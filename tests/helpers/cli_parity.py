@@ -48,6 +48,8 @@ DELEGATED = {
     "_dispatch_organization_request",
     "_dispatch_swarm_request",
     "_dispatch_rattish_triggers",
+    "_dispatch_rattish_secrets",
+    "_dispatch_worktree_setup",
 }
 
 
@@ -356,13 +358,18 @@ def _swarm_routes(tree: ast.Module) -> set[str]:
     return routes
 
 
-def _trigger_routes(tree: ast.Module) -> set[str]:
+def _trigger_routes(
+    tree: ast.Module,
+    name: str = "_dispatch_rattish_triggers",
+    prefix: str = "/api/rattish/triggers",
+) -> set[str]:
+    """Routes of a sub-dispatcher that compares ``action``, the path after ``prefix``."""
     routes = set()
-    function = _function(tree, "_dispatch_rattish_triggers", "GoferUiRequestHandler")
+    function = _function(tree, name, "GoferUiRequestHandler")
     for node in _ifs(function):
         if not _mentions(node.test, {"action"}):
             continue
-        method, route = "*", "/api/rattish/triggers"
+        method, route = "*", prefix
         for term in _conjuncts(node.test):
             text = _src(term)
             if text.startswith("method == "):
@@ -468,6 +475,8 @@ def backend_routes(server_source: str | None = None) -> set[str]:
         | _rem_routes(tree)
         | _swarm_routes(tree)
         | _trigger_routes(tree)
+        | _trigger_routes(tree, "_dispatch_worktree_setup", "/api/worktree-setup")
+        | _trigger_routes(tree, "_dispatch_rattish_secrets", "/api/rattish/secrets")
         | _action_routes(tree)
     )
     return routes if server_source is not None else _expand_body_actions(routes)

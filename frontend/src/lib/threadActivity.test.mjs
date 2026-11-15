@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { expiredArchivedThreads, inspectThreadScopes, mergeTaskThreadMetadata, organizeThreads, threadIndexEntry, threadIsArchived, threadScopeBadge, threadScopeKey } from "./threadActivity.js";
+import { normalizeAppSettings, DEFAULT_APP_SETTINGS } from "./settings.js";
+import { ARCHIVE_GIT_LIMIT, ARCHIVE_PURGE_OPTIONS, expiredArchivedThreads, inspectThreadScopes, mergeTaskThreadMetadata, organizeThreads, threadIndexEntry, threadIsArchived, threadScopeBadge, threadScopeKey } from "./threadActivity.js";
 
 const now = Date.parse("2026-09-15T12:00:00Z");
 const at = minutes => new Date(now - minutes * 60000).toISOString();
@@ -52,6 +53,16 @@ test("archived threads expire after the configured time without activity", () =>
   assert.deepEqual(expiredArchivedThreads(archived, "never", now), []);
   assert.deepEqual(ids(expiredArchivedThreads(archived, "7", now)), ["old"]);
   assert.deepEqual(expiredArchivedThreads(archived, "30", now), []);
+});
+
+test("purging archive copies is off by default and only offers fixed ages", () => {
+  assert.deepEqual(ARCHIVE_PURGE_OPTIONS.map(([id]) => id), ["never", "7", "30", "90"]);
+  assert.equal(DEFAULT_APP_SETTINGS.memory.archivePurgeDays, "never");
+  assert.equal(normalizeAppSettings({}).memory.archivePurgeDays, "never");
+  assert.equal(normalizeAppSettings({ memory: { archivePurgeDays: "30" } }).memory.archivePurgeDays, "30");
+  assert.equal(normalizeAppSettings({ memory: { archivePurgeDays: "1" } }).memory.archivePurgeDays, "never");
+  assert.equal(normalizeAppSettings({ memory: { archivePurgeDays: 7 } }).memory.archivePurgeDays, "7");
+  assert.match(ARCHIVE_GIT_LIMIT, /can't remove copies already in Git commits/);
 });
 
 test("index entries keep the fields needed to group threads without metadata reads", () => {

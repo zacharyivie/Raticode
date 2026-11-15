@@ -6,3 +6,4 @@ Node example:
   provider: codex
   task: summarize
   target: Release notes
+  cache: 7d

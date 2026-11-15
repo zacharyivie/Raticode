@@ -2,5 +2,5 @@
   "workflow_id": "public-build",
   "project_root": "/fixture/project",
   "ast_sha256": "3ac7e6da30c81a707fe9eb01a082b3bf7f93b352cf2268a93883cad01b8f5bcb",
-  "ir_sha256": "787d42746b8f8f017c1400c9ddce13455708b541285e7f5fb087e661a66a0277"
+  "ir_sha256": "a6ed32ce77bfa77ea054a469157095c874c95bfa5f9d3d344a4d0b9a1c944528"
 }

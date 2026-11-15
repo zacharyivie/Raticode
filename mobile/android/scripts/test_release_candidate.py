@@ -631,9 +631,11 @@ class BundlePolicyTest(Base):
         self.aab = self.root / 'app.aab'
         self.aab.write_bytes(b'aab')
         rules = candidate.policy()
+        # Play's bundle leaves out installing its own updates.
+        play = sorted(set(rules['permissions']) - set(rules['play_bundle_omits']))
         self.info = {'package': rules['package'], 'version_code': CODE, 'version_name': VERSION,
                      'min_sdk': rules['min_sdk'], 'target_sdk': rules['target_sdk'], 'debuggable': False,
-                     'test_only': False, 'permissions': sorted(rules['permissions'])}
+                     'test_only': False, 'permissions': play}
         self.exported = dict(rules['exported'])
         self.verdict = {'signers': 1, 'names': ['CN=Raticode Mobile, O=Raticode'], 'certificates': [CERT]}
         for patcher in (
@@ -663,6 +665,8 @@ class BundlePolicyTest(Base):
         changes = {
             'version-code': lambda: self.info.update(version_code=CODE + 1),
             'new-permission': lambda: self.info['permissions'].append('android.permission.READ_SMS'),
+            'self-update-on-play': lambda: self.info.update(
+                permissions=sorted(self.info['permissions'] + ['android.permission.REQUEST_INSTALL_PACKAGES'])),
             'new-export': lambda: self.exported.update({'dev.raticode.mobile.Debug': None}),
             'debuggable': lambda: self.info.update(debuggable=True),
             'other-key': lambda: self.verdict.update(certificates=['e' * 64]),
@@ -677,6 +681,14 @@ class BundlePolicyTest(Base):
                 change()
                 with self.assertRaises(ValueError):
                     candidate.check_bundle(self.aab, signed=True)
+
+    def test_play_omits_only_the_self_update_permission(self):
+        rules = candidate.policy()
+        self.assertEqual(rules['play_bundle_omits'], ['android.permission.REQUEST_INSTALL_PACKAGES'])
+        self.assertIn('android.permission.REQUEST_INSTALL_PACKAGES', rules['permissions'])
+        self.assertTrue(str(candidate.RELEASE_BUNDLE).endswith('bundle/play/app-play.aab'))
+        source = (REPOSITORY / 'mobile/android/app/src/play/AndroidManifest.xml').read_text(encoding='utf8')
+        self.assertIn('android.permission.REQUEST_INSTALL_PACKAGES" tools:node="remove"', source)
 
     def test_bundle_and_apk_must_share_a_key(self):
         with self.assertRaisesRegex(ValueError, 'different keys'):
@@ -893,7 +905,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn('--instrumented-exit $?', build)
         self.assertNotIn('connectedDebugAndroidTest --console=plain &&', build)
         self.assertNotIn('continue-on-error:', build)
-        self.assertIn('assembleRelease bundleRelease lintRelease', build)
+        self.assertIn('assembleRelease bundlePlay lintRelease', build)
         self.assertIn('release-candidate.py collect', build)
         self.assertIn('report-instrumented', build)
         jobs = text.split('\n  emulator-tests:\n', 1)[1]

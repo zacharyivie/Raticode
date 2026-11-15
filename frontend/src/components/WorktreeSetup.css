@@ -1,0 +1,33 @@
+/* Project setup for new worktrees, shown on Rem tasks, organization tickets and swarm agents. */
+.wt-setup { --tone: rgb(var(--color-muted)); display: grid; gap: 6px; margin: 8px 0; padding: 10px 12px; border: 1px solid rgb(var(--color-line)); border-left: 3px solid var(--tone); border-radius: 6px; font-size: 12.5px; color: rgb(var(--color-ink)); }
+.wt-setup[data-tone=success] { --tone: rgb(var(--color-success)); }
+.wt-setup[data-tone=attention] { --tone: rgb(var(--color-warning)); background: rgb(var(--color-warning-soft) / .5); }
+.wt-setup[data-tone=danger] { --tone: rgb(var(--color-danger)); background: rgb(var(--color-danger-soft) / .5); }
+.wt-setup-line { display: flex; align-items: center; gap: 6px; color: var(--tone); }
+.wt-setup-line strong { color: rgb(var(--color-ink)); font-weight: 600; }
+.wt-setup-summary { margin: 0; color: rgb(var(--color-muted)); overflow-wrap: anywhere; }
+.wt-setup-warning { margin: 0; color: rgb(var(--color-ink)); font-weight: 500; }
+.wt-setup-error { margin: 0; color: rgb(var(--color-danger)); overflow-wrap: anywhere; }
+.wt-setup-ok { display: flex; align-items: center; gap: 6px; margin: 0; color: rgb(var(--color-success)); }
+.wt-setup-steps > summary { cursor: pointer; color: rgb(var(--color-muted)); }
+.wt-setup-steps ol { display: grid; gap: 6px; margin: 6px 0 0; padding: 0; list-style: none; }
+.wt-setup-steps li { display: grid; gap: 3px; }
+.wt-setup-step { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.wt-setup-step code { overflow-wrap: anywhere; }
+.wt-setup-mark { flex: none; font-size: 11px; font-weight: 650; color: rgb(var(--color-success)); }
+.wt-setup-steps li[data-ok=false] .wt-setup-mark { color: rgb(var(--color-danger)); }
+.wt-setup-detail { color: rgb(var(--color-muted)); overflow-wrap: anywhere; }
+.wt-setup-output { max-height: 220px; margin: 4px 0 0; padding: 8px; overflow: auto; border-radius: 4px; background: rgb(var(--color-ink) / .05); font: 11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.wt-setup-review { display: grid; gap: 8px; padding-top: 4px; }
+.wt-setup-effective { display: grid; gap: 4px; margin: 0; }
+.wt-setup-effective div { display: grid; grid-template-columns: 56px 1fr; gap: 8px; }
+.wt-setup-effective dt { color: rgb(var(--color-muted)); }
+.wt-setup-effective dd { display: grid; gap: 2px; margin: 0; min-width: 0; }
+.wt-setup-effective code { overflow-wrap: anywhere; }
+.wt-setup-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.wt-setup-button { display: inline-flex; align-items: center; gap: 6px; justify-self: start; height: 28px; padding: 0 10px; border: 1px solid rgb(var(--color-line)); border-radius: 6px; color: rgb(var(--color-ink)); font-size: 12px; font-weight: 500; }
+.wt-setup-button:hover:not(:disabled) { background: rgb(var(--color-ink) / .06); }
+.wt-setup-button:disabled { opacity: .45; }
+.wt-setup-button[data-variant=primary] { border-color: transparent; background: rgb(var(--color-brand-solid)); color: rgb(var(--color-on-brand)); font-weight: 600; }
+.wt-setup-button[data-variant=primary]:hover:not(:disabled) { background: rgb(var(--color-brand-hover)); }
+.wt-setup-button:focus-visible { outline: 2px solid rgb(var(--color-brand)); outline-offset: 2px; }

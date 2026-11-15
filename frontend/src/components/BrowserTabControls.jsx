@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { EyeOff, Plus, X } from "lucide-react";
+import { EyeOff, Plus, SquareArrowDownLeft, SquareArrowOutUpRight, X } from "lucide-react";
 import { engineBadge, engineLabel, webBrowserEngine } from "../lib/browserEngines.js";
 import { browserGroupHasNewTab } from "../lib/browserTabs.js";
 
@@ -93,8 +93,9 @@ export function BrowserFamilyChooser({ choices = [], inside = [], offerPrivate =
   useEffect(() => {
     if (!open) return undefined;
     const outside = (event) => { if (!rootRef.current?.contains(event.target)) setOpen(false); };
-    window.addEventListener("pointerdown", outside);
-    return () => window.removeEventListener("pointerdown", outside);
+    const view = rootRef.current?.ownerDocument?.defaultView || window;
+    view.addEventListener("pointerdown", outside);
+    return () => view.removeEventListener("pointerdown", outside);
   }, [open]);
   useEffect(() => {
     if (open) rootRef.current?.querySelector("[data-browser-family]")?.focus?.();
@@ -112,7 +113,7 @@ export function BrowserFamilyChooser({ choices = [], inside = [], offerPrivate =
         if (event.key === "Escape" && open) { event.preventDefault(); event.stopPropagation(); close(true); return; }
         if (!open || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
         const buttons = [...rootRef.current.querySelectorAll("[data-browser-family]")];
-        const index = buttons.indexOf(document.activeElement);
+        const index = buttons.indexOf(rootRef.current.ownerDocument.activeElement);
         if (index < 0) return;
         event.preventDefault();
         buttons[(index + (event.key === "ArrowRight" ? 1 : buttons.length - 1)) % buttons.length]?.focus();
@@ -166,6 +167,25 @@ export function BrowserFamilyChooser({ choices = [], inside = [], offerPrivate =
 }
 
 // A line under the tab bar, so it never covers a page.
+// Moves the whole Browser, tab bar and tabs, into a window of its own that can
+// go to another screen, and back.
+export function BrowserWindowToggle({ poppedOut = false, onToggle, className = "" }) {
+  const label = poppedOut ? "Bring the browser back to Raticode's window" : "Move the browser to its own window";
+  const Icon = poppedOut ? SquareArrowDownLeft : SquareArrowOutUpRight;
+  return (
+    <button
+      aria-label={label}
+      className={`grid h-9 w-9 shrink-0 place-items-center text-muted hover:bg-slate-100 hover:text-ink ${FOCUS} ${className}`}
+      data-testid="browser-window-toggle"
+      title={poppedOut ? "Bring browser back" : "Pop out browser"}
+      type="button"
+      onClick={() => onToggle?.()}
+    >
+      <Icon aria-hidden="true" size={14} />
+    </button>
+  );
+}
+
 export function BrowserTabNotice({ notice, onDismiss }) {
   useEffect(() => {
     if (!notice) return undefined;

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, ChevronsLeft, ChevronsRight } from "lucide-react";
 import { ProviderAuthentication } from "./ProviderModelEffortFields.jsx";
+import JevProviderSettings from "./JevProviderSettings.jsx";
+import LocalModelServerSettings from "./LocalModelServerSettings.jsx";
 import { apiUrl } from "../lib/api";
 import { menuModels } from "../lib/providerModels.js";
 
@@ -11,6 +13,8 @@ export default function ProviderSettings({ providerState }) {
     <button type="button" className="text-xs font-semibold text-brand" disabled={loading} onClick={refresh}>{loading ? "Checking providers…" : "Refresh providers"}</button>
     {error ? <p role="alert" className="text-xs text-red-600">{error}</p> : null}
     {capabilities.map(provider => <ProviderRow key={provider.id} provider={provider} />)}
+    <LocalModelServerSettings />
+    <JevProviderSettings />
   </div>;
 }
 

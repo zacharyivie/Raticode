@@ -6,6 +6,11 @@ process waits on standby and takes over if the owner exits, so a trigger can nev
 fire twice. Nothing fires while no owner is running, and the next owner says so:
 scheduled times that passed are recorded as missed.
 
+All triggers can be paused at once (``TriggerStore.set_paused``). While paused,
+nothing starts: cron times are recorded as skipped and never caught up, file
+changes aren't watched, and webhook calls are refused. Each trigger keeps its own
+on/off setting, so resuming brings back exactly the ones that were on.
+
 Every run goes through ``run_rattish_file``, the same path as ``Raticode rattish run``.
 """
 
@@ -33,6 +38,7 @@ from watchdog.observers.api import BaseObserver, ObservedWatch
 
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS
 from gofer.rattish.artifacts import RattishArtifactError
+from gofer.rattish.contracts import canonical_json_bytes
 from gofer.rattish.diagnostics import RattishError
 from gofer.rattish.run_service import (
     RattishRunResult,
@@ -42,8 +48,10 @@ from gofer.rattish.run_service import (
 )
 from gofer.rattish.triggers import (
     MAX_MISSED_COUNTED,
+    PAUSED_SKIP_MESSAGE,
     RUNS_ONLY_WHILE_RUNNING_NOTICE,
     TriggerError,
+    TriggerPause,
     TriggerRecord,
     TriggerStore,
     hash_token,
@@ -110,6 +118,7 @@ def run_in_process(run: TriggerRun) -> RattishRunResult:
             data_dir=run.data_dir,
             run_id=run.run_id,
             cancel_event=run.cancel_event,
+            started_by="trigger",
         )
     )
 
@@ -260,6 +269,18 @@ class _WebhookHandler(BaseHTTPRequestHandler):
         if not trigger.enabled:
             self._reply(409, {"error": "This trigger is turned off."})
             return
+        skipped = self.server.engine.refuse_while_paused(trigger)
+        if skipped is not None:
+            self._reply(
+                409,
+                {
+                    "error": "All triggers are paused on this computer.",
+                    "triggerId": trigger.id,
+                    "status": "skipped",
+                    "eventId": skipped,
+                },
+            )
+            return
         if self.headers.get("Transfer-Encoding"):
             self._reply(411, {"error": "Send a Content-Length header."})
             return
@@ -273,9 +294,9 @@ class _WebhookHandler(BaseHTTPRequestHandler):
             return
         raw = self.rfile.read(length) if length else b""
         try:
-            payload = json.loads(raw) if raw.strip() else None
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            self._reply(400, {"error": "The webhook body must be JSON."})
+            payload = parse_webhook_body(raw)
+        except WebhookBodyError as exc:
+            self._reply(400, {"error": str(exc)})
             return
         outcome = self.server.engine.receive_webhook(trigger, payload)
         self._reply(
@@ -287,6 +308,53 @@ class _WebhookHandler(BaseHTTPRequestHandler):
                 "runId": outcome.run_id,
             },
         )
+
+
+class WebhookBodyError(ValueError):
+    """Raised with a sentence for the caller when a webhook body can't start a run."""
+
+
+def _refuse_json_constant(name: str) -> Any:
+    raise WebhookBodyError(f"{name} isn't a JSON number. Send it as a string or null.")
+
+
+def parse_webhook_body(raw: bytes) -> Any:
+    """The JSON value a webhook call sends, or None for an empty body.
+
+    The value must also fit in a run record, which stores strict JSON, so it is
+    refused here with a reason instead of failing the run later.
+    """
+    if not raw.strip():
+        return None
+    try:
+        payload = json.loads(raw, parse_constant=_refuse_json_constant)
+    except RecursionError:
+        raise WebhookBodyError("The webhook body is nested too deeply.") from None
+    except (UnicodeError, json.JSONDecodeError):
+        raise WebhookBodyError("The webhook body must be JSON in UTF-8.") from None
+    except WebhookBodyError:
+        raise
+    except ValueError:
+        # Python refuses integers with more than 4,300 digits.
+        raise WebhookBodyError("The webhook body has a number too large to store.") from None
+    try:
+        canonical_json_bytes(payload)
+    except RecursionError:
+        raise WebhookBodyError("The webhook body is nested too deeply.") from None
+    except UnicodeError:
+        raise WebhookBodyError(
+            "The webhook body has text that isn't valid Unicode, such as a lone surrogate escape."
+        ) from None
+    except ValueError as exc:
+        if "integers" in str(exc):
+            raise WebhookBodyError(
+                "A whole number in the webhook body is too large to keep exactly. "
+                "Send numbers beyond 9007199254740991 as strings."
+            ) from None
+        raise WebhookBodyError(
+            "A number in the webhook body is too large. Send it as a string."
+        ) from None
+    return payload
 
 
 def scheduler_status(store: TriggerStore, *, now: datetime | None = None) -> dict[str, Any]:
@@ -319,6 +387,7 @@ def scheduler_status(store: TriggerStore, *, now: datetime | None = None) -> dic
         "webhookError": record.get("webhook_error") if running else None,
         "watchErrors": dict(record.get("watch_errors") or {}) if running else {},
         "notice": RUNS_ONLY_WHILE_RUNNING_NOTICE,
+        **store.pause_state().to_payload(),
     }
 
 
@@ -356,6 +425,7 @@ class TriggerEngine:
         self._schedules: dict[str, CronTrigger] = {}
         self._cursors: dict[str, datetime] = {}
         self._revision: int | None = None
+        self._pause = TriggerPause()
         self._next_resync: datetime | None = None
         self._next_heartbeat: datetime | None = None
         self._active: dict[str, int] = {}
@@ -429,6 +499,8 @@ class TriggerEngine:
 
     def _record_downtime(self, previous: Mapping[str, Any], now: datetime) -> None:
         """File changes and webhooks can't be replayed, so say a gap happened."""
+        if self._pause.paused:
+            return  # Nothing would have started anyway.
         last_seen = previous.get("heartbeat_at")
         for trigger in self._triggers.values():
             if not trigger.enabled or trigger.kind == "cron":
@@ -436,6 +508,9 @@ class TriggerEngine:
             since = parse_iso(trigger.baseline_at)
             if isinstance(last_seen, str):
                 since = max(since, parse_iso(last_seen))
+            for start, end in self._pause.windows:
+                if parse_iso(start) <= since < parse_iso(end):
+                    since = parse_iso(end)  # The gap began when the pause ended.
             if (now - since).total_seconds() < DOWNTIME_NOTICE_SECONDS:
                 continue
             what = "File changes" if trigger.kind == "file" else "Webhook calls"
@@ -465,6 +540,14 @@ class TriggerEngine:
         self._next_resync = now + timedelta(seconds=RESYNC_SECONDS)
         with self._lock:
             self._triggers = {item.id: item for item in self.store.list_triggers()}
+            self._pause = self.store.pause_state()
+            if self._pause.paused:
+                self._changes.clear()
+                for waiting in self._waiting.values():
+                    self.store.update_event(
+                        waiting.event_id, status="skipped", message=PAUSED_SKIP_MESSAGE
+                    )
+                self._waiting.clear()
         self._schedules = {}
         self._watch_errors = {}
         for trigger in self._triggers.values():
@@ -526,6 +609,24 @@ class TriggerEngine:
             if not due:
                 continue
             self.store.set_cursors({trigger_id: now})
+            # Read fresh: a pause or resume may have landed since this tick began.
+            pause = self.store.pause_state()
+            paused = [item for item in due if pause.covers(item)]
+            if paused:
+                # Times that fell in a pause are skipped on purpose: never caught up.
+                self.store.add_event(
+                    trigger,
+                    status="skipped",
+                    at=now,
+                    scheduled_for=paused[0],
+                    count=len(paused),
+                    message=PAUSED_SKIP_MESSAGE
+                    if len(paused) == 1
+                    else f"{len(paused)} scheduled runs skipped because all triggers were paused.",
+                )
+                due = [item for item in due if item not in paused]
+                if not due:
+                    continue
             late = [item for item in due if (now - item).total_seconds() > LATE_GRACE_SECONDS]
             on_time = [item for item in due if item not in late]
             if late:
@@ -549,7 +650,7 @@ class TriggerEngine:
         now = self._clock()
         with self._lock:
             trigger = self._triggers.get(trigger_id)
-            if trigger is None or not trigger.enabled:
+            if trigger is None or not trigger.enabled or self._pause.paused:
                 return
             pending = self._changes.get(trigger_id)
             if pending is None:
@@ -615,6 +716,14 @@ class TriggerEngine:
         matches = hmac.compare_digest(hash_token(token), expected or _DUMMY_TOKEN_HASH)
         return trigger if matches and expected else None
 
+    def refuse_while_paused(self, trigger: TriggerRecord) -> int | None:
+        """Record a webhook call as skipped when all triggers are paused."""
+        if not self.store.pause_state().paused:
+            return None
+        return self.store.add_event(
+            trigger, status="skipped", at=self._clock(), message=PAUSED_SKIP_MESSAGE
+        )
+
     def receive_webhook(self, trigger: TriggerRecord, payload: Any) -> DispatchOutcome:
         now = self._clock()
         event = {
@@ -644,6 +753,15 @@ class TriggerEngine:
                     message="The scheduler was stopping.",
                 )
                 return DispatchOutcome("skipped", event_id)
+            if self._pause.paused:
+                event_id = self.store.add_event(
+                    trigger,
+                    status="skipped",
+                    at=moment,
+                    scheduled_for=occurrence.scheduled_for,
+                    message=PAUSED_SKIP_MESSAGE,
+                )
+                return DispatchOutcome("skipped", event_id)
             if self._workflow_busy(trigger.source_path):
                 if trigger.overlap == "skip":
                     event_id = self.store.add_event(
@@ -663,7 +781,7 @@ class TriggerEngine:
         waiting = self._waiting.get(trigger.id)
         if waiting is not None:
             waiting.folded += 1
-            waiting.occurrence = occurrence
+            waiting.occurrence = _fold_occurrences(waiting.occurrence, occurrence)
             self.store.update_event(
                 waiting.event_id,
                 count=waiting.folded + 1,
@@ -773,7 +891,7 @@ class TriggerEngine:
         wanted = {
             trigger.id: trigger
             for trigger in self._triggers.values()
-            if trigger.kind == "file" and trigger.enabled
+            if trigger.kind == "file" and trigger.enabled and not self._pause.paused
         }
         if self._observer is None and wanted:
             started = Observer()
@@ -892,6 +1010,23 @@ class TriggerEngine:
         finally:
             self._is_owner = False
             self._file_lock.release()
+
+
+def _fold_occurrences(waiting: _Occurrence, later: _Occurrence) -> _Occurrence:
+    """One queued run standing for both starts.
+
+    Changed files add up, so the run still sees a file that changed before the
+    later batch; a file named in both keeps its latest change. Webhook calls and
+    schedules carry no such set: the queued run takes the latest one.
+    """
+    if later.trigger.kind != "file":
+        return later
+    paths: dict[str, Mapping[str, Any]] = {}
+    for event in [*waiting.events, *later.events]:
+        path = str(event.get("path"))
+        if path in paths or len(paths) < MAX_FILE_CHANGES_PER_RUN:
+            paths[path] = event
+    return _Occurrence(later.trigger, later.scheduled_for, list(paths.values()), later.catching_up)
 
 
 def _watch_signature(trigger: TriggerRecord) -> str:

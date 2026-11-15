@@ -626,6 +626,10 @@
       "license": "MIT",
       "version": "2.0.0"
     },
+    "execnet": {
+      "license": "MIT",
+      "version": "2.1.2"
+    },
     "fastembed": {
       "license": "Apache-2.0",
       "version": "0.9.1"
@@ -849,6 +853,10 @@
     "pytest-mock": {
       "license": "MIT",
       "version": "3.15.1"
+    },
+    "pytest-xdist": {
+      "license": "MIT",
+      "version": "3.8.0"
     },
     "python-dotenv": {
       "license": "BSD-3-Clause",

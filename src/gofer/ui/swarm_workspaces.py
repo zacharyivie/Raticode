@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -167,7 +168,8 @@ def prepare_attempt(workspace: dict[str, Any], attempt_id: str) -> dict[str, str
         base,
         timeout=SLOW_GIT_SECONDS,
     )
-    return {"path": str(path), "branch": branch, "baseRevision": base}
+    # The project's worktree setup runs once the caller has let go of the swarm lock.
+    return {"path": str(path), "branch": branch, "baseRevision": base, "setup": "pending"}
 
 
 def cleanup_completed_turn(workspace: dict[str, Any], attempt: dict[str, Any]) -> bool:
@@ -618,6 +620,7 @@ def integrate(
     logs: Path,
     *,
     cancel: threading.Event | None = None,
+    setup: Callable[[Path], dict[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
     root = Path(workspace["path"])
     if git(root, "status", "--porcelain"):
@@ -643,6 +646,13 @@ def integrate(
         outcome["conflicts"] = git(candidate, "diff", "--name-only", "--diff-filter=U").splitlines()
         return outcome
     merged = git(candidate, "rev-parse", "HEAD")
+    if setup is not None and not reused and checks:
+        # Checks run here, so the project's setup (installed packages, say) must too.
+        # Without checks nothing needs it, and its commands could run scripts the agents
+        # just changed in this merge, so it doesn't run.
+        prepared = setup(candidate)
+        if prepared is not None:
+            outcome["setup"] = prepared
     results = run_checks(candidate, checks, logs, cancel=cancel)
     outcome.update(revision=merged, checks=results)
     if (

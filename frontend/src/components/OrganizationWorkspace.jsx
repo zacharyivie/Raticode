@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, Building2, History, Plus, Download, Pause, Play, Users, ListTodo, Activity, Settings, Folder, GitBranch, Check, X, ChevronRight, Upload, Clock, ShieldCheck, AlertTriangle, Archive } from "lucide-react";
-import { organizationRequest, teamMembers, projectPeople, employeeTree, eligibleManagers, historyByDate, configurationChanges, newEmployee, initials, plural, employeeStatus, STATUS_LABELS, TASK_STATUSES, needsApproval, isOpenTask, taskGroups, actorLabel, changeLabel, activityEntries, usageCost, relativeDay, filterWork, appendActivity, attentionSummary, monthUsage, reportsCost, dangerousPermission, pendingRequests as waitingRequests, approveAllSummary } from "../lib/organizations.js";
+import { organizationRequest, teamMembers, projectPeople, employeeTree, eligibleManagers, historyByDate, configurationChanges, newEmployee, initials, plural, employeeStatus, STATUS_LABELS, TASK_STATUSES, needsApproval, isOpenTask, taskGroups, actorLabel, changeLabel, activityEntries, usageCost, relativeDay, filterWork, appendActivity, attentionSummary, monthUsage, reportsCost, dangerousPermission, pendingRequests as waitingRequests, approveAllSummary, startBlockers } from "../lib/organizations.js";
 import ApproveAllRequests from "./OrganizationApproveAll.jsx";
 import AutoMode, { AutoHalt } from "./OrganizationAutoMode.jsx";
 import { removeWorker } from "../lib/organizationModel.js";
@@ -107,7 +107,8 @@ export default function OrganizationWorkspace({ rootPath, organizationId, projec
   function openCollection(kind, id = null) { navigate(kind); setCollectionId(id); }
   function edit(id) { setEditor(id); setNotice(""); }
   async function saveConfig(next, reason, expectedRevision) {
-    const result = await act(organization ? "configure" : "create", { config: next, reason, expectedRevision });
+    // Workers the user adds here get the organization's folders to work on by themselves.
+    const result = await act(organization ? "configure" : "create", { config: next, reason, expectedRevision, followProjects: true });
     if (result) { setEditor(null); scroll.current?.scrollTo(0, 0); }
     return result;
   }
@@ -139,7 +140,7 @@ export default function OrganizationWorkspace({ rootPath, organizationId, projec
       : !running && organization?.runtime.pauseReason && <div className="org-banner org-pause" role="status"><Pause size={14} aria-hidden="true" /><span>{organization.runtime.pauseReason}</span></div>}
     <div ref={scroll} className="org-scroll"><div className="org-content">
       {editor === "organization" ? <EditorFrame onBack={() => organization ? setEditor(null) : onClose()} label={organization ? "Back to organization" : "Back to editor"}>
-        <OrganizationEditor key={organizationId} rootPath={rootPath} config={config} tasks={tasks} memorySettings={memorySettings} revision={revision} busy={busy} onSave={saveConfig} onCancel={() => organization ? setEditor(null) : onClose()} onArchive={organization && !running && !archived ? async () => { if (await act("archive", { archived: true })) setEditor(null); } : null} />
+        <OrganizationEditor key={organizationId} rootPath={rootPath} config={config} tasks={tasks} memorySettings={memorySettings} defaults={defaults} revision={revision} busy={busy} onSave={saveConfig} onCancel={() => organization ? setEditor(null) : onClose()} onArchive={organization && !running && !archived ? async () => { if (await act("archive", { archived: true })) setEditor(null); } : null} />
         {organization && <AutoMode organization={organization} busy={busy} className="org-panel" onAct={async (action, params, message) => { const data = await act(action, params); if (data && message) setNotice(message); return data; }} />}
         {!organization && <PackageImport busy={busy} onAction={act} />}
       </EditorFrame> : !organization ? <p role="status" className="org-loading">Loading organization...</p> : <>
@@ -235,6 +236,8 @@ export function StartSheet({ organization, busy, onStart, onCancel }) {
   const employees = config.employees.filter(e => !e.paused);
   const dangerous = employees.filter(e => dangerousPermission(e.permissionMode));
   const limit = (value, noun) => Number(value) ? `${Number(value).toLocaleString()} ${noun}` : `unlimited ${noun}`;
+  const blockers = startBlockers(organization, preview);
+  const idle = preview != null && ready === 0;
   return <section ref={ref} tabIndex={-1} className="org-start" aria-label="Start this organization">
     <div className="org-section-heading"><div><h3>Start {config.name}?</h3><p className="org-note">Review what will run. Nothing starts until you confirm.</p></div><Play size={22} aria-hidden="true" /></div>
     <ul className="org-start-facts">
@@ -244,6 +247,9 @@ export function StartSheet({ organization, busy, onStart, onCancel }) {
       <li>Monthly limits: {limit(config.monthlyTurnLimit, "runs")}, {limit(config.monthlyTokenLimit, "tokens")}, {Number(config.monthlyBudgetUsd) ? `$${config.monthlyBudgetUsd} budget` : "no dollar budget"}. Each task can use up to {plural(config.maxTaskTurns, "run")} of up to {Math.round(config.turnTimeoutSeconds / 60)} minutes.</li>
       {preview?.heartbeatTurnsPerDay > 0 && <li>Heartbeats can add up to {preview.heartbeatTurnsPerDay.toFixed(1)} runs a day while idle.</li>}
     </ul>
+    {(idle || blockers.gaps.length > 0) && <div className="org-start-blocked" role="note"><strong><AlertTriangle size={14} aria-hidden="true" />{idle ? "No ticket can start yet." : "Before work can run:"}</strong>
+      <ul>{blockers.gaps.map(gap => <li key={gap}>{gap}</li>)}{blockers.reasons.map(({ reason, count }) => <li key={reason}>{plural(count, "ticket")}: {reason}</li>)}</ul>
+      {idle && <small>You can still start it. {preview.heartbeatTurnsPerDay > 0 ? "Idle workers check in and can propose work." : "Workers pick up tickets as soon as they're ready."}</small>}</div>}
     {dangerous.length > 0 && <p className="org-banner org-pause" role="alert"><AlertTriangle size={14} aria-hidden="true" />{dangerous.map(e => e.name).join(", ")} can run commands without the provider&apos;s sandbox or approvals.</p>}
     {error && <p role="alert" className="org-error">{error}</p>}
     <div className="org-actions"><button className="org-button org-primary" type="button" disabled={busy} onClick={onStart}><Play size={14} />Start organization</button><button className="org-button" type="button" onClick={onCancel}>Not now</button></div>
@@ -269,21 +275,32 @@ function ConfigurationImpact({ before, after, tasks = [] }) {
   return <p className="org-banner org-pause">{global ? "This change pauses the organization. " : "The organization keeps its current operating state. "}{stopped.length ? `Stops ${stopped.length} active task${stopped.length === 1 ? "" : "s"}: ${stopped.map(t => t.title).join(", ")}. ` : "No active tasks need to stop. "}Provider and instruction changes apply on the next run.</p>;
 }
 
-function OrganizationEditor({ rootPath, config, tasks, memorySettings, revision, busy, onSave, onCancel, onArchive }) {
-  const [draft, setDraft] = useState(() => config ? structuredClone(config) : { name: "", slug: "", description: "", instructions: "", goals: [], employees: [], projects: [], projectRoots: rootPath ? [rootPath] : [], teams: [], monthlyBudgetUsd: 0, monthlyTurnLimit: 200, monthlyTokenLimit: 0, maxChildTasksPerTurn: 5, maxDelegationDepth: 3, workspaceIsolation: "worktree", blockGitPush: true, pullBacklog: true, maxConcurrency: 1, maxTaskTurns: 20, turnTimeoutSeconds: 1800, remSecondBrain: { enabled: memorySettings.secondBrainEnabled || false, root: memorySettings.secondBrainRoot || "", format: memorySettings.secondBrainFormat || "md" } });
+// Creating needs only a name; the rest has working defaults and folds away until wanted.
+function MoreSettings({ creating, children }) {
+  return creating ? <details className="org-form-disclosure"><summary>More settings: limits, safety and Second Brain. The defaults suit a first organization.</summary>{children}</details> : children;
+}
+
+function OrganizationEditor({ rootPath, config, tasks, memorySettings, defaults = {}, revision, busy, onSave, onCancel, onArchive }) {
+  const [draft, setDraft] = useState(() => config ? structuredClone(config) : { name: "", slug: "", description: "", instructions: "", goals: [], employees: [], projects: [], projectRoots: rootPath ? [rootPath] : [], teams: [], monthlyBudgetUsd: 0, monthlyTurnLimit: 200, monthlyTokenLimit: 0, maxChildTasksPerTurn: 5, maxDelegationDepth: 3, workspaceIsolation: "worktree", blockGitPush: true, pullBacklog: true, maxConcurrency: 1, maxTaskTurns: 20, turnTimeoutSeconds: 1800, resumeAfterRestart: true, remSecondBrain: { enabled: memorySettings.secondBrainEnabled || false, root: memorySettings.secondBrainRoot || "", format: memorySettings.secondBrainFormat || "md" } });
   const [baseRevision] = useState(revision);
   const [goals, setGoals] = useState((config?.goals || []).join("\n"));
 
   const [reason, setReason] = useState(config ? "" : "Created organization");
+  // An optional first worker, so a new organization doesn't open empty.
+  const [firstWorker, setFirstWorker] = useState({ name: "", title: "" });
+  const creating = !config;
   const [error, setError] = useState("");
   const patch = (key, value) => setDraft(d => ({ ...d, [key]: value }));
-  return <form className="org-form" onSubmit={event => { event.preventDefault(); try { onSave({ ...draft, slug: draft.slug || draft.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""), goals: goals.split("\n").filter(Boolean), monthlyBudgetUsd: Number(draft.monthlyBudgetUsd || 0), monthlyTurnLimit: Number(draft.monthlyTurnLimit || 0), monthlyTokenLimit: Number(draft.monthlyTokenLimit || 0), maxChildTasksPerTurn: Number(draft.maxChildTasksPerTurn ?? 5), maxDelegationDepth: Number(draft.maxDelegationDepth ?? 3), maxConcurrency: Number(draft.maxConcurrency), maxTaskTurns: Number(draft.maxTaskTurns), turnTimeoutSeconds: Number(draft.turnTimeoutSeconds) }, reason, baseRevision); } catch (failure) { setError(failure.message); } }}>
-    <h3>{config ? "Organization settings" : "Build your organization"}</h3><p className="org-note">{config ? "Changes are recorded in configuration history. Display changes apply immediately. Permission changes stop affected runs; workspace changes pause the company." : "Define the purpose, then add your Rem employees. Your organization starts paused."}</p>
-    <div className="org-form-grid"><TextField label="Organization name" value={draft.name} onChange={v => patch("name", v)} required /><TextField label="Package slug" value={draft.slug} onChange={v => patch("slug", v)} placeholder="e.g. product-studio" /></div>
+  return <form className="org-form" onSubmit={event => { event.preventDefault(); try { onSave({ ...draft, employees: creating && firstWorker.name.trim() ? [{ ...newEmployee(defaults), name: firstWorker.name.trim(), title: firstWorker.title.trim() }] : draft.employees, slug: draft.slug || draft.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""), goals: goals.split("\n").filter(Boolean), monthlyBudgetUsd: Number(draft.monthlyBudgetUsd || 0), monthlyTurnLimit: Number(draft.monthlyTurnLimit || 0), monthlyTokenLimit: Number(draft.monthlyTokenLimit || 0), maxChildTasksPerTurn: Number(draft.maxChildTasksPerTurn ?? 5), maxDelegationDepth: Number(draft.maxDelegationDepth ?? 3), maxConcurrency: Number(draft.maxConcurrency), maxTaskTurns: Number(draft.maxTaskTurns), turnTimeoutSeconds: Number(draft.turnTimeoutSeconds) }, reason, baseRevision); } catch (failure) { setError(failure.message); } }}>
+    <h3>{config ? "Organization settings" : "Build your organization"}</h3><p className="org-note">{config ? "Changes are recorded in configuration history. Display changes apply immediately. Permission changes stop affected runs; workspace changes pause the company." : "Name it and say what it's for. It starts paused, so nothing runs until you start it. Once started, it keeps running after Raticode restarts until you pause it."}</p>
+    <div className="org-form-grid"><TextField label="Organization name" value={draft.name} onChange={v => patch("name", v)} required />{!creating && <TextField label="Package slug" value={draft.slug} onChange={v => patch("slug", v)} placeholder="e.g. product-studio" />}</div>
     <TextField label="Purpose" value={draft.description} onChange={v => patch("description", v)} multiline placeholder="What should this organization accomplish?" />
-    <div className="org-form-grid"><TextField label="Company instructions" value={draft.instructions} onChange={v => patch("instructions", v)} multiline /><TextField label="Goals, one per line" value={goals} onChange={setGoals} multiline /></div>
+    {creating && <fieldset className="org-first-worker"><legend>First worker <small>Optional</small></legend><div className="org-form-grid"><TextField label="First worker's name" value={firstWorker.name} onChange={name => setFirstWorker(w => ({ ...w, name }))} placeholder="e.g. Ada" /><TextField label="First worker's title" value={firstWorker.title} onChange={title => setFirstWorker(w => ({ ...w, title }))} placeholder="e.g. Engineer" /></div><p className="org-note">Uses {defaults.provider || "codex"}{defaults.model ? ` / ${defaults.model}` : ""}, Rem&apos;s provider from Settings. They can work on their own in the organization&apos;s project folders. Change it, or add more workers, after creating.</p></fieldset>}
     {!config && rootPath && <label className="org-check"><input type="checkbox" checked={draft.projectRoots.includes(rootPath)} onChange={event => patch("projectRoots", event.target.checked ? [rootPath] : [])} />Assign the current project to this organization</label>}
     {!config && <p className="org-note">{draft.projectRoots.length ? `Initial project: ${rootPath}. Add more projects after creating the organization.` : "Assign Raticode projects after creating the organization."}</p>}
+    <MoreSettings creating={creating}>
+    {creating && <TextField label="Package slug" value={draft.slug} onChange={v => patch("slug", v)} placeholder="e.g. product-studio" />}
+    <div className="org-form-grid"><TextField label="Company instructions" value={draft.instructions} onChange={v => patch("instructions", v)} multiline /><TextField label="Goals, one per line" value={goals} onChange={setGoals} multiline /></div>
     <h4 className="org-form-divider">Operating limits</h4>
     <div className="org-form-grid org-form-thirds"><NumberField label="Maximum concurrent employees" value={draft.maxConcurrency} onChange={v => patch("maxConcurrency", v)} required /><NumberField label="Maximum runs per task" value={draft.maxTaskTurns} onChange={v => patch("maxTaskTurns", v)} required /><NumberField label="Run time limit in seconds" value={draft.turnTimeoutSeconds} onChange={v => patch("turnTimeoutSeconds", v)} required /></div>
     <div className="org-form-grid org-form-thirds"><NumberField label="Monthly run limit, 0 is unlimited" value={draft.monthlyTurnLimit ?? "200"} onChange={v => patch("monthlyTurnLimit", v)} /><NumberField label="Monthly token limit, 0 is unlimited" value={draft.monthlyTokenLimit ?? "0"} onChange={v => patch("monthlyTokenLimit", v)} /><NumberField label="Monthly dollar budget, 0 disables" value={draft.monthlyBudgetUsd ?? "0"} onChange={v => patch("monthlyBudgetUsd", v)} /></div><p className="org-note">Limits use reported usage. A run already in progress can go past what&apos;s left.</p>
@@ -294,7 +311,8 @@ function OrganizationEditor({ rootPath, config, tasks, memorySettings, revision,
     <label className="org-check"><input type="checkbox" checked={draft.pullBacklog !== false} onChange={e => patch("pullBacklog", e.target.checked)} />Workers pull accepted Backlog tickets into To do when they run out of work</label>
     <p className="org-note">Manage teams and initiatives from Org chart. Assign Raticode projects in Projects.</p>
     <details className="org-form-disclosure"><summary>Second Brain</summary><label className="org-check"><input type="checkbox" checked={!!draft.remSecondBrain?.enabled} onChange={e => patch("remSecondBrain", { ...draft.remSecondBrain, enabled: e.target.checked })} />Use Second Brain for employee research and reports</label><TextField label="Knowledge folder" value={draft.remSecondBrain?.root || ""} onChange={root => patch("remSecondBrain", { ...draft.remSecondBrain, root })} /></details>
-    <ConfigurationImpact before={config} after={draft} tasks={tasks} /><TextField label="Change reason" value={reason} onChange={setReason} required />{error && <p role="alert">{error}</p>}<div className="org-actions"><button className="org-button org-primary" type="submit" disabled={busy}>{config ? "Save settings" : "Create organization"}</button><button className="org-button" type="button" onClick={onCancel}>Cancel</button>{onArchive && <ConfirmButton label="Archive organization" className="org-button org-danger" danger busy={busy} message="Hide this organization and release its project folders? History and work records are kept, and you can restore it." confirmLabel="Archive" onConfirm={onArchive} />}</div>
+    </MoreSettings>
+    <ConfigurationImpact before={config} after={draft} tasks={tasks} />{!creating && <TextField label="Change reason" value={reason} onChange={setReason} required />}{error && <p role="alert">{error}</p>}<div className="org-actions"><button className="org-button org-primary" type="submit" disabled={busy}>{config ? "Save settings" : "Create organization"}</button><button className="org-button" type="button" onClick={onCancel}>Cancel</button>{onArchive && <ConfirmButton label="Archive organization" className="org-button org-danger" danger busy={busy} message="Hide this organization and release its project folders? History and work records are kept, and you can restore it." confirmLabel="Archive" onConfirm={onArchive} />}</div>
   </form>;
 }
 

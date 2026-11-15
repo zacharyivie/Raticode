@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self'">
+<title>Raticode dictation</title>
+<style>
+  html, body { margin: 0; background: transparent; overflow: hidden; font: 13px/1.3 system-ui, "Segoe UI", Roboto, sans-serif; user-select: none; }
+  .pill { box-sizing: border-box; display: flex; align-items: center; gap: 10px; height: 52px; margin: 4px; padding: 0 8px 0 14px;
+    border-radius: 26px; background: rgba(24, 24, 27, .94); color: #f4f4f5; border: 1px solid rgba(255, 255, 255, .14);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, .35); }
+  .dot { flex: none; width: 12px; height: 12px; border-radius: 50%; background: #a1a1aa; }
+  [data-phase="listening"] .dot, [data-phase="starting"] .dot { background: #ef4444; animation: pulse 1.2s ease-in-out infinite; }
+  [data-phase="finishing"] .dot, [data-phase="tidying"] .dot { background: #818cf8; }
+  [data-phase="done"] .dot { background: #22c55e; }
+  [data-phase="error"] .dot { background: #f59e0b; }
+  .text { flex: 1; min-width: 0; }
+  .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .detail { color: #a1a1aa; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  button { flex: none; font: inherit; font-size: 12px; color: #f4f4f5; background: rgba(255, 255, 255, .1); border: 1px solid rgba(255, 255, 255, .18);
+    border-radius: 14px; padding: 5px 11px; cursor: pointer; }
+  button:hover { background: rgba(255, 255, 255, .18); }
+  button:focus-visible { outline: 2px solid #22d3ee; outline-offset: 1px; }
+  button[hidden] { display: none; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  @media (prefers-reduced-motion: reduce) { .dot { animation: none !important; } }
+</style>
+</head>
+<body>
+  <div class="pill" role="status" aria-live="polite" data-phase="idle">
+    <span class="dot" aria-hidden="true"></span>
+    <div class="text"><div class="title" id="title">Raticode</div><div class="detail" id="detail"></div></div>
+    <button type="button" id="stop" hidden>Stop</button>
+    <button type="button" id="open" hidden>Open</button>
+  </div>
+  <script src="dictation-overlay.js"></script>
+</body>
+</html>

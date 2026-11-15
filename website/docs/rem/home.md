@@ -48,7 +48,7 @@ A [board ticket](./board.md) key such as `REM-5`, or an organization's `ENG-18`,
 
 - Cards started together share one line, such as "Started 3 things while you were away: 2 tickets and 1 research run."
 - Ranking and research updates name the tickets they proposed, left out or closed.
-- The **While you were away** card sums up what self-work did since you last looked.
+- The **While you were away** card sums up what self-work did since you last looked. When workflows ran in that time, it adds a line such as "6 workflow runs: 5 passed, 1 failed · est. $0.42". Select it to open [Workflow runs](../studio/runs.md#every-workflow-s-runs) from that moment (from 0.5.5).
 - When self-work stops, after a [timed window](./board.md#timed-self-work) or when you turn it off, Rem posts [a report](./board.md#the-report-when-self-work-stops) listing each task it worked on and how it went. Select one to open it.
 
 ### Project folders and files
@@ -64,6 +64,16 @@ Those places, on Linux, macOS and Windows:
 
 Files whose names usually hold secrets, such as `.env`, keys and certificates (`.key`, `.pem`, `.p12`), follow the same rule wherever they are. A request from a paired phone never gets keys, certificates or password stores, even when it names the exact file, and a phone that asks for them is locked until you unlock it on the computer. See [Suspicious requests lock the phone](../mobile/pairing.md#suspicious-requests-lock-the-phone).
 
+### Earlier messages
+
+Rem's chat opens with its newest 200 messages (from 0.5.5). However long the conversation gets, opening and refreshing it costs the same.
+
+- **Show earlier messages**, at the top of the chat, adds the 40 messages before them. Scrolling up to the top does the same.
+- What you were reading stays in place while earlier messages are added above it.
+- Messages you loaded stay while new ones arrive. The **new messages** button counts only messages that arrive while you read further up.
+- A task's **Conversation** updates list the messages loaded in the chat.
+- The phone app pages back through Rem's chat the same way.
+
 ### Search the conversation
 
 Click the magnifying glass in the chat header, or press Ctrl+F (Cmd+F on a Mac) in Rem's chat. Search covers the whole conversation, back to its first message.
@@ -71,7 +81,7 @@ Click the magnifying glass in the chat header, or press Ctrl+F (Cmd+F on a Mac) 
 - It looks in your messages, Rem's replies and their **Details**, task updates, task card titles and attached file names.
 - It ignores case, and every word you type must appear in the message. The desktop matches words itself; no model reads them.
 - Results come newest first, with the time and a highlighted snippet. A match found only in a task title or file name says so. **Show more results** loads the next 50.
-- Click a result, or press Enter for the newest, to jump there. The message unfolds and the matching words flash.
+- Click a result, or press Enter for the newest, to jump there. A result older than the loaded messages loads everything back to it first. The message unfolds and the matching words flash.
 - **Done** or Escape closes search without moving the chat. Your scroll position and unsent message, with its attachments, stay as they were.
 
 ## Tasks
@@ -186,7 +196,7 @@ Tell Rem when a one-time task should start:
 Each run of a work task goes through **Plan**, **Work**, **Check** and **Report**.
 
 1. **Work.** A worker thread does the work with the task's provider and the project's permissions. Rem answers the worker's routine questions. It asks you only for a missing fact or something only you can authorize, such as publishing, deploying, spending money or deleting something permanently.
-2. **Check.** A separate, read-only **review** checks every acceptance criterion against files, command results and saved reports. Evidence it can't confirm doesn't pass. Research must save a report.
+2. **Check.** A separate, read-only **review** checks every acceptance criterion against files, command results and saved reports. Evidence it can't confirm doesn't pass. Research must save a report. A Claude Code review runs its commands in [Claude Code's sandbox](./board.md#claude-code-s-sandbox).
 3. **Repair.** If the review fails, the work goes back to the worker, up to two times. After that the task moves to **Needs you** with the reason.
 
 Task cards show how many checks passed, failed or haven't run.
@@ -211,6 +221,10 @@ When a run needs you, or is being fixed after review, open the task. Under the r
 Long reasons show three lines; **Show more** opens the rest. Before a review runs, the sheet only counts the checks that haven't run. The phone's task screen shows the same lists (it needs an up-to-date computer).
 
 **Retry review** re-checks saved work without redoing it, for when a review was interrupted. A worker thread keeps one transcript across runs of the same task, with its steps folded under **Show thoughts**.
+
+### Two tasks in one project
+
+When a task starts while another is already changing the same Git project, Rem gives it a temporary worktree on a `rem/` branch and removes the worktree afterwards, keeping the branch. If the project has an approved [setup file](../studio/worktree-setup.md), it runs in that worktree before the worker starts, and the task's status shows the result.
 
 ### Changes land on dev
 
@@ -272,7 +286,7 @@ The phone shows sleeping tasks and **Wake now** once both apps are updated. `Rat
 
 **Settings > Rem > Rem task workers** sets how many Rem tasks (and phone turns) run at once. 0 picks a number from this computer's cores and memory. Paused runs don't take a slot.
 
-Work you ask for goes ahead of [self-work](./board.md#your-work-comes-first): when both don't fit, self-work pauses to make room.
+Work you ask for goes ahead of [self-work](./board.md#your-work-comes-first): when both don't fit, the lowest-priority self-work pauses to make room, one for each task of yours, and picks up again as soon as a thread is free.
 
 **Queue tests and builds** makes tests, builds and browser test runs from all of Rem's tasks wait for a free slot, so many agents can work without overloading the computer.
 
@@ -289,5 +303,9 @@ Work you ask for goes ahead of [self-work](./board.md#your-work-comes-first): wh
 A reply that saved or changed a memory shows a note with **Undo**. Text that looks like a password, key or token is never saved.
 
 **Clear history and tasks**, in the same menu, asks first. It stops Rem's running work and deletes its conversation, tasks, memories and worker threads. Your own threads, project files and saved reports stay.
+
+### If Rem's database is damaged
+
+Raticode keeps the last 3 verified copies of Rem's database, taken at startup and once a day. If the database is damaged when Raticode starts, Raticode moves it aside without deleting it, restores the newest copy and posts a notice in Rem's chat, on the desktop and on the phone, saying which copy was restored and when it was saved. Workflows, the studio and phone pairing keep running. See [Rem's database backups](../knowledge/second-brain.md#rem-s-database-backups).
 
 See also [Global board and self-work](./board.md), [Chat and threads](./chat.md) and, on the phone, [Rem on the phone](../mobile/rem.md).

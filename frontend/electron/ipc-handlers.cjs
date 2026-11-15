@@ -2,6 +2,13 @@ const desktopIpcHandlers = [
   ["gofer:prepare-lifecycle-result", "completeLifecycle"],
   ["gofer:clipboard-read", "readClipboard"],
   ["gofer:edit-focused", "editFocused"],
+  ["gofer:global-dictation-configure", "configureGlobalDictation"],
+  ["gofer:global-dictation-report", "reportGlobalDictation"],
+  ["gofer:global-dictation-suspend", "suspendGlobalDictation"],
+  ["gofer:screen-context-configure", "configureScreenContext"],
+  ["gofer:screen-context-sources", "listScreenSources"],
+  ["gofer:screen-context-capture", "captureScreen"],
+  ["gofer:screen-context-privacy", "openScreenPrivacySettings"],
   ["gofer:api-session", "apiSession"],
   ["gofer:developer-info", "developerInfo"],
   ["gofer:developer-action", "developerAction"],
@@ -13,6 +20,7 @@ const desktopIpcHandlers = [
   ["gofer:configure-rem", "configureRem"],
   ["gofer:archive-rem", "archiveRem"],
   ["gofer:forget-rem", "forgetRem"],
+  ["gofer:purge-rem", "purgeRem"],
   ["gofer:restart-backend", "restartBackend"],
   ["gofer:open-logs", "openLogsFolder"],
   ["gofer:get-data-dir", "getGoferDataDir"],
@@ -58,6 +66,7 @@ const desktopIpcHandlers = [
   ["gofer:browser-library", "browserLibrary"],
   ["gofer:browser-policy", "browserPolicy"],
   ["gofer:gecko", "gecko"],
+  ["gofer:browser-window", "browserWindow"],
   ["gofer:terminal-create", "createTerminal"],
   ["gofer:terminal-write", "writeTerminal"],
   ["gofer:terminal-resize", "resizeTerminal"],
@@ -73,6 +82,8 @@ const updateIpcHandlers = [
   ["gofer:install-downloaded-update", "installDownloadedUpdate"],
   ["gofer:open-update-release", "openUpdateRelease"],
   ["gofer:get-update-state", "getUpdateState"],
+  ["gofer:set-automatic-update-checks", "setAutomaticUpdateChecks"],
+  ["gofer:dismiss-update-reminder", "dismissUpdateReminder"],
 ];
 
 const ipcHandlerDefinitions = [...desktopIpcHandlers, ...updateIpcHandlers];

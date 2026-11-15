@@ -249,7 +249,7 @@ export const SAMPLE_HEALTH = [
 ];
 
 export const HEALTH_KINDS = [
-  ["link", "Broken links"], ["metadata", "Missing metadata"], ["extraction", "Extraction problems"], ["duplicate", "Exact duplicates"], ["citation", "Ambiguous citations"],
+  ["link", "Dead links"], ["metadata", "Missing metadata"], ["extraction", "Extraction problems"], ["duplicate", "Exact duplicates"], ["citation", "Ambiguous citations"],
 ];
 
 export const SAMPLE_JOBS = [

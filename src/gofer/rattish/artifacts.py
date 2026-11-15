@@ -6,7 +6,9 @@ import hashlib
 import json
 import os
 import re
+import threading
 import uuid
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
@@ -30,6 +32,7 @@ from gofer.rattish.diagnostics import (
     SourcePosition,
     SourceSpan,
 )
+from gofer.rattish.ir_validation import ValidatedRattishIR, copy_validated_ir
 from gofer.rattish.migration import migrate_source
 from gofer.rattish.parser import parse_rattish
 from gofer.rattish.project_paths import project_path
@@ -44,6 +47,9 @@ from gofer.utils.brand_compat import LEGACY_WORKSPACE_DIRECTORIES
 from gofer.utils.paths import get_data_dir
 
 ARTIFACT_VERSION = 1
+# Cached artifacts that already passed full validation, keyed by the exact file
+# bytes and everything the validation depended on.
+VALIDATED_ARTIFACT_LIMIT = 256
 
 
 class RattishArtifactError(RuntimeError):
@@ -496,7 +502,30 @@ def _read_cached_artifact(
     referenced_workflows: Mapping[tuple[str, str], ReferencedWorkflow],
 ) -> CompiledArtifact | None:
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
+        raw = path.read_bytes()
+        compiler = _compiler(asset_root)
+        diagnostic_identity = _asset_identity([asset_root / "schemas" / "diagnostic.schema.json"])
+        workflow_dependencies = {
+            key: {
+                "interface_fingerprint": _workflow_interface_fingerprint(workflow.ir),
+                "compilation_fingerprint": workflow.ir["source"]["compilation_fingerprint"],
+            }
+            for key, workflow in referenced_workflows.items()
+        }
+        # Identical bytes checked against the same expected inputs, schemas and
+        # contracts already passed everything below; any difference misses.
+        memo_key = _validated_artifact_key(
+            raw,
+            cache_inputs,
+            compiler,
+            diagnostic_identity,
+            provider_contracts,
+            workflow_dependencies,
+        )
+        remembered = _remembered_artifact(memo_key)
+        if remembered is not None:
+            return remembered.compiled()
+        document = json.loads(raw.decode("utf-8"))
         if (
             not isinstance(document, dict)
             or document.get("artifact_version") != ARTIFACT_VERSION
@@ -505,25 +534,14 @@ def _read_cached_artifact(
             or not isinstance(document.get("ir"), dict)
         ):
             return None
-        compiler = _compiler(asset_root)
-        schema = compiler.ir_validator.schema
-        contract_registry = compiler.contracts
         ir = load_ir(
             cast(dict[str, Any], document["ir"]),
-            schema,
-            {contract.node_type: contract.document for contract in contract_registry},
+            compiler.ir_validator.schema,
+            {contract.node_type: contract.document for contract in compiler.contracts},
             provider_contracts,
-            {
-                key: {
-                    "interface_fingerprint": _workflow_interface_fingerprint(workflow.ir),
-                    "compilation_fingerprint": workflow.ir["source"]["compilation_fingerprint"],
-                }
-                for key, workflow in referenced_workflows.items()
-            },
+            workflow_dependencies,
         )
-        diagnostic_validator = _diagnostic_validator(
-            _asset_identity([asset_root / "schemas" / "diagnostic.schema.json"])
-        )
+        diagnostic_validator = _diagnostic_validator(diagnostic_identity)
         diagnostics = tuple(
             cast(dict[str, Any], item) for item in document["diagnostics"] if isinstance(item, dict)
         )
@@ -534,7 +552,11 @@ def _read_cached_artifact(
         source_path = Path(str(document.get("source_path", "")))
         if not source_path.is_absolute():
             return None
-        return CompiledArtifact(ir, diagnostics, True, source_path)
+        entry = _ValidatedArtifact(
+            ir, tuple(json.loads(json.dumps(item)) for item in diagnostics), source_path
+        )
+        _remember_artifact(memo_key, entry)
+        return entry.compiled()
     except (
         OSError,
         UnicodeError,
@@ -543,6 +565,94 @@ def _read_cached_artifact(
         ValidationError,
     ):
         return None
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedArtifact:
+    ir: ValidatedRattishIR
+    diagnostics: tuple[dict[str, Any], ...]
+    source_path: Path
+
+    def compiled(self) -> CompiledArtifact:
+        # Callers get their own copies, so nothing they do reaches the shared entry.
+        return CompiledArtifact(
+            copy_validated_ir(self.ir),
+            tuple(json.loads(json.dumps(item)) for item in self.diagnostics),
+            True,
+            self.source_path,
+        )
+
+
+ValidatedArtifactKey = tuple[str, str, str, tuple[tuple[str, int, str], ...], tuple[Any, ...]]
+_validated_artifacts: OrderedDict[ValidatedArtifactKey, _ValidatedArtifact] = OrderedDict()
+_validated_artifacts_lock = threading.Lock()
+
+
+@lru_cache(maxsize=8)
+def _compiler_validation_fingerprint(compiler: RattishCompiler) -> str:
+    """Fingerprint the IR schema and node contracts that load_ir checks against."""
+    return json_fingerprint(
+        {
+            "ir_schema": json_fingerprint(compiler.ir_validator.schema),
+            "node_contracts": [
+                [contract.node_type, contract.version, contract.fingerprint]
+                for contract in sorted(compiler.contracts, key=lambda item: item.node_type)
+            ],
+        }
+    )
+
+
+@lru_cache(maxsize=8)
+def _diagnostic_schema_fingerprint(identity: AssetIdentity) -> str:
+    return json_fingerprint(_diagnostic_validator(identity).schema)
+
+
+def _validated_artifact_key(
+    raw: bytes,
+    cache_inputs: str,
+    compiler: RattishCompiler,
+    diagnostic_identity: AssetIdentity,
+    provider_contracts: Mapping[str, ProviderContract],
+    workflow_dependencies: Mapping[tuple[str, str], Mapping[str, Any]],
+) -> ValidatedArtifactKey:
+    return (
+        hashlib.sha256(raw).hexdigest(),
+        cache_inputs,
+        _compiler_validation_fingerprint(compiler)
+        + _diagnostic_schema_fingerprint(diagnostic_identity),
+        tuple(
+            sorted(
+                (contract.provider_id, contract.version, contract.fingerprint)
+                for contract in provider_contracts.values()
+            )
+        ),
+        tuple(
+            sorted(
+                (
+                    key,
+                    str(value.get("interface_fingerprint")),
+                    str(value.get("compilation_fingerprint")),
+                )
+                for key, value in workflow_dependencies.items()
+            )
+        ),
+    )
+
+
+def _remembered_artifact(key: ValidatedArtifactKey) -> _ValidatedArtifact | None:
+    with _validated_artifacts_lock:
+        entry = _validated_artifacts.get(key)
+        if entry is not None:
+            _validated_artifacts.move_to_end(key)
+        return entry
+
+
+def _remember_artifact(key: ValidatedArtifactKey, entry: _ValidatedArtifact) -> None:
+    with _validated_artifacts_lock:
+        _validated_artifacts[key] = entry
+        _validated_artifacts.move_to_end(key)
+        while len(_validated_artifacts) > VALIDATED_ARTIFACT_LIMIT:
+            _validated_artifacts.popitem(last=False)
 
 
 def _write_json_atomic(path: Path, document: dict[str, Any]) -> None:

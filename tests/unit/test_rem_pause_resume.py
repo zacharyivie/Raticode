@@ -346,7 +346,8 @@ def test_new_user_work_pauses_self_work_which_resumes_after_it(board):
     assert any(n["text"].startswith("Picked 1 paused task back up") for n in report["notes"])
 
 
-def test_paused_self_work_waits_for_the_user_to_be_away_again(board):
+def test_paused_self_work_resumes_as_soon_as_a_thread_is_free(board):
+    """It made way only for as long as the user's work needed the thread."""
     home, fake, _ = board
     fake.hold.clear()
     add(home, "Solo")
@@ -360,17 +361,17 @@ def test_paused_self_work_waits_for_the_user_to_be_away_again(board):
     mine = start_task(home, "Request")
     until(home, lambda: run_of(home, solo["id"])["state"] == "paused")
     assert run_of(home, solo["id"])["paused"]["reason"] == PRIORITY_REASON
-    fake.hold.set()
+    fake.released.add("Request")
     until(home, lambda: run_of(home, mine["id"])["state"] == "succeeded")
-    # Still here (the prompt was at minute 15): the paused ticket waits.
-    at(home, 25)
-    for _ in range(10):
-        tick(home)
-    assert run_of(home, solo["id"])["state"] == "paused"
-    # Fifteen quiet minutes later it resumes, before anything new starts.
-    at(home, 31)
+    # The user is still here (minute 15), yet the paused ticket is already back at work.
+    until(home, lambda: run_of(home, solo["id"])["state"] == "executing")
+    resumed = run_of(home, solo["id"])
+    assert resumed["resumed"]["by"] == "rem"
+    # The resumed turn reaches the provider just after the run says it is working.
+    until(home, lambda: len(worker_prompts(fake, solo["thread_id"])) == 2)
+    assert RESUME_TEXT in worker_prompts(fake, solo["thread_id"])[-1]
+    fake.hold.set()
     settle(home, "Solo", states=("done",))
-    assert run_of(home, solo["id"])["state"] == "succeeded"
 
 
 def test_a_self_work_run_the_user_resumes_is_not_paused_again(board):

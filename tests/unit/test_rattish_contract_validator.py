@@ -30,6 +30,7 @@ def test_representative_contracts_validate() -> None:
         "file",
         "folder",
         "http-request",
+        "jev",
         "local-search",
         "local-vectorize",
         "loop",

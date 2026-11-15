@@ -124,7 +124,7 @@ async function run() {
   const tabStripShown = async () => JSON.stringify(await browserTabs()) === JSON.stringify(openTabs);
   const remChatInMain = () => page("Boolean(document.querySelector('.studio-panes > section .rem-home')?.offsetParent)");
   const sidebarWidth = () => page("Math.round(document.querySelector('.studio-sidebar').getBoundingClientRect().width)");
-  await page("void (window.__browserViews = [...document.querySelectorAll('webview')])");
+  await page("void (window.__browserViews = [...document.querySelectorAll('[data-browser-view]')])");
   await page("document.querySelector('.studio-sidebar #sidebar-tab-rem').click()");
   await waitFor(remChatInMain, "Rem's chat did not open");
   assert.equal(await tabStripShown(), false, "Rem's chat covers the tabs");

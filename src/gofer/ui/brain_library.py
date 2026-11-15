@@ -16,16 +16,19 @@ import logging
 import os
 import posixpath
 import re
+import secrets
 import shutil
 import sqlite3
+import sys
 import tempfile
 import threading
+import time
 import uuid
 import zipfile
 from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from html import escape
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -36,10 +39,23 @@ if TYPE_CHECKING:
     from gofer.core.provider_profiles import ResolvedProviderSettings
 
 
+from gofer.ui.brain_backups import (
+    backup_path,
+    backup_settings,
+    backup_warning,
+    clean_partials,
+    due_key,
+    format_size,
+    prune,
+    validate_backup,
+    verify_package,
+)
 from gofer.ui.brain_documents import (
     EXTENSIONS,
     MAX_ENTRIES,
+    MAX_FILE,
     MAX_MANIFEST,
+    MAX_PACKAGE,
     MAX_TEXT,
     checked_archive,
     extract,
@@ -51,8 +67,17 @@ from gofer.ui.brain_documents import (
     validate_portable,
     validate_settings,
 )
+from gofer.ui.report_links import (
+    ABSOLUTE,
+    OUTSIDE,
+    TEMPORARY,
+    LinkCheck,
+    check_link,
+    rewrite_links,
+)
 from gofer.utils.atomic_output import atomic_binary_output, open_binary_input
 from gofer.utils.logging import RepeatingFailure
+from gofer.utils.paths import restrict_to_owner
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +91,14 @@ KINDS = (
     "projects",
     "topics",
 )
+
+# Tables whose rows the library snapshot shows. A write to any of them moves the
+# library revision, so polls that already have the current one skip the snapshot.
+REVISED_TABLES = frozenset({"brains", "entities", "tasks", "preferences"})
+_WRITE_ACTIONS = frozenset({sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE})
+# Library health's filesystem checks (link targets, folder permissions) are reused
+# for this long unless Library health opens or a scan finishes.
+HEALTH_RECHECK_SECONDS = 60.0
 
 
 def now() -> str:
@@ -152,6 +185,66 @@ def linked_document(doc: dict[str, Any], link: str, documents: list[dict[str, An
     return matches[0]["id"] if len(matches) == 1 else None
 
 
+def git_folder(root: Path) -> Path | None:
+    """Return the brain's Git folder, following a ``.git`` file to a separate one."""
+    marker = root / ".git"
+    try:
+        if marker.is_dir():
+            return marker
+        if marker.is_file():
+            with marker.open(encoding="utf-8", errors="replace") as handle:
+                for line in handle.read(4096).splitlines():
+                    if line.startswith("gitdir:"):
+                        target = Path(line[len("gitdir:") :].strip()).expanduser()
+                        folder = (target if target.is_absolute() else root / target).resolve()
+                        # Only a real Git folder (or a worktree's): a .git file pointing at
+                        # some other folder must never get its permissions changed.
+                        real = (folder / "HEAD").is_file() and (
+                            (folder / "objects").is_dir() or (folder / "commondir").is_file()
+                        )
+                        return folder if real else None
+    except OSError:
+        return None
+    return None
+
+
+def open_to_others(root: Path) -> list[dict[str, Any]]:
+    """List the brain folder and its Git folder when other accounts can read them.
+
+    A Git folder inside a private brain folder is unreachable, so it only counts when
+    the brain folder is open too or the Git folder lives elsewhere. Windows has no
+    POSIX modes to check.
+    """
+    if sys.platform == "win32":
+        return []
+    try:
+        mode = root.stat().st_mode & 0o777
+    except OSError:
+        return []
+    found = []
+    if mode & 0o077:
+        found.append({"part": "folder", "path": str(root), "mode": mode})
+    git = git_folder(root)
+    if git is not None:
+        try:
+            git_mode = git.stat().st_mode & 0o777
+        except OSError:
+            git_mode = 0
+        if git_mode & 0o077 and (mode & 0o077 or not git.is_relative_to(root)):
+            found.append({"part": "git", "path": str(git), "mode": git_mode})
+    return found
+
+
+def restrict_brain(root: Path) -> list[dict[str, Any]]:
+    """Apply the owner-only folder rule to a brain and its separate Git folder.
+
+    Returns what other accounts can still read, such as a folder another account owns.
+    """
+    for item in open_to_others(root):
+        restrict_to_owner(Path(item["path"]))
+    return open_to_others(root)
+
+
 class BrainLibrary:
     def __init__(
         self,
@@ -181,8 +274,28 @@ class BrainLibrary:
         self._topic_cache: dict[str, Any] = {}
         self._receipts_seen: dict[str, float] = {}
         self._embedding_checked: set[str] = set()
+        self._restricted: set[str] = set()
+        # Long-passage fingerprints per document version, for report families.
+        self._passage_cache: dict[tuple[str, str], set[str]] = {}
         # Set by the UI server so the Second Brain can show organization tickets.
         self.organization_source: Callable[[], list[dict[str, Any]]] | None = None
+        # Poll tokens: the stored library revision, this process, and an epoch that
+        # moves when something outside the database the snapshot shows changes
+        # (health found by filesystem checks, folder availability, capabilities).
+        self._session = secrets.token_hex(4)
+        self._outside_epoch = 0
+        self._outside_digest = ""
+        self._availability: tuple[tuple[str, bool], ...] | None = None
+        # Filesystem results for Library health, reused until the next recheck.
+        self._fs_checked_at: float | None = None
+        self._fs_force = False
+        self._fs_generation = 0
+        self._link_checks: dict[tuple[str, str, str], LinkCheck] = {}
+        self._exists: dict[str, bool] = {}
+        # True/False, or the reason a path is unsafe (source_path's ValueError).
+        self._sources: dict[str, bool | str] = {}
+        self._open_checks: dict[str, list[dict[str, Any]]] = {}
+        self._health_cache: tuple[Any, list[dict[str, Any]], list[dict[str, Any]]] | None = None
         with self.connect() as db:
             db.executescript("""
                 PRAGMA journal_mode=WAL;
@@ -206,6 +319,9 @@ class BrainLibrary:
                 CREATE TABLE IF NOT EXISTS preferences(key TEXT PRIMARY KEY, body TEXT);
                 CREATE TABLE IF NOT EXISTS external_sources(brain TEXT, id TEXT, body TEXT,
                     PRIMARY KEY(brain,id));
+                CREATE TABLE IF NOT EXISTS library_revision(
+                    id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL);
+                INSERT OR IGNORE INTO library_revision VALUES(1,0);
             """)
             for row in db.execute("SELECT id,body FROM tasks") if recover else []:
                 task = json.loads(row[1])
@@ -224,13 +340,119 @@ class BrainLibrary:
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
+        """A connection whose writes to the snapshot's tables move the library revision.
+
+        The revision moves in the same transaction as the write, so a reader never sees
+        new rows under an old revision. Every process that opens the library (the UI
+        server, Rem's Second Brain tools) shares the stored revision.
+        """
         db = sqlite3.connect(self.database, timeout=30)
         db.row_factory = sqlite3.Row
+        wrote = False
+
+        def watch(action: int, table: str | None, *_: str | None) -> int:
+            nonlocal wrote
+            if action in _WRITE_ACTIONS and table in REVISED_TABLES:
+                wrote = True
+            return sqlite3.SQLITE_OK
+
+        db.set_authorizer(watch)
         try:
             with db:
                 yield db
+                if wrote:
+                    db.execute("UPDATE library_revision SET value=value+1 WHERE id=1")
         finally:
             db.close()
+
+    def revision(self) -> int:
+        """The library revision: it goes up on every write to brains, entities, tasks
+        and view preferences."""
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM library_revision WHERE id=1").fetchone()
+        return int(row[0]) if row else 0
+
+    def _token(self, revision: int) -> str:
+        return f"{revision}.{self._session}.{self._outside_epoch}"
+
+    def _brain_availability(self) -> tuple[tuple[str, bool], ...]:
+        """Which brain folders exist, without decoding the brain records."""
+        with self.connect() as db:
+            rows = db.execute("SELECT id,root FROM brains ORDER BY rowid").fetchall()
+        return tuple((str(row[0]), Path(row[1]).is_dir()) for row in rows)
+
+    def recheck_health(self) -> None:
+        """Run Library health's filesystem checks again on the next snapshot."""
+        self._fs_force = True
+
+    def _fs_due(self) -> bool:
+        return (
+            self._fs_force
+            or self._fs_checked_at is None
+            or time.monotonic() - self._fs_checked_at >= HEALTH_RECHECK_SECONDS
+        )
+
+    def _fs_window(self) -> None:
+        """Forget filesystem results once a minute, or when a recheck was asked for."""
+        if not self._fs_due():
+            return
+        self._fs_force = False
+        self._fs_checked_at = time.monotonic()
+        self._fs_generation += 1
+        self._link_checks.clear()
+        self._exists.clear()
+        self._sources.clear()
+        self._open_checks.clear()
+
+    def _check_link(self, link: str, root: Path, folder: Path) -> LinkCheck:
+        key = (link, str(root), str(folder))
+        if key not in self._link_checks:
+            self._link_checks[key] = check_link(link, root, folder)
+        return self._link_checks[key]
+
+    def _path_exists(self, path: Path | str) -> bool:
+        key = str(path)
+        if key not in self._exists:
+            self._exists[key] = Path(key).exists()
+        return self._exists[key]
+
+    def _source_exists(self, root: Path, relative: str) -> bool:
+        """Whether a file inside the brain exists; ValueError for an unsafe path."""
+        key = f"{root}\0{relative}"
+        if key not in self._sources:
+            try:
+                self._sources[key] = source_path(root, relative).exists()
+            except ValueError as exc:
+                self._sources[key] = str(exc)
+        found = self._sources[key]
+        if isinstance(found, str):
+            raise ValueError(found)
+        return found
+
+    def _open_to_others(self, root: Path) -> list[dict[str, Any]]:
+        key = str(root)
+        if key not in self._open_checks:
+            self._open_checks[key] = open_to_others(root)
+        return self._open_checks[key]
+
+    def poll(self, known: str = "", *, recheck: bool = False) -> dict[str, Any]:
+        """The library for a client that already has the snapshot at ``known``.
+
+        While nothing changed it answers ``{unchanged, revision}`` without decoding
+        entities or running health, like Rem home's polled views (``rem_poll_result``).
+        Library health's filesystem checks still run at most once a minute, or right
+        away after ``recheck``; the answer stays ``unchanged`` when they find nothing new.
+        """
+        if recheck:
+            self.recheck_health()
+        if known and not self._fs_due():
+            token = self._token(self.revision())
+            if token == known and self._brain_availability() == self._availability:
+                return {"unchanged": True, "revision": token}
+        payload = self.snapshot()
+        if known and payload["revision"] == known:
+            return {"unchanged": True, "revision": known}
+        return payload
 
     def close(self) -> None:
         self.stop.set()
@@ -360,6 +582,9 @@ class BrainLibrary:
         root = raw.resolve(strict=True)
         if not root.is_dir():
             raise ValueError("Choose a folder")
+        # Brains hold notes and research that may quote private material. Library
+        # health warns when this could not make the folder private.
+        restrict_brain(root)
         with self.lock:
             for brain in self.brains():
                 if Path(brain["root"]) == root:
@@ -443,10 +668,17 @@ class BrainLibrary:
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
+            # Read before the rows: a write landing meanwhile leaves this snapshot
+            # tagged with the older revision, so the next poll fetches it again.
+            revision = self.revision()
+            self._fs_window()
             brains = self.brains()
             available = []
+            moment = datetime.now(UTC)
             for brain in brains:
                 brain["state"] = "available" if Path(brain["root"]).is_dir() else "unavailable"
+                brain["backup"] = backup_settings(brain)
+                brain["backupWarning"] = backup_warning(brain, moment)
                 if brain["state"] == "available":
                     available.append(brain["id"])
             payload: dict[str, Any] = {
@@ -477,20 +709,51 @@ class BrainLibrary:
                 for name, profile in load_provider_profiles(self.folder.parent).items()
                 if profile.subscription == "openai_api"
             ]
+            availability = tuple((brain["id"], brain["state"] == "available") for brain in brains)
+            # Health depends on the rows, which folders exist, today's date (check-by
+            # reminders) and the filesystem results of the current recheck window.
+            key = (revision, availability, date.today(), self._fs_generation)
+            if self._health_cache is not None and self._health_cache[0] == key:
+                health = copy.deepcopy(self._health_cache[1])
+                payload["families"] = copy.deepcopy(self._health_cache[2])
+            else:
+                health = self.health(payload)
+                self._health_cache = (
+                    key,
+                    copy.deepcopy(health),
+                    copy.deepcopy(payload["families"]),
+                )
+            capabilities = {
+                "pdf": importlib.util.find_spec("pypdf") is not None,
+                "ocr": bool(shutil.which("tesseract") and shutil.which("pdftoppm")),
+                "semantic": importlib.util.find_spec("fastembed") is not None,
+                "home": str(Path.home()),
+                "embeddingProfiles": profile_names,
+                "researchProfiles": research_profiles(self.folder.parent),
+            }
+            outside = hashlib.sha256(
+                json.dumps(
+                    [
+                        health,
+                        [[b["id"], b["state"], b.get("backupWarning")] for b in brains],
+                        capabilities,
+                    ],
+                    sort_keys=True,
+                    default=str,
+                ).encode()
+            ).hexdigest()
+            if outside != self._outside_digest:
+                self._outside_digest = outside
+                self._outside_epoch += 1
+            self._availability = availability
             payload.update(
                 brains=brains,
                 tasks=tasks,
-                health=self.health(payload),
+                health=health,
                 loaded=True,
                 **view,
-                capabilities={
-                    "pdf": importlib.util.find_spec("pypdf") is not None,
-                    "ocr": bool(shutil.which("tesseract") and shutil.which("pdftoppm")),
-                    "semantic": importlib.util.find_spec("fastembed") is not None,
-                    "home": str(Path.home()),
-                    "embeddingProfiles": profile_names,
-                    "researchProfiles": research_profiles(self.folder.parent),
-                },
+                capabilities=capabilities,
+                revision=self._token(revision),
             )
             return payload
 
@@ -499,6 +762,18 @@ class BrainLibrary:
         brain_id: str,
         cancel: threading.Event | None = None,
         progress: Callable[[float], None] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return self._scan(brain_id, cancel, progress)
+        finally:
+            # Files came and went: Library health checks links again right away.
+            self.recheck_health()
+
+    def _scan(
+        self,
+        brain_id: str,
+        cancel: threading.Event | None,
+        progress: Callable[[float], None] | None,
     ) -> dict[str, Any]:
         brain = self.brain(brain_id)
         root = Path(brain["root"])
@@ -677,7 +952,15 @@ class BrainLibrary:
             for doc in touched:
                 saved = fresh.get(doc["id"])
                 if saved:
-                    for key in ("reading", "inbox", "excluded", "ignoredIssues", "metadata"):
+                    for key in (
+                        "reading",
+                        "inbox",
+                        "excluded",
+                        "ignoredIssues",
+                        "metadata",
+                        "replacedBy",
+                        "checkBy",
+                    ):
                         if key in saved and not (
                             saved.get("missing")
                             and not doc.get("missing")
@@ -776,14 +1059,22 @@ class BrainLibrary:
         return references
 
     def health(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
-        issues: list[dict[str, Any]] = []
+        issues: list[dict[str, Any]] = self.access_health(payload["brains"])
         hashes: dict[str, str] = {}
+        # A note that repeats the same dead link reports it once.
+        seen: set[str] = set()
+        roots = {brain["id"]: Path(brain["root"]) for brain in payload["brains"]}
+        # Each brain's documents, built once for every link that names a document.
+        brain_documents: dict[str, list[dict[str, Any]]] = {}
+        for item in payload["documents"]:
+            brain_documents.setdefault(item["brainId"], []).append(item)
         for doc in payload["documents"]:
 
             def issue(kind: str, detail: str, fix: str, **extra: Any) -> None:
                 key = f"{kind}:{doc['id']}:{doc['version']}:{detail}"
                 issue_id = hashlib.sha256(key.encode()).hexdigest()[:24]
-                if issue_id not in doc.get("ignoredIssues", []):
+                if issue_id not in doc.get("ignoredIssues", []) and issue_id not in seen:
+                    seen.add(issue_id)
                     issues.append(
                         {
                             "id": issue_id,
@@ -812,30 +1103,64 @@ class BrainLibrary:
                 )
             else:
                 hashes[doc["version"]] = doc["id"]
-            root = Path(
-                next(brain["root"] for brain in payload["brains"] if brain["id"] == doc["brainId"])
-            )
+            root = roots[doc["brainId"]]
             for link in doc.get("links", []):
+                checked = self._check_link(link, root, root / Path(doc["path"]).parent)
+                if checked.reason == ABSOLUTE:
+                    shown = Path(checked.resolved).relative_to(root.resolve()).as_posix()
+                    if self._path_exists(checked.resolved):
+                        issue(
+                            "link",
+                            f"Absolute path to a file in this brain: {link}. It breaks when "
+                            f"the brain moves; make it relative ({checked.relative}).",
+                            "Make links relative",
+                            target=link,
+                            reason="absolute",
+                        )
+                    else:
+                        issue(
+                            "link",
+                            f"Linked file is missing: {shown} (written as an absolute path).",
+                            "Repair link",
+                            target=link,
+                            reason="missing",
+                            absolute=True,
+                        )
+                    continue
+                if checked.reason in {TEMPORARY, OUTSIDE}:
+                    gone = not self._path_exists(checked.resolved)
+                    if checked.reason == OUTSIDE and not gone:
+                        # Links to files in other projects are often deliberate. They
+                        # are only dead once the file is gone; saving still warns.
+                        continue
+                    where = (
+                        "a temporary folder" if checked.reason == TEMPORARY else "outside the brain"
+                    )
+                    gone_text = " The file no longer exists." if gone else ""
+                    issue(
+                        "link",
+                        f"Link points to {where}: {link}.{gone_text}",
+                        "Repair link",
+                        target=link,
+                        reason=checked.reason,
+                    )
+                    continue
                 if urlparse(link).scheme or link.startswith("#") or "?" in link:
                     continue
                 clean = link.split("#")[0]
                 try:
-                    exists = source_path(root, linked_path(doc, clean)).exists() or bool(
-                        linked_document(
-                            doc,
-                            clean,
-                            [
-                                item
-                                for item in payload["documents"]
-                                if item["brainId"] == doc["brainId"]
-                            ],
-                        )
+                    exists = self._source_exists(root, linked_path(doc, clean)) or bool(
+                        linked_document(doc, clean, brain_documents[doc["brainId"]])
                     )
                 except ValueError:
                     exists = False
                 if not exists:
                     issue(
-                        "link", f"Linked document is missing: {clean}", "Repair link", target=clean
+                        "link",
+                        f"Linked document is missing: {clean}",
+                        "Repair link",
+                        target=clean,
+                        reason="missing",
                     )
             if any(
                 c["docId"] == doc["id"] and c["state"] in {"relocate", "unavailable", "changed"}
@@ -843,7 +1168,161 @@ class BrainLibrary:
                 for c in report["citations"]
             ):
                 issue("citation", "A report cites a previous source version.", "Review citations")
+        issues += self._lifecycle_health(payload)
         return issues
+
+    def _lifecycle_health(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """Replaced-by suggestions for report families, and check-by reminders."""
+        from datetime import date
+
+        from gofer.ui.brain_families import check_due, report_families
+
+        documents = {doc["id"]: doc for doc in payload["documents"]}
+        if "families" not in payload:
+            payload["families"] = report_families(payload["documents"], self._passage_cache)
+        issues: list[dict[str, Any]] = []
+
+        def add(doc: dict[str, Any], kind: str, detail: str, fix: str, **extra: Any) -> None:
+            key = f"{kind}:{doc['id']}:{doc['version']}:{extra.get('newerId', '')}:{detail}"
+            issue_id = hashlib.sha256(key.encode()).hexdigest()[:24]
+            if issue_id not in doc.get("ignoredIssues", []):
+                issues.append(
+                    {
+                        "id": issue_id,
+                        "kind": kind,
+                        "docId": doc["id"],
+                        "detail": detail,
+                        "fix": fix,
+                        **extra,
+                    }
+                )
+
+        for family in payload["families"]:
+            suggestion = family["suggestion"]
+            if not suggestion:
+                continue
+            older, newer = documents[suggestion["olderId"]], documents[suggestion["newerId"]]
+            add(
+                older,
+                "family",
+                f"Shares {suggestion['shared']} of its {suggestion['olderPassages']} long "
+                f"passages with the newer “{newer['title']}”. It may be an older version.",
+                "Review suggestion",
+                familyId=family["id"],
+                newerId=newer["id"],
+                share=suggestion["share"],
+            )
+        today = date.today()
+        for doc in payload["documents"]:
+            if check_due(doc, today):
+                add(
+                    doc,
+                    "review",
+                    f"Check-by date {doc['checkBy']} has arrived. "
+                    "Confirm the report is still accurate.",
+                    "Mark checked",
+                    checkBy=doc["checkBy"],
+                )
+        return issues
+
+    def access_health(self, brains: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Warn about brain folders, or their Git folders, other accounts can read."""
+        issues = []
+        for brain in brains:
+            if brain.get("state") != "available":
+                continue
+            for item in self._open_to_others(Path(brain["root"])):
+                key = f"permissions:{brain['id']}:{item['path']}:{item['mode']:o}"
+                issue_id = hashlib.sha256(key.encode()).hexdigest()[:24]
+                if issue_id in brain.get("ignoredIssues", []):
+                    continue
+                what = "brain folder" if item["part"] == "folder" else "brain's Git history"
+                issues.append(
+                    {
+                        "id": issue_id,
+                        "kind": "permissions",
+                        "brainId": brain["id"],
+                        "path": item["path"],
+                        "detail": (
+                            f"Other accounts on this computer can read the {what}"
+                            f" (permissions {item['mode']:o})."
+                        ),
+                        "fix": "Make private",
+                    }
+                )
+        return issues
+
+    def absolute_links(
+        self, brain_id: str, *, apply: bool = False, expected: Any = None
+    ) -> dict[str, Any]:
+        """Preview, or apply, making absolute links inside a brain relative.
+
+        The preview counts every absolute link in the brain's notes that resolves
+        inside the brain folder. Applying needs the preview's count, so nothing is
+        rewritten unless the user saw exactly what changes. Links to temporary or
+        outside folders are counted and left as written. Running it again after it
+        has been applied finds nothing to change.
+        """
+        brain = self.brain(brain_id)
+        root = Path(brain["root"])
+        if not root.is_dir():
+            raise ValueError("Brain folder is unavailable")
+        planned: list[tuple[dict[str, Any], str, str]] = []
+        changes: list[dict[str, Any]] = []
+        left = {TEMPORARY: 0, OUTSIDE: 0}
+        missing = 0
+        for doc in sorted(self.entities("documents", brain_id), key=lambda item: item["path"]):
+            if doc.get("missing") or Path(doc["path"]).suffix.lower() not in {
+                ".md",
+                ".markdown",
+                ".html",
+                ".htm",
+            }:
+                continue
+            try:
+                data = read_source(root, doc["path"])
+                text = data.decode(doc.get("encoding", "utf-8"))
+                folder = source_path(root, doc["path"]).parent
+            except (OSError, ValueError):
+                continue
+            repaired, rewritten, flagged = rewrite_links(text, doc["path"], root, folder)
+            for check in flagged:
+                left[str(check.reason)] += 1
+            if not rewritten:
+                continue
+            planned.append((doc, text, repaired))
+            for check in rewritten:
+                exists = Path(check.resolved).exists()
+                missing += not exists
+                changes.append(
+                    {
+                        "docId": doc["id"],
+                        "path": doc["path"],
+                        "old": check.link,
+                        "new": check.relative,
+                        "targetExists": exists,
+                    }
+                )
+        summary: dict[str, Any] = {
+            "count": len(changes),
+            "documents": len(planned),
+            "missingTargets": missing,
+            "temporary": left[TEMPORARY],
+            "outside": left[OUTSIDE],
+            "changes": changes[:500],
+        }
+        if not apply:
+            return summary
+        if expected is None or int(expected) != len(changes):
+            raise ValueError(
+                "The links changed since the preview. Preview the repair again before applying it."
+            )
+        written = 0
+        for doc, _, repaired in planned:
+            with atomic_binary_output(source_path(root, doc["path"])) as handle:
+                handle.write(repaired.encode(doc.get("encoding", "utf-8")))
+            written += 1
+        return {**summary, "changes": changes[:50], "applied": True, "written": written}
 
     def mutate(self, params: dict[str, Any]) -> dict[str, Any]:
         kind, item_id = str(params.get("kind")), str(params.get("id", ""))
@@ -911,8 +1390,13 @@ class BrainLibrary:
                     "excluded",
                     "encoding",
                     "ignoredIssues",
+                    "checkBy",
                 }
                 patch = {key: value for key, value in item.items() if key in editable}
+                if "checkBy" in patch:
+                    from gofer.ui.brain_families import check_by
+
+                    patch["checkBy"] = check_by(patch["checkBy"])
                 metadata = {
                     **existing.get("metadata", {}),
                     **{
@@ -1089,6 +1573,38 @@ class BrainLibrary:
                 self.start_task("index", {"brainId": brain_id, "force": True})
             return item
 
+    def confirm_replacement(self, older_id: str, newer_id: str) -> dict[str, Any]:
+        """Mark older_id as replaced by newer_id, or clear the mark when newer_id is empty.
+
+        The link is stored on the document record and written to the brain's portable
+        metadata. The report files themselves are not changed.
+        """
+        from gofer.ui.brain_families import newest_replacement
+
+        with self.lock:
+            older = self.entity("documents", older_id)
+            brain = self.brain(older["brainId"])
+            if not Path(brain["root"]).is_dir():
+                raise ValueError("Brain folder is unavailable")
+            if not newer_id:
+                older.pop("replacedBy", None)
+            else:
+                newer = self.entity("documents", newer_id)
+                if newer["brainId"] != older["brainId"]:
+                    raise ValueError("A report can only be replaced by one in the same brain")
+                if newer_id == older_id:
+                    raise ValueError("A report can't replace itself")
+                by_id = {doc["id"]: doc for doc in self.entities("documents", older["brainId"])}
+                if older_id in newest_replacement(newer, by_id):
+                    raise ValueError(
+                        "That report is already marked as replaced by this one. "
+                        "Clear that mark first."
+                    )
+                older["replacedBy"] = {"docId": newer_id, "at": now()}
+            self.put("documents", older)
+            self._portable(older["brainId"])
+            return older
+
     def validate_evidence(self, evidence: dict[str, Any]) -> dict[str, Any]:
         doc = self.entity("documents", str(evidence.get("docId", "")))
         version = evidence.get("version") or doc["version"]
@@ -1180,6 +1696,12 @@ class BrainLibrary:
                     for doc in self.entities("documents", brain["id"]):
                         doc["fingerprint"] = ""
                         self.put("documents", doc)
+            if "backup" in patch:
+                previous = backup_settings(brain)
+                brain["backup"] = validate_backup(patch["backup"], Path(brain["root"]))
+                if brain["backup"]["enabled"] and not previous["enabled"]:
+                    # The 7-day warning counts from here until the first verified backup.
+                    brain["backupStatus"] = {**brain.get("backupStatus", {}), "enabledAt": now()}
             brain["lastOpened"] = patch.get("lastOpened", brain["lastOpened"])
             self.put_brain(brain)
             self._portable(brain["id"])
@@ -1189,7 +1711,7 @@ class BrainLibrary:
 
     def request(self, action: str, params: dict[str, Any]) -> Any:
         if action == "snapshot":
-            return self.snapshot()
+            return self.poll(str(params.get("revision") or ""), recheck=bool(params.get("recheck")))
         if action == "open":
             return self.open(params)
         if action == "update_brain":
@@ -1313,14 +1835,37 @@ class BrainLibrary:
         if action == "ignore_health":
             issues = {issue["id"]: issue for issue in self.snapshot()["health"]}
             for issue_id in params["ids"]:
-                if issue_id in issues:
+                if issue_id in issues and "brainId" in issues[issue_id]:
+                    brain = self.brain(issues[issue_id]["brainId"])
+                    brain["ignoredIssues"] = list(set(brain.get("ignoredIssues", []) + [issue_id]))
+                    self.put_brain(brain)
+                elif issue_id in issues:
                     doc = self.entity("documents", issues[issue_id]["docId"])
                     doc["ignoredIssues"] = list(set(doc.get("ignoredIssues", []) + [issue_id]))
                     self.put("documents", doc)
                     self._portable(doc["brainId"])
             return {}
+        if action == "backup_estimate":
+            return self.backup_estimate(str(params["brainId"]))
+        if action == "absolute_links_preview":
+            return self.absolute_links(str(params["brainId"]))
+        if action == "restrict_access":
+            brain = self.brain(str(params["brainId"]))
+            remaining = restrict_brain(Path(brain["root"]))
+            self.recheck_health()
+            return {"remaining": [item["path"] for item in remaining]}
         if action == "search":
             return self.search(params)
+        if action == "report_families":
+            from gofer.ui.brain_families import report_families
+
+            return report_families(self.entities("documents", str(params["brainId"])))
+        if action == "confirm_replacement":
+            return self.confirm_replacement(
+                str(params.get("olderId", "")), str(params.get("newerId", ""))
+            )
+        if action == "clear_replacement":
+            return self.confirm_replacement(str(params.get("docId", "")), "")
         if action == "related":
             doc = self.entity("documents", str(params["id"]))
             return [item["docId"] for item in self._similar(doc) if not item["revision"]][:5]
@@ -1779,8 +2324,10 @@ class BrainLibrary:
             "job",
             "bibliography",
             "repair-link",
+            "repair-absolute-links",
             "add-files",
             "compare",
+            "backup",
         }
         if kind not in operations:
             raise ValueError("Unknown Second Brain operation")
@@ -1804,6 +2351,19 @@ class BrainLibrary:
                 if active:
                     if params.get("event"):
                         self.deferred_jobs.add(str(params["jobId"]))
+                    return dict(active)
+            if kind == "backup":
+                active = next(
+                    (
+                        task
+                        for task in self.snapshot()["tasks"]
+                        if task["state"] == "running"
+                        and task["kind"] == "backup"
+                        and task["brainId"] == brain_id
+                    ),
+                    None,
+                )
+                if active:
                     return dict(active)
             if kind == "index":
                 if brain_id in self._scan_pending:
@@ -1831,6 +2391,8 @@ class BrainLibrary:
                 "purpose",
                 "snapshots",
                 "verify",
+                "conversations",
+                "scheduled",
                 "collectionId",
                 "provider",
                 "question",
@@ -1851,6 +2413,7 @@ class BrainLibrary:
                 "encoding",
                 "old",
                 "target",
+                "expected",
                 "export",
                 "title",
                 "url",
@@ -1930,6 +2493,8 @@ class BrainLibrary:
                 result = self.import_package(params, cancel, progress)
             elif kind == "export":
                 result = self.export_package(params, cancel, progress)
+            elif kind == "backup":
+                result = self.backup(params, cancel, progress)
             elif kind == "capture":
                 result = self.capture(params, cancel)
             elif kind == "report":
@@ -1968,6 +2533,11 @@ class BrainLibrary:
                 from gofer.ui.brain_bibliography import bibliography_operation
 
                 result = bibliography_operation(self, params)
+            elif kind == "repair-absolute-links":
+                result = self.absolute_links(
+                    task["brainId"], apply=True, expected=params.get("expected")
+                )
+                result["index"] = self.scan(task["brainId"], cancel, progress)
             elif kind == "repair-link":
                 doc = self.entity("documents", params["docId"])
                 root = Path(self.brain(doc["brainId"])["root"])
@@ -1985,6 +2555,17 @@ class BrainLibrary:
                     lambda _: f"[[{link_target}",
                     data,
                 ).replace(f"]({old})", f"]({quote(markdown_target, safe='/#')})")
+                if Path(doc["path"]).suffix.lower() in {".html", ".htm"}:
+                    # HTML reports link with href and src attributes.
+                    for attribute in ("href", "src"):
+                        for mark in ('"', "'"):
+                            repaired = repaired.replace(
+                                f"{attribute}={mark}{escape(old, quote=True)}{mark}",
+                                f"{attribute}={mark}{quote(markdown_target, safe='/#')}{mark}",
+                            ).replace(
+                                f"{attribute}={mark}{old}{mark}",
+                                f"{attribute}={mark}{quote(markdown_target, safe='/#')}{mark}",
+                            )
                 if repaired == data:
                     raise ValueError("Choose a link that can be repaired in the original document")
                 with atomic_binary_output(source_path(root, doc["path"])) as handle:
@@ -2035,6 +2616,14 @@ class BrainLibrary:
                         brain = self.brain(task["brainId"])
                         brain["index"].update(state="failed", error=str(exc))
                         self.put_brain(brain)
+                    except ValueError:
+                        pass
+                if task["kind"] == "backup":
+                    try:
+                        self._backup_status(
+                            task["brainId"],
+                            lastAttempt={"at": now(), "state": "failed", "error": str(exc)},
+                        )
                     except ValueError:
                         pass
                 if task["kind"] == "job" and params.get("jobId"):
@@ -2366,6 +2955,21 @@ class BrainLibrary:
             for item in ordered:
                 item["score"] = fused[item["docId"]]
                 item["fusedFrom"] = sorted(sources[item["docId"]])
+        from gofer.ui.brain_families import demote_replaced, replacement_status
+
+        documents_by_id = {
+            doc["id"]: doc for brain_id in brains for doc in self.entities("documents", brain_id)
+        }
+        replaced = {
+            doc_id
+            for doc_id, doc in documents_by_id.items()
+            if (doc.get("replacedBy") or {}).get("docId")
+        }
+        ordered = demote_replaced(ordered, replaced)
+        for item in ordered:
+            doc = documents_by_id.get(item["docId"])
+            if doc and (item["docId"] in replaced or doc.get("checkBy")):
+                item.update(replacement_status(doc, documents_by_id))
         return {
             "hits": ordered,
             "generation": {
@@ -2428,6 +3032,15 @@ class BrainLibrary:
         for brain in self.brains():
             if self.stop.is_set():
                 return
+            if brain["id"] not in self._restricted:
+                # Brains opened before the owner-only rule existed become private once
+                # per session, like Raticode's data folder.
+                self._restricted.add(brain["id"])
+                try:
+                    if Path(brain["root"]).is_dir():
+                        restrict_brain(Path(brain["root"]))
+                except OSError:
+                    pass
             try:
                 if (
                     Path(brain["root"]).is_dir()
@@ -2441,6 +3054,7 @@ class BrainLibrary:
                 # A refresh already running or a folder that is gone: checked again later.
                 log.debug("Skipped refreshing brain %s (%s)", brain.get("id"), type(exc).__name__)
                 continue
+        self._scheduled_backups(datetime.now().astimezone())
         for job in self.entities("jobs"):
             if not job.get("enabled") or job["trigger"]["kind"] != "schedule":
                 continue
@@ -2494,6 +3108,119 @@ class BrainLibrary:
                     label=f"Running {job['name']}",
                 )
 
+    def _backup_status(self, brain_id: str, **patch: Any) -> dict[str, Any]:
+        with self.lock:
+            brain = self.brain(brain_id)
+            brain["backupStatus"] = {**brain.get("backupStatus", {}), **patch}
+            self.put_brain(brain)
+            return brain
+
+    def _scheduled_backups(self, moment: datetime) -> None:
+        for brain in self.brains():
+            if self.stop.is_set():
+                return
+            key = due_key(backup_settings(brain), moment)
+            if key is None or (brain.get("backupStatus") or {}).get("lastScheduled") == key:
+                continue
+            if not Path(brain["root"]).is_dir():
+                # An unplugged drive: try again when the brain is back.
+                continue
+            try:
+                # Claim the period first, so a failing backup waits for the next one
+                # instead of retrying every 15 seconds. The failure shows in settings.
+                self._backup_status(brain["id"], lastScheduled=key)
+                self.start_task(
+                    "backup",
+                    {"brainId": brain["id"], "scheduled": True},
+                    label=f"Backing up {brain['name']}",
+                )
+            except (ValueError, OSError) as exc:
+                log.debug("Skipped backing up brain %s (%s)", brain.get("id"), type(exc).__name__)
+
+    def backup_estimate(self, brain_id: str) -> dict[str, Any]:
+        """Bytes a complete package would hold, and how much is Rem's conversation archive."""
+        from gofer.ui.brain_graph import conversation_archives
+
+        root = Path(self.brain(brain_id)["root"])
+        archives = {path.name for path in conversation_archives(root)}
+        total = conversations = 0
+        for parent, dirs, names in os.walk(root, followlinks=False):
+            dirs[:] = [
+                name
+                for name in dirs
+                if name not in {".raticode", ".git"} and not (Path(parent) / name).is_symlink()
+            ]
+            inside = Path(parent) != root and (Path(parent).relative_to(root).parts[0] in archives)
+            for name in names:
+                path = Path(parent) / name
+                if path.is_symlink() or name in {".env", ".env.local", "credentials.json"}:
+                    continue
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    continue
+                total += size
+                conversations += size if inside else 0
+        return {
+            "total": total,
+            "conversations": conversations,
+            "archives": sorted(archives),
+            "limit": MAX_PACKAGE,
+        }
+
+    def backup(
+        self, params: dict[str, Any], cancel: threading.Event, progress: Callable[[float], None]
+    ) -> dict[str, Any]:
+        """Write a complete package to the backup folder, verify the saved copy, then prune."""
+        brain = self.brain(params["brainId"])
+        # Re-check: the brain may have moved since the folder was chosen.
+        settings = validate_backup(backup_settings(brain), Path(brain["root"]))
+        if not settings["folder"]:
+            raise ValueError("Choose a backup folder in Brain settings first")
+        folder = Path(settings["folder"])
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        clean_partials(folder)
+        moment = datetime.now(UTC)
+        destination = backup_path(folder, brain, moment)
+        while destination.exists():
+            # Two backups within one second: names must stay unique and in order.
+            moment += timedelta(seconds=1)
+            destination = backup_path(folder, brain, moment)
+        exported = self.export_package(
+            {
+                "brainId": brain["id"],
+                "destination": str(destination),
+                "purpose": "complete",
+                "snapshots": True,
+                "verify": True,
+                "conversations": settings["conversations"],
+            },
+            cancel,
+            lambda value: progress(value * 0.85),
+        )
+        try:
+            checked = verify_package(destination)
+        except Exception:
+            # Never keep, or count, a copy that would not restore.
+            destination.unlink(missing_ok=True)
+            raise
+        progress(95)
+        removed = prune(folder, brain, settings["keep"], destination)
+        verified = {
+            "at": now(),
+            "path": str(destination),
+            "size": exported["size"],
+            "files": checked["files"],
+            "documents": checked["documents"],
+            "conversations": exported["conversations"],
+        }
+        self._backup_status(
+            brain["id"],
+            lastVerified=verified,
+            lastAttempt={"at": verified["at"], "state": "verified", "error": ""},
+        )
+        return {**verified, "removed": removed, "verified": True}
+
     def export_package(
         self, params: dict[str, Any], cancel: threading.Event, progress: Callable[[float], None]
     ) -> dict[str, Any]:
@@ -2534,6 +3261,19 @@ class BrainLibrary:
                 # Packages without these newer records still import into older builds.
                 del library[kind]
         referenced_ids = {ref["docId"] for ref in evidence_references(library)}
+        archives: set[str] = set()
+        if purpose != "collection" and not params.get("conversations", True):
+            # Rem's conversation archive can be most of a brain. Leaving it out keeps
+            # the package under its size limit; archived files that a report, citation
+            # or collection uses still go in, so evidence keeps resolving.
+            from gofer.ui.brain_graph import conversation_archives
+
+            archives = {path.name for path in conversation_archives(root)}
+            library["documents"] = [
+                doc
+                for doc in library["documents"]
+                if doc["path"].split("/", 1)[0] not in archives or doc["id"] in referenced_ids
+            ]
         included_ids = {doc["id"] for doc in library["documents"]}
         with self.connect() as db:
             frozen = {
@@ -2581,8 +3321,8 @@ class BrainLibrary:
                     if ref["docId"] == doc["id"]
                 }
                 doc["versions"] = [entry for entry in doc["versions"] if entry["hash"] in used]
-        files = {
-            f"files/{doc['path']}": read_source(roots[doc["id"]], original_paths[doc["id"]])
+        sources = {
+            f"files/{doc['path']}": (roots[doc["id"]], original_paths[doc["id"]])
             for doc in library["documents"]
             if not doc.get("missing")
         }
@@ -2596,13 +3336,44 @@ class BrainLibrary:
                     if name not in {".raticode", ".git"}
                     and not (Path(parent) / name).is_symlink()
                     and (purpose == "complete" or not name.startswith("."))
+                    and not (Path(parent) == root and name in archives)
                 ]
                 for name in names:
                     path = Path(parent) / name
                     if path.is_symlink() or name in {".env", ".env.local", "credentials.json"}:
                         continue
                     relative = path.relative_to(root).as_posix()
-                    files.setdefault(f"files/{relative}", read_source(root, relative))
+                    sources.setdefault(f"files/{relative}", (root, relative))
+        if purpose != "documents":
+            # Refuse before reading a gigabyte into memory: the verifier would reject it.
+            total, largest = 0, ("", 0)
+            for name, (base, relative) in sources.items():
+                try:
+                    size = (base / relative).stat().st_size
+                except OSError:
+                    continue
+                total += size
+                largest = max(largest, (name, size), key=lambda item: item[1])
+            if largest[1] > MAX_FILE:
+                raise ValueError(
+                    f"{largest[0].removeprefix('files/')} is {format_size(largest[1])}, over"
+                    f" the {format_size(MAX_FILE)} limit for one file in a package"
+                )
+            if total > MAX_PACKAGE:
+                hint = (
+                    " Leave out Rem's conversation archive, or move large files out of the brain."
+                    if params.get("conversations", True)
+                    else " Move large files out of the brain."
+                )
+                raise ValueError(
+                    f"This package would be {format_size(total)}, over the"
+                    f" {format_size(MAX_PACKAGE)} package limit.{hint}"
+                )
+        files: dict[str, bytes] = {}
+        for name, (base, relative) in sources.items():
+            if cancel.is_set():
+                raise InterruptedError("Export cancelled")
+            files[name] = read_source(base, relative)
         if purpose == "documents":
             files = {name.removeprefix("files/"): content for name, content in files.items()}
         manifest: dict[str, Any] = {
@@ -2614,8 +3385,9 @@ class BrainLibrary:
             "files": {name: hashlib.sha256(data).hexdigest() for name, data in files.items()},
         }
         destination.parent.mkdir(parents=True, exist_ok=True)
+        # A recognizable name, so a backup can remove one left by a killed process.
         with tempfile.NamedTemporaryFile(
-            dir=destination.parent, suffix=".zip", delete=False
+            dir=destination.parent, prefix=".raticode-export-", suffix=".zip.partial", delete=False
         ) as handle:
             temporary = Path(handle.name)
         try:
@@ -2646,6 +3418,8 @@ class BrainLibrary:
                 "path": str(destination),
                 "verified": bool(params.get("verify", True)),
                 "documents": len(library["documents"]),
+                "size": destination.stat().st_size,
+                "conversations": not archives,
             }
         finally:
             temporary.unlink(missing_ok=True)

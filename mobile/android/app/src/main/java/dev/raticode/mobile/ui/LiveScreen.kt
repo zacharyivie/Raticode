@@ -38,6 +38,7 @@ import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.launch
 import dev.raticode.mobile.live.VoiceTidy
 import dev.raticode.mobile.live.LiveClient
+import dev.raticode.mobile.live.RemAlertRules
 import dev.raticode.mobile.live.Kanban
 import dev.raticode.mobile.live.SelfWorkView
 import androidx.core.content.FileProvider
@@ -111,8 +112,16 @@ internal object LiveNavigation {
         return bar.toMutableList().apply { add(to, removeAt(from)) }
     }
 
-    fun initialPage(initialThread: String?, home: String = HOME) =
-        when (initialThread) { null -> home; "approvals" -> "Approvals"; "rem" -> "Rem"; else -> "Chat" }
+    fun initialPage(initialThread: String?, home: String = HOME) = when {
+        initialThread == null -> home
+        initialThread == "approvals" -> "Approvals"
+        initialThread == "rem" -> "Rem"
+        RemAlertRules.parseWorkflowTarget(initialThread) != null -> "Workflows"
+        else -> "Chat"
+    }
+    /** The thread a notification opens, or null when it opens a page instead. */
+    fun initialThread(initialThread: String?) =
+        initialThread?.takeIf { it != "approvals" && it != "rem" && RemAlertRules.parseWorkflowTarget(it) == null }
     /** Where system back goes from [page], or null when back leaves the app. A page opened from More goes back to More. */
     fun back(page: String, lastTop: String, home: String = HOME, bar: List<String> = DEFAULT) = when (page) {
         home -> null
@@ -142,7 +151,7 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
     var now by remember { mutableStateOf(System.currentTimeMillis()/1000) }
     LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(2000); now = System.currentTimeMillis()/1000 } }
     var draft by remember { mutableStateOf("") }
-    var selected by rememberSaveable { mutableStateOf(initialThread?.takeIf { it != "approvals" && it != "rem" }) }
+    var selected by rememberSaveable { mutableStateOf(LiveNavigation.initialThread(initialThread)) }
     val homeState = rememberSaveableStateHolder()
     // Files on their way to Rem's message box from another page, such as Ask Rem in the Developer log.
     var remHandoff by remember { mutableStateOf<RemHandoff?>(null) }
@@ -159,8 +168,11 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
     }
     val topLevel = LiveNavigation.topLevel(bar)
     var browserReveal by remember { mutableIntStateOf(0) }
-    // The global board's section, kept across pages so Rem's report can open it.
-    var kanbanTab by rememberSaveable { mutableStateOf(KanbanTabs.BOARD) }
+    // The global board's section, kept across pages so Rem's report can open it, and saved so it comes back after a restart.
+    var kanbanTab by rememberSaveable { mutableStateOf(BoardFilterPrefs.tab(context)) }
+    LaunchedEffect(kanbanTab) { BoardFilterPrefs.saveTab(context, kanbanTab) }
+    // A workflow run a tapped workflow message asked to open, taken up by the Workflows page.
+    var workflowRunToOpen by remember { mutableStateOf(RemAlertRules.parseWorkflowTarget(initialThread)) }
     // An organization the board asked to open, taken up by the Organizations page.
     var organizationToOpen by remember { mutableStateOf<String?>(null) }
     // A ticket a pill in Rem's chat asked to open, taken up by the global board.
@@ -180,19 +192,24 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
     fun backFrom(target: String): (() -> Unit)? = if (target in bar) null else ({ page = LiveNavigation.back(target, lastTop, home, bar) ?: home })
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(client, lifecycle) {
+        // Update checks run only in the real app, never against a test's client.
+        val updates = liveClient == null
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_START) client.foreground()
-            if (event == Lifecycle.Event.ON_STOP) client.background()
+            if (event == Lifecycle.Event.ON_START) { client.foreground(); if (updates) dev.raticode.mobile.update.AppUpdates.foreground(context) }
+            if (event == Lifecycle.Event.ON_STOP) { client.background(); if (updates) dev.raticode.mobile.update.AppUpdates.background() }
         }
         lifecycle.addObserver(observer)
-        if (liveClient == null && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) client.foreground()
+        if (liveClient == null && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) { client.foreground(); dev.raticode.mobile.update.AppUpdates.foreground(context) }
         onDispose { lifecycle.removeObserver(observer) }
     }
     // Passing App lock is when the user first sees this page, so reading it and clearing its alerts wait for that.
     val appLocked = remember { dev.raticode.mobile.applock.AppLockRuntime.get(context) }.locked
     var wasAppLocked by remember { mutableStateOf(appLocked) }
     LaunchedEffect(appLocked) {
-        if (wasAppLocked && !appLocked && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) client.foreground()
+        if (wasAppLocked && !appLocked && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+            client.foreground()
+            if (liveClient == null) dev.raticode.mobile.update.AppUpdates.remind(context)
+        }
         wasAppLocked = appLocked
     }
     LaunchedEffect(client.threads) {
@@ -209,6 +226,9 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
     LaunchedEffect(initialThread) {
         if (initialThread == "approvals") { page = "Approvals"; consumeInitialThread() }
         else if (initialThread == "rem") { page = "Rem"; consumeInitialThread() }
+        else if (RemAlertRules.parseWorkflowTarget(initialThread) != null) {
+            workflowRunToOpen = RemAlertRules.parseWorkflowTarget(initialThread); page = "Workflows"; consumeInitialThread()
+        }
         else if (initialThread != null) { selected = initialThread; page = "Chat"; consumeInitialThread() }
     }
     var exportId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -346,6 +366,7 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
             val mediaTrack = dev.raticode.mobile.browser.BrowserMedia.bar
             if (mediaTrack != null && !fullscreenVideo && !compactTyping && !(typing && shortScreen))
                 BrowserMediaBar(mediaTrack, onOpen = { dev.raticode.mobile.browser.BrowserMedia.reveal(context, it); page = "Browser" })
+            if (!fullscreenVideo && !(typing && shortScreen)) AppUpdateBanner()
             if (page == "Desktop" || page == "Files" || !client.paired) StudioHeader(if (client.paired) { if (client.connected) "Encrypted ${client.route}" else "Offline" } else "Mobile companion") {
                 if (client.paired) TextButton(onClick = { page = if (page == "Desktop") "Threads" else "Desktop" },
                     colors = ButtonDefaults.textButtonColors(contentColor = LocalStudioColors.current.onNavigation)) {
@@ -377,6 +398,7 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
                         OutlinedButton(onClick = { client.preview(code); code = "" }, enabled = code.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text("Review invitation") }
                         }
                         SettingsGroup("Tailscale (optional)") { TailscaleSettings(client) }
+                        SettingsGroup("Raticode Mobile updates") { AppUpdateSettings() }
                     }
                 } else if (page == "Threads" || (page == "Chat" && selected == null)) {
                     backFrom("Threads")?.let { MoreBackRow(it) }
@@ -424,7 +446,7 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
                 } else if (page == "Voice") {
                     VoicePage(client, backFrom("Voice"))
                 } else if (page == "Workflows") {
-                    WorkflowsPage(client, backFrom("Workflows"))
+                    WorkflowsPage(client, backFrom("Workflows"), workflowRunToOpen) { workflowRunToOpen = null }
                 } else if (page == "SourceControl") {
                     homeState.SaveableStateProvider(SOURCE_CONTROL_STATE) {
                         SourceControlPage(client, backFrom("SourceControl")) { words -> keepSourceControl = true; askRem(words) }
@@ -614,6 +636,7 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
                         SettingsGroup("Wi-Fi connection") { LanRecovery(client) }
                         SettingsGroup("Tailscale") { TailscaleSettings(client) }
                         SettingsGroup("Voice assistant") { VoiceAssistantSettings(client) }
+                        SettingsGroup("Raticode Mobile updates") { AppUpdateSettings() }
                         SettingsGroup("Background & notifications") {
                             Text("Keep receiving responses when you leave the app.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                             TextButton(onClick = {
@@ -626,7 +649,7 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                             LiveNotificationSettings()
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                            RemNotificationSettings(client.remAlerts, client.desktopControl, client.remAlertFilter)
+                            RemNotificationSettings(client.remAlerts, client.desktopControl, client.remAlertFilter, client.remAlertWorkflow)
                         }
                         SettingsGroup("Other desktops") {
                             TextButton(onClick = client::refreshFleet, enabled = client.connected) { Text("Refresh fleet status") }
@@ -657,6 +680,7 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
     // Opened from the launcher: offer to make Rem the phone's assistant (Android 12+; voice mode needs on-device speech).
     if (offerVoiceSetup && client.loaded && android.os.Build.VERSION.SDK_INT >= 31)
         VoiceSetupOffer(client.paired, onDone = consumeVoiceOffer, onOpenVoicePage = { page = "Voice" })
+    AppUpdateDialogs()
     // A plain locked state: the desktop's suspicious-request guard refuses everything until the user unlocks it there.
     var lockNoticeSeen by remember { mutableStateOf(false) }
     LaunchedEffect(client.lockedByDesktop) { if (!client.lockedByDesktop) lockNoticeSeen = false }

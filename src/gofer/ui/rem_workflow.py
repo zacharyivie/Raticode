@@ -10,6 +10,7 @@ worker starts. A node never starts work Rem itself would refuse.
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -96,7 +97,18 @@ def existing_store(data_dir: Path) -> RemHomeStore | None:
     """Rem's store in ``data_dir``, or None when Rem has never been used there."""
     if not (data_dir / STORE_FILE).is_file():
         return None
-    return RemHomeStore(data_dir)
+    try:
+        return RemHomeStore(data_dir)
+    except sqlite3.DatabaseError as exc:
+        from gofer.ui.rem_db_backups import is_damage
+
+        if not is_damage(exc):
+            raise
+        # Only the backend restores Rem's database; it does so when Raticode starts.
+        raise unavailable(
+            "Rem's database is damaged. Restart Raticode to restore its newest verified "
+            "copy, then run the workflow again."
+        ) from exc
 
 
 def rem_running(store: RemHomeStore) -> bool:

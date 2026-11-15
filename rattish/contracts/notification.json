@@ -9,7 +9,7 @@
     "properties": {
       "title": {"type": "string"},
       "body": {"type": "string"},
-      "channel": {"type": "string", "enum": ["desktop", "slack", "teams", "webhook", "email"], "x-rattish-case-insensitive": true},
+      "channel": {"type": "string", "enum": ["desktop", "phone", "slack", "teams", "webhook", "email"], "x-rattish-case-insensitive": true},
       "urgency": {"type": "string", "enum": ["low", "normal", "critical"], "x-rattish-case-insensitive": true},
       "webhook_url": {"type": ["string", "null"], "minLength": 1},
       "headers": {"type": "object", "additionalProperties": {"type": "string"}},
@@ -63,7 +63,7 @@
     "ports": {
       "title": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string"}, "required": false, "delivery": "local_binding", "encoding": "identity"},
       "body": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string"}, "required": false, "delivery": "local_binding", "encoding": "identity"},
-      "channel": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string", "enum": ["desktop", "slack", "teams", "webhook", "email"]}, "required": false, "delivery": "local_binding", "encoding": "identity"},
+      "channel": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string", "enum": ["desktop", "phone", "slack", "teams", "webhook", "email"]}, "required": false, "delivery": "local_binding", "encoding": "identity"},
       "urgency": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string", "enum": ["low", "normal", "critical"]}, "required": false, "delivery": "local_binding", "encoding": "identity"},
       "webhook-url": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string", "minLength": 1}, "required": false, "delivery": "local_binding", "encoding": "identity"},
       "headers": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "additionalProperties": {"type": "string"}}, "required": false, "delivery": "local_binding", "encoding": "identity"},
@@ -86,7 +86,7 @@
         "sent": {"const": true},
         "title": {"type": "string"},
         "body": {"type": "string"},
-        "channel": {"type": "string", "enum": ["desktop", "slack", "teams", "webhook", "email"]},
+        "channel": {"type": "string", "enum": ["desktop", "phone", "slack", "teams", "webhook", "email"]},
         "urgency": {"type": "string", "enum": ["low", "normal", "critical"]}
       },
       "required": ["sent", "title", "body", "channel", "urgency"],
@@ -94,10 +94,11 @@
     }
   },
   "error_kinds": ["cancelled", "configuration", "internal", "network", "output_validation", "timeout"],
-  "effects": ["command", "network"],
+  "effects": ["command", "network", "state_write"],
   "preflight_checks": [
     {"id": "channel-configured", "severity": "error", "description": "The selected channel must have all required destination settings."},
-    {"id": "channel-available", "severity": "error", "description": "The selected notification channel must be available in this runtime environment."}
+    {"id": "channel-available", "severity": "error", "description": "The selected notification channel must be available in this runtime environment."},
+    {"id": "phone-paired", "severity": "warning", "description": "Pair a phone in Settings > Paired devices and turn on Workflow messages in its alert settings, or no phone shows the stored notice."}
   ],
   "static_diagnostics": [
     {

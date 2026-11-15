@@ -1,0 +1,17 @@
+{
+  "starterVersion": 1,
+  "id": "notify-on-condition",
+  "name": "Notify on condition",
+  "summary": "Runs a check command and sends a desktop or webhook notification only when its output matches a pattern.",
+  "order": 5,
+  "docsPath": "/docs/starters/notify-on-condition",
+  "providers": [],
+  "secrets": [
+    "ALERT_WEBHOOK_URL"
+  ],
+  "trigger": {
+    "kind": "cron",
+    "description": "Check every 15 minutes.",
+    "command": "Raticode rattish triggers add cron WORKFLOW_PATH --cron \"*/15 * * * *\""
+  }
+}

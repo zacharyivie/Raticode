@@ -9,6 +9,7 @@ import re
 import time
 from typing import Any
 
+from gofer.core.secrets_folder import keychain_then_folder, org_secret_file
 from gofer.devices.storage import OSSecretStore
 from gofer.ui.organization_operations import trigger_routine
 from gofer.ui.organization_store import OrganizationConflict, now
@@ -50,7 +51,11 @@ def receive(manager: Any, oid: str, rid: str, headers: Any, raw: bytes) -> dict[
     reference = org["runtime"].get("secrets", {}).get((hook or {}).get("secretRef"))
     if not hook or not hook["enabled"] or not reference or reference["revoked"]:
         raise ValueError("Webhook unavailable")
-    secret = OSSecretStore(service="Raticode organization secrets").get(reference["account"])
+    account = reference["account"]
+    secret = keychain_then_folder(
+        lambda: OSSecretStore(service="Raticode organization secrets").get(account),
+        org_secret_file(account),
+    )
     if not secret:
         raise ValueError("Webhook credential unavailable")
     signed = timestamp.encode() + b"." + delivery.encode() + b"." + raw

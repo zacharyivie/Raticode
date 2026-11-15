@@ -57,6 +57,8 @@ PROVIDER_LABELS = {
     "grok": "Grok",
     "openai_api": "OpenAI API",
     "anthropic_api": "Anthropic API",
+    # A classification provider for jev workflow nodes, not a coding provider.
+    "jev": "Jev (TypeSafe)",
 }
 DASHBOARD_URLS = {
     "codex": "https://chatgpt.com/codex/settings/usage",

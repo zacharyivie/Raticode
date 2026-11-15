@@ -12,8 +12,15 @@ import {
   typesAltGraphCharacter,
 } from "./settings.js";
 import {
+  ANYWHERE_COMMAND_ID,
+  DEFAULT_ANYWHERE_BINDING,
   DEFAULT_VOICE_BINDING,
   VOICE_COMMAND_ID,
+  announceVoicePhase,
+  onVoicePhase,
+  pickRemComposer,
+  requestAnywhereDictation,
+  stopAnywhereDictation,
   DICTATION_MODES,
   ariaKeyshortcuts,
   pickVoiceComposer,
@@ -184,4 +191,104 @@ test("dictation offers press to start and stop, the default, and hold to talk", 
   assert.equal(normalizeAppSettings({}).devices.dictationAutoSend, false);
   assert.equal(normalizeAppSettings({ devices: { dictationAutoSend: true } }).devices.dictationAutoSend, true);
   assert.equal(normalizeAppSettings({ devices: { dictationAutoSend: "yes" } }).devices.dictationAutoSend, false);
+});
+
+function fakeRemComposer(name, options = {}) {
+  const entry = fakeComposer(name, options);
+  entry.options = [];
+  entry.toggle = (opts) => { entry.toggled += 1; entry.options.push(opts); };
+  entry.rem = () => options.rem !== false;
+  entry.anywhere = () => Boolean(options.anywhere);
+  return entry;
+}
+
+test("dictating from any app is its own shortcut, off until turned on, and clashes with in-app keys", () => {
+  const command = KEYBINDING_COMMANDS.find((item) => item.id === ANYWHERE_COMMAND_ID);
+  assert.equal(command.defaultBinding, DEFAULT_ANYWHERE_BINDING);
+  assert.equal(command.scope, "system");
+  assert.equal(DEFAULT_APP_SETTINGS.devices.dictateAnywhere, false);
+  assert.equal(normalizeAppSettings({}).devices.dictateAnywhere, false);
+  assert.equal(normalizeAppSettings({ devices: { dictateAnywhere: "yes" } }).devices.dictateAnywhere, false);
+  assert.equal(normalizeAppSettings({ devices: { dictateAnywhere: true } }).devices.dictateAnywhere, true);
+  for (const platform of ["Linux x86_64", "Win32", "MacIntel"]) {
+    assert.deepEqual(keybindingConflictIds(DEFAULT_APP_SETTINGS, ANYWHERE_COMMAND_ID, undefined, platform), [], platform);
+  }
+  // The system-wide key reaches Raticode first, so it clashes with in-app shortcuts, and
+  // with keys that only work in one part of the app.
+  const same = normalizeAppSettings({ keybindings: { [ANYWHERE_COMMAND_ID]: "Mod+Alt+KeyV" } });
+  assert.deepEqual(keybindingConflictIds(same, ANYWHERE_COMMAND_ID, undefined, "Linux x86_64"), [VOICE_COMMAND_ID]);
+  const graph = normalizeAppSettings({ keybindings: { [ANYWHERE_COMMAND_ID]: "KeyF" } });
+  assert.deepEqual(keybindingConflictIds(graph, ANYWHERE_COMMAND_ID, undefined, "Linux x86_64"), ["graph.fit"]);
+  // It is never an in-app shortcut: pressing it inside Raticode is left to the system.
+  assert.equal(voiceShortcutLabel(DEFAULT_ANYWHERE_BINDING, "Linux x86_64"), "Ctrl+Alt+Space");
+});
+
+test("dictation from another app goes only to Rem's box: the one dictating, else in use, else shown, else loaded", async () => {
+  const thread = fakeRemComposer("thread", { rem: false, lastUsed: 99 });
+  const rem = fakeRemComposer("rem", { visible: false, lastUsed: 1 });
+  const remove = [thread, rem].map(registerVoiceComposer);
+  try {
+    // A thread's box is never picked, even if used last; Rem's box takes it while unseen.
+    assert.equal(pickRemComposer(null).name, "rem");
+    assert.deepEqual(await requestAnywhereDictation({ waitMs: 0 }), { ok: true });
+    assert.deepEqual(rem.options, [{ anywhere: true }]);
+    assert.equal(thread.toggled, 0);
+    const shown = fakeRemComposer("shown", { lastUsed: 0 });
+    const removeShown = registerVoiceComposer(shown);
+    assert.equal(pickRemComposer(null).name, "shown");
+    removeShown();
+  } finally {
+    remove.forEach((unregister) => unregister());
+  }
+});
+
+test("with Rem's chat not loaded yet, dictation from another app loads it and starts there, or says why it can't", async () => {
+  const later = fakeRemComposer("rem");
+  let revealed = 0;
+  let removeLater = () => {};
+  try {
+    const done = requestAnywhereDictation({ reveal: () => { revealed += 1; setTimeout(() => { removeLater = registerVoiceComposer(later); }, 20); }, stepMs: 5 });
+    assert.deepEqual(await done, { ok: true });
+    assert.equal(revealed, 1);
+    assert.deepEqual(later.options, [{ anywhere: true }]);
+  } finally {
+    removeLater();
+  }
+  const failed = await requestAnywhereDictation({ reveal() {}, waitMs: 20, stepMs: 5 });
+  assert.equal(failed.ok, false);
+  assert.match(failed.message, /Rem's chat didn't load/);
+  const busy = fakeRemComposer("busy", { available: false });
+  const removeBusy = registerVoiceComposer(busy);
+  try {
+    const answer = await requestAnywhereDictation({ reveal: () => assert.fail("must not reveal"), waitMs: 0 });
+    assert.equal(answer.ok, false);
+    assert.match(answer.message, /still answering/);
+    assert.equal(busy.toggled, 0);
+  } finally {
+    removeBusy();
+  }
+});
+
+test("the overlay's Stop ends only a dictation started from another app, and phase listeners never break dictation", () => {
+  const mic = fakeRemComposer("mic", { dictating: true });
+  const removeMic = registerVoiceComposer(mic);
+  assert.equal(stopAnywhereDictation(), false);
+  assert.equal(mic.toggled, 0);
+  removeMic();
+  const anywhere = fakeRemComposer("anywhere", { dictating: true, anywhere: true });
+  const removeAnywhere = registerVoiceComposer(anywhere);
+  try {
+    assert.equal(stopAnywhereDictation(), true);
+    assert.equal(anywhere.toggled, 1);
+  } finally {
+    removeAnywhere();
+  }
+  const seen = [];
+  const stopBroken = onVoicePhase(() => { throw new Error("listener failed"); });
+  const stopSeen = onVoicePhase((state) => seen.push(state));
+  announceVoicePhase({ phase: "listening", global: true });
+  stopBroken();
+  stopSeen();
+  announceVoicePhase({ phase: "idle", global: true });
+  assert.deepEqual(seen, [{ phase: "listening", global: true }]);
 });

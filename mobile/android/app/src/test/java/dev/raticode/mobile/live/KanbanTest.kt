@@ -371,6 +371,39 @@ class KanbanTest {
         assertTrue(Kanban.settingsParams(selfWork.settings, autoPull = true).getBoolean("auto_pull_backlog"))
     }
 
+    @Test fun autoApprovalIsHiddenFromOlderDesktopsAndAsksBeforeTurningOn() {
+        // This test's desktop answer predates the setting: no switch, and the ticket isn't marked.
+        assertNull(selfWork.settings.autoApprove)
+        assertFalse(ticket("/2").autoApproved)
+        // A real desktop answer with it on, after research approved one idea on its own.
+        val view = DesktopViews.parse(Kanban.SELF_WORK, JSONObject(javaClass.getResource("/desktop/selfwork-read-auto-approve.json")!!.readText())) as SelfWorkView
+        assertEquals(true, view.settings.autoApprove)
+        assertEquals(1, view.state.autoApprovedSession)
+        val added = view.report!!.ticketsAdded.single()
+        assertTrue(added.autoApproved); assertFalse(added.proposed)
+        assertTrue(Kanban.reportHeadline(view.report).contains("1 auto-approved"))
+        assertFalse(Kanban.reportHeadline(view.report).contains("to approve"))
+        assertEquals("On: new ideas go to Backlog approved, marked Auto-approved, until self-work ends (1 this session). They wait in Backlog until you move them, or turn on backlog pulling.",
+            Kanban.autoApproveDetail(view))
+        val off = view.copy(settings = view.settings.copy(autoApprove = false))
+        assertEquals("Off: ideas from Rem's research wait in Backlog for your approval.", Kanban.autoApproveDetail(off))
+        assertTrue(Kanban.autoApproveDetail(view.copy(state = view.state.copy(boardEnabled = false))).startsWith("Needs the Kanban board"))
+        val warning = Kanban.autoApproveWarning(off)
+        assertTrue(warning.first().contains("for as long as self-work runs, without you reading them first"))
+        assertFalse(warning.joinToString(" ").contains("a session,"))
+        assertTrue(warning.last().contains("stay yours to decide"))
+        // Turning it on carries the user's confirmation; turning it off doesn't need one.
+        val on = Kanban.settingsParams(off.settings, autoApprove = true)
+        assertTrue(on.getBoolean("auto_approve_proposals")); assertTrue(on.getBoolean("confirm_auto_approve"))
+        val turnOff = Kanban.settingsParams(view.settings, autoApprove = false)
+        assertFalse(turnOff.getBoolean("auto_approve_proposals")); assertFalse(turnOff.has("confirm_auto_approve"))
+        assertFalse(Kanban.settingsParams(view.settings, maxThreads = 2).has("auto_approve_proposals"))
+        // A ticket self-work approved is marked, and isn't a proposal waiting for the user.
+        val marked = (DesktopViews.parse(Kanban.BOARD, JSONObject("""{"tickets":[{"ticket_id":"7","scope":"rem","key":"REM-7","title":"Voice","status":"backlog","auto_approved":true,"revision":1}]}""")) as KanbanBoard).tickets.single()
+        assertTrue(marked.autoApproved); assertFalse(marked.proposed)
+        assertTrue(Kanban.onBoard(marked))
+    }
+
     @Test fun statusSaysWhatRemIsDoing() {
         assertEquals("Working in 2 of 2 threads", Kanban.status(selfWork.copy(state = selfWork.state.copy(threadLimit = 2))))
         assertEquals("2 threads working. 4 to-dos left.", Kanban.status(selfWork.copy(state = selfWork.state.copy(detail = "2 threads working. 4 to-dos left."))))
@@ -531,5 +564,37 @@ class KanbanTest {
         assertEquals(2, view.state.pausedThreads)
         assertEquals(1, view.state.pausedForYou)
         assertEquals(0, selfWork.state.pausedThreads)
+    }
+
+    @Test fun aTicketShowsWhatItWaitsForAndTheNoticeWhenOneWasCancelled() {
+        // Written by the desktop's phone handler: Starter workflows waits for a To do ticket and a Done one; Trigger gallery for a cancelled one.
+        val real = DesktopViews.parse(Kanban.BOARD, JSONObject(javaClass.getResource("/desktop/kanban-board-waits.json")!!.readText())) as KanbanBoard
+        val starters = real.tickets.first { it.title == "Starter workflows" }
+        assertEquals(listOf("REM-1" to "todo", "REM-2" to "done"), starters.waitsFor.map { it.key to it.status })
+        assertTrue(starters.waiting); assertEquals("", starters.waitNotice)
+        assertEquals("Waits for: Polling triggers", Kanban.waitsLine(starters))
+        val gallery = real.tickets.first { it.title == "Trigger gallery" }
+        assertTrue(gallery.waitNotice.startsWith("REM-3 “Old plan” was cancelled"))
+        val first = real.tickets.first { it.title == "Polling triggers" }
+        assertEquals("", Kanban.waitsLine(first)); assertFalse(first.waiting)
+        // The picker offers the same board's tickets, not itself or ones already listed; the edit replaces the whole list.
+        assertEquals(listOf("REM-5"), Kanban.waitChoices(real, starters).map { it.key })
+        val params = Kanban.waitsParams(starters, starters.waitsFor.map { it.id } - starters.waitsFor.first().id)
+        assertEquals("edit", params.getString("action")); assertEquals("rem", params.getString("scope"))
+        assertEquals(starters.revision, params.getLong("expected_revision"))
+        assertEquals(listOf(starters.waitsFor[1].id), (0 until params.getJSONArray("waits_for").length()).map { params.getJSONArray("waits_for").getString(it) })
+        assertTrue(Kanban.canEditWaits(starters))
+        assertFalse(Kanban.canEditWaits(starters.copy(status = "done")))
+        assertFalse(Kanban.canEditWaits(starters.copy(scope = Kanban.SCOPE_ORG, organizationId = "eng", running = true)))
+        assertTrue(Kanban.canEditWaits(starters.copy(running = true)))
+    }
+
+    @Test fun anOlderDesktopsTicketWaitsForNothingAndBadKeysAreDropped() {
+        val old = DesktopViews.parse(Kanban.BOARD, JSONObject("""{"tickets":[{"ticket_id":"1","scope":"rem","key":"REM-1","title":"Old","status":"todo"},
+            {"ticket_id":"2","scope":"rem","key":"REM-2","title":"New","status":"todo","waiting":true,
+             "waits_for":[{"ticket_id":"1","key":"REM-1","title":"Old","status":"todo"},{"ticket_id":"9","key":"<b>x","title":"Odd","status":"removed"},{"key":"REM-3"}]}]}""")) as KanbanBoard
+        assertEquals(emptyList<TicketWait>(), old.tickets.first { it.id == "1" }.waitsFor)
+        assertEquals(listOf("REM-1", ""), old.tickets.first { it.id == "2" }.waitsFor.map { it.key })
+        assertEquals("Waits for: Old and 1 more", Kanban.waitsLine(old.tickets.first { it.id == "2" }))
     }
 }

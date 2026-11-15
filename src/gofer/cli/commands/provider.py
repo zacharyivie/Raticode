@@ -1,21 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from gofer.cli.output import emit_json, format_option, wants_json
-from gofer.core.provider_profiles import (
-    ProviderProfile,
-    load_provider_profiles,
-    save_provider_profiles,
-    validate_provider_profile,
-    validate_safe_provider_env,
-)
 from gofer.utils.paths import get_data_dir
+
+if TYPE_CHECKING:
+    from gofer.core.provider_profiles import ProviderProfile
 
 app = typer.Typer(help="Manage provider settings", no_args_is_help=True)
 profile_app = typer.Typer(help="Manage named provider profiles", no_args_is_help=True)
@@ -40,6 +36,8 @@ def list_profiles(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """List provider profiles. JSON names secrets and env variables, never their values."""
+    from gofer.core.provider_profiles import load_provider_profiles
+
     as_json = wants_json(output_format)
     profiles = load_provider_profiles(data_dir or get_data_dir())
     if as_json:
@@ -54,6 +52,7 @@ def list_profiles(
                     "apiKeySecret": profile.api_key_secret,
                     "apiKeyEnv": profile.api_key_env,
                     "apiBaseUrl": profile.api_base_url,
+                    "local": profile.local,
                     "envNames": sorted(profile.env),
                 }
                 for profile in profiles.values()
@@ -67,7 +66,7 @@ def list_profiles(
     for profile in profiles.values():
         table.add_row(
             profile.name,
-            profile.subscription,
+            "local model server" if profile.local else profile.subscription,
             profile.model or "",
             str(profile.timeout or ""),
             profile.api_key_secret or profile.api_key_env or "",
@@ -82,10 +81,22 @@ def list_profiles(
 )
 def create_profile(
     name: str = typer.Argument(..., help="Profile name"),
-    subscription: str = typer.Option(
-        "codex",
+    subscription: str | None = typer.Option(
+        None,
         "--subscription",
-        help="CLI or API subscription, such as codex, antigravity, grok, or openai_api",
+        help=(
+            "CLI or API subscription, such as codex, antigravity, grok, or openai_api "
+            "(default: codex, or openai_api with --local)"
+        ),
+    ),
+    local: bool = typer.Option(
+        False,
+        "--local",
+        help=(
+            "A local model server you run, such as Ollama, llama.cpp or LM Studio, through "
+            "its OpenAI-compatible API. Needs no API key on this computer's own address. "
+            "--api-base-url defaults to http://127.0.0.1:11434/v1 (Ollama)."
+        ),
     ),
     model: str | None = typer.Option(None, "--model", help="Provider model"),
     timeout: float | None = typer.Option(None, "--timeout", help="Default timeout in seconds"),
@@ -133,6 +144,23 @@ def create_profile(
     organization: str | None = typer.Option(None, "--organization", help="Provider organization"),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
+    from gofer.core.provider_profiles import (
+        DEFAULT_LOCAL_MODEL_BASE_URL,
+        LOCAL_MODEL_SERVER_SUBSCRIPTION,
+        load_provider_profiles,
+        save_provider_profiles,
+    )
+
+    if local:
+        if subscription not in (None, LOCAL_MODEL_SERVER_SUBSCRIPTION):
+            err_console.print(
+                "[red]--local uses the OpenAI-compatible API; leave out --subscription "
+                f"or use --subscription {LOCAL_MODEL_SERVER_SUBSCRIPTION}[/red]"
+            )
+            raise typer.Exit(1)
+        subscription = LOCAL_MODEL_SERVER_SUBSCRIPTION
+        api_base_url = api_base_url or DEFAULT_LOCAL_MODEL_BASE_URL
+    subscription = subscription or "codex"
     if subscription not in _SUBSCRIPTIONS:
         err_console.print(f"[red]Invalid subscription '{subscription}'[/red]")
         raise typer.Exit(1)
@@ -158,10 +186,17 @@ def create_profile(
         api_key_env=api_key_env,
         api_key_secret=api_key_secret,
         organization=organization,
+        local=local,
     )
     profiles[name] = profile
     save_provider_profiles(profiles, data_dir or get_data_dir())
     console.print(f"[green]Created provider profile[/green] [bold]{name}[/bold]")
+    _print_local_warning(profile)
+    if profile.local:
+        console.print(
+            f"Check it with: Raticode provider profile check {name}. In a workflow, use "
+            f"provider: openai-api, profile: {name} and a model the server lists."
+        )
 
 
 @profile_app.command(
@@ -208,6 +243,13 @@ def edit_profile(
     organization: str | None = typer.Option(None, "--organization", help="Provider organization"),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
+    from gofer.core.provider_profiles import (
+        load_provider_profiles,
+        save_provider_profiles,
+        validate_provider_profile,
+        validate_safe_provider_env,
+    )
+
     profiles = load_provider_profiles(data_dir or get_data_dir())
     profile = profiles.get(name)
     if profile is None:
@@ -271,6 +313,61 @@ def edit_profile(
     profiles[name] = updated_profile
     save_provider_profiles(profiles, data_dir or get_data_dir())
     console.print(f"[green]Updated provider profile[/green] [bold]{name}[/bold]")
+    _print_local_warning(updated_profile)
+
+
+@profile_app.command(
+    "check",
+    help=(
+        "Check a local model server profile: whether its server answers and which models "
+        "it lists. With --model, also whether it has that model. Exits 1 if not."
+    ),
+)
+def check_profile(
+    name: str = typer.Argument(..., help="Local model server profile name"),
+    model: str | None = typer.Option(
+        None, "--model", help="Model ID to look for (default: the profile's model)"
+    ),
+    output_format: str = format_option(),
+    data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
+) -> None:
+    from gofer.core.local_models import check_local_server
+
+    try:
+        result = check_local_server(name, model=model, data_dir=data_dir or get_data_dir())
+    except ValueError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    ok = result.reachable and result.model_available is not False
+    if wants_json(output_format):
+        emit_json(result.to_json())
+        if not ok:
+            raise typer.Exit(1)
+        return
+    if result.warning:
+        err_console.print(f"[yellow]Warning: {result.warning}[/yellow]")
+    if not result.reachable:
+        err_console.print(f"[red]{result.error}[/red]")
+        raise typer.Exit(1)
+    console.print(f"The server at {result.base_url} answered.")
+    if result.models:
+        console.print("Models it lists:")
+        for item in result.models:
+            console.print(f"  {item}", markup=False, highlight=False)
+    else:
+        console.print("It lists no models. Load or pull one in the server first.")
+    if result.model_available is True:
+        console.print(f"[green]Model {result.model} is available.[/green]")
+    elif result.model_available is False:
+        err_console.print(f"[red]The server doesn't list model {result.model}.[/red]")
+        raise typer.Exit(1)
+
+
+def _print_local_warning(profile: ProviderProfile) -> None:
+    from gofer.core.provider_profiles import local_server_warning
+
+    if warning := local_server_warning(profile):
+        err_console.print(f"[yellow]Warning: {warning}[/yellow]")
 
 
 @profile_app.command(
@@ -282,6 +379,8 @@ def rm_profile(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
+    from gofer.core.provider_profiles import load_provider_profiles, save_provider_profiles
+
     profiles = load_provider_profiles(data_dir or get_data_dir())
     if name not in profiles:
         err_console.print(f"[red]Provider profile '{name}' not found[/red]")
@@ -312,7 +411,14 @@ def _profile_from_options(
     api_key_env: str | None,
     api_key_secret: str | None,
     organization: str | None,
+    local: bool = False,
 ) -> ProviderProfile:
+    from gofer.core.provider_profiles import (
+        ProviderProfile,
+        validate_provider_profile,
+        validate_safe_provider_env,
+    )
+
     try:
         parsed_env = _parse_key_value_options(env or [], "--env", "KEY=VALUE")
         parsed_unsafe_env = _parse_key_value_options(
@@ -342,6 +448,7 @@ def _profile_from_options(
             api_key_env=api_key_env,
             api_key_secret=api_key_secret,
             organization=organization,
+            local=local,
         )
         validate_provider_profile(profile)
         return profile

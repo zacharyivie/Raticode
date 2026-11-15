@@ -54,6 +54,7 @@ The [CLI reference](./cli.md) explains how the commands fit together.
 - `--workflow` / `-w` `STR`: Workflow ID, file stem, or TOML path to include in diagnostics.
 - `--format` `STR`: Output format: text or json.
 - `--json`: Same as --format json.
+- `--secrets-dir` `PATH`: Check this headless secrets folder. Defaults to $CREDENTIALS_DIRECTORY, then the folder a running headless backend reads.
 
 ### Raticode licenses
 
@@ -81,6 +82,7 @@ The [CLI reference](./cli.md) explains how the commands fit together.
 - `--headless`: Run with no desktop window: listen on loopback only, write the owner token and endpoint to owner-only files in &#60;data&#62;/headless/, and load Rem's settings from a file.
 - `--token-file` `PATH`: Headless: read the owner token from this owner-only file (mode 600) instead.
 - `--rem-settings` `PATH`: Headless: Rem settings JSON. Defaults to &#60;data&#62;/headless/rem-settings.json.
+- `--secrets-dir` `PATH`: Headless: read keychain secrets (Jev key, Organizations and webhook secrets, usage reporting credentials, workflow secrets) from owner-only files (mode 600) in this folder when there is no system keychain. Defaults to $CREDENTIALS_DIRECTORY from systemd. Read-only.
 
 ### Raticode wait
 
@@ -534,9 +536,74 @@ Projects the backend knows about (read only).
 - `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
 - `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
 
+### Raticode projects setup
+
+*Backend: needs a running Raticode backend.* Show a project's worktree setup and whether you approved it.
+
+- `PROJECT` (optional): Project folder. Leave it out to list setups waiting for your approval.
+- `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
+- `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
+- `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
+- `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+
 ## Raticode provider
 
 Manage provider settings
+
+### Raticode provider jev check
+
+*Backend: needs a running Raticode backend.* Check the saved key with Jev and refresh its model list. Makes one Jev call.
+
+- `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
+- `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
+- `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
+- `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+
+### Raticode provider jev disable
+
+*Backend: needs a running Raticode backend.* Stop every jev workflow node from calling Jev, keeping the saved key.
+
+- `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
+- `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
+- `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
+- `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+
+### Raticode provider jev enable
+
+*Backend: needs a running Raticode backend.* Let jev workflow nodes call Jev with the saved key.
+
+- `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
+- `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
+- `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
+- `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+
+### Raticode provider jev remove-key
+
+*Backend: needs a running Raticode backend.* Delete the saved Jev key from the system keychain.
+
+- `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
+- `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
+- `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
+- `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+
+### Raticode provider jev set-key
+
+*Backend: needs a running Raticode backend.* Save a Jev API key in the system keychain. Prompts without echoing it.
+
+- `--stdin`: Read the key from standard input instead of a hidden prompt.
+- `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
+- `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
+- `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
+- `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+
+### Raticode provider jev status
+
+*Backend: needs a running Raticode backend.* Show whether a Jev key is saved, whether Jev is on, and the last key check.
+
+- `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
+- `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
+- `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
+- `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
 
 ### Raticode provider list
 
@@ -559,12 +626,21 @@ Manage provider settings
 - `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
 - `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
 
+### Raticode provider profile check
+
+*Offline: works without a backend.* Check a local model server profile: whether its server answers and which models it lists. With --model, also whether it has that model. Exits 1 if not.
+
+- `NAME` (required): Local model server profile name
+- `--model` `STR`: Model ID to look for (default: the profile's model)
+- `--format` `STR`: Output format: text or json.
+
 ### Raticode provider profile create
 
 *Offline: works without a backend.* Create a provider profile in the data folder.
 
 - `NAME` (required): Profile name
-- `--subscription` `STR`: CLI or API subscription, such as codex, antigravity, grok, or openai_api
+- `--subscription` `STR`: CLI or API subscription, such as codex, antigravity, grok, or openai_api (default: codex, or openai_api with --local)
+- `--local`: A local model server you run, such as Ollama, llama.cpp or LM Studio, through its OpenAI-compatible API. Needs no API key on this computer's own address. --api-base-url defaults to http://127.0.0.1:11434/v1 (Ollama).
 - `--model` `STR`: Provider model
 - `--timeout` `FLOAT`: Default timeout in seconds
 - `--effort` / `--reasoning` `STR`: Model effort setting (--reasoning is deprecated)
@@ -664,6 +740,25 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
 - `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
 
+### Raticode rattish cache clear
+
+*Offline: works without a backend.* Remove a workflow's saved answers, so its cached nodes call their model again.
+
+- `SOURCE` (optional): Path to a .rattish workflow file. Or name the workflow with --workflow-id.
+- `--workflow-id` `STR`: The workflow's ID, instead of a source path.
+- `--all`: Clear every workflow's result cache.
+- `--data-dir` `PATH`: Override the app data directory that holds the cache.
+- `--format` `STR`: Output format: text or json.
+
+### Raticode rattish cache show
+
+*Offline: works without a backend.* Show how many saved answers a workflow's result cache holds and their size.
+
+- `SOURCE` (optional): Path to a .rattish workflow file. Or name the workflow with --workflow-id.
+- `--workflow-id` `STR`: The workflow's ID, instead of a source path.
+- `--data-dir` `PATH`: Override the app data directory that holds the cache.
+- `--format` `STR`: Output format: text or json.
+
 ### Raticode rattish check
 
 *Offline: works without a backend.* Compile a Rattish file and report language errors without running it.
@@ -682,10 +777,11 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 
 ### Raticode rattish create
 
-*Offline: works without a backend.* Create and register a workflow in PROJECT/.raticode/.
+*Offline: works without a backend.* Create and register a workflow in PROJECT/.raticode/, empty or from a starter.
 
-- `NAME` (required): Human-readable workflow name.
+- `NAME` (optional): Human-readable workflow name. Optional with --from.
 - `--project` `PATH`: Repository project folder that will own the workflow.
+- `--from` `STR`: Copy a starter workflow, its test set and sample files. See `rattish starters`.
 - `--format` `STR`: Output format: text or json.
 - `--registry-dir` `PATH`: Override the app directory used for workflow registration.
 
@@ -750,6 +846,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 *Offline: works without a backend.* List registered Rattish workflows grouped by repository project.
 
 - `--format` `STR`: Output format: text or json.
+- `--project` `PATH`: First find every workflow.rattish in this project folder, as opening it in the app does, then list only that project.
 - `--registry-dir` `PATH`: Override the app directory used for workflow registration.
 
 ### Raticode rattish logs
@@ -771,6 +868,18 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `SOURCE` (required): Path to a .rattish workflow file.
 - `--format` `STR`: Output format: text or json.
 - `--data-dir` `PATH`: Override the app data directory used for internal artifacts.
+
+### Raticode rattish prune
+
+*Offline: works without a backend.* Preview or delete old runs of a Rattish workflow.
+
+- `SOURCE` (required): Path to a .rattish workflow file.
+- `--keep-last` `INT RANGE`: Always keep the newest N runs.
+- `--keep-days` `INT RANGE`: Keep runs started in the last N days.
+- `--keep-failed-days` `INT RANGE`: Keep failed runs started in the last N days.
+- `--apply`: Delete the listed runs instead of previewing them.
+- `--format` `STR`: Output format: text or json.
+- `--data-dir` `PATH`: Override the app data directory used for runs and artifacts.
 
 ### Raticode rattish reject
 
@@ -794,6 +903,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `--from-node` `STR`
 - `--only-node` `STR`
 - `--force`: Resume even if the source changed.
+- `--input` `STR` (repeatable): A password input the run didn't save, as name=value. Repeat for more.
 - `--wait`: Wait for the resumed run to finish.
 - `--timeout` `STR`: Longest to wait, such as 30s, 5m or 1h30m.
 - `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
@@ -810,18 +920,60 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `--format` `STR`: Output format: text or json.
 - `--data-dir` `PATH`: Override the app data directory used for runs and artifacts.
 
-### Raticode rattish runs
+### Raticode rattish runs list
 
-*Backend: needs a running Raticode backend.* (Backend) List a workflow's runs, newest first.
+*Backend: needs a running Raticode backend.* (Backend) List a workflow's runs, or every workflow's runs with --all, newest first.
 
-- `WORKFLOW_ID` (required)
-- `--status` `STR`: success, error, running or stopped.
+- `WORKFLOW_ID` (optional): The workflow whose runs to list. Leave it out with --all.
+- `--all`: List runs from every registered workflow, newest first.
+- `--status` `STR`: success, error, running, stopped or disconnected.
+- `--since` `STR`: With --all: runs started since an ISO time, or a span back such as 30m, 24h, 7d.
+- `--workflow` `STR` (repeatable): With --all: only this workflow. Repeat for more.
 - `--limit` `INT`
 - `--offset` `INT`
 - `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
 - `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
 - `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
 - `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+
+### Raticode rattish runs rerun
+
+*Backend: needs a running Raticode backend.* (Backend) Run a workflow again with the same inputs and trigger events as an earlier run.
+
+- `RUN_ID` (required): The run to run again, from `rattish runs`.
+- `--input` `STR` (repeatable): A password input the run didn't save, as name=value. Repeat for more.
+- `--workflow` `STR`: The run's workflow. Found from the run ID when left out.
+- `--wait`: Wait for the new run to finish.
+- `--follow`: Wait, printing run events as NDJSON lines while it runs.
+- `--timeout` `STR`: Longest to wait, such as 30s, 5m or 1h30m.
+- `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
+- `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
+- `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
+- `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+
+### Raticode rattish secrets list
+
+*Offline: works without a backend.* List saved workflow secret names. Values are never shown.
+
+- `--format` `STR`: Output format: text or json.
+- `--data-dir` `PATH`: Override the app data directory.
+
+### Raticode rattish secrets remove
+
+*Offline: works without a backend.* Delete a saved workflow secret from the system keychain.
+
+- `NAME` (required): The saved secret's name.
+- `--format` `STR`: Output format: text or json.
+- `--data-dir` `PATH`: Override the app data directory.
+
+### Raticode rattish secrets set
+
+*Offline: works without a backend.* Save a workflow secret in the system keychain, replacing any saved value.
+
+- `NAME` (required): The name workflows use in secret&#91;"NAME"&#93;.
+- `--stdin`: Read the value from standard input (all of it, so it can span lines) instead of a hidden prompt.
+- `--format` `STR`: Output format: text or json.
+- `--data-dir` `PATH`: Override the app data directory.
 
 ### Raticode rattish show
 
@@ -851,9 +1003,15 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
 - `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
 
+### Raticode rattish starters
+
+*Offline: works without a backend.* List the starter workflows that `rattish create --from` can copy.
+
+- `--format` `STR`: Output format: text or json.
+
 ### Raticode rattish stop
 
-*Backend: needs a running Raticode backend.* (Backend) Stop a workflow's active run.
+*Backend: needs a running Raticode backend.* (Backend) Stop a workflow's active run. With no backend running, it still asks the run to stop.
 
 - `WORKFLOW_ID` (required)
 - `--run` `STR`: Stop this run only.
@@ -861,6 +1019,20 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
 - `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
 - `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+
+### Raticode rattish test
+
+*Offline: works without a backend.* Run a workflow's test set: each case runs the workflow and its checks.
+
+- `SOURCE` (required): Path to a .rattish workflow file.
+- `--tests` `PATH`: Test set file. Defaults to NAME.tests.json beside the workflow.
+- `--case` `STR` (repeatable): Run only this case ID. Repeat for several cases.
+- `--estimate`: Print the expected cost and run nothing.
+- `--history`: List saved results and compare the newest with the last other revision.
+- `--max-cost` `FLOAT RANGE`: Refuse to run when the expected cost in US dollars is over this or unknown.
+- `--skip-judge`: Skip model-judgment checks, so they cost nothing.
+- `--format` `STR`: Output format: text or json.
+- `--data-dir` `PATH`: Override the app data directory used for runs and results.
 
 ### Raticode rattish triggers add cron
 
@@ -970,11 +1142,27 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `--format` `STR`: Output format: text or json.
 - `--data-dir` `PATH`: Override the app data directory.
 
+### Raticode rattish triggers pause
+
+*Offline: works without a backend.* Pause every trigger at once. Each trigger keeps its own on/off setting.
+
+- `--all`: Every trigger on this computer.
+- `--format` `STR`: Output format: text or json.
+- `--data-dir` `PATH`: Override the app data directory.
+
 ### Raticode rattish triggers remove
 
 *Offline: works without a backend.* Delete a trigger and its history.
 
 - `TRIGGER_ID` (required): Trigger ID.
+- `--format` `STR`: Output format: text or json.
+- `--data-dir` `PATH`: Override the app data directory.
+
+### Raticode rattish triggers resume
+
+*Offline: works without a backend.* Resume triggers after pause --all, exactly as each one was set.
+
+- `--all`: Every trigger on this computer.
 - `--format` `STR`: Output format: text or json.
 - `--data-dir` `PATH`: Override the app data directory.
 
@@ -1154,7 +1342,7 @@ Rem from the command line. Chat, tasks, memories, alerts and settings go through
 *Backend: needs a running Raticode backend.* Alerts for anything that needs you: stuck or finished tasks, proposals, organizations.
 
 - `--cursor` `STR`: The cursor from the last read; without it, only the cursor
-- `--include` `STR`: Comma list of needs_you, finished, proposals (default: all)
+- `--include` `STR`: Comma list of needs_you, finished, proposals, workflow (default: all)
 - `--watch`: Keep reading and print each alert
 - `--timeout` `STR`: Longest to wait, such as 30s, 5m or 1h30m.
 - `--interval` `FLOAT RANGE`: Seconds between polls.
@@ -1167,6 +1355,15 @@ Rem from the command line. Chat, tasks, memories, alerts and settings go through
 
 *Offline: works without a backend.* List every skill and MCP server available to Rem threads.
 
+- `--format` `STR`: Output format: table (or text) or json
+
+### Raticode rem restore-db
+
+*Offline: works without a backend.* Restore Rem's database from a verified copy. Quit Raticode first.
+
+- `--snapshot` `STR`: Restore this copy, by its file name from --list, instead of the newest one
+- `--list`: List the verified copies and exit
+- `--force`: Restore even though a running Raticode holds Rem
 - `--format` `STR`: Output format: table (or text) or json
 
 ### Raticode rem runs acknowledge
@@ -1586,6 +1783,7 @@ Rem's self-work: status, report and settings. Needs a running backend.
 
 - `--file` / `-f` `PATH` (required): JSON from `selfwork export`, or -
 - `--expected-revision` `INT`: Refuse if the settings changed since this revision
+- `--confirm-auto-approve`: Needed when the file turns auto-approval on: self-work then approves its own backlog tickets without asking you
 - `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
 - `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
 - `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
@@ -1635,6 +1833,11 @@ Rem's self-work: status, report and settings. Needs a running backend.
 - `--enabled` / `--disabled`
 - `--max-threads` `INT RANGE`
 - `--auto-pull-backlog` / `--no-auto-pull-backlog`
+- `--session-token-limit` `INT RANGE`: Start no new work past this many tokens in one self-work session; 0 is no limit
+- `--daily-token-limit` `INT RANGE`: Start no new work past this many self-work tokens in a day; 0 is no limit
+- `--rate-limit-percent` `INT RANGE`: Start no new work while a stored rate-limit window of Rem's provider is at or above this percent; 0 is no limit
+- `--auto-approve` / `--no-auto-approve`: Let self-work approve the backlog tickets its research finds, until self-work ends, instead of waiting for you; turning it on needs --confirm-auto-approve
+- `--confirm-auto-approve`: Confirm you want self-work to approve its own tickets without asking you
 - `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
 - `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
 - `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
@@ -1858,6 +2061,7 @@ Global Kanban tickets: Rem's and every organization's. Needs a running backend.
 - `--type` `STR`: research, maintain, develop or errand
 - `--project` `PATH`: Open project folder
 - `--done-when` `STR`: How to tell it's finished
+- `--waits-for` `STR` (repeatable): A ticket this one waits for, by key such as REM-3 or by ID; repeat for several. Self-work skips the ticket until all of them are Done.
 - `--org` `STR`: Organization ID, for an organization's ticket
 - `--assignee` `STR`: rem, or a worker ID with --org
 - `--request-id` `STR`: Idempotency key sent as request_id. Only Rem messages, tasks, run controls and thread messages, and board ticket create and comment, deduplicate on it: reuse the ID when retrying those. Other endpoints ignore it. 'auto' generates one and prints it in the result.
@@ -1880,7 +2084,7 @@ Global Kanban tickets: Rem's and every organization's. Needs a running backend.
 
 ### Raticode tickets edit
 
-*Backend: needs a running Raticode backend.* Change a ticket's title, description, priority, type, project or finish line.
+*Backend: needs a running Raticode backend.* Change a ticket's title, description, priority, type, project, finish line or waits.
 
 - `TICKET` (required)
 - `--expected-revision` `INT` (required): The ticket's revision from `show`
@@ -1891,6 +2095,8 @@ Global Kanban tickets: Rem's and every organization's. Needs a running backend.
 - `--type` `STR`
 - `--project` `PATH`
 - `--done-when` `STR`
+- `--waits-for` `STR` (repeatable): A ticket this one waits for, by key such as REM-3 or by ID; repeat for several. Self-work skips the ticket until all of them are Done. Replaces the whole list.
+- `--clear-waits`: Stop waiting for other tickets
 - `--org` `STR`: Organization ID, for an organization's ticket
 - `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
 - `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
@@ -1989,6 +2195,7 @@ Run the workflow studio API
 - `--headless`: Run with no desktop window: listen on loopback only, write the owner token and endpoint to owner-only files in &#60;data&#62;/headless/, and load Rem's settings from a file.
 - `--token-file` `PATH`: Headless: read the owner token from this owner-only file (mode 600) instead.
 - `--rem-settings` `PATH`: Headless: Rem settings JSON. Defaults to &#60;data&#62;/headless/rem-settings.json.
+- `--secrets-dir` `PATH`: Headless: read keychain secrets (Jev key, Organizations and webhook secrets, usage reporting credentials, workflow secrets) from owner-only files (mode 600) in this folder when there is no system keychain. Defaults to $CREDENTIALS_DIRECTORY from systemd. Read-only.
 
 ## Raticode usage
 

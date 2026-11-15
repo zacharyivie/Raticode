@@ -32,7 +32,6 @@ const {
 } = require("./browser-client-hints.cjs");
 
 const {
-  BROWSER_PARTITIONS,
   PARTITIONS,
   allowPageTab,
   clampZoom,
@@ -68,6 +67,9 @@ const HIGH_ENTROPY_FIELDS = ["architecture", "bitness", "formFactors", "fullVers
 const CLIENT_HINT_URLS = ["https://*/*", "wss://*/*", "http://localhost/*", "http://127.0.0.1/*", "http://*.localhost/*", "ws://localhost/*", "ws://127.0.0.1/*"];
 const MAX_RESTORED_ENTRIES = 25;
 const MAX_PAGE_STATE_CHARS = 16 * 1024;
+// Where a view lays its page out until the studio says where it is on screen.
+const DEFAULT_VIEW_BOUNDS = { x: 0, y: 0, width: 1280, height: 800 };
+const VIEW_DETACH_GRACE_MS = 3000;
 const USER_INPUT_TYPES = new Set(["mouseDown", "keyDown", "rawKeyDown", "touchStart", "gestureTap", "char"]);
 
 // The page reports the element it was right-clicked on; keep a bounded copy.
@@ -92,7 +94,6 @@ function createBrowserSessions({
   dialog,
   shell,
   session: electronSession,
-  webContents: webContentsApi,
   getMainWindow,
   resolvePath,
   store,
@@ -107,6 +108,11 @@ function createBrowserSessions({
   chromium = {},
   nativeImage = null,
   privateCleanupDelayMs = PRIVATE_CLEANUP_DELAY_MS,
+  // Raticode (chromium) tabs are views this module owns (Electron's WebContentsView).
+  WebContentsView = null,
+  preloadPath = "",
+  // The window a view sits in: "main" is Raticode's, "popout" the Browser's own window.
+  getHostWindow = () => null,
 }) {
   const sessions = new Map();
   const ownersWithCleanup = new WeakSet();
@@ -525,7 +531,13 @@ function createBrowserSessions({
     }
     sessions.set(id, session);
     registerOwnerCleanup(event.sender);
-    return { ...sessionState(session), src: session.pendingSrc, partition: PARTITIONS[profileKind(session)] };
+    try {
+      createView(session);
+    } catch (error) {
+      sessions.delete(id);
+      throw error;
+    }
+    return { ...sessionState(session), partition: PARTITIONS[profileKind(session)] };
   }
 
   function baseSession({ id, owner, kind, url, initialUrl = url, grantId = "", clientId = "", applicationKeybindings = {}, openBrowserBinding = "Mod+Alt+Slash", agent = null }) {
@@ -584,56 +596,153 @@ function createBrowserSessions({
     return { entries, index };
   }
 
-  function isPendingAttach(ownerId, params = {}) {
-    if (!BROWSER_PARTITIONS.has(params.partition)) return false;
-    const requested = String(params.src ?? "");
-    for (const session of sessions.values()) {
-      if (session.ownerId === ownerId && session.pendingSrc && session.pendingSrc === requested
-          && PARTITIONS[profileKind(session)] === params.partition) return true;
-    }
-    return requested === "about:blank";
+  // Raticode creates every tab's view itself; nothing else may attach a <webview>.
+  function isPendingAttach() {
+    return false;
   }
 
-  // Until a guest is adopted it may not open anything.
+  // Until a view is set up it may not open anything.
   function hardenGuest(guest) {
     guest.setWindowOpenHandler(() => ({ action: "deny" }));
   }
 
-  function adopt(event, session, webContentsId) {
-    const guest = webContentsApi.fromId(Number(webContentsId));
-    if (!guest || guest.isDestroyed() || guest.hostWebContents !== event.sender || guest.getType() !== "webview") {
-      throw new Error("Browser view is unavailable.");
+  // ---------------------------------------------------------------------------
+  // Views
+  //
+  // Each Raticode (chromium) tab is a WebContentsView this module owns. The
+  // studio draws an empty slot where the page goes and says where it is, in
+  // which window (Raticode's or the Browser's own), and whether it shows. The
+  // view follows it there. Moving a view to another window keeps the same page
+  // running, so nothing reloads and media keeps playing. Hidden views stay in a
+  // window, hidden, so they keep running and can still be captured.
+
+  function viewPreferences(session) {
+    return {
+      partition: PARTITIONS[profileKind(session)],
+      ...(preloadPath ? { preload: preloadPath } : {}),
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      nodeIntegrationInSubFrames: false,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      webviewTag: false,
+      // The PDF viewer.
+      plugins: true,
+      // Background tabs slow their timers, as webview tabs did; audio keeps playing.
+      backgroundThrottling: true,
+    };
+  }
+
+  function createView(session) {
+    if (typeof WebContentsView !== "function") throw new Error("Browser view is unavailable.");
+    const view = new WebContentsView({ webPreferences: viewPreferences(session) });
+    const contents = view.webContents;
+    hardenGuest(contents);
+    if (!sameProfile(contents.session, profile(profileKind(session)))) {
+      contents.close?.();
+      throw new Error("Browser view uses the wrong profile.");
     }
-    if (!sameProfile(guest.session, profile(profileKind(session)))) throw new Error("Browser view uses the wrong profile.");
-    if (session.contents === guest) return;
-    if (session.contents) throw new Error("Browser session already has a view.");
-    session.contents = guest;
+    session.view = view;
+    session.viewWindow = null;
+    session.viewShown = false;
+    if (typeof view.setBackgroundColor === "function") view.setBackgroundColor("#ffffff");
+    view.setBounds({ ...DEFAULT_VIEW_BOUNDS });
+    view.setVisible(false);
+    hostView(session, "main");
+    const first = session.pendingSrc;
+    session.contents = contents;
     session.pendingSrc = "";
-    if (typeof guest.setBackgroundColor === "function") guest.setBackgroundColor("#ffffff");
-    guest.once("destroyed", () => closeSession(session));
+    contents.once("destroyed", () => { if (session.contents === contents) closeSession(session); });
     configure(session);
     session.ownerZoomFactor = session.owner.getZoomFactor();
-    // The first page loads before the view is adopted, so apply its site
-    // settings and history entry now.
-    const current = guest.getURL();
-    if (current && current !== "about:blank") {
-      session.localNavigation = current.startsWith("file:");
-      applySiteZoom(session, current);
-      recordHistory(session, current);
-    } else {
-      syncZoom(session);
-    }
+    syncZoom(session);
     if (session.pendingHistory) {
       const history = session.pendingHistory;
       session.pendingHistory = null;
-      void restoreHistory(session, guest, history);
+      void restoreHistory(session, contents, history);
+    } else if (first && first !== "about:blank") {
+      session.localNavigation = first.startsWith("file:");
+      void run(session, () => contents.loadURL(first));
+    } else {
+      // A view that never loaded has no page yet; a webview always showed
+      // about:blank first, and Rem's controls expect a page to talk to.
+      void contents.loadURL("about:blank").catch(() => {});
     }
     emitState(session);
   }
 
-  // Chromium only restores history into a view that has not navigated yet,
-  // and the view has already shown about:blank. When restoring fails, still
-  // open the page the tab was showing.
+  function hostWindowFor(host) {
+    const window = (host === "popout" && getHostWindow("popout")) || getMainWindow();
+    return window && !window.isDestroyed() ? window : null;
+  }
+
+  function hostView(session, host) {
+    const window = hostWindowFor(host);
+    if (!window || !session.view) return null;
+    if (session.viewWindow !== window || session.viewWindow.isDestroyed?.()) {
+      // Adding a view to another window takes it out of the one it was in.
+      window.contentView.addChildView(session.view);
+      session.viewWindow = window;
+    }
+    return window;
+  }
+
+  function placeView(session, options = {}) {
+    if (!session.view || !liveContents(session)) return { placed: false };
+    hostView(session, options.host === "popout" ? "popout" : "main");
+    // The studio measures in its own CSS pixels; the window counts them zoomed.
+    const zoom = session.owner.getZoomFactor?.() || 1;
+    const scaled = (value, low, high) => Math.min(Math.max(Number.isFinite(value) ? Math.round(value * zoom) : 0, low), high);
+    const width = scaled(Number(options.width), 0, 20000);
+    const height = scaled(Number(options.height), 0, 20000);
+    const shown = options.visible === true && width > 0 && height > 0;
+    // A hidden view keeps its last size, so its page doesn't lay out again.
+    if (shown) session.view.setBounds({ x: scaled(Number(options.x), -20000, 20000), y: scaled(Number(options.y), -20000, 20000), width, height });
+    session.view.setVisible(shown);
+    session.viewShown = shown;
+    return { placed: true, shown };
+  }
+
+  // A picture of the page, shown in its slot while Raticode draws something over it.
+  async function viewSnapshot(session) {
+    const contents = liveContents(session);
+    if (!session.view || !contents) return { snapshot: "" };
+    try {
+      const image = await contents.capturePage();
+      return { snapshot: image.isEmpty() ? "" : `data:image/jpeg;base64,${image.toJPEG(85).toString("base64")}` };
+    } catch {
+      return { snapshot: "" };
+    }
+  }
+
+  // Before the Browser's own window closes: its views go back to Raticode's, hidden.
+  function returnViews(window) {
+    for (const session of sessions.values()) {
+      if (!session.view || session.viewWindow !== window) continue;
+      session.view.setVisible(false);
+      session.viewShown = false;
+      session.viewWindow = null;
+      hostView(session, "main");
+    }
+  }
+
+  function removeView(session, contents) {
+    const view = session.view;
+    if (!view) return;
+    session.view = null;
+    try {
+      if (session.viewWindow && !session.viewWindow.isDestroyed()) session.viewWindow.contentView.removeChildView(view);
+    } catch { /* The window is closing. */ }
+    session.viewWindow = null;
+    if (contents && !contents.isDestroyed()) {
+      if (typeof contents.close === "function") contents.close();
+      else contents.destroy?.();
+    }
+  }
+
+  // Chromium only restores history into a view that has not navigated yet.
+  // When restoring fails, still open the page the tab was showing.
   async function restoreHistory(session, guest, history) {
     const target = history.entries[history.index].url;
     try {
@@ -656,10 +765,12 @@ function createBrowserSessions({
     session.closed = true;
     session.contents = null;
     clearTimeout(session.detachTimer);
+    clearTimeout(session.moveTimer);
     session.mediaWatch?.stop();
     session.mediaWatch = null;
     emitMedia(session.owner);
     if (isStreamed(contents)) contents.close();
+    removeView(session, contents);
     for (const [requestId, prompt] of prompts) {
       if (prompt.session === session) settlePrompt(requestId, null);
     }
@@ -674,6 +785,13 @@ function createBrowserSessions({
     ownersWithCleanup.add(owner);
     const ownerId = owner.id;
     owner.once("destroyed", () => closeForOwner(ownerId));
+    // A reloaded or crashed studio restores its tabs as new ones, so the tabs it had belong
+    // to nobody: close them, as a reload closed the old <webview> tabs, instead of leaving
+    // their pages running and drawn over the reloaded window.
+    owner.on("did-start-navigation", (details) => {
+      if (details?.isMainFrame && !details.isSameDocument) closeForOwner(ownerId);
+    });
+    owner.on("render-process-gone", () => closeForOwner(ownerId));
   }
 
   function closeForOwner(ownerId) {
@@ -782,6 +900,24 @@ function createBrowserSessions({
       update();
     });
     contents.on("unresponsive", () => { session.unresponsive = true; update(); });
+    // A page's own full screen (a video's button): the view fills its window,
+    // and the window goes full screen as it did for webview tabs.
+    contents.on("enter-html-full-screen", () => {
+      session.fullscreen = true;
+      const window = session.viewWindow;
+      if (window && !window.isDestroyed() && !window.isFullScreen?.()) {
+        session.fullscreenWindow = window;
+        window.setFullScreen?.(true);
+      }
+      update();
+    });
+    contents.on("leave-html-full-screen", () => {
+      session.fullscreen = false;
+      const window = session.fullscreenWindow;
+      session.fullscreenWindow = null;
+      if (window && !window.isDestroyed() && window.isFullScreen?.()) window.setFullScreen?.(false);
+      update();
+    });
     contents.on("responsive", () => { session.unresponsive = false; update(); });
     contents.on("audio-state-changed", (event) => {
       session.audible = typeof event?.audible === "boolean" ? event.audible : contents.isCurrentlyAudible();
@@ -1585,7 +1721,8 @@ function createBrowserSessions({
       { label: "Save as PDF…", click: () => void saveAsPdf(session) },
       ...(streamed ? [] : [{ type: "separator" }, { label: "Inspect", click: () => contents.inspectElement(params.x, params.y) }]),
     );
-    const owner = getMainWindow();
+    // The menu opens in the window the tab is in.
+    const owner = session.viewWindow && !session.viewWindow.isDestroyed() ? session.viewWindow : getMainWindow();
     Menu.buildFromTemplate(template).popup(owner && !owner.isDestroyed() ? { window: owner } : {});
   }
 
@@ -1681,6 +1818,14 @@ function createBrowserSessions({
     sessions.set(session.id, session);
     registerOwnerCleanup(owner);
     if (streamed) createStreamContents(session, streamed);
+    else {
+      try {
+        createView(session);
+      } catch (error) {
+        sessions.delete(session.id);
+        throw error;
+      }
+    }
     owner.send("gofer:browser-agent-open", { id: session.id, label, partition: PARTITIONS.rem, engine: streamed || "raticode" });
     return session;
   }
@@ -2065,6 +2210,7 @@ function createBrowserSessions({
       signInBlocked: isStreamed(session) && session.kind === "user" && Boolean(contents && GOOGLE_REJECTED.test(contents.getURL())),
       error: session.error,
       favicon: session.favicon || "",
+      fullscreen: session.fullscreen === true,
       id: session.id,
       loadError: session.loadError,
       muted: session.muted,
@@ -2194,7 +2340,7 @@ function createBrowserSessions({
 
   function browserAction(event, options = {}) {
     // Destruction of a guest can precede the renderer's cleanup IPC.
-    if (["close", "adopt", "focus", "set-preferences", "viewport", "prompt-response", "firefox-view", "firefox-input", "frame-ack", "view-detached", "media-control"].includes(options.action) && !sessions.has(options.id)) {
+    if (["close", "adopt", "focus", "set-preferences", "viewport", "prompt-response", "firefox-view", "firefox-input", "frame-ack", "view-detached", "media-control", "place", "view-snapshot"].includes(options.action) && !sessions.has(options.id)) {
       return { closed: true, ready: false };
     }
     const session = ownedSession(event, options.id);
@@ -2202,13 +2348,29 @@ function createBrowserSessions({
       case "adopt":
         // Rem's tabs are created before the studio picks their tab identity.
         if (session.agent && !session.clientId && typeof options.clientId === "string") session.clientId = options.clientId.slice(0, 200);
-        // A Firefox or Chrome tab has no view to adopt; the studio only draws its frames.
-        if (isStreamed(session)) {
+        // The studio has drawn the tab again: a Firefox or Chrome tab streams its
+        // frames there, and a Raticode (chromium) view follows its slot.
+        if (isStreamed(session) || session.view) {
           clearTimeout(session.detachTimer);
           return sessionState(session);
         }
-        adopt(event, session, options.webContentsId);
-        return sessionState(session);
+        throw new Error("Browser view is unavailable.");
+      case "place":
+        return placeView(session, options);
+      case "view-detached":
+        if (!session.view) break;
+        session.view.setVisible(false);
+        session.viewShown = false;
+        // Closing Rem's tab in the studio removes its slot. A remount draws
+        // it again within moments; otherwise the tab is gone.
+        if (session.agent && !session.agent.shared) {
+          clearTimeout(session.detachTimer);
+          session.detachTimer = setTimeout(() => { if (sessions.get(session.id) === session) closeAgentTab(session); }, VIEW_DETACH_GRACE_MS);
+          session.detachTimer.unref?.();
+        }
+        return { ok: true };
+      case "view-snapshot":
+        return viewSnapshot(session);
       case "viewport": {
         const width = Number(options.width);
         const height = Number(options.height);
@@ -2574,6 +2736,7 @@ function createBrowserSessions({
     handleLogin,
     handleSelectClientCertificate,
     hardenGuest,
+    returnViews,
     install,
     isPendingAttach,
     normalizeUrl: (value) => normalizeBrowserUrl(value, policy.searchUrl),

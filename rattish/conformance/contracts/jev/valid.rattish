@@ -1,0 +1,12 @@
+Rattish: 1
+Workflow:
+  name: Jev contract
+Node example:
+  type: jev
+  question: Does the customer ask for their money back?
+  criteria:
+    yes: The writer asks for a refund, chargeback or reversed payment.
+    no: Complaints, questions or praise that don't ask for money back.
+  threshold: 0.6
+  state: I was charged twice and want one payment reversed.
+  cache: 12h

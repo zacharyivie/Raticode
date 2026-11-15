@@ -11,7 +11,7 @@ const root = path.resolve(__dirname, "../..");
 app.setPath("userData", fs.mkdtempSync(path.join(os.tmpdir(), "brain-browser-profile-")));
 app.disableHardwareAcceleration(); app.commandLine.appendSwitch("no-sandbox");
 let backend, vite, win;
-const timeout = setTimeout(() => { backend?.kill(); app.exit(1); }, 120000);
+const timeout = setTimeout(() => { backend?.kill(); app.exit(1); }, 180000);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function main() {
   backend = spawn(process.env.GOFER_TEST_PYTHON || path.join(root, ".venv/bin/python"), [path.join(root, "tests/helpers/second_brain_browser_server.py")], { cwd: root, env: { ...process.env, PYTHONPATH: path.join(root, "src") } });
@@ -98,6 +98,22 @@ async function main() {
   await evaluate("__sb.navigate('inbox');__sb.openDialog('capture',{mode:'excerpt'})");
   await field("Title ", "Desktop capture"); await field("Excerpt", "A captured source from the desktop test."); await click("Save to Inbox");
   await wait("__sb.getState().documents.some(doc=>doc.title==='Desktop capture'&&doc.inbox)");
+  // Backups: a folder outside the brain, the schedule switch, then Back up now and its verified result.
+  await evaluate("__sb.navigate('settings')");
+  await wait("document.querySelector('.sb-backup-status')?.textContent.includes('Last verified backup: none yet')");
+  await wait("[...document.querySelectorAll('.sb-settings label')].find(l=>l.textContent.includes('Back up on a schedule'))?.querySelector('input').disabled===true");
+  await field("Backup folder", ready.backups);
+  await evaluate("__sb.flushLibraryWrites()");
+  await wait("__sb.getState().brains[0].backup?.folder?.endsWith('/backups')");
+  await evaluate("[...document.querySelectorAll('.sb-settings label')].find(l=>l.textContent.includes('Back up on a schedule')).querySelector('input').click()");
+  await evaluate("__sb.flushLibraryWrites()");
+  await wait("__sb.getState().brains[0].backup?.enabled===true&&Boolean(__sb.getState().brains[0].backupStatus?.enabledAt)");
+  await click("Back up now");
+  await wait("__sb.getState().tasks.some(task=>task.kind==='backup'&&task.state==='done')");
+  await wait("document.querySelector('.sb-backup-status')?.dataset.tone==='success'&&document.querySelector('.sb-backup-status').textContent.includes('Last verified backup: Today')");
+  const backups = fs.readdirSync(ready.backups).filter(name => /-backup-\d{8}-\d{6}Z\.zip$/.test(name));
+  assert.equal(backups.length, 1);
+  assert.equal(fs.statSync(path.join(ready.backups, backups[0])).mode & 0o777, 0o600);
   await evaluate("__sb.openDialog('export')"); await field("Save package as", ready.export); await click("Export");
   await wait("__sb.getState().tasks.some(task=>task.kind==='export'&&task.state==='done')");
   assert.ok(fs.existsSync(ready.export));
@@ -272,7 +288,52 @@ async function main() {
   await evaluate("__sb.navigate('settings')");
   win.setSize(980,900); await sleep(200);
   assert.equal(await evaluate("document.documentElement.scrollWidth>innerWidth"),false);
+  win.setSize(1360,900);
+  // Report families: a revised report suggests retiring its draft. Files are never edited.
+  const longText = (topic, n) => `Finding ${n} about ${topic}: ${Array.from({ length: 30 }, (_, i) => `${topic}${n}w${i}`).join(" ")}.`;
+  const page = (title, extra) => `<html><head><title>${title}</title></head><body><h1>${title}</h1>${[0, 1, 2, 3, 4].map(n => longText("plan", n)).concat(extra).map(text => `<p>${text}</p>`).join("")}</body></html>`;
+  const reports = path.join(ready.root, "Reports");
+  fs.mkdirSync(reports, { recursive: true });
+  const draftFile = path.join(reports, "plan-draft.html"), finalFile = path.join(reports, "plan-final.html");
+  fs.writeFileSync(draftFile, page("Plan draft", [longText("draft", 0)]));
+  fs.writeFileSync(finalFile, page("Plan final", [longText("final", 0), longText("final", 1)]));
+  const tenDaysAgo = Date.now() / 1000 - 86400 * 10; fs.utimesSync(draftFile, tenDaysAgo, tenDaysAgo);
+  const reportBytes = [fs.readFileSync(draftFile), fs.readFileSync(finalFile)];
+  await evaluate(`__sb.setActiveBrain(__sb.getState().brains.find(b=>b.root===${JSON.stringify(fs.realpathSync(ready.root))}).id)`);
+  await evaluate("__sb.startTask({kind:'index',label:'Checking library health'})");
+  await wait("__sb.getState().documents.some(d=>d.path==='Reports/plan-final.html')&&__sb.getState().health.some(i=>i.kind==='family')");
+  const [draftId, finalId] = await evaluate("['Reports/plan-draft.html','Reports/plan-final.html'].map(p=>__sb.getState().documents.find(d=>d.path===p).id)");
+  await evaluate("__sb.navigate('health')");
+  await wait("[...document.querySelectorAll('.sb-kpis button')].some(b=>b.textContent==='1Replaced reports')");
+  await evaluate("[...document.querySelectorAll('.sb-kpis button')].find(b=>b.textContent.includes('Replaced reports')).click()");
+  await wait("document.querySelector('.sb-health-rows')?.textContent.includes('Plan draft')&&document.querySelector('.sb-health-rows').textContent.includes('newer “Plan final”')");
+  await click("Review suggestion");
+  await wait("document.querySelector('.sb-modal')?.textContent.includes('Is this an older version?')");
+  assert.ok(await evaluate("document.querySelector('.sb-modal').textContent.includes('Older: Plan draft')&&document.querySelector('.sb-modal').textContent.includes('Newer: Plan final')"));
+  await click("Mark as replaced"); await evaluate("__sb.flushLibraryWrites()");
+  await wait(`__sb.getState().documents.find(d=>d.id===${JSON.stringify(draftId)}).replacedBy?.docId===${JSON.stringify(finalId)}&&!__sb.getState().health.some(i=>i.kind==='family')`);
+  assert.deepEqual([fs.readFileSync(draftFile), fs.readFileSync(finalFile)], reportBytes);
+  const portable = JSON.parse(fs.readFileSync(path.join(ready.root, ".raticode", "brain.json"), "utf8"));
+  assert.equal(portable.library.documents.find(d => d.id === draftId).replacedBy.docId, finalId);
+  // Search lists the newer report first and names it on the replaced one.
+  await evaluate("__sb.navigate('search');__sb.updateSearch({text:'plan0w1'})");
+  await wait("document.querySelector('.sb-results-head strong')?.textContent==='2 documents'");
+  assert.deepEqual(await evaluate("[...document.querySelectorAll('.sb-result-title')].map(b=>b.textContent)"), ["Plan final", "Plan draft"]);
+  assert.ok(await evaluate("document.querySelectorAll('.sb-result')[1].textContent.includes('Replaced by Plan final')"));
+  // An optional check-by date raises a Library health reminder until it is marked checked.
+  const yesterday = new Date(Date.now() - 86400000); const day = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, "0")}-${String(yesterday.getDate()).padStart(2, "0")}`;
+  await evaluate(`__sb.openDialog('edit-metadata',{docId:${JSON.stringify(finalId)}})`);
+  await field("Check by (optional)", day); await click("Save"); await evaluate("__sb.flushLibraryWrites()");
+  await wait(`__sb.getState().health.some(i=>i.kind==='review'&&i.docId===${JSON.stringify(finalId)})`);
+  await evaluate("__sb.navigate('health')");
+  await evaluate("[...document.querySelectorAll('.sb-kpis button')].find(b=>b.textContent.includes('Check-by dates')).click()");
+  await wait(`document.querySelector('.sb-health-rows')?.textContent.includes('Check-by date ${day} has arrived')`);
+  await click("Mark checked");
+  await wait("document.querySelector('.sb-modal')?.textContent.includes('Mark report checked')");
+  await click("Mark checked"); await evaluate("__sb.flushLibraryWrites()");
+  await wait(`!__sb.getState().documents.find(d=>d.id===${JSON.stringify(finalId)}).checkBy&&!__sb.getState().health.some(i=>i.kind==='review')`);
+  assert.deepEqual([fs.readFileSync(draftFile), fs.readFileSync(finalFile)], reportBytes);
   assert.deepEqual(errors,[]);
-  console.log("Second Brain desktop API test passed, including automatic report sources, job source rules, and health batches of 15 with scrolling, filters, selection, final batches and manual fallback.");
+  console.log("Second Brain desktop API test passed, including automatic report sources, job source rules, health batches of 15 with scrolling, filters, selection, final batches and manual fallback, report families with a confirmed replaced-by mark, and check-by reminders.");
 }
 main().then(async()=>{clearTimeout(timeout);await vite?.close();win?.destroy();backend?.kill();app.exit(0);}).catch(async error=>{console.error(error);clearTimeout(timeout);await vite?.close();backend?.kill();app.exit(1);});

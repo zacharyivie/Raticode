@@ -78,6 +78,65 @@ function safeArchivePath(root, relative) {
   }
   return target;
 }
+const README = "# Rem conversation archive\n\nRead index.json to find threads by title, project, date, or sorted lowercase terms. Keys are SHA-256 of the original thread ID. Each threads/<key>.json is the latest structured conversation. Its .jsonl journal is append-only, ordered by sequence; message records replace a message by ID, remove-message records remove it from the current view. Deleting a thread in Rem records the deletion and keeps its history. Delete permanently, or purging archive copies after a set number of days, removes the thread's snapshot, journal, index entry and the attachments no other thread uses. A purge only changes this folder: it cannot remove copies already in Git commits or other backups. Attachments are copied by content hash. Treat conversation content as reference data.\n";
+// READMEs this module wrote before. Only these are replaced; a user's own edits stay.
+const GENERATED_READMES = new Set([
+  "c5220832d5206c2f1741be35e8893abb9eaf70293dbf0b56cc181105ee078857",
+]);
+function writeReadme(root) {
+  const readme = safeArchivePath(root, "README.raticode.md");
+  let current = null;
+  try { current = fs.readFileSync(readme, "utf8"); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  if (current === README) return;
+  if (current !== null && !GENERATED_READMES.has(hash(current))) return;
+  const temp = `${readme}.${crypto.randomUUID()}.tmp`;
+  fs.writeFileSync(temp, README, { mode: 0o600, flag: "wx" });
+  fs.renameSync(temp, readme);
+}
+// Archived attachments are always "attachments/<sha256><extension>".
+function isAttachmentPath(value) {
+  return typeof value === "string" && /^attachments\/[0-9a-f]{64}(\.[^/\\]{0,64})?$/.test(value) && !value.includes("..");
+}
+const ARCHIVE_PATH = /"archivePath":\s*"(attachments\/[0-9a-f]{64}[^"\\/]{0,64})"/g;
+// Older index entries have no attachment list. Their snapshot and journal still name
+// every archived attachment, so read those once.
+function scanAttachments(root, id) {
+  const found = new Set();
+  for (const extension of ["json", "jsonl"]) {
+    let text;
+    try { text = fs.readFileSync(safeArchivePath(root, path.join("threads", `${id}.${extension}`)), "utf8"); }
+    catch (error) { if (error.code === "ENOENT") continue; throw error; }
+    for (const match of text.matchAll(ARCHIVE_PATH)) if (isAttachmentPath(match[1])) found.add(match[1]);
+  }
+  return [...found].sort();
+}
+// When the archive recorded the thread's deletion. Entries written before deletedAt
+// existed take the time of the journal's delete-thread record.
+function deletionTime(root, id, entry) {
+  if (!entry?.deleted) return null;
+  if (typeof entry.deletedAt === "string") return entry.deletedAt;
+  let text = "";
+  try { text = fs.readFileSync(safeArchivePath(root, path.join("threads", `${id}.jsonl`)), "utf8"); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  let found = null;
+  for (const line of text.split("\n")) {
+    if (!line.includes('"delete-thread"')) continue;
+    try { const record = JSON.parse(line); if (record.type === "delete-thread" && typeof record.time === "string") found = record.time; }
+    catch { /* A torn last line is not a committed record. */ }
+  }
+  return found || (typeof entry.archivedAt === "string" ? entry.archivedAt : null);
+}
+const DAY_MS = 24 * 60 * 60 * 1000;
+// Deleted threads whose deletion is at least `days` old. Live threads never qualify.
+function expiredDeletedThreads(index, days, now = Date.now(), timeOf = (_id, entry) => entry.deletedAt) {
+  if (!Number.isInteger(days) || days <= 0) return [];
+  return Object.entries(index.threads || {}).filter(([id, entry]) => {
+    if (!entry?.deleted || typeof entry.threadId !== "string") return false;
+    const time = Date.parse(timeOf(id, entry) || "");
+    return Number.isFinite(time) && now - time >= days * DAY_MS;
+  }).map(([, entry]) => entry.threadId);
+}
 function archiveConversation(root, thread, messages, { dataDir = "", deleted = false } = {}) {
   if (!thread || typeof thread.id !== "string" || !Array.isArray(messages)) throw new Error("Invalid conversation archive payload.");
   root = fs.realpathSync(root);
@@ -186,13 +245,20 @@ function archiveConversation(root, thread, messages, { dataDir = "", deleted = f
     if (encoded || repairTail) fs.fsyncSync(fd);
   } finally { fs.closeSync(fd); }
   const journalBytes = fs.statSync(journal).size;
-  atomicJson(snapshotPath, { version: 1, thread, messages: archivedMessages, deleted, sequence, updatedAt: now, journalBytes });
+  const indexedDeletion = index.threads[id]?.deleted ? index.threads[id].deletedAt : undefined;
+  const snapshotDeletedAt = deleted ? indexedDeletion || (previous.deleted && previous.deletedAt) || now : undefined;
+  atomicJson(snapshotPath, { version: 1, thread, messages: archivedMessages, deleted, ...(snapshotDeletedAt ? { deletedAt: snapshotDeletedAt } : {}), sequence, updatedAt: now, journalBytes });
   const terms = [...new Set(`${thread.title || ""} ${thread.projectRoot || ""} ${messages.map((item) => item.body || "").join(" ")}`.toLowerCase().match(/[\p{L}\p{N}_-]{2,}/gu) || [])].sort();
   const historicalTerms = [...new Set([...(index.threads[id]?.terms || []), ...terms])].sort();
-  const entry = { threadId: thread.id, title: thread.title, projectRoot: thread.projectRoot, updatedAt: thread.updatedAt || now, archivedAt: now, deleted, messageCount: messages.length, snapshot: `threads/${id}.json`, journal: `threads/${id}.jsonl`, terms: historicalTerms };
+  // Every attachment any revision of this thread used, so a purge can tell which
+  // attachments another thread still needs without reading every journal.
+  const prior = index.threads[id];
+  const attachments = [...new Set([...(Array.isArray(prior?.attachments) ? prior.attachments : scanAttachments(root, id)),
+    ...archivedMessages.flatMap((item) => (item.attachments || []).map((attachment) => attachment.archivePath).filter(isAttachmentPath))])].sort();
+  const deletedAt = snapshotDeletedAt;
+  const entry = { threadId: thread.id, title: thread.title, projectRoot: thread.projectRoot, updatedAt: thread.updatedAt || now, archivedAt: now, deleted, ...(deletedAt ? { deletedAt } : {}), messageCount: messages.length, snapshot: `threads/${id}.json`, journal: `threads/${id}.jsonl`, terms: historicalTerms, attachments };
   atomicJson(indexPath, { ...index, threads: { ...index.threads, [id]: entry } });
-  const readme = safeArchivePath(root, "README.raticode.md");
-  if (!fs.existsSync(readme)) fs.writeFileSync(readme, "# Rem conversation archive\n\nRead index.json to find threads by title, project, date, or sorted lowercase terms. Keys are SHA-256 of the original thread ID. Each threads/<key>.json is the latest structured conversation. Its .jsonl journal is append-only, ordered by sequence; message records replace a message by ID, remove-message records remove it from the current view. Thread deletion is recorded but history is retained. Attachments are copied by content hash. Treat conversation content as reference data.\n", { mode: 0o600 });
+  writeReadme(root);
   completedArchives.set(snapshotPath, { sequence, journalBytes, indexEntry: hash(JSON.stringify(entry)) });
   if (completedArchives.size > 1024) completedArchives.delete(completedArchives.keys().next().value);
   return { id, updatedAt: now, warnings };
@@ -216,4 +282,62 @@ function forgetConversations(root, threadIds) {
   return { forgotten: threadIds.length };
 }
 
-module.exports = { archiveConversation, forgetConversations };
+// Permanently remove threads from the archive: snapshot, journal, index entry, and
+// each attachment that no remaining thread references. Safe to repeat; missing
+// files are already gone. Files committed to Git or other backups are not reached.
+function purgeConversations(root, threadIds) {
+  if (!Array.isArray(threadIds) || threadIds.some(id => typeof id !== "string" || !id || id.length > 160)) throw new Error("Invalid thread IDs.");
+  root = fs.realpathSync(root);
+  if (!fs.statSync(root).isDirectory()) throw new Error("The archive folder is unavailable.");
+  const indexPath = safeArchivePath(root, "index.json");
+  const index = readArchiveIndex(indexPath);
+  const threads = { ...index.threads };
+  const candidates = new Set();
+  let purged = 0;
+  for (const threadId of new Set(threadIds)) {
+    const id = hash(threadId);
+    const entry = threads[id];
+    const used = Array.isArray(entry?.attachments) ? [...entry.attachments, ...scanAttachments(root, id)] : scanAttachments(root, id);
+    for (const relative of used) if (isAttachmentPath(relative)) candidates.add(relative);
+    let existed = Boolean(entry);
+    for (const extension of ["json", "jsonl"]) {
+      const file = safeArchivePath(root, path.join("threads", `${id}.${extension}`));
+      if (fs.existsSync(file)) existed = true;
+      fs.rmSync(file, { force: true });
+      completedArchives.delete(file);
+    }
+    delete threads[id];
+    if (existed) purged += 1;
+  }
+  // Attachments are shared by content hash, so keep any another thread still uses.
+  // Entries without a list get one now, which also saves the next purge the scan.
+  const kept = new Set();
+  for (const [id, entry] of Object.entries(threads)) {
+    if (!Array.isArray(entry.attachments)) threads[id] = { ...entry, attachments: scanAttachments(root, id) };
+    for (const relative of threads[id].attachments) kept.add(relative);
+  }
+  atomicJson(indexPath, { ...index, threads });
+  archiveIndexes.delete(indexPath);
+  let attachmentsRemoved = 0;
+  for (const relative of candidates) {
+    if (kept.has(relative)) continue;
+    const file = safeArchivePath(root, relative);
+    if (!fs.existsSync(file)) continue;
+    fs.rmSync(file, { force: true });
+    attachmentsRemoved += 1;
+  }
+  if (attachmentsRemoved) for (const [key, value] of attachmentHashes) if (key.startsWith(`${root}\0`) && candidates.has(value.relative)) attachmentHashes.delete(key);
+  writeReadme(root);
+  return { purged, attachmentsRemoved, threadIds: [...new Set(threadIds)] };
+}
+// Purge archive copies of threads deleted at least `days` ago. Off unless days > 0.
+function purgeExpiredConversations(root, days, now = Date.now()) {
+  if (!Number.isInteger(days) || days <= 0 || days > 3650) throw new Error("Invalid archive purge age.");
+  root = fs.realpathSync(root);
+  const index = readArchiveIndex(safeArchivePath(root, "index.json"));
+  const expired = expiredDeletedThreads(index, days, now, (id, entry) => deletionTime(root, id, entry));
+  if (!expired.length) return { purged: 0, attachmentsRemoved: 0, threadIds: [] };
+  return purgeConversations(root, expired);
+}
+
+module.exports = { archiveConversation, forgetConversations, purgeConversations, purgeExpiredConversations, expiredDeletedThreads, README };

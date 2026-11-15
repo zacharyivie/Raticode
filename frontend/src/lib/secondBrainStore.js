@@ -13,7 +13,7 @@ let sequence = 0;
 export const uid = prefix => `${prefix}-${Date.now().toString(36)}-${(++sequence).toString(36)}`;
 
 function initialState() {
-  return { loaded: false, brains: [], activeBrainId: "", documents: [], collections: [], savedSearches: [], reports: [], health: [], jobs: [], citations: [], projects: [], topics: [], views: {}, tasks: [], dialog: null, toast: null };
+  return { loaded: false, brains: [], activeBrainId: "", documents: [], collections: [], savedSearches: [], reports: [], health: [], families: [], jobs: [], citations: [], projects: [], topics: [], views: {}, tasks: [], dialog: null, toast: null };
 }
 function seededState(sample) {
   return {
@@ -42,6 +42,9 @@ let fixture = false;
 let queue = Promise.resolve();
 let pending = 0;
 let poll = null;
+// The library revision the state came from. Polls send it and get { unchanged } while it is current.
+let revision = "";
+let recheckNext = false;
 let preferencesTimer;
 let researchProvider = { id: "codex", model: "cli-default" };
 const listeners = new Set();
@@ -58,14 +61,14 @@ function persistChanges(before, after) {
     const old = new Map(before[kind].map(item => [item.id, item]));
     const next = new Map(after[kind].map(item => [item.id, item]));
     for (const [id, item] of next) if (JSON.stringify(old.get(id)) !== JSON.stringify(item)) {
-      enqueue("mutate", { kind, id, item: structuredClone(kind === "documents" ? Object.fromEntries(Object.entries(item).filter(([key]) => ["id", "brainId", "title", "author", "tags", "project", "reading", "dates", "source", "inbox", "excluded", "encoding", "ignoredIssues"].includes(key))) : item) });
+      enqueue("mutate", { kind, id, item: structuredClone(kind === "documents" ? Object.fromEntries(Object.entries(item).filter(([key]) => ["id", "brainId", "title", "author", "tags", "project", "reading", "dates", "source", "inbox", "excluded", "encoding", "ignoredIssues", "checkBy"].includes(key))) : item) });
     }
     for (const id of old.keys()) if (!next.has(id)) enqueue("mutate", { kind, id, delete: true });
   }
   if (before.brains !== after.brains) for (const brain of after.brains) {
     const old = before.brains.find(item => item.id === brain.id);
     if (old) {
-      const patch = Object.fromEntries(Object.entries(brain).filter(([key, value]) => ["name", "root", "settings", "lastOpened"].includes(key) && JSON.stringify(old[key]) !== JSON.stringify(value)));
+      const patch = Object.fromEntries(Object.entries(brain).filter(([key, value]) => ["name", "root", "settings", "backup", "lastOpened"].includes(key) && JSON.stringify(old[key]) !== JSON.stringify(value)));
       if (Object.keys(patch).length) enqueue("update_brain", { id: brain.id, patch });
     }
   }
@@ -77,6 +80,8 @@ function persistChanges(before, after) {
 function enqueue(action, params) {
   pending++;
   queue = queue.then(() => brainRequest(action, params)).catch(error => {
+    // The optimistic edit never reached the library: the next refresh replaces it in full.
+    revision = "";
     state = { ...state, toast: { id: uid("error"), message: error.message, tone: "danger" } }; emit();
   }).finally(() => { pending--; if (!pending) void refreshLibrary(); });
   return queue;
@@ -85,11 +90,23 @@ export function flushLibraryWrites() { return queue; }
 export function setResearchProvider(provider) { researchProvider = provider; }
 export function isSampleLibrary() { return fixture; }
 export function researchProviderSettings() { return researchProvider; }
-export async function refreshLibrary({ initial = false } = {}) {
+export function libraryRevision() { return revision; }
+// recheck asks the library to run Library health's file checks now instead of within the minute.
+export async function refreshLibrary({ initial = false, recheck = false } = {}) {
+  recheckNext ||= recheck;
   if (fixture || (pending && !initial)) return;
+  const asked = recheckNext;
+  recheckNext = false;
   try {
-    const snapshot = await brainRequest();
+    const snapshot = await brainRequest("snapshot", { revision: initial ? "" : revision, recheck: asked });
     if (pending) return;
+    if (snapshot.unchanged) {
+      // Nothing changed since the snapshot this window has: keep its state and skip a render.
+      revision = snapshot.revision;
+      if (state.error) { state = { ...state, error: null }; emit(); }
+      return;
+    }
+    revision = snapshot.revision || "";
     const priorTasks = new Map(state.tasks.map(item => [item.id, item.state]));
     const activeBrainId = (initial ? snapshot.activeBrainId : state.activeBrainId) || snapshot.brains[0]?.id || "";
     state = { ...state, ...snapshot, activeBrainId: snapshot.brains.some(item => item.id === activeBrainId) ? activeBrainId : snapshot.brains[0]?.id || "", views: initial ? snapshot.views || {} : state.views, loaded: true, error: null };
@@ -99,13 +116,16 @@ export async function refreshLibrary({ initial = false } = {}) {
     }
     emit();
   } catch (error) {
+    // After a failed refresh nothing here is trusted: the next one asks for the whole library.
+    revision = "";
+    recheckNext ||= asked;
     state = { ...state, loaded: true, error: error.message }; emit();
   }
 }
 export function subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); }
 export const getState = () => state;
 export function useSecondBrain() { return useSyncExternalStore(subscribe, getState, getState); }
-export function resetSecondBrainStore() { clearInterval(poll); clearTimeout(preferencesTimer); poll = null; state = initialState(); loading = null; fixture = false; emit(); }
+export function resetSecondBrainStore() { clearInterval(poll); clearTimeout(preferencesTimer); poll = null; state = initialState(); loading = null; fixture = false; revision = ""; recheckNext = false; emit(); }
 // Explicit fixtures for tests and the visual harness. Production never seeds a sample library.
 export async function loadSampleLibrary() {
   fixture = true;
@@ -293,6 +313,16 @@ export function updateClaim(reportId, claimId, patch) { updateReport(reportId, r
 export function updateReportCitation(reportId, citationId, patch) { updateReport(reportId, report => ({ citations: report.citations.map(citation => citation.id === citationId ? { ...citation, ...patch } : citation) })); }
 
 export function resolveHealth(ids) { if (!fixture) enqueue("ignore_health", { ids: [].concat(ids) }); const list = new Set([].concat(ids)); set(current => ({ ...current, health: current.health.filter(issue => !list.has(issue.id)) })); }
+// Marks olderId as replaced by newerId in the brain's portable metadata. Report files are not changed.
+export function confirmReplacement(olderId, newerId) {
+  const replacedBy = newerId ? { docId: newerId, at: new Date().toISOString() } : undefined;
+  if (!fixture) enqueue(newerId ? "confirm_replacement" : "clear_replacement", newerId ? { olderId, newerId } : { docId: olderId });
+  set(current => ({
+    ...current,
+    documents: current.documents.map(doc => { if (doc.id !== olderId) return doc; const next = { ...doc, replacedBy }; if (!replacedBy) delete next.replacedBy; return next; }),
+    health: newerId ? current.health.filter(issue => !(issue.kind === "family" && issue.docId === olderId)) : current.health,
+  }));
+}
 export function saveJob(job) { job = { ...job, provider: job.provider || researchProvider }; set(current => ({ ...current, jobs: current.jobs.some(item => item.id === job.id) ? current.jobs.map(item => item.id === job.id ? job : item) : [...current.jobs, job] })); }
 export function removeJob(id) { set(current => ({ ...current, jobs: current.jobs.filter(job => job.id !== id) })); }
 export function captureSource({ title, url, excerpt }) {
@@ -347,6 +377,20 @@ export async function backfillProvenance(brainId = state.activeBrainId) {
     const result = await brainRequest("backfill_provenance", { brainId });
     await refreshLibrary();
     notify(result.created || result.updated ? `Found the history of ${result.created + result.updated} report${result.created + result.updated === 1 ? "" : "s"}.` : "Every report with a known history already shows it.");
+    return result;
+  } catch (error) { notify(error.message, "danger"); return null; }
+}
+// Read-only: counts the absolute links inside the brain that the repair would make relative.
+export async function previewAbsoluteLinks(brainId = state.activeBrainId) {
+  if (fixture) return { count: 0, documents: 0, missingTargets: 0, temporary: 0, outside: 0, changes: [] };
+  return brainRequest("absolute_links_preview", { brainId });
+}
+export async function restrictBrainAccess(brainId = state.activeBrainId) {
+  if (fixture) { notify("This visual fixture does not execute backend operations.", "info"); return null; }
+  try {
+    const result = await brainRequest("restrict_access", { brainId });
+    await refreshLibrary();
+    notify(result.remaining.length ? "Raticode could not make every folder private. Another account may own it; change its permissions in a terminal." : "Only your account can read this brain now.", result.remaining.length ? "danger" : undefined);
     return result;
   } catch (error) { notify(error.message, "danger"); return null; }
 }

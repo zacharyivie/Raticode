@@ -359,6 +359,90 @@ def test_notices_start_from_now_then_report_what_needs_you(backend):
     assert bogus["error"]["http"] == 400
 
 
+def test_notices_report_a_workflow_phone_notice(backend):
+    """A run's notification node with channel: phone shows up as a workflow alert."""
+    import anyio
+
+    from gofer.rattish.compiler import CompileContext, RattishCompiler
+    from gofer.rattish.workflow_runtime import execute_workflow
+
+    service, project, _ = backend
+    first = cli("rem", "notices", "--include", "workflow")["data"]
+    assert first["notices"] == [] and first["include"] == ["workflow"]
+    rattish = Path(__file__).parents[2] / "rattish"
+    compiler = RattishCompiler.from_paths(
+        schema_root=rattish / "schemas",
+        contract_paths=[rattish / "contracts" / "notification.json"],
+    )
+    source = """Rattish: 1
+Workflow:
+  name: Phone notice
+Node notify:
+  type: notification
+  channel: phone
+  title: Backup finished
+  body: 12 files copied.
+"""
+    ir = compiler.compile(source, CompileContext("phone-notice", project)).ir
+    result = anyio.run(
+        lambda: execute_workflow(ir, data_dir=service.data_dir, run_id="run-phone-1")
+    )
+    assert result.latest_node_outputs["notify"]["sent"] is True
+    found = cli("rem", "notices", "--cursor", first["cursor"], "--include", "workflow")["data"]
+    assert [
+        (n["reason"], n["kind"], n["title"], n["body"], n["workflow_id"], n["run_id"])
+        for n in found["notices"]
+    ] == [
+        (
+            "workflow",
+            "workflow",
+            "Backup finished",
+            "12 files copied.",
+            "phone-notice",
+            "run-phone-1",
+        )
+    ]
+    text = cli(
+        "rem", "notices", "--cursor", first["cursor"], "--include", "workflow", "--output", "text"
+    ).stdout
+    assert "workflow: Backup finished" in text
+    # The default includes workflow alerts; naming another switch leaves them out.
+    assert cli("rem", "notices", "--cursor", first["cursor"])["data"]["notices"]
+    assert not cli("rem", "notices", "--cursor", first["cursor"], "--include", "finished")["data"][
+        "notices"
+    ]
+    # A cursor from before workflow alerts still reads, starting the workflow part from now.
+    legacy = ".".join(first["cursor"].split(".")[:4])
+    assert cli("rem", "notices", "--cursor", legacy)["data"]["notices"] == []
+
+
+def test_notices_say_how_many_workflow_notices_were_dropped(backend, monkeypatch):
+    """Notices pruned from the computer's store before a read show up as dropped."""
+    from gofer.core import phone_alerts
+
+    service, _, _ = backend
+    monkeypatch.setattr(phone_alerts, "KEEP", 2)
+    store = phone_alerts.PhoneAlertStore(Path(service.data_dir))
+    first = cli("rem", "notices", "--include", "workflow")["data"]
+    assert first["dropped"] == 0
+    for index in range(5):
+        store.add(title=f"t{index}", body="", workflow_id="wf", run_id=f"r{index}")
+    found = cli("rem", "notices", "--cursor", first["cursor"], "--include", "workflow")["data"]
+    assert [n["title"] for n in found["notices"]] == ["t3", "t4"]
+    assert found["dropped"] == 3
+    text = cli(
+        "rem", "notices", "--cursor", first["cursor"], "--include", "workflow", "--output", "text"
+    ).stdout
+    assert "workflow: 3 workflow messages were removed before this read" in text
+    # Only a read that includes workflow alerts hears about the gap.
+    assert (
+        cli("rem", "notices", "--cursor", first["cursor"], "--include", "finished")["data"][
+            "dropped"
+        ]
+        == 0
+    )
+
+
 def test_settings_export_apply_round_trip_and_agent_guard(backend, tmp_path, monkeypatch):
     service, project, _ = backend
     shown = cli("rem", "settings", "show")["data"]
@@ -440,6 +524,59 @@ def test_tickets_create_edit_move_comment_with_revisions(backend):
     assert cli("tickets", "move", "REM-1", "sideways", "--expected-revision", "4", code=2)
 
 
+def test_tickets_wait_for_other_tickets(backend):
+    service, project, _ = backend
+    cli("tickets", "create", "--title", "Polling triggers", "--request-id", "w1")
+    cli("tickets", "create", "--title", "Webhooks", "--request-id", "w2")
+    created = cli(
+        "tickets",
+        "create",
+        "--title",
+        "Starter workflows",
+        "--waits-for",
+        "REM-1",
+        "--waits-for",
+        "REM-2",
+        "--request-id",
+        "w3",
+    )["data"]["board"]
+    starters = next(t for t in created["tickets"] if t["key"] == "REM-3")
+    assert [w["key"] for w in starters["waits_for"]] == ["REM-1", "REM-2"]
+    assert starters["waiting"] is True
+    shown = cli("tickets", "show", "REM-3", "--output", "text")
+    assert "Waits for: REM-1 Polling triggers (todo); REM-2 Webhooks (todo)" in shown.stdout
+    listed = cli("tickets", "list", "--output", "text")
+    assert "Starter workflows (waits for REM-1, REM-2)" in listed.stdout
+    # A loop is refused with the path that would close it.
+    looped = cli(
+        "tickets", "edit", "REM-1", "--expected-revision", "1", "--waits-for", "REM-3", code=2
+    )
+    assert "REM-1 → REM-3 → REM-1" in looped["error"]["message"]
+    # Replacing the list, then clearing it.
+    cli("tickets", "edit", "REM-3", "--expected-revision", "1", "--waits-for", "REM-2")
+    assert [w["key"] for w in cli("tickets", "show", "REM-3")["data"]["ticket"]["waits_for"]] == [
+        "REM-2"
+    ]
+    assert cli(
+        "tickets",
+        "edit",
+        "REM-3",
+        "--expected-revision",
+        "2",
+        "--waits-for",
+        "REM-1",
+        "--clear-waits",
+        code=2,
+    )
+    cli("tickets", "edit", "REM-3", "--expected-revision", "2", "--clear-waits")
+    assert cli("tickets", "show", "REM-3")["data"]["ticket"]["waits_for"] == []
+    # A cancelled ticket it waits for shows a notice.
+    cli("tickets", "edit", "REM-3", "--expected-revision", "3", "--waits-for", "REM-2")
+    cli("tickets", "move", "REM-2", "cancelled", "--expected-revision", "1")
+    notice = cli("tickets", "show", "REM-3", "--output", "text").stdout
+    assert "Notice: REM-2 “Webhooks” was cancelled" in notice
+
+
 def test_proposals_need_the_user_and_agents_cannot_decide_or_finish(backend, tmp_path, monkeypatch):
     service, project, sent = backend
     proposal = _proposal(service, project)
@@ -494,6 +631,12 @@ def test_selfwork_status_set_export_apply_and_report(backend, tmp_path):
         "--max-threads",
         "2",
         "--no-auto-pull-backlog",
+        "--session-token-limit",
+        "500000",
+        "--daily-token-limit",
+        "2000000",
+        "--rate-limit-percent",
+        "80",
     )["data"]
     assert changed["settings"]["max_threads"] == 2
     exported = runner.invoke(app, ["selfwork", "export"])
@@ -502,6 +645,10 @@ def test_selfwork_status_set_export_apply_and_report(backend, tmp_path):
         "enabled": changed["settings"]["enabled"],
         "max_threads": 2,
         "auto_pull_backlog": False,
+        "session_token_limit": 500_000,
+        "daily_token_limit": 2_000_000,
+        "rate_limit_percent": 80,
+        "auto_approve_proposals": False,
     }
     settings["max_threads"] = 3
     target = tmp_path / "self-work.json"
@@ -512,6 +659,51 @@ def test_selfwork_status_set_export_apply_and_report(backend, tmp_path):
     assert cli("selfwork", "apply", "--file", str(target), code=2)
     report = cli("selfwork", "report", "--mark-seen")
     assert report["command"] == "selfwork report"
+
+
+def test_selfwork_auto_approval_needs_the_users_confirmation(backend, tmp_path, monkeypatch):
+    revision = cli("selfwork", "status")["data"]["settings"]["revision"]
+    # Turning it on says what it allows and needs the explicit flag; nothing is sent first.
+    refused = cli("selfwork", "set", "--expected-revision", str(revision), "--auto-approve", code=2)
+    assert "--confirm-auto-approve" in refused["error"]["message"]
+    monkeypatch.setenv("RATICODE_AGENT_SESSION", "1")
+    agent = cli(
+        "selfwork",
+        "set",
+        "--expected-revision",
+        str(revision),
+        "--auto-approve",
+        "--confirm-auto-approve",
+        code=5,
+    )
+    assert agent["error"]["code"] == "user_only"
+    monkeypatch.delenv("RATICODE_AGENT_SESSION")
+    on = cli(
+        "selfwork",
+        "set",
+        "--expected-revision",
+        str(revision),
+        "--auto-approve",
+        "--confirm-auto-approve",
+    )
+    assert on["data"]["settings"]["auto_approve_proposals"] is True
+    assert (
+        "Auto-approval is on: 0 tickets approved"
+        in runner.invoke(app, ["selfwork", "status", "--output", "text"]).stdout
+    )
+    exported = json.loads(runner.invoke(app, ["selfwork", "export"]).stdout)
+    assert exported["auto_approve_proposals"] is True
+    off = cli("selfwork", "set", "--expected-revision", str(revision + 1), "--no-auto-approve")
+    assert off["data"]["settings"]["auto_approve_proposals"] is False
+    # A file that turns it back on needs the same confirmation.
+    target = tmp_path / "self-work.json"
+    target.write_text(json.dumps(exported))
+    assert (
+        "--confirm-auto-approve"
+        in (cli("selfwork", "apply", "--file", str(target), code=2)["error"]["message"])
+    )
+    applied = cli("selfwork", "apply", "--file", str(target), "--confirm-auto-approve")
+    assert applied["data"]["settings"]["auto_approve_proposals"] is True
 
 
 def test_errors_go_to_stderr_with_an_envelope_and_exit_code(backend, monkeypatch):

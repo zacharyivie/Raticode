@@ -76,14 +76,14 @@ function SchedulerNotice({ scheduler }) {
   return (
     <div
       className={`rounded-lg border px-3 py-2.5 text-xs leading-5 ${
-        summary.running ? "border-line bg-slate-50" : "border-amber-500/60 bg-amber-500/10"
+        summary.running && !summary.paused ? "border-line bg-slate-50" : "border-amber-500/60 bg-amber-500/10"
       }`}
       role="status"
     >
       <div className="flex items-start gap-2 font-semibold text-ink">
         <span
           aria-hidden="true"
-          className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${summary.running ? "bg-emerald-500" : "bg-amber-500"}`}
+          className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${summary.running && !summary.paused ? "bg-emerald-500" : "bg-amber-500"}`}
         />
         <span>{summary.text}</span>
       </div>
@@ -361,7 +361,9 @@ function TriggerCard({ scheduler, trigger, onChanged, onEdit, onRevealToken }) {
       </div>
       <p className="break-all font-mono text-[11px] leading-4 text-muted">{triggerDetail(trigger)}</p>
       <p className="text-[11px] leading-4 text-muted">{triggerPolicyText(trigger)}</p>
-      {trigger.nextRunAt ? (
+      {trigger.enabled && scheduler?.paused ? (
+        <p className="text-[11px] leading-4 text-amber-700 dark:text-amber-300">Paused with all triggers</p>
+      ) : trigger.nextRunAt ? (
         <p className="text-[11px] leading-4 text-slate-700">Next: {formatWhen(trigger.nextRunAt)}</p>
       ) : null}
       {latest ? (

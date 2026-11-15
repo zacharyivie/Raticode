@@ -6,9 +6,6 @@ from typing import Any
 
 import typer
 
-from gofer.core.authoring import OPERATION_MODELS, authoring_contract, operation_field_enum_values
-from gofer.core.graph import EdgeConditionType
-
 _COMMAND_ENUM_FIELDS = {
     "resource_type": "resource_type",
     "task": "task",
@@ -30,6 +27,9 @@ def _json_default(value: object) -> object:
 
 
 def _parameter_contract(parameter: Any, command_id: str) -> dict[str, object]:
+    from gofer.core.authoring import OPERATION_MODELS, operation_field_enum_values
+    from gofer.core.graph import EdgeConditionType
+
     option_names = list(getattr(parameter, "opts", ())) + list(
         getattr(parameter, "secondary_opts", ())
     )
@@ -99,6 +99,8 @@ def schema_command(
     Workflows are written in Rattish. The legacy TOML authoring contract is still
     available with --legacy-toml, --operation, --capability or --command.
     """
+    from gofer.core.authoring import authoring_contract
+
     if output_format != "json":
         typer.echo(f"Unsupported schema format: {output_format}", err=True)
         raise typer.Exit(2)

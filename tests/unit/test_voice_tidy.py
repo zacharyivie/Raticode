@@ -251,6 +251,40 @@ def test_a_continuation_sends_the_text_before_it_but_tidies_only_the_new_words(t
     assert "<written>" not in seen["prompt"]
 
 
+def test_a_continuation_asks_for_full_capitals_and_punctuation():
+    # Desktop rounds while talking all continue the message. Asking for "no capital letter when
+    # it carries on a sentence" made Claude Haiku 5.5 leave whole rounds lowercase and
+    # unpunctuated, even after a full stop; the composer now joins rounds itself.
+    asked = tidying.prompt("i also want to know whether the tests ran", "", "Check the logs.")
+    lowered = asked.lower()
+    assert "capital" in lowered and "punctuation" in lowered
+    assert "no capital" not in lowered and "small letter" not in lowered
+    assert "tidy the message fully" in lowered
+    assert "add punctuation, capitals and sentence breaks" in tidying.INSTRUCTIONS.lower()
+
+
+def test_each_tidy_is_logged_with_its_outcome_but_never_its_words(tmp_path, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="gofer.ui.voice_tidy")
+    heard = "tell zebra the plan"
+
+    tidying.tidy(heard, ON, tmp_path, before="Okay.", run=lambda *_a, **_o: "Tell Zebra the plan.")
+    tidying.tidy(heard, ON, tmp_path, run=lambda *_a, **_o: "Zebra " * 40)
+
+    def fails(*_args, **_options):
+        raise ValueError("provider said: tell zebra the plan")
+
+    tidying.tidy(heard, ON, tmp_path, run=fails)
+    lines = [record.getMessage() for record in caplog.records]
+    assert len(lines) == 3
+    assert lines[0].startswith("Voice tidy: tidied 4 words with Claude Haiku 5.5 in ")
+    assert lines[0].endswith(", continuing the message")
+    assert "(The tidied text added words.)" in lines[1]
+    assert "(Tidying failed with a provider error.)" in lines[2]
+    assert not any("zebra" in line.lower() or "plan" in line for line in lines)
+
+
 def test_a_dictation_too_long_to_tidy_comes_back_whole(tmp_path):
     heard = " ".join(f"word{index}" for index in range(900))
     assert len(heard) > tidying.MAX_CHARS

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import socket
 import threading
 from email.message import Message
@@ -1526,7 +1527,9 @@ def test_ui_server_post_workflow_routes_and_syncs(monkeypatch, tmp_path) -> None
 
 
 def test_ui_server_update_delete_run_and_stop_routes(monkeypatch, tmp_path) -> None:
-    async def fake_run(workflow_id, data_dir, *, dry_run, trigger_context=None):
+    async def fake_run(workflow_id, data_dir, *, dry_run, trigger_context=None, started_by=None):
+        # The app's own Run button records the run as started by hand.
+        assert started_by == "manual"
         return {
             "workflowId": workflow_id,
             "dataDir": str(data_dir),
@@ -1782,8 +1785,62 @@ def test_ui_server_provider_profile_runner_prune_and_resume_routes(
             "force": True,
             "trigger_context": {"reason": "test"},
             "background": False,
+            "started_by": "manual",
+            "inputs": None,
         }
     }
+    # A Rattish resume can give again the password inputs its run didn't save.
+    resumed = cast(
+        dict[str, Any],
+        _request(
+            tmp_path,
+            "POST",
+            "/api/workflows/wf/runs/r1/resume",
+            body={"background": True, "inputs": {"token": "pw"}},
+        ).json(),
+    )
+    assert resumed["run"]["inputs"] == {"token": "pw"} and resumed["run"]["background"] is True
+    refused = _request(
+        tmp_path, "POST", "/api/workflows/wf/runs/r1/resume", body={"inputs": ["pw"]}
+    )
+    assert refused.status == 400
+    assert "inputs must be an object" in cast(dict[str, Any], refused.json())["error"]
+
+
+def test_ui_server_rerun_route_passes_the_run_and_given_inputs(monkeypatch, tmp_path) -> None:
+    import gofer.ui.api as api_module
+
+    async def fake_rerun(run_id, data_dir, **kwargs):
+        return {"runId": run_id, "dataDir": str(data_dir), **kwargs}
+
+    monkeypatch.setattr(api_module, "rerun_workflow_payload", fake_rerun)
+    assert _request(
+        tmp_path,
+        "POST",
+        "/api/rattish/runs/20261114T000000Z-abc/rerun",
+        body={
+            "workflowId": "wf",
+            "background": True,
+            "inputs": {"token": "pw"},
+            "startedBy": "rem",
+        },
+    ).json() == {
+        "run": {
+            "runId": "20261114T000000Z-abc",
+            "dataDir": str(tmp_path),
+            "workflow_id": "wf",
+            "inputs": {"token": "pw"},
+            "background": True,
+            "started_by": "rem",
+        }
+    }
+    found = cast(
+        dict[str, Any], _request(tmp_path, "POST", "/api/rattish/runs/r2/rerun", body={}).json()
+    )
+    assert found["run"]["workflow_id"] is None and found["run"]["started_by"] == "manual"
+    for body in ({"inputs": "token=pw"}, {"workflowId": 3}, {"startedBy": "phone"}):
+        refused = _request(tmp_path, "POST", "/api/rattish/runs/r2/rerun", body=body)
+        assert refused.status == 400
 
 
 def test_ui_server_chat_routes_and_stream_headers(monkeypatch, tmp_path) -> None:
@@ -2395,7 +2452,16 @@ def test_ui_server_serve_shutdown_cleans_up(monkeypatch, tmp_path, capsys) -> No
             self.calls.append("server_close")
 
     fake_server = FakeServer()
-    monkeypatch.setattr(server_module, "create_server", lambda **_kwargs: fake_server)
+    # The desktop's backend reads no secrets folder, but systemd's variable naming one is
+    # sealed before the server (and anything it spawns) starts.
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path / "creds"))
+    inherited: list[str | None] = []
+
+    def create_server(**_kwargs: Any) -> FakeServer:
+        inherited.append(os.environ.get("CREDENTIALS_DIRECTORY"))
+        return fake_server
+
+    monkeypatch.setattr(server_module, "create_server", create_server)
     monkeypatch.setattr(server_module, "_install_shutdown_handlers", lambda _server: None)
     usage_refresh: list[Any] = []
 
@@ -2407,6 +2473,8 @@ def test_ui_server_serve_shutdown_cleans_up(monkeypatch, tmp_path, capsys) -> No
 
     server_module.serve(host="127.0.0.1", port=9999, data_dir=tmp_path)
     assert usage_refresh == [tmp_path, "stop"]
+    assert inherited == [None]
+    assert "CREDENTIALS_DIRECTORY" not in os.environ
 
     output = capsys.readouterr()
     assert "GOFER_UI_READY" in output.out
@@ -3693,9 +3761,15 @@ def test_generation_job_routes_require_authentication_and_project_grants(tmp_pat
     assert _request(tmp_path, "POST", "/api/generation-jobs", authenticated=False).status == 401
     outside = tmp_path.parent / f"{tmp_path.name}-outside"
     outside.mkdir()
-    result = _request(tmp_path, "POST", "/api/generation-jobs", body={
-        "kind": "commit", "projectRoot": str(outside),
-    })
+    result = _request(
+        tmp_path,
+        "POST",
+        "/api/generation-jobs",
+        body={
+            "kind": "commit",
+            "projectRoot": str(outside),
+        },
+    )
     assert result.status == 400
     assert "outside the approved" in result.text()
     result = _request(tmp_path, "GET", f"/api/generation-jobs?kind=commit&projectRoot={outside}")
@@ -3708,15 +3782,22 @@ def test_generation_job_routes_require_authentication_and_project_grants(tmp_pat
 
 @pytest.mark.parametrize("replaced_by_file", [False, True])
 def test_commit_job_polling_ignores_worktree_removed_after_grant_renewal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replaced_by_file: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replaced_by_file: bool,
 ) -> None:
     outside = tmp_path.parent / f"{tmp_path.name}-worktree"
     outside.mkdir()
     server = _fake_server(tmp_path)
     grant_id = server.path_grants.register(outside)
     server.generation_jobs.jobs["old-draft"] = {
-        "id": "old-draft", "kind": "commit", "projectRoot": str(outside),
-        "branch": "main", "createdAt": 1, "status": "failed", "error": "Old failure",
+        "id": "old-draft",
+        "kind": "commit",
+        "projectRoot": str(outside),
+        "branch": "main",
+        "createdAt": 1,
+        "status": "failed",
+        "error": "Old failure",
     }
     monkeypatch.setattr(f"{__name__}._fake_server", lambda *args, **kwargs: server)
     query = f"kind=commit&projectRoot={quote(str(outside))}&branch=main&grantId={grant_id}"
@@ -3730,15 +3811,23 @@ def test_commit_job_polling_ignores_worktree_removed_after_grant_renewal(
     assert after.status == 200
     assert after.json() == {"jobs": []}
     if not replaced_by_file:
-        start = _request(tmp_path, "POST", "/api/generation-jobs", body={
-            "kind": "commit", "projectRoot": str(outside), "grantId": grant_id,
-        })
+        start = _request(
+            tmp_path,
+            "POST",
+            "/api/generation-jobs",
+            body={
+                "kind": "commit",
+                "projectRoot": str(outside),
+                "grantId": grant_id,
+            },
+        )
         assert start.status == 400
         assert "does not exist" in start.text()
 
 
 def test_generation_job_post_returns_receipt_without_waiting_for_provider(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from gofer.ui import generation_jobs
 
@@ -3750,9 +3839,15 @@ def test_generation_job_post_returns_receipt_without_waiting_for_provider(
 
     monkeypatch.setattr(generation_jobs, "generate_report_theme", theme)
     try:
-        result = _request(tmp_path, "POST", "/api/generation-jobs", body={
-            "kind": "theme", "description": "An ocean journal",
-        })
+        result = _request(
+            tmp_path,
+            "POST",
+            "/api/generation-jobs",
+            body={
+                "kind": "theme",
+                "description": "An ocean journal",
+            },
+        )
         assert result.status == 202
         payload = cast(dict[str, Any], result.json())
         assert payload["status"] in {"queued", "running"}

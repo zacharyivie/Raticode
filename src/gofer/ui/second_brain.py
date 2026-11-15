@@ -155,9 +155,16 @@ def serve_registered_brains(
                 "act source quotes returned by read_note. When saving a cited report, supply "
                 "evidence entries with docId (the documentId returned by read_note), version, "
                 "blockId and the exact quote. This registers checkable citations in Reports. "
-                "Pass title, question and format when available."
+                "Pass title, question and format when available. "
+                "A result with status replaced is an older report the user marked as "
+                "replaced; replacedBy names the newer report. Prefer the newer report and "
+                "say so when you rely on the older one. checkBy is the date the user "
+                "wants a report checked again."
             )
         documents = [doc for brain in brains for doc in library.entities("documents", brain["id"])]
+        from gofer.ui.brain_families import replacement_status
+
+        all_documents = {doc["id"]: doc for doc in documents}
         if name == "search":
             query = str(arguments.get("query", ""))
             if query.strip():
@@ -188,9 +195,12 @@ def serve_registered_brains(
                                 "blockId": block["id"],
                                 "snippet": block["text"],
                                 "matchedBy": hit.get("fusedFrom") or [hit["matchKind"]],
+                                **replacement_status(doc, all_documents),
                             }
                         )
                 return result
+            # Listing: current reports first, replaced ones after them.
+            listed = sorted(documents, key=lambda doc: bool(doc.get("replacedBy")))
             return [
                 {
                     "brainId": doc["brainId"],
@@ -198,8 +208,9 @@ def serve_registered_brains(
                     "path": doc["path"],
                     "title": doc["title"],
                     "version": doc["version"],
+                    **replacement_status(doc, all_documents),
                 }
-                for doc in documents[:50]
+                for doc in listed[:50]
             ]
         if name == "read_note":
             candidates = [
@@ -244,6 +255,7 @@ def serve_registered_brains(
                 "version": version,
                 "blocks": blocks,
                 "source": doc["source"],
+                **replacement_status(doc, all_documents),
             }
         if name == "save_note":
             if len(brains) != 1:
@@ -437,7 +449,9 @@ def tool_definitions() -> list[dict[str, Any]]:
         ("read_note", "Read a note by its relative path.", {"path": {"type": "string"}}),
         (
             "save_note",
-            "Create a note in a topic subfolder and return its link. Existing files are kept.",
+            "Create a note in a topic subfolder and return its link. Existing files are kept. "
+            "Links to files in the brain are saved as relative paths; links to /tmp or "
+            "outside the brain are kept and returned as warnings.",
             {"path": {"type": "string"}, "content": {"type": "string"}},
         ),
     ]

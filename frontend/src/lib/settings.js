@@ -4,7 +4,7 @@ import { cloneJson } from "./jsonValue.js";
 import { webBrowserEngine } from "./browserEngines.js";
 import { DEFAULT_REM_RESOURCES, snapshotRemResources } from "./remResources.js";
 import { DEFAULT_PLUGIN_SETTINGS, normalizePluginSettings } from "./plugins.js";
-import { ARCHIVE_RETENTION_OPTIONS } from "./threadActivity.js";
+import { ARCHIVE_PURGE_OPTIONS, ARCHIVE_RETENTION_OPTIONS } from "./threadActivity.js";
 export const REPORT_THEMES = [
   {
     "id": "auto",
@@ -88,6 +88,10 @@ export const KEYBINDING_COMMANDS = [
   { id: "workflow.run", label: "Run workflow", group: "Workflow", scope: "global", defaultBinding: "Mod+Enter" },
   // Ctrl+Alt+V, or Command+Option+V on a Mac. Pressing it again while listening means Done.
   { id: "voice.dictate", label: "Dictate a message", group: "Rem", scope: "global", defaultBinding: "Mod+Alt+KeyV" },
+  // Works in every app once Settings > Devices > Dictate to Rem from any app is on.
+  { id: "voice.dictateAnywhere", label: "Dictate to Rem from any app", group: "Rem", scope: "system", defaultBinding: "Ctrl+Alt+Space" },
+  // Works in every app once Settings > Devices has both Show Rem your screen and Dictate to Rem from any app on.
+  { id: "voice.askAboutScreen", label: "Ask Rem about your screen", group: "Rem", scope: "system", defaultBinding: "Ctrl+Alt+Shift+Space" },
   { id: "file.new", label: "New file", group: "Code editor", scope: "code", defaultBinding: "Mod+KeyN" },
   { id: "file.save", label: "Save active file", group: "Code editor", scope: "code", defaultBinding: "Mod+KeyS" },
   { id: "file.close", label: "Close active file", group: "Code editor", scope: "code", defaultBinding: "Mod+KeyW" },
@@ -127,6 +131,10 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
     dictationMode: "toggle",
     // Send the message as soon as dictation finishes, for hands-free use.
     dictationAutoSend: false,
+    // The "Dictate to Rem from any app" shortcut works outside Raticode. Off by default.
+    dictateAnywhere: false,
+    // Rem can be shown a screenshot, taken only when you ask, for one message. Off by default.
+    screenContext: false,
   },
   editor: {
     autosaveDelay: 1000,
@@ -188,7 +196,7 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
     chatModel: "",
     chatEffort: "",
   },
-  memory: { reportFormat: "md", reportThemes: DEFAULT_REPORT_THEMES, archiveFolder: "", secondBrainEnabled: false, secondBrainRoot: "", secondBrainFormat: "md", secondBrainTheme: "auto" },
+  memory: { reportFormat: "md", reportThemes: DEFAULT_REPORT_THEMES, archiveFolder: "", archivePurgeDays: "never", secondBrainEnabled: false, secondBrainRoot: "", secondBrainFormat: "md", secondBrainTheme: "auto" },
   layout: {
     assistantPaneWidth: 380,
     bottomPanelHeight: 300,
@@ -264,6 +272,8 @@ export function normalizeAppSettings(value = {}) {
   settings.devices.audioInputId = safeString(settings.devices.audioInputId, "default", 512) || "default";
   settings.devices.dictationMode = enumValue(settings.devices.dictationMode, ["toggle", "hold"], "toggle");
   settings.devices.dictationAutoSend = settings.devices.dictationAutoSend === true;
+  settings.devices.dictateAnywhere = settings.devices.dictateAnywhere === true;
+  settings.devices.screenContext = settings.devices.screenContext === true;
   settings.editor.autosaveDelay = boundedNumber(settings.editor.autosaveDelay, 250, 10000, 1000);
   settings.editor.fontSize = boundedNumber(settings.editor.fontSize, 10, 24, 13);
   settings.editor.lineHeight = boundedNumber(settings.editor.lineHeight, 14, 40, 20);
@@ -301,6 +311,7 @@ export function normalizeAppSettings(value = {}) {
   settings.memory.secondBrainTheme = enumValue(settings.memory.secondBrainTheme, REPORT_THEMES.map((theme) => theme.id), "auto");
   settings.memory.secondBrainFormat = enumValue(settings.memory.secondBrainFormat, ["md", "html"], "md");
   settings.memory.archiveFolder = safeString(settings.memory.archiveFolder, "", 4096);
+  settings.memory.archivePurgeDays = enumValue(String(settings.memory.archivePurgeDays), ARCHIVE_PURGE_OPTIONS.map(([id]) => id), "never");
   settings.memory.secondBrainRoot = safeString(settings.memory.secondBrainRoot, "", 4096);
   settings.assistant.provider = safeString(settings.assistant.provider, "codex", 80);
   settings.assistant.model = safeString(settings.assistant.model, "", 160);
@@ -387,7 +398,8 @@ export function keybindingConflictIds(settings, commandId, binding = settingBind
       const right = normalizedBinding(settingBinding(settings, candidate.id), platform);
       return right && (left === right || left.startsWith(`${right} `) || right.startsWith(`${left} `));
     })()
-    && (candidate.scope === "global" || command.scope === "global" || candidate.scope === command.scope)
+    // A system-wide key takes the keys before Raticode sees them, so it clashes with everything.
+    && (["global", "system"].includes(candidate.scope) || ["global", "system"].includes(command.scope) || candidate.scope === command.scope)
   )).map((candidate) => candidate.id);
 }
 

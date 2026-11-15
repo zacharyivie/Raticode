@@ -124,6 +124,25 @@ contextBridge.exposeInMainWorld("goferDesktop", {
   apiSession: () => invokeDesktop("gofer:api-session"),
   clipboard: { readText: () => invokeDesktop("gofer:clipboard-read") },
   editFocused: (action) => invokeDesktop("gofer:edit-focused", { action }),
+  // Dictate to Rem from any app: the system-wide shortcut, its status and the overlay.
+  globalDictation: {
+    configure: (options) => invokeDesktop("gofer:global-dictation-configure", options),
+    report: (state) => invokeDesktop("gofer:global-dictation-report", state),
+    suspend: (suspended) => invokeDesktop("gofer:global-dictation-suspend", { suspended }),
+    onTrigger: (callback) => {
+      const listener = (_event, message) => callback(message);
+      ipcRenderer.on("gofer:global-dictation", listener);
+      return () => ipcRenderer.removeListener("gofer:global-dictation", listener);
+    },
+  },
+  // Show Rem your screen: one screenshot for one Rem message, only when asked.
+  screenContext: {
+    configure: (options) => invokeDesktop("gofer:screen-context-configure", options),
+    sources: () => invokeDesktop("gofer:screen-context-sources"),
+    // Straight through: the picture's bytes must not go through stripGrantIds.
+    capture: (sourceId = "") => ipcRenderer.invoke("gofer:screen-context-capture", { sourceId }),
+    openPrivacySettings: () => invokeDesktop("gofer:screen-context-privacy"),
+  },
   onPrepareLifecycle: (callback) => {
     const listener = async (_event, request) => {
       let approved = false;
@@ -152,6 +171,7 @@ contextBridge.exposeInMainWorld("goferDesktop", {
     configure: (key, value) => invokeDesktop("gofer:configure-rem", { key, value, grantId: typeof value === "string" ? grantForPath(value) : "" }),
     archive: (thread, messages, deleted = false) => invokeDesktop("gofer:archive-rem", { thread, messages, deleted }),
     forget: (threadIds) => invokeDesktop("gofer:forget-rem", { threadIds }),
+    purge: (threadIds) => invokeDesktop("gofer:purge-rem", { threadIds }),
   },
   getDataDir: () => ipcRenderer.invoke("gofer:get-data-dir"),
   appearance: {
@@ -347,6 +367,21 @@ contextBridge.exposeInMainWorld("goferBrowser", {
     action: typeof action === "string" ? action : "",
   }),
   onGecko: (callback) => subscribeToBrowserEvent("gofer:gecko-state", callback),
+  // The Browser in its own window: "status", "focus", or "close" once the studio has taken the tabs back.
+  browserWindow: (action) => ipcRenderer.invoke("gofer:browser-window", { action: typeof action === "string" ? action : "" }),
+  onBrowserWindow: (callback) => subscribeToBrowserEvent("gofer:browser-window", callback),
+  // Raticode (chromium) tabs: where the tab's slot is, in which window, and
+  // whether it shows. The page's view follows it.
+  place: (id, slot = {}) => browserAction(id, "place", {
+    x: finiteNumber(slot.x),
+    y: finiteNumber(slot.y),
+    width: finiteNumber(slot.width),
+    height: finiteNumber(slot.height),
+    visible: slot.visible === true,
+    host: slot.host === "popout" ? "popout" : "main",
+  }),
+  // A picture of the page, shown while Raticode draws something over it.
+  viewSnapshot: (id) => browserAction(id, "view-snapshot"),
   onFrame: (callback) => subscribeToBrowserEvent("gofer:browser-frame", callback),
   onFirefox: (callback) => subscribeToBrowserEvent("gofer:browser-firefox", callback),
   onAgentClose: (callback) => subscribeToBrowserEvent("gofer:browser-agent-close", callback),
@@ -719,6 +754,8 @@ contextBridge.exposeInMainWorld("goferUpdates", {
   installDownloaded: () => ipcRenderer.invoke("gofer:install-downloaded-update"),
   openRelease: () => ipcRenderer.invoke("gofer:open-update-release"),
   getState: () => ipcRenderer.invoke("gofer:get-update-state"),
+  setAutomatic: (enabled) => ipcRenderer.invoke("gofer:set-automatic-update-checks", enabled === true),
+  dismissReminder: () => ipcRenderer.invoke("gofer:dismiss-update-reminder"),
   onState: (callback) => {
     if (typeof callback !== "function") return () => {};
     const listener = (_event, payload) => callback(payload);

@@ -8,7 +8,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
 
@@ -43,6 +43,13 @@ CREDENTIAL_ENV_VARS = (
     "GOFER_BROWSER_ADMIN_TOKEN",
     "RATICODE_TOKEN",
     "RATICODE_TOKEN_FILE",
+    # Raticode reads the Jev key only from the keychain. One exported for another tool
+    # (the AI Product Remover service uses this name) must not reach agents either.
+    "JEV_API_KEY",
+    # systemd's folder of decrypted service credentials, read by a headless backend's
+    # secrets folder. It names a path, not a secret, but a child pointed at it could read
+    # every secret in it.
+    "CREDENTIALS_DIRECTORY",
 )
 
 
@@ -50,16 +57,17 @@ CREDENTIAL_ENV_VARS = (
 _SEALED_CREDENTIALS: dict[str, str] = {}
 
 
-def seal_credential_env() -> None:
+def seal_credential_env(names: Iterable[str] = CREDENTIAL_ENV_VARS) -> None:
     """Move the desktop's credentials out of this process's environment.
 
     build_subprocess_env() strips them, but a spawn that passes no env (a plain
     ``git status``, ``systemctl`` or ``pdftoppm`` call) inherits os.environ, and git
     runs configured helpers such as ``core.fsmonitor`` from a repository a worker can
     edit. Once sealed, no child can inherit them; read them with credential_env().
+    Sealing again keeps what an earlier call sealed, so startup can seal some names
+    early (``names``) and the rest later.
     """
-    _SEALED_CREDENTIALS.clear()
-    for name in CREDENTIAL_ENV_VARS:
+    for name in names:
         value = os.environ.pop(name, None)
         if value is not None:
             _SEALED_CREDENTIALS[name] = value
@@ -78,8 +86,8 @@ def build_subprocess_env(
     _sanitize_packaged_runtime_env(env)
     env.update(overrides or {})
     # These credentials authorize Studio, desktop path grants, browser grants and the
-    # Raticode API, not child providers or workflow commands. Strip them even from a
-    # copied parent env.
+    # Raticode API, or point at the headless secrets folder; none is for child providers
+    # or workflow commands. Strip them even from a copied parent env.
     for name in CREDENTIAL_ENV_VARS:
         env.pop(name, None)
     # Marks providers, Rem workers and workflow commands as agents: the CLI then

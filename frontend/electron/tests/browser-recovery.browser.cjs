@@ -1,5 +1,5 @@
 // A Raticode (chromium) tab whose page process ends or gets stuck while the
-// user is away: the real IntegratedBrowser tab, its <webview> with Raticode's
+// user is away: the real IntegratedBrowser tab, its page view with Raticode's
 // own preload, and the real browser sessions and bridge. Nothing is shown while
 // the tab is hidden, and the page reloads by itself, with its back/forward
 // list, once the tab is in front again. A page that keeps stopping gets a quiet
@@ -12,7 +12,7 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
-const { BrowserWindow, Menu, app, clipboard, dialog, ipcMain, nativeImage, session, shell, webContents } = require("electron");
+const { BrowserWindow, Menu, WebContentsView, app, clipboard, dialog, ipcMain, nativeImage, session, shell, webContents } = require("electron");
 const { createBrowserSessions } = require("../browser-sessions.cjs");
 const { createBrowserStore } = require("../browser-store.cjs");
 
@@ -97,6 +97,7 @@ async function run() {
   let window = null;
   const browsers = createBrowserSessions({
     app, Menu, clipboard, dialog, shell, session, webContents, nativeImage,
+    WebContentsView, preloadPath: path.join(__dirname, "..", "browser-preload.cjs"),
     getMainWindow: () => window,
     resolvePath: (target) => target,
     store: createBrowserStore(path.join(profile, "browser")),
@@ -121,13 +122,13 @@ async function run() {
       contextIsolation: true,
       preload: path.join(__dirname, "..", "preload.cjs"),
       sandbox: true,
-      webviewTag: true,
       additionalArguments: [`--gofer-browser-preload=${pathToFileURL(preload)}`],
     },
   });
   const page = (code) => window.webContents.executeJavaScript(code);
   await window.loadURL(`${base}/host`);
-  const guest = () => webContents.getAllWebContents().find((contents) => contents.getType() === "webview" && !contents.isDestroyed());
+  // The tab's page is a view the main process made.
+  const guest = () => webContents.getAllWebContents().find((contents) => contents.getType() === "window" && contents !== window.webContents && !contents.isDestroyed());
   const shownText = () => page("document.body.innerText");
   const noMessage = async (when) => {
     const text = await shownText();

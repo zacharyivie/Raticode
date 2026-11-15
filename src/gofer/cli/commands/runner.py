@@ -4,22 +4,17 @@ import json
 import time
 import uuid
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from gofer.cli.commands._legacy import refuse_rattish
 from gofer.cli.output import emit_json, format_option, wants_json
-from gofer.core.runner import (
-    RunnerQueueStore,
-    default_runner_capabilities,
-    run_worker_once,
-    workflow_required_capabilities,
-)
-from gofer.core.workflow import AgenticWorkflow, resolve_workflow_parameters
 from gofer.utils.paths import get_data_dir
+
+if TYPE_CHECKING:
+    from gofer.core.workflow import AgenticWorkflow
 
 app = typer.Typer(
     help=(
@@ -48,6 +43,8 @@ def register(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Register or update a local runner record."""
+    from gofer.core.runner import RunnerQueueStore, default_runner_capabilities
+
     store = RunnerQueueStore(data_dir)
     capabilities = default_runner_capabilities(
         [str(path) for path in workspace_root] if workspace_root else None
@@ -69,6 +66,8 @@ def list_runners(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """List known runners."""
+    from gofer.core.runner import RunnerQueueStore
+
     as_json = wants_json(output_format)
     rows = RunnerQueueStore(data_dir).list_runners()
     if as_json:
@@ -106,6 +105,10 @@ def queue_run(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Queue a workflow run for a separate runner process."""
+    from gofer.cli.commands._legacy import refuse_rattish
+    from gofer.core.runner import RunnerQueueStore, workflow_required_capabilities
+    from gofer.core.workflow import resolve_workflow_parameters
+
     base = data_dir or get_data_dir()
     refuse_rattish(
         workflow,
@@ -143,6 +146,8 @@ def queue_status(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Inspect queued and running work. One run always prints as JSON."""
+    from gofer.core.runner import RunnerQueueStore
+
     as_json = wants_json(output_format)
     store = RunnerQueueStore(data_dir)
     if run_id:
@@ -178,6 +183,8 @@ def cancel(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Cancel queued or running work."""
+    from gofer.core.runner import RunnerQueueStore
+
     try:
         run = RunnerQueueStore(data_dir).cancel_run(run_id)
     except ValueError as exc:
@@ -200,6 +207,8 @@ def start(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Start a local runner process that executes queued workflows."""
+    from gofer.core.runner import RunnerQueueStore, default_runner_capabilities, run_worker_once
+
     store = RunnerQueueStore(data_dir)
     capabilities = default_runner_capabilities()
     if provider_cli is not None:
@@ -221,6 +230,8 @@ def start(
 
 
 def _resolve_workflow(workflow: str, data_dir: Path) -> tuple[AgenticWorkflow, Path]:
+    from gofer.core.workflow import AgenticWorkflow
+
     path = Path(workflow).expanduser()
     if path.exists():
         return AgenticWorkflow.from_file(path), path

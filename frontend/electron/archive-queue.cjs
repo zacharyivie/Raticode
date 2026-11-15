@@ -10,6 +10,9 @@ function createArchiveQueue({ createWorker = () => new Worker(path.join(__dirnam
   let closed = false;
   const pending = [];
   const drainWaiters = [];
+  // Threads purged this session. A save that arrives after the purge was queued
+  // would write the thread back, so it is dropped instead.
+  const purged = new Set();
   function drained() {
     if (active || pending.length) return;
     worker?.unref();
@@ -55,6 +58,7 @@ function createArchiveQueue({ createWorker = () => new Worker(path.join(__dirnam
   function archive(root, thread, messages, options = {}) {
     if (closed) return Promise.reject(new Error("Conversation archive is closing."));
     if (!thread || typeof thread.id !== "string") return Promise.reject(new Error("Invalid conversation archive payload."));
+    if (!options.forget && !options.purge && !options.purgeExpired && purged.has(thread.id)) return Promise.resolve({ skipped: true, purged: true, warnings: [] });
     return new Promise((resolve, reject) => {
       const lastForThread = pending.findLast((job) => job.root === root && job.thread.id === thread.id);
       if (lastForThread && !lastForThread.options.deleted && !options.deleted) {
@@ -78,6 +82,15 @@ function createArchiveQueue({ createWorker = () => new Worker(path.join(__dirnam
   }
   // A deletion barrier waits for every already queued save before erasing it.
   const forget = (root, ids) => archive(root, { id: "rem-history-reset" }, ids, { deleted: true, forget: true });
-  return { archive, forget, close };
+  // Saves already queued run first; the purge then removes what they wrote.
+  function purge(root, ids) {
+    if (!Array.isArray(ids) || ids.some(id => typeof id !== "string" || !id)) return Promise.reject(new Error("Invalid thread IDs."));
+    const result = archive(root, { id: "rem-archive-purge" }, ids, { deleted: true, purge: true });
+    for (const id of ids) purged.add(id);
+    // A failed purge leaves the thread in Rem, so its later saves must still land.
+    return result.catch((error) => { for (const id of ids) purged.delete(id); throw error; });
+  }
+  const purgeExpired = (root, days) => archive(root, { id: "rem-archive-retention" }, [], { deleted: true, purgeExpired: true, days });
+  return { archive, forget, purge, purgeExpired, close };
 }
 module.exports = { createArchiveQueue };

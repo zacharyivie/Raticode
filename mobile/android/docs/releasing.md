@@ -23,7 +23,7 @@ The scripts are `scripts/release-candidate.py` (all checks, staging and publicat
 - in unsigned mode, the APK carries a valid signature;
 - a 64-bit native library has a LOAD segment aligned below 16 KB, which Google Play refuses for updates from 1 February 2027.
 
-`check-bundle` applies the same manifest checks and the 16 KB check to the App Bundle Google Play takes (`app/build/outputs/bundle/release/app-release.aab`), reading its base module with `aapt2`. It also estimates the largest download one phone gets (every shared file plus one ABI's libraries) and fails above Play's 500 MB limit. In signed mode it verifies the bundle's JAR signature with `jarsigner`, requires exactly one signer that isn't the debug key, and requires the certificate to equal `ANDROID_SIGNING_CERT_SHA256` and the APK's. A signed candidate stages the bundle as `raticode-mobile-X.Y.Z.aab` with `bundle-checks.json`; an unsigned candidate checks the bundle but doesn't stage it, because Play refuses unsigned uploads.
+`check-bundle` applies the same manifest checks and the 16 KB check to the App Bundle Google Play takes (`app/build/outputs/bundle/play/app-play.aab`, from the `play` build type), reading its base module with `aapt2`. It also estimates the largest download one phone gets (every shared file plus one ABI's libraries) and fails above Play's 500 MB limit. The bundle must leave out the permissions in `play_bundle_omits` (`REQUEST_INSTALL_PACKAGES`, which Update Raticode uses in the website APK): Play doesn't let an app install its own updates, so the `play` build type removes it in `app/src/play/AndroidManifest.xml`. Its R8 mapping is `app/build/outputs/mapping/play/mapping.txt`; upload that one to Play Console. In signed mode it verifies the bundle's JAR signature with `jarsigner`, requires exactly one signer that isn't the debug key, and requires the certificate to equal `ANDROID_SIGNING_CERT_SHA256` and the APK's. A signed candidate stages the bundle as `raticode-mobile-X.Y.Z.aab` with `bundle-checks.json`; an unsigned candidate checks the bundle but doesn't stage it, because Play refuses unsigned uploads.
 
 A new permission or exported component is a deliberate review point, like the desktop's reviewed licence list. Review the change, then update `scripts/release-policy.json` in the same commit. CI runs this check on every push, so the policy fails early rather than on release day.
 
@@ -47,7 +47,7 @@ The R8 mapping file is uploaded as the `r8-mapping` Actions artifact for 90 days
 | Packages | Linux, Windows and macOS packages, CLIs | One APK plus `apk-checks.json`, `device-tests.json`, checksums and the dependency audit. Signed candidates add the App Bundle for Google Play and `bundle-checks.json` |
 | Runtime tests | Packaged backends start on each OS | Instrumented tests plus a launch of the minified release APK on an emulator |
 | Dependency audit | pip-audit and npm audit of the lockfiles | OSV lookup of the resolved release runtime classpath; Gradle has no lockfile here |
-| Updates on devices | Built-in updater on Windows and Linux | None. People install each APK by hand |
+| Updates on devices | Built-in updater on Windows and Linux | Update Raticode in the app reads the `mobile-v` release, checks the APK against `apk-checks.json` and hands it to Android's installer. Play installs update through Play |
 
 The rest matches the desktop: stage-only candidates, a seven-day limit before first publication, provenance attestation, identical-file checks for squash merges, no asset replacement and safe retries.
 
@@ -147,7 +147,7 @@ Don't use the web **Publish release** button. It skips these checks and would pu
 RATICODE_RELEASE_SIGNING_PROPERTIES="$HOME/.local/share/raticode-android-signing/signing.properties" ./scripts/build-release.sh signed
 ```
 
-The signed bundle is `app/build/outputs/bundle/release/app-release.aab`. To launch-test the APK on an emulator without stealing focus, start one headless (`emulator -avd NAME -no-window -read-only`), then:
+The signed bundle is `app/build/outputs/bundle/play/app-play.aab`. To launch-test the APK on an emulator without stealing focus, start one headless (`emulator -avd NAME -no-window -read-only`), then:
 
 ```bash
 SIGNED_RELEASE=false python3 scripts/release-candidate.py collect --output /tmp/raticode-candidate

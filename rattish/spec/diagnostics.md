@@ -40,8 +40,10 @@ errors do not invalidate compiled IR, but they prevent a run in that environment
 | `RATTISH_UNKNOWN_NODE_TYPE` | error | No compatible built-in or plugin contract matches the type. |
 | `RATTISH_COMPILER_CAPABILITY_MISSING` | error | A known contract requires a compiler resolution mode that this implementation does not yet support. |
 | `RATTISH_CONTRACT_INVALID` | error | A node contract fails its meta-schema or contract invariants. |
-| `RATTISH_PROVIDER_CONTRACT_UNRESOLVED` | error | A required provider contract is unavailable during compilation. |
+| `RATTISH_PROVIDER_CONTRACT_UNRESOLVED` | error | A required provider contract, including one named by a `fallback` entry, is unavailable during compilation. |
+| `RATTISH_DUPLICATE_PROVIDER_FALLBACK` | warning | A `fallback` entry repeats a provider, profile, model and effort the step already tries, so switching to it can't help. |
 | `RATTISH_BLANK_AGENT_PROMPT` | warning | An Agent has neither meaningful inline prompt text nor a prompt path. |
+| `RATTISH_JEV_CRITERIA_MISSING` | warning | A yes-no `jev` node has no `criteria` describing what counts as yes and no. |
 | `RATTISH_SUSPECTED_PLAINTEXT_SECRET` | warning | A credential-shaped field contains plaintext. The source remains legal. |
 | `RATTISH_PATH_OUTSIDE_PROJECT` | error | A filesystem path is absolute, traverses upward, or escapes the workflow root through an intermediate symlink. |
 
@@ -123,9 +125,10 @@ point into a `.rattish` file.
 | `RATTISH_PREFLIGHT_HANDLER_UNAVAILABLE` | error | IR references a node runtime handler that this installation cannot execute. |
 | `RATTISH_PREFLIGHT_CONFIGURATION_INVALID` | error | Deployment-specific configuration needed by a preflight check is invalid. |
 | `RATTISH_PREFLIGHT_RESOURCE_MISSING` | error | A required prompt, script, executable, directory, or plugin handler is missing. |
-| `RATTISH_PREFLIGHT_PROVIDER_UNAVAILABLE` | error | The configured provider or model cannot run in this environment. |
+| `RATTISH_PREFLIGHT_PROVIDER_UNAVAILABLE` | error | The configured provider or model cannot run in this environment. For a step with a `fallback` list, none of its providers is installed. At run time the same code marks a provider that is not installed; the step skips its retries and moves to its next fallback entry. |
+| `RATTISH_PREFLIGHT_FALLBACK_PROVIDER_UNAVAILABLE` | warning | A step with a `fallback` list has a provider, primary or fallback, that is not installed. The step still runs and skips that provider. |
 | `RATTISH_PREFLIGHT_PROFILE_UNAVAILABLE` | error | The selected deployment profile is missing or incompatible. |
-| `RATTISH_PREFLIGHT_SECRET_UNAVAILABLE` | error | A referenced secret is unavailable. |
+| `RATTISH_PREFLIGHT_SECRET_UNAVAILABLE` | error | A referenced secret is neither saved in the host's secret store nor set in the environment, or its store cannot be read. The message names the secret and how to add it. |
 | `RATTISH_PREFLIGHT_PROMPT_TEMPLATE_INVALID` | error | A prompt file contains malformed or unbound placeholders. |
 | `RATTISH_PREFLIGHT_CHILD_WORKFLOW_UNAVAILABLE` | error | A compiled child dependency can no longer be loaded. |
 | `RATTISH_PREFLIGHT_CHILD_WORKFLOW_NOT_READY` | error | A referenced workflow tree failed deployment preflight. |
@@ -145,6 +148,11 @@ point into a `.rattish` file.
 | `RATTISH_CHILD_WORKFLOW_FAILED` | error | A child workflow failed without a more specific propagated error. |
 | `RATTISH_JOIN_UNRESOLVED` | error | Quiescence left a partial join with no possible producer completion. |
 | `RATTISH_RUN_LIMIT_EXCEEDED` | error | The next node execution would exceed a workflow or node run limit. |
+| `RATTISH_TOKEN_LIMIT_EXCEEDED` | error | The run's reported tokens went over the workflow `max-tokens` limit. |
+| `RATTISH_COST_LIMIT_EXCEEDED` | error | The run's reported estimated cost went over the workflow `max-cost-usd` limit, or a provider stopped at the spending cap the runtime set from the run's remaining budget. |
+| `RATTISH_TOKEN_LIMIT_UNCHECKABLE` | error | With `max-tokens` set, a provider call didn't report its tokens. |
+| `RATTISH_COST_LIMIT_UNCHECKABLE` | error | With `max-cost-usd` set, a provider call didn't report its cost. |
+| `RATTISH_PARENT_USAGE_LIMIT` | error | A child workflow stopped because the run that called it reached a usage limit. |
 | `RATTISH_TIMEOUT` | error | A node or workflow exhausted its configured active-processing timeout. |
 | `RATTISH_EXPORT_SUSPECTED_SECRET` | warning | Bundle inspection found credential-shaped plaintext or a suspicious file. |
 

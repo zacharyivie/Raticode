@@ -1,0 +1,65 @@
+rattish: 1
+
+# Starter: a webhook call waits for your approval before anything runs.
+# Guide: https://raticode.dev/docs/starters/webhook-approval
+workflow:
+  name: Webhook approval
+  interface-version: 1
+  inputs:
+    action-command:
+      schema: {"description": "Shell command to run after you approve. It gets the webhook body as JSON in REQUEST_JSON.", "minLength": 1, "type": "string"}
+      default: printf 'Approved request: %s\n' "$REQUEST_JSON"
+    decision-note:
+      schema: {"description": "Extra text shown with every approval request, such as who may approve.", "type": "string"}
+      default: ""
+
+node read-request:
+  type: bash-command
+  command: |
+    if [ -z "$REQUEST" ] || [ "$REQUEST" = "null" ]; then
+      echo "No webhook body. Start this workflow from its webhook trigger." >&2
+      exit 1
+    fi
+    printf '%s\n' "$REQUEST" | head -c 8000
+  with:
+    request:
+      from: trigger.events[0].payload
+      default: null
+  to: approve
+
+node approve:
+  type: approval-gate
+  message: |
+    A webhook asked to run this workflow's action. Approve only if you expected it.
+
+    {{note}}
+
+    Request body:
+    {{request}}
+  notify: true
+  decision-timeout: 24h
+  timeout-decision: reject
+  with:
+    request: node.read-request.output.stdout
+    note: input.decision-note
+  needs: read-request
+  to:
+    - act when node.approve.output.approved
+    - record-rejection otherwise
+
+node act:
+  type: bash-command
+  command: bash -c "$ACTION_COMMAND"
+  with:
+    action-command: input.action-command
+    request-json: node.read-request.output.stdout
+  needs: approve
+  finish: pass
+
+node record-rejection:
+  type: bash-command
+  command: echo "Not approved ($DECISION). Nothing ran."
+  with:
+    decision: node.approve.output.decision
+  needs: approve
+  finish: pass

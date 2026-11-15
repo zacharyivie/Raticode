@@ -156,7 +156,7 @@ jobs:
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
           AUR_COMMIT_NAME: ${{ vars.AUR_COMMIT_NAME || 'Zack Ivie' }}
-          AUR_COMMIT_EMAIL: ${{ vars.AUR_COMMIT_EMAIL || 'publisheddoonk@gmail.com' }}
+          AUR_COMMIT_EMAIL: ${{ vars.AUR_COMMIT_EMAIL || 'support@raticode.dev' }}
           VERSION: ${{ needs.render.outputs.version }}
         run: |
           set -euo pipefail

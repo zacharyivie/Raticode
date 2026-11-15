@@ -1,30 +1,18 @@
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from gofer.cli.commands._legacy import refuse_rattish
 from gofer.cli.output import emit_json, format_option, wants_json
-from gofer.core.agent import (
-    Agent,
-    AgentConfig,
-    agent_external_access_warnings,
-    configured_extra_paths,
-)
-from gofer.core.workflow import AgenticWorkflow, WorkflowConfig
-from gofer.subscriptions.acp_providers import AcpSubscription
-from gofer.subscriptions.antigravity import AntigravitySubscription
-from gofer.subscriptions.claude_code import ClaudeCodeSubscription
-from gofer.subscriptions.cli_providers import CliSubscription
-from gofer.subscriptions.codex import CodexSubscription
-from gofer.subscriptions.direct_api import AnthropicApiSubscription, OpenAiApiSubscription
-from gofer.utils.agent_helpers import resolve_prompt, unique_agent_id
 from gofer.utils.paths import get_data_dir
-from gofer.utils.registry import find_agent, find_workflow, list_all_agents
+
+if TYPE_CHECKING:
+    from gofer.core.agent import AgentConfig
+    from gofer.subscriptions.base import Subscription
 
 app = typer.Typer(
     help="[Legacy TOML] Manage and run agents in TOML workflows. Rattish declares agents as nodes.",
@@ -33,16 +21,34 @@ app = typer.Typer(
 console = Console()
 err_console = Console(stderr=True)
 
-_SUBSCRIPTIONS = {
-    "claude_code": ClaudeCodeSubscription(),
-    "codex": CodexSubscription(),
-    **{provider: CliSubscription(provider) for provider in ("cursor", "copilot", "opencode")},
-    "antigravity": AntigravitySubscription(),
-    "grok": AcpSubscription("grok"),
-    "openai_api": OpenAiApiSubscription(),
-    "anthropic_api": AnthropicApiSubscription(),
-}
-_SUBSCRIPTION_CHOICES = list(_SUBSCRIPTIONS)
+# Same order as gofer.cli.commands._subscriptions.cli_subscriptions(); a test checks it.
+_SUBSCRIPTION_CHOICES = [
+    "claude_code",
+    "codex",
+    "cursor",
+    "copilot",
+    "opencode",
+    "antigravity",
+    "grok",
+    "openai_api",
+    "anthropic_api",
+]
+
+
+def _subscriptions() -> dict[str, Subscription]:
+    """Build the provider runtimes on first use; loading them slows every command."""
+    cached: dict[str, Subscription] | None = globals().get("_SUBSCRIPTIONS")
+    if cached is None:
+        from gofer.cli.commands._subscriptions import cli_subscriptions
+
+        cached = globals()["_SUBSCRIPTIONS"] = cli_subscriptions()
+    return cached
+
+
+def __getattr__(name: str) -> Any:
+    if name == "_SUBSCRIPTIONS":
+        return _subscriptions()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 @app.command("create")
@@ -72,6 +78,10 @@ def create(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Create a new agent and save it to the data directory."""
+    from gofer.core.agent import AgentConfig
+    from gofer.core.workflow import AgenticWorkflow, WorkflowConfig
+    from gofer.utils.agent_helpers import resolve_prompt, unique_agent_id
+
     base = data_dir or get_data_dir()
     base.mkdir(parents=True, exist_ok=True)
 
@@ -170,6 +180,9 @@ def edit(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Edit an existing agent's configuration."""
+    from gofer.utils.agent_helpers import resolve_prompt
+    from gofer.utils.registry import find_agent
+
     base = data_dir or get_data_dir()
     try:
         wf, cfg = find_agent(agent_id, base)
@@ -266,6 +279,8 @@ def _resolve_extra_paths(paths: list[Path] | None) -> list[Path]:
 
 
 def _print_agent_access_summary(config: AgentConfig) -> None:
+    from gofer.core.agent import agent_external_access_warnings
+
     warnings = agent_external_access_warnings(config)
     if not warnings:
         return
@@ -275,6 +290,8 @@ def _print_agent_access_summary(config: AgentConfig) -> None:
 
 
 def _validate_agent_extra_paths(config: AgentConfig) -> None:
+    from gofer.core.agent import configured_extra_paths
+
     try:
         configured_extra_paths(config)
     except ValueError as exc:
@@ -289,6 +306,8 @@ def rm(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Remove an agent from its workflow."""
+    from gofer.utils.registry import find_agent
+
     base = data_dir or get_data_dir()
     try:
         wf, cfg = find_agent(agent_id, base)
@@ -329,13 +348,18 @@ def run(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Run a named agent."""
+    import asyncio
+
+    from gofer.core.agent import Agent
+    from gofer.utils.registry import find_agent
+
     try:
         _, config = find_agent(agent_id, data_dir)
     except KeyError as exc:
         err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
-    sub = _SUBSCRIPTIONS.get(config.subscription)
+    sub = _subscriptions().get(config.subscription)
     if sub is None:
         err_console.print(f"[red]Unknown subscription '{config.subscription}'[/red]")
         raise typer.Exit(1)
@@ -358,6 +382,9 @@ def list_agents(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """List agents. Without --workflow, lists all agents in the data directory."""
+    from gofer.cli.commands._legacy import refuse_rattish
+    from gofer.utils.registry import find_workflow, list_all_agents
+
     as_json = wants_json(output_format)
     base = data_dir or get_data_dir()
 

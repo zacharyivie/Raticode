@@ -1332,3 +1332,45 @@ async def test_coordinator_diagnosis_uses_selected_repository(manager, tmp_path)
     assert calls[0]["working_dir"] == mobile
     assert calls[0]["workflow"]["projectRoot"] == str(mobile)
     assert calls[0]["permission_mode"] == "read-only"
+
+
+async def test_new_attempt_worktree_runs_project_setup_before_the_agent(manager, tmp_path):
+    import json
+
+    from gofer.ui import worktree_setup
+
+    root = tmp_path / "project"
+    (root / ".raticode").mkdir(parents=True)
+    git(root, "init")
+    (root / ".gitignore").write_text("setup-ran.txt\n")
+    command = f"\"{sys.executable}\" -c \"open('setup-ran.txt', 'w').write('ok')\""
+    (root / ".raticode" / "worktree-setup.json").write_text(json.dumps({"setup": command}))
+    git(root, "add", ".")
+    git(root, "commit", "-m", "Initial")
+    sid = team(manager, root)
+    plan(manager, root, sid, [milestone(), milestone("b", "two")])
+    seen: dict[str, Any] = {}
+
+    async def look(**kwargs):
+        cwd = kwargs["working_dir"]
+        name = "one" if "You are One," in kwargs["agent_instructions"] else "two"
+        context = json.dumps(kwargs.get("messages") or kwargs.get("history") or "")
+        seen[name] = ((cwd / "setup-ran.txt").exists(), "Project setup didn" in str(kwargs))
+        assert cwd != root, context
+        yield {"type": "final", "message": {"body": "Looked"}}
+
+    manager._stream = look
+    # Not approved yet: the agent starts without setup and is told why.
+    await manager._turn(str(root), sid, "one", threading.Event())
+    assert seen["one"] == (False, True)
+    _, attempt = assignment(manager, root, sid, "a")
+    assert attempt["workspace"]["setup"]["status"] == "needs_approval"
+    events = manager.collection(root, sid, "events", {})["items"]
+    assert any(e["kind"] == "worktree_setup" for e in events)
+    # Approved: the next new worktree is set up before its agent starts.
+    state = worktree_setup.status(manager.data_dir, root)
+    worktree_setup.approve(manager.data_dir, root, state["file"]["sha256"])
+    await manager._turn(str(root), sid, "two", threading.Event())
+    assert seen["two"] == (True, False)
+    _, attempt = assignment(manager, root, sid, "b")
+    assert attempt["workspace"]["setup"]["status"] == "passed"

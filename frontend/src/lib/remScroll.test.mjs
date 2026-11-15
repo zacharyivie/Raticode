@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { FOLLOW_ZONE, followsAfterScroll, gapToEnd, wheelLeavesEnd } from "./remScroll.js";
+import { FOLLOW_ZONE, HOLD_PLACE_MS, followsAfterScroll, gapToEnd, readingPlace, restoreReadingPlace, wheelLeavesEnd } from "./remScroll.js";
 
 test("the first frames of a wheel turn up from the bottom stop Rem's chat following", () => {
   // A smooth wheel turn moves a few pixels per frame; every one of these frames is
@@ -70,4 +70,56 @@ test("a wheel turn up taken by a scrolling block inside a message leaves the cha
   } finally {
     globalThis.getComputedStyle = original;
   }
+});
+
+// A chat of rows laid out top to bottom, scrolled by scrollTop, inside a 500px view at y=100.
+function chat(heights) {
+  const stream = { scrollTop: 0, rows: [] };
+  let y = 0;
+  for (const [index, height] of heights.entries()) {
+    const row = { id: `m${index}`, top: y, height };
+    stream.rows.push(row);
+    y += height;
+  }
+  const box = row => ({ top: 100 + row.top - stream.scrollTop, bottom: 100 + row.top + row.height - stream.scrollTop });
+  stream.getBoundingClientRect = () => ({ top: 100, bottom: 600 });
+  stream.querySelectorAll = () => stream.rows.map(row => ({ getAttribute: () => row.id, getBoundingClientRect: () => box(row) }));
+  // Rows added above shift every row below them down.
+  stream.prepend = heights => {
+    const added = heights.reduce((sum, height) => sum + height, 0);
+    for (const row of stream.rows) row.top += added;
+    stream.rows.unshift(...heights.map((height, index) => ({ id: `p${index}`, top: heights.slice(0, index).reduce((sum, h) => sum + h, 0), height })));
+  };
+  return stream;
+}
+
+test("Rem's chat reads its place from the first message whose top is in view", () => {
+  const stream = chat([120, 120, 120, 120, 120, 120]);
+  stream.scrollTop = 150;
+  // m1 is cut off at the top (120..240 shows 150..240); m2 starts in view, 90px down.
+  assert.deepEqual(readingPlace(stream, 1000), { id: "m2", offset: 90, until: 1000 + HOLD_PLACE_MS });
+  // A message taller than the view: the one cut off at the top is all there is.
+  const tall = chat([2000, 120]);
+  tall.scrollTop = 300;
+  assert.equal(readingPlace(tall, 0).id, "m0");
+  assert.equal(readingPlace(chat([]), 0), null);
+  assert.equal(readingPlace(null), null);
+});
+
+test("Earlier messages added above leave the message you are reading where it was", () => {
+  const stream = chat([120, 120, 120, 120, 120, 120]);
+  stream.scrollTop = 150;
+  const place = readingPlace(stream);
+  stream.prepend([80, 300, 45]);
+  restoreReadingPlace(stream, place);
+  assert.equal(stream.scrollTop, 150 + 425);
+  assert.equal(readingPlace(stream).offset, place.offset);
+  // A row above that lays out at its real height later is corrected the same way.
+  stream.rows[1].height += 60;
+  for (const row of stream.rows.slice(2)) row.top += 60;
+  restoreReadingPlace(stream, place);
+  assert.equal(stream.scrollTop, 150 + 425 + 60);
+  // A place whose message is gone moves nothing.
+  restoreReadingPlace(stream, { id: "gone", offset: 0 });
+  assert.equal(stream.scrollTop, 635);
 });

@@ -114,8 +114,39 @@ def request_texts(event: dict[str, Any]) -> list[str]:
     if kind in _TEXT_FIELDS:
         return [payload[k] for k in _TEXT_FIELDS[kind] if isinstance(payload.get(k), str)]
     if kind == "desktop.action":
-        return list(_strings(payload.get("params"), 0))
+        params = payload.get("params")
+        if isinstance(params, dict) and isinstance(params.get("inputs"), dict):
+            # A workflow run's typed inputs. Their names are the workflow's own, so
+            # every value is screened, even under a name like ``path`` or ``target_id``.
+            rest = {key: value for key, value in params.items() if key != "inputs"}
+            return [*_strings(rest, 0), *_input_texts(params["inputs"])]
+        return list(_strings(params, 0))
     return []
+
+
+def _input_texts(inputs: dict[str, Any]) -> list[str]:
+    """Every string in a run's input values, at any depth the desktop accepts."""
+    found: list[str] = []
+
+    def walk(value: Any, depth: int) -> None:
+        if depth > 32:
+            return
+        if isinstance(value, str):
+            found.append(value)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                # Keys inside a JSON value are the phone's text; the top-level names aren't.
+                if depth:
+                    found.append(str(key))
+                walk(item, depth + 1)
+        elif isinstance(value, list):
+            # Every item: the request size limit already bounds the work, and a cap here
+            # let a payload hide behind filler items.
+            for item in value:
+                walk(item, depth + 1)
+
+    walk(inputs, 0)
+    return found
 
 
 def _strings(value: Any, depth: int) -> Iterator[str]:

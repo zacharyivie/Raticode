@@ -1,0 +1,65 @@
+rattish: 1
+
+# Starter: a daily report from a shell command.
+# Guide: https://raticode.dev/docs/starters/daily-report
+workflow:
+  name: Daily report
+  interface-version: 1
+  # Ends the run if its model calls' estimated cost passes this. Raise it or set none.
+  max-cost-usd: 0.50
+  inputs:
+    command:
+      schema: {"description": "Shell command whose output the report is about. It runs in the project folder.", "minLength": 1, "type": "string"}
+      default: git log --since="1 day ago" --stat
+    focus:
+      schema: {"description": "What the report should pay attention to.", "minLength": 1, "type": "string"}
+      default: What changed, what failed, and what needs attention today.
+    reports-folder:
+      schema: {"description": "Folder for the dated reports, relative to the project.", "minLength": 1, "type": "string"}
+      default: reports
+
+node collect:
+  type: bash-command
+  command: |
+    output=$(bash -c "$REPORT_COMMAND" 2>&1)
+    code=$?
+    echo "command: $REPORT_COMMAND"
+    echo "exit-code: $code"
+    echo "output:"
+    printf '%s\n' "$output" | tail -c 30000
+  with:
+    report-command: input.command
+  to: write-report
+
+node write-report:
+  type: agent
+  provider: claude-code
+  prompt: |
+    Write a short daily report in Markdown from the command output below.
+
+    Focus: {{focus}}
+
+    Start with one sentence on the overall state. Then list what changed, anything that
+    failed (the exit code is not 0, or the output shows errors), and what needs attention.
+    Keep it under 250 words. Use only what the output shows, and say so plainly when the
+    output is empty.
+
+    {{collected}}
+  with:
+    focus: input.focus
+    collected: node.collect.output.stdout
+  needs: collect
+  to: save-report
+
+node save-report:
+  type: bash-command
+  command: |
+    mkdir -p "$REPORTS_FOLDER" || exit 1
+    report="$REPORTS_FOLDER/$(date +%Y-%m-%d).md"
+    cat > "$report" || exit 1
+    echo "$report"
+  with:
+    stdin: node.write-report.output
+    reports-folder: input.reports-folder
+  needs: write-report
+  finish: pass

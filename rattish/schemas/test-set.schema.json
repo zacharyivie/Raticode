@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raticode.dev/schemas/rattish/test-set.schema.json",
+  "title": "Rattish workflow test set",
+  "description": "Input cases and checks for one Rattish workflow, saved beside it as <name>.tests.json.",
+  "type": "object",
+  "required": ["testSetVersion", "cases"],
+  "additionalProperties": false,
+  "properties": {
+    "testSetVersion": {"const": 1},
+    "judge": {"$ref": "#/$defs/judgeModel"},
+    "cases": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {"$ref": "#/$defs/case"}
+    }
+  },
+  "$defs": {
+    "label": {"type": "string", "maxLength": 200},
+    "target": {
+      "description": "Where the check looks: status, error, outputs.<name> or nodes.<node-id>, with .key and [index] steps.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "provider": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+    "optionalText": {"type": ["string", "null"], "maxLength": 200},
+    "judgeModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": {"$ref": "#/$defs/provider"},
+        "model": {"$ref": "#/$defs/optionalText"},
+        "profile": {"$ref": "#/$defs/optionalText"},
+        "effort": {"$ref": "#/$defs/optionalText"}
+      }
+    },
+    "case": {
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+        "name": {"$ref": "#/$defs/label"},
+        "inputs": {"type": "object"},
+        "triggerEvents": {
+          "description": "Trigger events the case starts with, as a webhook or file trigger would supply them in trigger.events.",
+          "type": "array",
+          "maxItems": 256,
+          "items": {"type": "object"}
+        },
+        "expectStatus": {"enum": ["passed", "failed", "any"]},
+        "checks": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {"$ref": "#/$defs/check"}
+        }
+      }
+    },
+    "check": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {"type": {"enum": ["text", "json", "command", "judge"]}},
+      "allOf": [
+        {"if": {"properties": {"type": {"const": "text"}}}, "then": {"$ref": "#/$defs/textCheck"}},
+        {"if": {"properties": {"type": {"const": "json"}}}, "then": {"$ref": "#/$defs/jsonCheck"}},
+        {"if": {"properties": {"type": {"const": "command"}}}, "then": {"$ref": "#/$defs/commandCheck"}},
+        {"if": {"properties": {"type": {"const": "judge"}}}, "then": {"$ref": "#/$defs/judgeCheck"}}
+      ]
+    },
+    "textCheck": {
+      "description": "Compares the target as text. Use exactly one of equals, contains, notContains or matches (a regular expression).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "text"},
+        "label": {"$ref": "#/$defs/label"},
+        "target": {"$ref": "#/$defs/target"},
+        "equals": {"type": "string"},
+        "contains": {"type": "string"},
+        "notContains": {"type": "string"},
+        "matches": {"type": "string", "maxLength": 1000},
+        "ignoreCase": {"type": "boolean"}
+      }
+    },
+    "jsonCheck": {
+      "description": "Checks one JSON field. Use exactly one of equals, notEquals, exists or oneOf.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "json"},
+        "label": {"$ref": "#/$defs/label"},
+        "target": {"$ref": "#/$defs/target"},
+        "equals": true,
+        "notEquals": true,
+        "exists": {"type": "boolean"},
+        "oneOf": {"type": "array", "minItems": 1}
+      }
+    },
+    "commandCheck": {
+      "description": "Runs a shell command in the project folder with the target on standard input and passes when it exits with exitCode.",
+      "type": "object",
+      "required": ["command"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "command"},
+        "label": {"$ref": "#/$defs/label"},
+        "target": {"$ref": "#/$defs/target"},
+        "command": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "exitCode": {"type": "integer", "minimum": 0, "maximum": 255},
+        "timeoutSeconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600}
+      }
+    },
+    "judgeCheck": {
+      "description": "Asks a model whether the target meets the criteria. Costs one model call per case.",
+      "type": "object",
+      "required": ["criteria"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "judge"},
+        "label": {"$ref": "#/$defs/label"},
+        "target": {"$ref": "#/$defs/target"},
+        "criteria": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "provider": {"$ref": "#/$defs/provider"},
+        "model": {"$ref": "#/$defs/optionalText"},
+        "profile": {"$ref": "#/$defs/optionalText"},
+        "effort": {"$ref": "#/$defs/optionalText"}
+      }
+    }
+  }
+}

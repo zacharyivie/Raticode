@@ -8,9 +8,12 @@ import {
 import { dangerousPermission, organizationRequest, plural, runProvenance, transcriptEntries } from "../lib/organizations.js";
 import { providerPermissionDefault, providerPermissionOptions } from "../lib/providerPermissions.js";
 import { CADENCES, DAY_NAMES, LONG_DAYS, ORDINALS, blockId, blockProblem, cleanBlock, describeBlock, keywordsText, parseKeywords, scheduleProblem, withCadence } from "../lib/organizationSchedule.js";
+import { usageSentence } from "../lib/remKanban.js";
 import { statusLine, visibleComments } from "../lib/ticketConversation.js";
 import { ProviderModelEffortFields, useProviderCapabilities } from "./ProviderModelEffortFields.jsx";
+import TicketPatchReview from "./TicketPatchReview.jsx";
 import { Avatar, Bar, Chip, Pill } from "./OrganizationViews.jsx";
+import { WorktreeSetupNotice } from "./WorktreeSetup.jsx";
 
 const pct = value => Math.round(value * 100);
 const Rec = ({ label, children }) => <div className="oh-rec"><span className="lbl">{label}</span><div>{children}</div></div>;
@@ -111,6 +114,11 @@ function TicketSheet({ model, ticket, ctx }) {
     decision === "accept" ? `${ticket.key} accepted. Its epic and milestones now count it.` : `${ticket.key} sent back to To do with your note. Its claims were cleared for the next run.`);
   const branch = changes.data?.branch || ticket.worktree?.branch || ticket.releasedWorktree?.branch;
   const files = changes.data?.files || [];
+  const [reviewing, setReviewing] = useState(false);
+  // The patch and the decision on it, through the same review as the Kanban board's sheet.
+  const patchable = Boolean(branch) && files.length > 0 && ticket.column !== "running" && ticket.status !== "cancelled";
+  const decidable = ticket.column === "review" || (ticket.status === "done" && !ticket.landed);
+  const address = { ticket_id: ticket.id, scope: "organization", organization_id: ctx.organizationId, revision: ticket.revision };
   const startEdit = () => {
     const values = { title: ticket.title, description: ticket.description, epicId: ticket.epicId || "", assignee: ticket.assignee || "", doneWhen: ticket.doneWhen, priority: ticket.priority };
     setDraft(values); setOpened({ values, revision: ticket.revision }); setEditing(true);
@@ -130,7 +138,7 @@ function TicketSheet({ model, ticket, ctx }) {
   }
   const linkable = Object.values(model.knowledge).filter(entry => !ticket.used.includes(entry.id));
   return <>
-    {(hint => hint && <Rec label="Next"><p className={`oh-next ${hint.tone}`}>{hint.text}</p></Rec>)(startHint(model, ticket))}
+    {(hint => hint && <Rec label="Next"><p className={`oh-next-hint ${hint.tone}`}>{hint.text}</p></Rec>)(startHint(model, ticket))}
     <Rec label="Why">{ticket.doneWhen ? <><p>{ticket.doneWhen}</p><small className="oh-faint">Done when, in your words</small></> : <Muted>No done-when yet. <button className="oh-link" type="button" onClick={startEdit}>Add one</button></Muted>}
       {ticket.description && <details className="oh-fold"><summary>Details</summary><p className="oh-prose">{ticket.description}</p></details>}</Rec>
     <Rec label="Part of"><div className="oh-chips">{ticket.project && <Chip model={model} refId={`project:${ticket.project}`} onOpen={ctx.onOpen} />}{milestone && <Chip model={model} refId={`ms:${milestone.id}`} onOpen={ctx.onOpen} />}{epic ? <Chip model={model} refId={`epic:${epic.id}`} onOpen={ctx.onOpen} /> : <Muted>No epic</Muted>}</div></Rec>
@@ -139,10 +147,14 @@ function TicketSheet({ model, ticket, ctx }) {
       {linkable.length > 0 && ticket.column !== "running" && <select className="oh-inline-select" aria-label="Link a note" value="" onChange={event => event.target.value && update({ knowledge: [...(ticket.knowledge || []), event.target.value] }, "Note linked. The next run sees it.")}><option value="">Link a note…</option>{linkable.map(entry => <option key={entry.id} value={entry.id}>{entry.title}</option>)}</select>}
     </Rec>
     <Rec label="Did">{branch ? <><div className="oh-chips"><span className="oh-chip static"><GitBranch size={13} /><span className="oh-key">{branch}</span></span></div>
-      {files.length > 0 ? <details className="oh-fold"><summary>{plural(files.length, "file")}, <span className="oh-add">+{files.reduce((sum, f) => sum + f[1], 0)}</span> <span className="oh-del">−{files.reduce((sum, f) => sum + f[2], 0)}</span></summary><Files files={files} /></details> : <Muted>{changes.error ? `Couldn't read the branch: ${changes.error}` : changes.data ? "No committed changes yet" : "Reading changes…"}</Muted>}</>
+      {patchable ? <TicketPatchReview key={ticket.id} ticket={address} worker={model.workers[ticket.assignee]?.name || "the worker"} decide={decidable}
+        caution={caution.risky ? `${caution.text}. Check before accepting.` : ""} expanded={reviewing} onExpand={setReviewing} onUpdated={() => ctx.refresh?.()} />
+      : files.length > 0 ? <details className="oh-fold"><summary>{plural(files.length, "file")}, <span className="oh-add">+{files.reduce((sum, f) => sum + f[1], 0)}</span> <span className="oh-del">−{files.reduce((sum, f) => sum + f[2], 0)}</span></summary><Files files={files} /></details> : <Muted>{changes.error ? `Couldn't read the branch: ${changes.error}` : changes.data ? "No committed changes yet" : "Reading changes…"}</Muted>}</>
       : !ticket.runs.length && <Muted>Nothing yet.</Muted>}
       {changes.data?.shared?.files?.length > 0 && <details className="oh-fold"><summary>Shared repository: {plural(changes.data.shared.files.length, "file")} on <span className="oh-key">{changes.data.shared.branch}</span></summary><Files files={changes.data.shared.files} /><small className="oh-faint">Merged into the shared repository when you accept this ticket.</small></details>}
       {ticket.runs.length > 0 && <div className="oh-chips oh-gap">{ticket.runs.slice(-4).map(id => <Chip key={id} model={model} refId={`run:${id}`} onOpen={ctx.onOpen} />)}</div>}
+      <WorktreeSetupNotice setup={ticket.worktreeSetup} />
+      {model.runtime.taskUsage?.[ticket.id] && <p className="oh-faint" data-testid="org-ticket-usage">Usage: {usageSentence(model.runtime.taskUsage[ticket.id])}</p>}
     </Rec>
     <Rec label="Claims">{ticket.claims.length ? <><ul className="oh-claims">{ticket.claims.map(claim => <li key={claim.id}><span className="c-text">{claim.text}</span><EvidenceButton claim={claim} onOpen={ctx.onOpen} /></li>)}</ul>
       {ready.length > 0 && ticket.column !== "running" && <div className="oh-row"><Confirm busy={ctx.busy} label={<><FlaskConical size={14} />Run {plural(ready.length, "check")}</>} confirmLabel="Run them"
@@ -150,7 +162,10 @@ function TicketSheet({ model, ticket, ctx }) {
         onConfirm={() => ctx.onAct("check_run", { taskId: ticket.id }, `Running ${plural(ready.length, "check")}. Results appear on each claim.`)} /></div>}</>
       : <Muted>{ticket.column === "running" ? "Claims appear as the run posts them." : ticket.runs.length ? "The last run posted no claims." : "No run yet."}</Muted>}</Rec>
     <Rec label="You">
-      {ticket.column === "review" ? <>
+      {ticket.column === "review" && patchable ? <div className="oh-decide">
+        <Muted>Review the changes under Did, then accept to land them or request changes there.</Muted>
+        <Confirm busy={ctx.busy} className="oh-btn ghost" label="Accept without landing" confirmLabel="Accept" message={`Marks ${ticket.key} done and leaves ${branch} unmerged.`} onConfirm={() => review("accept")} />
+      </div> : ticket.column === "review" ? <>
         {caution.risky && <p className="oh-caution"><AlertTriangle size={15} /><span>{caution.text}. Check before accepting.</span></p>}
         <label className="oh-sr" htmlFor="oh-review-note">Review note</label>
         <textarea id="oh-review-note" className="oh-note-input" rows={2} placeholder="Note for the worker (optional)" value={note} onChange={e => setNote(e.target.value)} />
@@ -594,7 +609,9 @@ function ScheduleEditor({ model, ctx, suggested }) {
 
 function WorkerEditor({ model, worker, ctx, isNew }) {
   const { capabilities, loading, refresh } = useProviderCapabilities();
-  const base = worker || { id: crypto.randomUUID(), name: "", title: "", role: "", reportsTo: null, provider: "codex", model: "cli-default", effort: null, permissionMode: providerPermissionDefault("codex"), paused: true, persona: "", responsibilities: [], instructions: "", resources: { shell: true, web: false, skills: [], mcpServers: [] }, skills: [], memory: "", metadata: {}, heartbeatSeconds: 0 };
+  // A new worker starts on the provider and model you chose for Rem in Settings.
+  const provider = ctx.defaults?.provider || "codex";
+  const base = worker || { id: crypto.randomUUID(), name: "", title: "", role: "", reportsTo: null, provider, model: ctx.defaults?.model || "cli-default", effort: ctx.defaults?.effort || null, permissionMode: providerPermissionDefault(provider), paused: true, persona: "", responsibilities: [], instructions: "", resources: { shell: true, web: false, skills: [], mcpServers: [] }, skills: [], memory: "", metadata: {}, heartbeatSeconds: 0 };
   const [draft, setDraft] = useState(() => structuredClone(base));
   // The worker as the form last loaded it. Edits are what differs from it, and only those are
   // saved, so a change made elsewhere meanwhile (by Rem, say) isn't undone.
@@ -616,7 +633,8 @@ function WorkerEditor({ model, worker, ctx, isNew }) {
     delete clean.color;
     const employees = isNew ? [...model.config.employees, clean] : model.config.employees.map(e => (e.id === clean.id ? { ...e, ...Object.fromEntries(changed.map(key => [key, clean[key]])) } : e));
     const reason = isNew ? `Added ${clean.name || "a worker"}, held until you start them` : `Updated ${clean.name}: ${changed.map(key => ({ reportsTo: "reports to", permissionMode: "permissions", paused: "hold", ticketAccess: "ticket permissions", heartbeatSeconds: "check-ins" }[key] || key)).join(", ")}`;
-    const result = await ctx.onAct("configure", { config: { ...model.config, employees }, expectedRevision: model.organization.revision, reason }, `${reason}. Recorded as a new revision.`);
+    // A worker you add gets the organization's folders to work on by itself.
+    const result = await ctx.onAct("configure", { config: { ...model.config, employees }, expectedRevision: model.organization.revision, reason, ...(isNew ? { followProjects: true } : {}) }, `${reason}. Recorded as a new revision.`);
     if (result && !result.needsUserConsent) setOpened(structuredClone(draft));
     if (result && isNew) ctx.replace(`worker:${clean.id}`);
   }

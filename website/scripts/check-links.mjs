@@ -2,13 +2,13 @@
 // landing components and #anchors, which VitePress's dead-link check does not cover.
 // It also checks what search engines read: the sitemap, robots.txt, each page's title,
 // description, canonical address and link preview tags, the 404 page and the home page's
-// structured data.
+// structured data. It also checks /.well-known/security.txt.
 // Run after `npm run build`: `npm run check:links`. External links are listed, not fetched.
 import { execFileSync } from 'node:child_process'
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
 import { join, relative, posix } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { siteLocation } from '../data/site.ts'
+import { securityTxtLifetimeDays, securityTxtPath, siteLocation, supportMailto } from '../data/site.ts'
 import { desktopRelease } from '../data/releases.ts'
 
 const dist = fileURLToPath(new URL('../.vitepress/dist/', import.meta.url))
@@ -63,6 +63,9 @@ for (const file of htmlFiles(dist)) {
   const html = readFileSync(file, 'utf8')
   for (const [, raw] of html.matchAll(attr)) {
     const link = raw.replace(/&amp;/g, '&')
+    // Every email link uses the support address in data/site.ts, so changing it there and
+    // missing a page fails here.
+    if (link.startsWith('mailto:') && link !== supportMailto) problems.push(`${page}: ${link} is not ${supportMailto}`)
     if (!link || /^(mailto:|tel:|javascript:|data:)/.test(link)) continue
     // Absolute links to this site (canonical, og:url, og:image) must resolve like internal ones.
     if (link.startsWith(siteUrl)) { checkSitePath(page, link.slice(siteOrigin.length), link); continue }
@@ -160,8 +163,16 @@ if (!existsSync(notFound)) {
   if (!theme) problems.push('404.html: the custom NotFoundPage is not in the built theme')
 }
 
-// The home page describes the site and the app as schema.org data.
 const homeHtml = readFileSync(join(dist, 'index.html'), 'utf8')
+// The places that say how to get help keep the support email.
+for (const name of ['index.html', 'docs/support.html', 'docs/privacy.html', 'docs/reference/troubleshooting.html']) {
+  const path = join(dist, name)
+  if (!existsSync(path) || !readFileSync(path, 'utf8').includes(`href="${supportMailto}"`)) {
+    problems.push(`${name}: no ${supportMailto} link`)
+  }
+}
+
+// The home page describes the site and the app as schema.org data.
 const ldScripts = [...homeHtml.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)].map((m) => m[1])
 if (ldScripts.length !== 1) {
   problems.push(`index.html: expected one JSON-LD block, found ${ldScripts.length}`)
@@ -217,6 +228,31 @@ if (!existsSync(robotsFile)) {
   if (/^Disallow:\s*\S/m.test(robots)) problems.push('robots.txt disallows part of the site')
 }
 
+// security.txt (RFC 9116) names the support email, its own address, a policy page that
+// exists and an expiry date within the next year.
+const securityFile = join(dist, securityTxtPath)
+if (!existsSync(securityFile)) {
+  problems.push(`${securityTxtPath} is missing`)
+} else {
+  const fields = new Map()
+  for (const line of readFileSync(securityFile, 'utf8').split('\n')) {
+    const match = line.match(/^([A-Za-z-]+): (.+)$/)
+    if (match) fields.set(match[1], match[2])
+  }
+  if (fields.get('Contact') !== supportMailto) problems.push(`${securityTxtPath}: Contact is not ${supportMailto}`)
+  if (fields.get('Canonical') !== `${siteUrl}${securityTxtPath}`) problems.push(`${securityTxtPath}: Canonical is not ${siteUrl}${securityTxtPath}`)
+  const policy = fields.get('Policy') ?? ''
+  if (!policy.startsWith(siteUrl)) problems.push(`${securityTxtPath}: Policy is not on the site`)
+  else checkSitePath(securityTxtPath, policy.slice(siteOrigin.length), policy)
+  const expires = Date.parse(fields.get('Expires') ?? '')
+  const daysLeft = (expires - Date.now()) / 86_400_000
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(fields.get('Expires') ?? '') || Number.isNaN(expires)) {
+    problems.push(`${securityTxtPath}: Expires is not an RFC 3339 UTC time`)
+  } else if (daysLeft <= 0 || daysLeft > securityTxtLifetimeDays + 1) {
+    problems.push(`${securityTxtPath}: Expires is not within the next ${securityTxtLifetimeDays} days`)
+  }
+}
+
 if (process.argv.includes('--list-external')) {
   for (const link of [...external].sort()) console.log(link)
 }
@@ -225,4 +261,4 @@ if (problems.length) {
   console.error(`\n${new Set(problems).size} problem(s) with links or search engine tags.`)
   process.exit(1)
 }
-console.log(`Internal links, sitemap, robots.txt and search engine tags OK across ${htmlFiles(dist).length} pages; ${external.size} external links not fetched.`)
+console.log(`Internal links, sitemap, robots.txt, security.txt and search engine tags OK across ${htmlFiles(dist).length} pages; ${external.size} external links not fetched.`)

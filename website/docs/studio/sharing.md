@@ -15,6 +15,7 @@ Select a registered workflow, choose its export action, pick an output folder an
 - The bundle holds the workflow source and the resources it can package.
 - It isn't an export of your whole project, or a backup of Rem conversations.
 - For normal Git review, keep `workflow.rattish` and its scripts in source control. Bundles are for handing a workflow to another installation.
+- For a [workflow found outside `.raticode`](./projects.md#workflows-anywhere-in-the-project), the bundle carries its folder without the folders of other workflows inside it, and without `.env`, keys, logs and dependency folders unless a `.raticodeignore` there says otherwise. A workflow at the very top of a project can't be exported or duplicated until you move it into its own folder (from 0.5.5).
 
 ## Import a bundle
 

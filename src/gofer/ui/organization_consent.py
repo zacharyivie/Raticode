@@ -14,6 +14,8 @@ applied, so it never starts on settings the user meant to change first.
 
 from __future__ import annotations
 
+import copy
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -25,6 +27,9 @@ if TYPE_CHECKING:
 ORGANIZATION_BOUND = {"configure", "restore", "resume_all"}
 # Requests bound to one ticket's revision.
 TICKET_BOUND = {"task_update", "approve", "review", "reopen"}
+# Ticket requests that still apply after unrelated changes to their ticket (rebased).
+# Reviews and reopens judge the ticket's state itself, so they stay bound to it.
+REBASABLE = {"task_update", "approve"}
 # Requests that start or end work; they go after every change they might depend on.
 LAST = {"control": 1, "archive": 2}
 # At most this many requests wait per organization (organizations._request_consent).
@@ -62,14 +67,77 @@ def approval_order(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(requests, key=key)
 
 
+def intent(action: str, params: dict[str, Any]) -> str:
+    """What a request asks for, whatever revision Rem saw when it asked.
+
+    Rem asking again for the same change after the ticket or organization moved on
+    refreshes the request already waiting instead of adding a second one.
+    """
+    rest = {key: value for key, value in params.items() if key != "expectedRevision"}
+    return json.dumps([action, rest], sort_keys=True, default=str)
+
+
+def _ticket(org: dict[str, Any], params: dict[str, Any]) -> dict[str, Any] | None:
+    return next((t for t in org["runtime"]["tasks"] if t["id"] == params.get("taskId")), None)
+
+
+def seen_fields(org: dict[str, Any], action: str, params: dict[str, Any]) -> dict[str, Any] | None:
+    """What a ticket request depends on, as it was when Rem asked.
+
+    That is the ticket's plan revision, which moves with any edit to what the ticket
+    asks for, plus the current value of every field a ticket edit changes. ``None`` for
+    requests that can't be carried onto a newer revision.
+    """
+    if action not in REBASABLE:
+        return None
+    task = _ticket(org, params)
+    if task is None or task["revision"] != params.get("expectedRevision"):
+        return None
+    seen: dict[str, Any] = {"planRevision": task.get("planRevision", 1)}
+    if action == "task_update":
+        changes = params.get("changes")
+        if not isinstance(changes, dict) or not changes:
+            return None
+        seen.update({field: copy.deepcopy(task.get(field)) for field in changes})
+    return {"revision": task["revision"], "fields": seen}
+
+
+def rebased(org: dict[str, Any], request: dict[str, Any]) -> dict[str, Any] | None:
+    """``request``'s parameters moved onto its ticket's current revision, or ``None``.
+
+    A comment, a status move or the user approving the plan changes a ticket's revision,
+    and a request bound to the old revision would then fail with "Task changed". When
+    nothing the request depends on changed (see ``seen_fields``), applying it now does
+    exactly what Rem asked and the user saw, so it applies at the current revision.
+    """
+    params = request.get("params") or {}
+    seen = request.get("seen")
+    if request.get("action") not in REBASABLE or not isinstance(seen, dict):
+        return None
+    task = _ticket(org, params)
+    expected = params.get("expectedRevision")
+    if task is None or not isinstance(expected, int) or seen.get("revision") != expected:
+        return None
+    if task["revision"] == expected:
+        return None
+    fields = seen.get("fields") or {}
+    current = {**task, "planRevision": task.get("planRevision", 1)}
+    if not fields or any(current.get(field) != value for field, value in fields.items()):
+        return None
+    return {**params, "expectedRevision": task["revision"]}
+
+
 def conflict(org: dict[str, Any], request: dict[str, Any]) -> str:
     """Why ``request`` can no longer apply as Rem asked, or "".
 
     A configuration request replaces the whole configuration Rem saw. Applying it after
     the organization moved on would undo the changes made since, so it is left waiting.
+    A ticket request still applies when only unrelated parts of its ticket changed.
     """
     action = request.get("action")
     params = request.get("params") or {}
+    if rebased(org, request) is not None:
+        return ""
     expected = params.get("expectedRevision")
     if action in ORGANIZATION_BOUND and isinstance(expected, int):
         if expected != org["revision"]:

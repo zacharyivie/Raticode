@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import threading
 from pathlib import Path
 
@@ -9,7 +11,14 @@ import pytest
 
 import gofer.ui.api as api
 from gofer.rattish.editor import source_revision
-from gofer.rattish.run_service import run_rattish_file
+from gofer.rattish.run_service import (
+    effective_run_status,
+    has_live_run,
+    process_start_token,
+    request_run_stop,
+    run_rattish_file,
+    run_stop_marker,
+)
 from gofer.rattish.runtime import (
     DEFAULT_NODE_HANDLERS,
     HandlerResult,
@@ -385,3 +394,183 @@ async def test_rattish_runs_refuse_resume_options_instead_of_rerunning(
             resume_options=ResumeOptions(run_id="earlier", from_node="step"),
         )
     assert not started
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux exposes process start")
+async def test_a_run_whose_pid_another_program_reused_reads_as_interrupted(
+    tmp_path: Path,
+) -> None:
+    """After a restart, a dead runner's PID can belong to an unrelated live program."""
+    base, workflow = setup_workflow(tmp_path)
+    seen: dict[str, object] = {}
+
+    async def handler(node, context, bindings):
+        return HandlerResult(True, {"stdout": "", "stderr": "", "exit_code": 0})
+
+    def on_started(result) -> None:
+        seen.update(result.document)
+
+    run = await run_rattish_file(
+        workflow.entrypoint,
+        data_dir=base,
+        handlers=NodeHandlerRegistry({"raticode.bash_command": handler}),
+        on_started=on_started,
+    )
+    assert seen["runner_start"] == process_start_token(os.getpid())
+
+    # The parent process is alive but didn't start this run.
+    live_stranger = os.getppid()
+    reused = {
+        **run.document,
+        "status": "running",
+        "runner_pid": live_stranger,
+        "runner_start": "an-earlier-boot:12345",
+    }
+    assert effective_run_status(reused) == "interrupted"
+    run.path.write_text(json.dumps(reused))
+    result = api.workflow_run_log_payload(workflow.workflow_id, run.document["run_id"], base)
+    assert result["status"] == "disconnected"
+    assert not has_live_run(workflow.entrypoint, data_dir=base)
+
+    # The same program, still going, keeps counting as live.
+    same = {**reused, "runner_start": process_start_token(live_stranger)}
+    assert effective_run_status(same) == "running"
+
+
+@pytest.mark.anyio
+async def test_a_stop_marker_ends_a_run_that_has_no_cancel_event(tmp_path: Path) -> None:
+    """Another process asks through a file beside the record; the run ends as stopped."""
+    base, workflow = setup_workflow(tmp_path)
+    working = anyio.Event()
+    cleaned: list[str] = []
+    started: dict[str, Path] = {}
+    final = {}
+
+    async def handler(node, context, bindings):
+        working.set()
+        try:
+            await anyio.sleep(60)
+        finally:
+            cleaned.append(node["id"])
+        return HandlerResult(True, {"stdout": "", "stderr": "", "exit_code": 0})
+
+    async def execute():
+        result = await run_rattish_file(
+            workflow.entrypoint,
+            data_dir=base,
+            handlers=NodeHandlerRegistry({"raticode.bash_command": handler}),
+            on_started=lambda run: started.setdefault("path", run.path),
+        )
+        final.update(result.document)
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as group:
+            group.start_soon(execute)
+            await working.wait()
+            record = started["path"]
+            assert await anyio.to_thread.run_sync(request_run_stop, record) is True
+            assert run_stop_marker(record).is_file()
+    assert final["status"] == "stopped"
+    assert final["events"][-1] == {**final["events"][-1], "status": "stopped"}
+    assert cleaned == ["work"]
+    # The request ends with the run, and a finished run can't be asked again.
+    assert not run_stop_marker(record).exists()
+    assert request_run_stop(record) is False
+    assert not run_stop_marker(record).exists()
+
+
+@pytest.mark.anyio
+async def test_the_app_stop_reaches_a_run_it_did_not_start_and_runs_shows_the_request(
+    tmp_path: Path,
+) -> None:
+    """A run this backend doesn't track, such as a trigger scheduler's, is asked by marker.
+
+    The node keeps going for a moment after the request, as a provider call or a
+    command's cleanup can, so Runs must say "Stop requested" until it really ends.
+    """
+    base, workflow = setup_workflow(tmp_path)
+    working, release = anyio.Event(), threading.Event()
+    started: dict[str, Path] = {}
+    final = {}
+
+    async def handler(node, context, bindings):
+        working.set()
+        with anyio.CancelScope(shield=True):
+            while not release.is_set():
+                await anyio.sleep(0.01)
+        return HandlerResult(True, {"stdout": "", "stderr": "", "exit_code": 0})
+
+    async def execute():
+        result = await run_rattish_file(
+            workflow.entrypoint,
+            data_dir=base,
+            handlers=NodeHandlerRegistry({"raticode.bash_command": handler}),
+            on_started=lambda run: started.setdefault("path", run.path),
+        )
+        final.update(result.document)
+
+    def runs_row(run_id: str) -> dict[str, object]:
+        runs = api.list_workflow_run_logs_payload(workflow.workflow_id, base)["runs"]
+        return next(run for run in runs if run["id"] == run_id)
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as group:
+            group.start_soon(execute)
+            await working.wait()
+            run_id = started["path"].stem
+            assert runs_row(run_id)["stopRequested"] is False
+            answer = api.stop_workflow_run_payload(workflow.workflow_id, base, run_id)
+            assert answer == {
+                "workflowId": workflow.workflow_id,
+                "runId": run_id,
+                "stopped": True,
+                "message": "Stop requested",
+            }
+            await anyio.sleep(0.5)  # Past the runner's marker check; the node is shielded.
+            row = runs_row(run_id)
+            assert (row["status"], row["stopRequested"]) == ("running", True)
+            detail = api.workflow_run_log_payload(workflow.workflow_id, run_id, base)
+            assert (detail["status"], detail["stopRequested"]) == ("running", True)
+            release.set()
+    assert final["status"] == "stopped"
+    row = runs_row(run_id)
+    assert (row["status"], row["stopRequested"]) == ("stopped", False)
+    again = api.stop_workflow_run_payload(workflow.workflow_id, base, run_id)
+    assert again["stopped"] is False and again["message"] == "This run is no longer running."
+    assert not run_stop_marker(started["path"]).exists()
+
+
+@pytest.mark.anyio
+async def test_stopping_a_workflow_without_a_run_id_asks_every_running_run(
+    tmp_path: Path,
+) -> None:
+    base, workflow = setup_workflow(tmp_path)
+    working = anyio.Event()
+    count = {"n": 0}
+    finals: list[str] = []
+
+    async def handler(node, context, bindings):
+        count["n"] += 1
+        if count["n"] == 2:
+            working.set()
+        await anyio.sleep(60)
+        return HandlerResult(True, {"stdout": "", "stderr": "", "exit_code": 0})
+
+    async def execute():
+        result = await run_rattish_file(
+            workflow.entrypoint,
+            data_dir=base,
+            handlers=NodeHandlerRegistry({"raticode.bash_command": handler}),
+        )
+        finals.append(result.status)
+
+    assert api.stop_workflow_run_payload(workflow.workflow_id, base)["stopped"] is False
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as group:
+            group.start_soon(execute)
+            group.start_soon(execute)
+            await working.wait()
+            answer = api.stop_workflow_run_payload(workflow.workflow_id, base)
+            assert answer["stopped"] is True and len(answer["runIds"]) == 2
+    assert finals == ["stopped", "stopped"]

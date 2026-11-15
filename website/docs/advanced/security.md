@@ -35,9 +35,10 @@ Each layer is separate. Turning one off doesn't turn off the others.
 ## Credentials
 
 - Sign in to coding-provider CLIs through their own login. API-backed providers need their configured credentials.
-- In workflows, refer to secrets by name, such as `secret["SERVICE_TOKEN"]`, which reads an environment variable. Don't paste the value into source, reports or screenshots.
-- Device identities and organization secrets use the platform's credential store. Organization tools can grant a secret reference without putting the value in task text.
-- Ordinary workflow environment variables aren't an encrypted vault, and projects and the chat archive aren't encrypted at rest.
+- In workflows, refer to secrets by name, such as `secret["SERVICE_TOKEN"]`. Don't paste the value into source, reports or screenshots. From 0.5.5, the reference reads a value saved in the system keychain first, then, on a headless backend, a read-only `workflow-secret-NAME` file in its secrets folder, then the environment variable with the same name. Save one in **Workflow settings > Secrets** or with `Raticode rattish secrets set NAME`. See [Secrets](../workflows/inputs.md#secrets).
+- Saved workflow secrets belong to the computer and its data folder, and any workflow you run there can read them, so save only what you'd hand to those workflows. Raticode never shows a saved value again, keeps it out of run records, and lets only you save or remove one: agent tokens and the CLI inside a Rem or worker turn can list names but not change them. On Linux, other programs running as you can read the Secret Service too, so the keychain protects values at rest, not from your own processes.
+- Device identities, organization secrets, workflow secrets and, from 0.5.5, the [Jev](../workflows/jev.md) key use the platform's credential store. Raticode reads the Jev key only from there, never from an environment variable, and never passes it to agents or workflow commands. On a server with no keychain, a headless backend can read these secrets, except device identities, from a read-only [secrets folder](../reference/headless.md#secrets-without-a-keychain) of owner-only files (from 0.5.5). It never writes a secret there in plain text. Organization tools can grant a secret reference without putting the value in task text.
+- Workflow environment variables aren't an encrypted vault, and projects and the chat archive aren't encrypted at rest.
 
 ## Stored data
 
@@ -52,6 +53,7 @@ Workflow source and editor metadata live in each project's `.raticode/` folder. 
 - Some CLI commands accept a different data folder.
 - The desktop app's own profile, which holds working chat state, is stored apart from the backend files.
 - Swarms and organizations keep their own saved state.
+- Rem's chat, tasks and board are in `rem-home.sqlite3`. Raticode keeps verified copies of it in the private `rem-db-backups` folder beside it ([Rem's database backups](../knowledge/second-brain.md#rem-s-database-backups)).
 - An enabled [conversation archive](../knowledge/archive.md) writes a separate copy to the folder you choose. [Second Brain](../knowledge/second-brain.md) indexes your knowledge folder.
 
 Back up every location you rely on. Deleting one copy doesn't always delete the others.
@@ -66,5 +68,6 @@ Raticode needs no Raticode account or cloud service. These still use the network
 - model downloads
 - Tailscale, if you turn it on for the phone
 - HTTP request nodes in workflows
+- jev nodes in workflows, which call TypeSafe's Jev service (from 0.5.5)
 
 See [Provider setup](../setup.md), [Tools and resources](../rem/resources.md) and [Troubleshooting](../reference/troubleshooting.md).

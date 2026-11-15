@@ -107,7 +107,8 @@ internal class GeckoBrowser private constructor(private val app: Application) {
     private val mediaDetails = HashMap<String, MediaDetails>()
     private val documents = GeckoDocuments()
     private val actions = HashMap<String, WebExtension.Action>()
-    private val defaultActions = HashMap<String, WebExtension.Action>()
+    /** Each extension's toolbar button and page button for every tab, kept apart: GeckoView only merges a tab's button with the same kind. */
+    private val defaultActions = GeckoRules.ExtensionButtons<WebExtension.Action> { change, everyTab -> change.withDefault(everyTab) }
     /** The session Gecko's extensions were last told is the tab in view (see [GeckoRules.extensionTab]). */
     private var extensionTab: GeckoSession? = null
     /** Counts popups and tabs opened, so Open can tell whether a button press showed anything. */
@@ -874,17 +875,16 @@ internal class GeckoBrowser private constructor(private val app: Application) {
      * An extension's toolbar button changed. [session] is the tab it changed for, or null for every tab; a tab's own
      * button only lists what differs, so it is filled in from the one for every tab.
      */
-    private fun remember(extension: WebExtension, session: GeckoSession?, action: WebExtension.Action) {
-        val shown = if (session == null) action.also { defaultActions[extension.id] = it }
-            else if (session === this.session) defaultActions[extension.id]?.let(action::withDefault) ?: action
-            else return
+    private fun remember(extension: WebExtension, session: GeckoSession?, action: WebExtension.Action, page: Boolean) {
+        if (session != null && session !== this.session) return
+        val shown = defaultActions.changed(extension.id, page, forEveryTab = session == null, button = action)
         actions[extension.id] = shown
         extensions = extensions.map { if (it.id == extension.id) it.copy(action = shown) else it }
     }
 
     private val sessionActions = object : WebExtension.ActionDelegate {
-        override fun onBrowserAction(extension: WebExtension, session: GeckoSession?, action: WebExtension.Action) = remember(extension, session, action)
-        override fun onPageAction(extension: WebExtension, session: GeckoSession?, action: WebExtension.Action) = remember(extension, session, action)
+        override fun onBrowserAction(extension: WebExtension, session: GeckoSession?, action: WebExtension.Action) = remember(extension, session, action, page = false)
+        override fun onPageAction(extension: WebExtension, session: GeckoSession?, action: WebExtension.Action) = remember(extension, session, action, page = true)
         override fun onTogglePopup(extension: WebExtension, action: WebExtension.Action) = openPopup(extension)
         override fun onOpenPopup(extension: WebExtension, action: WebExtension.Action) = openPopup(extension)
     }
@@ -958,7 +958,7 @@ internal class GeckoBrowser private constructor(private val app: Application) {
     }
 
     fun uninstall(extension: Extension) {
-        runtime.webExtensionController.uninstall(extension.native).accept({ actions.remove(extension.id); defaultActions.remove(extension.id); notice = "Removed ${extension.name}."; refreshExtensions() }, { notice = "${extension.name} couldn't be removed." })
+        runtime.webExtensionController.uninstall(extension.native).accept({ actions.remove(extension.id); defaultActions.forget(extension.id); notice = "Removed ${extension.name}."; refreshExtensions() }, { notice = "${extension.name} couldn't be removed." })
     }
     fun setEnabled(extension: Extension, on: Boolean) {
         val controller = runtime.webExtensionController

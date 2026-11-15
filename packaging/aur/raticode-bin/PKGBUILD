@@ -1,4 +1,4 @@
-# Maintainer: Zack Ivie <publisheddoonk at gmail dot com>
+# Maintainer: Zack Ivie <support at raticode dot dev>
 #
 # Generated values: scripts/aur-packages.py in https://github.com/zacharyivie/Raticode
 # sets pkgver, pkgrel and sha256sums from the release's published checksums-linux.txt.

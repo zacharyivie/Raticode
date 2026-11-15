@@ -15,6 +15,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.test.platform.app.InstrumentationRegistry
+import dev.raticode.mobile.live.WorkflowControl
 import dev.raticode.mobile.live.Workflows
 import dev.raticode.mobile.ui.RaticodeTheme
 import dev.raticode.mobile.ui.WorkflowDetail
@@ -36,7 +37,7 @@ class WorkflowScreensTest {
     private val now = java.time.OffsetDateTime.now()
     private fun ago(minutes: Long) = now.minusMinutes(minutes).toString()
 
-    private fun workflow(running: Boolean, resume: Boolean = false) = Workflows.parse(JSONObject("""{
+    private fun workflow(running: Boolean, resume: Boolean = false, inputs: Boolean = false) = Workflows.parse(JSONObject("""{
         "workflow_id": "wf-report", "name": "Nightly research report", "project_name": "Notes", "status": "${if (running) "running" else "failed"}",
         "nodes": [{"node_id": "start", "label": "Collect sources", "kind": "tool"}, {"node_id": "summarize", "label": "Summarize findings", "kind": "agent"},
                   {"node_id": "check", "label": "Check citations", "kind": "agent"}, {"node_id": "approve", "label": "Approve publishing", "kind": "approval"},
@@ -55,7 +56,16 @@ class WorkflowScreensTest {
             {"node_id": "approve", "status": "pending"}, {"node_id": "publish", "status": "pending"}]},
         "revision": "sha256:fixture", "preview": {"blocking": [], "destructive": ["Publishes the report to the shared folder"], "warnings": []},
         "controls": {"run": {"allowed": ${!running}, "reason": "${if (running) "A run is already going." else ""}"}, "stop": {"allowed": $running, "reason": ""},
-                     "resume": {"allowed": $resume, "reason": "${if (resume) "" else "Resuming Rattish workflow runs is not supported yet. Start a new run instead."}"}}}"""))
+                     "resume": {"allowed": $resume, "reason": "${if (resume) "" else "Resuming Rattish workflow runs is not supported yet. Start a new run instead."}"${if (resume) ", \"rerun_nodes\": [\"check\"]" else ""}}}}""").apply {
+        // The desktop's Run form fields for a workflow with typed inputs, as workflows.read sends them.
+        if (inputs) put("inputs", org.json.JSONArray("""[
+            {"name": "count", "label": "count", "description": "", "kind": "integer", "required": false, "secret": false, "has_default": true, "minimum": 1, "maximum": 9, "default": 3},
+            {"name": "dry", "label": "Dry run", "description": "Check without publishing", "kind": "boolean", "required": false, "secret": false, "has_default": true, "default": false},
+            {"name": "extra", "label": "extra", "description": "", "kind": "json", "required": false, "secret": false, "has_default": false, "json_type": "object"},
+            {"name": "mode", "label": "mode", "description": "", "kind": "choice", "required": false, "secret": false, "has_default": true, "choices": ["fast", "safe"], "default": "safe"},
+            {"name": "target", "label": "Target", "description": "Where to ship", "kind": "text", "required": true, "secret": false, "has_default": false},
+            {"name": "token", "label": "token", "description": "", "kind": "text", "required": false, "secret": true, "has_default": true}]"""))
+    })
 
     private val list = Workflows.parseList(JSONObject("""{"earlier": 0, "workflows": [
         {"workflow_id": "wf-report", "name": "Nightly research report", "project_name": "Notes", "status": "running",
@@ -149,6 +159,84 @@ class WorkflowScreensTest {
         assertEquals(listOf("workflows.resume" to "r3"), actions)
     }
 
+    @Test fun runAgainNeedsConfirmationAndNamesInputsThePhoneCannotFill() {
+        val actions = mutableListOf<Pair<String, String?>>()
+        var control by mutableStateOf(WorkflowControl(true, ""))
+        compose.setContent {
+            Phone(320, 568) { WorkflowDetail(workflow(running = false).copy(rerunControl = control), null, WorkflowScreenState(true, false, null, null), {}, {}, {}) { a, r -> actions += a to r } }
+        }
+        compose.onNodeWithTag("workflowRerun").assertIsEnabled().performClick()
+        compose.onNodeWithText("Run Nightly research report again with the same inputs?").assertIsDisplayed()
+        shot("rerun-confirm-small")
+        compose.onNode(hasText("Run again") and hasAnyAncestor(isDialog())).performClick()
+        assertEquals(listOf(Workflows.RERUN to "r3"), actions)
+        control = WorkflowControl(false, "This run's input token is a password, which Raticode doesn't save, and this phone can't fill it in. Use Run again on your computer.")
+        compose.waitForIdle()
+        compose.onNodeWithTag("workflowRerun").assertIsNotEnabled()
+        compose.onNodeWithText("Run again: " + control.reason).assertExists()
+    }
+
+    @Test fun resumeFromAFailedStepNamesTheStepsItRunsAgain() {
+        compose.setContent {
+            Phone(320, 568) { WorkflowDetail(workflow(running = false, resume = true), null, WorkflowScreenState(true, false, null, null), {}, {}, {}) { _, _ -> } }
+        }
+        compose.onNodeWithText("Resume from failed step").assertIsDisplayed()
+        compose.onNodeWithTag("workflowResume").performClick()
+        compose.onNodeWithText("Resume from the failed step?").assertIsDisplayed()
+        compose.onNodeWithText("Runs again").assertIsDisplayed()
+        compose.onNodeWithText("• check").assertIsDisplayed()
+        shot("resume-confirm-small")
+    }
+
+    @Test fun theRunSheetCollectsTypedInputsBeforeSendingThem() {
+        val sent = mutableListOf<JSONObject>()
+        val actions = mutableListOf<Pair<String, String?>>()
+        var size by mutableStateOf(320 to 568)
+        var font by mutableFloatStateOf(1f)
+        var dark by mutableStateOf(false)
+        compose.setContent {
+            Phone(size.first, size.second, font, dark) {
+                WorkflowDetail(workflow(running = false, inputs = true), null, WorkflowScreenState(true, false, null, null), {}, {}, {},
+                    onRunWithInputs = { sent += it }) { a, r -> actions += a to r }
+            }
+        }
+        compose.onNodeWithTag("workflowRun").performClick()
+        compose.onNodeWithTag("workflowRunSheet").assertIsDisplayed()
+        compose.onNodeWithText("Run Nightly research report").assertIsDisplayed()
+        compose.onNodeWithTag("runInput:count").assert(hasText("3"))
+        shot("run-sheet-small")
+        // Nothing is sent until the required input is filled in.
+        compose.onNodeWithTag("workflowRunSend").performScrollTo().performClick()
+        compose.onNodeWithText("Fix the fields marked above, then run.").assertExists()
+        assertTrue(sent.isEmpty())
+        compose.onNodeWithTag("runInput:target").performScrollTo().performTextInput("staging")
+        compose.onNodeWithTag("runInput:count").performScrollTo().performTextReplacement("12")
+        compose.onNodeWithTag("workflowRunSend").performScrollTo().performClick()
+        compose.onNodeWithText("Must be at most 9", substring = true).assertExists()
+        assertTrue(sent.isEmpty())
+        // Clearing a number field leaves it blank rather than snapping back.
+        compose.onNodeWithTag("runInput:count").performScrollTo().performTextClearance()
+        compose.onNodeWithTag("runInput:count").assert(hasText("Leave blank to use the workflow's default.", substring = true))
+        compose.onNodeWithTag("runInput:count").performTextInput("4")
+        compose.onNodeWithTag("runInput:dry").performScrollTo().performClick()
+        compose.onNodeWithText("fast").performScrollTo().performClick()
+        compose.onNodeWithTag("runInput:extra").performScrollTo().performTextInput("{\"tags\": [\"a\"]}")
+        font = 1.3f; dark = true; size = 360 to 740; compose.waitForIdle()
+        shot("run-sheet-filled-common-large-font-dark")
+        compose.onNodeWithTag("workflowRunSend").performScrollTo().performClick()
+        assertEquals(1, sent.size)
+        val values = sent.single()
+        assertEquals("staging", values.getString("target"))
+        assertEquals(4L, values.getLong("count"))
+        assertTrue(values.getBoolean("dry"))
+        assertEquals("fast", values.getString("mode"))
+        assertEquals("[\"a\"]", values.getJSONObject("extra").getJSONArray("tags").toString())
+        assertFalse(values.has("token"))
+        // The sheet replaces the plain confirmation, so nothing else was sent.
+        assertTrue(actions.isEmpty())
+        compose.onAllNodesWithTag("workflowRunSheet").assertCountEquals(0)
+    }
+
     @Test fun offlineAndBusyStatesTurnControlsOff() {
         var state by mutableStateOf(WorkflowScreenState(false, false, null, null))
         compose.setContent { Phone(360, 740) { WorkflowDetail(workflow(running = false), null, state, {}, {}, {}) { _, _ -> } } }
@@ -205,6 +293,61 @@ class WorkflowScreensTest {
     @Test fun emptyListSaysWhereToCreateOne() {
         compose.setContent { Phone(320, 568) { WorkflowList(Workflows.parseList(JSONObject()), WorkflowScreenState(true, false, null, null), {}) {} } }
         compose.onNodeWithText("No workflows yet. Create one in Raticode on your computer, then it shows up here.").assertIsDisplayed()
+    }
+
+    private fun withTriggers(paused: Boolean) = Workflows.parse(JSONObject("""{
+        "workflow_id": "wf-report", "name": "Nightly research report", "project_name": "Notes", "status": "idle",
+        "nodes": [{"node_id": "start", "label": "Collect sources", "kind": "tool"}], "edges": [], "runs": [],
+        "controls": {"run": {"allowed": true, "reason": ""}, "stop": {"allowed": false, "reason": ""}, "resume": {"allowed": false, "reason": ""}},
+        "triggers_paused": $paused,
+        "triggers": [{"trigger_id": "trg_on", "kind": "cron", "kind_label": "Schedule", "label": "Weekday digest", "description": "0 9 * * 1-5 (UTC)",
+                      "enabled": true, "next_run_at": "${now.plusHours(3)}", "last_result": {"status": "passed", "at": "${ago(60)}", "message": ""}},
+                     {"trigger_id": "trg_off", "kind": "file", "kind_label": "File change", "label": "", "description": "Notes/inbox (*.md)",
+                      "enabled": false, "next_run_at": "", "last_result": {"status": "skipped", "at": "${ago(30)}", "message": "Skipped because all triggers were paused."}}]}"""))
+
+    @Test fun triggersListTheirKindNextRunAndLastResultAndTurningOneOnAsksFirst() {
+        val switched = mutableListOf<Pair<String, Boolean>>()
+        compose.setContent {
+            Phone(360, 740) {
+                WorkflowDetail(withTriggers(paused = false), null, WorkflowScreenState(true, false, null, null), {}, {}, {},
+                    onTrigger = { trigger, on -> switched += trigger.id to on }) { _, _ -> }
+            }
+        }
+        compose.onNodeWithTag("workflowTriggersTab").performClick()
+        compose.onNodeWithText("Weekday digest").assertIsDisplayed()
+        compose.onNodeWithText("Schedule · 0 9 * * 1-5 (UTC)").assertIsDisplayed()
+        compose.onNodeWithText("Last: Succeeded", substring = true, useUnmergedTree = true).assertExists()
+        compose.onNodeWithText("Skipped because all triggers were paused.").assertIsDisplayed()
+        shot("triggers-small")
+        // Off goes at once; on asks first.
+        compose.onNodeWithTag("trigger:trg_on").performClick()
+        assertEquals(listOf("trg_on" to false), switched)
+        compose.onNodeWithTag("trigger:trg_off").performClick()
+        compose.onNodeWithText("Turn on File change?").assertIsDisplayed()
+        assertEquals(1, switched.size)
+        compose.onNodeWithTag("triggerOnConfirm").performClick()
+        assertEquals(listOf("trg_on" to false, "trg_off" to true), switched)
+    }
+
+    @Test fun pausingAllTriggersGoesAtOnceAndResumingAsksFirst() {
+        val sent = mutableListOf<Boolean>()
+        var paused by mutableStateOf(false)
+        compose.setContent {
+            Phone(360, 740) {
+                WorkflowList(list.copy(triggers = dev.raticode.mobile.live.TriggerPause(paused, if (paused) ago(5) else "", 3, 2)),
+                    WorkflowScreenState(true, false, null, null), {}, onPauseTriggers = { sent += it; paused = it }) {}
+            }
+        }
+        compose.onNodeWithText("2 of 3 triggers on.").assertIsDisplayed()
+        compose.onNodeWithTag("pauseAllTriggers").performClick()
+        assertEquals(listOf(true), sent)
+        compose.onNodeWithText("Paused since", substring = true).assertIsDisplayed()
+        shot("triggers-paused-list")
+        compose.onNodeWithTag("pauseAllTriggers").performClick()
+        compose.onNodeWithText("Resume all triggers?").assertIsDisplayed()
+        assertEquals(listOf(true), sent)
+        compose.onNodeWithTag("resumeTriggersConfirm").performClick()
+        assertEquals(listOf(true, false), sent)
     }
 
     private fun pressBack() = InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_BACK).also { compose.waitForIdle() }

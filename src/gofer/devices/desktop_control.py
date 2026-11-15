@@ -8,7 +8,11 @@ and approval policies, so the phone gains no authority the desktop UI lacks.
 
 The phone never sends paths. Projects are named by the IDs in the phone's
 catalog; Rem tasks, runs, threads, organizations, swarms and workflows by their
-desktop IDs. Workflows are viewed and run, never edited (see ``workflows.py``).
+desktop IDs. Workflows are viewed, run, stopped, resumed and run again, never edited (see
+``workflows.py``); their triggers can be turned on or off and all paused at once.
+A run can take typed inputs from the phone's Run form; the desktop checks them
+against the workflow's input schema, and the phone guard screens them first like
+any other request text. Workflow secrets never go to the phone.
 Source control is a read-only status view of open projects (``source_control.py``),
 and the file explorer browses their folders and opens files read-only
 (``file_explorer.py``). The phone's own browser sees the window's open web tabs and
@@ -42,7 +46,7 @@ done. Neither device stores the words; a failure answers with the heard text.
 Excluded on purpose: editing, renaming or deleting files, terminals, driving the
 browser (pages, input, Rem's browser tools and its profiles), pairing, provider
 credentials, skill and MCP server definitions, organization configuration and
-imports, workflow editing and run inputs, and settings that widen what agents
+imports, workflow editing and workflow secrets, and settings that widen what agents
 may do.
 """
 
@@ -105,6 +109,7 @@ READ_OPS = frozenset(
         "usage.overview",
         "workflows.list",
         "workflows.read",
+        "workflows.runs",
     }
 )
 ACTION_OPS = frozenset(
@@ -149,6 +154,9 @@ ACTION_OPS = frozenset(
         "workflows.run",
         "workflows.stop",
         "workflows.resume",
+        "workflows.rerun",
+        "workflows.trigger",
+        "workflows.triggers.pause",
     }
 )
 # Result bodies are JSON text split into parts. Escaping can at most double a
@@ -207,9 +215,11 @@ MENTIONS = 32
 # Phone alerts per read; older ones are counted, not sent.
 REM_NOTICES = 8
 # The alert switches a phone can name in rem.notices; the desktop decides what counts.
-REM_NOTICE_FILTERS = ("needs_you", "finished", "proposals")
-# Report position, then organization event position, or "-" with no organizations here.
-_REM_NOTICE_MARK = re.compile(r"n1\.([0-9]{1,16})\.([0-9]{1,16}|-)")
+REM_NOTICE_FILTERS = ("needs_you", "finished", "proposals", "workflow")
+# Report position, organization event position or "-" with no organizations here, then
+# the workflow alert position. Marks from desktops before workflow alerts end after the
+# organization position; the workflow position then starts from now.
+_REM_NOTICE_MARK = re.compile(r"n1\.([0-9]{1,16})\.([0-9]{1,16}|-)(?:\.([0-9]{1,16}))?")
 # Rem run states that end a task; a cancelled one was stopped by the person being told.
 _REM_FINISHED = {"succeeded", "failed", "blocked", "outcome_unknown"}
 _LOCAL_LINK = re.compile(r"\[([^\]]*)\]\(<?(?:file:|/|~/|[A-Za-z]:[\\/])[^)]*\)")
@@ -920,7 +930,9 @@ def _snapshot_refused(exc: PairingError) -> Refused:
     return Refused("unauthorized", "The desktop couldn't send this file safely.")
 
 
-def _notice_filter(params: dict[str, Any]) -> tuple[list[str], tuple[int, int | None] | None]:
+def _notice_filter(
+    params: dict[str, Any],
+) -> tuple[list[str], tuple[int, int | None, int | None] | None]:
     """The checked ``include`` and ``mark`` of a ``rem.notices`` read that names a filter."""
     include = params["include"]
     if set(params) - {"after", "include", "mark"}:
@@ -938,7 +950,11 @@ def _notice_filter(params: dict[str, Any]) -> tuple[list[str], tuple[int, int | 
     match = _REM_NOTICE_MARK.fullmatch(mark) if type(mark) is str and len(mark) <= 256 else None
     if match is None:
         raise Refused("invalid", "Unknown alert position.")
-    return include, (int(match[1]), None if match[2] == "-" else int(match[2]))
+    return include, (
+        int(match[1]),
+        None if match[2] == "-" else int(match[2]),
+        None if match[3] is None else int(match[3]),
+    )
 
 
 def _task_reason(work: dict[str, Any], include: list[str]) -> str:
@@ -983,8 +999,26 @@ def _alert_text(value: Any, limit: int) -> str:
 
 
 def _source_notice(alert: dict[str, Any]) -> dict[str, Any]:
-    """A self-work or organization alert as a notice. Neither kind is in Rem's chat."""
+    """A self-work, organization or workflow alert as a notice. None of them is in Rem's chat."""
     reason = alert["reason"]
+    if reason == "workflow":
+        # Left by a notification node with channel: phone. The phone keeps the text
+        # generic unless the user turned on Show Rem's words, and opens the run on a tap.
+        name = _alert_text(alert.get("workflow_name"), 160)
+        return {
+            "id": _text(alert["id"], 128),
+            "kind": "workflow",
+            "body": _alert_text(alert.get("body"), 1500),
+            "created_at": _text(alert.get("at"), 80),
+            "title": _alert_text(alert.get("title"), 160) or name,
+            "needs_user": False,
+            "reason": reason,
+            "workflow_id": _text(alert.get("workflow_id"), 200),
+            "workflow_name": name,
+            "run_id": _text(alert.get("run_id"), 128),
+            # A run's one "And N more from this run" notice: N, the notices it folds.
+            "more_from_run": _count(alert.get("more_from_run")),
+        }
     if reason == "proposals":
         count = int(alert["count"])
         body = f"{count} proposal{'' if count == 1 else 's'} waiting for your approval."
@@ -1007,6 +1041,11 @@ def _source_notice(alert: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _count(value: Any) -> int:
+    """A stored count as a bounded non-negative integer."""
+    return min(max(value, 0), 1_000_000) if type(value) is int else 0
+
+
 def _notice_when(notice: dict[str, Any]) -> float:
     try:
         return datetime.fromisoformat(notice["created_at"]).timestamp()
@@ -1024,6 +1063,8 @@ def _notice_answer(
         found = sorted([*found, *map(_source_notice, sources["alerts"])], key=_notice_when)
         more = more or sources["more"]
         mark["mark"] = sources["mark"]
+        # Workflow messages removed on the desktop before this phone read them.
+        mark["dropped"] = sources["dropped"]
     return {
         "cursor": cursor,
         "notices": found[-REM_NOTICES:],
@@ -1036,7 +1077,7 @@ def _notice_answer(
 
 def _project_scoped(op: str) -> bool:
     """Reads that need the phone's open projects, read under the device lock."""
-    return op.startswith("source_control.") or op in {"files.list", "files.text"}
+    return op.startswith("source_control.") or op in {"files.list", "files.text", "workflows.runs"}
 
 
 def _phone_name(name: str) -> bool:
@@ -1308,6 +1349,7 @@ class DesktopControl:
             roots = self._rem_config_roots(store)
             from gofer.ui.rem_kanban import message_ticket_keys, task_ticket_keys
 
+            # The newest window of the chat; the phone pages back with rem.history.
             conversation = store.conversation()
             # The phone reads run summaries only, never traces or worker config.
             tasks = store.tasks(summary=True)
@@ -1412,7 +1454,7 @@ class DesktopControl:
         if op.startswith("workflows."):
             from gofer.devices.workflows import gather
 
-            return gather(op, params, self.workflows.base)
+            return gather(op, params, self.workflows.base, projects)
         if op.startswith("source_control."):
             from gofer.devices import source_control
 
@@ -1571,11 +1613,21 @@ class DesktopControl:
                 "memories": True,
                 # Phones send thread.manage read/unread only to desktops that say so here.
                 "thread_read": True,
+                # Phones send thread.manage delete_permanently only to desktops that say so.
+                "thread_purge": True,
                 # Phones read rem.notices for Rem chat alerts only from desktops that say so.
                 "rem_notices": self.rem is not None,
                 # Phones send rem.notices include and mark only to desktops that say so.
                 "rem_notices_filter": self.rem is not None,
+                # Phones name the workflow switch in include only to desktops that say so.
+                "rem_notices_workflow": self.rem is not None,
                 "workflows": self.workflows.available(),
+                # Phones read workflows.runs, every workflow's runs in one list, only
+                # from desktops that say so here.
+                "workflow_runs": self.workflows.available(),
+                # Phones list triggers and send workflows.trigger and
+                # workflows.triggers.pause only to desktops that say so here.
+                "workflow_triggers": self.workflows.available(),
                 # Phones read source_control.* only from desktops that say so here;
                 # history, commit and diff came later, with their own flag.
                 "source_control": True,
@@ -1674,7 +1726,7 @@ class DesktopControl:
             return self._settings_view()
         if op == "usage.overview":
             return self._usage(data)
-        if op in {"workflows.list", "workflows.read"}:
+        if op in {"workflows.list", "workflows.read", "workflows.runs"}:
             return self.workflows.read(peer, op, params, data)
         if op.startswith("source_control."):
             from gofer.devices import source_control
@@ -1730,7 +1782,8 @@ class DesktopControl:
             else "",
             "provider": _text(conversation.get("provider"), 80),
             "model": _text(conversation.get("model"), 160),
-            "earlier": len(messages) - len(shown),
+            # What the desktop didn't read for this snapshot, plus what didn't fit.
+            "earlier": int(snapshot.get("earlier") or 0) + len(messages) - len(shown),
             "messages": shown,
             # Finished one-time tasks leave the list; the most recently run comes first.
             "tasks": listed,
@@ -1836,15 +1889,20 @@ class DesktopControl:
         return clean_phone_actions(raw)
 
     def _notice_sources(
-        self, rem: Any, include: list[str], positions: tuple[int, int | None] | None
+        self,
+        rem: Any,
+        include: list[str],
+        positions: tuple[int, int | None, int | None] | None,
     ) -> dict[str, Any]:
-        """Self-work and organization alerts after ``positions``, and the position after them.
+        """Self-work, organization and workflow alerts after ``positions``, and the next position.
 
         Every source's position moves on whichever switches are on, so a switch turned on
         later starts from now instead of from when the first one went on. A phone with no
         saved ``mark`` passes ``None`` and only learns the current positions.
         """
-        report, organization = positions or (None, None)
+        from gofer.core.phone_alerts import PhoneAlertStore
+
+        report, organization, workflow = positions or (None, None, None)
         reports = rem.self_work.alerts_after(report)
         manager = self.organizations
         organizations = (
@@ -1852,12 +1910,26 @@ class DesktopControl:
             if manager is None
             else manager.alerts_after(None if not manager.enabled else organization)
         )
+        data_dir = getattr(rem, "data_dir", None)
+        workflows: dict[str, Any] = (
+            PhoneAlertStore(Path(data_dir)).after(workflow)
+            if data_dir
+            else {"last": 0, "more": False, "dropped": 0, "alerts": []}
+        )
         last = "-" if organizations is None else str(organizations["last"])
-        alerts = [*reports["alerts"], *(organizations["alerts"] if organizations else [])]
+        alerts = [
+            *reports["alerts"],
+            *(organizations["alerts"] if organizations else []),
+            *workflows["alerts"],
+        ]
         return {
             "include": include,
-            "mark": f"n1.{reports['last']}.{last}",
-            "more": reports["more"] or bool(organizations and organizations["more"]),
+            "mark": f"n1.{reports['last']}.{last}.{workflows['last']}",
+            "more": reports["more"]
+            or bool(organizations and organizations["more"])
+            or workflows["more"],
+            # The position moves either way; only a phone with the switch on hears of gaps.
+            "dropped": workflows.get("dropped", 0) if "workflow" in include else 0,
             "alerts": [a for a in alerts if a["reason"] in include],
         }
 
@@ -2070,8 +2142,9 @@ class DesktopControl:
             body = _authored(data.get("messages") or [], message_id, {"assistant"})
             base = (data.get("metadata") or {}).get("projectRoot") or None
         else:
-            messages = self._need(self.rem, "Rem").store.conversation()["messages"]
-            body = _authored(messages, message_id, {"rem"})
+            # The one message, by ID: a link in a message paged back from history opens too.
+            found = self._need(self.rem, "Rem").store.find_message(message_id)
+            body = _authored([found] if found else [], message_id, {"rem"})
         if body is None:
             raise Refused("not_found", "This message is no longer on the desktop.")
         if not _whole_link(body, href):
@@ -2429,6 +2502,8 @@ class DesktopControl:
                     "pause_reason": _text(item.get("pauseReason"), 300),
                     "employees": int(item.get("employees") or 0),
                     "open_tasks": int(item.get("openTasks") or 0),
+                    "needs_you": int(item.get("needsYou") or 0),
+                    "archived": item.get("archived") is True,
                     "projects": [
                         self._project_name(peer, root, catalog)
                         for root in item.get("projectRoots") or []
@@ -2705,12 +2780,8 @@ class DesktopControl:
                 or len(set(map(str, identifiers))) != len(identifiers)
             ):
                 raise Refused("invalid", f"Attach at most {REM_FILES} different files.")
-            snapshot = rem.store.conversation()
             # A resent request Rem already holds, answered or still waiting, isn't stored twice.
-            sent = any(
-                m.get("id") == request
-                for m in [*snapshot["messages"], *(snapshot.get("waiting") or [])]
-            )
+            sent = rem.store.find_message(request, waiting=True) is not None
             if identifiers and not sent:
                 message["attachments"] = self._rem_attachments(peer, rem, identifiers)
             try:
@@ -2904,12 +2975,9 @@ class DesktopControl:
         ):
             raise Refused("invalid", "This file can't be opened from the phone.")
         rem = self._need(self.rem, "Rem")
-        snapshot = rem.store.conversation()
-        messages = [*(snapshot.get("messages") or []), *(snapshot.get("waiting") or [])]
-        message = next(
-            (m for m in messages if m.get("id") == message_id and m.get("role") == "user"), None
-        )
-        if message is None:
+        # The one message, by ID, stored or still waiting; the chat itself isn't read.
+        message = rem.store.find_message(message_id, waiting=True)
+        if message is None or message.get("role") != "user":
             raise Refused("not_found", "This message is no longer in Rem's chat.")
         attachment = next(
             (

@@ -85,6 +85,34 @@ def test_export_and_import_paths_cannot_use_a_brain_grant_to_escape(api, tmp_pat
     assert not target.exists()
 
 
+def test_backup_folder_needs_its_own_desktop_grant(api, tmp_path):
+    root = tmp_path / "brain"
+    root.mkdir()
+    grant = api.path_grants.register(root)
+    brain = request(api, "open", {"root": str(root)}, {str(root): grant})[1]["result"]
+    folder = tmp_path / "backups"
+    patch = {"backup": {"enabled": True, "folder": str(folder)}}
+    params = {"id": brain["id"], "patch": patch}
+    # Scheduled backups write there unattended, so a brain grant is not enough.
+    assert request(api, "update_brain", params, {str(folder): grant})[0] == 403
+    assert request(api, "update_brain", params)[0] == 403
+    folder.mkdir()
+    status, value = request(
+        api, "update_brain", params, {str(folder): api.path_grants.register(folder)}
+    )
+    assert status == 200
+    assert value["result"]["backup"]["enabled"] is True
+    status, value = request(api, "backup_estimate", {"brainId": brain["id"]})
+    assert status == 200 and value["result"]["conversations"] == 0
+
+
+def test_agent_tokens_cannot_change_backups(api, tmp_path):
+    from gofer.ui.headless import AGENT_SECOND_BRAIN_ACTIONS
+
+    assert "update_brain" not in AGENT_SECOND_BRAIN_ACTIONS
+    assert "task" not in AGENT_SECOND_BRAIN_ACTIONS
+
+
 def test_malformed_actions_are_structured_errors(api):
     status, value = request(api, "mutate", {"kind": "unknown", "id": "x"})
     assert status == 400 and "error" in value

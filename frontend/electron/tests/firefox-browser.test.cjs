@@ -514,9 +514,10 @@ test("a real Firefox reports files a page builds (blob: and data: links) with ma
     assert.equal(contents.isLoading(), false, "a download left the tab loading");
   } finally {
     contents.close();
-    engine.stop();
+    // Firefox writes its profile while it shuts down, so removing the folder before it
+    // exits fails with ENOTEMPTY on a busy machine and hides the test's own result.
+    await engine.stopAndWait();
     server.close();
-    // stop() doesn't wait for Firefox to exit, and it writes its profile while it shuts down.
     fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 30, retryDelay: 100 });
   }
 });

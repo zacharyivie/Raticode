@@ -122,4 +122,49 @@ class RemNoticesTest {
         assertFalse(JSONObject(state.getJSONArray("outbox").getString(0)).getJSONObject("payload").getJSONObject("params").has("include"))
         assertFalse(dropQueuedNoticeFilters(state))
     }
+
+    @Test fun workflowMessagesParseWithTheirRun() {
+        val read = RemNoticeText.parse(JSONObject("""{"cursor": 4, "mark": "n1.0.-.2", "skipped": 0, "more": false, "notices": [
+            {"id": "workflow-2", "kind": "workflow", "reason": "workflow", "body": "12 files copied.", "created_at": "2026-11-14T21:03:07+00:00",
+             "title": "Backup finished", "needs_user": true, "workflow_id": "nightly", "workflow_name": "Nightly", "run_id": "run-1"},
+            {"id": "t1", "kind": "task_update", "reason": "finished", "body": "Done", "created_at": "", "title": "T", "needs_user": false,
+             "workflow_id": "not-for-tasks", "run_id": "x"}]}"""))
+        val (message, task) = read.notices
+        assertEquals("workflow" to "workflow", message.kind to message.reason)
+        assertEquals(Triple("nightly", "run-1", "Nightly"), Triple(message.workflowId, message.runId, message.workflowName))
+        // A workflow message never claims to need the user, and only workflow messages carry a run.
+        assertFalse(message.needsUser)
+        assertEquals("" to "", task.workflowId to task.runId)
+        assertEquals(RemAlertRules.WORKFLOW_GENERIC, RemNoticeText.line(message, showText = false))
+        val overview = DesktopViews.parse("overview", JSONObject().put("rem_notices_filter", true).put("rem_notices_workflow", true)) as DesktopOverview
+        assertTrue(overview.remNoticesWorkflow)
+        assertFalse((DesktopViews.parse("overview", JSONObject().put("rem_notices_filter", true)) as DesktopOverview).remNoticesWorkflow)
+    }
+
+    @Test fun readsNamingWorkflowMessagesAreDroppedWhenADesktopStopsAdvertisingThem() {
+        fun event(params: JSONObject) = JSONObject().put("type", "desktop.read").put("payload", JSONObject().put("op", "rem.notices").put("params", params)).toString()
+        val state = JSONObject().put("outbox", JSONArray(listOf(event(JSONObject().put("include", JSONArray(listOf("finished", "workflow")))),
+            event(JSONObject().put("include", JSONArray(listOf("finished")))), event(JSONObject().put("after", 3)))))
+        assertTrue(dropQueuedNoticeFilters(state, workflowOnly = true))
+        assertEquals(2, state.getJSONArray("outbox").length())
+        assertFalse(dropQueuedNoticeFilters(state, workflowOnly = true))
+        val params = RemNoticeText.readParams(3, true, RemAlertRules.sendable(listOf("finished", "workflow"), workflowSupported = false), "n1.0.-")
+        assertEquals("[\"finished\"]", params.getJSONArray("include").toString())
+    }
+
+    @Test fun theProtocolFixturesFoldedNoticeAndDroppedCountParse() {
+        // Unit tests run from mobile/android/app; the desktop shares this one copy of the protocol.
+        val file = java.io.File("../../../src/gofer/devices/protocol/v2/fixtures/desktop.result.rem-notices-workflow.json")
+        val body = JSONObject(JSONObject(file.readText()).getJSONObject("payload").getString("body"))
+        val read = RemNoticeText.parse(body)
+        assertEquals(3, read.dropped)
+        assertEquals(listOf(0, 9), read.notices.map { it.moreFromRun })
+        assertEquals(listOf("run-42", "run-42"), read.notices.map { it.runId })
+        // A desktop from before the cap sends neither field; a bad count is bounded.
+        assertEquals(0, RemNoticeText.parse(JSONObject("""{"cursor": 1}""")).dropped)
+        val wild = RemNoticeText.parse(JSONObject("""{"cursor": 1, "dropped": -4, "notices": [
+            {"id": "w", "kind": "workflow", "more_from_run": 99999999}, {"id": "t", "kind": "task_update", "more_from_run": 3}]}"""))
+        assertEquals(0, wild.dropped)
+        assertEquals(listOf(1_000_000, 0), wild.notices.map { it.moreFromRun })
+    }
 }

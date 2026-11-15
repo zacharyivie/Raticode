@@ -18,6 +18,14 @@ class LiveNavigationTest {
         assertEquals("Chat", LiveNavigation.initialPage("8b0c6f2e-thread"))
     }
 
+    @Test fun aWorkflowMessageOpensWorkflowsNotAThread() {
+        val target = dev.raticode.mobile.live.RemAlertRules.workflowTarget("nightly", "run-1")
+        assertEquals("Workflows", LiveNavigation.initialPage(target))
+        assertNull(LiveNavigation.initialThread(target))
+        assertNull(LiveNavigation.initialThread("rem"))
+        assertEquals("8b0c6f2e-thread", LiveNavigation.initialThread("8b0c6f2e-thread"))
+    }
+
     @Test fun backReturnsToRemAndThenLeaves() {
         assertNull(LiveNavigation.back("Rem", "Rem"))
         assertEquals("Rem", LiveNavigation.back("Swarms", "Swarms"))

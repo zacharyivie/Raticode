@@ -131,6 +131,12 @@ android {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
+        // Google Play's App Bundle: the release build without the permission to install its own updates, which Play
+        // doesn't allow (src/play/AndroidManifest.xml). Play installs its updates; the app sends Play users there.
+        create("play") {
+            initWith(getByName("release"))
+            matchingFallbacks += listOf("release")
+        }
     }
 }
 

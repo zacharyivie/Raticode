@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000165",
+  "id": "10000000-0000-4000-8000-000000000217",
+  "sequence": 217,
+  "type": "desktop.result",
+  "payload": {
+    "op": "rem.notices",
+    "ok": true,
+    "part": 0,
+    "parts": 1,
+    "body": "{\"cursor\":512,\"notices\":[{\"id\":\"workflow-8\",\"kind\":\"workflow\",\"body\":\"Copied 12 files.\",\"created_at\":\"2026-11-14T03:00:00+00:00\",\"title\":\"Backup finished\",\"needs_user\":false,\"reason\":\"workflow\",\"workflow_id\":\"nightly-backup\",\"workflow_name\":\"Nightly backup\",\"run_id\":\"run-42\",\"more_from_run\":0},{\"id\":\"workflow-30\",\"kind\":\"workflow\",\"body\":\"And 9 more from this run.\",\"created_at\":\"2026-11-14T03:01:00+00:00\",\"title\":\"Nightly backup\",\"needs_user\":false,\"reason\":\"workflow\",\"workflow_id\":\"nightly-backup\",\"workflow_name\":\"Nightly backup\",\"run_id\":\"run-42\",\"more_from_run\":9}],\"skipped\":0,\"more\":false,\"mark\":\"n1.40.-.30\",\"dropped\":3}"
+  }
+}

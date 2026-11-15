@@ -2,24 +2,73 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
+import tempfile
 import threading
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 
 import pytest
 
-from gofer.core import command_slots
+from gofer.core import command_slots, secrets_folder
 from gofer.core.agent import AgentResult
 from gofer.core.provider_profiles import ResolvedProviderSettings
 from gofer.subscriptions.base import Subscription
+from gofer.utils import process
 from gofer.utils.paths import get_data_dir
+
+# Lets tests marked ``serial`` run alone under ``pytest -n``; see the module.
+pytest_plugins = ["tests.helpers.serial_tests"]
+
+TESTS = Path(__file__).resolve().parent
+
+
+def checkouts(here: Path = TESTS.parent) -> list[Path]:
+    """This checkout and, from a worktree, the main checkout that holds it."""
+    roots = [here]
+    try:
+        common = subprocess.run(
+            ["git", "-C", str(here), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        common = ""
+    if common and Path(common).name == ".git":
+        roots.append(Path(common).resolve().parent)
+    return roots
+
+
+def temp_inside_checkout(temp: Path, roots: list[Path]) -> Path | None:
+    temp = temp.resolve()
+    return next((root for root in roots if temp.is_relative_to(root)), None)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Refuse a temp folder inside the repository.
+
+    pytest's temp folders there show up as changes in the checkout the user's
+    app runs from, and organization and kanban tests fail because their
+    projects land inside a Raticode worktree. Use a folder outside instead.
+    """
+    temp = Path(config.option.basetemp or tempfile.gettempdir())
+    root = temp_inside_checkout(temp, checkouts())
+    if root is not None:
+        raise pytest.UsageError(
+            f"Test temp folder {temp} is inside the Raticode checkout {root}. "
+            "Set TMPDIR (or --basetemp) to a folder outside the repository, "
+            "such as ~/.cache/<task>-tmp."
+        )
 
 
 @pytest.fixture(autouse=True)
 def isolated_gofer_data_dir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> Path:
+) -> Iterator[Path]:
     """Keep tests from touching the developer's real Raticode data directory."""
     env_root = tmp_path / "gofer-env"
     home = env_root / "home"
@@ -46,11 +95,24 @@ def isolated_gofer_data_dir(
     # prompt on the developer's desktop. Tests that need these set them explicitly.
     for name in ("DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_PID"):
         monkeypatch.delenv(name, raising=False)
+    # A systemd service's credentials folder must not become a test's secrets folder.
+    monkeypatch.delenv(secrets_folder.CREDENTIALS_DIRECTORY_ENV, raising=False)
+    # Credentials one test's startup sealed out of the environment stay with that test.
+    monkeypatch.setattr(process, "_SEALED_CREDENTIALS", {})
     monkeypatch.setenv(
         "DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/raticode-test-session-bus"
     )
 
-    return get_data_dir()
+    # A backend whose data folder is tmp_path puts its trusted tools folder in the
+    # base folder that the test's neighbours share (one per pytest-xdist worker).
+    # That marks the whole base folder as Raticode's own data, so remove it again
+    # rather than let it change how later tests on the same worker see their paths.
+    shared_trusted_bin = tmp_path.parent / ".gofer-trusted-bin"
+    already_there = shared_trusted_bin.exists()
+    yield get_data_dir()
+    secrets_folder.configure_secrets_dir(None)
+    if not already_there and shared_trusted_bin.is_dir():
+        shutil.rmtree(shared_trusted_bin, ignore_errors=True)
 
 
 class FakeSubscription(Subscription):
@@ -121,6 +183,15 @@ class FakeSubscription(Subscription):
             thoughts=self._thoughts,
             message=self._message,
         )
+
+
+@pytest.fixture
+def secrets_dir(tmp_path: Path) -> Path:
+    """A private headless secrets folder, configured for this test only."""
+    folder = tmp_path / "secrets"
+    folder.mkdir(mode=0o700)
+    secrets_folder.configure_secrets_dir(folder)
+    return folder
 
 
 @pytest.fixture

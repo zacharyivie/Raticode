@@ -14,17 +14,18 @@ contracts freeze.
 
 ## Built-in type names
 
-Rattish 1 currently names these 24 built-in node types:
+Rattish 1 currently names these 25 built-in node types:
 
 ```text
 agent                 approval-gate         bash-command
 break                 common-llm-task       copy-file
 delete-file           file                  folder
-http-request          local-search          local-vectorize
-loop                  move-file             notification
-open-resource         prompt-file           python-script
-read-file             rem-prompt            rem-task
-shell-script          workflow              write-file
+http-request          jev                   local-search
+local-vectorize       loop                  move-file
+notification          open-resource         prompt-file
+python-script         read-file             rem-prompt
+rem-task              shell-script          workflow
+write-file
 ```
 
 All type names compare case-insensitively and lower to the spelling shown above.
@@ -177,6 +178,7 @@ no separate agent declaration and no `agent-id` field.
 | `output-schema` | JSON object or `none` | `none` |
 | `output-schema-path` | Path or `none` | `none` |
 | `repair-attempts` | integer from 0 through 3 | `0` |
+| `fallback` | list of at most 4 maps of `provider`, `profile`, `model`, `effort` | `[]` |
 
 `prompt` and `prompt-path` are mutually exclusive. Supplying both is a compile error.
 Supplying neither lowers to `prompt: ""` and produces a warning only.
@@ -185,6 +187,36 @@ Supplying neither lowers to `prompt: ""` and produces a warning only.
 The compiler resolves omitted `model` and `effort` values from the selected provider's
 versioned contract and writes the resolved values into IR. Provider installation and
 credentials remain deployment-preflight concerns.
+
+### Fallback providers
+
+Each `fallback` entry requires `provider` and may set `profile`, `model` and `effort`; no
+other key is allowed. The compiler resolves the entry's provider contract on its own
+(`RATTISH_PROVIDER_CONTRACT_UNRESOLVED` with `details.fallback` when none exists), fills an
+omitted `model` and `effort` from that entry's contract, never the step's, and freezes the
+entry fully in `configuration.fallback` and in `resolutions.provider.fallback`, each with
+its provider contract identity. Every fallback provider also becomes a `provider_contract`
+dependency. An entry identical to the primary choice or an earlier entry warns with
+`RATTISH_DUPLICATE_PROVIDER_FALLBACK`.
+
+At run time the step runs its primary provider with its full `retry-count`. When the last
+attempt fails with a `provider` error whose `details.availability` is `rate_limit`,
+`overloaded`, `signed_out` or `not_installed`, the runtime emits a `node_fell_back` event
+and runs the next entry with the same `retry-count`. `not_installed` is non-retryable
+(`details.retryable: false`), so that provider's retries are skipped. Other error kinds,
+including `output_validation` after structured-output repair, `timeout` and `budget`, end
+the step, and no switch happens once the run's usage limits request a stop. The run's
+`max-tokens` and `max-cost-usd` count every provider's calls. A fallback provider starts
+from the step's prompt: it doesn't resume the failed session, whose side effects remain,
+exactly as with a `retry-count` attempt.
+
+Each node run record carries `provider` (the provider, profile, model and effort of its
+last attempt) and, after a switch, `fallbacks` with `from`, `to`, `reason` and the
+error `message`.
+
+Preflight check `provider-available` fails only when no provider in the chain is
+installed. `fallback-provider-available` warns about each missing one, and
+`profile-compatible` checks every entry's profile and credentials.
 
 `profile` selects deployment-only environment and secret configuration. It does not
 select or override `provider`, `model`, or `effort`. A profile need not exist on the
@@ -217,6 +249,33 @@ using `agent-id`.
 | `output-schema` | JSON object or `none` | `none` |
 | `output-schema-path` | Path or `none` | `none` |
 | `repair-attempts` | integer from 0 through 3 | `0` |
+| `fallback` | as on `agent` | `[]` |
+| `cache` | cache duration or `none` | `none` |
+
+`fallback` behaves as on `agent` (see Fallback providers above). `cache` is described in
+Result cache below; it can't be combined with `memory` other than `none`.
+
+### Result cache
+
+`common-llm-task` and `jev` accept `cache`, a duration matching
+`^[1-9][0-9]*(s|m|h|d|w)$` and at most `365d`. `agent` does not, because an agent can change
+files; authoring it there is `RATTISH_UNKNOWN_FIELD`. The compiler materializes `cache: none`
+when it is absent.
+
+At run time, after bindings resolve and configuration renders, a node with `cache` and no
+secret-derived binding computes a key: SHA-256 of the canonical JSON of the provider, profile,
+model and effort of the provider choice about to run, the rendered prompt (for `jev`, the
+question and state), the bound locals, the node's output schema, the project root, and the
+compiled node without `source_span`, `routes`, `readiness` and `configuration.cache`. An entry
+younger than both its saved expiry and the node's current `cache` duration is used as the
+node's output: no handler runs, the output is still validated against the output schema, the
+node run record carries `cached_at`, its `node_completed` event carries `cached: true`, and its
+usage records `cached_results: 1` with 0 tokens and $0 instead of a call. Only successful,
+schema-valid outputs are saved.
+
+Entries live in `<data>/rattish-cache/<workflow-id>/<key>.json` with owner-only permissions,
+at most 2 MiB each and 32 MiB per workflow; a write past the cap removes the entries expiring
+first. Runs started by a test set never read or write the cache.
 
 The common `with` block replaces the current `input-mapping` field.
 
@@ -296,14 +355,14 @@ mutually exclusive when both are authored.
 | `notification-title` | String | `"Raticode approval needed"` |
 | `subject` | String or `none` | `none` |
 
-`notification` preserves the current channels `desktop`, `slack`, `teams`, `webhook`, and
+`notification` supports the channels `desktop`, `phone`, `slack`, `teams`, `webhook`, and
 `email`:
 
 | Field | Type | Default |
 |---|---|---:|
 | `title` | String | `"Raticode notification"` |
 | `body` | String | `""` |
-| `channel` | `desktop`, `slack`, `teams`, `webhook`, or `email` | `desktop` |
+| `channel` | `desktop`, `phone`, `slack`, `teams`, `webhook`, or `email` | `desktop` |
 | `urgency` | `low`, `normal`, or `critical` | `normal` |
 | `webhook-url` | String or `none` | `none` |
 | `headers` | StringMap | `{}` |
@@ -319,7 +378,13 @@ mutually exclusive when both are authored.
 | `expected-statuses` | IntegerList | `[200, 201, 202, 204]` |
 | `network-allowlist` | StringList | `[]` |
 
-Slack, Teams, and generic webhook channels require `webhook-url`. Email requires
+The `phone` channel stores the title, body, workflow ID and run ID in the computer's alert
+store (`phone-alerts.sqlite3` in the data folder); the paired phone reads it at its next sync.
+Its success output means the notice was stored. One run keeps at most 20 notices; past that
+the store keeps a single "And N more from this run" notice for the run, and the node still
+succeeds. The store keeps the newest 500 notices. Its `phone-paired` preflight check is a
+warning when no phone is paired. Slack, Teams, and generic webhook channels require
+`webhook-url`. Email requires
 `email-from`, at least one `email-to` value, and `smtp-host`. The `with` block may replace
 the message fields, destination fields, headers, payload, and SMTP connection values for
 one execution. Runtime credentials do not appear in the success output.
@@ -367,6 +432,39 @@ ends `succeeded`; any other final state fails the node with error kind `rem`, or
 `cancelled` when the run was stopped. Stopping or timing out the node cancels the run it
 started. A task already running for anything other than the same workflow node fails with
 `RATTISH_REM_BUSY`. Deployment preflight requires the task to exist.
+
+## Classifier nodes
+
+| Type | Required fields | Optional fields and defaults |
+|---|---|---|
+| `jev` | `question: String` | `question-type: yes-no \| choice = yes-no`, `criteria: {yes, no} = {}`, `options: StringMap = {}`, `threshold: Number 0..1 = 0.5`, `state: String = ""`, `model: String = "jev-1.14.0"`, `long-context: Boolean = false`, `request-timeout: duration = 15s`, `cache: cache duration \| none = none` |
+
+`jev` asks TypeSafe's hosted Jev classifier one question about `state` and returns a closed
+object with `label`, `score`, `probabilities`, `question_type`, `threshold`, `model`,
+`requested_model`, `input_tokens`, `output_tokens` and `latency_ms`. `with.state` and
+`with.question` replace the authored values for one execution; `state` may be any JSON
+value.
+
+- `yes-no` sends a `noul` question. `score` is the probability of yes and `label` is
+  `"yes"` when `score >= threshold`, else `"no"`. `criteria.yes` and `criteria.no` are sent
+  as Jev's `true` and `false` criteria; leaving them out is the warning
+  `RATTISH_JEV_CRITERIA_MISSING`.
+- `choice` sends a `choice` question whose criteria are `options` (2 to 255 names mapped to
+  descriptions). `label` is the option Jev picked and `score` its confidence. A choice node
+  can't set `criteria` or `threshold`, and a yes-no node can't set `options`.
+- The model is frozen into IR, never resolved through an alias at run time.
+  `request-timeout` limits one HTTP attempt and is at most `60s`.
+- `cache` reuses a saved answer as described in Result cache above.
+
+The node is not a provider-backed agent: it has no `provider`, `profile` or `effort`. The
+runtime calls `https://api.typesafe.ai/v1/systemone` with the key saved in the OS keychain;
+workflow source can't change the host or supply the key. Redirects are refused. Each
+runtime process allows four Jev calls in flight and shares one rate-limit cooldown (60 to
+300 seconds, from `Retry-After`). Errors carry `details.retryable`; the workflow runtime
+skips `retry-count` for non-retryable errors and waits at least `details.retry_after_ms`
+before retrying a rate limit. Deployment preflight check `jev-configured` requires a saved
+key with Jev turned on. An empty `state` is a runtime configuration error, as is a state
+over 512 KiB.
 
 ## Required contract work
 

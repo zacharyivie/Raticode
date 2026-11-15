@@ -42,6 +42,6 @@ object RunPause {
 
     /** Why a paused run waits, in one sentence, for its task screen. */
     fun note(pausedBy: String): String = if (pausedBy == "priority")
-        "Rem paused this self-work so your own work could run first. It picks up in the same thread once your work is done and you've been away 15 minutes."
+        "Rem paused this self-work so your own work could run first. It picks up in the same thread as soon as a thread is free again."
     else "Its thread and any worktree are kept. Resume continues in the same thread, where the worker checks what it already did."
 }

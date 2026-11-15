@@ -113,6 +113,27 @@
 .commit-diff-overview { position: absolute; top: 0; bottom: 0; right: 0; width: 12px; pointer-events: none; overflow: hidden; }
 .commit-diff-overview i { position: absolute; right: 1px; width: 10px; height: 3px; background: var(--commit-match-color); }
 .commit-diff-overview i.is-current { height: 5px; box-shadow: inset 0 0 0 1px var(--commit-match-ink); }
+/* Line comments on a ticket's patch. */
+.commit-diff .commit-diff-commented-line { background: rgb(var(--color-brand) / .1); }
+.commit-diff .commit-diff-commented-gutter { border-left: 3px solid rgb(var(--color-brand)); margin-left: 2px; }
+.commit-diff-comment-open { display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; border: 1px solid rgb(var(--color-line)); border-radius: 4px; color: rgb(var(--color-muted)); }
+.commit-diff-comment-open:hover { color: rgb(var(--color-ink)); border-color: rgb(var(--color-brand)); }
+.commit-diff-comments { display: grid; gap: 8px; padding: 8px 16px; border-bottom: 1px solid rgb(var(--color-line)); background: rgb(var(--color-brand) / .04); font-size: 12px; }
+.commit-diff-comments ul { display: grid; gap: 6px; }
+.commit-diff-comments li { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: baseline; }
+.commit-diff-comments li p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.commit-diff-comments li button { color: rgb(var(--color-muted)); padding: 2px; }
+.commit-diff-comment-line { font-family: ui-monospace, monospace; color: rgb(var(--color-muted)); white-space: nowrap; }
+.commit-diff-comment-form { display: grid; gap: 6px; }
+.commit-diff-comment-where { display: flex; align-items: center; gap: 8px; color: rgb(var(--color-muted)); }
+.commit-diff-comment-where input { width: 5em; }
+.commit-diff-comment-form input, .commit-diff-comment-form select, .commit-diff-comment-form textarea { padding: 3px 6px; border: 1px solid rgb(var(--color-line)); border-radius: 4px; background: rgb(var(--color-canvas)); color: rgb(var(--color-ink)); }
+.commit-diff-comment-form textarea { resize: vertical; font: inherit; }
+.commit-diff-comment-actions { display: flex; gap: 8px; }
+.commit-diff-comment-actions button { padding: 3px 10px; border: 1px solid rgb(var(--color-line)); border-radius: 4px; }
+.commit-diff-comment-actions button.is-primary { border-color: rgb(var(--color-brand)); color: rgb(var(--color-brand)); }
+.commit-diff-comment-actions button:disabled { opacity: .45; }
+.commit-diff-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 @container (max-width: 620px) {
   .commit-diff-filter-hint { order: 3; flex-basis: 100%; }
 }

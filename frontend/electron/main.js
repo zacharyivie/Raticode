@@ -17,8 +17,12 @@ const {
   app,
   clipboard,
   BrowserWindow,
+  WebContentsView,
   Menu,
   Tray,
+  desktopCapturer,
+  globalShortcut,
+  screen,
   nativeImage,
   dialog,
   ipcMain,
@@ -26,12 +30,14 @@ const {
   session,
   protocol,
   systemPreferences,
+  powerMonitor,
   webContents,
 } = require("electron");
 protocol.registerSchemesAsPrivileged([{ scheme: "raticode-media", privileges: { standard: true, secure: true, stream: true } }]);
 const { createMediaPreviews } = require("./media-preview.cjs");
 const mediaPreviews = createMediaPreviews();
 const { autoUpdater } = require("electron-updater");
+const updateSchedule = require("./update-schedule.cjs");
 const { raticodeReleaseSigning } = require("../package.json");
 const pty = require("node-pty");
 const { previousBrands: LEGACY_BRANDS } = require("./brand-compat.json");
@@ -89,7 +95,10 @@ let applicationLog;
 const { registerIpcHandlers } = require("./ipc-handlers.cjs");
 const { createFirefoxEngine } = require("./firefox-engine.cjs");
 const { createGeckoWindow } = require("./gecko-window.cjs");
+const { createBrowserWindowManager } = require("./browser-window.cjs");
 const { X11_SWITCH, relaunchNeeded } = require("./gecko-display.cjs");
+const { createGlobalDictation, hasToggleFlag, shortcutSupport, toggleCommand } = require("./global-dictation.cjs");
+const { MAC_PRIVACY_URL, captureSupport, createScreenContext, createScreenShortcut } = require("./screen-context.cjs");
 const { CHROME, EDGE, createChromiumEngine } = require("./chromium-engine.cjs");
 const { BACKEND_FEATURES, featureEnv, featureStates, readFeatureChoices, writeFeatureChoice } = require("./feature-preview.cjs");
 const { inspectPath, missingRecentFiles, missingThreadRoots } = require("./path-info.cjs");
@@ -164,6 +173,11 @@ let updateState = {
   progress: null,
 };
 let installUpdateAfterDownload = false;
+// Automatic update checks: on startup and every 10 minutes while the Check for updates setting is on.
+let updateScheduler = null;
+let automaticUpdateChecks = false;
+let updateReminderClock = null;
+let updateReminderDay = "";
 
 // Set as soon as a quit starts, before unsaved files are checked. Ctrl+C in the
 // terminal starts one: Electron turns SIGINT, SIGTERM and SIGHUP into app.quit()
@@ -204,7 +218,8 @@ if (!isSmokeTest && !process.env.VITE_DEV_SERVER_URL && relaunchNeeded({ userDat
 
 const singleInstanceLock = isSmokeTest || app.requestSingleInstanceLock();
 if (!singleInstanceLock) {
-  if (!isProduction) {
+  // `--toggle-dictation` only reaches the running Raticode; it says nothing of its own.
+  if (!isProduction && !hasToggleFlag(process.argv)) {
     // The running window may come from another checkout with different code.
     // Say so instead of silently focusing it as if this launch had worked.
     console.error(
@@ -241,7 +256,8 @@ function createWindow(apiBaseUrl, { show = true } = {}) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: !isSmokeTest,
-      webviewTag: true,
+      // Web tabs are views the main process owns (browser-sessions.cjs), not <webview>s.
+      webviewTag: false,
       backgroundThrottling: false,
       additionalArguments: [
         `--gofer-api-base-url=${apiBaseUrl}`,
@@ -284,22 +300,8 @@ function createWindow(apiBaseUrl, { show = true } = {}) {
     callback({ responseHeaders });
   });
 
-  mainWindow.webContents.on("will-attach-webview", (event, webPreferences, params) => {
-    if (!browsers.isPendingAttach(terminalOwnerId, params)) {
-      event.preventDefault();
-      return;
-    }
-    delete webPreferences.preloadURL;
-    webPreferences.preload = browserPreloadPath;
-    webPreferences.backgroundThrottling = true;
-    webPreferences.contextIsolation = true;
-    webPreferences.nodeIntegration = false;
-    webPreferences.nodeIntegrationInSubFrames = false;
-    webPreferences.sandbox = true;
-    webPreferences.webSecurity = true;
-    webPreferences.allowRunningInsecureContent = false;
-  });
-  mainWindow.webContents.on("did-attach-webview", (_event, guestContents) => browsers.hardenGuest(guestContents));
+  // Nothing in the studio may attach a <webview>: web tabs are views Raticode makes itself.
+  mainWindow.webContents.on("will-attach-webview", (event) => event.preventDefault());
 
   mainWindow.on("unresponsive", () => applicationLog?.write("warn", "renderer", "The Raticode window stopped responding"));
   mainWindow.on("responsive", () => applicationLog?.write("info", "renderer", "The Raticode window is responding again"));
@@ -340,12 +342,25 @@ function createWindow(apiBaseUrl, { show = true } = {}) {
     mainWindow.loadURL(VITE_DEV_SERVER_URL);
   }
 
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  mainWindow.webContents.setWindowOpenHandler((details) => {
+    // The Browser in its own window: the studio's own blank window, nothing else.
+    const browserWindowRequest = browserWindow().windowOpenRequest(details);
+    if (browserWindowRequest) return browserWindowRequest;
+    const { url } = details;
     if (isSafeExternalUrl(url) && !mainWindow.webContents.isDestroyed()) {
       mainWindow.webContents.send("gofer:browser-open-tab", { url });
     }
     return { action: "deny" };
   });
+
+  mainWindow.webContents.on("did-create-window", (child, details) => {
+    if (!browserWindow().adopt(child, details)) child.destroy();
+  });
+  // A reloaded or crashed studio has lost the tabs it moved; close their window.
+  mainWindow.webContents.on("did-start-navigation", (details) => {
+    if (details?.isMainFrame && !details.isSameDocument) void browserWindow().closeNow();
+  });
+  mainWindow.webContents.on("render-process-gone", () => void browserWindow().closeNow());
 
   if (process.env.GOFER_ELECTRON_DEVTOOLS === "1") {
     mainWindow.webContents.openDevTools({ mode: "detach" });
@@ -359,6 +374,7 @@ function createWindow(apiBaseUrl, { show = true } = {}) {
 
 
   mainWindow.on("closed", () => {
+    browserWindow().destroy();
     browsers.closeForOwner(terminalOwnerId);
     closeTerminalsForOwner(terminalOwnerId);
     if (mainWindow !== window) return; // Already replaced, for example by a backend restart.
@@ -838,7 +854,145 @@ function createBackgroundTray() {
   backgroundTray.on("double-click", showMainWindow);
 }
 
-app.on("second-instance", showMainWindow);
+// `Raticode --toggle-dictation` (bound to a key in the desktop's own shortcut settings
+// where apps can't register keys) starts or stops dictation without showing the window.
+app.on("second-instance", (_event, argv) => {
+  if (hasToggleFlag(argv)) {
+    globalDictation.trigger("command");
+    return;
+  }
+  showMainWindow();
+});
+
+// Dictate to Rem from any app. Off until Settings > Devices turns it on; see global-dictation.cjs.
+let dictationOverlayWindow = null;
+let dictationOverlayTimer = null;
+const DICTATION_OVERLAY_SIZE = { width: 380, height: 60 };
+function showDictationOverlay(state) {
+  if (isQuitting || isSmokeTest) return;
+  clearTimeout(dictationOverlayTimer);
+  if (!dictationOverlayWindow || dictationOverlayWindow.isDestroyed()) {
+    // Never takes focus: you keep typing where you were.
+    dictationOverlayWindow = new BrowserWindow({
+      ...DICTATION_OVERLAY_SIZE,
+      show: false,
+      frame: false,
+      transparent: true,
+      resizable: false,
+      movable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      focusable: false,
+      skipTaskbar: true,
+      alwaysOnTop: true,
+      hasShadow: false,
+      title: "Raticode dictation",
+      webPreferences: {
+        preload: path.join(__dirname, "dictation-overlay-preload.cjs"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        spellcheck: false,
+      },
+    });
+    dictationOverlayWindow.setAlwaysOnTop(true, "floating");
+    dictationOverlayWindow.setVisibleOnAllWorkspaces?.(true, { visibleOnFullScreen: true });
+    dictationOverlayWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    dictationOverlayWindow.webContents.on("will-navigate", (event) => event.preventDefault());
+    // Bottom centre of the screen the pointer is on. Wayland places it where it likes.
+    try {
+      const area = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
+      dictationOverlayWindow.setPosition(
+        Math.round(area.x + (area.width - DICTATION_OVERLAY_SIZE.width) / 2),
+        Math.round(area.y + area.height - DICTATION_OVERLAY_SIZE.height - 48),
+      );
+    } catch { /* Placement is best effort. */ }
+    const window = dictationOverlayWindow;
+    window.once("ready-to-show", () => { if (!window.isDestroyed() && window.pendingState) sendDictationOverlay(window); });
+    void window.loadFile(path.join(__dirname, "dictation-overlay.html"));
+  }
+  dictationOverlayWindow.pendingState = state;
+  if (!dictationOverlayWindow.webContents.isLoading()) sendDictationOverlay(dictationOverlayWindow);
+  if (!dictationOverlayWindow.isVisible()) dictationOverlayWindow.showInactive();
+  if (state.phase === "done" || state.phase === "error") {
+    dictationOverlayTimer = setTimeout(hideDictationOverlay, state.phase === "error" ? 8000 : 4000);
+  }
+}
+function sendDictationOverlay(window) {
+  window.webContents.send("gofer:dictation-overlay-state", window.pendingState);
+}
+function hideDictationOverlay() {
+  clearTimeout(dictationOverlayTimer);
+  if (dictationOverlayWindow && !dictationOverlayWindow.isDestroyed()) dictationOverlayWindow.destroy();
+  dictationOverlayWindow = null;
+}
+ipcMain.on("gofer:dictation-overlay-action", (event, action) => {
+  if (!dictationOverlayWindow || dictationOverlayWindow.isDestroyed() || event.sender !== dictationOverlayWindow.webContents) return;
+  if (action === "stop") {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("gofer:global-dictation", { action: "stop", source: "overlay" });
+  } else if (action === "open") {
+    hideDictationOverlay();
+    showMainWindow();
+  }
+});
+
+const globalDictation = createGlobalDictation({
+  globalShortcut,
+  support: shortcutSupport({ ozonePlatform: app.commandLine.getSwitchValue("ozone-platform") }),
+  command: process.platform === "linux"
+    ? toggleCommand({ packaged: app.isPackaged, appPath: app.getAppPath(), configHome: process.env.XDG_CONFIG_HOME || "" })
+    : "",
+  send: (message) => {
+    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading()) return false;
+    mainWindow.webContents.send("gofer:global-dictation", message);
+    return true;
+  },
+  overlay: { show: showDictationOverlay, hide: hideDictationOverlay },
+  onListening: (listening) => {
+    if (backgroundTray && !backgroundTray.isDestroyed?.()) {
+      backgroundTray.setToolTip(listening ? "Raticode · listening for Rem" : "Raticode · running in background");
+    }
+  },
+});
+app.on("will-quit", () => globalDictation.dispose());
+
+// Show Rem your screen. Off until Settings > Devices turns it on; a screenshot is taken
+// only for the Rem message box's Screen button or the "Ask Rem about your screen" shortcut,
+// and goes to the window in memory. See screen-context.cjs.
+const screenContext = createScreenContext({
+  desktopCapturer,
+  screen,
+  systemPreferences,
+  support: captureSupport({ ozonePlatform: app.commandLine.getSwitchValue("ozone-platform") }),
+  ownSourceIds: () => [mainWindow, dictationOverlayWindow]
+    .filter((window) => window && !window.isDestroyed())
+    .map((window) => { try { return window.getMediaSourceId(); } catch { return ""; } }),
+});
+let screenShortcutBusy = false;
+async function askAboutScreen() {
+  // Both switches must be on: the shortcut takes a screenshot and opens the microphone.
+  if (screenShortcutBusy || !globalDictation.status().enabled) return;
+  screenShortcutBusy = true;
+  try {
+    // Taken before the listening panel shows, so the panel isn't in the picture.
+    const result = await screenContext.capture({ pointer: true });
+    if (!result.ok) {
+      globalDictation.report({ phase: "error", global: true, message: result.error });
+      return;
+    }
+    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading()) {
+      globalDictation.report({ phase: "error", global: true, message: "Raticode's window isn't ready yet. Try again in a moment." });
+      return;
+    }
+    globalDictation.setNote(`Screenshot of ${result.name} attached; it waits for you to send it.`);
+    mainWindow.webContents.send("gofer:global-dictation", { action: "screen", source: "shortcut", capture: result });
+  } finally {
+    screenShortcutBusy = false;
+  }
+}
+const screenShortcut = createScreenShortcut({ globalShortcut, onPress: () => void askAboutScreen() });
+app.on("will-quit", () => screenShortcut.dispose());
 
 let lifecycleApproved = false;
 let lifecyclePending = null;
@@ -888,6 +1042,7 @@ app.on("before-quit", (event) => {
     void conversationArchives.close().finally(() => { archivesDrained = true; app.quit(); });
     return;
   }
+  browserWindow().destroy();
   browsers.closeAll();
   geckoWindow.close();
   closeTerminalEditorServer();
@@ -931,6 +1086,34 @@ function setupIpcHandlers() {
   });
   registerIpcHandlers(ipcMain, {
     completeLifecycle,
+    configureGlobalDictation: (_event, options = {}) => globalDictation.configure({
+      enabled: options?.enabled === true,
+      binding: typeof options?.binding === "string" ? options.binding.slice(0, 80) : "",
+      label: typeof options?.label === "string" ? options.label.slice(0, 80) : "",
+    }),
+    reportGlobalDictation: (_event, state = {}) => globalDictation.report({
+      phase: String(state?.phase ?? ""),
+      global: state?.global === true,
+      message: typeof state?.message === "string" ? state.message : "",
+      sent: state?.sent === true,
+    }),
+    suspendGlobalDictation: (_event, { suspended } = {}) => globalDictation.suspend(suspended === true),
+    configureScreenContext: (_event, options = {}) => {
+      const enabled = options?.enabled === true;
+      const status = screenContext.configure({ enabled });
+      const shortcut = screenShortcut.configure({
+        enabled: enabled && options?.shortcut === true,
+        binding: typeof options?.binding === "string" ? options.binding.slice(0, 80) : "",
+      });
+      return { ...status, shortcut };
+    },
+    listScreenSources: () => screenContext.list(),
+    captureScreen: (_event, { sourceId } = {}) => screenContext.capture({ sourceId: typeof sourceId === "string" ? sourceId.slice(0, 200) : "" }),
+    openScreenPrivacySettings: () => {
+      if (process.platform !== "darwin") return false;
+      void shell.openExternal(MAC_PRIVACY_URL);
+      return true;
+    },
     readClipboard: () => clipboard.readText(),
     editFocused: (event, { action } = {}) => {
       const method = { undo: "undo", redo: "redo", cut: "cut", copy: "copy", paste: "paste", selectAll: "selectAll" }[action];
@@ -948,6 +1131,7 @@ function setupIpcHandlers() {
     configureRem,
     archiveRem,
     forgetRem,
+    purgeRem,
     checkForUpdates,
     copyPath,
     movePath,
@@ -955,6 +1139,7 @@ function setupIpcHandlers() {
     browserLibrary: (event, options) => browsers.browserLibrary(event, options),
     browserOwnerZoom: (event) => browsers.ownerZoom(event),
     gecko: (_event, options = {}) => geckoWindow.handle(String(options?.action || ""), options),
+    browserWindow: (_event, options = {}) => browserWindow().handle(String(options?.action || "")),
     browserPolicy: (event, options) => browsers.setPolicy(event, options?.policy),
     createBrowser: (event, options) => browsers.createBrowser(event, options),
     createFile,
@@ -995,6 +1180,8 @@ function setupIpcHandlers() {
     openLogsFolder,
     openPath,
     openUpdateRelease,
+    setAutomaticUpdateChecks,
+    dismissUpdateReminder,
     pathInfo,
     missingRecentFiles: (_event, options = {}) => missingRecentFiles(options.paths),
     missingThreadRoots: (_event, options = {}) => missingThreadRoots(options.paths),
@@ -1075,6 +1262,10 @@ const browsers = createBrowserSessions({
   chrome: chromeEngine,
   chromium: { edge: edgeEngine },
   nativeImage,
+  WebContentsView,
+  preloadPath: browserPreloadPath,
+  // A Raticode (chromium) tab's view sits in whichever window shows the Browser.
+  getHostWindow: (host) => (host === "popout" ? browserWindow().window : null),
 });
 firefoxEngine.events.on("exit", () => browsers.firefoxStopped());
 // Firefox tabs come back once the user closes the window they signed in with.
@@ -1087,7 +1278,8 @@ edgeEngine.events.on("sign-in-window-closed", () => void browsers.reviveStreamTa
 // Gecko: real Firefox, its window placed inside Raticode's.
 const geckoWindow = createGeckoWindow({
   dataDir: app.getPath("userData"),
-  getWindow: () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null),
+  // Firefox's window sits in whichever window shows the Browser.
+  getWindow: (host) => (host === "popout" && browserWindow().window) || (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null),
   log: (level, message) => applicationLog?.write(level, "browser", message),
   x11Switch: app.commandLine.getSwitchValue("ozone-platform") === "x11",
   ask: async ({ message, detail }) => (await dialog.showMessageBox(mainWindow, { type: "question", buttons: ["Import", "Cancel"], defaultId: 1, cancelId: 1, message, detail })).response === 0,
@@ -1102,6 +1294,26 @@ const geckoWindow = createGeckoWindow({
   },
 });
 
+// The Browser plugin in its own window, made on first use (screen needs a ready app).
+let browserWindowManager = null;
+function browserWindow() {
+  if (!browserWindowManager) {
+    browserWindowManager = createBrowserWindowManager({
+      dataDir: app.getPath("userData"),
+      getMainWindow: () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null),
+      screen,
+      icon: path.join(__dirname, app.isPackaged ? "../dist/icon.png" : "../public/icon.png"),
+      // Firefox's window must leave before the window it sits in closes.
+      beforeClose: async (window) => {
+        browsers.returnViews(window);
+        await geckoWindow.rehost("main");
+      },
+      log: (level, message) => applicationLog?.write(level, "browser", message),
+    });
+  }
+  return browserWindowManager;
+}
+
 const agentBrowserCapabilities = createCapabilityRegistry();
 const agentBrowser = createAgentBrowserController({
   openTab: (details) => browsers.openAgentTab(details),
@@ -1115,6 +1327,8 @@ const agentBrowser = createAgentBrowserController({
 });
 browsers.setViewportListener((tab) => void agentBrowser.viewportChanged(tab));
 setInterval(() => agentBrowser.sweep(), 60 * 1000).unref();
+setTimeout(() => void runArchiveRetention(), 60 * 1000).unref();
+setInterval(() => void runArchiveRetention(), 60 * 60 * 1000).unref();
 
 app.on("certificate-error", (event, contents, url, error, certificate, callback, isMainFrame) => {
   browsers.handleCertificateError(event, contents, url, error, certificate, callback, isMainFrame);
@@ -1597,6 +1811,10 @@ function setupAutoUpdater() {
   autoUpdater.allowDowngrade = false;
   autoUpdater.allowPrerelease = false;
 
+  // Coming back to the window is the usual "first use today".
+  app.on("browser-window-focus", (_event, window) => {
+    if (window === mainWindow) maybeShowUpdateReminder();
+  });
   autoUpdater.on("checking-for-update", () => {
     setUpdateState({ checking: true, error: "" });
   });
@@ -1614,6 +1832,7 @@ function setupAutoUpdater() {
   });
   autoUpdater.on("update-not-available", (info) => {
     setUpdateState({
+      reminder: null,
       available: false,
       checking: false,
       downloaded: false,
@@ -1687,14 +1906,22 @@ function logUpdaterError(error) {
   applicationLog?.write("warn", "updater", error instanceof Error ? (error.stack || error.message) : String(error));
 }
 
+// The toolbar's check button. It shares an automatic check that is already running instead of
+// starting a second request, and the next automatic check counts from this one.
 async function checkForUpdates() {
+  return updateScheduler ? updateScheduler.checkNow() : runUpdateCheck();
+}
+
+async function runUpdateCheck() {
   try {
-    setUpdateState({ checking: true, error: "" });
+    setUpdateState({ checking: true, error: "", retryAt: 0 });
     if (!supportsAutoUpdates()) {
       setUpdateState(await checkLatestReleaseFallback());
-    } else {
-      await autoUpdater.checkForUpdates();
+    } else if (!await autoUpdater.checkForUpdates()) {
+      // electron-updater answers null when it isn't set up; that is not "up to date".
+      throw Object.assign(new Error("This copy of Raticode has no update settings, so it can't check for updates. Download the newest version from the release page."), { userFacing: true });
     }
+    setUpdateState({ checking: false, checkedAt: Date.now(), ...(updateState.available ? {} : { reminder: null }) });
   } catch (error) {
     if (isNoPublishedVersionsError(error)) {
       setNoReleasesUpdateState();
@@ -1706,6 +1933,7 @@ async function checkForUpdates() {
       downloading: false,
       verifying: false,
       error: describeUpdateError(error),
+      retryAt: Number(error?.retryAt) || 0,
     });
   }
   return getUpdateState();
@@ -1795,6 +2023,88 @@ function setNoReleasesUpdateState() {
   });
 }
 
+// A download, a macOS signature check or a waiting restart owns the updater.
+function updaterBusy() {
+  return Boolean(updateState.downloading || updateState.verifying || updateState.downloaded);
+}
+
+function ensureUpdateScheduler() {
+  if (!updateScheduler) {
+    updateScheduler = updateSchedule.createUpdateScheduler({
+      runCheck: () => runUpdateCheck(),
+      isBusy: updaterBusy,
+      onSettled: () => maybeShowUpdateReminder(),
+    });
+  }
+  return updateScheduler;
+}
+
+// The renderer sends the Check for updates setting when it starts and whenever it changes.
+function setAutomaticUpdateChecks(_event, enabled) {
+  automaticUpdateChecks = enabled === true && !isSmokeTest;
+  const scheduler = ensureUpdateScheduler();
+  if (automaticUpdateChecks) {
+    scheduler.start();
+    if (!updateReminderClock) {
+      // Only looks at the last answer; it never contacts GitHub.
+      updateReminderClock = setInterval(() => maybeShowUpdateReminder(), 60 * 1000);
+      updateReminderClock.unref?.();
+    }
+  } else {
+    scheduler.stop();
+    if (updateReminderClock) clearInterval(updateReminderClock);
+    updateReminderClock = null;
+    if (updateState.reminder) setUpdateState({ reminder: null });
+  }
+  return getUpdateState();
+}
+
+function updateReminderFile() {
+  return path.join(app.getPath("userData"), "update-reminder.json");
+}
+
+// The window is in front and someone used the keyboard or mouse in the last five minutes.
+function userIsUsingRaticode() {
+  if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || mainWindow.isMinimized() || !mainWindow.isFocused()) return false;
+  try {
+    return powerMonitor.getSystemIdleTime() < updateSchedule.ACTIVE_IDLE_SECONDS;
+  } catch {
+    return true;
+  }
+}
+
+// One reminder a day, the first time the user is at Raticode that day, in a single banner that
+// replaces itself. Days away don't add reminders: only the day of the last one is kept.
+function maybeShowUpdateReminder() {
+  if (!automaticUpdateChecks || updateState.reminder) return;
+  const today = updateSchedule.localDay();
+  if (updateReminderDay === today) return;
+  const file = updateReminderFile();
+  const decision = updateSchedule.reminderDecision({
+    available: Boolean(updateState.available),
+    latestVersion: updateState.info?.version,
+    record: updateSchedule.readReminderRecord(fs, file),
+    today,
+    userActive: userIsUsingRaticode(),
+  });
+  if (!decision.show) {
+    if (decision.record.day === today) updateReminderDay = today;
+    return;
+  }
+  updateReminderDay = today;
+  try {
+    updateSchedule.writeReminderRecord(fs, file, decision.record);
+  } catch (error) {
+    applicationLog?.write("warn", "updater", `Couldn't save when the update reminder was shown: ${error?.message || error}`);
+  }
+  setUpdateState({ reminder: { version: decision.record.version, day: today } });
+}
+
+function dismissUpdateReminder() {
+  setUpdateState({ reminder: null });
+  return getUpdateState();
+}
+
 function updateInfoPayload(info) {
   if (!info) return null;
   return {
@@ -1843,7 +2153,7 @@ async function checkLatestReleaseFallback() {
     };
   }
   if (!response.ok) {
-    throw Object.assign(new Error(updateCheckHttpError(response)), { userFacing: true });
+    throw Object.assign(new Error(updateCheckHttpError(response)), { userFacing: true, retryAt: updateRetryAt(response) });
   }
   const release = parseUpdateMetadata(await response.text());
   if (!release.version) {
@@ -1901,6 +2211,16 @@ function updateCheckHttpError(response) {
     return `GitHub refused the update check (HTTP ${response.status}). A VPN, proxy or firewall may be blocking it, or GitHub may be limiting requests from this network.`;
   }
   return `GitHub returned HTTP ${response.status} while checking for updates.`;
+}
+
+// When GitHub will take another request after refusing one, from its rate-limit headers.
+function updateRetryAt(response, now = Date.now()) {
+  if (response.status !== 403 && response.status !== 429) return 0;
+  const header = (name) => response.headers?.get?.(name) || "";
+  const resetSeconds = Number(header("x-ratelimit-reset"));
+  if (header("x-ratelimit-remaining") === "0" && resetSeconds > 0) return resetSeconds * 1000;
+  const retryAfter = Number(header("retry-after"));
+  return retryAfter > 0 ? now + retryAfter * 1000 : 0;
 }
 
 function macInstallerUrl(release) {
@@ -2362,16 +2682,18 @@ function rendererLog(_event, { message } = {}) {
   const text = String(message || "");
   applicationLog?.write(ROUTINE_RENDERER_ERRORS.test(text) ? "debug" : "error", "renderer", text);
 }
+// Purging archive copies of deleted threads is off unless the user picks an age.
+const ARCHIVE_PURGE_CHOICES = ["never", "7", "30", "90"];
 function remSettings() {
   try {
     const config = JSON.parse(fs.readFileSync(path.join(app.getPath("userData"), "rem-settings.json"), "utf8"));
-    return { ...config, reportFormat: reportOutputFormat(config) };
+    return { ...config, reportFormat: reportOutputFormat(config), archivePurgeDays: ARCHIVE_PURGE_CHOICES.includes(config.archivePurgeDays) ? config.archivePurgeDays : "never" };
   }
-  catch (error) { if (error.code !== "ENOENT") throw error; return { archiveFolder: "", secondBrainEnabled: false, secondBrainRoot: "", secondBrainFormat: "md", secondBrainTheme: "auto" }; }
+  catch (error) { if (error.code !== "ENOENT") throw error; return { archiveFolder: "", archivePurgeDays: "never", secondBrainEnabled: false, secondBrainRoot: "", secondBrainFormat: "md", secondBrainTheme: "auto" }; }
 }
 async function configureRem(_event, options = {}) {
   const config = remSettings();
-  if (options.key === "reset") Object.assign(config, { reportFormat: "md", reportThemes: normalizeReportThemes(null), archiveFolder: "", secondBrainEnabled: false, secondBrainRoot: "", secondBrainFormat: "md", secondBrainTheme: "auto" });
+  if (options.key === "reset") Object.assign(config, { reportFormat: "md", reportThemes: normalizeReportThemes(null), archiveFolder: "", archivePurgeDays: "never", secondBrainEnabled: false, secondBrainRoot: "", secondBrainFormat: "md", secondBrainTheme: "auto" });
   else if (["archiveFolder", "secondBrainRoot"].includes(options.key)) {
     const folder = options.value ? getIpcSecurity().resolveDesktopPath(options.value, { mustExist: true }) : "";
     if (folder && !(await fs.promises.stat(folder)).isDirectory()) throw new Error("Choose a folder.");
@@ -2379,7 +2701,8 @@ async function configureRem(_event, options = {}) {
   } else if (options.key === "secondBrainEnabled") {
     if (options.value && !config.secondBrainRoot) throw new Error("Choose a Second Brain folder first.");
     config.secondBrainEnabled = options.value === true;
-  } else if (options.key === "reportFormat" && REPORT_FORMATS.includes(options.value)) config.reportFormat = options.value;
+  } else if (options.key === "archivePurgeDays" && ARCHIVE_PURGE_CHOICES.includes(String(options.value))) config.archivePurgeDays = String(options.value);
+  else if (options.key === "reportFormat" && REPORT_FORMATS.includes(options.value)) config.reportFormat = options.value;
   else if (options.key === "secondBrainFormat" && ["md", "html"].includes(options.value)) config.secondBrainFormat = options.value;
   else if (options.key === "reportThemes") config.reportThemes = normalizeReportThemes(options.value);
   else if (options.key === "secondBrainTheme" && REPORT_THEMES.includes(options.value)) config.secondBrainTheme = options.value;
@@ -2388,6 +2711,7 @@ async function configureRem(_event, options = {}) {
   const file = path.join(app.getPath("userData"), "rem-settings.json");
   fs.writeFileSync(`${file}.tmp`, JSON.stringify(config), { mode: 0o600 });
   fs.renameSync(`${file}.tmp`, file);
+  if (options.key === "archivePurgeDays" || options.key === "archiveFolder") void runArchiveRetention();
   return config;
 }
 async function archiveRem(_event, { thread, messages, deleted } = {}) {
@@ -2396,6 +2720,33 @@ async function archiveRem(_event, { thread, messages, deleted } = {}) {
   const result = await conversationArchives.archive(config.archiveFolder, thread, messages, { dataDir: getGoferDataDir(), deleted: deleted === true });
   for (const warning of result.warnings || []) applicationLog?.write("warn", "archive", warning);
   return result;
+}
+
+// Delete permanently: remove a thread's archive files. Without an archive there is nothing to purge.
+async function purgeRem(_event, { threadIds } = {}) {
+  const config = remSettings();
+  if (!config.archiveFolder) return { skipped: true };
+  const result = await conversationArchives.purge(config.archiveFolder, threadIds);
+  applicationLog?.write("info", "archive", `Deleted ${result.purged} thread(s) permanently from the conversation archive; removed ${result.attachmentsRemoved} unshared attachment(s).`);
+  return result;
+}
+
+// Purge archive copies of threads deleted at least the chosen number of days ago.
+// Runs at startup, hourly, and when the setting or folder changes. Never by default.
+let archiveRetentionRunning = false;
+async function runArchiveRetention() {
+  if (archiveRetentionRunning) return;
+  let config;
+  try { config = remSettings(); } catch { return; }
+  const days = Number(config.archivePurgeDays);
+  if (!config.archiveFolder || !Number.isInteger(days) || days <= 0) return;
+  archiveRetentionRunning = true;
+  try {
+    const result = await conversationArchives.purgeExpired(config.archiveFolder, days);
+    if (result?.purged) applicationLog?.write("info", "archive", `Archive retention purged ${result.purged} thread(s) deleted more than ${days} days ago; removed ${result.attachmentsRemoved} unshared attachment(s).`);
+  } catch (error) {
+    applicationLog?.write("warn", "archive", `Archive retention could not purge deleted threads: ${error.message}`);
+  } finally { archiveRetentionRunning = false; }
 }
 
 async function forgetRem(_event, { threadIds } = {}) {

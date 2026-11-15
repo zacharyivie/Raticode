@@ -38,6 +38,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from gofer.utils.private_files import private_file_problem
+
 HEADLESS_DIRNAME = "headless"
 OWNER_TOKEN_FILENAME = "owner-token"
 ENDPOINT_FILENAME = "endpoint.json"
@@ -135,14 +137,49 @@ def check_private_file(path: Path, *, secret: bool) -> None:
         info = path.lstat()
     except FileNotFoundError as exc:
         raise HeadlessError(f"{path} doesn't exist") from exc
-    if not path.is_file() or path.is_symlink():
-        raise HeadlessError(f"{path} must be a regular file")
-    if info.st_uid != os.getuid():
-        raise HeadlessError(f"{path} belongs to another account")
-    mask = 0o077 if secret else 0o022
-    if info.st_mode & mask:
-        needed = "600" if secret else "go-w"
-        raise HeadlessError(f"{path} is open to other accounts; run chmod {needed} on it")
+    # lstat: a symlink is not a regular file, so it is refused rather than followed.
+    problem = private_file_problem(info, secret=secret)
+    if problem:
+        raise HeadlessError(f"{path} {problem}")
+
+
+def prepare_secrets_dir(option: Path | None) -> Path | None:
+    """Choose and check this backend's read-only secrets folder.
+
+    ``--secrets-dir`` wins; otherwise systemd's ``$CREDENTIALS_DIRECTORY`` when it set one.
+    The variable is then sealed out of this process's environment like the desktop's
+    tokens, so the providers, workers and commands the backend starts aren't pointed at
+    the folder.
+    """
+    from gofer.core import secrets_folder
+    from gofer.utils.process import seal_credential_env
+
+    folder = secrets_folder.resolve_secrets_dir(option)
+    seal_credential_env((secrets_folder.CREDENTIALS_DIRECTORY_ENV,))
+    try:
+        return secrets_folder.configure_secrets_dir(folder)
+    except secrets_folder.SecretsFolderError as exc:
+        raise HeadlessError(str(exc)) from exc
+
+
+def secret_feature_log_lines(keychain: bool | None = None) -> list[tuple[bool, str]]:
+    """(is_warning, line) pairs saying where each secret-backed feature reads secrets."""
+    from gofer.core import secrets_folder
+
+    folder = secrets_folder.configured_secrets_dir()
+    lines: list[tuple[bool, str]] = []
+    if folder is not None:
+        lines.append((False, f"Reading secrets read-only from the secrets folder {folder}"))
+    features = secrets_folder.secret_features(keychain)
+    if all(feature.source == "keychain" for feature in features):
+        lines.append((False, "Secrets are kept in the system keychain"))
+        return lines
+    for feature in features:
+        if feature.available:
+            lines.append((False, f"{feature.label}: {feature.source}. {feature.detail}"))
+        else:
+            lines.append((True, f"Unavailable: {feature.label}. {feature.detail}"))
+    return lines
 
 
 def read_token_file(path: Path) -> str:
@@ -188,6 +225,7 @@ def publish_endpoint(
     host: str,
     port: int,
     token_file: Path | None,
+    secrets_dir: Path | None = None,
 ) -> Path:
     url_host = f"[{host}]" if ":" in host else host
     record = {
@@ -197,6 +235,8 @@ def publish_endpoint(
         "pid": os.getpid(),
         "dataDir": str(data_dir),
         "tokenFile": str(token_file) if token_file else None,
+        # Only the folder's path, so `Raticode doctor` can check the same files.
+        "secretsDir": str(secrets_dir) if secrets_dir else None,
         "startedAt": datetime.now(UTC).isoformat(),
     }
     path = endpoint_path(data_dir)

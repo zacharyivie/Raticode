@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
+import urllib.parse
 from pathlib import Path
 from typing import Any, Literal
 
@@ -32,6 +34,10 @@ DEFAULT_DIRECT_API_KEY_ENVS = {
     "openai_api": "OPENAI_API_KEY",
     "anthropic_api": "ANTHROPIC_API_KEY",
 }
+# A local model server profile is an OpenAI-compatible chat-completions server the user
+# runs themselves, such as Ollama, llama.cpp or LM Studio. Raticode never installs one.
+LOCAL_MODEL_SERVER_SUBSCRIPTION = "openai_api"
+DEFAULT_LOCAL_MODEL_BASE_URL = "http://127.0.0.1:11434/v1"
 ApprovalMode = Literal[
     "cli-managed",
     "default",
@@ -76,6 +82,8 @@ class ProviderProfile(BaseModel):
     api_key_secret: str | None = None
     organization: str | None = None
     provider_options: dict[str, Any] = Field(default_factory=dict)
+    # A local model server (see DEFAULT_LOCAL_MODEL_BASE_URL). Only on openai_api.
+    local: bool = False
 
     @field_validator("name")
     @classmethod
@@ -105,6 +113,7 @@ class ResolvedProviderSettings(BaseModel):
     api_key_secret: str | None = None
     organization: str | None = None
     provider_options: dict[str, Any] = Field(default_factory=dict)
+    local: bool = False
 
 
 def profile_store_path(data_dir: Path | None = None) -> Path:
@@ -138,16 +147,90 @@ def save_provider_profiles(
     # data roots while leaving the destination entry itself unresolved.
     path = path.parent.resolve() / path.name
     payload = {
-        "profiles": {
-            name: profile.model_dump(exclude_none=True)
-            for name, profile in sorted(profiles.items())
-        }
+        "profiles": {name: _stored_profile(profile) for name, profile in sorted(profiles.items())}
     }
     # Profiles may retain explicitly opted-in or legacy plaintext credentials.
     # Publish privately and atomically without truncating files through links.
     content = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
     with atomic_binary_output(path) as output:
         output.write(content)
+
+
+def _stored_profile(profile: ProviderProfile) -> dict[str, Any]:
+    stored = profile.model_dump(exclude_none=True)
+    # Profiles from before local model servers keep their exact stored form.
+    if not profile.local:
+        stored.pop("local", None)
+    return stored
+
+
+def is_loopback_base_url(url: str | None) -> bool:
+    """Whether an API base URL points at this computer (localhost or a loopback IP)."""
+    try:
+        host = urllib.parse.urlsplit(url or "").hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+    host = host.rstrip(".").lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def local_server_host(url: str | None) -> str | None:
+    try:
+        host = urllib.parse.urlsplit(url or "").hostname
+    except ValueError:
+        return None
+    return host.rstrip(".").lower() if host else None
+
+
+def local_server_warning(settings: ProviderProfile | ResolvedProviderSettings) -> str | None:
+    """The warning a local model server profile shows when it isn't on this computer."""
+    if not settings.local or is_loopback_base_url(settings.api_base_url):
+        return None
+    host = local_server_host(settings.api_base_url) or "the server"
+    return (
+        f"This server isn't on this computer. Prompts, files the prompt includes and the "
+        f"model's replies travel over the network to {host}, and anyone who can reach it "
+        "can use it unless it checks the API key. Use HTTPS or a network you trust."
+    )
+
+
+def _validate_local_server(settings: ResolvedProviderSettings) -> None:
+    if settings.subscription != LOCAL_MODEL_SERVER_SUBSCRIPTION:
+        raise ValueError(
+            "A local model server profile uses the OpenAI-compatible API "
+            f"(subscription '{LOCAL_MODEL_SERVER_SUBSCRIPTION}'), not '{settings.subscription}'"
+        )
+    url = settings.api_base_url or ""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        parsed.port
+    except ValueError as exc:
+        raise ValueError(f"Local model server address {url!r} isn't a valid URL") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError(
+            "A local model server needs an http:// or https:// address, such as "
+            f"{DEFAULT_LOCAL_MODEL_BASE_URL}"
+        )
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError(
+            "A local model server address can't contain a user name, password, query or "
+            "fragment. Give the API key with --api-key-secret or --api-key-env instead."
+        )
+    if not is_loopback_base_url(url) and not (settings.api_key_secret or settings.api_key_env):
+        raise ValueError(
+            f"The local model server at {parsed.hostname} isn't on this computer, so it "
+            "needs an API key. Save the key as a workflow secret and pass its name with "
+            "--api-key-secret, or name an environment variable with --api-key-env."
+        )
+    if settings.organization:
+        raise ValueError("Local model server profiles do not support organization")
 
 
 def is_sensitive_env_name(name: str) -> bool:
@@ -196,6 +279,12 @@ def provider_profile_ui_payload(profile: ProviderProfile) -> dict[str, Any]:
     legacy_sensitive = sorted(sensitive_plaintext_env(profile))
     if legacy_sensitive:
         payload["masked_env"] = legacy_sensitive
+    if profile.local:
+        payload["loopback"] = is_loopback_base_url(profile.api_base_url)
+        if warning := local_server_warning(profile):
+            payload["warning"] = warning
+    else:
+        payload.pop("local", None)
     return payload
 
 
@@ -232,6 +321,11 @@ def provider_profile_from_ui_payload(
     )
     raw_payload["env"] = env
     raw_payload["secret_refs"] = secret_refs
+    for derived in ("loopback", "warning", "masked_env"):
+        raw_payload.pop(derived, None)
+    if raw_payload.get("local") is True:
+        raw_payload.setdefault("subscription", LOCAL_MODEL_SERVER_SUBSCRIPTION)
+        raw_payload.setdefault("api_base_url", DEFAULT_LOCAL_MODEL_BASE_URL)
     profile = ProviderProfile(**raw_payload)
     validate_provider_profile(profile)
     return profile
@@ -294,10 +388,13 @@ def resolve_provider_settings(
         api_key_secret=profile.api_key_secret if profile else None,
         organization=profile.organization if profile else None,
         provider_options=dict(profile.provider_options) if profile else {},
+        local=bool(profile and profile.local),
     )
 
 
 def validate_provider_settings(settings: ResolvedProviderSettings) -> None:
+    if settings.local:
+        _validate_local_server(settings)
     if settings.subscription == "antigravity" and settings.effort not in (
         None,
         "cli-default",
@@ -325,8 +422,7 @@ def validate_provider_settings(settings: ResolvedProviderSettings) -> None:
             if getattr(settings, name)
             not in (
                 (None, "default", "cli-managed")
-                if name == "approval_mode"
-                and settings.subscription in {"antigravity", "grok"}
+                if name == "approval_mode" and settings.subscription in {"antigravity", "grok"}
                 else (None, "default")
             )
         ]
@@ -401,6 +497,7 @@ def validate_provider_profile(profile: ProviderProfile) -> None:
             api_key_secret=profile.api_key_secret,
             organization=profile.organization,
             provider_options=dict(profile.provider_options),
+            local=profile.local,
         )
     )
 
@@ -411,7 +508,12 @@ def unresolved_provider_secret_refs(settings: ResolvedProviderSettings) -> list[
         for secret_name in settings.secret_refs.values()
         if not _secret_value(secret_name)
     }
-    if settings.subscription in DIRECT_API_SUBSCRIPTIONS:
+    if settings.local:
+        if settings.api_key_secret and _direct_api_secret(settings) is None:
+            missing.add(settings.api_key_secret)
+        elif settings.api_key_env and not os.environ.get(settings.api_key_env):
+            missing.add(settings.api_key_env)
+    elif settings.subscription in DIRECT_API_SUBSCRIPTIONS:
         if settings.api_key_secret:
             if not _secret_value(settings.api_key_secret):
                 missing.add(settings.api_key_secret)
@@ -432,7 +534,27 @@ def resolved_provider_env(settings: ResolvedProviderSettings) -> dict[str, str]:
                 f"or {secret_name} before running."
             )
         env[env_name] = secret
-    if settings.subscription in DIRECT_API_SUBSCRIPTIONS:
+    if settings.local:
+        # A server on this computer needs no key; one elsewhere was given a key when
+        # the profile was saved (see _validate_local_server).
+        if settings.api_key_secret:
+            secret = _direct_api_secret(settings)
+            if secret is None:
+                raise ValueError(
+                    f"Local model server profile '{settings.profile_name}' requires API key "
+                    f"secret '{settings.api_key_secret}'. Save it in Workflow settings > "
+                    f"Secrets or set the {settings.api_key_secret} environment variable."
+                )
+            env["GOFER_DIRECT_API_KEY"] = secret
+        elif settings.api_key_env:
+            secret = os.environ.get(settings.api_key_env)
+            if secret is None:
+                raise ValueError(
+                    f"Local model server profile '{settings.profile_name}' requires "
+                    f"environment variable '{settings.api_key_env}'."
+                )
+            env["GOFER_DIRECT_API_KEY"] = secret
+    elif settings.subscription in DIRECT_API_SUBSCRIPTIONS:
         if settings.api_key_secret:
             secret = _secret_value(settings.api_key_secret)
             if secret is None:
@@ -453,6 +575,20 @@ def resolved_provider_env(settings: ResolvedProviderSettings) -> dict[str, str]:
     return env
 
 
+def _direct_api_secret(settings: ResolvedProviderSettings) -> str | None:
+    """A local server's key: a saved workflow secret first, then the environment."""
+    name = settings.api_key_secret
+    if not name:
+        return None
+    from gofer.rattish.workflow_secrets import WorkflowSecretError, workflow_secret_value
+
+    try:
+        value = workflow_secret_value(name)
+    except WorkflowSecretError:
+        value = None
+    return value if value is not None else _secret_value(name)
+
+
 def _secret_value(name: str) -> str | None:
     for env_name in (f"GOFER_SECRET_{name}", name):
         if env_name in os.environ:
@@ -468,4 +604,7 @@ def _resolved_direct_api_key_env(
         return profile.api_key_env
     if profile and profile.api_key_env:
         return profile.api_key_env
+    if profile and profile.local:
+        # Never send the user's OpenAI key to a local server.
+        return None
     return DEFAULT_DIRECT_API_KEY_ENVS.get(subscription)

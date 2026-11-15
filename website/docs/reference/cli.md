@@ -41,11 +41,14 @@ Raticode rattish docs --format json
 | `Raticode rattish inspect-ir PATH --pretty` | Print the compiled representation | No |
 | `Raticode rattish preflight PATH --format json` | Check required runtime resources | No |
 | `Raticode rattish run PATH --format json` | Execute the workflow | **Yes** |
+| `Raticode rattish test PATH` | Run the workflow's [test set](../workflows/tests.md) and check each case. `--estimate` prints the expected cost only | **Yes**, once per case |
+| `Raticode rattish prune PATH` | Preview old runs that the workflow's [retention settings](../studio/runs.md#old-runs) no longer keep. `--apply` deletes them | No |
+| `Raticode rattish cache show\|clear PATH` | Show or clear the saved answers of nodes with [`cache:`](../nodes/common-llm-task.md#result-cache). `--workflow-id ID` names the workflow by ID; `clear --all` clears every workflow | No |
 | `Raticode rattish triggers add cron\|file\|webhook PATH ...` | Start the workflow on a schedule, file change, or local webhook. See [Triggers](../workflows/triggers.md) | Later, when it fires |
 
 - `PATH` is the source file. For a registered workflow, use the exact path `create` returned.
 - Run `--help` on a command for its current options. Most take `--data-dir`.
-- Only `format` edits its target, and only `run` executes nodes. A run can write files, call providers and contact services, as the source says.
+- Only `format` edits its target, `prune --apply` deletes run records and `cache clear` deletes saved answers. Only `run` and `test` execute nodes. A run can write files, call providers and contact services, as the source says.
 
 ## Inputs and limits
 
@@ -64,12 +67,15 @@ Raticode rattish run WORKFLOW_PATH --input 'message="Hello"' --format json
 Raticode provider --help
 Raticode provider profile list --format json
 Raticode provider profile create NAME --subscription codex --model MODEL
+Raticode provider profile create NAME --local --api-base-url http://127.0.0.1:11434/v1
+Raticode provider profile check NAME --model MODEL
 Raticode provider profile edit NAME --model MODEL
 Raticode provider profile rm NAME
 Raticode doctor --json
 ```
 
 - Provider profiles are reusable deployment settings. `Raticode provider profile create --help` lists the supported subscription and permission options.
+- `--local` creates a [local model server](../setup.md#local-model-servers) profile for a server you run, such as Ollama. `check` asks that server for its models and exits 1 if it doesn't answer or doesn't list `--model`. New in 0.5.5.
 - `edit` replaces only the values you pass. `rm` asks first unless you add `--yes`.
 - Sign in to native provider CLIs separately.
 - A profile never overrides a Rattish node's explicit provider, model or effort.

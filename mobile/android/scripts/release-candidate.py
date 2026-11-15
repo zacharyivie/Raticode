@@ -53,7 +53,8 @@ OSV_BATCH = "https://api.osv.dev/v1/querybatch"
 RELEASE_APK = ROOT / "app/build/outputs/apk/release/app-release.apk"
 UNSIGNED_APK = ROOT / "app/build/outputs/apk/release/app-release-unsigned.apk"
 # Gradle names the bundle the same whether it signed it or not.
-RELEASE_BUNDLE = ROOT / "app/build/outputs/bundle/release/app-release.aab"
+# Google Play's bundle comes from the "play" build type: the release build without REQUEST_INSTALL_PACKAGES.
+RELEASE_BUNDLE = ROOT / "app/build/outputs/bundle/play/app-play.aab"
 # Google Play's limit on a base module's compressed download (500 MB). Above 200 MB,
 # Play warns people on mobile data before they install.
 PLAY_DOWNLOAD_LIMIT = 500_000_000
@@ -309,10 +310,19 @@ def native_alignment(archive: Path, prefix: str = "lib/") -> dict[str, Any]:
     return {"libraries": libraries, "page_alignment": PAGE_ALIGNMENT}
 
 
-def manifest_policy(info: dict[str, Any], tree: dict[str, Any]) -> tuple[str, int, dict[str, str | None]]:
-    """The checks an APK and an App Bundle share: identity, SDK levels, permissions and exports."""
+def manifest_policy(
+    info: dict[str, Any], tree: dict[str, Any], play: bool = False
+) -> tuple[str, int, dict[str, str | None]]:
+    """The checks an APK and an App Bundle share: identity, SDK levels, permissions and exports.
+
+    Google Play's bundle (``play``) must leave out the permissions in ``play_bundle_omits``,
+    such as installing its own updates, which Play doesn't allow.
+    """
     version, code = versions()
-    rules = policy()
+    rules = dict(policy())
+    if play:
+        omitted = set(rules.get("play_bundle_omits", []))
+        rules["permissions"] = [name for name in rules["permissions"] if name not in omitted]
     require(info["package"] == rules["package"], f"Package is {info['package']}, not {rules['package']}")
     require(
         (info["version_name"], info["version_code"]) == (version, code),
@@ -454,7 +464,7 @@ def check_bundle(aab: Path, signed: bool, apk_certificate: str | None = None) ->
         tree = parse_manifest_tree(
             run(build_tool("aapt2"), "dump", "xmltree", "--file", "AndroidManifest.xml", base)
         )
-    version, code, exported = manifest_policy(info, tree)
+    version, code, exported = manifest_policy(info, tree, play=True)
     alignment = native_alignment(aab, prefix="base/lib/")
     size = bundle_download_estimate(aab)
     verdict = jar_signature(aab)

@@ -16,7 +16,10 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
+from gofer.core.usage_ledger import empty_usage, merge_usage, run_usage
+from gofer.core.usage_ledger import organization_ticket_usage as organization_ticket_usage
 from gofer.ui import rem_ticket_activity as activity
+from gofer.ui import rem_ticket_review as review
 from gofer.ui.organization_store import (
     OrganizationConflict,
     assignable_roots,
@@ -37,6 +40,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "enabled": True,
     "max_threads": 2,
     "auto_pull_backlog": False,
+    # Self-work starts nothing new past these; 0 turns each one off.
+    "session_token_limit": 0,
+    "daily_token_limit": 0,
+    "rate_limit_percent": 0,
+    # The user's choice alone: new self-work ideas become accepted Backlog tickets instead of
+    # waiting for approval, for as long as self-work runs.
+    "auto_approve_proposals": False,
     "revision": 0,
 }
 # What one board response may carry, so a phone's reply always fits its message limit.
@@ -45,6 +55,8 @@ BOARD_TICKETS = 500
 CLOSED_TICKETS = 80
 REPORT_ROWS = 2000
 ORG_ACTOR = "Rem:kanban"
+# How many tickets one ticket may wait for.
+MAX_WAITS = 20
 # A board ticket key as written in chat, such as REM-5 or AGE-18: a capital letter, then
 # capitals or digits, a dash and a number. Not part of a longer word, path or version
 # ("xREM-5", "REM-5a", "a/REM-5", "REM-5.2"). The desktop and phone match the same way
@@ -191,8 +203,241 @@ def new_ticket(db: sqlite3.Connection, **fields: Any) -> dict[str, Any]:
         "summary": "",
         "attempts": 0,
         "moved_to": None,
+        # Rem tickets that must be Done before self-work starts this one.
+        "waits_for": [],
         **fields,
     }
+
+
+def wait_ids(ticket: dict[str, Any]) -> list[str]:
+    """The IDs of the Rem tickets this one waits for, in the order they were added."""
+    raw = ticket.get("waits_for")
+    return [str(i) for i in raw if isinstance(i, str)] if isinstance(raw, list) else []
+
+
+def tickets_by_id(db: sqlite3.Connection, ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+    """Rem's tickets with these IDs; IDs of tickets that no longer exist are left out."""
+    wanted = list(dict.fromkeys(ids))
+    found: dict[str, dict[str, Any]] = {}
+    for start in range(0, len(wanted), 500):
+        chunk = wanted[start : start + 500]
+        rows = db.execute(
+            f"SELECT body FROM kanban_tickets WHERE id IN ({','.join('?' * len(chunk))})", chunk
+        )
+        for row in rows:
+            ticket = json.loads(row[0])
+            found[ticket["id"]] = ticket
+    return found
+
+
+def unmet_waits(ticket: dict[str, Any], by_id: dict[str, dict[str, Any]]) -> list[str]:
+    """The tickets this one still waits for: every listed ticket that isn't Done."""
+    return [i for i in wait_ids(ticket) if (by_id.get(i) or {}).get("status") != "done"]
+
+
+def held_by_waits(db: sqlite3.Connection, tickets: list[dict[str, Any]]) -> set[str]:
+    """IDs of the tickets in ``tickets`` that still wait for another ticket to be Done."""
+    by_id = tickets_by_id(db, (i for t in tickets for i in wait_ids(t)))
+    return {t["id"] for t in tickets if unmet_waits(t, by_id)}
+
+
+def rem_nodes(tickets: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Rem's tickets as the waits code reads them: key, title, status and what each waits for."""
+    return {
+        t["id"]: {
+            "key": f"REM-{t['number']}",
+            "title": str(t.get("title") or ""),
+            "status": t["status"],
+            "waits": wait_ids(t),
+        }
+        for t in tickets
+    }
+
+
+def organization_nodes(org: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """An organization's tickets the same way; their waits are the organization's dependsOn."""
+    prefix = ticket_prefix(org["config"])
+    return {
+        t["id"]: {
+            "key": f"{prefix}-{t['number']}" if t.get("number") else "",
+            "title": str(t.get("title") or ""),
+            "status": t["status"],
+            "waits": [str(d) for d in t.get("dependsOn") or []],
+        }
+        for t in org["runtime"]["tasks"]
+        if not t.get("heartbeat")
+    }
+
+
+def waits_view(
+    waits: list[str], nodes: dict[str, dict[str, Any]]
+) -> tuple[list[dict[str, Any]], bool, str]:
+    """What a ticket waits for as the board shows it: the list, whether it still waits,
+    and a notice when one of them was cancelled, so the user decides what happens next."""
+    listed = []
+    for identity in waits:
+        other = nodes.get(identity)
+        listed.append(
+            {
+                "ticket_id": identity,
+                "key": other["key"] if other else "",
+                "title": other["title"][:200] if other else "A removed ticket",
+                "status": other["status"] if other else "removed",
+            }
+        )
+    gone = [w for w in listed if w["status"] in {"cancelled", "removed"}]
+    notice = ""
+    if gone:
+        names = [f"{w['key']} “{w['title']}”" if w["key"] else w["title"] for w in gone]
+        subject = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+        kinds = {w["status"] for w in gone}
+        how = (
+            "cancelled"
+            if kinds == {"cancelled"}
+            else "removed"
+            if kinds == {"removed"}
+            else "cancelled or removed"
+        )
+        notice = (
+            f"{subject} {'was' if len(gone) == 1 else 'were'} {how}, so this ticket won't start "
+            "on its own. Remove "
+            + ("it" if len(gone) == 1 else "them")
+            + " from Waits for, or cancel or start this ticket yourself."
+        )
+    return listed, any(w["status"] != "done" for w in listed), notice
+
+
+def choose_waits(
+    nodes: dict[str, dict[str, Any]],
+    identity: str | None,
+    raw: Any,
+    *,
+    keep: Iterable[str] = (),
+    where: str = "Rem's",
+) -> list[str]:
+    """The ticket IDs a request names for ``waits_for``, checked against one board's tickets.
+
+    Each entry is a ticket ID or its key, such as REM-4. A ticket waits only for tickets
+    with the same owner (Rem's for Rem's, an organization's for its own). It can't wait for
+    itself, for a cancelled ticket (unless it already did, in ``keep``) or in a loop.
+    """
+    if not isinstance(raw, list) or not all(isinstance(r, str) for r in raw):
+        raise KanbanRefused("invalid", "Choose the tickets this one waits for.")
+    if len(raw) > MAX_WAITS:
+        raise KanbanRefused("invalid", f"A ticket can wait for at most {MAX_WAITS} tickets.")
+    by_key = {n["key"]: i for i, n in nodes.items() if n["key"]}
+    kept = set(keep)
+    chosen: list[str] = []
+    for entry in raw:
+        name = entry.strip()
+        target = name if name in nodes else by_key.get(name.upper())
+        if target is None:
+            raise KanbanRefused(
+                "not_found",
+                f"{name} isn't one of {where} tickets. A ticket can only wait for tickets on "
+                "the same board as itself: Rem's for Rem's, an organization's for its own."
+                if TICKET_KEY.fullmatch(name.upper())
+                else "A ticket it waits for no longer exists.",
+            )
+        if target == identity:
+            raise KanbanRefused("invalid", "A ticket can't wait for itself.")
+        if nodes[target]["status"] == "cancelled" and target not in kept:
+            raise KanbanRefused(
+                "invalid",
+                f"{nodes[target]['key'] or 'That ticket'} is cancelled. Restore it before a "
+                "ticket waits for it.",
+            )
+        if target not in chosen:
+            chosen.append(target)
+    if identity:
+        graph = {i: n["waits"] for i, n in nodes.items()}
+        graph[identity] = chosen
+        loop = _wait_loop(graph, identity)
+        if loop:
+            path = " → ".join(nodes[i]["key"] or nodes[i]["title"][:60] for i in loop if i in nodes)
+            raise KanbanRefused("invalid", f"Tickets can't wait for each other in a loop: {path}.")
+    return chosen
+
+
+def resolve_waits(
+    db: sqlite3.Connection, identity: str | None, raw: Any, keep: Iterable[str] = ()
+) -> list[str]:
+    """``choose_waits`` for one of Rem's tickets, against Rem's board."""
+    return choose_waits(rem_nodes(read_tickets(db)), identity, raw, keep=keep)
+
+
+def note_waiters(db: sqlite3.Connection, ticket: dict[str, Any]) -> None:
+    """Tell the tickets that wait for ``ticket``, on their timelines, that it was cancelled.
+
+    They stay where they are: the user decides whether to drop the link or the ticket.
+    """
+    key = f"REM-{ticket['number']}"
+    for waiter in read_tickets(db, *OPEN_STATUSES):
+        if ticket["id"] in wait_ids(waiter):
+            activity.add_comment(
+                db,
+                waiter["id"],
+                author="system",
+                kind="status",
+                title=f"{key}, which this waits for, was cancelled",
+                body=(
+                    f"{key} “{ticket['title']}” was cancelled. Self-work won't start this ticket "
+                    "until you remove it from Waits for, or you start or cancel this one."
+                ),
+                dedupe=f"wait-cancelled:{ticket['id']}:{ticket['revision']}",
+            )
+
+
+def move_waiters(db: sqlite3.Connection, duplicate: dict[str, Any], kept: dict[str, Any]) -> None:
+    """Point tickets that waited for a merged duplicate at the ticket it was merged into.
+
+    A ticket that would then wait for itself, or wait in a loop, keeps its link to the
+    cancelled duplicate and gets the usual cancelled notice instead.
+    """
+    from_key, to_key = f"REM-{duplicate['number']}", f"REM-{kept['number']}"
+    stranded = False
+    for waiter in read_tickets(db, *OPEN_STATUSES):
+        waits = wait_ids(waiter)
+        if duplicate["id"] not in waits:
+            continue
+        moved = [kept["id"] if i == duplicate["id"] else i for i in waits]
+        moved = list(dict.fromkeys(moved))
+        graph = {i: n["waits"] for i, n in rem_nodes(read_tickets(db)).items()}
+        graph[waiter["id"]] = moved
+        if waiter["id"] == kept["id"] or _wait_loop(graph, waiter["id"]):
+            stranded = True
+            continue
+        waiter.update(waits_for=moved, revision=waiter["revision"] + 1)
+        put_ticket(db, waiter)
+        activity.add_comment(
+            db,
+            waiter["id"],
+            author="system",
+            kind="status",
+            title=f"Now waits for {to_key} instead of {from_key}",
+            body=(
+                f"{from_key} was closed as a duplicate of {to_key} “{kept['title']}”, so this "
+                f"ticket now waits for {to_key}."
+            ),
+            dedupe=f"wait-moved:{duplicate['id']}:{kept['id']}",
+        )
+    if stranded:
+        note_waiters(db, duplicate)
+
+
+def _wait_loop(graph: dict[str, list[str]], start: str) -> list[str]:
+    """A path from ``start`` back to itself through what tickets wait for, or []."""
+    stack: list[tuple[str, list[str]]] = [(start, [start])]
+    seen: set[str] = set()
+    while stack:
+        node, path = stack.pop()
+        for following in graph.get(node, []):
+            if following == start:
+                return [*path, start]
+            if following not in seen:
+                seen.add(following)
+                stack.append((following, [*path, following]))
+    return []
 
 
 def ticket_keys(text: Any) -> list[str]:
@@ -275,6 +520,12 @@ def pending_proposal(ticket: dict[str, Any]) -> bool:
     )
 
 
+def auto_approved(ticket: dict[str, Any]) -> bool:
+    """Whether self-work approved this ticket itself, with auto-approval on, not the user."""
+    proposal = ticket.get("proposal") or {}
+    return proposal.get("state") == "approved" and proposal.get("by") == "self_work"
+
+
 def rem_assignment(db: sqlite3.Connection, store: RemHomeStore) -> dict[str, Any]:
     """The projects the user assigned to Rem for self-work, with their revision."""
     saved = store.setting(db, "self_work_projects")
@@ -301,12 +552,40 @@ def self_work_scope(ticket: dict[str, Any], assignment: dict[str, Any], usable: 
     return "unavailable" if root in assignment["projects"] else "unassigned"
 
 
+def rem_ticket_usage(
+    db: sqlite3.Connection, tickets: list[dict[str, Any]], data_dir: Path
+) -> dict[str, dict[str, Any]]:
+    """Each ticket's model use: every call its runs made, by ticket ID.
+
+    A ticket's runs are the ones started for it, one per attempt, and the run it names now.
+    """
+    wanted = {t["id"] for t in tickets}
+    runs: dict[str, set[str]] = {}
+    for run_id, ticket_id in db.execute(
+        "SELECT id, json_extract(body,'$.self_work.ticket_id') FROM runs "
+        "WHERE json_extract(body,'$.self_work.ticket_id') IS NOT NULL"
+    ):
+        if ticket_id in wanted:
+            runs.setdefault(ticket_id, set()).add(run_id)
+    for ticket in tickets:
+        if ticket.get("run_id"):
+            runs.setdefault(ticket["id"], set()).add(ticket["run_id"])
+    used = run_usage({r for ids in runs.values() for r in ids}, data_dir)
+    return {
+        identity: merge_usage(*(used[r] for r in ids if r in used))
+        for identity, ids in runs.items()
+    }
+
+
 def ticket_view(
     ticket: dict[str, Any],
     assignment: dict[str, Any] | None = None,
     usable: set[str] | None = None,
+    usage: dict[str, Any] | None = None,
+    nodes: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     root = ticket.get("project_dir")
+    waits, waiting, wait_notice = waits_view(wait_ids(ticket), nodes or {})
     return {
         "ticket_id": ticket["id"],
         "scope": "rem",
@@ -320,6 +599,8 @@ def ticket_view(
         "assignee_id": "rem",
         "assignee": "Rem",
         "proposed": pending_proposal(ticket),
+        # Self-work approved it on its own; the user hasn't looked at it.
+        "auto_approved": auto_approved(ticket),
         "proposal_reason": (ticket.get("proposal") or {}).get("reason", ""),
         "duplicate_of": ticket.get("duplicate_of") or "",
         "created_by": ticket.get("created_by", ""),
@@ -342,10 +623,27 @@ def ticket_view(
         "self_work_scope": self_work_scope(ticket, assignment or {"projects": []}, usable or set()),
         "run_id": ticket.get("run_id") or "",
         "thread_id": ticket.get("thread_id") or "",
+        # Tokens its runs used; calls a provider didn't report count as unknown.
+        "usage": usage or empty_usage(),
+        "branch": "",
+        "landed": bool(ticket.get("landed")),
+        # The Rem tickets this one waits for; self-work skips it while any isn't Done.
+        "waits_for": waits,
+        "waiting": waiting,
+        "wait_notice": wait_notice,
     }
 
 
-def organization_ticket_view(org: dict[str, Any], task: dict[str, Any]) -> dict[str, Any]:
+def organization_ticket_view(
+    org: dict[str, Any],
+    task: dict[str, Any],
+    usage: dict[str, Any] | None = None,
+    nodes: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    waits, waiting, wait_notice = waits_view(
+        [str(d) for d in task.get("dependsOn") or []],
+        organization_nodes(org) if nodes is None else nodes,
+    )
     employees = {e["id"]: e for e in org["config"]["employees"]}
     assignee = task.get("assignee") or ""
     number = task.get("number")
@@ -363,6 +661,7 @@ def organization_ticket_view(org: dict[str, Any], task: dict[str, Any]) -> dict[
         "assignee_id": assignee,
         "assignee": (employees.get(assignee) or {}).get("name", assignee),
         "proposed": False,
+        "auto_approved": False,
         "proposal_reason": "",
         "duplicate_of": "",
         "created_by": "",
@@ -380,6 +679,14 @@ def organization_ticket_view(org: dict[str, Any], task: dict[str, Any]) -> dict[
         "self_work_scope": "",
         "run_id": "",
         "thread_id": "",
+        "usage": usage or empty_usage(),
+        # The ticket's work branch, when it has one; its sheet shows the patch.
+        "branch": ((task.get("worktree") or task.get("releasedWorktree") or {}).get("branch"))
+        or "",
+        # The organization's own dependencies: it runs a ticket only once they're all Done.
+        "waits_for": waits,
+        "waiting": waiting,
+        "wait_notice": wait_notice,
     }
 
 
@@ -395,13 +702,18 @@ class RemKanban:
         organizations: Callable[[], Any] = lambda: None,
         start: Callable[[str, str], None] | None = None,
         resume: Callable[[str, str], Any] | None = None,
+        follow_up: Callable[[str, str, str], Any] | None = None,
     ) -> None:
         self.store = store
+        # Where the usage ledger lives, beside Rem's store.
+        self.data_dir = store.path.parent
         self.organizations = organizations
         # Starts a ticket's run now (the self-work engine); given the ticket ID and actor.
         self.start = start
         # Resumes a ticket's paused run in its thread; given the run ID and actor.
         self.resume = resume
+        # Sends the user's request for changes to a ticket's thread: thread, body, request ID.
+        self.follow_up = follow_up
         # Organization ticket keys, re-read at most every ORG_KEYS_FOR seconds.
         self._org_keys: tuple[float, dict[str, dict[str, Any]]] = (-ORG_KEYS_FOR, {})
 
@@ -412,15 +724,31 @@ class RemKanban:
         return manager if manager is not None and manager.enabled else None
 
     def configured_organizations(self) -> list[dict[str, Any]]:
-        """Every organization that isn't archived, with its tickets."""
+        """Every organization that isn't archived, with its tickets.
+
+        These are the organization store's shared copies, decoded again only after an
+        organization changes, so nothing here may change them.
+        """
         manager = self.manager()
         if manager is None:
             return []
         return [
-            org
-            for org in manager.store.list_organizations()
-            if org["runtime"].get("archived") is not True
+            org for org in manager.store.snapshots() if org["runtime"].get("archived") is not True
         ]
+
+    def _ticket_usage(self, org: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        """Each of an organization's tickets' model use, by task ID.
+
+        Kept with the store's shared copy until the organization or the usage ledger
+        changes; each total is copied so a view can't change the kept one.
+        """
+        manager = self.manager()
+        used = (
+            manager.store.ticket_usage(org, self.data_dir)
+            if manager is not None
+            else organization_ticket_usage(org, self.data_dir)
+        )
+        return {identity: dict(total) for identity, total in used.items()}
 
     def _organization(self, identifier: str) -> dict[str, Any]:
         org = next((o for o in self.configured_organizations() if o["id"] == identifier), None)
@@ -526,10 +854,18 @@ class RemKanban:
             config = self.store.setting(db, "config")
             assignment = rem_assignment(db, self.store)
             usable = usable_projects(config, assignment)
+            stored = [
+                t for t in read_tickets(db) if (t.get("proposal") or {}).get("state") != "declined"
+            ]
+            spent = rem_ticket_usage(db, stored, self.data_dir)
+            # Declined proposals aren't shown, but a ticket may still wait for one.
+            shown_ids = {t["id"] for t in stored}
+            extra = tickets_by_id(
+                db, (i for t in stored for i in wait_ids(t) if i not in shown_ids)
+            )
+            nodes = rem_nodes([*stored, *extra.values()])
             tickets = [
-                ticket_view(t, assignment, usable)
-                for t in read_tickets(db)
-                if (t.get("proposal") or {}).get("state") != "declined"
+                ticket_view(t, assignment, usable, spent.get(t["id"]), nodes) for t in stored
             ]
         open_roots = open_project_roots(config)
         configured = self.configured_organizations()
@@ -601,8 +937,10 @@ class RemKanban:
                     ],
                 }
             )
+            org_used = self._ticket_usage(org)
+            org_nodes = organization_nodes(org)
             tickets.extend(
-                organization_ticket_view(org, task)
+                organization_ticket_view(org, task, org_used.get(task["id"]), org_nodes)
                 for task in org["runtime"]["tasks"]
                 if not task.get("heartbeat")
             )
@@ -612,6 +950,7 @@ class RemKanban:
         used = 0
         for ticket in [*reversed(opened), *list(reversed(closed))[:CLOSED_TICKETS]]:
             used += len(ticket["description"]) + 700
+            used += sum(len(w["title"]) + 120 for w in ticket["waits_for"])
             if used > BOARD_BYTES or len(shown) >= BOARD_TICKETS:
                 break
             shown.append(ticket)
@@ -648,6 +987,11 @@ class RemKanban:
                             "proposed",
                         )
                     },
+                    **(
+                        {"waits_for": [w["key"] or w["ticket_id"] for w in t["waits_for"]]}
+                        if t["waits_for"]
+                        else {}
+                    ),
                 }
                 for t in board["tickets"]
                 if t["status"] in OPEN_STATUSES
@@ -712,6 +1056,10 @@ class RemKanban:
             self.decide(actor, payload, str(action))
         elif action == "comment":
             self.comment(actor, payload, request_id)
+        elif action == "land":
+            return self.land(actor, payload)
+        elif action == "request_changes":
+            self.request_changes(actor, payload, request_id)
         else:
             raise KanbanRefused("invalid", "Unknown ticket action.")
         return None
@@ -754,6 +1102,15 @@ class RemKanban:
         assignee = _text(payload.get("assignee_id"), 100)
         if payload.get("scope") == "organization" or payload.get("organization_id"):
             identifier = self._organization_id(payload)
+            waits: list[str] = []
+            if payload.get("waits_for"):
+                org = self._organization(identifier)
+                waits = choose_waits(
+                    organization_nodes(org),
+                    None,
+                    payload["waits_for"],
+                    where=f"{org['config']['name']}’s",
+                )
             if assignee == "rem":
                 raise KanbanRefused("invalid", "Tickets in an organization go to its workers.")
             result = self._call(
@@ -767,6 +1124,7 @@ class RemKanban:
                     "status": status,
                     "idempotencyKey": request_id,
                     **({"assignee": assignee} if assignee else {}),
+                    **({"dependsOn": waits} if waits else {}),
                 },
             )
             if actor == "rem":
@@ -793,8 +1151,10 @@ class RemKanban:
             raise KanbanRefused("invalid", "Choose an open project.")
 
         def operation(db: sqlite3.Connection) -> dict[str, Any]:
+            waits = resolve_waits(db, None, payload.get("waits_for") or [])
             ticket = new_ticket(
                 db,
+                waits_for=waits,
                 title=title,
                 description=description,
                 status=status,
@@ -834,9 +1194,22 @@ class RemKanban:
         if "priority" in payload:
             changes["priority"] = clean_priority(payload["priority"])
         if payload.get("scope") == "organization":
+            identifier = self._organization_id(payload)
+            if "waits_for" in payload:
+                org = self._organization(identifier)
+                task = next((t for t in org["runtime"]["tasks"] if t["id"] == identity), None)
+                if task is None:
+                    raise KanbanRefused("not_found", "This ticket no longer exists.")
+                changes["dependsOn"] = choose_waits(
+                    organization_nodes(org),
+                    identity,
+                    payload["waits_for"] or [],
+                    keep=task.get("dependsOn") or [],
+                    where=f"{org['config']['name']}’s",
+                )
             self._call(
                 actor,
-                self._organization_id(payload),
+                identifier,
                 "task_update",
                 {"taskId": identity, "expectedRevision": revision, "changes": changes},
             )
@@ -855,7 +1228,13 @@ class RemKanban:
         with self.store.connect() as db:
             ticket = get_ticket(db, identity)
             self._check_revision(ticket, revision)
-            if ticket.get("claim"):
+            if "waits_for" in payload:
+                changes["waits_for"] = resolve_waits(
+                    db, identity, payload["waits_for"] or [], keep=wait_ids(ticket)
+                )
+            # What a ticket waits for only decides when self-work starts it, so it can change
+            # while the ticket runs; its plan can't.
+            if ticket.get("claim") and changes.keys() - {"waits_for"}:
                 raise KanbanRefused("conflict", "Stop this ticket's run before editing its plan.")
             if changes.keys() & {"title", "description", "project_dir"}:
                 ticket["triage"] = None
@@ -937,6 +1316,8 @@ class RemKanban:
                         else ticket["summary"],
                     )
                     put_ticket(db, ticket)
+                    if target == "cancelled":
+                        note_waiters(db, ticket)
                     who = "you" if actor == "user" else "Rem"
                     activity.note_move(
                         db,
@@ -1033,6 +1414,7 @@ class RemKanban:
                 summary=f"Handed to {name}.",
             )
             put_ticket(db, current)
+            note_waiters(db, current)
             activity.add_comment(
                 db,
                 identity,
@@ -1078,6 +1460,8 @@ class RemKanban:
                     status_to="cancelled",
                 )
             put_ticket(db, ticket)
+            if action != "approve":
+                note_waiters(db, ticket)
 
     def comment(self, actor: str, payload: dict[str, Any], request_id: str) -> None:
         """Add a comment to a ticket's timeline: the user's, or Rem's."""
@@ -1103,6 +1487,148 @@ class RemKanban:
                 dedupe=f"request:{request_id}",
             )
 
+    # Review and land ---------------------------------------------------------------
+
+    def _ticket_run(self, ticket: dict[str, Any]) -> dict[str, Any] | None:
+        if not ticket.get("run_id"):
+            return None
+        with self.store.read() as db:
+            try:
+                return self.store.get(db, "runs", ticket["run_id"])
+            except KeyError:
+                return None
+
+    def patch(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """A ticket's full patch, where it lands and whether it merges cleanly; a read."""
+        identity = self._ticket_id(payload)
+        if payload.get("scope") == "organization":
+            return cast(
+                dict[str, Any],
+                self._call(
+                    "user",
+                    self._organization_id(payload),
+                    "ticket_patch",
+                    {"taskId": identity},
+                ),
+            )
+        with self.store.read() as db:
+            ticket = get_ticket(db, identity)
+        try:
+            result = review.read_rem_patch(self._ticket_run(ticket), payload.get("branch"))
+        except review.ReviewRefused as exc:
+            raise KanbanRefused(exc.code, str(exc)) from None
+        return {**result, "landed": ticket.get("landed")}
+
+    def land(self, actor: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """The user's Accept: land the ticket's branch in its base, after a clean check."""
+        if actor != "user":
+            raise KanbanRefused("unauthorized", review.ONLY_YOU)
+        identity, revision = self._ticket_id(payload), self._revision(payload)
+        note = _text(payload.get("note"), 4000)
+        if payload.get("scope") == "organization":
+            return cast(
+                dict[str, Any],
+                self._call(
+                    actor,
+                    self._organization_id(payload),
+                    "land",
+                    {
+                        "taskId": identity,
+                        "expectedRevision": revision,
+                        "patchRevision": payload.get("patch_revision"),
+                        **({"body": note} if note else {}),
+                    },
+                ),
+            )
+        with self.store.read() as db:
+            ticket = get_ticket(db, identity)
+        self._check_revision(ticket, revision)
+        if ticket.get("claim") or ticket["status"] in {"in_progress", "in_review"}:
+            raise KanbanRefused("conflict", "Wait for the ticket's run to finish first.")
+        if ticket["status"] == "cancelled":
+            raise KanbanRefused("invalid", "Restore this ticket before accepting it.")
+        run = self._ticket_run(ticket)
+        try:
+            result = review.land_rem(run, payload, ticket["title"])
+        except review.ReviewRefused as exc:
+            raise KanbanRefused(exc.code, str(exc)) from None
+        if not result["landed"]:
+            return result
+        with self.store.connect() as db:
+            current = get_ticket(db, identity)
+            before = current["status"]
+            record = {key: result[key] for key in ("branch", "baseBranch", "commit", "how")}
+            current.update(landed={**record, "at": now()}, revision=current["revision"] + 1)
+            if before != "done":
+                current.update(
+                    status="done",
+                    block_reason="",
+                    blocked_at=None,
+                    # Accepted by hand: this state of its run no longer moves the ticket.
+                    sync=activity.sync_key(run),
+                    summary=current.get("summary") or "Accepted by you.",
+                )
+            put_ticket(db, current)
+            body = review.landed_note(result) + (f"\n\n{note}" if note else "")
+            if before != "done":
+                activity.note_move(
+                    db, current, before, author="user", title="Accepted and landed", body=body
+                )
+            else:
+                activity.add_comment(db, identity, author="user", body=body)
+        return result
+
+    def request_changes(self, actor: str, payload: dict[str, Any], request_id: str) -> None:
+        """Send the user's line comments, or a rebase request, back to the same worker."""
+        if actor != "user":
+            raise KanbanRefused("unauthorized", "Only you can request changes from the patch.")
+        identity, revision = self._ticket_id(payload), self._revision(payload)
+        try:
+            body = review.change_request(payload)
+        except review.ReviewRefused as exc:
+            raise KanbanRefused(exc.code, str(exc)) from None
+        if payload.get("scope") == "organization":
+            identifier = self._organization_id(payload)
+            org = self._organization(identifier)
+            task = next((t for t in org["runtime"]["tasks"] if t["id"] == identity), None)
+            if task is None:
+                raise KanbanRefused("not_found", "This ticket no longer exists.")
+            if task.get("revision") != revision:
+                raise KanbanRefused(
+                    "conflict", "This ticket changed on the desktop. Check it and try again."
+                )
+            try:
+                review.organization_request_changes(
+                    lambda action, params: self._call(actor, identifier, action, params),
+                    task,
+                    revision,
+                    body,
+                    request_id,
+                )
+            except review.ReviewRefused as exc:
+                raise KanbanRefused(exc.code, str(exc)) from None
+            return
+        with self.store.read() as db:
+            ticket = get_ticket(db, identity)
+        self._check_revision(ticket, revision)
+        if ticket.get("claim") and not ticket.get("paused"):
+            raise KanbanRefused("conflict", "This ticket is running. Wait for it to finish.")
+        if not ticket.get("thread_id") or self.follow_up is None:
+            raise KanbanRefused("invalid", "This ticket has no worker thread to send changes to.")
+        try:
+            self.follow_up(ticket["thread_id"], body, request_id)
+        except (ValueError, RemConflict) as exc:
+            raise KanbanRefused("conflict", str(exc)) from None
+        with self.store.connect() as db:
+            activity.add_comment(
+                db,
+                identity,
+                author="user",
+                title="Requested changes",
+                body=body,
+                dedupe=f"request:{request_id}",
+            )
+
     def timeline(self, payload: dict[str, Any]) -> dict[str, Any]:
         """One ticket's timeline, oldest first, with the ticket as the board shows it now."""
         identity = self._ticket_id(payload)
@@ -1117,7 +1643,12 @@ class RemKanban:
             ]
             earlier = max(0, len(comments) - activity.TIMELINE_ENTRIES)
             return {
-                "ticket": organization_ticket_view(org, task),
+                "ticket": organization_ticket_view(
+                    org,
+                    task,
+                    self._ticket_usage(org).get(identity),
+                    organization_nodes(org),
+                ),
                 "comments": comments[earlier:],
                 "earlier": earlier,
                 "can_comment": True,
@@ -1127,8 +1658,12 @@ class RemKanban:
             config = self.store.setting(db, "config")
             assignment = rem_assignment(db, self.store)
             entries, earlier = activity.read_comments(db, identity)
+            used = rem_ticket_usage(db, [ticket], self.data_dir).get(identity)
+            waited = rem_nodes(tickets_by_id(db, wait_ids(ticket)).values())
         return {
-            "ticket": ticket_view(ticket, assignment, usable_projects(config, assignment)),
+            "ticket": ticket_view(
+                ticket, assignment, usable_projects(config, assignment), used, waited
+            ),
             "comments": [activity.rem_comment(e) for e in entries],
             "earlier": earlier,
             "can_comment": True,

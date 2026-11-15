@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 
 from gofer.cli.output import emit_json, format_option, wants_json
-from gofer.ui.headless import AgentTokenStore, HeadlessError, create_private_file, in_agent_session
 from gofer.utils.paths import get_data_dir
+
+if TYPE_CHECKING:
+    from gofer.ui.headless import AgentTokenStore
 
 app = typer.Typer(
     help=(
@@ -22,10 +25,14 @@ _DATA_DIR = typer.Option(None, "--data-dir", help="Raticode data directory")
 
 
 def _store(data_dir: Path | None) -> AgentTokenStore:
+    from gofer.ui.headless import AgentTokenStore
+
     return AgentTokenStore(data_dir or get_data_dir())
 
 
 def _refuse_agent_session() -> None:
+    from gofer.ui.headless import in_agent_session
+
     if in_agent_session():
         typer.echo(
             "Agent tokens can't be created or revoked from inside a Raticode agent session.",
@@ -49,6 +56,8 @@ def create(
     data_dir: Path | None = _DATA_DIR,
 ) -> None:
     """Create an agent token and write it to a new owner-only file. It is never printed."""
+    from gofer.ui.headless import HeadlessError, create_private_file
+
     _refuse_agent_session()
     if output.exists():
         typer.echo(f"Error: {output} already exists; choose a new file.", err=True)
@@ -74,6 +83,8 @@ def list_tokens(
     data_dir: Path | None = _DATA_DIR,
 ) -> None:
     """List agent tokens by name. Token values are never stored or shown."""
+    from gofer.ui.headless import HeadlessError
+
     as_json = wants_json(output_format)
     try:
         tokens = [token.to_payload() for token in _store(data_dir).list()]
@@ -98,6 +109,8 @@ def revoke(
     data_dir: Path | None = _DATA_DIR,
 ) -> None:
     """Revoke an agent token. A running backend stops accepting it immediately."""
+    from gofer.ui.headless import HeadlessError
+
     _refuse_agent_session()
     try:
         removed = _store(data_dir).revoke(name)

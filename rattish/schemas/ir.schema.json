@@ -107,6 +107,8 @@
         "name": {"type": "string", "minLength": 1},
         "interface_version": {"type": ["integer", "null"], "minimum": 1},
         "max_runs": {"type": ["integer", "null"], "minimum": 1},
+        "max_tokens": {"type": ["integer", "null"], "minimum": 1},
+        "max_cost_usd": {"type": ["number", "null"], "exclusiveMinimum": 0},
         "timeout_ms": {"type": ["integer", "null"], "minimum": 1},
         "inputs": {
           "type": "array",
@@ -122,6 +124,8 @@
         "name",
         "interface_version",
         "max_runs",
+        "max_tokens",
+        "max_cost_usd",
         "timeout_ms",
         "inputs",
         "outputs"
@@ -656,6 +660,32 @@
       "additionalProperties": false
     },
     "provider_resolution": {
+      "type": "object",
+      "properties": {
+        "provider_id": {"$ref": "#/$defs/identifier"},
+        "contract_version": {"type": "integer", "minimum": 1},
+        "contract_fingerprint": {"$ref": "#/$defs/sha256"},
+        "model": {"type": "string", "minLength": 1},
+        "effort": {"type": "string", "minLength": 1},
+        "profile": {"type": ["string", "null"]},
+        "fallback": {
+          "description": "Providers tried in order after this one fails with a provider availability error. Absent from IR compiled before fallback lists.",
+          "type": "array",
+          "maxItems": 4,
+          "items": {"$ref": "#/$defs/provider_choice"}
+        }
+      },
+      "required": [
+        "provider_id",
+        "contract_version",
+        "contract_fingerprint",
+        "model",
+        "effort",
+        "profile"
+      ],
+      "additionalProperties": false
+    },
+    "provider_choice": {
       "type": "object",
       "properties": {
         "provider_id": {"$ref": "#/$defs/identifier"},

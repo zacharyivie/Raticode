@@ -337,10 +337,13 @@ class OrganizationExecution:
                 raise ValueError("Fleet runtime unavailable")
             return FleetGateway(self.fleet, target)
         if target.get("cancellationAccount"):
+            from gofer.core.secrets_folder import keychain_then_folder, org_secret_file
             from gofer.devices.storage import OSSecretStore
 
-            value = OSSecretStore(service="Raticode organization secrets").get(
-                target["cancellationAccount"]
+            account = target["cancellationAccount"]
+            value = keychain_then_folder(
+                lambda: OSSecretStore(service="Raticode organization secrets").get(account),
+                org_secret_file(account),
             )
             if not value:
                 raise ValueError("Original cancellation credential unavailable")
@@ -451,6 +454,7 @@ class OrganizationExecution:
                         invocation_id=f"organization:{attempt['id']}",
                         provider=kind,
                         metadata=attempt.get("usage", {}),
+                        run_id=attempt["id"],
                         status=attempt["status"],
                         data_dir=self.manager.data_dir,
                     )
@@ -460,6 +464,7 @@ class OrganizationExecution:
         self, chosen: dict[str, Any], cancel: threading.Event
     ) -> AsyncGenerator[dict[str, Any], None]:
         from gofer.rattish.artifacts import compile_rattish_source
+        from gofer.rattish.result_cache import ResultCache
         from gofer.rattish.runtime import DEFAULT_NODE_HANDLERS, NodeHandlerRegistry
         from gofer.rattish.workflow_runtime import execute_workflow
         from gofer.ui.organization_operations import file_evidence
@@ -525,6 +530,7 @@ class OrganizationExecution:
                 data_dir=self.manager.data_dir,
                 handlers=GrantedHandlers(),
                 subscriptions=meter.subscriptions(),
+                result_cache=ResultCache(self.manager.data_dir),
             )
         )
         try:

@@ -3,6 +3,7 @@ const PROVIDER_NAMES = {
   opencode: "OpenCode", antigravity: "Antigravity", agy: "Antigravity", grok: "Grok",
   openai: "OpenAI API", anthropic: "Anthropic API",
   openai_api: "OpenAI API", anthropic_api: "Anthropic API",
+  jev: "Jev (TypeSafe)",
 };
 
 export function usageProviderName(provider) {

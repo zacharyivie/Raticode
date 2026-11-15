@@ -1,0 +1,17 @@
+{
+  "starterVersion": 1,
+  "id": "summarize-new-files",
+  "name": "Summarize new files",
+  "summary": "Reads files you haven't summarized yet from a folder and saves a digest, one section per file.",
+  "order": 1,
+  "docsPath": "/docs/starters/summarize-new-files",
+  "providers": [
+    "claude-code"
+  ],
+  "secrets": [],
+  "trigger": {
+    "kind": "file",
+    "description": "Run when files land in the folder.",
+    "command": "Raticode rattish triggers add file WORKFLOW_PATH --path inbox --glob \"*.md\" --debounce 5"
+  }
+}

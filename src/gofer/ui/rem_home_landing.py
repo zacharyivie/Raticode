@@ -105,6 +105,29 @@ def _written_by(branch: str, path: str | None, commands: list[str]) -> bool:
     return False
 
 
+def written_branches(
+    project: str | Path,
+    before: dict[str, str],
+    commands: list[str],
+    known: list[str] | tuple[str, ...] = (),
+) -> list[str]:
+    """Feature branches this run created or moved and wrote to, landed on dev or not."""
+    now = branch_tips(project)
+    if now is None:
+        return []
+    main, paths = _worktrees(project)
+    found = []
+    for branch, tip in sorted(now.items()):
+        if branch in SHARED_BRANCHES or before.get(branch) == tip:
+            continue
+        path = paths.get(branch)
+        if path and path == main:
+            continue
+        if branch in known or _written_by(branch, path, commands):
+            found.append(branch)
+    return found
+
+
 def unlanded_branches(
     project: str | Path,
     before: dict[str, str],

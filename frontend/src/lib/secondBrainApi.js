@@ -6,6 +6,8 @@ export async function brainRequest(action = "snapshot", params = {}) {
   const paths = [];
   if (action === "open") paths.push([params.root, Boolean(params.create)]);
   if (action === "update_brain" && params.patch?.root) paths.push([params.patch.root, false]);
+  // A backup folder may not exist yet; Raticode creates it on the first backup.
+  if (action === "update_brain" && params.patch?.backup?.folder) paths.push([params.patch.backup.folder, "maybe"]);
   if (action === "import_preview") paths.push([params.path, false]);
   if (action === "task") {
     if (params.kind === "add-files") paths.push(...(params.paths || []).map(path => [path, false]));
@@ -16,10 +18,18 @@ export async function brainRequest(action = "snapshot", params = {}) {
   for (const [path, newPath] of paths) {
     if (!path) continue;
     const parent = path.replace(/[\\/]+$/, "").replace(/[\\/][^\\/]+$/, "") || "/";
-    await workspace?.trustProjectRoot?.(newPath ? parent : path);
+    if (newPath === "maybe") {
+      try { await workspace?.trustProjectRoot?.(path); }
+      catch (error) { if (error?.code !== "ENOENT") throw error; await workspace?.trustProjectRoot?.(parent); }
+    } else await workspace?.trustProjectRoot?.(newPath ? parent : path);
     workspaceGrants[path] = workspace?.pathGrantForApi?.(path) || workspace?.pathGrantForApi?.(parent);
   }
-  const response = await fetch(apiUrl("/second-brains"), action === "snapshot" ? {} : {
+  // A snapshot poll sends the revision it has and gets { unchanged, revision } while it is current.
+  const query = action === "snapshot" ? new URLSearchParams([
+    ...(params.revision ? [["revision", params.revision]] : []),
+    ...(params.recheck ? [["recheck", "1"]] : []),
+  ]).toString() : "";
+  const response = await fetch(apiUrl(query ? `/second-brains?${query}` : "/second-brains"), action === "snapshot" ? {} : {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action, params, workspaceGrants }),
   });

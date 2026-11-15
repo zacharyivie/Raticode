@@ -14,6 +14,14 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from gofer.core.provider_profiles import load_provider_profiles
+from gofer.core.secrets_folder import (
+    SAVE_HINT,
+    SecretsFolderError,
+    configured_secrets_dir,
+    folder_fingerprint,
+    read_folder_secret,
+    usage_secret_file,
+)
 from gofer.core.usage_ledger import usage_db
 from gofer.utils.paths import get_data_dir
 
@@ -135,11 +143,7 @@ def _validate_account(provider: Any, profile: Any, data_dir: Path | None) -> Non
             raise UsageCredentialError("The provider profile does not match this account.")
 
 
-def usage_credential_revision(
-    provider: str, profile: str | None = None, *, data_dir: Path | None = None
-) -> str:
-    if provider not in _FIELDS:
-        return ""
+def _saved_revision(provider: str, profile: str | None, data_dir: Path | None) -> str:
     with usage_db(data_dir) as db:
         row = db.execute(
             "SELECT value FROM usage_meta WHERE key=?", ("reporting:" + _scope(provider, profile),)
@@ -147,30 +151,79 @@ def usage_credential_revision(
     return str(row[0]) if row else ""
 
 
+def _folder_files(provider: str, profile: str | None) -> dict[str, str]:
+    """Field name -> secrets folder file name for this account."""
+    files = {}
+    for field in _FIELDS[provider]:
+        name = usage_secret_file(provider, profile, field["name"])
+        if name is not None:
+            files[field["name"]] = name
+    return files
+
+
+def _folder_values(provider: str, profile: str | None) -> dict[str, str]:
+    """Read-only values from the headless secrets folder, if the backend has one."""
+    values = {}
+    for field, name in _folder_files(provider, profile).items():
+        try:
+            value = read_folder_secret(name)
+        except SecretsFolderError as exc:
+            raise UsageCredentialError(str(exc)) from None
+        if value is not None:
+            values[field] = value
+    return values
+
+
+def usage_credential_revision(
+    provider: str, profile: str | None = None, *, data_dir: Path | None = None
+) -> str:
+    """The saved credentials' revision, else one for the secrets folder's files.
+
+    A folder revision changes when one of the files does, so measurements taken with old
+    credentials aren't shown as the new account's. It never depends on a value.
+    """
+    if provider not in _FIELDS:
+        return ""
+    saved = _saved_revision(provider, profile, data_dir)
+    if saved:
+        return saved
+    fingerprint = folder_fingerprint(list(_folder_files(provider, profile).values()))
+    return "secrets-folder:" + fingerprint if fingerprint else ""
+
+
+def _keychain_values(
+    provider: str, profile: str | None, revision: str, data_dir: Path | None
+) -> dict[str, str]:
+    raw = _secret_store().get(_account(provider, profile, data_dir))
+    record = json.loads(raw or "{}")
+    if record.get("revision") != revision:
+        raise ValueError("Credential revision mismatch")
+    values = record["values"]
+    if not isinstance(values, dict) or any(
+        name not in {field["name"] for field in _FIELDS[provider]} or not isinstance(value, str)
+        for name, value in values.items()
+    ):
+        raise ValueError("Invalid stored credential")
+    return values
+
+
 def resolve_usage_credentials(
     provider: str, profile: str | None = None, *, data_dir: Path | None = None
 ) -> dict[str, str]:
+    """Saved credentials from the keychain; when it can't give them, the secrets folder."""
     if provider not in _FIELDS:
         return {}
     _validate_account(provider, profile, data_dir)
     with _lock:
-        revision = usage_credential_revision(provider, profile, data_dir=data_dir)
+        revision = _saved_revision(provider, profile, data_dir)
         if not revision:
-            return {}
+            return _folder_values(provider, profile)
         try:
-            raw = _secret_store().get(_account(provider, profile, data_dir))
-            record = json.loads(raw or "{}")
-            if record.get("revision") != revision:
-                raise ValueError("Credential revision mismatch")
-            values = record["values"]
-            if not isinstance(values, dict) or any(
-                name not in {field["name"] for field in _FIELDS[provider]}
-                or not isinstance(value, str)
-                for name, value in values.items()
-            ):
-                raise ValueError("Invalid stored credential")
-            return values
+            return _keychain_values(provider, profile, revision, data_dir)
         except Exception:
+            folder = _folder_values(provider, profile)
+            if folder:
+                return folder
             raise UsageCredentialError(_STORE_ERROR) from None
 
 
@@ -183,9 +236,17 @@ def usage_credentials_payload(
     try:
         # A read also checks that an installed store is actually unlocked.
         _secret_store().get(_account(provider, profile, data_dir))
-        values = resolve_usage_credentials(provider, profile, data_dir=data_dir)
     except Exception:
-        error = _STORE_ERROR
+        error = _STORE_ERROR + " " + SAVE_HINT
+    try:
+        # Without a keychain, a headless backend can still read its secrets folder. With
+        # no folder, a failed probe means the read would fail too (and could prompt again).
+        if error is None or configured_secrets_dir() is not None:
+            values = resolve_usage_credentials(provider, profile, data_dir=data_dir)
+    except UsageCredentialError as exc:
+        error = error or str(exc)
+    except Exception:
+        error = error or _STORE_ERROR
     return {
         "provider": provider,
         "profile": profile,
@@ -227,7 +288,14 @@ def save_usage_credentials(
     if any(name in remove and value.strip() for name, value in values.items()):
         raise UsageCredentialError("Choose either replace or remove for each credential.")
     with _lock:
-        current = resolve_usage_credentials(provider, profile, data_dir=data_dir)
+        # Only the keychain's values: secrets folder files are never copied into it.
+        saved = _saved_revision(provider, profile, data_dir)
+        try:
+            current = _keychain_values(provider, profile, saved, data_dir) if saved else {}
+        except Exception:
+            raise UsageCredentialError(
+                "Could not save reporting credentials. " + _STORE_ERROR + " " + SAVE_HINT
+            ) from None
         updated = dict(current)
         for name, value in values.items():
             value = value.strip()
@@ -253,6 +321,6 @@ def save_usage_credentials(
                 )
         except Exception:
             raise UsageCredentialError(
-                "Could not save reporting credentials. " + _STORE_ERROR
+                "Could not save reporting credentials. " + _STORE_ERROR + " " + SAVE_HINT
             ) from None
     return usage_credentials_payload(provider, profile, data_dir=data_dir)

@@ -14,13 +14,22 @@ import {
 import { PROVIDER_PERMISSIONS, defaultPermissionMode } from "../lib/providerPermissions.js";
 import { audioInputConstraints, createSilenceWatch, silentInputMessage } from "../lib/audioDevices.js";
 import { loadVoiceTidy, tidyTranscript } from "../lib/voiceTidy.js";
-import { DictationText, QUIET_MS } from "../lib/dictation.js";
+import { ANYWHERE_QUIET_AFTER_WORDS_MS, ANYWHERE_QUIET_BEFORE_WORDS_MS, DictationText, QUIET_MS } from "../lib/dictation.js";
 import { ProgressiveTidy, TIDY_PAUSE_MS, hasVoice } from "../lib/progressiveTidy.js";
+import { addRound, closeDictation, holdStop } from "../lib/dictationPunctuation.js";
 import { DotMood, levelFromSamples } from "../lib/voiceDots.js";
 import { VoiceStage, atStage, reportQuietRecording, reportSilentInput, reportVoiceProblem, trackState } from "../lib/voiceDiagnostics.js";
-import { ariaKeyshortcuts, registerVoiceComposer, useDictationAutoSend, useDictationMode, useVoiceBinding, voiceShortcutLabel } from "../lib/voiceShortcut.js";
+import { announceVoicePhase, ariaKeyshortcuts, registerVoiceComposer, useDictationAutoSend, useDictationMode, useVoiceBinding, voiceShortcutLabel } from "../lib/voiceShortcut.js";
 
 const menuClass = "ml-1 h-8 min-w-0 max-w-40 rounded-md border border-line bg-transparent px-1.5 text-xs text-ink outline-none hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-brand disabled:cursor-not-allowed disabled:opacity-50";
+
+// A dictation started from another app tells the desktop's listening overlay how it went.
+// Only the phase and a short status line go; never the words.
+function announce(dictation, phase, { message = "", sent = false } = {}) {
+  if (!dictation?.anywhere || dictation.announced) return;
+  if (phase === "done" || phase === "error" || phase === "idle") dictation.announced = true;
+  announceVoicePhase({ phase, global: true, message, sent });
+}
 
 export default function ChatComposer({
   inputLabel,
@@ -52,6 +61,17 @@ export default function ChatComposer({
   machines = [],
   machineLocked = false,
   onMachineChange = () => {},
+  // Rem's own message box: dictation started from another app comes here.
+  rem = false,
+  // More buttons beside Attach, and more tiles beside the attachments (Rem's screenshot).
+  tools = null,
+  extraTiles = null,
+  // Something besides the words and attachments to send, such as a screenshot.
+  extraContent = false,
+  // A status line under the box about what goes with the message.
+  extraNote = "",
+  // Send after dictation waits instead, such as while a screenshot is attached.
+  holdAutoSend = false,
 }) {
   const errorId = useId();
   const fileInputRef = useRef(null);
@@ -86,6 +106,7 @@ export default function ChatComposer({
 
   function endDictation(dictation) {
     if (dictationRef.current !== dictation) return;
+    announce(dictation, "idle");
     dictation.session?.cancel();
     dictation.session = null;
     dictation.abort?.abort();
@@ -99,6 +120,7 @@ export default function ChatComposer({
 
   useEffect(() => () => {
     const dictation = dictationRef.current;
+    announce(dictation, "idle");
     dictation?.session?.cancel();
     dictation?.abort?.abort();
     dictationRef.current = null;
@@ -118,7 +140,10 @@ export default function ChatComposer({
     if (!listening) return undefined;
     const timer = window.setInterval(() => {
       const dictation = dictationRef.current;
-      if (dictation?.session && Date.now() - dictation.lastWordsAt >= QUIET_MS) stopRef.current();
+      // Started from another app, it ends like a phone assistant: soon after you stop talking.
+      const quiet = !dictation?.anywhere ? QUIET_MS
+        : dictation.words.text ? ANYWHERE_QUIET_AFTER_WORDS_MS : ANYWHERE_QUIET_BEFORE_WORDS_MS;
+      if (dictation?.session && Date.now() - dictation.lastWordsAt >= quiet) stopRef.current();
     }, 1000);
     return () => window.clearInterval(timer);
   }, [listening]);
@@ -178,13 +203,30 @@ export default function ChatComposer({
   }
 
   // With tidying on, words are only ever added to the end of the box: text already tidied,
-  // and anything else in the box, stays as it is.
-  function addToBox(dictation, words) {
-    const text = appendTranscription(boxText(dictation), words);
+  // and anything else in the box, stays as it is. A round while talking (hold) keeps its
+  // closing full stop back until the next words show whether the sentence goes on; words
+  // that couldn't be tidied (tidied: false) go in with basic capitals.
+  function addToBox(dictation, words, { tidied = true, hold = false } = {}) {
+    const box = boxText(dictation);
+    const held = dictation.heldStop && dictation.wrote !== null && box === dictation.wrote;
+    const round = hold && tidied ? holdStop(words) : { text: words, held: false };
+    dictation.heldStop = round.held;
+    return writeBox(dictation, addRound(box, round.text, { held, tidied }));
+  }
+
+  function writeBox(dictation, text) {
     dictation.wroteOver = draftRef.current;
     dictation.wrote = text;
     onDraftChange(text);
     return text;
+  }
+
+  // The dictation is over: its last sentence ends with a full stop, held back or missing.
+  function closeBox(dictation) {
+    if (dictation.wrote === null) return;
+    const box = boxText(dictation);
+    const closed = closeDictation(box);
+    if (closed !== box) writeBox(dictation, closed);
   }
 
   // Recording or transcription can't go on: keep what was heard, as heard, with the reason.
@@ -196,10 +238,14 @@ export default function ChatComposer({
     const rest = dictation.tidyOn ? dictation.progress.tail(heard) : heard;
     const message = error instanceof Error ? error.message : "Live transcription stopped.";
     reportVoiceProblem(error?.voiceStage || VoiceStage.STREAM, error);
+    announce(dictation, heard ? "done" : "error", { message: heard ? "Recording stopped early; your words so far are kept." : message });
     endDictation(dictation);
     if (heard) {
       if (!dictation.tidyOn) onDraftChange(appendTranscription(dictation.base, heard));
-      else if (rest) addToBox(dictation, rest);
+      else {
+        if (rest) addToBox(dictation, rest, { tidied: false });
+        closeBox(dictation);
+      }
       setVoiceNotice(`${message} Your words so far are kept${dictation.tidyOn && rest ? ", untidied" : ""}.`);
     } else {
       setTranscriptionError(message);
@@ -318,9 +364,12 @@ export default function ChatComposer({
     return closing;
   }
 
-  async function startDictation({ hold = false } = {}) {
+  async function startDictation({ hold = false, anywhere = false } = {}) {
     if (dictationRef.current) return;
     const dictation = {
+      // Started with the system-wide shortcut while Raticode may be in the background.
+      anywhere,
+      announced: false,
       base: draftRef.current,
       words: new DictationText(),
       tidyOn: false,
@@ -336,6 +385,9 @@ export default function ChatComposer({
       // Tidy rounds while listening, with tidying on: what came back, and the request out.
       progress: new ProgressiveTidy(Date.now()),
       round: null,
+      // The last round's closing full stop, held back until the next words show whether the
+      // sentence goes on.
+      heldStop: false,
       // What this dictation last put in the box, and what the box held just before.
       wrote: null,
       wroteOver: null,
@@ -346,9 +398,10 @@ export default function ChatComposer({
     setTranscriptionError("");
     setVoiceNotice("");
     setVoice({ phase: "starting", held: hold });
+    announce(dictation, "starting");
     // Keyboard control follows the dictation: Space, Enter and Esc work from here. A held
-    // mic or key keeps focus, so letting go of it is seen.
-    if (!hold) textareaRef.current?.focus();
+    // mic or key keeps focus, so letting go of it is seen. From another app, focus stays put.
+    if (!hold && !anywhere) textareaRef.current?.focus();
     // A failed check leaves tidying off, so the words show as they are heard.
     dictation.tidyOn = await loadVoiceTidy({ resolve: false }).then((payload) => payload.enabled === true, () => false);
     try {
@@ -361,11 +414,13 @@ export default function ChatComposer({
       dictation.starting = false;
       dictation.lastWordsAt = Date.now();
       setVoice({ phase: "listening", held: hold });
+      announce(dictation, "listening");
       // Stopped while the microphone was opening: go straight on to the words.
       if (dictation.stopRequested) void finishDictation();
     } catch (error) {
       if (dictationRef.current !== dictation) return;
       reportVoiceProblem(error?.voiceStage, error);
+      announce(dictation, "error", { message: microphoneErrorMessage(error) });
       endDictation(dictation);
       setTranscriptionError(microphoneErrorMessage(error));
     }
@@ -426,27 +481,32 @@ export default function ChatComposer({
     if (!dictation || dictation.finishing || dictation.starting) return;
     dictation.finishing = true;
     setVoice({ phase: "finishing" });
+    announce(dictation, "finishing");
     await closeSession(dictation);
     if (dictationRef.current !== dictation) return;
     const heard = dictation.words.text;
     if (!heard) {
-      endDictation(dictation);
-      onDraftChange(dictation.base);
-      setVoiceNotice("");
-      setTranscriptionError(dictation.noSignal
+      const problem = dictation.noSignal
         ? silentInputMessage(dictation.inputLabel)
         : dictation.silent
         ? "No microphone signal was recorded. Test the input in Settings > Devices."
-        : "No speech was detected. Test the microphone in Settings > Devices, then speak closer to the selected input.");
+        : "No speech was detected. Test the microphone in Settings > Devices, then speak closer to the selected input.";
+      announce(dictation, "error", { message: problem });
+      endDictation(dictation);
+      onDraftChange(dictation.base);
+      setVoiceNotice("");
+      setTranscriptionError(problem);
       return;
     }
     if (!dictation.tidyOn) {
       putDictatedWords(appendTranscription(dictation.base, heard), true);
+      announce(dictation, "done", { sent: Boolean(autoSendRef.current), message: heldMessage() });
       endDictation(dictation);
-      textareaRef.current?.focus();
+      if (!dictation.anywhere) textareaRef.current?.focus();
       return;
     }
     setVoice({ phase: "tidying" });
+    announce(dictation, "tidying");
     window.clearTimeout(dictation.pauseTimer);
     window.clearTimeout(dictation.gapTimer);
     // A round that is out adds its words first, so the rest goes after them.
@@ -468,16 +528,19 @@ export default function ChatComposer({
       }
       if (dictationRef.current !== dictation) return;
       const tidied = result.tidied && String(result.text ?? "").trim();
-      // Words that couldn't be tidied go in as heard, never dropped.
-      addToBox(dictation, tidied ? result.text : rest);
+      // Words that couldn't be tidied go in as heard, with basic capitals, never dropped.
+      addToBox(dictation, tidied ? result.text : rest, { tidied: Boolean(tidied) });
       progress.kept(request);
       if (!tidied) reason = result.reason || "Tidying isn't available right now.";
     }
+    closeBox(dictation);
     // Words that couldn't be tidied wait in the box even with Send after dictation on.
     putDictatedWords(boxText(dictation), !reason && dictation.wrote !== null);
-    if (reason) setVoiceNotice(`Not tidied: ${reason}`);
+    if (reason) setVoiceNotice(`Not tidied: ${reason} ${UNTIDIED_NOTE}`);
+    else setVoiceNotice((current) => (current.startsWith(BEHIND_PREFIX) ? "" : current));
+    announce(dictation, "done", { sent: Boolean(autoSendRef.current), message: reason ? `Not tidied: ${reason}` : heldMessage() });
     endDictation(dictation);
-    textareaRef.current?.focus();
+    if (!dictation.anywhere) textareaRef.current?.focus();
   }
 
   // New words while listening, with tidying on: tidy what was said so far once enough new
@@ -533,7 +596,13 @@ export default function ChatComposer({
         return;
       }
       const text = progress.answered(request, result);
-      if (text) addToBox(dictation, text);
+      if (text) {
+        addToBox(dictation, text, { hold: true });
+        setVoiceNotice((current) => (current.startsWith(BEHIND_PREFIX) ? "" : current));
+      } else if (result.tidied !== true) {
+        // Said while listening, not only when it ends, so the wait for tidied words is explained.
+        setVoiceNotice(`${BEHIND_PREFIX} ${result.reason || "Tidying isn't available right now."} Your words are kept and tidied again with the next ones.`);
+      }
       if (dictation.finishing) return;
       // Words said while it was out: a round now if it has gone quiet, otherwise when enough
       // words and time have passed.
@@ -546,7 +615,7 @@ export default function ChatComposer({
   // The finished words go in the box to edit; with Send after dictation on, and words fit
   // to send, they are sent once the box shows them.
   function putDictatedWords(text, sendable) {
-    autoSendRef.current = dictationAutoSend && sendable && text.trim() ? { text, before: draftRef.current } : null;
+    autoSendRef.current = dictationAutoSend && !holdAutoSendRef.current && sendable && text.trim() ? { text, before: draftRef.current } : null;
     onDraftChange(text);
     if (autoSendRef.current) setAutoSendTick((tick) => tick + 1);
   }
@@ -575,9 +644,11 @@ export default function ChatComposer({
   }
 
   // Press to start and stop: the mic button, the menu and, in that mode, the shortcut.
-  function toggleDictation() {
+  // From another app ({ anywhere: true }) it always works this way: a system-wide key can't
+  // tell when it is let go.
+  function toggleDictation({ anywhere = false } = {}) {
     if (!dictationRef.current) {
-      if (!sending) void startDictation();
+      if (!sending) void startDictation({ anywhere });
       return;
     }
     stopDictation();
@@ -609,7 +680,16 @@ export default function ChatComposer({
   releaseRef.current = releaseDictation;
   stopRef.current = stopDictation;
 
+  const holdAutoSendRef = useRef(holdAutoSend);
+  holdAutoSendRef.current = holdAutoSend;
+  // A screenshot always waits to be checked, so the panel says where it is.
+  function heldMessage() {
+    return holdAutoSendRef.current ? "Open Raticode to check the screenshot, then send." : "";
+  }
+
   const voiceApiRef = useRef(null);
+  const remRef = useRef(rem);
+  remRef.current = rem;
   voiceApiRef.current = {
     toggle: toggleDictation,
     press: dictationMode === "hold" ? pressDictation : toggleDictation,
@@ -621,11 +701,13 @@ export default function ChatComposer({
   useEffect(() => {
     const entry = {
       root: () => composerRef.current,
-      toggle: () => voiceApiRef.current.toggle(),
+      toggle: (options) => voiceApiRef.current.toggle(options),
       press: () => voiceApiRef.current.press(),
       release: () => voiceApiRef.current.release(),
       available: () => voiceApiRef.current.available(),
       dictating: () => Boolean(dictationRef.current),
+      anywhere: () => Boolean(dictationRef.current?.anywhere),
+      rem: () => remRef.current === true,
       lastUsed: 0,
     };
     composerEntryRef.current = entry;
@@ -657,6 +739,7 @@ export default function ChatComposer({
   const voiceKeys = voiceShortcutLabel(voiceBinding);
   const voiceAriaKeys = ariaKeyshortcuts(voiceBinding);
   const error = attachmentError || transcriptionError;
+  const hasContent = Boolean(draft.trim() || attachments.length || extraContent);
   const busyVoice = voicePhase === "starting" || voicePhase === "finishing" || voicePhase === "tidying";
   const holdMode = dictationMode === "hold";
   const micLabel = !dictating ? "Dictate a message"
@@ -680,8 +763,9 @@ export default function ChatComposer({
         className="overflow-hidden rounded-[14px] border border-line bg-white transition focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/10"
       >
         {attachmentWarning ? <p role="status" className="px-2.5 pt-2.5 text-[11px] text-amber-700 dark:text-amber-300">{attachmentWarning}</p> : null}
-        {attachments.length ? (
+        {attachments.length || extraTiles ? (
           <div className="flex flex-wrap gap-1.5 px-2.5 pt-2.5">
+            {extraTiles}
             {attachments.map((attachment) => (
               <AttachmentTile
                 key={attachment.id}
@@ -715,8 +799,8 @@ export default function ChatComposer({
               return;
             }
             if (sending) {
-              if ((draft.trim() || attachments.length) && !steeringPending) onSteer?.();
-            } else if (!sendDisabled && (draft.trim() || attachments.length)) onSend(null, { background: event.ctrlKey });
+              if (hasContent && !steeringPending) onSteer?.();
+            } else if (!sendDisabled && hasContent) onSend(null, { background: event.ctrlKey });
           }}
         />
         {dictating ? (
@@ -805,6 +889,7 @@ export default function ChatComposer({
             >
               <Paperclip aria-hidden="true" size={16} />
             </button>
+            {tools}
             {permissionOptions.length ? (
               <select
                 aria-label="Rem permissions"
@@ -846,7 +931,7 @@ export default function ChatComposer({
               {sending ? <button
                 aria-label="Steer Rem"
                 className="mr-2 rounded-lg bg-brand px-3 py-2 text-xs text-white disabled:opacity-50"
-                disabled={(!draft.trim() && !attachments.length) || steeringPending}
+                disabled={!hasContent || steeringPending}
                 type="button"
                 onClick={onSteer}
               >{steeringPending ? "Submitting…" : "Steer"}</button> : null}
@@ -857,7 +942,7 @@ export default function ChatComposer({
                     ? "border border-line bg-white text-red-600 hover:border-red-200 hover:bg-red-50"
                     : "bg-brand text-white hover:bg-indigo-700"
                 }`}
-                disabled={!sending && (dictating || sendDisabled || (!draft.trim() && !attachments.length))}
+                disabled={!sending && (dictating || sendDisabled || !hasContent)}
                 title={sending ? "Stop Rem" : sendLabel}
                 type="button"
                 onClick={sending ? onStop : onSend}
@@ -873,6 +958,7 @@ export default function ChatComposer({
       </div>
       {error ? <p id={errorId} className="mt-1.5 px-1 text-[10px] text-red-600">{error}</p> : null}
       {voiceNotice ? <p role="status" className="mt-1.5 px-1 text-[10px] text-amber-700 dark:text-amber-300">{voiceNotice}</p> : null}
+      {extraNote ? <p role="status" className="mt-1.5 px-1 text-[10px] text-muted" data-composer-note>{extraNote}</p> : null}
       <p className="mt-1.5 whitespace-normal break-words px-1 text-[9px] leading-snug text-muted">
         {dictating ? dictationHint : sending ? "Enter to steer · Stop cancels the response" : idleHint}
       </p>
@@ -892,6 +978,9 @@ const NO_SPEECH = /No speech was detected/;
 const RECORDER_TAIL_MS = 150;
 // How much of the end of the box goes with a tidy round as the text it continues.
 const TIDY_CONTEXT_CHARS = 300;
+// Notices about tidying: a round that failed while listening, and words added untidied.
+const BEHIND_PREFIX = "Not tidied yet:";
+const UNTIDIED_NOTE = "Those words were added as heard, with basic capitals and a full stop.";
 
 // In Hold to talk, a press shorter than this with nothing heard is a tap, not a dictation.
 const HOLD_TAP_MS = 400;

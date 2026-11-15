@@ -31,6 +31,9 @@ from apscheduler.triggers.cron import CronTrigger
 from gofer.rattish.artifacts import RattishArtifactError, compile_rattish_file
 from gofer.rattish.diagnostics import RattishError
 from gofer.rattish.runtime import InvalidRattishWorkflowInputError, _prepare_workflow_inputs
+from gofer.rattish.trigger_defaults import DEFAULT_DEBOUNCE_SECONDS as DEFAULT_DEBOUNCE_SECONDS
+from gofer.rattish.trigger_defaults import DEFAULT_MISSED as DEFAULT_MISSED
+from gofer.rattish.trigger_defaults import DEFAULT_OVERLAP as DEFAULT_OVERLAP
 from gofer.rattish.workspaces import list_registered_workflows
 
 TriggerKind = Literal["cron", "file", "webhook"]
@@ -40,14 +43,14 @@ TRIGGER_KINDS: tuple[str, ...] = ("cron", "file", "webhook")
 OVERLAP_POLICIES: tuple[str, ...] = ("skip", "queue", "parallel")
 # record: show the missed runs and move on. run_once: also run once to catch up.
 MISSED_POLICIES: tuple[str, ...] = ("record", "run_once")
-DEFAULT_OVERLAP = "skip"
-DEFAULT_MISSED = "record"
-DEFAULT_DEBOUNCE_SECONDS = 2.0
 MIN_DEBOUNCE_SECONDS = 0.1
 MAX_DEBOUNCE_SECONDS = 3600.0
 DEFAULT_WEBHOOK_PORT = 8767
 EVENTS_KEPT_PER_TRIGGER = 200
 MAX_MISSED_COUNTED = 2000
+# Finished pauses kept so cron times inside them count as skipped, not missed.
+PAUSE_WINDOWS_KEPT = 50
+PAUSED_SKIP_MESSAGE = "Skipped because all triggers were paused."
 RUNS_ONLY_WHILE_RUNNING_NOTICE = (
     "Triggers run only while Raticode or its background scheduler is running."
 )
@@ -127,6 +130,30 @@ class TriggerEvent:
             "message": self.message,
             "count": self.count,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class TriggerPause:
+    """Whether every trigger on this computer is paused at once.
+
+    Pausing is one switch over all triggers. It never changes a trigger's own on/off
+    setting, so resuming brings back exactly the triggers that were on. ``windows``
+    are the latest finished pauses, so a scheduler that wasn't running during one can
+    still tell a skipped cron time from a missed one.
+    """
+
+    paused: bool = False
+    since: str | None = None
+    windows: tuple[tuple[str, str], ...] = ()
+
+    def covers(self, moment: datetime) -> bool:
+        """Whether ``moment`` fell inside a pause, finished or still going."""
+        if self.paused and self.since is not None and moment >= parse_iso(self.since):
+            return True
+        return any(parse_iso(start) <= moment < parse_iso(end) for start, end in self.windows)
+
+    def to_payload(self) -> dict[str, Any]:
+        return {"paused": self.paused, "pausedAt": self.since if self.paused else None}
 
 
 def utc_now() -> datetime:
@@ -224,7 +251,7 @@ def parse_cron(expression: str, timezone: str) -> CronTrigger:
         # Crontab means "either one" here and APScheduler means "both at once".
         raise TriggerError("Use a day of the month or a weekday, not both.")
     try:
-        return CronTrigger(
+        schedule = CronTrigger(
             minute=minute,
             hour=hour,
             day=day,
@@ -234,6 +261,12 @@ def parse_cron(expression: str, timezone: str) -> CronTrigger:
         )
     except ValueError as exc:
         raise TriggerError(f"That cron expression isn't valid: {exc}") from None
+    if next_occurrence(schedule, utc_now()) is None:
+        # Such as 0 9 31 2 *: February never has a 31st, so this would never run.
+        raise TriggerError(
+            "That schedule never runs: no date matches its day of the month and month."
+        )
+    return schedule
 
 
 def occurrences_between(
@@ -850,6 +883,46 @@ class TriggerStore:
             )
             self._bump(db)
 
+    def pause_state(self) -> TriggerPause:
+        with self._connect() as db:
+            row = db.execute("SELECT value FROM settings WHERE key = 'pause'").fetchone()
+        return _pause_from_json(row["value"]) if row else TriggerPause()
+
+    def set_paused(self, paused: bool, *, now: datetime | None = None) -> TriggerPause:
+        """Pause or resume every trigger. Each trigger's own on/off stays as it is.
+
+        Pausing twice keeps the first pause's start, and resuming when nothing is
+        paused changes nothing.
+        """
+        moment = iso(now or utc_now())
+        with self._transaction() as db:
+            row = db.execute("SELECT value FROM settings WHERE key = 'pause'").fetchone()
+            current = _pause_from_json(row["value"]) if row else TriggerPause()
+            if bool(paused) == current.paused:
+                return current
+            if paused:
+                updated = TriggerPause(True, moment, current.windows)
+            else:
+                start = current.since or moment
+                windows = (*current.windows, (start, moment))[-PAUSE_WINDOWS_KEPT:]
+                updated = TriggerPause(False, None, windows)
+            db.execute(
+                "INSERT INTO settings(key, value) VALUES('pause', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (
+                    json.dumps(
+                        {
+                            "paused": updated.paused,
+                            "since": updated.since,
+                            "windows": [list(item) for item in updated.windows],
+                        },
+                        sort_keys=True,
+                    ),
+                ),
+            )
+            self._bump(db)
+        return updated
+
     def scheduler_record(self) -> dict[str, Any] | None:
         with self._connect() as db:
             row = db.execute("SELECT value FROM settings WHERE key = 'scheduler'").fetchone()
@@ -864,10 +937,34 @@ class TriggerStore:
             )
 
 
+def _pause_from_json(raw: str) -> TriggerPause:
+    try:
+        value = json.loads(raw)
+        windows = tuple(
+            (str(start), str(end))
+            for start, end in value.get("windows") or []
+            if parse_iso(str(start)) <= parse_iso(str(end))
+        )
+        since = value.get("since")
+        paused = value.get("paused") is True
+        if paused:
+            since = str(since) if isinstance(since, str) else iso(utc_now())
+            parse_iso(since)
+        return TriggerPause(paused, since if paused else None, windows)
+    except (AttributeError, TypeError, ValueError):
+        # A damaged record must not stop triggers being listed or resumed.
+        return TriggerPause()
+
+
 def next_run_at(record: TriggerRecord, now: datetime | None = None) -> str | None:
     if record.kind != "cron" or not record.enabled:
         return None
-    schedule = parse_cron(record.config["expression"], record.config["timezone"])
+    try:
+        schedule = parse_cron(record.config["expression"], record.config["timezone"])
+    except TriggerError:
+        # Saved before a check existed, or its time zone left this computer's
+        # database. The scheduler reports why; listing triggers must still work.
+        return None
     upcoming = next_occurrence(schedule, now or utc_now())
     return iso(upcoming) if upcoming else None
 

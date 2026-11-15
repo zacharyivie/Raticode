@@ -257,4 +257,23 @@ internal object GeckoRules {
         }.distinctBy { it.url }.take(MAX_BOOKMARKS).toList()
 
     private fun unescape(text: String) = text.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&")
+
+    /**
+     * The button each extension shows. An extension sets a toolbar button and a page button for every tab, then changes
+     * them per tab; a tab's change lists only what differs, so [fill] completes it from the same kind's every-tab button.
+     * GeckoView refuses to fill one kind from the other and throws, which once ended the app, so the kinds are kept apart
+     * and a refused fill shows the tab's change as it is.
+     */
+    class ExtensionButtons<A : Any>(private val fill: (change: A, everyTab: A) -> A) {
+        private val everyTab = HashMap<Pair<String, Boolean>, A>()
+
+        /** The button to show after [button] arrives for every tab ([forEveryTab]) or for one tab. */
+        fun changed(extension: String, page: Boolean, forEveryTab: Boolean, button: A): A {
+            val key = extension to page
+            if (forEveryTab) return button.also { everyTab[key] = it }
+            return everyTab[key]?.let { runCatching { fill(button, it) }.getOrNull() } ?: button
+        }
+
+        fun forget(extension: String) { everyTab.keys.removeAll { it.first == extension } }
+    }
 }

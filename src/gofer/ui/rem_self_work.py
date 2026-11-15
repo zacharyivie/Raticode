@@ -9,6 +9,18 @@ then, with auto-pull on, backlog tickets it has ranked by impact and relevance, 
 that no longer make sense; then research that proposes new tickets. Proposals wait in Backlog
 until the user approves them, which moves them to To do.
 
+With auto-approval on (``auto_approve_proposals``, off by default and only the user's to
+change), new research ideas become accepted Backlog tickets instead, marked as approved by
+self-work, for as long as self-work runs. They take the normal path from there: ranked and
+pulled when backlog pulling is on, otherwise left for the user. Proposals already waiting stay
+the user's to decide, and turning it off keeps the tickets it already approved.
+
+Research runs in rounds: each project and angle once a round, at most MAX_RESEARCH_PASSES. When
+a round is done and nothing else is left, a new round starts RESEARCH_ROUND_AFTER after the last
+one began, but only if the last round found something new. A long session, such as a timed
+window the user's messages don't end, keeps its threads busy that way instead of running dry
+after one round. Waiting proposals still stop research while auto-approval is off.
+
 Every run self-work starts shows in Rem's chat like a requested task: a card when it starts, and
 an update when it finishes. Cards started in one pass share a ``batch``, so the desktop and phone
 show them together under one line instead of one message each. Each card lists the tickets its
@@ -50,19 +62,26 @@ from gofer.ui.rem_kanban import (
     PRIORITIES,
     KanbanRefused,
     add_report,
+    auto_approved,
     backlog_score,
     board_enabled,
     get_ticket,
+    held_by_waits,
     link_tickets,
+    move_waiters,
     new_ticket,
     open_project_roots,
     pending_proposal,
     put_ticket,
     read_tickets,
     rem_assignment,
+    resolve_waits,
     same_work,
     ticket_ref,
+    tickets_by_id,
+    unmet_waits,
     usable_projects,
+    wait_ids,
 )
 
 if TYPE_CHECKING:
@@ -71,8 +90,11 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 IDLE_AFTER = timedelta(minutes=15)
-# Research stops here even if the user stays away, so an idle week can't spend without limit.
+# Research runs per round. Rounds repeat only when the last one found something new, so an idle
+# week can't spend without limit; waiting proposals and the user's usage limits stop it too.
 MAX_RESEARCH_PASSES = 6
+# The soonest a new research round starts after the last one began.
+RESEARCH_ROUND_AFTER = timedelta(hours=1)
 MAX_PENDING_PROPOSALS = 12
 # With the board off, research ideas have nowhere to wait for approval, so each project and
 # angle is researched at most once in this period, however many quiet spells there are.
@@ -86,6 +108,14 @@ RESEARCH_ANGLES = (
     ("Research new features for {name}", "new features its users would want"),
     ("Research reliability problems in {name}", "bugs, failure paths and security risks"),
     ("Research speed and upkeep in {name}", "slow paths and maintenance that would pay off"),
+)
+# The largest token limit a setting takes, far past any real day of work.
+TOKEN_LIMIT_MAX = 1_000_000_000_000
+LIMIT_SETTINGS = ("session_token_limit", "daily_token_limit", "rate_limit_percent")
+AUTO_APPROVE = "auto_approve_proposals"
+AUTO_APPROVED_NOTE = (
+    "Self-work approved this ticket on its own because “Approve its own backlog tickets” is on "
+    "in Settings > Rem. You haven't reviewed it. Edit it, move it or cancel it like any ticket."
 )
 REPORT_ITEMS = 100
 # Report rows one phone alert read looks at; it reads again for the rest.
@@ -104,9 +134,12 @@ UNATTENDED = (
 
 PROPOSAL_FORMAT = """End your final message with one fenced ```json block and nothing after it:
 {"proposals":[{"title":"short name","description":"what to build and how it would work",\
-"why":"evidence for the value","type":"develop|research|maintain"}],\
+"why":"evidence for the value","type":"develop|research|maintain",\
+"waits_for":["key of a board ticket, or exact title of an earlier proposal in this list"]}],\
 "duplicates":[{"ticket_id":"exact id","duplicate_of":"exact id","reason":"why"}]}
-Propose at most 5 tickets. Use an empty list when you find nothing worth proposing."""
+Propose at most 5 tickets. Use an empty list when you find nothing worth proposing. Fill \
+waits_for only when a proposal can't be done well before another ticket is finished, and \
+leave it out otherwise."""
 
 IDEAS_FORMAT = """End your final message with one fenced ```json block and nothing after it:
 {"proposals":[{"title":"short name","description":"what to build and how it would work",\
@@ -120,6 +153,10 @@ class Proposal(BaseModel):
     description: str = Field(default="", max_length=4000)
     why: str = Field(default="", max_length=1000)
     type: Literal["develop", "research", "maintain"] = "develop"
+    # Board keys (REM-4) or titles of earlier proposals that must be Done before this one.
+    waits_for: Annotated[list[Annotated[str, Field(max_length=200)]], Field(max_length=10)] = Field(
+        default_factory=list
+    )
 
 
 class Duplicate(BaseModel):
@@ -181,6 +218,15 @@ def _instant(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+def tokens_text(number: int) -> str:
+    """A token count as people say it: 950, 12.4k, 3.2M."""
+    if number >= 1_000_000:
+        return f"{number / 1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
+    if number >= 1_000:
+        return f"{number / 1_000:.1f}".rstrip("0").rstrip(".") + "k"
+    return str(number)
+
+
 def count(number: int, noun: str) -> str:
     return f"{number} {noun}{'' if number == 1 else 's'}"
 
@@ -203,6 +249,26 @@ def stored_settings(db: sqlite3.Connection, store: Any) -> dict[str, Any]:
     return {**DEFAULT_SETTINGS, **store.setting(db, "self_work")}
 
 
+def found_in(db: sqlite3.Connection, session_id: str) -> int:
+    """How many tickets self-work's research added in this session, approved or not."""
+    row = db.execute(
+        "SELECT COUNT(*) FROM kanban_tickets WHERE json_extract(body,'$.created_by')="
+        "'self_work' AND json_extract(body,'$.proposal.round')=?",
+        (session_id,),
+    ).fetchone()
+    return int(row[0] or 0)
+
+
+def auto_approved_in(db: sqlite3.Connection, session_id: str) -> int:
+    """How many tickets self-work approved on its own in this session, kept or not since."""
+    row = db.execute(
+        "SELECT COUNT(*) FROM kanban_tickets WHERE json_extract(body,'$.proposal.by')="
+        "'self_work' AND json_extract(body,'$.proposal.round')=?",
+        (session_id,),
+    ).fetchone()
+    return int(row[0] or 0)
+
+
 def self_started(run: dict[str, Any]) -> bool:
     """Whether Rem started this run on its own, rather than for something the user asked.
 
@@ -222,16 +288,35 @@ def _holds_thread(run: dict[str, Any], clock: datetime) -> bool:
     return not (run["state"] == "queued" and run.get("waiting_for") and until and until > clock)
 
 
-def _pause_order(run: dict[str, Any]) -> tuple[int, int, str]:
-    """Which self-work makes way first: work not started yet, then research, then tickets.
+def _rank(run: dict[str, Any], priorities: dict[str, str]) -> int:
+    """How much a self-work run matters, lowest first: research and ranking, then tickets
+    by their priority (low, medium, high, critical).
 
-    Within each, the newest goes first, so the least progress is set aside.
+    ``priorities`` maps ticket IDs to their priority now; a ticket missing from it counts
+    as medium, the board's default.
     """
-    kind = (run.get("self_work") or {}).get("kind")
+    started = run.get("self_work") or {}
+    if started.get("kind") in {"research", "triage"}:
+        return 0
+    priority = priorities.get(str(started.get("ticket_id") or ""), "medium")
+    return 1 + (len(PRIORITIES) - 1 - PRIORITIES.get(priority, PRIORITIES["medium"]))
+
+
+def _pause_order(
+    run: dict[str, Any], priorities: dict[str, str] | None = None
+) -> tuple[int, int, str]:
+    """Which self-work makes way first: the lowest priority, then the most recently started.
+
+    Research and ranking come below every ticket; tickets go by their priority. Among equals,
+    work not started yet goes first, then the newest, so the least progress is set aside.
+    """
     started = bool(run.get("started_at")) and run["state"] != "queued"
-    stage = 0 if not started else 1 if kind in {"research", "triage"} else 2
     newest = str(run.get("started_at") or run.get("created_at") or "")
-    return stage, 0, "".join(chr(0x10FFFF - ord(c)) for c in newest)
+    return (
+        _rank(run, priorities or {}),
+        0 if not started else 1,
+        "".join(chr(0x10FFFF - ord(c)) for c in newest),
+    )
 
 
 PRIORITY_REASON = "Paused so your own work could run first. Rem resumes it on its own."
@@ -295,20 +380,33 @@ class SelfWork:
         return [r for r in holding if self_started(r)], [r for r in holding if not self_started(r)]
 
     def _yield_to_user(
-        self, mine: list[dict[str, Any]], theirs: list[dict[str, Any]], limit: int
+        self,
+        mine: list[dict[str, Any]],
+        theirs: list[dict[str, Any]],
+        limit: int,
+        priorities: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         """Pause the self-work that the user's own work needs room for; returns it.
 
-        The user's work counts against the thread limit ahead of self-work, so when both
-        together go over it, the newest self-work makes way: it stops like a Stop would
-        and settles as paused, with its thread, session and worktree kept. Self-work the
-        user resumed by hand is theirs to keep running.
+        The user's work counts against the thread limit ahead of self-work. Only when both
+        together go over it does self-work make way, exactly as many runs as the excess:
+        one for each task of the user's that doesn't fit, none while a thread is free. The
+        lowest priority goes first (``_pause_order``). It stops like a Stop would and
+        settles as paused, with its thread, session and worktree kept. A run already pausing
+        holds no thread, and one already stopping is freeing its own, so neither is counted
+        or paused twice. Self-work the user resumed by hand is theirs to keep running.
         """
-        excess = len(mine) + len(theirs) - limit
+        stopping = [r for r in mine if r["state"] == "cancelling"]
+        excess = len(mine) + len(theirs) - limit - len(stopping)
         if excess <= 0 or not theirs:
             return []
         candidates = sorted(
-            (r for r in mine if (r.get("resumed") or {}).get("by") != "user"), key=_pause_order
+            (
+                r
+                for r in mine
+                if r["state"] != "cancelling" and (r.get("resumed") or {}).get("by") != "user"
+            ),
+            key=lambda r: _pause_order(r, priorities),
         )
         paused: list[dict[str, Any]] = []
         for candidate in candidates[:excess]:
@@ -328,7 +426,7 @@ class SelfWork:
                 f"Paused {count(len(paused), 'self-work task')} so your work runs first: "
                 f"{named}. "
                 + ("It picks" if len(paused) == 1 else "They pick")
-                + " up in the same thread once your work is done and you've been away 15 minutes."
+                + " up in the same thread as soon as a thread is free again."
             )
             log.info("Rem self-work: %s", text)
             with self.store.connect() as db:
@@ -336,10 +434,19 @@ class SelfWork:
                 self.store.message(db, text, identity=f"yielded-{uuid4().hex}")
         return paused
 
-    def _resume_priority(self, runs: list[dict[str, Any]], slots: int, usable: set[str]) -> int:
-        """Pick up self-work that made way for the user, oldest first; returns how many.
+    def _resume_priority(
+        self,
+        runs: list[dict[str, Any]],
+        slots: int,
+        usable: set[str],
+        priorities: dict[str, str] | None = None,
+    ) -> int:
+        """Pick up self-work that made way for the user; returns how many.
 
-        These go before anything new, so paused work is finished instead of abandoned.
+        As soon as a thread is free again, whether or not the user is still here: it was
+        already under way, so it isn't new self-work. The highest priority goes first, then
+        the one paused longest. These go before anything new, so paused work is finished
+        instead of abandoned.
         """
         waiting = sorted(
             (
@@ -350,7 +457,10 @@ class SelfWork:
                 and (r.get("paused") or {}).get("by") == "priority"
                 and self._project_of(r) in usable
             ),
-            key=lambda r: str((r.get("paused") or {}).get("at") or ""),
+            key=lambda r: (
+                -_rank(r, priorities or {}),
+                str((r.get("paused") or {}).get("at") or ""),
+            ),
         )
         resumed: list[str] = []
         for run in waiting[: max(slots, 0)]:
@@ -700,6 +810,8 @@ class SelfWork:
             "mode": view["state"]["mode"],
             "detail": view["state"]["detail"],
             "thread_limit": view["state"]["thread_limit"],
+            # Read-only for Rem: only the user turns it on, in Settings > Rem.
+            "auto_approve_proposals": view["settings"]["auto_approve_proposals"],
             "active_threads": view["state"]["active_threads"],
             "paused_threads": view["state"]["paused_threads"],
         }
@@ -728,9 +840,23 @@ class SelfWork:
         limit = self.limit(settings)
         # The user's own work goes first, whether or not self-work is on or a session runs.
         mine, theirs = self._occupancy(runs)
-        if self._yield_to_user(mine, theirs, limit):
+        priorities = {t["id"]: str(t.get("priority") or "medium") for t in tickets}
+        if self._yield_to_user(mine, theirs, limit, priorities):
             return
+        # Self-work that made way picks up as soon as a thread is free, before anything new,
+        # unless a task waits for nothing else to run. Only while self-work is still on and
+        # under its limits: turning it off or reaching a limit starts nothing, not even this.
         session = state.get("session")
+        free = limit - len(mine) - len(theirs)
+        resumed = (
+            self._resume_priority(runs, free, usable, priorities)
+            if free > 0
+            and not holding
+            and on
+            and usable
+            and not self._limit_reason(settings, config, session, clock)
+            else 0
+        )
         # A window the user set works straight away, unless they asked it to wait as usual.
         waits = not window or bool(window.get("wait_for_idle"))
         quiet = not waits or clock - self._idle_since(state) >= IDLE_AFTER
@@ -751,20 +877,29 @@ class SelfWork:
             session = self._merge_once(session, usable)
             with self.store.read() as db:
                 tickets = read_tickets(db, *WORKING)
+        # Past a limit the user set, nothing new starts; work already running finishes.
+        limited = self._limit_reason(settings, config, session, clock)
+        if limited or session.get("limited"):
+            self._note_limited(limited)
+        if limited:
+            return
         # Tickets outside Rem's projects stay where they are and hold nothing else back.
         tickets = [t for t in tickets if t.get("project_dir") in usable]
+        # A ticket that waits for another isn't started, picked back up or pulled until every
+        # ticket it waits for is Done. One already running still holds its thread.
+        with self.store.read() as db:
+            held = held_by_waits(db, tickets)
+        startable = [t for t in tickets if t["id"] not in held or t.get("claim")]
         passes = state.get("passes") or []
         # Every running thread counts, the user's first; paused work holds none.
-        slots = limit - len(mine) - len(theirs)
-        resumed = self._resume_priority(runs, slots, usable) if slots > 0 else 0
-        slots -= resumed
+        slots = limit - len(mine) - len(theirs) - resumed
         running = [t for t in tickets if t.get("claim") and not t.get("paused")]
         # Running tickets above still hold their threads, so turning the board off mid-session
         # never starts more work than the limit; only new ticket work stops.
         # Blocked tickets were already under way, so with the board on they come first.
         unblocked = (
             self._review_blocked(
-                [t for t in tickets if t["status"] == "blocked" and not t.get("claim")],
+                [t for t in startable if t["status"] == "blocked" and not t.get("claim")],
                 slots,
                 config,
             )
@@ -773,7 +908,7 @@ class SelfWork:
         )
         slots -= unblocked
         waiting = sorted(
-            (t for t in tickets if board and t["status"] == "todo" and not t.get("claim")),
+            (t for t in startable if board and t["status"] == "todo" and not t.get("claim")),
             key=work_order,
         )
         todos = self._fill(waiting, slots, config)
@@ -782,11 +917,18 @@ class SelfWork:
         backlog_left = False
         if board and settings["auto_pull_backlog"] and slots > 0:
             pulled, triaging, backlog_left = self._pull_backlog(
-                session, slots, config, passes, tickets, usable
+                session, slots, config, passes, startable, usable
             )
             slots -= pulled + triaging
         researching, finished = self._research(
-            session, slots, config, passes, tickets, usable, board=board
+            session,
+            slots,
+            config,
+            passes,
+            tickets,
+            usable,
+            board=board,
+            auto=bool(settings.get(AUTO_APPROVE)),
         )
         started = unblocked + todos + pulled + triaging + researching
         if fresh:
@@ -895,6 +1037,101 @@ class SelfWork:
             except Superseded:
                 # It finished after the read above; a finished run stays finished.
                 pass
+
+    # Limits ------------------------------------------------------------------------
+
+    def _self_work_tokens(self, since: datetime) -> int:
+        """Reported tokens self-started runs used from ``since``; unreported calls add none."""
+        from gofer.core.usage_ledger import run_tokens_since
+
+        per_run = run_tokens_since(since, self.home.data_dir)
+        if not per_run:
+            return 0
+        identities = list(per_run)
+        total = 0
+        with self.store.read() as db:
+            for start in range(0, len(identities), 500):
+                chunk = identities[start : start + 500]
+                for identity, body in db.execute(
+                    f"SELECT id, body FROM runs WHERE id IN ({','.join('?' * len(chunk))})",
+                    chunk,
+                ):
+                    if self_started(json.loads(body)):
+                        total += per_run[identity]
+        return total
+
+    def _limit_reason(
+        self,
+        settings: dict[str, Any],
+        config: dict[str, Any],
+        session: dict[str, Any] | None,
+        clock: datetime,
+    ) -> tuple[str, str] | None:
+        """Which self-work limit stops new work now, as a key and a sentence; None if none.
+
+        Token limits count the tokens providers reported for self-started runs, in this
+        self-work session or since midnight on this computer. The rate-limit limit reads the
+        windows Raticode last stored for the provider Rem's tasks use.
+        """
+        from gofer.core.provider_usage import PROVIDER_LABELS
+        from gofer.core.usage_service import stored_windows
+
+        after = " Running work finishes normally."
+        try:
+            limit = int(settings.get("session_token_limit") or 0)
+            started = _instant(session.get("started_at")) if session else None
+            if limit and started:
+                used = self._self_work_tokens(started)
+                if used >= limit:
+                    return "session_tokens", (
+                        f"Stopped starting new work: self-work used {tokens_text(used)} tokens "
+                        f"this session, past its limit of {tokens_text(limit)}.{after}"
+                    )
+            limit = int(settings.get("daily_token_limit") or 0)
+            if limit:
+                midnight = clock.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+                used = self._self_work_tokens(midnight)
+                if used >= limit:
+                    return "daily_tokens", (
+                        f"Stopped starting new work: self-work used {tokens_text(used)} tokens "
+                        f"today, past its daily limit of {tokens_text(limit)}.{after}"
+                    )
+            percent = int(settings.get("rate_limit_percent") or 0)
+            if percent:
+                provider = str(config.get("provider") or "codex")
+                for window in stored_windows(provider, self.home.data_dir):
+                    if window["percent"] >= percent:
+                        name = PROVIDER_LABELS.get(provider, provider)
+                        return f"rate:{provider}:{window['id']}", (
+                            f"Stopped starting new work: {name}'s {window['label']} limit is "
+                            f"{round(window['percent'])}% used, at or above the "
+                            f"{percent}% set for self-work.{after}"
+                        )
+        except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+            # A usage store that can't be read doesn't stop self-work; the log says so.
+            log.warning("Rem self-work could not check its limits (%s)", type(exc).__name__)
+        return None
+
+    def _note_limited(self, limited: tuple[str, str] | None) -> None:
+        """Say in the report, once per limit and session, why self-work started nothing new."""
+        with self.store.connect() as db:
+            state = self.store.setting(db, "self_work_state")
+            session = state.get("session")
+            if not session:
+                return
+            if limited is None:
+                if not session.get("limited"):
+                    return
+                session.pop("limited", None)
+                session.pop("limited_reason", None)
+            else:
+                key, text = limited
+                if session.get("limited") == key:
+                    return
+                session.update(limited=key, limited_reason=text)
+                add_report(db, "note", text=text)
+                log.info("Rem self-work: %s", text)
+            self.store.set_setting(db, "self_work_state", state)
 
     def _begin_session(self) -> dict[str, Any]:
         session = {
@@ -1240,6 +1477,9 @@ class SelfWork:
                 self.store.setting(db, "config"), rem_assignment(db, self.store)
             ):
                 return False
+            # Nor one that waits for a ticket that isn't Done; someone can still start it.
+            if origin == "self_work" and unmet_waits(current, tickets_by_id(db, wait_ids(current))):
+                return False
             task = self.store.add_task(db, recipe)
             attempt = int(current.get("attempts") or 0) + 1
             run = self.store.add_run(
@@ -1480,14 +1720,16 @@ class SelfWork:
         usable: set[str],
         *,
         board: bool = True,
+        auto: bool = False,
     ) -> tuple[int, str]:
         """Use the free threads for research; returns runs started and why it's finished, if so.
 
         With the board off, ideas can't pile up waiting for approval, so instead each project
-        and angle is researched at most once every IDEAS_AGAIN_AFTER.
+        and angle is researched at most once every IDEAS_AGAIN_AFTER. With auto-approval on,
+        new ideas don't wait for approval, so ideas already waiting don't stop it.
         """
         pending = sum(1 for t in tickets if pending_proposal(t))
-        if board and pending >= MAX_PENDING_PROPOSALS:
+        if board and pending >= MAX_PENDING_PROPOSALS and not auto:
             return 0, f"Stopped researching: {pending} ideas are waiting for your approval."
         ordered = [r for r in open_project_roots(config) if r in usable]
         pairs = [(root, angle) for angle in range(len(RESEARCH_ANGLES)) for root in ordered]
@@ -1500,26 +1742,88 @@ class SelfWork:
             for angle, (title, _) in enumerate(RESEARCH_ANGLES)
             if r.get("title") == title.format(name=Path(str(r.get("target") or "")).name)[:160]
         }
-        targets = [
-            (root, angle)
-            for root, angle in pairs[:MAX_RESEARCH_PASSES]
-            if f"{root}#{angle}" not in session.get("researched", [])
-            and f"{root}#{angle}" not in recent
-            and f"{root}#{angle}" not in held
-        ]
+
+        def open_targets() -> list[tuple[str, int]]:
+            return [
+                (root, angle)
+                for root, angle in pairs[:MAX_RESEARCH_PASSES]
+                if f"{root}#{angle}" not in session.get("researched", [])
+                and f"{root}#{angle}" not in recent
+                and f"{root}#{angle}" not in held
+            ]
+
+        targets = open_targets()
+        researching = any(r.get("kind") == "research" for r in passes)
+        round_due = self._next_round_due(session, board=board)
+        if not targets and not researching and slots > 0 and round_due is True:
+            session = self._begin_round(session)
+            targets = open_targets()
         started = 0
         for target, angle in targets:
             if started >= slots:
                 break
-            started += self._begin_research(target, angle, config, tickets, board=board)
+            started += self._begin_research(target, angle, config, tickets, board=board, auto=auto)
         if len(targets) > started:
             return started, ""
+        waiting = (
+            f" {count(pending, 'idea')} {'waits' if pending == 1 else 'wait'} for your "
+            "approval on the board."
+            if board and pending
+            else ""
+        )
+        if round_due == "nothing_new":
+            return started, (
+                "Out of work. The last round of research found nothing new, so research is done "
+                "until self-work starts again." + waiting
+            )
         if not board:
             return started, (
-                "Out of work. Research is done for now, and with the board off there are no "
-                "tickets to take on."
+                "Out of work for now. Research is done for this round, and with the board off "
+                "there are no tickets to take on."
             )
-        return started, "Out of work. The backlog is reviewed and research is done."
+        return started, (
+            "Out of work for now. The backlog is reviewed and this round of research is done; "
+            "the next round starts an hour after this one began." + waiting
+        )
+
+    def _next_round_due(self, session: dict[str, Any], *, board: bool) -> bool | str:
+        """Whether a new research round may start now: True, False (not yet), or
+        "nothing_new" when the last round found nothing, which ends research this session.
+
+        With the board off nothing becomes a ticket, and each project and angle already waits
+        IDEAS_AGAIN_AFTER between runs, so only the time between rounds applies.
+        """
+        began = _instant(session.get("round_started_at") or session.get("started_at"))
+        if board:
+            with self.store.read() as db:
+                found = found_in(db, str(session.get("id") or ""))
+            if found <= int(session.get("found_before_round") or 0):
+                return "nothing_new"
+        return bool(began is None or self.clock() - began >= RESEARCH_ROUND_AFTER)
+
+    def _begin_round(self, session: dict[str, Any]) -> dict[str, Any]:
+        """Start the next research round: every project and angle may be researched again."""
+        with self.store.connect() as db:
+            state = self.store.setting(db, "self_work_state")
+            current = state.get("session")
+            if not current or current.get("id") != session.get("id"):
+                return session
+            found = found_in(db, str(current["id"]))
+            current.update(
+                researched=[],
+                round=int(current.get("round") or 0) + 1,
+                round_started_at=self.clock().isoformat(),
+                found_before_round=found,
+                exhausted="",
+            )
+            self.store.set_setting(db, "self_work_state", state)
+            add_report(
+                db,
+                "note",
+                text=f"Started research round {current['round'] + 1}: the last round found "
+                "new tickets, and nothing else was left to do.",
+            )
+            return dict(current)
 
     def _recent_ideas(self) -> set[str]:
         """Projects and angles researched with the board off within IDEAS_AGAIN_AFTER."""
@@ -1540,13 +1844,19 @@ class SelfWork:
         tickets: list[dict[str, Any]],
         *,
         board: bool = True,
+        auto: bool = False,
     ) -> bool:
         if not board:
             return self._start_research(target, angle, config, self._ideas_recipe(target, angle))
         name = Path(target).name
         title, focus = RESEARCH_ANGLES[angle]
         listed = [
-            {"ticket_id": t["id"], "title": t["title"], "status": t["status"]}
+            {
+                "ticket_id": t["id"],
+                "key": f"REM-{t['number']}",
+                "title": t["title"],
+                "status": t["status"],
+            }
             for t in sorted((t for t in tickets if t.get("project_dir") == target), key=work_order)[
                 :80
             ]
@@ -1562,8 +1872,15 @@ class SelfWork:
                 "can cite a source. "
                 "Save one short report with what you found.\n"
                 "Only propose what fits the product's direction and isn't on the board already. "
-                "Your proposals wait for the user's approval, so never start building them. "
-                "Name tickets on this board that describe the same work as duplicates.\n"
+                + (
+                    "Your proposals may be approved without the user reading them first and "
+                    "then worked on, so propose only work you would stand behind. Never start "
+                    "building them here. "
+                    if auto
+                    else "Your proposals wait for the user's approval, so never start building "
+                    "them. "
+                )
+                + "Name tickets on this board that describe the same work as duplicates.\n"
                 f"{PROPOSAL_FORMAT}\nBoard:\n{encode(listed)}"
             ),
             acceptance_criteria=[
@@ -1577,7 +1894,7 @@ class SelfWork:
                 ),
             ],
         )
-        return self._start_research(target, angle, config, recipe, board=True)
+        return self._start_research(target, angle, config, recipe, board=True, auto=auto)
 
     @staticmethod
     def _ideas_recipe(target: str, angle: int) -> Recipe:
@@ -1618,6 +1935,7 @@ class SelfWork:
         recipe: Recipe,
         *,
         board: bool = False,
+        auto: bool = False,
     ) -> bool:
         name = Path(target).name
         key = f"{target}#{angle}"
@@ -1632,9 +1950,10 @@ class SelfWork:
             if not session or key in session.get("researched", []):
                 return False
             task = self.store.add_task(db, recipe)
-            run = self.store.add_run(
-                db, task, f"research:{session['id']}:{key}", config, announce=False
-            )
+            # Each round researches a project and angle again, as a run of its own.
+            rounds = int(session.get("round") or 0)
+            occurrence = f"research:{session['id']}:{f'r{rounds}:' if rounds else ''}{key}"
+            run = self.store.add_run(db, task, occurrence, config, announce=False)
             run["self_work"] = {"kind": "research", "target": target}
             self.store.put(db, "runs", run)
             task["next_occurrence_at"] = None
@@ -1642,7 +1961,10 @@ class SelfWork:
             self._announce(
                 db,
                 run,
-                f"Started “{recipe.title}” while you were away. Any tickets it proposes "
+                f"Started “{recipe.title}” while you were away. Auto-approval is on, so "
+                "tickets it finds go to Backlog already approved."
+                if board and auto
+                else f"Started “{recipe.title}” while you were away. Any tickets it proposes "
                 "wait in Backlog for your approval."
                 if board
                 else f"Started “{recipe.title}” while you were away. The board is off, so "
@@ -1690,8 +2012,9 @@ class SelfWork:
                 and not t.get("duplicate_restored")
                 and t.get("project_dir") in usable
             ),
-            # Tickets the user wrote or approved win over ones still awaiting approval.
-            key=lambda t: (pending_proposal(t), t["number"]),
+            # Tickets the user wrote or approved win over ones self-work approved itself, and
+            # those over ones still awaiting approval.
+            key=lambda t: (pending_proposal(t), auto_approved(t), t["number"]),
         )
         kept: list[dict[str, Any]] = []
         for ticket in backlog:
@@ -1723,6 +2046,8 @@ class SelfWork:
             revision=ticket["revision"] + 1,
         )
         put_ticket(db, ticket)
+        # Tickets that waited for the duplicate would otherwise wait forever.
+        move_waiters(db, ticket, original)
         activity.add_comment(
             db,
             ticket["id"],
@@ -1855,20 +2180,44 @@ class SelfWork:
         known = read_tickets(db)
         added = 0
         created: list[dict[str, Any]] = []
+        approved: list[dict[str, Any]] = []
         closed: list[dict[str, Any]] = []
         # Which self-work round these belong to, for the phone's one alert per round.
         batch = str(record.get("session_id") or run["id"])
         # Counted the same way as the review that started this research.
         pending = sum(1 for t in known if pending_proposal(t) and t.get("project_dir") in usable)
+        # Read now, not when the run started: turning it off mid-run stops it at once.
+        auto = bool(stored_settings(db, self.store).get(AUTO_APPROVE))
+        # A proposal may wait for a board ticket by key or title, or for an earlier proposal
+        # by title; one skipped as a repeat stands for the ticket it repeats.
+        proposed: dict[str, str] = {
+            str(t["title"]).casefold(): t["id"]
+            for t in known
+            if t.get("project_dir") in {target, None} and t["status"] != "cancelled"
+        }
         for proposal in result.proposals:
-            if pending >= MAX_PENDING_PROPOSALS:
+            if not auto and pending >= MAX_PENDING_PROPOSALS:
                 break
-            if any(
-                same_work(proposal.title, t["title"])
-                for t in known
-                if t.get("project_dir") in {target, None}
-            ) or any(same_work(proposal.title, name) for name in org):
+            repeats = next(
+                (
+                    t
+                    for t in known
+                    if t.get("project_dir") in {target, None}
+                    and same_work(proposal.title, t["title"])
+                ),
+                None,
+            )
+            if repeats is not None:
+                proposed.setdefault(proposal.title.casefold(), repeats["id"])
                 continue
+            if any(same_work(proposal.title, name) for name in org):
+                continue
+            approve = auto
+            decision: dict[str, Any] = (
+                {"state": "approved", "by": "self_work", "decided_at": now()}
+                if approve
+                else {"state": "pending"}
+            )
             ticket = new_ticket(
                 db,
                 title=proposal.title,
@@ -1876,9 +2225,10 @@ class SelfWork:
                 status="backlog",
                 type=proposal.type,
                 project_dir=target,
+                waits_for=self._proposal_waits(db, proposal, proposed),
                 created_by="self_work",
                 proposal={
-                    "state": "pending",
+                    **decision,
                     "reason": proposal.why,
                     "run_id": run["id"],
                     "round": batch,
@@ -1886,9 +2236,24 @@ class SelfWork:
             )
             put_ticket(db, ticket)
             known.append(ticket)
+            proposed.setdefault(proposal.title.casefold(), ticket["id"])
             created.append(ticket_ref(ticket, "created"))
             added += 1
-            pending += 1
+            if approve:
+                approved.append(created[-1])
+                activity.add_comment(
+                    db,
+                    ticket["id"],
+                    author="rem",
+                    kind="status",
+                    title="Auto-approved by self-work",
+                    body=AUTO_APPROVED_NOTE,
+                    status_to="backlog",
+                    links=activity.links(run),
+                    dedupe="auto-approved",
+                )
+            else:
+                pending += 1
             add_report(
                 db,
                 "ticket_added",
@@ -1896,7 +2261,8 @@ class SelfWork:
                 title=ticket["title"],
                 scope="rem",
                 organization_name="",
-                proposed=True,
+                proposed=not approve,
+                auto_approved=approve,
                 round=batch,
             )
         by_id = {t["id"]: t for t in known}
@@ -1915,9 +2281,10 @@ class SelfWork:
             if repeat.get("duplicate_restored"):
                 continue
             # A restored ticket can't be the reason another closes; the user decides that.
+            # Ideas self-work approved itself are still its own to close, until claimed.
             if (
                 repeat.get("created_by") == "self_work"
-                and pending_proposal(repeat)
+                and (pending_proposal(repeat) or auto_approved(repeat))
                 and not original.get("duplicate_restored")
             ):
                 self._close_duplicate(db, repeat, original, duplicate.reason or "Same work")
@@ -1935,19 +2302,52 @@ class SelfWork:
             ticket_id="",
             title=title,
             state="researched",
-            summary=f"Added {count(added, 'ticket')} for your approval.",
+            summary=(
+                f"Added {count(added, 'ticket')}, {len(approved)} approved by self-work."
+                if approved
+                else f"Added {count(added, 'ticket')} for your approval."
+            ),
             thread_id=record.get("thread_id") or "",
         )
-        text = (
-            f"Proposed {', '.join(r['key'] for r in created)} from “{title}”. "
-            + ("They wait" if len(created) > 1 else "It waits")
-            + " in Backlog until you approve."
-            if created
-            else f"Finished “{title}” with nothing new to propose."
-        )
+        waiting = [r for r in created if r not in approved]
+        sentences = []
+        if approved:
+            sentences.append(
+                f"Added {', '.join(r['key'] for r in approved)} from “{title}”, approved on "
+                "my own because auto-approval is on. "
+                + ("They're" if len(approved) > 1 else "It's")
+                + " in Backlog; edit or cancel "
+                + ("them" if len(approved) > 1 else "it")
+                + " any time."
+            )
+        if waiting:
+            sentences.append(
+                f"Proposed {', '.join(r['key'] for r in waiting)} from “{title}”. "
+                + ("They wait" if len(waiting) > 1 else "It waits")
+                + " in Backlog until you approve."
+            )
+        text = " ".join(sentences) or f"Finished “{title}” with nothing new to propose."
         if closed:
             text += f" Closed {', '.join(r['key'] for r in closed)} as duplicates."
         return text, [*created, *closed]
+
+    @staticmethod
+    def _proposal_waits(
+        db: sqlite3.Connection, proposal: Proposal, proposed: dict[str, str]
+    ) -> list[str]:
+        """The tickets a research proposal waits for, keeping only those the board accepts.
+
+        A worker's list is a suggestion: an entry that names no ticket, or a cancelled one,
+        is dropped rather than losing the proposal.
+        """
+        waits: list[str] = []
+        for entry in proposal.waits_for:
+            name = proposed.get(entry.strip().casefold(), entry)
+            try:
+                waits = resolve_waits(db, None, [*waits, name])
+            except KanbanRefused:
+                continue
+        return waits
 
     def _ingest_ideas(
         self,
@@ -2273,16 +2673,36 @@ class SelfWork:
         return {"last": last, "more": last < latest, "alerts": alerts}
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Change a setting; ``expected_revision`` keeps two devices from overwriting each other."""
+        """Change a setting; ``expected_revision`` keeps two devices from overwriting each other.
+
+        Only the user reaches this: Settings > Rem, a paired phone or the CLI with the owner's
+        token. Agent tokens are refused before it, and Rem's chat changes only the switch and
+        windows. Turning auto-approval on also needs ``confirm_auto_approve: true``, which a
+        client sends only after the user confirmed what it allows.
+        """
         unknown = set(payload) - {
             "enabled",
             "max_threads",
             "auto_pull_backlog",
+            AUTO_APPROVE,
+            "confirm_auto_approve",
+            *LIMIT_SETTINGS,
             "expected_revision",
         }
         if unknown:
             raise KanbanRefused("invalid", "Unknown self-work setting.")
-        for flag in ("enabled", "auto_pull_backlog"):
+        for key in ("session_token_limit", "daily_token_limit"):
+            value = payload.get(key)
+            if key in payload and (type(value) is not int or not 0 <= value <= TOKEN_LIMIT_MAX):
+                raise KanbanRefused(
+                    "invalid", "Choose a whole number of tokens, or 0 for no token limit."
+                )
+        percent = payload.get("rate_limit_percent")
+        if "rate_limit_percent" in payload and (
+            type(percent) is not int or not 0 <= percent <= 100
+        ):
+            raise KanbanRefused("invalid", "Choose a percent from 1 to 100, or 0 for no limit.")
+        for flag in ("enabled", "auto_pull_backlog", AUTO_APPROVE):
             if flag in payload and type(payload[flag]) is not bool:
                 raise KanbanRefused("invalid", "Expected on or off.")
         threads = payload.get("max_threads")
@@ -2295,7 +2715,20 @@ class SelfWork:
             settings = stored_settings(db, self.store)
             if payload.get("expected_revision") != settings["revision"]:
                 raise KanbanRefused("conflict", "These settings changed. Check them and try again.")
-            changes = {k: v for k, v in payload.items() if k != "expected_revision"}
+            changes = {
+                k: v
+                for k, v in payload.items()
+                if k not in {"expected_revision", "confirm_auto_approve"}
+            }
+            turning_on = changes.get(AUTO_APPROVE) is True and not settings.get(AUTO_APPROVE)
+            if turning_on and payload.get("confirm_auto_approve") is not True:
+                # "invalid": the phone protocol's error codes are fixed.
+                raise KanbanRefused(
+                    "invalid",
+                    "Confirm first: with this on, Rem approves the tickets its self-work "
+                    "research finds, for as long as self-work runs, without asking you.",
+                )
+            turning_off = changes.get(AUTO_APPROVE) is False and bool(settings.get(AUTO_APPROVE))
             self._advance_in(db, clock)
             settings = stored_settings(db, self.store)
             schedule = windows.read(db)
@@ -2315,6 +2748,21 @@ class SelfWork:
             settings.update(changes)
             settings["revision"] += 1
             self.store.set_setting(db, "self_work", settings)
+            if turning_on:
+                add_report(
+                    db,
+                    "note",
+                    text="You turned on auto-approval: new ideas from self-work research go to "
+                    "Backlog approved until self-work ends. Ideas already waiting still need "
+                    "your approval.",
+                )
+            elif turning_off:
+                add_report(
+                    db,
+                    "note",
+                    text="You turned off auto-approval: new ideas wait for your approval again. "
+                    "Tickets it already approved stay on the board.",
+                )
             self._sync_period(db, clock, "user")
         return self.view()
 
@@ -2374,12 +2822,15 @@ class SelfWork:
             timed = windows.view(db, clock)
             state = self.store.setting(db, "self_work_state")
             tickets = read_tickets(db, *WORKING)
+            held = held_by_waits(db, tickets)
             report = self._report(db, state)
             config = self.store.setting(db, "config")
             usable = usable_projects(config, rem_assignment(db, self.store))
             runs_now = self._current_runs(db)
             on = windows.effective(settings["enabled"], schedule, clock, db)
             current = windows.active(schedule, clock, db)
+            session_id = (state.get("session") or {}).get("id")
+            auto_count = auto_approved_in(db, session_id) if session_id else 0
         board = board_enabled(config)
         # With the board off, tickets aren't self-work's to count.
         proposals = sum(1 for t in tickets if board and pending_proposal(t))
@@ -2418,6 +2869,13 @@ class SelfWork:
             and t["status"] in {"todo", "in_progress", "in_review"}
             and todo_work(t)
             and t.get("project_dir") in usable
+            and (t["id"] not in held or t.get("claim"))
+        )
+        # Open tickets self-work leaves until the tickets they wait for are Done.
+        waiting_on = sum(
+            1
+            for t in tickets
+            if board and t["id"] in held and not t.get("claim") and not pending_proposal(t)
         )
         session = state.get("session")
         last_prompt = state.get("last_prompt_at") or ""
@@ -2428,10 +2886,14 @@ class SelfWork:
             mode, detail = "paused", "Waiting for Raticode to connect."
         elif not usable and not active:
             mode, detail = "waiting", "Choose Rem's projects in Settings > Rem to start self-work."
+        elif session and session.get("limited_reason") and not active:
+            mode, detail = "waiting", session["limited_reason"]
         elif session and session.get("exhausted") and not active:
             mode, detail = "waiting", session["exhausted"]
         elif session or active:
             mode, detail = "working", self._working_detail(active, todo)
+            if session and session.get("limited_reason"):
+                detail += " " + session["limited_reason"]
         elif current and not current.get("wait_for_idle"):
             mode, detail = "waiting", "Starts work on its next check."
         else:
@@ -2458,10 +2920,19 @@ class SelfWork:
                 "saved_enabled": settings["enabled"],
                 "max_threads": settings["max_threads"],
                 "auto_pull_backlog": settings["auto_pull_backlog"],
+                # Only the user turns it on; new research ideas skip their approval.
+                AUTO_APPROVE: bool(settings.get(AUTO_APPROVE)),
+                # 0 is off for each: tokens per session and per day, and a provider window's %.
+                **{key: int(settings.get(key) or 0) for key in LIMIT_SETTINGS},
                 "idle_minutes": int(IDLE_AFTER.total_seconds() / 60),
                 "revision": settings["revision"],
             },
-            "limits": {"max_threads_min": 1, "max_threads_max": MAX_THREADS},
+            "limits": {
+                "max_threads_min": 1,
+                "max_threads_max": MAX_THREADS,
+                "token_limit_max": TOKEN_LIMIT_MAX,
+                "rate_limit_percent_max": 100,
+            },
             "state": {
                 "mode": mode,
                 "active_threads": active,
@@ -2470,7 +2941,10 @@ class SelfWork:
                 "paused_for_you": made_way,
                 "thread_limit": self.limit(settings),
                 "todo_remaining": todo,
+                "waiting_on_tickets": waiting_on,
                 "proposals_waiting": proposals,
+                # Tickets self-work approved on its own this session.
+                "auto_approved_session": auto_count,
                 "assigned_projects": len(usable),
                 "outside_projects": skipped,
                 # Off: self-work runs research tasks only and leaves tickets alone.
@@ -2503,6 +2977,8 @@ class SelfWork:
                 if mode == "waiting" and not session and usable and not current
                 else "",
                 "detail": detail,
+                # Why self-work starts nothing new right now, or "" while no limit applies.
+                "limit_reason": str((session or {}).get("limited_reason") or "") if on else "",
             },
             "report": report,
             "schedule": timed,
@@ -2538,6 +3014,7 @@ class SelfWork:
                     "organization_id",
                     "organization_name",
                     "proposed",
+                    "auto_approved",
                     "at",
                 )
             }
@@ -2574,6 +3051,7 @@ class SelfWork:
         latest_note: str = "",
     ) -> str:
         proposed = sum(1 for a in added if a.get("proposed"))
+        approved = sum(1 for a in added if a.get("auto_approved"))
         finished = sum(1 for w in work if w.get("state") == "done")
         researched = sum(1 for w in work if w.get("state") == "researched")
         unblocked = sum(1 for w in work if w.get("state") == "unblocked")
@@ -2585,10 +3063,12 @@ class SelfWork:
                 if w.get("state") in {"blocked", "still_blocked"} and w.get("ticket_id")
             }
         ) + sum(1 for w in work if w.get("state") == "blocked" and not w.get("ticket_id"))
-        direct = len(added) - proposed
+        direct = len(added) - proposed - approved
         parts = []
         if direct:
             parts.append(f"added {count(direct, 'ticket')}")
+        if approved:
+            parts.append(f"auto-approved {count(approved, 'ticket')}")
         if proposed:
             parts.append(f"proposed {proposed} for your approval")
         if finished:

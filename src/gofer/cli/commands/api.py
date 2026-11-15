@@ -25,7 +25,6 @@ from gofer.cli.client import (
     in_agent_session,
     wait_until,
 )
-from gofer.ui.headless import AGENT_SECOND_BRAIN_ACTIONS, agent_request_refusal
 
 # Organization actions only the user may send through `api` from inside an agent turn.
 # They start, pause or resume work, decide consent requests, change what needs consent,
@@ -52,6 +51,7 @@ USER_ONLY_ORG_ACTIONS = frozenset(
         # runs-agents
         "approve",
         "review",
+        "land",
         "reopen",
         "check_run",
         "execution_reconcile",
@@ -75,6 +75,10 @@ API_PATHS = (
     "/chat/steer",
     "/chat/steering",
     "/chat/stop",
+    "/classifiers/jev",
+    "/classifiers/jev/check",
+    "/classifiers/jev/key",
+    "/classifiers/jev/settings",
     "/devices",
     "/doctor",
     "/health",
@@ -84,8 +88,13 @@ API_PATHS = (
     "/provider/profiles",
     "/provider/settings",
     "/queue",
+    "/rattish/cache",
+    "/rattish/runs",
+    "/rattish/secrets",
+    "/rattish/starters",
     "/rattish/triggers",
     "/rattish/triggers/login",
+    "/rattish/triggers/pause",
     "/rattish/triggers/preview",
     "/rattish/workflows",
     "/rattish/workflows/import",
@@ -94,8 +103,10 @@ API_PATHS = (
     "/rem/context",
     "/rem/conversation",
     "/rem/events",
+    "/rem/history",
     "/rem/kanban",
     "/rem/kanban/participant",
+    "/rem/kanban/patch",
     "/rem/kanban/report/seen",
     "/rem/kanban/settings",
     "/rem/kanban/ticket",
@@ -119,6 +130,8 @@ API_PATHS = (
     "/workflows",
     "/workflows/import",
     "/workflows/import/preview",
+    "/worktree-setup",
+    "/worktree-setup/pending",
 )
 
 
@@ -237,6 +250,8 @@ def agent_api_refusal(method: str, path: str, body: Any, query: dict[str, Any]) 
     would let it. This is a guard in the client, not a boundary; the backend applies its
     own rules to whichever token arrives.
     """
+    from gofer.ui.headless import AGENT_SECOND_BRAIN_ACTIONS, agent_request_refusal
+
     full = api_path(path)
     route = full.split("?", 1)[0]
     reason = agent_request_refusal(method, route)

@@ -181,7 +181,7 @@ export function startDeviceWorkspaceSync({ storage = window.localStorage, reposi
           if (remote.delete_requested && remote.metadata) {
             if (!deleteThread) throw new Error("Open the desktop thread view to finish deleting this thread.");
             await importThread(remote);
-            await deleteThread(remote.metadata.id);
+            await deleteThread(remote.metadata.id, { purge: remote.purge_requested === true });
             await remove(peer, remote.thread_id);
             threads.delete(remote.metadata.id);
             emit("gofer:device-thread-deleted", { id: remote.metadata.id });

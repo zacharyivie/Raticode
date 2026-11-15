@@ -28,7 +28,22 @@
       },
       "output_schema": {"type": ["object", "null"]},
       "output_schema_path": {"type": ["string", "null"], "x-rattish-type": "Path"},
-      "repair_attempts": {"type": "integer", "minimum": 0, "maximum": 3}
+      "repair_attempts": {"type": "integer", "minimum": 0, "maximum": 3},
+      "fallback": {
+        "type": "array",
+        "maxItems": 4,
+        "items": {
+          "type": "object",
+          "properties": {
+            "provider": {"type": "string", "minLength": 1, "x-rattish-role": "provider_id"},
+            "profile": {"type": ["string", "null"]},
+            "model": {"type": "string", "minLength": 1},
+            "effort": {"type": "string", "minLength": 1}
+          },
+          "required": ["provider"],
+          "additionalProperties": false
+        }
+      }
     },
     "required": ["provider"],
     "allOf": [
@@ -57,7 +72,8 @@
     "extra_paths": [],
     "output_schema": null,
     "output_schema_path": null,
-    "repair_attempts": 0
+    "repair_attempts": 0,
+    "fallback": []
   },
   "computed_defaults": {
     "model": {
@@ -112,6 +128,11 @@
       "id": "profile-compatible",
       "severity": "error",
       "description": "A selected deployment profile must exist and support the provider."
+    },
+    {
+      "id": "fallback-provider-available",
+      "severity": "warning",
+      "description": "Each fallback provider should be installed and available, so the step can switch to it."
     },
     {
       "id": "prompt-path-readable",

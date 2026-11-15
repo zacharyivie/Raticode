@@ -28,11 +28,26 @@ Open **Organizations** in the sidebar. You don't need a project selected. Each o
 
 - Opening a ticket, project, worker or note fills the main area. The back button at the top left, or Escape, returns to the list.
 - The header has **Start** or **Pause**, **Find anything** (Ctrl+K), a working-hours pill, the current work schedule block, and a gear for **Settings, history and operations**.
+- The tabs work from the keyboard: Tab reaches the open one, the arrow keys move between them, and Home and End jump to the first and last. In a narrow window the tabs show their icons and name only the open one; hover a tab for its name. Each count beside a tab is the number of things that need you there.
+- While an organization opens, the page shows its outline. If it can't open, it says why and offers **Try again** and **Back to organizations**. If a later refresh fails, the page keeps what it last showed, says what time that was, and offers **Try again**; Raticode also keeps retrying every few seconds.
+- A ticket's evidence counts use an icon and a number: a check for verified, a triangle for a changed source, a cross for failed, a spinner for being checked and a question mark for claims without verified evidence. Hover one for its meaning.
+- **Issues** remembers its filters for each organization on this computer: the board type, project, worker, epic, **Needs me** and **Lanes by epic**. They're still set when you come back or restart Raticode. A filter that's on is highlighted, and **Clear filters** turns them all off. A saved project, worker or epic that's been removed falls back to all, and the other filters stay.
 - On the phone, the same five sections are under the **Orgs** tab.
 
 ## Set up an organization
 
-Create the organization, then add employees, reporting lines, teams, goals, initiatives and owned projects. A project folder can belong to only one organization.
+Click **+** next to **Organizations** in the sidebar. Creating one needs only a name:
+
+- **Purpose** says what it's for.
+- **Assign the current project** gives it the open project's folder. A project folder can belong to only one organization.
+- **First worker** (optional) adds one worker by name and title. It uses the provider and model you chose for Rem in Settings, and isn't held: the organization itself starts paused. It gets the organization's project folders, so it can [work on its own](#workers-run-like-small-rems) once you start.
+- **More settings** holds the package slug, company instructions, goals, monthly and per-run limits, where employees work, the git push block, Backlog pulls and Second Brain. The defaults suit a first organization; change them later from the gear.
+
+An organization created in the Organizations tab keeps running after Raticode restarts once you start it, until you pause it. One created by Rem or from the command line starts with this off. Turn that off with **Keep running after Raticode restarts** in the working hours editor. Organizations made before this change keep their setting.
+
+The **Organization** tab shows **Get started** until the organization has run and every step is done: add a worker (or release a held one), give it a project folder, let workers work on their own, add a first ticket, and start it. Each step's button opens the place where you do it. **Give them projects** gives every worker that isn't held the organization's folders its workspace access allows, in one click. It also shows on organizations that already ran when a worker has no projects. Add more employees, reporting lines, teams, goals and initiatives whenever you need them.
+
+New workers added from the **Workers** tab or **Add worker** use Rem's provider and model from Settings, get the organization's project folders, and start held until you release them.
 
 Each employee has:
 
@@ -56,20 +71,27 @@ Give each employee a narrow role and review these settings before starting work.
 
 ## Workers run like small Rems
 
-Each worker looks after its own tickets in a loop, like Rem's [self-work](../rem/board.md#self-work), inside the projects you gave it. Choose a worker's projects in the board's **People** view; only you can change them.
+Each worker looks after its own tickets in a loop, like Rem's [self-work](../rem/board.md#self-work), inside the projects you gave it. Only you choose a worker's projects:
+
+- Workers you create with the organization or add yourself get all of its project folders that their workspace access allows. They keep all of them as you add or remove folders.
+- Choose different projects for a worker in the board's **People** view. A narrower choice stays as you set it when folders change. Choosing every folder again makes the worker follow them.
+- Workers that Rem adds, or that were saved before this change, get no projects until you give them some, from **People** or **Get started**.
 
 While the organization runs and working hours are open, a worker with projects:
 
 1. **Checks its Blocked tickets first**, once per blocked spell. It restarts what it can and says what changed. A ticket that needs you stays Blocked, with a comment saying what's needed.
-2. **Works its To do tickets** by priority. Tickets that fit the current [work schedule](#work-schedule) block move up a level.
-3. **Pulls accepted Backlog tickets** when it has nothing else it can start. See [Pull from Backlog](#pull-from-backlog).
-4. **Checks in when idle.** It plans follow-ups in To do and proposes new work for the current block as **Backlog** tickets. Proposals stay in Backlog until you accept them; tickets that need approval wait for it.
+2. **Reviews results it's the reviewer of.** When a ticket names this worker as its reviewer and its result is handed in, the worker's next check-in starts with that review: it accepts, sends the ticket back with what to fix, or rejects it. It's asked once per hand-in. If it doesn't review it then, or it's held or not assigned to the ticket's project, the result waits for you, or for Rem in [Auto mode](#auto-mode).
+3. **Works its To do tickets** by priority. Tickets that fit the current [work schedule](#work-schedule) block move up a level.
+4. **Pulls accepted Backlog tickets** when it has nothing else it can start. See [Pull from Backlog](#pull-from-backlog).
+5. **Checks in when idle.** It plans follow-ups in To do and proposes new work for the current block as **Backlog** tickets. Proposals stay in Backlog until you accept them; tickets that need approval wait for it.
 
 Check-ins:
 
 - come hourly unless the worker's **Check-ins** setting says otherwise
 - double their wait after each check-in in a row that creates nothing, up to eight times; real work resets this
 - happen only during working hours, and count against run, token and dollar limits like any run
+- never happen for a worker without projects, and the Operating desk shows no next check-in time for it
+- close by themselves when Raticode crashes during one, or when the provider has a temporary problem. The next check-in takes their place, and check-ins come less often until one works. Neither counts toward the three failed check-ins in a row that stop check-ins until you resume them.
 
 ### Where a worker may work
 
@@ -201,7 +223,9 @@ By default each task runs in its own Git worktree on an `org/<task>` branch, mad
 
 - Employees never edit your project folder, so several can work at once and your uncommitted changes are safe.
 - The task shows its branch and worktree.
-- When the task is done or cancelled, Raticode commits anything left in the worktree, removes it, and keeps the branch for you to review and merge in [Source control](../studio/source-control.md).
+- A project with a [setup file](../studio/worktree-setup.md) you approved gets it run in each new worktree before the employee starts. The ticket shows the result.
+- The ticket's **Did** section shows the branch's full patch. **Accept** lands the branch in the branch its worktree came from after a clean-merge check, and a conflict offers asking the worker to rebase. See [Review and land](../rem/board.md#review-and-land).
+- When the task is done or cancelled, Raticode commits anything left in the worktree, removes it, and keeps the branch. A branch you didn't land stays for you to land from the ticket or merge in [Source control](../studio/source-control.md).
 - Folders that aren't Git repositories run in place.
 
 **Settings > Where employees work > Directly in the project folder** turns worktrees off. Employees then take turns in the folder, and a run starts only when it has no uncommitted changes.
@@ -212,7 +236,7 @@ By default each task runs in its own Git worktree on an `org/<task>` branch, mad
 
 **Operations** holds the work queue, task filters, activity, routines, execution destinations and recovery controls. A task has an assignee, priority, dependencies, plan, evidence and review state.
 
-- Approving a plan and accepting a result are separate decisions.
+- Approving a plan and accepting a result are separate decisions. Accepting a ticket with a branch lands it, and only you can do that; **Accept without landing** marks it done and leaves the branch.
 - An independent reviewer can accept, reject or request revision.
 - A finished dependency can wake waiting work.
 - A cancelled task stays cancelled until someone reopens it.
@@ -226,10 +250,22 @@ By default each task runs in its own Git worktree on an `org/<task>` branch, mad
 - plans still waiting for approval
 - employees and their permission modes
 - the monthly limits
+- when no ticket could start yet, why: no workers, every worker held, no project folder, no open tickets, and the most common reasons the waiting tickets give, such as **Assign an employee** or **Employee is held**. You can still start it.
 
 Approve a plan from the task itself, where its description is visible. Start never runs **Backlog** tickets directly, but once the organization runs, free workers [pull accepted ones into To do](#pull-from-backlog) unless you turn that off. Start keeps individual employee holds; **Resume all employees** is a separate action.
 
 **Pause** stops running tasks and moves them to **Blocked**, waiting for the next Start, which puts them back in To do. The interrupted run doesn't count against the task's run limit. Delegated work (swarms, paired desktops, HTTPS gateways) stays blocked for review instead.
+
+### When a run fails
+
+A run that fails because of what looks like a temporary provider problem tries again by itself. That covers rate limits, an overloaded or unreachable service, server errors such as 500 or 529, and a run that ended without an answer.
+
+- The ticket waits in **Blocked** ("Waiting to try again after a temporary provider problem"). A comment shows the error and when it tries again.
+- It tries again after 1 minute, then 5, then 15. Each try is a normal run and counts against the ticket's and the organization's limits.
+- If the third try fails too, the ticket stays **Blocked** for a look, and the comment says it already tried three times. Reopening it later gives it three fresh tries.
+- While it waits to try again, it isn't counted in **Needs you** and doesn't alert your phone.
+
+Other failures stop the ticket in **Blocked** for a look right away: a signed-out provider, a wrong setting, a run that hit its time limit. So does anything delegated (swarms, paired desktops, HTTPS gateways), because it may have had outside effects. A failed check-in is replaced by the next one instead. In [Auto mode](#auto-mode), Rem looks at these stuck tickets before you're asked.
 
 ### See what a run did
 
@@ -287,7 +323,9 @@ Monthly limits can be set for the organization, each employee and each initiativ
 
 ## Recovery and history
 
-- After Raticode restarts, an organization pauses until you start it, and the pause reason says so. With **Keep running after Raticode restarts** (in the working hours editor) it carries on by itself, and work that was mid-run is flagged for you to reopen.
+- After Raticode restarts, an organization with **Keep running after Raticode restarts** (in the working hours editor) carries on by itself. Organizations created in the Organizations tab have it on. Without it, the organization pauses until you start it, and the pause reason says so. The activity log says whether it paused or kept running, and how many tickets were interrupted.
+- Quitting Raticode while a worker runs stops the run the same way **Pause** does: the ticket waits in **Blocked** ("Waiting for the organization to start again"), the stopped run doesn't count against its run limit, and it goes back to **To do** and runs first when the organization runs again.
+- Work that was mid-run when Raticode crashed or was killed may have done things nobody recorded, so it stays **Blocked** ("Interrupted when Raticode restarted") until you or Rem reopen it. A check-in cut off this way closes instead, and the next check-in takes its place.
 - Interrupted or uncertain outside work keeps its receipt and reservation; it's never silently replayed. Use **Check stopped executions**, or **Confirm stopped after inspection** with evidence when automatic confirmation isn't possible.
 - **Configuration history** previews a restore against the current revision. Restoring configuration doesn't undo file changes, spending or task history.
 - Permission changes revoke affected claims. Changing owned workspaces pauses the organization.
@@ -305,21 +343,23 @@ Rem can't start an organization by itself. When Rem asks for any of these, the O
 - approve a plan, remove a task's approval or review step, accept a result that needs independent review, authorize a workflow, or confirm that interrupted outside work has stopped
 - turn on a routine or webhook, or make an enabled routine run more often
 - re-enable or repoint a revoked credential
-- add or resume employees, give a permission mode that can write, or give employees more tools, skills, folders or credentials; add project folders or execution destinations
+- add or resume employees, give a permission mode that can write, or give employees more tools, skills, folders or credentials; add project folders (the request names each one) or execution destinations
 - let a worker do more with tickets, or change who a worker reports to
 - raise or remove a run, token or dollar limit, raise an operating limit, make heartbeats more frequent, or widen working hours
 - allow `git push`, or let employees edit the project folder directly
 - turn on the shared repository, keep the organization running after restarts, or write organization knowledge into the Second Brain folder
+- turn on the Second Brain for employees or point it at another folder. Its tool reads and writes notes in that folder outside the workers' sandbox, so the request names the folder, and so does a request to start the organization
 - add claim-check commands, or run project checks automatically after every run
 
 Requests:
 
-- expire after a day; asking twice returns the same request, applied at most once
+- expire after a day; asking twice returns the same request, applied at most once. When Rem asks again for the same change after the ticket or organization moved on, the waiting request is updated instead of adding a second one. If the change now means something else, for example because you took away a tool it would give back, the old request closes and a new one waits, so approving what you saw (in the tab or by telling Rem in chat) never applies more than it said
+- for a ticket edit or plan approval, still apply when only other parts of the ticket changed after Rem asked, such as a comment, a status move or you approving its plan. If what the request changes, or what the ticket asks for, changed since, approving it fails and closes it; ask Rem again
 - are refused right away if they'd fail anyway, such as claiming a folder another organization owns
 
 ### Approve several requests at once
 
-Each request has its own **Approve** and **Decline**. When two or more wait, **Needs you** on the **Organization** section (and the banner in Settings) also shows **Approve all**. The sidebar shows how many requests wait in each organization.
+Each request has its own **Approve** and **Decline**. When two or more wait, **Needs you** on the **Organization** section (and the banner in Settings) also shows **Approve all**. The sidebar shows how many things need you in each organization: Rem's requests, results to review, blocked tickets and plans to approve. Blocked tickets that wait by themselves don't count: ones waiting for a Start, working hours, other tickets or their next automatic try, and in Auto mode ones Rem hasn't looked at yet.
 
 1. **Approve all N** opens the exact list it will approve, in the order it applies them. Nothing changes yet.
 2. **Approve these N** approves only those requests. One that arrives after the list opened isn't included; the list says so, and it keeps waiting. **Cancel** or **Esc** closes the list.
@@ -336,7 +376,7 @@ The order keeps one approval from breaking the next:
 Raticode reads the organization again before each request:
 
 - **A change made for an older revision** is left waiting instead of undoing newer changes. This happens when two configuration changes expect the same revision: only the first applies. Decline the other and ask Rem again.
-- **A ticket that changed after Rem asked** is left waiting the same way.
+- **A ticket that changed after Rem asked** is left waiting the same way, unless only parts the request doesn't depend on changed (a comment, a status move, its plan approved). Those still apply.
 - **Starting the organization** is left waiting if anything else in the list didn't apply. Check the organization, then approve the start by itself.
 
 Only your own click approves here. Rem, workers and agent tokens can't use Approve all, the same as with each request's **Approve**. There are two exceptions, both described below: [telling Rem to approve](#tell-rem-to-approve), and [Auto mode](#auto-mode).
@@ -362,7 +402,8 @@ With Auto mode on, what would wait for you goes to a Rem review step instead:
 
 - Rem's own requests (the list in [Use Rem](#use-rem))
 - plans and worker proposals waiting for approval
-- finished tickets waiting for your review, when no worker is their reviewer
+- finished tickets waiting for your review: when no worker is their reviewer, or their worker reviewer is held, isn't assigned to the ticket's project, or had its check-in and didn't review
+- tickets Raticode stopped in **Blocked** after a run failed, was interrupted (including by a crash or restart), ended without an answer, or was rejected by a worker reviewer. See [Stuck tickets](#stuck-tickets).
 
 Rem reads each one with the organization's mission and instructions, what it changes, and the revision it expects, then decides:
 
@@ -374,14 +415,25 @@ Rem reads each one with the organization's mission and instructions, what it cha
 | **Stopped for you** | The organization pauses. See below. |
 | **Left for you** | It waits for you, and the organization keeps working. |
 
-Something dangerous doesn't stop the organization by itself. Rem first declines it or makes it safe. Raticode checks each decision before applying it: a dangerous request can't be approved as asked, and a changed version must no longer be dangerous. When a ticket or request mentions live trading, a brokerage, real money, deploying, publishing, deletion or spending, Rem can approve it only by saying why none of that happens (for example, the ticket forbids live orders); that explanation is kept with the decision. Otherwise it declines or changes it. Dangerous means live trading, real money or a brokerage or trading API; running workers without a sandbox or with full access; adding or changing credentials; `git push`, publishing or deploying; irreversible deletion; more project folders or access; or spending beyond the budget.
+Something dangerous doesn't stop the organization by itself. Rem first declines it or makes it safe. Raticode checks each decision before applying it: a dangerous request can't be approved as asked, and a changed version must no longer be dangerous. When a ticket or request mentions live trading, a brokerage, real money, deploying, publishing, deletion or spending, Rem can approve it only by saying why none of that happens (for example, the ticket forbids live orders); that explanation is kept with the decision. Otherwise it declines or changes it. Dangerous means live trading, real money or a brokerage or trading API; running workers without a sandbox or with full access; adding or changing credentials; `git push`, publishing or deploying; irreversible deletion; more project folders or access, including a new Second Brain folder; or spending beyond the budget.
 
 The organization stops only when:
 
 - something is dangerous and Rem can't make it safe without stopping everything, or
-- it can't go on without you: a missing credential, hardware that isn't available, no internet access, or a sign-in only you can complete. Rem failing to answer three times in a row (for example, its model is signed out) counts too.
+- it can't go on without you: a missing credential, hardware that isn't available, no internet access, or a sign-in only you can complete. Rem failing to answer three times in a row (for example, its model is signed out) counts too. When Rem's model is only rate-limited, overloaded or unreachable for a while, Rem keeps trying for about an hour (seven tries) before that counts.
 
 An ordinary or merely uncertain request never stops it; Rem decides it or recommends a change. When it stops, the organization pauses with the reason and what you need to do, the request waits in **Needs you**, and the organization's page and sidebar show **Auto · stopped**. Approve or decline that request, or start the organization again, to lift the stop. If it was running, answering the request starts it again.
+
+### Stuck tickets
+
+In Auto mode, a ticket Raticode stopped in **Blocked** goes to Rem before it goes to you. Rem reads the block reason, the error and the last comments, then:
+
+- **Reopens it** into To do when its worker can likely finish it now, such as after a passing error, an interrupted run or review feedback it can act on. A comment says why. The run counts against the ticket's limits as usual.
+- **Leaves it for you** when trying again would fail the same way or needs something only you can give, such as a sign-in, a credential, a missing tool or a decision outside the charter. The comment says exactly what you need to do. Only then does the ticket count in **Needs you** and alert your phone.
+
+Rem doesn't look at tickets that you or Rem blocked or rejected, delegated work, tickets at their run limit (only you grant more runs) or check-ins. Rem reopens one ticket at most twice between good runs; after that it waits for you. Each blocked spell is looked at once.
+
+### What stays yours
 
 These stay yours, even in Auto mode. They wait for you while work goes on:
 

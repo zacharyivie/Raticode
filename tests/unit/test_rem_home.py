@@ -458,6 +458,55 @@ def test_verification_ignores_dependencies_and_records_links_without_following_t
     assert subject_hash(project) != before
 
 
+def test_verification_treats_files_deleted_during_the_scan_as_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Another worker's pytest run made and removed SQLite -shm files inside the project
+    # while a review hashed it; the [Errno 2] that followed blocked a finished task.
+    import gofer.ui.rem_home as rem_home_module
+
+    (tmp_path / "kept.txt").write_text("kept")
+    (tmp_path / "going.txt").write_text("going")
+    baseline = subject_hash(tmp_path)
+    real_walk = os.walk
+
+    def walk_with(phantom_file: str | None = None, vanished_dir: bool = False):
+        def walk(root, **kwargs):
+            if vanished_dir:
+                kwargs["onerror"](FileNotFoundError(2, "No such file or directory", "gone"))
+            for directory, folders, files in real_walk(root, **kwargs):
+                yield directory, folders, [*files, phantom_file] if phantom_file else files
+
+        return walk
+
+    # Listed by the walk, deleted before lstat: hashed as if it never existed.
+    monkeypatch.setattr(rem_home_module.os, "walk", walk_with("organizations.sqlite3-shm"))
+    assert subject_hash(tmp_path) == baseline
+    # A folder deleted between listing and reading is skipped the same way.
+    monkeypatch.setattr(rem_home_module.os, "walk", walk_with(vanished_dir=True))
+    assert subject_hash(tmp_path) == baseline
+    monkeypatch.setattr(rem_home_module.os, "walk", real_walk)
+
+    # Deleted between lstat and open: no error, and the hash still shows a change.
+    original_open = Path.open
+
+    def vanishing_open(path, *args, **kwargs):
+        if path.name == "going.txt":
+            raise FileNotFoundError(2, "No such file or directory", str(path))
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", vanishing_open)
+    assert subject_hash(tmp_path) != baseline
+
+    # Other errors, such as a folder the scan may not read, still stop the review.
+    def denied(path, *args, **kwargs):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(Path, "open", denied)
+    with pytest.raises(PermissionError):
+        subject_hash(tmp_path)
+
+
 def test_verification_ignores_compiled_workflow_caches(tmp_path: Path):
     workflow = tmp_path / ".raticode" / "daily"
     compiled = workflow / "compiled"
@@ -1597,8 +1646,19 @@ def test_all_providers_execute_and_verify_using_selected_model(
     for options in observed:
         assert options["provider"] == provider
         assert options["model"] == "selected-model" and options["effort"] == (effort or None)
-    assert observed[0]["workflow"]["remManagedTask"] == {"readOnly": False, "networkAccess": False}
-    assert observed[1]["workflow"]["remManagedTask"] == {"readOnly": True, "networkAccess": False}
+    run_ref = {"runId": run["id"]}
+    assert observed[0]["workflow"]["remManagedTask"] == {
+        "readOnly": False,
+        "networkAccess": False,
+        **run_ref,
+    }
+    assert observed[1]["workflow"]["remManagedTask"] == {
+        "readOnly": True,
+        "networkAccess": False,
+        **run_ref,
+        # Nobody watches a review, so Claude Code's shell runs in its OS sandbox.
+        **({"claudeSandbox": True} if provider == "claude_code" else {}),
+    }
     assert observed[1]["workflow"]["remResources"]["web"] is False
     if provider in {"grok", "antigravity"}:
         assert all(o["permission_mode"] == "cli-managed" for o in observed)
@@ -1609,9 +1669,7 @@ def test_all_providers_execute_and_verify_using_selected_model(
 
 
 @pytest.mark.parametrize("provider", ["codex", "claude_code"])
-def test_only_codex_reviewers_get_a_private_scratch_folder(
-    home: RemHome, tmp_path: Path, provider: str
-):
+def test_reviewers_get_a_private_scratch_folder(home: RemHome, tmp_path: Path, provider: str):
     original = home.source
     observed: list[dict[str, Any]] = []
 
@@ -1631,7 +1689,17 @@ def test_only_codex_reviewers_get_a_private_scratch_folder(
     worker, review = observed
     assert "trusted_scratch_dir" not in worker
     if provider == "claude_code":
-        assert "trusted_scratch_dir" not in review
+        # Reviews run with nobody watching, so Claude Code's shell is sandboxed
+        # and its caches go to a scratch folder kept for this run's reviews.
+        assert "claudeSandbox" not in worker["workflow"]["remManagedTask"]
+        assert review["workflow"]["remManagedTask"]["claudeSandbox"] is True
+        scratch = Path(review["trusted_scratch_dir"])
+        assert scratch.parent == home.data_dir / "rem-work" / "turn-scratch"
+        assert scratch.name.endswith("-verify")
+        assert review["permission_mode"] == "dontAsk"
+        assert str(scratch) in review["agent_instructions"]
+        assert "read-only to the shell" in review["agent_instructions"]
+        assert not scratch.exists()
         return
     scratch = Path(review["trusted_scratch_dir"])
     assert scratch.is_relative_to(home.data_dir / "rem-work" / "review-scratch")
@@ -2012,6 +2080,71 @@ def test_concurrent_project_edits_use_a_temporary_worktree(
     assert git(project, "show", f"{branch}:feature.txt") == "isolated change"
     assert not (project / "feature.txt").exists()
     assert git(project, "worktree", "list").count("\n") == 0
+
+
+def test_rem_worktree_gets_the_approved_project_setup(
+    home: RemHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import json
+    import sys
+
+    from gofer.ui import worktree_setup
+
+    project = tmp_path / "repo"
+    (project / ".raticode").mkdir(parents=True)
+    git(project, "init", "-q", "-b", "main")
+    (project / ".gitignore").write_text("deps\nsetup-ran.txt\n")
+    setup = {
+        "setup": f"\"{sys.executable}\" -c \"open('setup-ran.txt', 'w').write('ok')\"",
+        "link": ["deps"],
+    }
+    (project / ".raticode" / "worktree-setup.json").write_text(json.dumps(setup))
+    git(project, "add", "-A")
+    git(project, "-c", "user.name=T", "-c", "user.email=t@e", "commit", "-qm", "init")
+    (project / "deps").mkdir()
+    state = worktree_setup.status(home.data_dir, project)
+    worktree_setup.approve(home.data_dir, project, state["file"]["sha256"])
+    seen: dict[str, Any] = {}
+    release = threading.Event()
+    original = home.source
+
+    async def source(**kwargs):
+        if "independent read-only reviewer" not in kwargs["agent_instructions"]:
+            root = Path(kwargs["workflow"]["projectRoot"])
+            if root != project:
+                seen.update(
+                    ran=(root / "setup-ran.txt").read_text(),
+                    linked=(root / "deps").is_symlink(),
+                    told="worktree setup already ran" in kwargs["agent_instructions"],
+                )
+                (root / "feature.txt").write_text("isolated change\n")
+            while not release.is_set() and not kwargs["cancel_event"].is_set():
+                await asyncio.sleep(0.01)
+        async for event in original(**kwargs):
+            yield event
+
+    home.source = source
+    first = home.create_task({"request_id": "first", **recipe(project)})["task"]
+    second = home.create_task({"request_id": "second", **recipe(project)})["task"]
+    for key in ("GIT_AUTHOR", "GIT_COMMITTER"):
+        monkeypatch.setenv(f"{key}_NAME", "Rem")
+        monkeypatch.setenv(f"{key}_EMAIL", "rem@example.com")
+    try:
+        home.tick()
+        home.tick()
+        deadline = time.monotonic() + 10
+        while not seen and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        release.set()
+    for task in (first, second):
+        wait_run(home, task["id"], {"succeeded", "blocked"})
+    assert seen == {"ran": "ok", "linked": True, "told": True}
+    finished = wait_run(home, second["id"], {"succeeded"})
+    assert finished["worktree_setup"]["status"] == "passed"
+    branch = next(line.strip() for line in git(project, "branch").splitlines() if "rem/" in line)
+    # What the setup placed is ignored, so only the worker's change is on the branch.
+    assert git(project, "show", "--name-only", "--format=", branch) == "feature.txt"
 
 
 def test_rem_messages_carry_attachments_to_the_decision(home: RemHome, tmp_path: Path):
@@ -2928,9 +3061,17 @@ def test_clear_history_erases_context_and_journals_but_keeps_user_files(
     manual.mkdir(parents=True)
     (manual / "journal.jsonl").write_text("User's own thread")
     (tmp_path / "implementation.py").write_text("completed implementation")
+    from gofer.ui import rem_db_backups
+
+    old_copy = rem_db_backups.snapshot(home.data_dir)
+    assert b"corrupted old context" in old_copy.read_bytes()
     request = {"request_id": "clear", "conversation_id": old_conversation, "confirm": True}
     cleared = home.clear_history(request)
     assert set(cleared["removed_thread_ids"]) == set(ids)
+    # A backup copy from before the clear would bring the history back on a restore.
+    copies = rem_db_backups.snapshots(home.data_dir)
+    assert len(copies) == 1
+    assert b"corrupted old context" not in copies[0].read_bytes()
     assert cleared["conversation"]["id"] != old_conversation
     assert home.clear_history(request)["conversation"] == cleared["conversation"]
     assert home.store.conversation()["messages"] == []

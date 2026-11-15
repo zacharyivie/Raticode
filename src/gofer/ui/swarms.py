@@ -28,7 +28,7 @@ from typing import Any
 from gofer.core.prompt_envelope import AgentResources
 from gofer.core.provider_permissions import provider_permission_args
 from gofer.core.resources import ResourceLimits
-from gofer.ui import swarm_git
+from gofer.ui import swarm_git, worktree_setup
 from gofer.ui import swarm_workspaces as workspaces
 from gofer.ui.chat import stream_workflow_chat
 from gofer.ui.swarm_store import SwarmStore
@@ -424,6 +424,40 @@ class SwarmManager:
                 "payload": copy.deepcopy(payload),
             }
         )
+
+    def _setup_note(
+        self, root: str, swarm_id: str, agent_id: str, attempt_id: str, source: str
+    ) -> dict[str, Any] | None:
+        """Run the project's worktree setup in a new attempt worktree, outside the lock."""
+        with self._lock:
+            found = self._attempt(self._get(root, swarm_id)["run"], attempt_id)
+            path = (found or {}).get("workspace", {}).get("path")
+        if not path:
+            return None
+        setup = worktree_setup.prepare_quietly(
+            self.data_dir, source=source, worktree=path, surface="swarm", log=log.warning
+        )
+        with self._lock:
+            current = self._get(root, swarm_id)
+            found = self._attempt(current["run"], attempt_id)
+            if found and found.get("workspace", {}).get("setup") == "pending":
+                if setup is None:
+                    found["workspace"].pop("setup", None)
+                else:
+                    found["workspace"]["setup"] = setup
+                    self._event(
+                        current["run"],
+                        "worktree_setup",
+                        agent_id,
+                        {
+                            "attemptId": attempt_id,
+                            "status": setup["status"],
+                            "summary": setup["summary"],
+                            "projectPath": setup["projectPath"],
+                        },
+                    )
+                self._save(current)
+        return setup
 
     def _view(self, swarm: dict[str, Any]) -> dict[str, Any]:
         swarm["configurationHash"] = configuration_hash(saved_configuration(swarm))
@@ -1912,7 +1946,19 @@ class SwarmManager:
             logs = self.data_dir / "verification" / rid
             if integration and snapshot:
                 result = workspaces.integrate(
-                    workspace, snapshot, checks, logs, cancel=check_cancel
+                    workspace,
+                    snapshot,
+                    checks,
+                    logs,
+                    cancel=check_cancel,
+                    setup=lambda candidate: worktree_setup.prepare_quietly(
+                        self.data_dir,
+                        source=workspace.get("projectRoot", root),
+                        worktree=candidate,
+                        surface="swarm",
+                        cancel=check_cancel,
+                        log=log.warning,
+                    ),
                 )
             elif integration:
                 path = Path(workspace["path"])
@@ -1921,6 +1967,20 @@ class SwarmManager:
                     raise SwarmError("Integration workspace must be clean")
                 if revision != workspace["baseRevision"] and not checks:
                     raise SwarmError("Combined code changes require application-run checks")
+                # The review worktree was made under the swarm lock, so its setup waits
+                # for the first checks that run in it.
+                prepared = (
+                    worktree_setup.prepare_quietly(
+                        self.data_dir,
+                        source=workspace.get("projectRoot", root),
+                        worktree=path,
+                        surface="swarm",
+                        cancel=check_cancel,
+                        log=log.warning,
+                    )
+                    if checks and "setup" not in workspace
+                    else None
+                )
                 outcomes = workspaces.run_checks(path, checks, logs, cancel=check_cancel)
                 result = {
                     "revision": revision,
@@ -1931,6 +1991,8 @@ class SwarmManager:
                         and not workspaces.git(path, "status", "--porcelain")
                     ),
                 }
+                if prepared is not None:
+                    result["setup"] = prepared
             else:
                 assert snapshot is not None and milestone_snapshot is not None
                 submission = payload.get("result")
@@ -1955,6 +2017,10 @@ class SwarmManager:
             if check_cancel.is_set() or run["state"] not in {"running", "paused"}:
                 result.update(passed=False, error="Checks interrupted; reconcile this attempt")
             run.pop("integrationBusy", None)
+            if integration and not snapshot and result.get("setup"):
+                for prepared_workspace in self._workspaces(run):
+                    if prepared_workspace.get("path") == workspace["path"]:
+                        prepared_workspace["setup"] = result["setup"]
             if snapshot:
                 attempt = self._attempt(run, snapshot["id"])
                 assert attempt is not None
@@ -3277,6 +3343,15 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                 attempt["contextChars"] = len(json.dumps(context))
                 self._save(swarm)
                 prompt = self._instructions(swarm, agent, token)
+            if attempt.get("workspace", {}).get("setup") == "pending":
+                setup = self._setup_note(
+                    root, swarm_id, agent_id, turn_attempt_id, attempt.get("projectRoot") or root
+                )
+                if setup and setup.get("status") != "passed":
+                    context["worktreeSetup"] = (
+                        f"{setup['summary']} Prepare what your checks need yourself, and don't "
+                        "change the project's setup file to get around the approval."
+                    )
             # Prior snapshots stay in the audit log; don't resend them every turn.
             transcript = []
             transcript.append({"role": "user", "body": json.dumps(context)})

@@ -123,7 +123,7 @@ def test_discover_registered_workflows_only_in_managed_workspaces(
     assert (raticode_workflow / "workflow.rattish").read_text(encoding="utf-8") == source
 
 
-def test_discovery_hides_previous_project_file_registrations(
+def test_discovery_keeps_previous_project_file_registrations(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "project"
@@ -169,13 +169,16 @@ def test_discovery_hides_previous_project_file_registrations(
 
     discovered = discover_registered_workflows(project, registry_dir=registry)
 
+    # A workflow.rattish outside .raticode is a project workflow now, and an earlier
+    # registration of it keeps its ID.
     assert [(workflow.workflow_id, workflow.workflow_root) for workflow in discovered] == [
         ("kept", workflow_root),
+        ("stray", stray_root),
     ]
     assert [
         (workflow.workflow_id, workflow.workflow_root)
         for workflow in list_registered_workflows(registry_dir=registry)
-    ] == [("other", other_root), ("kept", workflow_root)]
+    ] == [("other", other_root), ("kept", workflow_root), ("stray", stray_root)]
     persisted = json.loads(registry_path.read_text(encoding="utf-8"))
     assert [item["id"] for item in persisted["workflows"]] == ["other", "kept", "stray"]
     assert (stray_root / "workflow.rattish").read_text(encoding="utf-8") == source
@@ -209,8 +212,8 @@ def test_workspace_operations_reject_linked_workspace_roots(tmp_path: Path, acti
     "relative_path",
     [
         "first.rattish",
-        "workflow.rattish",
-        "automations/workflow.rattish",
+        "automations/daily.rattish",
+        "node_modules/package/workflow.rattish",
         ".raticode/first.rattish",
         ".raticode/workflow.rattish",
         ".raticode/custom/first.rattish",

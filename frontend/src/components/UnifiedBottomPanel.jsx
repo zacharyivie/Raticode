@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { Activity, AlertCircle, AlertTriangle, ChevronDown, History, Terminal as TerminalIcon } from "lucide-react";
+import { Activity, AlertCircle, AlertTriangle, ChevronDown, FlaskConical, History, Terminal as TerminalIcon } from "lucide-react";
 
 const RunTimelinePanel = lazy(() => import("./DagCanvas.jsx").then(module => ({ default: module.RunTimelinePanel })));
 import { DEFAULT_APP_SETTINGS, formatKeybinding, matchesCommand, settingBinding } from "../lib/settings.js";
@@ -8,6 +8,7 @@ import RunSummary from "./RunSummary.jsx";
 import { workflowRunSummary } from "../lib/workflowRuns.js";
 
 const TerminalWorkspace = lazy(() => import("./TerminalWorkspace.jsx"));
+const WorkflowTestsPanel = lazy(() => import("./WorkflowTestsPanel.jsx"));
 import { bottomPanelTabForShortcut, clamp } from "../lib/terminalWorkspace.js";
 import { trackPointerDrag } from "../lib/paneResize.js";
 import { bottomPanelStartState, openTerminalTab, terminalInEditor } from "../lib/workspaceLayout.js";
@@ -25,6 +26,7 @@ export default function UnifiedBottomPanel({
   theme = "light",
   timelineProps,
   runsProps = {},
+  testsProps = {},
 }) {
   const [startState] = useState(() => bottomPanelStartState(settings.layout));
   const hasExplicitPanelSelectionRef = useRef(startState.explicit);
@@ -34,6 +36,7 @@ export default function UnifiedBottomPanel({
   const [newTerminalRequest, setNewTerminalRequest] = useState(0);
   const [terminalMounted, setTerminalMounted] = useState(startState.tab === "terminal");
   const [runsMounted, setRunsMounted] = useState(startState.tab === "runs");
+  const [testsMounted, setTestsMounted] = useState(startState.tab === "tests");
   // Settings > Layout can move terminals into an editor tab.
   const editorTerminal = terminalInEditor(settings);
   const [timelineMounted, setTimelineMounted] = useState(false);
@@ -54,6 +57,7 @@ export default function UnifiedBottomPanel({
     setActiveTab(tab);
     setCollapsed(false);
     if (tab === "runs") setRunsMounted(true);
+    if (tab === "tests") setTestsMounted(true);
     if (tab === "terminal") setTerminalMounted(true);
   }, [editorTerminal]);
 
@@ -244,6 +248,12 @@ export default function UnifiedBottomPanel({
           {runSummary.unread.length ? <span className="text-brand">· {runSummary.unread.length} unread</span> : null}
           {runSummary.disconnected.length ? <span aria-label="Some run status is out of date" title="Some run status is out of date">!</span> : null}
         </PanelTab>
+        <PanelTab
+          active={activeTab === "tests"}
+          icon={FlaskConical}
+          label="Tests"
+          onClick={() => handleTabClick("tests")}
+        />
         {editorTerminal ? null : <PanelTab
           active={activeTab === "terminal"}
           icon={TerminalIcon}
@@ -272,6 +282,13 @@ export default function UnifiedBottomPanel({
         {runsMounted ? <div className={activeTab === "runs" ? "h-full" : "hidden"} role="tabpanel" aria-label="Runs">
           <RunSummary {...runsProps} embedded onClose={() => setCollapsed(true)} />
         </div> : null}
+        {testsMounted ? (
+          <div className={activeTab === "tests" ? "h-full" : "hidden"} role="tabpanel" aria-label="Tests">
+            <Suspense fallback={<p role="status" className="p-3 text-xs text-muted">Loading tests...</p>}>
+              <WorkflowTestsPanel {...testsProps} active={!collapsed && activeTab === "tests"} />
+            </Suspense>
+          </div>
+        ) : null}
         {terminalMounted ? (
           <div className={activeTab === "terminal" ? "h-full" : "hidden"} role="tabpanel">
             <Suspense fallback={<p role="status" className="p-3 text-xs text-muted">Loading terminal...</p>}><TerminalWorkspace

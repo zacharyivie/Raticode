@@ -1,15 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { coverCutouts, deviceBounds, sameBounds } from "../lib/geckoView.js";
+import { useBrowserHost } from "../lib/browserHost.js";
 
 const POSITION_CHECK_MS = 200;
 const BUTTON = "h-8 rounded-md border border-line bg-white px-3 text-xs font-semibold text-ink transition hover:bg-slate-50";
 
 // Menus and dialogs that are open and overlap the slot. They may be small
 // enough to sit between the points checked for covering.
-function openOverlays(rect) {
-  if (typeof document.querySelectorAll !== "function") return [];
-  return [...document.querySelectorAll("[role=menu], [role=dialog], [role=alertdialog], [role=listbox], [role=tooltip]")].filter((element) => {
-    if (element.closest?.("[aria-hidden=true], [inert]") || window.getComputedStyle?.(element)?.visibility === "hidden") return false;
+function openOverlays(rect, doc = document, view = window) {
+  if (typeof doc?.querySelectorAll !== "function") return [];
+  return [...doc.querySelectorAll("[role=menu], [role=dialog], [role=alertdialog], [role=listbox], [role=tooltip]")].filter((element) => {
+    if (element.closest?.("[aria-hidden=true], [inert]") || view.getComputedStyle?.(element)?.visibility === "hidden") return false;
     const box = element.getBoundingClientRect();
     return box.width > 0 && box.height > 0 && box.right > rect.left && box.left < rect.right && box.bottom > rect.top && box.top < rect.bottom;
   });
@@ -51,6 +52,10 @@ function rememberHandedOver(tabId, url) {
 // tabs, and onPendingOpened reports which ones Firefox has.
 export default function GeckoBrowser({ active, tabId = "", initialUrl = "", pendingUrls = [], newTabRequests = 0, onPendingOpened, onStateChange }) {
   const bridge = window.goferBrowser;
+  // Firefox's window follows the Browser into its own window.
+  const host = useBrowserHost();
+  const hostName = host.poppedOut ? "popout" : "main";
+  const hostView = host.window || window;
   const slotRef = useRef(null);
   const openedRef = useRef(false);
   const onStateChangeRef = useRef(onStateChange);
@@ -155,46 +160,48 @@ export default function GeckoBrowser({ active, tabId = "", initialUrl = "", pend
   // Keep Firefox's window on the slot, and out of the way of anything drawn over it.
   useEffect(() => {
     if (!active || !bridge?.gecko) return undefined;
+    const view = hostView;
+    const doc = view.document;
     let last = null;
     const report = () => {
       const slot = slotRef.current;
       if (!slot) return;
       const rect = slot.getBoundingClientRect();
-      const ratio = window.devicePixelRatio || 1;
-      const shown = rect.width > 1 && rect.height > 1 && !document.hidden;
+      const ratio = view.devicePixelRatio || 1;
+      const shown = rect.width > 1 && rect.height > 1 && !doc.hidden;
       const cutouts = shown ? coverCutouts(slot, rect, {
-        elementAt: (x, y) => document.elementFromPoint(x, y),
-        positionOf: (element) => window.getComputedStyle?.(element)?.position || "",
+        elementAt: (x, y) => doc.elementFromPoint(x, y),
+        positionOf: (element) => view.getComputedStyle?.(element)?.position || "",
         rectOf: (element) => element.getBoundingClientRect(),
-        extra: openOverlays(rect),
+        extra: openOverlays(rect, doc, view),
         ratio,
       }) : [];
       const visible = shown && cutouts !== null;
-      const next = { ...deviceBounds(rect, ratio), visible, cutouts: visible ? cutouts : [] };
+      const next = { ...deviceBounds(rect, ratio), visible, cutouts: visible ? cutouts : [], host: hostName };
       if (sameBounds(last, next)) return;
       last = next;
       void bridge.gecko("place", next).catch(() => {});
     };
     report();
     const timer = window.setInterval(report, POSITION_CHECK_MS);
-    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(report) : null;
+    const observer = typeof view.ResizeObserver === "function" ? new view.ResizeObserver(report) : null;
     if (slotRef.current) observer?.observe(slotRef.current);
-    window.addEventListener("resize", report);
+    view.addEventListener("resize", report);
     // Clicking Raticode's own interface takes the keyboard back from Firefox.
     // The click passed on from Firefox's page below isn't one of those.
     const takeFocusBack = (event) => {
       if (!event.isTrusted) return;
       void bridge.gecko("focus-app").catch(() => {});
     };
-    window.addEventListener("pointerdown", takeFocusBack, true);
+    view.addEventListener("pointerdown", takeFocusBack, true);
     return () => {
       window.clearInterval(timer);
       observer?.disconnect();
-      window.removeEventListener("resize", report);
-      window.removeEventListener("pointerdown", takeFocusBack, true);
-      void bridge.gecko("place", { visible: false }).catch(() => {});
+      view.removeEventListener("resize", report);
+      view.removeEventListener("pointerdown", takeFocusBack, true);
+      void bridge.gecko("place", { visible: false, host: hostName }).catch(() => {});
     };
-  }, [active, bridge]);
+  }, [active, bridge, hostName, hostView]);
 
   async function restartApp() {
     try {

@@ -443,6 +443,66 @@ def test_webhook_signatures_retries_conflicts_and_revocation(
         receive(manager, org["id"], routine["id"], headers(body), body)
 
 
+def test_webhook_secret_from_the_headless_secrets_folder(
+    setup: Any, monkeypatch: Any, secrets_dir: Path
+) -> None:
+    """With no keychain, a webhook verifies with org-secret-ACCOUNT from the folder."""
+    manager, org, call = setup
+    from gofer.devices.storage import StorageError
+    from gofer.ui import organization_webhooks
+
+    class NoKeychain:
+        def __init__(self, **kwargs: Any) -> None:
+            raise StorageError("protected_store_unavailable")
+
+    monkeypatch.setattr(organization_webhooks, "OSSecretStore", NoKeychain)
+    signing = secrets_dir / "org-secret-ci-hook"
+    signing.write_text("folder-signing-key\n", encoding="utf-8")
+    signing.chmod(0o600)
+    call("secret_reference", id="hook", account="ci-hook")
+    routine = call(
+        "routine_save",
+        routine={"name": "Hook", "task": {"title": "From CI", "assignee": "worker"}},
+    )
+    call(
+        "webhook_save", routineId=routine["id"], expectedRevision=1, secretRef="hook", enabled=True
+    )
+    body = b"{}"
+    timestamp = str(int(time.time()))
+    signature = hmac.new(
+        b"folder-signing-key", timestamp.encode() + b".d-1." + body, hashlib.sha256
+    ).hexdigest()
+    headers = {
+        "X-Raticode-Timestamp": timestamp,
+        "X-Raticode-Delivery": "d-1",
+        "X-Raticode-Signature": "sha256=" + signature,
+    }
+    receive(manager, org["id"], routine["id"], headers, body)
+    assert call("read")["runtime"]["tasks"][0]["title"] == "From CI"
+
+    # Without the file, the keychain's own error stands.
+    signing.unlink()
+    with pytest.raises(ValueError, match="protected_store_unavailable"):
+        receive(manager, org["id"], routine["id"], {**headers, "X-Raticode-Delivery": "d-2"}, body)
+
+
+def test_secret_store_without_a_keychain_names_the_secrets_folder(
+    setup: Any, monkeypatch: Any
+) -> None:
+    manager, org, call = setup
+    from gofer.devices import storage
+
+    class NoKeychain:
+        def __init__(self, **kwargs: Any) -> None:
+            raise storage.StorageError("protected_store_unavailable")
+
+    monkeypatch.setattr(storage, "OSSecretStore", NoKeychain)
+    with pytest.raises(ValueError, match="--secrets-dir") as error:
+        call("secret_store", id="gateway", value="private-test-credential")
+    assert "private-test-credential" not in str(error.value)
+    assert "private-test-credential" not in json.dumps(call("read"))
+
+
 @pytest.mark.parametrize("root", ["TEAM.md", "AGENTS.md"])
 def test_standalone_packages_import_paused_template(root: str) -> None:
     files = {

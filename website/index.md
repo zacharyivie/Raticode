@@ -1,9 +1,9 @@
 ---
 layout: page
 pageClass: landing
-title: Raticode — Build the maze. Let the agents run it.
+title: Raticode — Your agents keep working while you sleep.
 titleTemplate: false
-description: Turn the coding work you keep re-prompting into local agentic workflows. Design them with Rem, see every step as a graph, and run them on your machine or with the CLI.
+description: "Your agents keep working while you sleep. Self-work, Organizations and scheduled workflows run on your own computer when you're away. Open source, no account needed."
 # The landing page is always dark. Tell browsers and dark-mode extensions not to recolor it,
 # which turned the headline gradient and the preview graph unreadable.
 head:

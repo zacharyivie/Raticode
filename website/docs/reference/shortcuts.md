@@ -28,6 +28,8 @@ These are the default bindings. **Settings > Keybindings** shows your current as
 | New terminal | Ctrl+T |
 | Close terminal | Ctrl+W |
 | Dictate a message | Mod+Alt+V (press again to finish) |
+| Dictate to Rem from any app, once turned on in **Settings > Devices** (from 0.5.5) | Ctrl+Alt+Space, in every app ([details](../rem/attachments.md#dictate-from-any-app)) |
+| Ask Rem about your screen, once **Show Rem your screen** and **Dictate to Rem from any app** are on in **Settings > Devices** (from 0.5.5) | Ctrl+Alt+Shift+Space, in every app ([details](../rem/attachments.md#show-rem-your-screen)) |
 
 Run starts executable work. Check which workflow is active before using its shortcut. Shortcuts yield to focused controls when their input handling takes precedence.
 

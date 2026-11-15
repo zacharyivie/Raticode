@@ -17,6 +17,7 @@ import RaticodeMark from "./RaticodeMark.jsx";
 
 const THEME_STORAGE_KEY = "gofer-ui-theme";
 const ISSUE_URL = `${packageMetadata.bugs.url}/new`;
+const SUPPORT_EMAIL = packageMetadata.bugs.email;
 
 function currentLocation() {
   return typeof window !== "undefined" && window.location?.href
@@ -221,7 +222,8 @@ export function AppCrashPage({ crash }) {
             Something snapped.
           </h1>
           <p className="mx-auto mb-4 max-w-[48ch] text-[15px] leading-6 text-muted">
-            Raticode hit an unexpected error and could not keep the studio running. Reloading usually clears it. If it happens again, copy the details and open an issue.
+            Raticode hit an unexpected error and could not keep the studio running. Reloading usually clears it. If it happens again, copy the details and open an issue, or email{" "}
+            <a className="font-semibold text-ink underline" href={`mailto:${SUPPORT_EMAIL}`} rel="noreferrer" target="_blank">{SUPPORT_EMAIL}</a>.
           </p>
 
           <div className="mx-auto mb-6 inline-flex max-w-full items-center gap-2 overflow-x-auto whitespace-nowrap rounded-md border border-line bg-slate-50 px-3 py-1.5 font-mono text-[11px] text-muted">

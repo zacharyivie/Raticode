@@ -18,6 +18,9 @@ from typing import Any
 
 from gofer.core.provider_capabilities import PROVIDER_BINARIES, model_block_applies
 from gofer.core.provider_preferences import provider_preference, voice_tidy_preference
+from gofer.utils.logging import get_logger
+
+log = get_logger(__name__)
 
 # Fast models by provider, best first. Each entry is matched against the
 # provider's model list. Claude Code's fallback list has only aliases, so its
@@ -255,10 +258,13 @@ def prompt(heard: str, context: str, before: str = "") -> str:
     if context:
         parts.append(f"Context, for spelling only:\n<context>\n{context}\n</context>")
     if before:
+        # Telling a fast model to leave the first letter small when the message carries on a
+        # sentence made it leave whole messages untidied, even after a full stop. The caller
+        # joins the message to the written text, so only plain tidying is asked for here.
         parts.append(
-            "The message continues text that is already written and tidied. Don't repeat or "
-            "change it; tidy only the message, so it reads on from it (for example, no capital "
-            "letter when it carries on a sentence):\n"
+            "The message comes after text that is already written and tidied. Don't repeat or "
+            "change that text; it is there so names and the topic carry on. Tidy the message "
+            "fully, with capitals and punctuation, as you would on its own:\n"
             f"<written>\n{before}\n</written>"
         )
     parts.append(f"Message to tidy:\n<message>\n{heard}\n</message>")
@@ -286,11 +292,9 @@ def chat_context(rem: Any) -> str:
         names = [n for n in dict.fromkeys(n.strip() for n in names) if n]
         if names:
             lines.append("Names: " + "; ".join(names))
-        messages = store.conversation().get("messages") or []
+        # The end of the chat only, read newest first; a long chat costs nothing more.
         recent = [
-            m
-            for m in messages
-            if m.get("role") in {"user", "rem"} and isinstance(m.get("body"), str)
+            m for m in store.tail(12, roles=("user", "rem")) if isinstance(m.get("body"), str)
         ][-6:]
         for message in recent:
             body = " ".join(message["body"].split())[:300]
@@ -325,13 +329,15 @@ def tidy(
     started = clock()
 
     def plain(reason: str) -> dict[str, Any]:
-        return {
+        result = {
             "text": heard,
             "tidied": False,
             "reason": reason,
             "model": chosen.get("label") or "",
             "ms": int((clock() - started) * 1000),
         }
+        _log_outcome(result, heard, before)
+        return result
 
     if not heard:
         return plain("Nothing was heard.")
@@ -366,13 +372,41 @@ def tidy(
     text, problem = check(heard, answer)
     if text is None:
         return plain(problem)
-    return {
+    result = {
         "text": text,
         "tidied": True,
         "reason": "",
         "model": chosen.get("label") or "",
         "ms": int((clock() - started) * 1000),
     }
+    _log_outcome(result, heard, before)
+    return result
+
+
+def _log_outcome(result: dict[str, Any], heard: str, before: str) -> None:
+    """One line per tidy call for diagnosing dictation quality, never with any words."""
+    words = len(_WORD.findall(heard))
+    where = ", continuing the message" if before else ""
+    if result["tidied"]:
+        log.info(
+            "Voice tidy: tidied %d words with %s in %d ms%s",
+            words,
+            result["model"] or "the chosen model",
+            result["ms"],
+            where,
+        )
+        return
+    # Provider error text can quote what it was sent, so only the kind of failure is logged.
+    reason = str(result["reason"])
+    if reason.startswith("Tidying failed:"):
+        reason = "Tidying failed with a provider error."
+    log.info(
+        "Voice tidy: kept %d words as heard after %d ms%s (%s)",
+        words,
+        result["ms"],
+        where,
+        reason,
+    )
 
 
 def _failure(exc: BaseException, seconds: float) -> str:

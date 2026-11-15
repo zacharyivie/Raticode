@@ -121,6 +121,15 @@ class ThreadSectionsTest {
         assertTrue("Unread again until the desktop says otherwise", ThreadActivity.unread(state.getJSONArray("threads").getJSONObject(0), null))
     }
 
+    @Test fun deletePermanentlyIsAManageActionThatStatesTheGitLimit() {
+        assertTrue("delete_permanently" in ThreadSelection.MANAGE_ACTIONS)
+        val message = ThreadSelection.permanentDeleteMessage("Plans")
+        assertTrue(message.startsWith("Delete \"Plans\" permanently?"))
+        assertTrue(message.contains("can't remove copies already in Git commits"))
+        assertTrue(ThreadSelection.permanentDeleteMessage("").contains("\"Untitled\""))
+        assertFalse("The selection bar keeps plain Delete only", ThreadSelection.actions(emptyList(), true).any { it.action == "delete_permanently" })
+    }
+
     @Test fun selectionTogglesThreadsAndHeadersSelectWholeSections() {
         var selected = ThreadSelection.toggle(emptySet(), "a")
         selected = ThreadSelection.toggle(selected, "b")

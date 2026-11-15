@@ -153,7 +153,56 @@ def global_health_diagnostics(data_dir: Path) -> list[HealthDiagnostic]:
         _workflow_assistant_cli_diagnostic(data_dir),
         _organizations_preview_diagnostic(),
     ]
+    diagnostics.extend(secret_storage_diagnostics())
     diagnostics.extend(_configured_provider_diagnostics(data_dir))
+    return diagnostics
+
+
+def secret_storage_diagnostics(keychain: bool | None = None) -> list[HealthDiagnostic]:
+    """Where secret-backed features read their secrets, and which can't work here.
+
+    Checks only whether the keychain can be reached, never reads or unlocks it, and
+    reads secrets folder files only to check them.
+    """
+    from gofer.core.secrets_folder import configured_secrets_dir, secret_features
+
+    folder = configured_secrets_dir()
+    features = secret_features(keychain)
+    diagnostics: list[HealthDiagnostic] = []
+    if folder is not None:
+        diagnostics.append(
+            HealthDiagnostic(
+                id="secrets.folder",
+                severity="ok",
+                subject=str(folder),
+                message=f"Secrets folder {folder} is read when the keychain can't help.",
+                detail={"path": str(folder)},
+            )
+        )
+    if all(feature.source == "keychain" for feature in features):
+        diagnostics.append(
+            HealthDiagnostic(
+                id="secrets.keychain",
+                severity="ok",
+                subject="System keychain",
+                message="The system keychain is available for saved secrets.",
+            )
+        )
+        return diagnostics
+    for feature in features:
+        if feature.available:
+            message = f"{feature.label}: from the {feature.source}. {feature.detail}"
+        else:
+            message = f"{feature.label} unavailable. {feature.detail}"
+        diagnostics.append(
+            HealthDiagnostic(
+                id=f"secrets.{feature.id}",
+                severity="ok" if feature.available else "warning",
+                subject=feature.label,
+                message=message,
+                detail=feature.to_dict(),
+            )
+        )
     return diagnostics
 
 

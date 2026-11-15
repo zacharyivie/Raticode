@@ -212,7 +212,7 @@ function ThreadGroup({ label, count, icon = null, description, open, onToggle, o
   </section>;
 }
 
-function ThreadActions({ thread, unread, onPin, onRename, onDelete, onMarkRead }) {
+function ThreadActions({ thread, unread, onPin, onRename, onDelete, onDeletePermanently, onMarkRead }) {
   const [open, setOpen] = useState(false);
   const root = useRef(null);
   const trigger = useRef(null);
@@ -237,11 +237,12 @@ function ThreadActions({ thread, unread, onPin, onRename, onDelete, onMarkRead }
       {onMarkRead ? item(unread ? "Mark as read" : "Mark as unread", () => onMarkRead(thread.id, unread)) : null}
       {item(thread.pinned ? "Unpin thread" : "Pin thread", () => onPin?.(thread.id, !thread.pinned))}
       {item("Delete thread", () => onDelete(thread.id), "text-red-600 hover:bg-red-50")}
+      {onDeletePermanently ? item("Delete permanently", () => onDeletePermanently(thread.id), "text-red-700 font-semibold hover:bg-red-50") : null}
     </div> : null}
   </div>;
 }
 
-export function ThreadList({ launchedThreadId, onLaunchAnimationEnd, activeThreadId, activityByThread = {}, onArchive, onPin, onRename, onDelete, onOpen, onSelect, onMenu, onMarkRead, selectedIds = emptyThreadSelection.ids, formatDate = defaultFormatDate, archived = false, threads, totalCount = threads.length, onLoadOlder, pageSize = 15, loadThread = entry => entry, sort = true, emptyText = "No thread history yet." }) {
+export function ThreadList({ launchedThreadId, onLaunchAnimationEnd, activeThreadId, activityByThread = {}, onArchive, onPin, onRename, onDelete, onDeletePermanently, onOpen, onSelect, onMenu, onMarkRead, selectedIds = emptyThreadSelection.ids, formatDate = defaultFormatDate, archived = false, threads, totalCount = threads.length, onLoadOlder, pageSize = 15, loadThread = entry => entry, sort = true, emptyText = "No thread history yet." }) {
   const [visibleCount, setVisibleCount] = useState(pageSize);
   const sortedThreads = sort ? [...threads].sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""))) : threads;
   if (threads.length) {
@@ -304,7 +305,7 @@ export function ThreadList({ launchedThreadId, onLaunchAnimationEnd, activeThrea
                 onClick={() => onArchive?.(thread.id)}>
                 <Archive aria-hidden="true" size={15} />
               </button>}
-              <ThreadActions thread={thread} unread={unread} onPin={onPin} onRename={onRename} onDelete={onDelete} onMarkRead={onMarkRead} />
+              <ThreadActions thread={thread} unread={unread} onPin={onPin} onRename={onRename} onDelete={onDelete} onDeletePermanently={onDeletePermanently} onMarkRead={onMarkRead} />
             </div>;
           })}
           {totalCount > visibleCount ? (

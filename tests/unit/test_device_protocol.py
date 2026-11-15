@@ -509,7 +509,7 @@ def test_collection_exact_limit_is_accepted(collection) -> None:
 def test_canonical_mobile_contract_manifest() -> None:
     manifest = (CONTRACT / "SHA256SUMS").read_bytes()
     assert hashlib.sha256(manifest).hexdigest() == (
-        "6ce757361c6139c7d00fbac7ace18f59bdce36d7074236bf6a0ff8702b26746a"
+        "0e52f977809ad27e14cf23beb23029a34d6fcd8431c2d214cb390b7801fb8456"
     )
     for line in manifest.decode().splitlines():
         digest, relative = line.split("  ", 1)
@@ -564,6 +564,125 @@ def test_canonical_mobile_worker_grant_is_forbidden() -> None:
         "trust_revision": 0,
     }
     assert not Draft202012Validator(schema).is_valid(record)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        # A run names its workflow and carries inputs as named values, nothing else.
+        ("inputs", ["staging"]),
+        ("inputs", "target=staging"),
+        ("inputs", {f"input-{i}": i for i in range(65)}),
+        ("command", "sh"),
+        ("path", "/etc/passwd"),
+        ("workflow_id", ""),
+    ],
+)
+def test_workflow_run_params_stay_closed(field: str, value: object) -> None:
+    schema = json.loads((CONTRACT / "event.schema.json").read_text())
+    record = strict_json(
+        (CONTRACT / "fixtures/desktop.action.workflows-run-inputs.json").read_bytes()
+    )
+    validator = Draft202012Validator(schema)
+    assert validator.is_valid(record)
+    record["payload"]["params"][field] = value
+    assert not validator.is_valid(record)
+
+
+@pytest.mark.parametrize(
+    "fixture,field,value",
+    [
+        # Turning a trigger on or off names the workflow and trigger, nothing else.
+        ("desktop.action.workflows-trigger", "enabled", "yes"),
+        ("desktop.action.workflows-trigger", "confirmed", "true"),
+        ("desktop.action.workflows-trigger", "trigger_id", ""),
+        ("desktop.action.workflows-trigger", "config", {"expression": "* * * * *"}),
+        ("desktop.action.workflows-trigger", "inputs", {"target": "prod"}),
+        ("desktop.action.workflows-trigger", "path", "/etc/passwd"),
+        # Pausing all triggers carries a yes/no and the phone's confirmation only.
+        ("desktop.action.workflows-triggers-pause", "paused", 1),
+        ("desktop.action.workflows-triggers-pause", "confirmed", None),
+        ("desktop.action.workflows-triggers-pause", "trigger_id", "trg_0123456789abcdef"),
+    ],
+)
+def test_workflow_trigger_params_stay_closed(fixture: str, field: str, value: object) -> None:
+    schema = json.loads((CONTRACT / "event.schema.json").read_text())
+    record = strict_json((CONTRACT / f"fixtures/{fixture}.json").read_bytes())
+    validator = Draft202012Validator(schema)
+    assert validator.is_valid(record)
+    record["payload"]["params"][field] = value
+    assert not validator.is_valid(record)
+
+
+@pytest.mark.parametrize(
+    "fixture,field",
+    [
+        ("desktop.action.workflows-trigger", "workflow_id"),
+        ("desktop.action.workflows-trigger", "enabled"),
+        ("desktop.action.workflows-triggers-pause", "paused"),
+    ],
+)
+def test_workflow_trigger_params_need_their_fields(fixture: str, field: str) -> None:
+    schema = json.loads((CONTRACT / "event.schema.json").read_text())
+    record = strict_json((CONTRACT / f"fixtures/{fixture}.json").read_bytes())
+    del record["payload"]["params"][field]
+    assert not Draft202012Validator(schema).is_valid(record)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        # Run again names a run and nothing else: the desktop keeps the inputs.
+        ("inputs", {"token": "x"}),
+        ("command", "sh"),
+        ("path", "/etc/passwd"),
+        ("run_id", ""),
+        ("run_id", "r" * 129),
+        ("workflow_id", ""),
+    ],
+)
+def test_workflow_rerun_params_stay_closed(field: str, value: object) -> None:
+    schema = json.loads((CONTRACT / "event.schema.json").read_text())
+    record = strict_json((CONTRACT / "fixtures/desktop.action.workflows-rerun.json").read_bytes())
+    validator = Draft202012Validator(schema)
+    assert validator.is_valid(record)
+    record["payload"]["params"][field] = value
+    assert not validator.is_valid(record)
+    del record["payload"]["params"][field]
+    if field in {"run_id", "workflow_id"}:
+        assert not validator.is_valid(record)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        # Alert reads name switches from a fixed list and a bounded opaque position.
+        ("include", ["workflow", "workflow"]),
+        ("include", ["shell"]),
+        ("include", []),
+        ("include", "workflow"),
+        ("mark", "x" * 257),
+        ("mark", ""),
+    ],
+)
+def test_rem_notices_params_name_known_alerts(field: str, value: object) -> None:
+    schema = json.loads((CONTRACT / "event.schema.json").read_text())
+    record = strict_json(
+        (CONTRACT / "fixtures/desktop.read.rem-notices-workflow.json").read_bytes()
+    )
+    validator = Draft202012Validator(schema)
+    assert validator.is_valid(record)
+    record["payload"]["params"][field] = value
+    assert not validator.is_valid(record)
+
+
+def test_rem_notices_takes_every_alert_switch() -> None:
+    schema = json.loads((CONTRACT / "event.schema.json").read_text())
+    record = strict_json(
+        (CONTRACT / "fixtures/desktop.read.rem-notices-workflow.json").read_bytes()
+    )
+    record["payload"]["params"]["include"] = ["needs_you", "finished", "proposals", "workflow"]
+    assert Draft202012Validator(schema).is_valid(record)
 
 
 @pytest.mark.parametrize(

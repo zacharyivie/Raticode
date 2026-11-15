@@ -185,12 +185,56 @@ export function needsYou(model, now = Date.now()) {
   // Reviews come before flagged work: they are what moves the plan forward.
   const tickets = Object.values(model.tickets);
   for (const ticket of tickets) if (ticket.column === "review") items.push({ type: "review", ref: `ticket:${ticket.id}` });
-  for (const ticket of tickets) if (ticket.column !== "review" && ticket.flag && ticket.column !== "done") items.push({ type: "flag", ref: `ticket:${ticket.id}` });
+  // Blocked work that waits by itself (a Start, working hours, its next automatic try) or
+  // that Rem looks at first in Auto mode isn't the user's yet.
+  const waitsElsewhere = ticket => ticket.status === "blocked" && ticket.waitingOn && ticket.waitingOn !== "you";
+  for (const ticket of tickets) if (ticket.column !== "review" && ticket.flag && ticket.column !== "done" && !waitsElsewhere(ticket)) items.push({ type: "flag", ref: `ticket:${ticket.id}` });
   // Check-ins that failed three times in a row stop until you resume them.
   for (const [workerId, beat] of Object.entries(model.organization?.diagnostics?.heartbeats || {})) {
     if (beat.stalled && model.workers[workerId]) items.push({ type: "heartbeat", worker: workerId, stall: beat.stalled });
   }
   return items;
+}
+
+// Workers that aren't held but have no projects to work on by themselves, with the folders
+// they could be given: the organization's, within their workspace access. Without projects
+// a worker never checks in, pulls Backlog or reviews on its own.
+export function unassignedWorkers(config, runtime) {
+  const roots = config.projectRoots || [];
+  return (config.employees || []).flatMap(worker => {
+    if (worker.paused) return [];
+    const saved = runtime.selfWorkProjects?.[worker.id] || {};
+    const revision = Number(saved.revision || 0);
+    if (revision > 0 && ((saved.projects || []).length || !saved.follows)) return [];
+    const projects = roots.filter(root => worker.workspacePaths == null || worker.workspacePaths.includes(root));
+    return projects.length ? [{ id: worker.id, name: worker.name, projects, revision }] : [];
+  });
+}
+
+// The few steps an organization needs before work runs by itself, in order. Each says
+// whether it's done and, when not, what opens the place to do it. Empty once it has run
+// and every step before Start is done.
+export function setupSteps(model) {
+  const { config, runtime } = model;
+  const workers = config.employees || [];
+  const tasks = runtime.tasks || [];
+  const ran = runtime.state === "running" || Object.keys(runtime.attempts || {}).length > 0;
+  const held = workers.length > 0 && workers.every(worker => worker.paused);
+  const unassigned = unassignedWorkers(config, runtime);
+  const roots = (config.projectRoots || []).length > 0;
+  const names = unassigned.map(worker => worker.name);
+  const steps = [
+    held
+      ? { id: "worker", done: false, label: "Release a worker's hold", hint: "Every worker is held, so nobody would pick up work.", open: `worker:${workers[0].id}` }
+      : { id: "worker", done: workers.length > 0, label: "Add a worker", hint: "A worker is an AI agent with a role, a provider and instructions.", open: "new:worker" },
+    { id: "folder", done: roots, label: "Give it a project folder", hint: "Workers only change folders the organization owns.", tab: "projects" },
+    { id: "projects", done: workers.length > 0 && roots && !unassigned.length, label: "Let workers work on their own",
+      hint: names.length ? `${names.length > 2 ? `${names.slice(0, 2).join(", ")} and ${names.length - 2} more` : names.join(" and ")} ${names.length === 1 ? "has" : "have"} no projects, so they won't check in, pull Backlog or review work on their own.` : "Gives each worker the organization's folders to work in by itself.",
+      assign: unassigned },
+    { id: "ticket", done: tasks.length > 0, label: "Add a first ticket", hint: "Put it in To do with a worker assigned, and it runs when you start.", open: "new:ticket" },
+    { id: "start", done: ran, label: "Start the organization", hint: "It stays paused until you start it. You review what will run first.", start: true },
+  ];
+  return ran && steps.slice(0, -1).every(step => step.done) ? [] : steps;
 }
 
 // Entity lookup for chips, the palette and the side sheet. References read "type:id".

@@ -38,13 +38,15 @@ export function usePopupMenu(menuRef, onClose, { includeParent = false } = {}) {
       const inside = includeParent ? menuRef.current?.parentElement : menuRef.current;
       if (!inside?.contains(event.target)) onCloseRef.current();
     };
-    window.addEventListener("pointerdown", close, true);
-    return () => window.removeEventListener("pointerdown", close, true);
+    // The window the menu is in: Raticode's, or the Browser's own window.
+    const view = menuRef.current?.ownerDocument?.defaultView || window;
+    view.addEventListener("pointerdown", close, true);
+    return () => view.removeEventListener("pointerdown", close, true);
   }, [menuRef, includeParent]);
   return (event) => {
     const enabled = [...(menuRef.current?.querySelectorAll("[role=menuitem]:not([disabled])") || [])];
     if (!enabled.length) return;
-    const index = enabled.indexOf(document.activeElement);
+    const index = enabled.indexOf((menuRef.current?.ownerDocument || document).activeElement);
     const next = {
       ArrowDown: (index + 1) % enabled.length,
       ArrowUp: index <= 0 ? enabled.length - 1 : index - 1,

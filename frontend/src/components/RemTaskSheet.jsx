@@ -7,6 +7,7 @@ import {
   runSleep, sleepBudget, startsWhen, taskActivity, taskMessages, taskRecap, taskToDraft, validateDraft, weekdayShort,
 } from "../lib/remHome.js";
 import TaskChecks from "./RemTaskChecks.jsx";
+import { WorktreeSetupNotice } from "./WorktreeSetup.jsx";
 import { TicketPills } from "./TicketPill.jsx";
 import { taskTickets } from "../lib/ticketMentions.js";
 import { closeTaskSheet, createRemTask, deleteRemTask, openRemThread, openTaskSheet, updateRemTask } from "../lib/remHomeStore.js";
@@ -237,6 +238,7 @@ function TaskStatus({ task, activity, now }) {
       </ol> : null}
       {run.state === "repairing" ? <TaskChecks criteria={run.criteria} label="What the review found" /> : null}
       {runSleep(run) ? <p className="rem-status-note" data-sleep="true">{sleepBudget(runSleep(run))}. It holds no worker while it sleeps.</p> : null}
+      <WorktreeSetupNotice setup={run.worktree_setup} />
       <StatusActions run={run} controls={controls} />
     </section>;
   }
@@ -252,7 +254,7 @@ function TaskStatus({ task, activity, now }) {
     return <section className="rem-status" aria-label="Paused run" data-tone="neutral">
       <div className="rem-status-line"><TaskGlyph activity={activity} type={task.type} size={16} /><strong>{by === "priority" ? PAUSED_FOR_YOU : "Paused"}</strong>{last.paused?.at ? <small>{formatWhen(last.paused.at, now, { past: true })}</small> : null}</div>
       <p className="rem-status-note">{by === "priority"
-        ? "Rem paused this self-work so your own work could run first. It picks up in the same thread once your work is done and you’ve been away 15 minutes."
+        ? "Rem paused this self-work so your own work could run first. It picks up in the same thread as soon as a thread is free again."
         : "Its thread and any worktree are kept. Resume continues in the same thread, where the worker checks what it already did."}</p>
       <StatusActions controls={controls} />
     </section>;
@@ -263,6 +265,7 @@ function TaskStatus({ task, activity, now }) {
     <div className="rem-status-line"><OutcomeGlyph status={{ ...info, tone, state: last.state, type: task.type }} /><strong>{last.state === "succeeded" ? taskRecap(last.summary_short || info.label) : plainMarkdown(last.summary_short) || info.label}</strong>{last.finished_at ? <small>{formatWhen(last.finished_at, now, { past: true })}</small> : null}</div>
     {criteriaSummary(last.criteria) ? <p className="rem-status-note">{criteriaSummary(last.criteria)}</p> : null}
     <TaskChecks criteria={last.criteria} label="Checks from the last run" />
+    <WorktreeSetupNotice setup={last.worktree_setup} />
     {task.state === "paused" ? <p className="rem-status-note">Schedule paused</p> : task.next_occurrence_at ? <p className="rem-status-note">Next run {formatWhen(task.next_occurrence_at, now)}</p> : null}
     <StatusActions run={last} controls={controls} />
   </section>;

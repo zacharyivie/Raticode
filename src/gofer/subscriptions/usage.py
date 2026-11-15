@@ -18,6 +18,7 @@ from typing import Any, ParamSpec
 from uuid import uuid4
 
 from gofer.core.agent import AgentResult
+from gofer.core.usage_context import provider_invocation
 
 _P = ParamSpec("_P")
 logger = logging.getLogger(__name__)
@@ -351,31 +352,43 @@ def track_invocation(
         invocation_id = uuid4().hex
         result: AgentResult | None = None
         status = "failed"
-        try:
-            result = await function(*args, **kwargs)
-            status = "completed" if result.success else "failed"
-            return result
-        except asyncio.CancelledError:
-            status = "cancelled"
-            raise
-        finally:
-            cancellation = bound.get("cancel_event")
-            if cancellation is not None and cancellation.is_set():
+        with provider_invocation(invocation_id) as invocation:
+            try:
+                result = await function(*args, **kwargs)
+                status = "completed" if result.success else "failed"
+                return result
+            except asyncio.CancelledError:
                 status = "cancelled"
-            if provider:
-                try:
-                    record_invocation(
-                        invocation_id=invocation_id,
-                        provider=provider,
-                        profile=getattr(settings, "profile_name", None),
-                        model=(result.model if result else None)
-                        or getattr(settings, "model", None),
-                        metadata=normalize_usage(provider, result.usage_metadata) if result else {},
-                        status=status,
-                    )
-                except Exception as exc:
-                    # Accounting must not turn a successful provider call into a
-                    # failed call. Avoid logging prompts, keys, or response bodies.
-                    logger.warning("Unable to persist provider usage (%s)", type(exc).__name__)
+                raise
+            finally:
+                cancellation = bound.get("cancel_event")
+                if (
+                    cancellation is not None and cancellation.is_set()
+                ) or invocation.stopped_by_run:
+                    status = "cancelled"
+                if result is not None:
+                    metadata = normalize_usage(str(provider), result.usage_metadata)
+                else:
+                    # A call cancelled part way keeps the usage it reported while running.
+                    metadata = dict(invocation.live_tokens)
+                    if invocation.live_cost_usd is not None:
+                        metadata["cost_usd"] = invocation.live_cost_usd
+                    if metadata:
+                        metadata["partial"] = True
+                if provider:
+                    try:
+                        record_invocation(
+                            invocation_id=invocation_id,
+                            provider=provider,
+                            profile=getattr(settings, "profile_name", None),
+                            model=(result.model if result else None)
+                            or getattr(settings, "model", None),
+                            metadata=metadata,
+                            status=status,
+                        )
+                    except Exception as exc:
+                        # Accounting must not turn a successful provider call into a
+                        # failed call. Avoid logging prompts, keys, or response bodies.
+                        logger.warning("Unable to persist provider usage (%s)", type(exc).__name__)
 
     return tracked

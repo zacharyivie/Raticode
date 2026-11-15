@@ -254,7 +254,9 @@ def test_builder_uses_existing_agent(monkeypatch: Any, tmp_path: Path) -> None:
     )
     source_workflow = AgenticWorkflow(WorkflowConfig(id="agents", name="Agents"))
     source_workflow.register_agent(existing)
-    monkeypatch.setattr(builder_mod, "list_all_agents", lambda: [(source_workflow, existing)])
+    monkeypatch.setattr(
+        "gofer.utils.registry.list_all_agents", lambda: [(source_workflow, existing)]
+    )
     builder = _blank_builder()
     _patch_questionary(
         monkeypatch,
@@ -276,7 +278,7 @@ def test_builder_falls_back_to_new_agent_and_parses_prompt_tools_and_mcp(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(builder_mod, "list_all_agents", lambda: [])
+    monkeypatch.setattr("gofer.utils.registry.list_all_agents", lambda: [])
     monkeypatch.setattr(builder_mod, "get_data_dir", lambda: tmp_path)
     builder = _blank_builder()
     _patch_questionary(
@@ -419,7 +421,9 @@ def test_builder_authors_named_structured_output_workflow(
     )
     source_workflow = AgenticWorkflow(WorkflowConfig(id="agents", name="Agents"))
     source_workflow.register_agent(existing)
-    monkeypatch.setattr(builder_mod, "list_all_agents", lambda: [(source_workflow, existing)])
+    monkeypatch.setattr(
+        "gofer.utils.registry.list_all_agents", lambda: [(source_workflow, existing)]
+    )
     builder = _blank_builder()
 
     _patch_questionary(

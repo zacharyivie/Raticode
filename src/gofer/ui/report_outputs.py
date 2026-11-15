@@ -12,6 +12,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 from gofer.core.http import read_response_bytes
 from gofer.core.prompt_envelope import AgentResources, McpReference
+from gofer.ui.report_links import link_warning, rewrite_links
 from gofer.utils.atomic_output import atomic_binary_output
 
 REPORT_FORMATS = {"md", "html", "slides", "pdf"}
@@ -243,7 +244,13 @@ def _free_name(target: Path, root: Path) -> str:
     return target.with_name(f"{stem}-new{target.suffix}").relative_to(root).as_posix()
 
 
-def save_report(root: Path, relative: str, content: Any, report_format: str) -> dict[str, str]:
+def save_report(root: Path, relative: str, content: Any, report_format: str) -> dict[str, Any]:
+    """Save a new report under ``root`` and return its path and link.
+
+    Absolute links to files inside ``root`` are rewritten relative to the report.
+    Links to temporary folders or outside ``root`` are kept as written and listed
+    in ``warnings`` so the caller can tell the author.
+    """
     if report_format not in REPORT_FORMATS:
         raise ValueError("Choose Markdown, HTML, Slides, or PDF.")
     extension = "html" if report_format == "slides" else report_format
@@ -273,11 +280,23 @@ def save_report(root: Path, relative: str, content: Any, report_format: str) -> 
             f"A report already exists at {shown}. Saved reports are never replaced; "
             f"save this one under a new name, such as {_free_name(target, root)}."
         )
+    content, rewritten, flagged = rewrite_links(
+        content, target.name if report_format != "pdf" else "source.html", root, target.parent
+    )
     prepared = prepare_report(content, report_format)
     if len(prepared.encode("utf-8")) > MAX_REPORT_BYTES:
         raise ValueError("The prepared report exceeds 2 MB. Shorten the report or its assets.")
     data = render_pdf(prepared) if report_format == "pdf" else prepared.encode("utf-8")
-    result = {"path": str(target), "link": f"[{target.stem}](<{target}>)"}
+    result: dict[str, Any] = {"path": str(target), "link": f"[{target.stem}](<{target}>)"}
+    if rewritten:
+        result["linksMadeRelative"] = len(rewritten)
+    if flagged:
+        warnings = list(dict.fromkeys(link_warning(check) for check in flagged))
+        result["warnings"] = warnings[:20] + (
+            [f"{len(warnings) - 20} more links point outside the brain."]
+            if len(warnings) > 20
+            else []
+        )
     # Keep the authored PDF source searchable by existing knowledge tools.
     with atomic_binary_output(root / relative, exclusive=True) as output:
         output.write(data)
@@ -360,7 +379,8 @@ def serve_reports(root: Path, report_format: str) -> None:
             "name": "save_report",
             "description": reports.call("rules", {})
             + " Supply Markdown or HTML content. PDF accepts HTML source; "
-            "Slides accepts section.slide.",
+            "Slides accepts section.slide. Links to files in the folder are saved as "
+            "relative paths; links to /tmp or outside it are kept and returned as warnings.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -36,7 +36,7 @@ async function main() {
   await runBrowserTest(path.join(__dirname, "../electron/tests/agent-browser.browser.cjs"));
   await runBrowserTest(path.join(__dirname, "../electron/tests/agent-browser-studio.browser.cjs"));
   await runBrowserTest(path.join(__dirname, "../electron/tests/firefox-studio.browser.cjs"));
-  for (const script of ["file-media", "editor-find-graph", "mac-ui-fixes", "rem-actions", "commit-diff", "usage", "report-themes", "report-outputs", "organizations"]) {
+  for (const script of ["file-media", "editor-find-graph", "mac-ui-fixes", "rem-actions", "commit-diff", "usage", "report-themes", "report-outputs", "organizations", "kanban-board-layout", "rem-task-sheet-layout"]) {
     await runBrowserTest(path.join(__dirname, `${script}.browser.cjs`));
   }
   await runBrowserTest(path.join(__dirname, "organizations.browser.cjs"), { RATICODE_TEST_ORGS_DISABLED: "1" });

@@ -34,6 +34,7 @@ Raticode org list
 
 - Every command takes the same connection options as `Raticode api`: `--endpoint`, `--token-file` and `--data-dir`. None accepts the token itself on the command line.
 - Inside a Rem worker session the CLI doesn't pick up the owner token. Give agents a limited [agent token](./headless.md#agent-tokens) instead.
+- A server usually has no system keychain, so the Jev key, Organizations and webhook secrets, usage reporting credentials and workflow secrets can't be saved there. Give the backend a read-only [secrets folder](./headless.md#secrets-without-a-keychain) instead (from 0.5.5): `Raticode serve --headless --secrets-dir PATH`, or systemd's `LoadCredentialEncrypted=` with no option. `Raticode doctor` lists which secret-backed features can't work.
 - Output is one JSON envelope on stdout: `{"ok", "command", "data", "error", "warnings"}`. Messages for people go to stderr. `--output text` prints a readable table.
 - Exit codes are the [backend client's codes](./cli.md#output-and-exit-codes): 0 done, 1 failed, 2 invalid input, 3 not found, 4 conflict or stale revision, 5 not allowed, 6 no backend, 7 waiting on you, 8 timed out.
 
@@ -46,11 +47,17 @@ Raticode rattish list --format json
 Raticode rattish show nightly-report --source
 Raticode rattish start nightly-report --input day='"2026-11-10"' --wait --timeout 30m
 Raticode rattish runs nightly-report --status error
+Raticode rattish runs --all --since 24h --output text
 Raticode rattish logs nightly-report RUN_ID
 Raticode rattish events nightly-report RUN_ID
 Raticode rattish stop nightly-report --run RUN_ID
 Raticode rattish resume nightly-report RUN_ID --from-node build --wait
+Raticode rattish runs rerun RUN_ID --wait
 ```
+
+`rattish runs WORKFLOW_ID` and `rattish runs --all` are short for `Raticode rattish runs list`. `Raticode rattish runs rerun RUN_ID` runs a workflow again with the inputs and trigger events an earlier run saved, using the workflow as it is now; it finds the workflow from the run ID. Password inputs are never saved, so give each one again with `--input name=value`, on `rattish resume` too. See [Run again with the same inputs](../studio/runs.md#resume-and-run-again) (from 0.5.5).
+
+`stop` reaches runs whichever process started them, including [triggered runs](../workflows/triggers.md#stop-a-triggered-run) from the background scheduler. With no backend running it still works: it asks runs on this computer to stop by themselves (from 0.5.5). Without `--run` it stops every run of the workflow.
 
 `start` starts the run and returns its ID straight away. Its nodes really run: agent nodes call providers and command nodes run commands. `--dry-run` only shows the plan.
 
@@ -153,6 +160,13 @@ Raticode org auto-mode ORG_ID --on --yes
 Raticode org auto-mode ORG_ID --off
 ```
 
+Credentials for workers and webhooks live in the system keychain. On a server without one, put each in an `org-secret-ACCOUNT` file in the backend's [secrets folder](./headless.md#secrets-without-a-keychain) and add a secret reference with that account (from 0.5.5):
+
+```bash
+Raticode api POST /organizations -f action=secret_reference -f organizationId=ORG_ID \
+  -f params.id=github -f params.account=github-token
+```
+
 ## Swarms
 
 `Raticode swarm` reads swarms and changes their settings. It never starts one, sends it messages or changes a running one. Swarms belong to a project folder, so every command takes `--project`.
@@ -200,12 +214,46 @@ Raticode usage refresh
 - `provider status` shows whether a provider is signed in. Signing in opens a browser, so do it on that computer with the provider's own CLI.
 - `usage show` reads what the backend has recorded and asks no provider.
 - `usage refresh` asks each signed-in provider for current numbers, so it runs their CLIs.
+- Without a keychain, usage reporting credentials come from `usage-PROVIDER-FIELD` files in the backend's [secrets folder](./headless.md#secrets-without-a-keychain), such as `usage-openai_api-admin_api_key` (from 0.5.5).
 - The [provider profile](./cli.md#provider-profiles-and-health) commands are unchanged and still edit the profile store directly.
+
+### Jev classifier
+
+```bash
+Raticode provider jev status
+Raticode provider jev set-key
+Raticode provider jev check
+Raticode provider jev disable
+Raticode provider jev enable
+Raticode provider jev remove-key
+```
+
+- [Jev](../workflows/jev.md) is the classifier behind the [jev node](../nodes/jev.md). It isn't a coding provider, so `provider list` doesn't show it.
+- `set-key` asks for the key without showing it, or reads one line from standard input with `--stdin`. The key never goes on the command line, where other accounts on the computer could see it. The backend keeps it in the system keychain.
+- On a server with no keychain, `set-key` fails with a message naming `--secrets-dir`. Put the key in a file named `jev-key` in the backend's [secrets folder](./headless.md#secrets-without-a-keychain) instead (from 0.5.5). `status` then says `Key: read from the secrets folder (jev-key)` and the JSON has `"keySource": "secrets folder"`. `remove-key` can't delete that file; replace or remove it yourself.
+- `check` makes one call to Jev to test the key and refresh the model list. `status` makes none.
+- `disable` stops every jev node from calling Jev and keeps the key. `remove-key` deletes it from the keychain.
+
+### Workflow secrets
+
+```bash
+Raticode rattish secrets set SERVICE_TOKEN
+printf '%s' "$VALUE" | Raticode rattish secrets set SERVICE_TOKEN --stdin
+Raticode rattish secrets list --format json
+Raticode rattish secrets remove SERVICE_TOKEN
+```
+
+- These save the values `secret["NAME"]` reads in the system keychain. They work without a running backend, the same as the Studio's **Workflow settings > Secrets** (from 0.5.5). See [Secrets](../workflows/inputs.md#secrets).
+- `set` asks for the value without showing it, or reads all of standard input with `--stdin` (one trailing newline is dropped). The value never goes on the command line.
+- `list` shows names, when each was saved, and whether an environment variable with the same name is also set. No command prints a value.
+- On a server with no keychain, `set` fails with a message naming `--secrets-dir`. Put the value in a file named `workflow-secret-NAME` in the backend's [secrets folder](./headless.md#secrets-without-a-keychain) instead (from 0.5.5). `secret["NAME"]` reads it when the keychain has no saved value, before the environment variable. `list` shows only keychain names; `Raticode api GET /rattish/secrets` also lists the folder's names under `folder`.
+- `set` and `remove` refuse inside a Rem or worker turn (exit code 5). `list` works there.
 
 ## Projects, devices and live threads
 
 ```bash
 Raticode projects list
+Raticode projects setup PATH
 Raticode devices list
 Raticode threads follow CONVERSATION_ID TURN_ID
 Raticode threads steering CONVERSATION_ID
@@ -214,6 +262,7 @@ Raticode threads stop CONVERSATION_ID TURN_ID
 ```
 
 - `projects list` lists the project folders that hold registered workflows.
+- `projects setup PATH` shows a project's [worktree setup](../studio/worktree-setup.md) and whether you approved it. Without a path it lists setups waiting for approval.
 - `devices list` shows paired phones and computers. Pairing stays in Settings.
 - `threads follow` prints a turn's events as they arrive and ends when the turn does.
 - The thread list lives in the desktop window, not the backend, so the CLI can't list or start threads yet. Moving that list into the backend is a planned follow-up.
@@ -246,6 +295,7 @@ The backend treats every request that carries your token as you. So inside a Rem
 - `org apply` and `org employees release`
 - `swarm apply` and `delete`
 - `provider set`
+- `provider jev set-key`, `check`, `remove-key`, `enable` and `disable`
 
 `Raticode api` follows the same rule inside a Rem or worker turn:
 
@@ -267,7 +317,7 @@ Some of the app's endpoints have no CLI command on purpose. Each has a reason:
 | --- | --- |
 | `org-run-control` | Starting, pausing or resuming an organization or its heartbeats, and deciding consent requests. This needs your separate authorization, so it stays in the Organizations tab. |
 | `consent-gated` | Changes the app asks your consent for: archiving an organization, restoring an earlier revision of one, routines, webhooks, GitHub imports and execution decisions. |
-| `user-decision` | Your decisions on an organization's tickets: approving a plan, accepting or sending back a review, and reopening a ticket. Each one lets agents start work, so make them in the Organizations tab. |
+| `user-decision` | Your decisions on tickets: approving a plan, accepting or sending back a review, landing a ticket's branch, requesting changes from its patch, and reopening a ticket. Each one lets agents start work or changes your branches, so make them in the ticket's sheet on the Kanban board or in the Organizations tab. |
 | `runs-agents` | Starting or steering agent work outside a workflow run: starting, controlling or messaging a swarm, and an organization's wake, launches, checks and retries. |
 | `worker-tools` | Tools an organization worker uses during its own run, such as claims, artifacts and memory. |
 | `thread-list` | Starting, listing, searching, archiving or deleting threads, from the app or a phone. The thread list lives in the desktop window; moving it into the backend is a planned follow-up. |
@@ -281,6 +331,7 @@ Some of the app's endpoints have no CLI command on purpose. Each has a reason:
 | `file-explorer` | The desktop window's file explorer, editor and project search. Scripts read and write project files directly. |
 | `window-settings` | App settings the desktop window owns, such as voice tidy, commit messages, report format, the conversation archive folder, the data folder and Feature Preview choices. |
 | `app-updates` | Updating the desktop app. Update the CLI with your package manager or a new release download. |
+| `setup-approval` | Approving or stopping a project's worktree setup, which then runs commands as you in every new worktree. Approve it in the app, where its commands are shown in full. |
 | `phone-only` | The phone's own screens: overview cards, drafts, its file browser, media and developer log. |
 | `device-link` | The encrypted link between paired devices: syncing, file transfer, cancelling a phone's request and remote jobs sent to another desktop. A script on this computer talks to the backend directly. |
 | `protocol-reply` | Replies, snapshots and progress updates the desktop sends back to a phone. |
@@ -295,7 +346,7 @@ Anything else the backend serves that has no command of its own is still reachab
 | --- | --- |
 | `Raticode api`, `Raticode wait` | [CLI reference](./cli.md#talk-to-a-running-backend) |
 | `Raticode rattish show`, `Raticode rattish start`, `Raticode rattish stop`, `Raticode rattish resume`, `Raticode rattish wait` | [Workflows](#workflows) |
-| `Raticode rattish runs`, `Raticode rattish logs`, `Raticode rattish events` | [Workflows](#workflows) |
+| `Raticode rattish runs list`, `Raticode rattish runs rerun`, `Raticode rattish logs`, `Raticode rattish events` | [Workflows](#workflows) |
 | `Raticode rattish approvals`, `Raticode rattish approve`, `Raticode rattish reject` | [Workflows](#workflows) |
 | `Raticode rattish export`, `Raticode rattish import`, `Raticode rattish triggers export`, `Raticode rattish triggers apply` | [Workflows](#workflows) |
 | `Raticode org list`, `Raticode org show`, `Raticode org history`, `Raticode org events`, `Raticode org projects` | [Organizations](#organizations) |
@@ -307,7 +358,8 @@ Anything else the backend serves that has no command of its own is still reachab
 | `Raticode swarm list`, `Raticode swarm show`, `Raticode swarm history`, `Raticode swarm export`, `Raticode swarm apply`, `Raticode swarm delete` | [Swarms](#swarms) |
 | `Raticode brain list`, `Raticode brain documents`, `Raticode brain search`, `Raticode brain read`, `Raticode brain save`, `Raticode brain projects` | [Second Brain](#second-brain) |
 | `Raticode provider list`, `Raticode provider models`, `Raticode provider status`, `Raticode provider set`, `Raticode usage show`, `Raticode usage refresh` | [Providers, models and usage](#providers-models-and-usage) |
-| `Raticode projects list`, `Raticode devices list` | [Projects, devices and live threads](#projects-devices-and-live-threads) |
+| `Raticode provider jev status`, `Raticode provider jev set-key`, `Raticode provider jev check`, `Raticode provider jev remove-key`, `Raticode provider jev enable`, `Raticode provider jev disable` | [Jev classifier](#jev-classifier) |
+| `Raticode projects list`, `Raticode projects setup`, `Raticode devices list` | [Projects, devices and live threads](#projects-devices-and-live-threads) |
 | `Raticode threads follow`, `Raticode threads steering`, `Raticode threads steer`, `Raticode threads stop` | [Projects, devices and live threads](#projects-devices-and-live-threads) |
 | `Raticode rem say`, `Raticode rem messages`, `Raticode rem search`, `Raticode rem follow`, `Raticode rem notices` | [Rem from the CLI](./cli-rem.md) |
 | `Raticode rem settings show`, `Raticode rem settings export`, `Raticode rem settings apply` | [Rem from the CLI](./cli-rem.md) |

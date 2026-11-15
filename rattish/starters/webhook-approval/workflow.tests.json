@@ -1,0 +1,51 @@
+{
+  "testSetVersion": 1,
+  "cases": [
+    {
+      "id": "approved",
+      "name": "Runs the action after you approve",
+      "inputs": {},
+      "triggerEvents": [
+        {
+          "type": "webhook",
+          "trigger_id": "test",
+          "received_at": "2026-01-01T09:00:00Z",
+          "payload": {"action": "publish-docs", "ref": "main", "test": "Approve this one when the test asks."}
+        }
+      ],
+      "checks": [
+        {"type": "json", "label": "You approved it", "target": "nodes.approve.decision", "equals": "approved"},
+        {"type": "text", "label": "The action ran with the request", "target": "nodes.act.stdout", "contains": "publish-docs"},
+        {"type": "json", "label": "No rejection recorded", "target": "nodes.record-rejection", "exists": false}
+      ]
+    },
+    {
+      "id": "rejected",
+      "name": "Runs nothing when you reject",
+      "inputs": {},
+      "triggerEvents": [
+        {
+          "type": "webhook",
+          "trigger_id": "test",
+          "received_at": "2026-01-01T09:05:00Z",
+          "payload": {"action": "delete-cache", "test": "Reject this one when the test asks."}
+        }
+      ],
+      "checks": [
+        {"type": "json", "label": "You rejected it", "target": "nodes.approve.decision", "equals": "rejected"},
+        {"type": "json", "label": "The action didn't run", "target": "nodes.act", "exists": false},
+        {"type": "text", "label": "Says nothing ran", "target": "nodes.record-rejection.stdout", "contains": "Nothing ran"}
+      ]
+    },
+    {
+      "id": "no-webhook-body",
+      "name": "Refuses a run that didn't come from the webhook",
+      "inputs": {},
+      "expectStatus": "failed",
+      "checks": [
+        {"type": "json", "label": "Asks for no approval", "target": "nodes.approve", "exists": false},
+        {"type": "json", "label": "The action didn't run", "target": "nodes.act", "exists": false}
+      ]
+    }
+  ]
+}

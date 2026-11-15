@@ -39,6 +39,13 @@ object RemNotifications {
     private const val ID = 2004
     private const val TAG = "rem"
     private const val SHORTCUT = "rem-chat"
+    /** Workflow messages: one alert each, told apart by their notice ID, in one group per workflow under a summary alert. */
+    private const val WORKFLOW_TAG = "rem-workflow"
+    private const val WORKFLOW_SUMMARY_TAG = "rem-workflow-group"
+    /** What a workflow message's alert carries for its group's summary to count it. */
+    private const val KEY_EXTRA = "dev.raticode.mobile.workflow_key"
+    private const val MORE_EXTRA = "dev.raticode.mobile.workflow_more"
+    private const val MISSED_KEY = "rem-workflow-missed"
     private const val PREFS = "rem-notifications"
     /** Android mutes a silent alert only when it belongs to a group, and the library doesn't reliably set one. */
     private const val QUIET_GROUP = "rem-quiet"
@@ -52,7 +59,7 @@ object RemNotifications {
             override fun number(key: String, default: Int) = prefs.getInt(key, default)
             override fun putNumber(key: String, value: Int) { prefs.edit().putInt(key, value).apply() }
         }, object : RemAlertRules.Surface {
-            override fun clear() { clear(context); TaskNotification.hideWords(context) }
+            override fun clear() { clear(context); clearWorkflows(context); TaskNotification.hideWords(context) }
             override fun forgetConversation() { runCatching { ShortcutManagerCompat.removeLongLivedShortcuts(context, listOf(SHORTCUT)) } }
             // The channel exists from the start, so Android's settings can show it before the first alert.
             override fun createChannel() = channel(context)
@@ -91,12 +98,87 @@ object RemNotifications {
             lockscreenVisibility = Notification.VISIBILITY_PRIVATE
         })
 
-    /** Rem's new messages, added to the alert already showing. */
-    fun post(context: Context, notices: List<RemNotice>, skipped: Int) {
-        if (!active(context) || (notices.isEmpty() && skipped == 0)) return
-        val lines = RemAlertRules.lines(notices, skipped, showText(context), System.currentTimeMillis())
+    /**
+     * Rem's new messages, added to the alert already showing. Workflow messages go in one group per workflow under a summary such
+     * as "4 messages from Nightly backup"; each child alert opens its run. Only the first group's summary in one read makes a sound,
+     * and children never do, so a burst buzzes once. [dropped] adds an alert that some workflow messages were missed.
+     */
+    fun post(context: Context, notices: List<RemNotice>, skipped: Int, dropped: Int = 0) {
+        if (!active(context) || (notices.isEmpty() && skipped == 0 && dropped == 0)) return
+        val (chat, workflows) = RemAlertRules.split(notices)
         val time = java.time.LocalTime.now()
-        notify(context, lines.map { message(context, it) }, silent = RemAlertRules.quiet(quietHours(context), time.hour * 60 + time.minute))
+        val silent = RemAlertRules.quiet(quietHours(context), time.hour * 60 + time.minute)
+        val now = System.currentTimeMillis()
+        if (workflows.isNotEmpty()) notifyWorkflows(context, workflows, silent, now)
+        RemAlertRules.missed(dropped)?.let { notifyMissed(context, it, now) }
+        if (chat.isEmpty() && skipped == 0) return
+        val lines = RemAlertRules.lines(chat, skipped, showText(context), now)
+        notify(context, lines.map { message(context, it) }, silent = silent)
+    }
+
+    private fun notifyWorkflows(context: Context, notices: List<RemNotice>, silent: Boolean, now: Long) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        channel(context)
+        val show = showText(context)
+        // Read before posting: Android may not list an alert posted a moment ago.
+        val shown = manager.activeNotifications.filter { it.tag == WORKFLOW_TAG && it.notification.group != null }.groupBy({ it.notification.group },
+            { RemAlertRules.Shown(it.notification.extras.getString(KEY_EXTRA).orEmpty(), it.notification.extras.getInt(MORE_EXTRA)) })
+        RemAlertRules.workflowGroups(notices, show, now).forEachIndexed { index, group ->
+            group.alerts.forEach { notifyWorkflow(context, manager, group.key, it, silent) }
+            notifySummary(context, manager, RemAlertRules.workflowSummary(group, shown[group.key].orEmpty(), show), silent = silent || index > 0)
+        }
+    }
+
+    private fun openRun(context: Context, code: Int, target: String) = PendingIntent.getActivity(context, code,
+        dev.raticode.mobile.childlock.NotificationOpenActivity.intent(context).setAction(Intent.ACTION_VIEW)
+            .putExtra(LiveNotifications.THREAD_EXTRA, "live:$target").setData(Uri.parse("raticode-live://$target")),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+
+    private fun workflowPublic(context: Context, text: String) = NotificationCompat.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_launcher)
+        .setContentTitle(RemAlertRules.WORKFLOW_LOCK_SCREEN_TITLE).setContentText(text).build()
+
+    /**
+     * One workflow message, in its workflow's group. It leaves the sound to the group's summary. A tap opens its run in
+     * Workflows; the lock screen only ever says a workflow sent a message.
+     */
+    private fun notifyWorkflow(context: Context, manager: NotificationManager, group: String, alert: RemAlertRules.WorkflowAlert, silent: Boolean) {
+        val id = alert.key.hashCode()
+        manager.notify(WORKFLOW_TAG, id, NotificationCompat.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_launcher)
+            .setContentTitle(alert.title).setContentText(alert.text).setStyle(NotificationCompat.BigTextStyle().bigText(alert.text))
+            .setWhen(alert.at).setShowWhen(true).setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setContentIntent(openRun(context, id, alert.target)).setAutoCancel(true).setSilent(silent)
+            .setGroup(group).setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_SUMMARY)
+            .addExtras(android.os.Bundle().apply { putString(KEY_EXTRA, alert.key); putInt(MORE_EXTRA, alert.more) })
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(workflowPublic(context, RemAlertRules.WORKFLOW_GENERIC)).build())
+    }
+
+    /** The group's summary, which carries the one sound for the group; its tap opens the newest run. */
+    private fun notifySummary(context: Context, manager: NotificationManager, summary: RemAlertRules.WorkflowSummary, silent: Boolean) {
+        val id = summary.key.hashCode()
+        manager.notify(WORKFLOW_SUMMARY_TAG, id, NotificationCompat.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_launcher)
+            .setContentTitle(summary.title).setContentText(summary.text).setNumber(summary.count)
+            .setWhen(summary.at).setShowWhen(true).setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setContentIntent(openRun(context, id, summary.target)).setAutoCancel(true).setSilent(silent)
+            .setGroup(summary.key).setGroupSummary(true).setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_SUMMARY)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(workflowPublic(context, RemAlertRules.WORKFLOW_GENERIC)).build())
+    }
+
+    /** Workflow messages deleted on the desktop before this phone read them. Quiet; a tap opens the workflow list. */
+    private fun notifyMissed(context: Context, text: String, now: Long) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        channel(context)
+        val id = MISSED_KEY.hashCode()
+        manager.notify(WORKFLOW_TAG, id, NotificationCompat.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_launcher)
+            .setContentTitle("Some workflow messages were missed").setContentText(text).setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setWhen(now).setShowWhen(true).setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setContentIntent(openRun(context, id, RemAlertRules.workflowTarget("", ""))).setAutoCancel(true).setSilent(true).setGroup(QUIET_GROUP)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(workflowPublic(context, RemAlertRules.WORKFLOW_GENERIC)).build())
+    }
+
+    /** Removes the workflow messages' alerts and their groups' summaries, which may show their words. */
+    private fun clearWorkflows(context: Context) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.activeNotifications.filter { it.tag == WORKFLOW_TAG || it.tag == WORKFLOW_SUMMARY_TAG }.forEach { manager.cancel(it.tag, it.id) }
     }
 
     /** The user's reply, shown in the alert at once so Android stops its progress spinner. */

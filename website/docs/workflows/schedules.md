@@ -23,7 +23,7 @@ Raticode rattish run /absolute/project/.raticode/WORKFLOW_ID/workflow.rattish --
 Before you turn the job on:
 
 - Use the absolute path to `Raticode` if the job doesn't inherit your interactive `PATH`.
-- Set up the same project files, provider sign-in, environment variables and secrets on that machine.
+- Set up the same project files, provider sign-in, environment variables and secrets on that machine. Saved [workflow secrets](./inputs.md#secrets) stay on the computer that saved them.
 - Run check and preflight in that same environment.
 - Decide what happens when a slow run overlaps the next one.
 - Keep the job's output and exit status for diagnosis.

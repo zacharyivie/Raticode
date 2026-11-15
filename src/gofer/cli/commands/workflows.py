@@ -18,9 +18,11 @@ from pathlib import Path
 from typing import Any
 
 import typer
+from typer import _click
+from typer.core import TyperGroup
 
 from gofer.cli import client_options as opts
-from gofer.cli.client import ExitCode, Output
+from gofer.cli.client import CliError, ExitCode, Output
 from gofer.cli.commands import _resources as res
 from gofer.cli.commands._backend import require_user
 from gofer.cli.commands._resources import Backend, failure, finish, quote, session, table
@@ -31,15 +33,48 @@ app = typer.Typer()
 triggers_app = typer.Typer()
 
 
+class _RunsGroup(TyperGroup):
+    """``rattish runs``: its own subcommands, else the run list (``rattish runs list``).
+
+    ``rattish runs WORKFLOW_ID`` and ``rattish runs --all`` keep working; a workflow
+    that is itself named ``list`` or ``rerun`` is listed with ``rattish runs list ID``.
+    """
+
+    def parse_args(self, ctx: _click.Context, args: list[str]) -> list[str]:
+        first = args[0] if args else None
+        if first is None or (first not in self.commands and first not in ctx.help_option_names):
+            args = ["list", *args]
+        return super().parse_args(ctx, args)
+
+
+runs_app = typer.Typer(
+    cls=_RunsGroup,
+    help=(
+        "(Backend) List workflow runs (`rattish runs WORKFLOW_ID`, `rattish runs --all`, the "
+        "same as `rattish runs list`), or run one again with its inputs (`rattish runs rerun "
+        "RUN_ID`)."
+    ),
+)
+
+
 def register(rattish_app: typer.Typer, rattish_triggers_app: typer.Typer) -> None:
     """Add the backend commands next to the offline ones; no names overlap."""
-    for source, target in ((app, rattish_app), (triggers_app, rattish_triggers_app)):
-        taken = {info.name for info in target.registered_commands}
+    for source, target in (
+        (app, rattish_app),
+        (triggers_app, rattish_triggers_app),
+        (runs_app, runs_app),
+    ):
+        taken = (
+            {info.name for info in target.registered_commands} if source is not target else set()
+        )
         for info in source.registered_commands:
             assert info.name not in taken, info.name
             # Help lists them beside the offline commands, so say which need a backend.
             info.help = f"(Backend) {inspect.getdoc(info.callback) or ''}".strip()
-            target.registered_commands.append(info)
+            if source is not target:
+                target.registered_commands.append(info)
+    assert "runs" not in {info.name for info in rattish_app.registered_commands}
+    rattish_app.add_typer(runs_app, name="runs")
 
 
 # Run states the app reports, and the exit code each ends a wait with.
@@ -49,6 +84,13 @@ _FINISHED = {
     "stopped": ExitCode.FAILED,
     "disconnected": ExitCode.UNKNOWN,
 }
+
+
+def _started_by() -> str:
+    """``rem`` when Rem or one of its workers runs this command, else ``manual``."""
+    from gofer.cli.client import in_agent_session
+
+    return "rem" if in_agent_session() else "manual"
 
 
 def _workflow(backend: Backend, workflow_id: str) -> dict[str, Any]:
@@ -198,7 +240,7 @@ def run_workflow(
         if not isinstance(loaded, dict):
             res.invalid(current, "The inputs file must hold a JSON object")
         values = {**loaded, **values}
-    body: dict[str, Any] = {"inputs": values, "dryRun": dry_run}
+    body: dict[str, Any] = {"inputs": values, "dryRun": dry_run, "startedBy": _started_by()}
     if not dry_run:
         body["background"] = True
     if expected_revision:
@@ -232,16 +274,56 @@ def stop_workflow(
     token_file: opts.TokenFile = None,
     data_dir: opts.DataDir = None,
 ) -> None:
-    """Stop a workflow's active run."""
+    """Stop a workflow's active run. With no backend running, it still asks the run to stop.
+
+    Reaches runs any process started, such as `rattish triggers start`. Without
+    --run it stops every running run of the workflow.
+    """
     current = session("rattish stop", output, endpoint, token_file, data_dir)
     path = (
         f"/workflows/{quote(workflow_id)}" + (f"/runs/{quote(run_id)}" if run_id else "") + "/stop"
     )
+
+    def call(backend: Backend, _out: Output) -> dict[str, Any]:
+        try:
+            return dict(backend.request("POST", path))
+        except CliError as exc:
+            # A backend named with --endpoint may be another data folder's; only
+            # the discovered local one falls back to this computer's run records.
+            if exc.exit_code != ExitCode.UNREACHABLE or endpoint:
+                raise
+        return _stop_without_backend(workflow_id, run_id, data_dir)
+
     finish(
         current,
-        lambda b, _o: b.request("POST", path),
+        call,
         lambda d: str(d.get("message") or ("Stopped" if d.get("stopped") else "Nothing to stop")),
     )
+
+
+def _stop_without_backend(
+    workflow_id: str, run_id: str | None, data_dir: Path | None
+) -> dict[str, Any]:
+    """Write stop markers the runs' own processes watch for."""
+    from gofer.cli.client import resolve_data_dir
+    from gofer.rattish.run_service import stop_rattish_runs
+
+    try:
+        asked = stop_rattish_runs(resolve_data_dir(data_dir), workflow_id, run_id)
+    except ValueError as exc:
+        raise failure(str(exc), ExitCode.USAGE) from None
+    except OSError as exc:
+        raise failure(f"Could not ask the run to stop: {exc}") from None
+    result: dict[str, Any] = {"workflowId": workflow_id}
+    if run_id:
+        result["runId"] = run_id
+    return {
+        **result,
+        "stopped": bool(asked),
+        "runIds": asked,
+        "backend": False,
+        "message": "Stop requested" if asked else "No active run",
+    }
 
 
 @app.command("resume")
@@ -251,6 +333,11 @@ def resume_workflow(
     from_node: str | None = typer.Option(None, "--from-node"),
     only_node: str | None = typer.Option(None, "--only-node"),
     force: bool = typer.Option(False, "--force", help="Resume even if the source changed."),
+    inputs: list[str] | None = typer.Option(
+        None,
+        "--input",
+        help="A password input the run didn't save, as name=value. Repeat for more.",
+    ),
     wait: bool = typer.Option(False, "--wait", help="Wait for the resumed run to finish."),
     timeout: opts.Timeout = None,
     output: opts.Output = opts.OutputFormat.json,
@@ -258,10 +345,16 @@ def resume_workflow(
     token_file: opts.TokenFile = None,
     data_dir: opts.DataDir = None,
 ) -> None:
-    """Resume a stopped or failed run. It runs nodes again."""
+    """Resume a stopped or failed run. It runs nodes again.
+
+    A run started with inputs or by a trigger resumes with its saved inputs and events.
+    Password inputs are never saved: give each one again with --input.
+    """
     current = session("rattish resume", output, endpoint, token_file, data_dir)
     limit = res.duration(current, timeout, 3600)
-    body: dict[str, Any] = {"background": True, "force": force}
+    body: dict[str, Any] = {"background": True, "force": force, "startedBy": _started_by()}
+    if inputs:
+        body["inputs"] = res.parse_assignments(current, inputs)
     if from_node:
         body["fromNode"] = from_node
     if only_node:
@@ -282,10 +375,25 @@ def resume_workflow(
     )
 
 
-@app.command("runs")
+@runs_app.command("list")
 def list_runs(
-    workflow_id: str = typer.Argument(...),
-    status: str | None = typer.Option(None, "--status", help="success, error, running or stopped."),
+    workflow_id: str | None = typer.Argument(
+        None, help="The workflow whose runs to list. Leave it out with --all."
+    ),
+    all_workflows: bool = typer.Option(
+        False, "--all", help="List runs from every registered workflow, newest first."
+    ),
+    status: str | None = typer.Option(
+        None, "--status", help="success, error, running, stopped or disconnected."
+    ),
+    since: str | None = typer.Option(
+        None,
+        "--since",
+        help="With --all: runs started since an ISO time, or a span back such as 30m, 24h, 7d.",
+    ),
+    workflows: list[str] | None = typer.Option(
+        None, "--workflow", help="With --all: only this workflow. Repeat for more."
+    ),
     limit: int = typer.Option(20, "--limit"),
     offset: int = typer.Option(0, "--offset"),
     output: opts.Output = opts.OutputFormat.json,
@@ -293,8 +401,30 @@ def list_runs(
     token_file: opts.TokenFile = None,
     data_dir: opts.DataDir = None,
 ) -> None:
-    """List a workflow's runs, newest first."""
+    """List a workflow's runs, or every workflow's runs with --all, newest first.
+
+    `rattish runs WORKFLOW_ID` and `rattish runs --all` run this command.
+    """
     current = session("rattish runs", output, endpoint, token_file, data_dir)
+    if all_workflows == (workflow_id is not None):
+        res.invalid(current, "Give a WORKFLOW_ID, or --all for every workflow's runs.")
+    if not all_workflows and (since or workflows):
+        res.invalid(current, "--since and --workflow work with --all.")
+    if all_workflows:
+        all_query = {
+            "limit": limit,
+            "offset": offset,
+            "status": status,
+            "since": since,
+            "workflow": list(workflows or []) or None,
+        }
+        finish(
+            current,
+            lambda b, _o: b.request("GET", "/rattish/runs", query=all_query),
+            _all_runs_text,
+        )
+        return
+    assert workflow_id is not None
     query = {"limit": limit, "offset": offset, "status": status}
 
     def text(data: dict[str, Any]) -> str:
@@ -302,18 +432,120 @@ def list_runs(
             [
                 str(run.get("id")),
                 str(run.get("status"))
-                + (" (needs approval)" if run.get("awaitingApproval") else ""),
+                + (
+                    " (stop requested)"
+                    if run.get("stopRequested")
+                    else " (needs approval)"
+                    if run.get("awaitingApproval")
+                    else ""
+                ),
                 str(run.get("startedAt") or ""),
                 f"{float(run.get('durationSeconds') or 0):.1f}s",
+                *_usage_cells(run.get("usage")),
             ]
             for run in data.get("runs", [])
         ]
-        return table(rows, ["RUN", "STATUS", "STARTED", "DURATION"]) or "No runs."
+        return (
+            table(rows, ["RUN", "STATUS", "STARTED", "DURATION", "TOKENS", "EST. COST"])
+            or "No runs."
+        )
 
     finish(
         current,
         lambda b, _o: b.request("GET", f"/workflows/{quote(workflow_id)}/logs", query=query),
         text,
+    )
+
+
+_STARTED_BY = {"manual": "manual", "trigger": "trigger", "phone": "phone", "rem": "Rem"}
+
+
+def _all_runs_text(data: dict[str, Any]) -> str:
+    rows = [
+        [
+            str(run.get("startedAt") or "")[:19].replace("T", " "),
+            str(run.get("workflowName") or run.get("workflowId")),
+            _STARTED_BY.get(str(run.get("startedBy")), str(run.get("startedBy") or "")),
+            str(run.get("status"))
+            + (" (needs approval)" if run.get("awaitingApproval") else "")
+            + (" (switched provider)" if run.get("fallbacks") else ""),
+            f"{float(run.get('durationSeconds') or 0):.1f}s",
+            *_usage_cells(run.get("usage")),
+            str(run.get("id")),
+        ]
+        for run in data.get("runs", [])
+    ]
+    headers = ["STARTED", "WORKFLOW", "HOW", "STATUS", "DURATION", "TOKENS", "EST. COST", "RUN"]
+    listed = table(rows, headers) or "No runs."
+    totals = data.get("totals") or {}
+    shown = len(rows)
+    total = int((data.get("pagination") or {}).get("total") or 0)
+    footer = str(totals.get("summary") or "")
+    if total > shown:
+        footer += f" (showing {shown}; use --limit and --offset for more)"
+    switches = [
+        f"{run.get('id')}  {item.get('line')}"
+        for run in data.get("runs", [])
+        for item in run.get("fallbacks") or []
+        if item.get("line")
+    ]
+    if switches:
+        listed += "\n\nProvider switches:\n" + "\n".join(switches)
+    return f"{listed}\n\n{footer}" if footer and rows else listed
+
+
+@runs_app.command("rerun")
+def rerun_run(
+    run_id: str = typer.Argument(..., help="The run to run again, from `rattish runs`."),
+    inputs: list[str] | None = typer.Option(
+        None,
+        "--input",
+        help="A password input the run didn't save, as name=value. Repeat for more.",
+    ),
+    workflow_id: str | None = typer.Option(
+        None, "--workflow", help="The run's workflow. Found from the run ID when left out."
+    ),
+    wait: bool = typer.Option(False, "--wait", help="Wait for the new run to finish."),
+    follow: bool = typer.Option(
+        False, "--follow", help="Wait, printing run events as NDJSON lines while it runs."
+    ),
+    timeout: opts.Timeout = None,
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Run a workflow again with the same inputs and trigger events as an earlier run.
+
+    The new run uses the workflow as it is now. Password inputs are never saved, so
+    give each one again with --input; the error names any that are missing. The run's
+    nodes really run. With --wait the exit code is the new run's, as for `rattish start`.
+    """
+    current = session("rattish runs rerun", output, endpoint, token_file, data_dir)
+    limit = res.duration(current, timeout, 3600)
+    body: dict[str, Any] = {
+        "background": True,
+        "inputs": res.parse_assignments(current, inputs),
+        "startedBy": _started_by(),
+    }
+    if workflow_id:
+        body["workflowId"] = workflow_id
+
+    def call(backend: Backend, out: Output) -> dict[str, Any]:
+        run = dict(
+            backend.request("POST", f"/rattish/runs/{quote(run_id)}/rerun", body).get("run") or {}
+        )
+        new_id = str(run.get("id") or run.get("runId") or "")
+        owner = str(run.get("workflowId") or workflow_id or "")
+        if (wait or follow) and new_id and owner:
+            state = _wait_for_run(backend, out if follow else None, owner, new_id, limit)
+            run = {**run, **state}
+        return run
+
+    finish(
+        current,
+        call,
+        lambda d: f"Run {d.get('id') or d.get('runId')}: {d.get('status', 'started')}",
     )
 
 
@@ -341,11 +573,44 @@ def run_logs(
 
     def text(data: dict[str, Any]) -> str:
         body = data.get("text") or data.get("logText") or data.get("content")
-        if isinstance(body, str):
-            return body
-        return json.dumps(data, indent=2)
+        if not isinstance(body, str):
+            body = json.dumps(data, indent=2)
+        usage = _usage_text(data.get("usage"))
+        return f"{usage}\n\n{body}" if usage else body
 
     finish(current, call, text)
+
+
+def _usage_cells(usage: Any) -> list[str]:
+    """Tokens and estimated cost cells; runs saved before usage tracking show a dash."""
+    if not isinstance(usage, dict):
+        return ["-", "-"]
+    return [str(usage.get("tokensLabel") or "-"), str(usage.get("costLabel") or "-")]
+
+
+def _usage_text(usage: Any) -> str:
+    """A run's usage, then one line per node that called a model."""
+    if not isinstance(usage, dict):
+        return ""
+    lines = [f"Usage: {usage.get('summary')}"]
+    limits = usage.get("limits") or {}
+    caps = [
+        f"{name} {value}"
+        for name, value in (
+            ("max-tokens", limits.get("maxTokens")),
+            ("max-cost-usd", limits.get("maxCostUsd")),
+        )
+        if value is not None
+    ]
+    if caps:
+        lines.append("Limits: " + ", ".join(caps))
+    for node, item in sorted((usage.get("nodes") or {}).items()):
+        if isinstance(item, dict):
+            lines.append(
+                f"  {node}: tokens {item.get('tokensLabel')}, "
+                f"estimated cost {item.get('costLabel')} ({item.get('calls')} calls)"
+            )
+    return "\n".join(lines)
 
 
 @app.command("events")

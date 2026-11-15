@@ -40,8 +40,12 @@ object DesktopViews {
         FileExplorer.OPEN -> FileExplorer.KEY + params.optString("project_id") + "\n" + params.optString("path")
         RemAttachments.OP -> RemAttachments.KEY + params.optString("file_id")
         VoiceTidy.KEY -> VoiceTidy.KEY
-        // Run, stop and resume refresh the workflow screen, whichever run it shows.
+        // Pausing all triggers answers on the workflow list, where its switch is.
+        Workflows.PAUSE -> Workflows.LIST
+        // Run, stop, resume and a trigger's switch refresh the workflow screen, whichever run it shows.
         Workflows.READ, in Workflows.ACTIONS -> Workflows.READ + ":" + params.optString("workflow_id")
+        // Each filter has its own view, so changing one never shows the last filter's runs as this one's.
+        Workflows.RUNS -> Workflows.RUNS + ":" + listOf("since", "status", "workflow_id").joinToString("|") { params.optString(it) }
         in SourceControl.READS - SourceControl.LIST -> SourceControl.viewKey(op, params)
         else -> if (op.startsWith("rem.")) "rem.home" else op
     }
@@ -58,8 +62,10 @@ object DesktopViews {
             organizationBacklogPull = json.optBoolean("organization_backlog_pull"),
             organizationRequests = json.optBoolean("organization_requests"),
             organizationAutoMode = json.optBoolean("organization_auto_mode"),
-            remNoticesFilter = json.optBoolean("rem_notices_filter"), wakeMac = json.opt(WakeOnLan.FIELD) as? String,
-            runPause = json.optBoolean("run_pause"))
+            remNoticesFilter = json.optBoolean("rem_notices_filter"), remNoticesWorkflow = json.optBoolean("rem_notices_workflow"), wakeMac = json.opt(WakeOnLan.FIELD) as? String,
+            runPause = json.optBoolean("run_pause"), threadPurge = json.optBoolean("thread_purge"),
+            workflowRuns = json.optBoolean("workflows") && json.optBoolean("workflow_runs"),
+            workflowTriggers = json.optBoolean("workflows") && json.optBoolean("workflow_triggers"))
         Kanban.BOARD -> Kanban.parseBoard(json)
         Kanban.SELF_WORK -> Kanban.parseSelfWork(json)
         Kanban.TIMELINE -> Kanban.parseTimeline(json)
@@ -73,6 +79,7 @@ object DesktopViews {
             TicketMentions.parseIndex(json.optJSONObject("tickets")))
         Workflows.LIST -> Workflows.parseList(json)
         Workflows.READ -> Workflows.parse(json)
+        Workflows.RUNS -> Workflows.parseRuns(json)
         in SourceControl.READS -> SourceControl.parseView(key, json)
         in FileExplorer.READS -> FileExplorer.parseView(key, json)
         "rem.home" -> RemHome(json.optString("turn_state", "idle"), json.optString("provider"), json.optString("model"), json.optInt("earlier"),
@@ -90,7 +97,8 @@ object DesktopViews {
                 it.optInt("count"), it.objects("steps").map { s -> RemThreadStep(s.optString("kind"), s.optString("title"), s.optString("detail"),
                     s.optString("body"), s.optString("command"), s.optString("status")) }, it.optString("sender")) })
         "organizations.list" -> json.objects("organizations").map { OrganizationSummary(it.optString("organization_id"), it.optString("name"),
-            it.optString("state"), it.optInt("employees"), it.optInt("open_tasks"), it.strings("projects")) }
+            it.optString("state"), it.optInt("employees"), it.optInt("open_tasks"), it.strings("projects"), it.optInt("needs_you"),
+            it.optString("pause_reason"), it.optBoolean("archived")) }
         OrganizationModel.NOTE -> OrganizationModel.parseNote(json)
         DeveloperLog.OP -> DeveloperLog.parse(json)
         "organizations.read" -> Organization(json.optString("organization_id"), json.optString("name"), json.optString("description"),
@@ -291,10 +299,18 @@ data class DesktopOverview(val projects: List<Pair<String, String>>, val rem: Bo
                            val organizationAutoMode: Boolean = false,
                            /** `rem.notices` takes `include` and `mark`, for alerts about work the phone didn't start. */
                            val remNoticesFilter: Boolean = false,
+                           /** `rem.notices` takes the `workflow` switch, for messages workflows send to the phone. */
+                           val remNoticesWorkflow: Boolean = false,
                            /** Set only while the desktop's wake setting is on. */
                            val wakeMac: String? = null,
                            /** The desktop takes `rem.run.pause` and `rem.run.resume`, and runs can be `paused`. */
-                           val runPause: Boolean = false)
+                           val runPause: Boolean = false,
+                           /** The desktop takes thread.manage `delete_permanently`, which also removes its archive copy. */
+                           val threadPurge: Boolean = false,
+                           /** The desktop answers `workflows.runs`, every workflow's runs in one list. */
+                           val workflowRuns: Boolean = false,
+                           /** The desktop lists triggers and takes `workflows.trigger` and `workflows.triggers.pause`. */
+                           val workflowTriggers: Boolean = false)
 /**
  * Rem's reply text added since the phone's last `rem.draft` read; [reset] means [text] is the whole draft. [attempt] numbers
  * Rem's model calls within a reply, so a later read can say which one the phone's text came from; an older desktop omits it.
@@ -497,7 +513,9 @@ data class RemThreadMessage(val id: String, val role: String, val body: String, 
                             /** Who wrote an instruction: `rem` or `user`; empty from an older desktop. */
                             val sender: String = "")
 data class RemThread(val id: String, val title: String, val running: Boolean, val earlier: Int, val messages: List<RemThreadMessage>)
-data class OrganizationSummary(val id: String, val name: String, val state: String, val employees: Int, val openTasks: Int, val projects: List<String>)
+/** [needsYou] counts Rem's requests plus tickets to review, unblock or approve; 0 from an older desktop. */
+data class OrganizationSummary(val id: String, val name: String, val state: String, val employees: Int, val openTasks: Int, val projects: List<String>,
+                               val needsYou: Int = 0, val pauseReason: String = "", val archived: Boolean = false)
 data class OrganizationEmployee(val id: String, val name: String, val title: String, val provider: String, val model: String, val paused: Boolean,
                                 val reportsTo: String = "")
 /** One entry of a ticket's conversation. A status change has [kind] `status`, a headline and its move; an older desktop sends no kind. */

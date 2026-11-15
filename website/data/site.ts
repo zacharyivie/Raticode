@@ -9,6 +9,30 @@
 
 export const defaultSiteUrl = 'https://raticode.dev/'
 
+// Email for support and contact. Components use these; Markdown pages spell the address out,
+// and `npm run check:links` fails if any mailto link on the built site uses another address.
+export const supportEmail = 'support@raticode.dev'
+export const supportMailto = `mailto:${supportEmail}`
+
+// /.well-known/security.txt (RFC 9116) tells security researchers how to report a problem.
+// Expires should be less than a year ahead, so every build sets it 360 days out; the site
+// is rebuilt with each release, which keeps it current. Policy points at the support
+// page's security section.
+export const securityTxtPath = '.well-known/security.txt'
+export const securityTxtLifetimeDays = 360
+
+export function securityTxt(siteUrl: string, now: Date = new Date()): string {
+  const expires = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + securityTxtLifetimeDays))
+  return [
+    `Contact: ${supportMailto}`,
+    `Expires: ${expires.toISOString().replace(/\.\d{3}Z$/, 'Z')}`,
+    'Preferred-Languages: en',
+    `Canonical: ${siteUrl}${securityTxtPath}`,
+    `Policy: ${siteUrl}docs/support#report-a-security-problem`,
+    '',
+  ].join('\n')
+}
+
 export interface SiteLocation {
   /** Full address of the site root, ending in a slash. */
   url: string

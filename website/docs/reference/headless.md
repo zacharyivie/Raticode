@@ -76,6 +76,152 @@ The desktop window normally tells Rem which projects, provider and resources to 
 
 [`Raticode rem settings export --file rem.json`](./cli-rem.md#rem-s-settings) writes this format from a running backend. `Raticode rem settings apply` changes the settings without a restart, but only for folders the backend can already reach. To add a project folder, add it to the settings file and restart.
 
+## Secrets without a keychain
+
+::: info New in 0.5.5
+The secrets folder is new in Raticode 0.5.5.
+:::
+
+Some features keep their secrets in the system keychain: the [Jev](../workflows/jev.md) key, Organizations secrets and webhook signing secrets, usage reporting credentials, and the [workflow secrets](../workflows/inputs.md#secrets) `secret["NAME"]` reads. Servers and containers often have no keychain. A headless backend can read these secrets from a folder of files instead:
+
+```bash
+Raticode serve --headless --secrets-dir ~/.config/raticode/secrets
+```
+
+- Without `--secrets-dir`, the backend uses `$CREDENTIALS_DIRECTORY` when systemd sets it. That's where `LoadCredentialEncrypted=` puts decrypted credentials, so a [systemd service](#with-systemd-credentials) needs no option.
+- Each file holds one secret. It must belong to the account that runs the backend and be mode 600 (or 400), the same rule as `--token-file`. A symlink, or a file other accounts can read, is refused with a message that names the file and never the value.
+- The folder must belong to that account or to root, and other accounts must not be able to add files to it. Otherwise the backend doesn't start.
+- The keychain comes first. A file is used only when the keychain can't give that secret.
+- Raticode only reads the folder. It never writes a secret there, or anywhere else, in plain text. It never reads a secret from an environment variable or a command-line argument: `$CREDENTIALS_DIRECTORY` names only the folder, and the backend removes it from the environment of the providers, workers and commands it starts.
+- Saving still needs the keychain. **Save** in Settings, `Raticode provider jev set-key`, **Save secret** in Workflow settings, `Raticode rattish secrets set` and storing an Organizations credential fail with a message that names `--secrets-dir`. To change a secret, replace its file. Raticode reads the file again each time it needs the secret, so no restart is needed.
+
+| File | Secret |
+| --- | --- |
+| `jev-key` | The Jev API key |
+| `org-secret-ACCOUNT` | An Organizations secret or webhook signing secret. `ACCOUNT` is the secret reference's account, with each `/` written as `.` |
+| `usage-PROVIDER-FIELD` | A usage reporting credential, such as `usage-openai_api-admin_api_key`. For a provider profile, `usage-PROVIDER-PROFILE-FIELD` |
+| `workflow-secret-NAME` | The value `secret["NAME"]` reads in a workflow, such as `workflow-secret-SERVICE_TOKEN`. `NAME` is the secret's name exactly as the workflow writes it |
+
+Usage reporting reads these fields: `claude_code` `oauth_token`; `cursor` `admin_api_key` and `email`; `openai_api` `admin_api_key` and `project_id`; `anthropic_api` `admin_api_key` and `workspace_id`.
+
+An Organizations secret reference names an account. On a server, add a reference whose account is your file's name without `org-secret-`:
+
+```bash
+Raticode api POST /organizations -f action=secret_reference -f organizationId=ORG_ID \
+  -f params.id=github -f params.account=github-token
+```
+
+The backend then reads `org-secret-github-token` wherever an employee's grant uses `secret://github`, or a webhook uses the `github` reference.
+
+A workflow secret needs no setup beyond the file. `secret["SERVICE_TOKEN"]` checks a value saved in the keychain first, then `workflow-secret-SERVICE_TOKEN` in the folder, then the `SERVICE_TOKEN` environment variable. **Workflow settings > Secrets** marks a name the folder provides as **Secrets folder** and lists the folder's workflow secrets, read-only. A file that breaks the rules above stops the run at preflight with a message naming the file; the environment variable isn't used in its place. See [Secrets](../workflows/inputs.md#secrets).
+
+### What's unavailable
+
+At startup, the headless log says where each secret-backed feature gets its secrets and warns about each one that can't work, such as `Unavailable: Usage reporting credentials. No system keychain. Add usage-PROVIDER-FIELD to the secrets folder ...`. `Raticode doctor` lists the same, without network calls:
+
+```bash
+Raticode doctor
+Raticode doctor --secrets-dir ~/.config/raticode/secrets
+```
+
+- `doctor` checks `--secrets-dir`, then `$CREDENTIALS_DIRECTORY`, then the folder of the running headless backend.
+- systemd mounts a service's credentials privately, so `doctor` in your shell may not be able to check them. It says so, and `Raticode api GET /doctor` shows the running backend's own report.
+- Phone pairing has no secrets folder fallback. It needs the keychain for the computer's device identity.
+- The folder belongs to the backend. `Raticode rattish run` runs a workflow inside the CLI process, which doesn't read it, so a jev node there can't use the folder's key and `secret["NAME"]` there can't read `workflow-secret-NAME`. Start runs through the backend with `Raticode rattish start`.
+
+::: warning Same account, same access
+Self-work and reviews that use Claude Code run in [Claude Code's sandbox](../rem/board.md#claude-code-s-sandbox), which hides the secrets folder and `$CREDENTIALS_DIRECTORY` from their shell commands and file tools. Everything else running as the backend's account can still read these files: workers and reviews that use other providers, the worker of a task you ask Rem for, and workflow commands. Removing `$CREDENTIALS_DIRECTORY` from their environment doesn't stop them, because the folder's usual places, such as `/run/credentials/<unit>/`, are easy to guess.
+
+Running the backend under its own account, as with `owner-token`, keeps other programs of yours away from the files, but not these: the backend starts them, so they run as its account. Put in the folder only secrets you'd let any worker read, and use Claude Code for self-work and reviews on projects you don't trust.
+:::
+
+### With systemd credentials
+
+This recipe runs the backend as a systemd user service, so the decrypted files belong to your account. It needs systemd 256 or later, and hasn't been tried with a published build yet.
+
+Encrypt each secret for your user. `systemd-ask-password` asks without showing the value, and the value never goes on a command line:
+
+```bash
+mkdir -p ~/.config/raticode/credentials
+systemd-ask-password -n "Jev key:" \
+  | systemd-creds --user encrypt --name=jev-key - ~/.config/raticode/credentials/jev-key.cred
+systemd-ask-password -n "GitHub token:" \
+  | systemd-creds --user encrypt --name=org-secret-github-token - \
+      ~/.config/raticode/credentials/org-secret-github-token.cred
+systemd-ask-password -n "SERVICE_TOKEN:" \
+  | systemd-creds --user encrypt --name=workflow-secret-SERVICE_TOKEN - \
+      ~/.config/raticode/credentials/workflow-secret-SERVICE_TOKEN.cred
+```
+
+Write `~/.config/systemd/user/raticode.service`:
+
+```ini
+[Unit]
+Description=Raticode headless backend
+
+[Service]
+ExecStart=/usr/local/bin/Raticode serve --headless
+LoadCredentialEncrypted=jev-key:%h/.config/raticode/credentials/jev-key.cred
+LoadCredentialEncrypted=org-secret-github-token:%h/.config/raticode/credentials/org-secret-github-token.cred
+LoadCredentialEncrypted=workflow-secret-SERVICE_TOKEN:%h/.config/raticode/credentials/workflow-secret-SERVICE_TOKEN.cred
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+Start it, keep it running after you log out, and read the startup lines:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now raticode
+loginctl enable-linger "$USER"
+journalctl --user -u raticode -b
+```
+
+- systemd decrypts each credential into `$CREDENTIALS_DIRECTORY` only for this service, mode 400. The backend finds the folder there with no option.
+- Use a user service. A system service with `User=` gets credential files that belong to root, with an access list that lets the service's account read them. They don't belong to the backend's account, so Raticode refuses them.
+- After replacing a `.cred` file, restart the service so systemd decrypts it again.
+
+### With Docker secrets
+
+Docker Compose mounts each file secret into `/run/secrets/` as it is on the host. It ignores a file secret's `uid`, `gid` and `mode` settings, so set the owner and mode on the host file. The owner is the numeric ID of the container's user: `docker run --rm raticode-headless id -u` shows it, usually 1000 for the `raticode` user the [container recipe](#in-a-container) creates.
+
+```bash
+mkdir -m 700 secrets
+(umask 077; read -rsp "Jev key: " key && printf '%s\n' "$key" > secrets/jev-key)
+(umask 077; read -rsp "SERVICE_TOKEN: " value && printf '%s\n' "$value" > secrets/workflow-secret-SERVICE_TOKEN)
+sudo chown -R 1000:1000 secrets
+```
+
+`compose.yaml`:
+
+```yaml
+services:
+  raticode:
+    image: raticode-headless
+    init: true
+    command: ["Raticode", "serve", "--headless", "--secrets-dir", "/run/secrets"]
+    volumes:
+      - raticode-data:/data
+      - raticode-home:/home/raticode
+    secrets:
+      - jev-key
+      - workflow-secret-SERVICE_TOKEN
+secrets:
+  jev-key:
+    file: ./secrets/jev-key
+  workflow-secret-SERVICE_TOKEN:
+    file: ./secrets/workflow-secret-SERVICE_TOKEN
+volumes:
+  raticode-data:
+  raticode-home:
+```
+
+- With plain `docker run`, mount the folder read-only instead: `-v "$PWD/secrets:/run/secrets:ro"`, and add `--secrets-dir /run/secrets` to the command.
+- In a Swarm stack (`docker stack deploy`), Docker does apply `uid`, `gid` and `mode`. Set `uid: "1000"`, `gid: "1000"` and `mode: 0400` on each secret. The default mode, 0444, lets other accounts read the file, so Raticode refuses it.
+- `docker exec raticode Raticode doctor` lists what the backend can and can't use.
+
 ## Turn on Organizations
 
 Organizations are a Feature Preview. A headless backend doesn't read the desktop app's Settings choice, so start it with the environment variable:
@@ -102,7 +248,7 @@ Raticode tokens revoke ci
 
 An agent token acts with Rem's authority, not yours:
 
-- Starting an organization, granting it full access or lifting holds records a consent request that you approve in the Organizations tab. An agent token can't approve it, approve Kanban proposals, store credentials or approve workflow approval gates.
+- Starting an organization, granting it full access or lifting holds records a consent request that you approve in the Organizations tab. An agent token can't approve it, approve Kanban proposals, store credentials or approve workflow approval gates. It also can't give an organization a folder inside Raticode's data folder.
 - It can't send Rem messages, create or change Kanban tickets, or control Rem's tasks and memories, because Rem treats those as your requests. Rem's self-work, for example, starts To-do tickets on its own.
 - It can't change Rem's settings, self-work settings, provider settings or sign-ins, Rem's skills and MCP servers, or retention. It can't pair or control devices, manage folder grants, start chat threads, or read the owner token.
 - It can't create, edit, run, queue, resume, stop or delete workflows, change their triggers, or create, start or control swarms. Editing a workflow and then running it would let it run any command it wrote, with your account.
@@ -118,7 +264,7 @@ Any other change, including endpoints added in later versions, is refused with H
 
 ## What Rem's workers can reach
 
-Raticode never gives either kind of token to Rem's workers, providers or workflow commands. Everything the backend starts runs with `RATICODE_AGENT_SESSION=1` and without `RATICODE_TOKEN` or `RATICODE_TOKEN_FILE`, even if you exported them before starting Raticode.
+Raticode never gives either kind of token to Rem's workers, providers or workflow commands. Everything the backend starts runs with `RATICODE_AGENT_SESSION=1` and without `RATICODE_TOKEN`, `RATICODE_TOKEN_FILE` or `CREDENTIALS_DIRECTORY`, even if they were set when Raticode started.
 
 Inside such a session:
 
@@ -173,6 +319,7 @@ docker exec raticode Raticode doctor
 - Write [Rem's settings](#give-rem-its-settings) to `/data/headless/rem-settings.json`, listing the project folders you mounted, such as `/srv/repos/api`. Then restart the container.
 - To turn on [Organizations](#turn-on-organizations), add `-e RATICODE_EXPERIMENTAL_ORGANIZATIONS=1` to `docker run`.
 - To use your own owner token, mount a file owned by the container's `raticode` user with mode 600 and add `--token-file /run/secrets/raticode-token` to the command. Scripts in the container then need the same `--token-file`.
+- A container has no keychain. Give the backend the Jev key and other keychain secrets with [Docker secrets](#with-docker-secrets).
 - For scripts that shouldn't act as you, create an [agent token](#agent-tokens) with `docker exec raticode Raticode tokens create ci --output /data/ci.token` and pass it with `--token-file`.
 
 Self-work and running organizations spend provider quota with nobody watching, so leave them off unless you mean to use them.

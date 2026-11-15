@@ -10,7 +10,14 @@
 .kb-search input { border: 0; outline: 0; background: transparent; width: 170px; color: var(--ink); }
 .kb-check { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
 .kb-proposed { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: var(--k-decision); }
+/* Self-work approved it on its own: says so in words, quieter than a decision waiting. */
+.kb-auto { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: var(--ink-2, currentColor); }
+.kb-auto-note { display: flex; align-items: flex-start; gap: 6px; margin: 0; padding: 8px 10px; border: 1px dashed var(--line); border-radius: 8px; font-size: 12.5px; color: var(--ink-2, currentColor); }
+.kb-auto-note svg { flex: none; margin-top: 2px; }
 /* Paused keeps its claim but isn't stuck: a quiet chip in words, not the red flag. */
+/* Wraps in a narrow column ("14.6M tokens + 2 unknown") instead of running past the card. */
+.kb-usage { display: inline-flex; align-items: center; gap: 3px; min-width: 0; font-variant-numeric: tabular-nums; color: var(--ink-2, currentColor); }
+.kb-usage svg { flex: none; }
 .kb-paused { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: var(--ink-2, currentColor); }
 .oh-card.is-paused { border-style: dashed; }
 
@@ -69,6 +76,7 @@
 .kb-stack .kb-more { width: 28px; height: 28px; background: var(--todo-soft); color: var(--todo); font-size: 10.5px; font-weight: 700; line-height: 1; }
 .kb-scope { display: flex; gap: 5px; align-items: flex-start; margin: 0; font-size: 11px; color: var(--review); line-height: 1.3; }
 .kb-scope svg { margin-top: 1px; }
+.oh-card .kb-scope span, .oh-card .kb-wait-notice span { min-width: 0; overflow-wrap: anywhere; }
 .kb-field { display: grid; gap: 4px; font-size: 12px; font-weight: 600; }
 .kb-people { display: grid; gap: 18px; align-content: start; max-width: 980px; }
 .kb-people-lead { margin: 0; }
@@ -124,3 +132,16 @@
 .kb-entry-details p { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow-y: auto; padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--raised); }
 .kb-comment { display: grid; gap: 6px; justify-items: end; }
 .kb-comment textarea { width: 100%; height: auto; min-height: 52px; padding: 6px 8px; resize: vertical; font: inherit; }
+
+/* Tickets that wait for other tickets. */
+.kb-waits { display: flex; gap: 5px; align-items: flex-start; margin: 0; font-size: 11px; color: var(--muted); line-height: 1.3; }
+.kb-waits svg, .kb-wait-notice svg { flex: none; margin-top: 1px; }
+.kb-waits span { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.kb-wait-notice { display: flex; gap: 6px; align-items: flex-start; margin: 0; font-size: 11px; line-height: 1.35; color: var(--review); }
+.kb-sheet .kb-wait-notice { padding: 8px 10px; border-radius: 8px; background: var(--review-soft); font-size: 12.5px; }
+.kb-wait-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.kb-wait-list li { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12.5px; }
+.kb-wait-list .kb-wait-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kb-wait-list li.is-done .kb-wait-title { color: var(--muted); }
+.rem-away-runs button { background: none; border: 0; padding: 0; cursor: pointer; color: inherit; font: inherit; text-align: left; text-decoration: underline dotted; text-underline-offset: 3px; }
+.rem-away-runs button:hover { text-decoration-style: solid; }

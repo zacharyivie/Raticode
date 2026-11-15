@@ -461,7 +461,7 @@ async def test_a_resume_that_never_started_does_not_block_the_run(
     # The attempt redid nothing, so the earlier run can still be resumed.
     assert run_service.resumed_child(attempt.path.parent, earlier) is None
     state = api.rattish_resume_state_payload(registered.workflow_id, earlier, base)
-    assert state == {"allowed": True, "reason": "", "rerunNodes": ["test"]}
+    assert state == {"allowed": True, "reason": "", "rerunNodes": ["test"], "needsInputs": []}
     listed = api.list_workflow_run_logs_payload(registered.workflow_id, base)["runs"]
     assert {run["id"]: run["resume"]["allowed"] for run in listed} == {
         earlier: True,

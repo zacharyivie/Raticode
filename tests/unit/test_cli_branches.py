@@ -12,7 +12,6 @@ from typer.testing import CliRunner
 
 from gofer.cli.commands import schedule as schedule_cmd
 from gofer.cli.commands import watch as watch_cmd
-from gofer.cli.commands import workflow as workflow_cmd
 from gofer.cli.main import app
 from gofer.core.agent import AgentConfig, AgentResult
 from gofer.core.graph import GraphNode
@@ -21,6 +20,15 @@ from gofer.core.workflow import AgenticWorkflow, WorkflowConfig
 from gofer.ui.chat import workflow_chat_prompt_path
 
 runner = CliRunner()
+
+
+def _unfolded(output: str) -> str:
+    """Join the lines Rich folds at the console width, so long temporary paths still match.
+
+    Parallel pytest workers add a ``popen-gwN`` folder to every temporary path.
+    """
+    return "".join(output.splitlines())
+
 
 _SIMPLE_TOML = """
 [workflow]
@@ -224,7 +232,8 @@ def test_agent_list_filters_by_workflow_and_reports_missing(tmp_path: Path) -> N
 def test_agent_list_empty_and_table_fields(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from gofer.cli.commands import agent as agent_cmd
 
-    monkeypatch.setattr(agent_cmd, "console", Console(width=240))
+    # Wide enough that the prompt path column never folds, however long tmp_path is.
+    monkeypatch.setattr(agent_cmd, "console", Console(width=1000))
     empty = runner.invoke(app, ["agent", "list", "--data-dir", str(tmp_path)])
 
     assert empty.exit_code == 0, empty.output
@@ -546,11 +555,10 @@ def test_agent_run_unknown_subscription_and_invalid_extra_paths(
 
 
 def test_agent_run_displays_external_extra_paths(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     agent_id = _create_agent(tmp_path)
-    extra_dir = tmp_path.parent / "agent-shared-access"
-    extra_dir.mkdir(exist_ok=True)
+    extra_dir = tmp_path_factory.mktemp("agent-shared-access")
     wf = AgenticWorkflow.from_file(tmp_path / f"{agent_id}.toml")
     wf.agents[agent_id] = wf.agents[agent_id].model_copy(update={"extra_paths": [extra_dir]})
     wf.to_file(tmp_path / f"{agent_id}.toml")
@@ -564,7 +572,7 @@ def test_agent_run_displays_external_extra_paths(
     assert result.exit_code == 0, result.output
     assert "Agent filesystem access outside working_dir" in result.output
     assert "outside working_dir" in result.output
-    assert str(extra_dir.resolve()) in result.output
+    assert str(extra_dir.resolve()) in _unfolded(result.output)
     assert sub.calls[0]["extra_paths"] == [extra_dir.resolve()]
 
 
@@ -770,7 +778,7 @@ extra_paths = ["{extra_dir}"]
     assert result.exit_code == 0, result.output
     assert "Agent filesystem access outside working_dir" in result.output
     assert "reviewer" in result.output
-    assert str(extra_dir) in result.output
+    assert str(extra_dir) in _unfolded(result.output)
 
 
 class _FakeWatcher:
@@ -807,7 +815,7 @@ def test_watch_empty_list_and_invalid_toml_skip(tmp_path: Path) -> None:
 def test_watch_start_no_watched_workflows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _FakeWatcher.instances = []
     _create_workflow(tmp_path)
-    monkeypatch.setattr(watch_cmd, "WorkflowWatcher", _FakeWatcher)
+    monkeypatch.setattr("gofer.core.watcher.WorkflowWatcher", _FakeWatcher)
 
     result = runner.invoke(app, ["watch", "start", "--data-dir", str(tmp_path)])
 
@@ -823,7 +831,7 @@ def test_watch_start_shutdowns_on_interrupt(
         _SIMPLE_TOML + '\n[workflow.watch]\npath = "inputs"\nglob = "*.txt"\nmode = "batch"\n',
         encoding="utf-8",
     )
-    monkeypatch.setattr(watch_cmd, "WorkflowWatcher", _FakeWatcher)
+    monkeypatch.setattr("gofer.core.watcher.WorkflowWatcher", _FakeWatcher)
     monkeypatch.setattr(
         "gofer.cli.commands.watch.time.sleep",
         lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()),
@@ -886,7 +894,7 @@ extra_paths = ["{extra_dir}"]
 """.strip(),
         encoding="utf-8",
     )
-    monkeypatch.setattr(watch_cmd, "WorkflowWatcher", _FakeWatcher)
+    monkeypatch.setattr("gofer.core.watcher.WorkflowWatcher", _FakeWatcher)
     monkeypatch.setattr(
         "gofer.cli.commands.watch.time.sleep",
         lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()),
@@ -897,7 +905,7 @@ extra_paths = ["{extra_dir}"]
     assert result.exit_code == 0, result.output
     assert "Agent filesystem access outside working_dir" in result.output
     assert "reviewer" in result.output
-    assert str(extra_dir) in result.output
+    assert str(extra_dir) in _unfolded(result.output)
 
 
 def test_workflow_unresolved_id_and_option_parse_errors(tmp_path: Path) -> None:
@@ -992,8 +1000,8 @@ working_dir = "{node_work_dir}"
     assert result.exit_code == 0, result.output
     assert "Agent filesystem access outside working_dir" in result.output
     assert "reviewer" in result.output
-    assert "extra_paths entry" in result.output
-    assert node_work_dir.name in result.output
+    assert "extra_paths entry" in _unfolded(result.output)
+    assert node_work_dir.name in _unfolded(result.output)
 
 
 def test_workflow_rejects_invalid_fan_source_combinations(tmp_path: Path) -> None:
@@ -1195,7 +1203,7 @@ def test_workflow_list_uses_index_and_supports_json(
     def fail_parse(path: Path) -> object:
         raise AssertionError(f"uncached workflow parse for {path.name}")
 
-    monkeypatch.setattr(workflow_cmd.AgenticWorkflow, "from_file", fail_parse)
+    monkeypatch.setattr(AgenticWorkflow, "from_file", fail_parse)
 
     result = runner.invoke(
         app,

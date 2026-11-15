@@ -10,10 +10,14 @@ import math
 import os
 import re
 import shutil
+import sqlite3
 import stat
 import sys
+import threading
 import uuid
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +29,7 @@ from jsonschema.exceptions import ValidationError  # type: ignore[import-untyped
 from referencing import Registry
 from referencing.exceptions import Unresolvable
 
+from gofer.classifiers.jev import JevClient, JevError, JevQuestion
 from gofer.core.agent import Agent, AgentConfig, AgentResult
 from gofer.core.approvals import (
     APPROVAL_GATE_STOPPED_REASON,
@@ -50,6 +55,7 @@ from gofer.core.structured_output import (
     parse_and_validate_output,
     structured_output_instruction,
 )
+from gofer.core.usage_context import active_usage_observer
 from gofer.rattish.contracts import canonical_json_bytes, json_fingerprint
 from gofer.rattish.ir_validation import (
     InvalidRattishIrError as InvalidRattishIrError,
@@ -62,9 +68,18 @@ from gofer.rattish.ir_validation import (
 from gofer.rattish.project_paths import path_kind, project_path
 from gofer.rattish.prompt_templates import render_prompt_template, render_template_value
 from gofer.rattish.provider_contracts import ProviderContract
+from gofer.rattish.provider_fallback import availability_reason
 from gofer.rattish.provider_runtime import (
     default_provider_subscriptions,
     runtime_subscription_id,
+)
+from gofer.rattish.result_cache import (
+    CACHEABLE_NODE_TYPES,
+    CachedResult,
+    ResultCache,
+    cache_duration_seconds,
+    cache_key,
+    is_cacheable_workflow_id,
 )
 from gofer.rattish.storage import migrate_legacy_directory, workflow_owned_directory
 from gofer.subscriptions.base import Subscription
@@ -75,6 +90,8 @@ from gofer.utils.paths import get_data_dir
 from gofer.utils.process import run_subprocess
 
 log = get_logger(__name__)
+# The data folder whose saved workflow secrets secret["NAME"] reads; None means the default.
+_SECRET_DATA_DIR: ContextVar[Path | None] = ContextVar("rattish_secret_data_dir", default=None)
 
 
 class UnsupportedRattishRuntimeError(RuntimeError):
@@ -99,6 +116,12 @@ class NodeExecutionResult:
     outcome: Literal["success", "allowed_failure", "failure"]
     output: Any
     error: RuntimeErrorInfo | None = None
+    # The provider, profile, model and effort of the last attempt, for provider-backed nodes.
+    provider: Mapping[str, Any] | None = None
+    # Each switch to a fallback provider: from, to, reason and the error that caused it.
+    fallbacks: tuple[Mapping[str, Any], ...] = ()
+    # When the output came from the result cache: when that answer was first made.
+    cached_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +156,10 @@ class RuntimeContext:
     approval_store: ApprovalStore | None = None
     handlers: NodeHandlerRegistry | None = None
     workflow_name: str = ""
+    # None uses the keychain-backed client with the process-wide Jev call limits.
+    jev_client: JevClient | None = None
+    # Saved answers for nodes with cache: DURATION. None (as in test sets) never caches.
+    result_cache: ResultCache | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +197,30 @@ class NodeHandlerRegistry:
         return handler_id in self._handlers
 
 
+# Installed IR and node configuration schemas are long-lived objects, so load_ir
+# reuses one validator per schema object. Each entry keeps its schema alive, which
+# stops id() reuse from matching a different schema.
+_SCHEMA_VALIDATOR_LIMIT = 128
+_schema_validators: OrderedDict[int, tuple[Mapping[str, Any], Draft202012Validator]] = OrderedDict()
+_schema_validators_lock = threading.Lock()
+
+
+def _schema_validator(schema: Mapping[str, Any]) -> Draft202012Validator:
+    key = id(schema)
+    with _schema_validators_lock:
+        entry = _schema_validators.get(key)
+        if entry is not None and entry[0] is schema:
+            _schema_validators.move_to_end(key)
+            return entry[1]
+    validator = Draft202012Validator(schema)
+    with _schema_validators_lock:
+        _schema_validators[key] = (schema, validator)
+        _schema_validators.move_to_end(key)
+        while len(_schema_validators) > _SCHEMA_VALIDATOR_LIMIT:
+            _schema_validators.popitem(last=False)
+    return validator
+
+
 def load_ir(
     document: Mapping[str, Any],
     schema: Mapping[str, Any],
@@ -181,7 +232,7 @@ def load_ir(
     owned = json.loads(json.dumps(document))
     validate_ir_versions(owned)
     try:
-        Draft202012Validator(schema).validate(owned)
+        _schema_validator(schema).validate(owned)
     except ValidationError as exc:
         location = ".".join(str(part) for part in exc.absolute_path) or "$"
         raise InvalidRattishIrError(f"Invalid Rattish IR at {location}: {exc.message}") from exc
@@ -204,7 +255,7 @@ def load_ir(
                 f"Node {node['id']!r} contract identity is stale or invalid."
             )
         try:
-            Draft202012Validator(contract["configuration_schema"]).validate(node["configuration"])
+            _schema_validator(contract["configuration_schema"]).validate(node["configuration"])
         except ValidationError as exc:
             location = ".".join(str(part) for part in exc.absolute_path) or "$"
             raise InvalidRattishIrError(
@@ -219,14 +270,15 @@ def load_ir(
                 raise InvalidRattishIrError(
                     "Loading provider-backed IR requires the installed provider contracts."
                 )
-            installed = provider_contracts.get(provider["provider_id"])
-            if installed is None or (
-                installed.version != provider["contract_version"]
-                or installed.fingerprint != provider["contract_fingerprint"]
-            ):
-                raise InvalidRattishIrError(
-                    f"Node {node['id']!r} provider contract is unavailable or stale."
-                )
+            for choice in (provider, *provider.get("fallback", ())):
+                installed = provider_contracts.get(choice["provider_id"])
+                if installed is None or (
+                    installed.version != choice["contract_version"]
+                    or installed.fingerprint != choice["contract_fingerprint"]
+                ):
+                    raise InvalidRattishIrError(
+                        f"Node {node['id']!r} provider contract is unavailable or stale."
+                    )
 
         workflow = node["resolutions"]["workflow"]
         if workflow is not None:
@@ -318,10 +370,21 @@ async def execute_node(
     notification_adapter: NotificationAdapter | None = None,
     run_id: str | None = None,
     approval_store: ApprovalStore | None = None,
+    jev_client: JevClient | None = None,
+    provider_choice: Mapping[str, Any] | None = None,
+    result_cache: ResultCache | None = None,
 ) -> NodeExecutionResult:
-    """Resolve inputs, dispatch one IR node, and validate successful output."""
+    """Resolve inputs, dispatch one IR node, and validate successful output.
+
+    ``provider_choice`` runs a provider-backed node with one entry of its compiled
+    fallback chain (see ``provider_fallback.provider_choices``) instead of its primary
+    provider. ``result_cache`` lets a node with ``cache: DURATION`` reuse a saved answer
+    (see ``result_cache``); without one, nothing is read from or saved to the cache.
+    """
     _require_validated_ir(ir)
     node = _find_node(ir, node_id)
+    if provider_choice is not None:
+        node = _with_provider_choice(node, provider_choice)
     resolved_data_dir = data_dir or get_data_dir()
     registry = handlers or DEFAULT_NODE_HANDLERS
     context = RuntimeContext(
@@ -344,8 +407,12 @@ async def execute_node(
         approval_store=approval_store,
         handlers=registry,
         workflow_name=str(ir["workflow"].get("name") or ""),
+        jev_client=jev_client,
+        result_cache=result_cache,
     )
     bindings = ResolvedBindings(local={}, environment={}, stdin=None)
+    cache_entry: tuple[str, int] | None = None
+    cached: CachedResult | None = None
     try:
         bindings = _resolve_bindings(node, context)
         effective_node = dict(node)
@@ -357,13 +424,19 @@ async def execute_node(
                 "template" if node["type"] == "prompt-file" else "",
             },
         )
-        handler = registry.require(node["runtime_handler"])
-        timeout_ms = node["execution"]["timeout_ms"]
-        if timeout_ms is None:
-            handled = await handler(effective_node, context, bindings)
+        cache_entry = _result_cache_entry(effective_node, context, bindings, result_cache)
+        if cache_entry is not None and result_cache is not None:
+            cached = result_cache.lookup(context.workflow_id, *cache_entry)
+        if cached is not None:
+            handled = HandlerResult(True, cached.output)
         else:
-            with anyio.fail_after(timeout_ms / 1000):
+            handler = registry.require(node["runtime_handler"])
+            timeout_ms = node["execution"]["timeout_ms"]
+            if timeout_ms is None:
                 handled = await handler(effective_node, context, bindings)
+            else:
+                with anyio.fail_after(timeout_ms / 1000):
+                    handled = await handler(effective_node, context, bindings)
     except TimeoutError as exc:
         timeout_ms = node["execution"]["timeout_ms"]
         handled = HandlerResult(
@@ -441,13 +514,94 @@ async def execute_node(
                 ),
             )
 
+    if handled.success and cached is None and cache_entry is not None and result_cache is not None:
+        try:
+            result_cache.store(
+                context.workflow_id, cache_entry[0], node_id, handled.output, cache_entry[1]
+            )
+        except (OSError, ValueError, TypeError) as exc:
+            # The answer is still good; only the next run's reuse is lost.
+            log.warning("Could not save node %r to the result cache: %s", node_id, exc)
+
     if handled.success:
         outcome: Literal["success", "allowed_failure", "failure"] = "success"
     elif node["execution"]["allow_fail"]:
         outcome = "allowed_failure"
     else:
         outcome = "failure"
-    return NodeExecutionResult(node_id, outcome, handled.output, handled.error)
+    return NodeExecutionResult(
+        node_id,
+        outcome,
+        handled.output,
+        handled.error,
+        cached_at=cached.created_at if cached is not None and handled.success else None,
+    )
+
+
+def _result_cache_entry(
+    node: Mapping[str, Any],
+    context: RuntimeContext,
+    bindings: ResolvedBindings,
+    result_cache: ResultCache | None,
+) -> tuple[str, int] | None:
+    """The cache key and duration for this activation, or None when it doesn't cache.
+
+    A node that read a secret never caches, so neither the secret nor an answer made
+    from it is written to the cache.
+    """
+    if result_cache is None or node["type"] not in CACHEABLE_NODE_TYPES:
+        return None
+    if not is_cacheable_workflow_id(context.workflow_id):
+        return None
+    duration = cache_duration_seconds(node["configuration"].get("cache"))
+    if duration is None or bindings.sensitive_values:
+        return None
+    configuration = node["configuration"]
+    if node["type"] == "common-llm-task":
+        if configuration.get("memory", "none") != "none":
+            return None
+        prompt: Any = common_llm_task_prompt(
+            configuration["task"],
+            str(_binding_or_configuration(bindings, configuration, "target")),
+            str(_binding_or_configuration(bindings, configuration, "instructions")),
+        )
+    else:
+        prompt = {
+            "question": str(_binding_or_configuration(bindings, configuration, "question")),
+            "state": _binding_or_configuration(bindings, configuration, "state"),
+        }
+    key = cache_key(
+        node,
+        project_root=str(context.project_root),
+        prompt=prompt,
+        inputs=bindings.local,
+    )
+    return key, duration
+
+
+def _with_provider_choice(node: Mapping[str, Any], choice: Mapping[str, Any]) -> Mapping[str, Any]:
+    resolution = node["resolutions"].get("provider")
+    if resolution is None:
+        raise ValueError(f"Node {node['id']!r} has no provider to replace.")
+    allowed = [
+        {key: value for key, value in resolution.items() if key != "fallback"},
+        *resolution.get("fallback", ()),
+    ]
+    selected = {key: value for key, value in choice.items() if key != "fallback"}
+    if selected not in allowed:
+        raise ValueError(f"Node {node['id']!r} has no compiled provider choice like that.")
+    configuration = dict(node["configuration"])
+    configuration.update(
+        provider=selected["provider_id"],
+        profile=selected["profile"],
+        model=selected["model"],
+        effort=selected["effort"],
+    )
+    return {
+        **node,
+        "configuration": configuration,
+        "resolutions": {**node["resolutions"], "provider": selected},
+    }
 
 
 async def execute_bash_node(
@@ -480,17 +634,8 @@ async def _agent_handler(
         raise ValueError("Agent IR has no provider resolution.")
     subscription_id = runtime_subscription_id(resolution["provider_id"])
     subscription = context.subscriptions.get(subscription_id)
-    if subscription is None:
-        return HandlerResult(
-            False,
-            "",
-            RuntimeErrorInfo(
-                "provider",
-                "RATTISH_PREFLIGHT_PROVIDER_UNAVAILABLE",
-                f"Provider runtime {resolution['provider_id']!r} is unavailable.",
-                {"provider": resolution["provider_id"]},
-            ),
-        )
+    if subscription is None or not subscription.is_available():
+        return HandlerResult(False, "", _provider_not_installed(resolution))
     settings = resolve_provider_settings(
         agent_subscription=subscription_id,
         profile_name=configuration["profile"],
@@ -552,20 +697,12 @@ async def _agent_handler(
         provider_settings=settings,
     )
     if not result.success:
-        message = result.message or result.output or f"Provider exited with {result.exit_code}."
-        return HandlerResult(
-            False,
-            result.output,
-            RuntimeErrorInfo(
-                "provider",
-                "RATTISH_RUNTIME_PROVIDER_ERROR",
-                message,
-                {
-                    "provider": resolution["provider_id"],
-                    "exit_code": result.exit_code,
-                },
-            ),
-        )
+        reached = _usage_limit_error()
+        if reached is not None:
+            # The run's usage limit stopped this call (or Claude Code's spending cap, set
+            # from the run's remaining budget, did), so the limit is why the node failed.
+            return HandlerResult(False, result.output, reached)
+        return HandlerResult(False, result.output, _provider_call_error(resolution, result))
 
     final_result = result
     output: Any = result.output
@@ -584,6 +721,50 @@ async def _agent_handler(
     if not bindings.sensitive_values:
         _remember_agent_result(node["id"], configuration["memory"], final_result, context)
     return HandlerResult(True, output)
+
+
+def _provider_not_installed(resolution: Mapping[str, Any]) -> RuntimeErrorInfo:
+    """The error for a provider whose runtime or CLI is missing on this computer.
+
+    Another attempt can't install it, so retry-count is skipped and a fallback entry,
+    when the step has one, is tried next.
+    """
+    return RuntimeErrorInfo(
+        "provider",
+        "RATTISH_PREFLIGHT_PROVIDER_UNAVAILABLE",
+        f"Provider runtime {resolution['provider_id']!r} is not installed or available.",
+        {
+            "provider": resolution["provider_id"],
+            "availability": "not_installed",
+            "retryable": False,
+        },
+    )
+
+
+def _provider_call_error(resolution: Mapping[str, Any], result: AgentResult) -> RuntimeErrorInfo:
+    """A failed provider call as a node error, naming an availability problem when it is one."""
+    message = result.message or result.output or f"Provider exited with {result.exit_code}."
+    details: dict[str, Any] = {
+        "provider": resolution["provider_id"],
+        "exit_code": result.exit_code,
+    }
+    reason = availability_reason(
+        "\n".join(part for part in (result.message, result.output) if part), result.exit_code
+    )
+    if reason is not None:
+        details["availability"] = reason
+        if reason == "not_installed":
+            details["retryable"] = False
+    return RuntimeErrorInfo("provider", "RATTISH_RUNTIME_PROVIDER_ERROR", message, details)
+
+
+def _usage_limit_error() -> RuntimeErrorInfo | None:
+    """The run's budget error when a usage limit has ended it, for the node it stopped."""
+    observer = active_usage_observer()
+    reached = observer.limit_reached() if observer is not None else None
+    if reached is None:
+        return None
+    return RuntimeErrorInfo("budget", reached["code"], reached["message"], reached["details"])
 
 
 async def _workflow_handler(
@@ -675,6 +856,7 @@ async def _workflow_handler(
             subscriptions=context.subscriptions,
             data_dir=context.data_dir,
             notification_adapter=context.notification_adapter,
+            result_cache=context.result_cache,
         )
     except InvalidRattishWorkflowInputError as exc:
         return HandlerResult(
@@ -741,6 +923,10 @@ async def _structured_agent_output(
             validation_error = str(exc)
         if attempt == repair_attempts:
             break
+        observer = active_usage_observer()
+        if observer is not None and observer.stop_requested():
+            # The run crossed a usage limit, so it ends instead of paying for a repair.
+            break
         repair_prompt = (
             "Your previous response did not satisfy the required structured output. "
             "Correct it without repeating unrelated work. Return only the corrected JSON "
@@ -757,6 +943,9 @@ async def _structured_agent_output(
         )
         if not result.success:
             validation_error = result.message or result.output or "Provider repair call failed."
+    reached = _usage_limit_error()
+    if reached is not None:
+        return None, result, reached
     return (
         None,
         result,
@@ -993,6 +1182,81 @@ async def _http_request_handler(
     return HandlerResult(True, output)
 
 
+# Jev failure kinds as Rattish error kinds and codes. ``retryable`` in the details tells
+# the workflow runtime to skip retry-count for errors another attempt can't fix.
+_JEV_ERRORS = {
+    "not_configured": ("configuration", "RATTISH_JEV_NOT_CONFIGURED"),
+    "auth": ("provider", "RATTISH_JEV_AUTH"),
+    "rejected": ("provider", "RATTISH_JEV_REJECTED"),
+    "model_unavailable": ("provider", "RATTISH_JEV_MODEL_UNAVAILABLE"),
+    "rate_limited": ("provider", "RATTISH_JEV_RATE_LIMITED"),
+    "unavailable": ("provider", "RATTISH_JEV_UNAVAILABLE"),
+    "network": ("network", "RATTISH_JEV_NETWORK"),
+    "timeout": ("timeout", "RATTISH_JEV_TIMEOUT"),
+    "invalid_response": ("output_validation", "RATTISH_JEV_INVALID_RESPONSE"),
+    "cancelled": ("cancelled", "RATTISH_JEV_CANCELLED"),
+}
+
+
+def _jev_error(exc: JevError) -> RuntimeErrorInfo:
+    kind, code = _JEV_ERRORS[exc.kind]
+    details: dict[str, Any] = {"retryable": exc.retryable}
+    if exc.status is not None:
+        details["status"] = exc.status
+    if exc.retry_after_seconds is not None:
+        details["retry_after_ms"] = math.ceil(exc.retry_after_seconds * 1000)
+    return RuntimeErrorInfo(kind, code, exc.message, details)
+
+
+async def _jev_handler(
+    node: Mapping[str, Any], context: RuntimeContext, bindings: ResolvedBindings
+) -> HandlerResult:
+    configuration = node["configuration"]
+    question_type = configuration["question_type"]
+    criteria = configuration["criteria"]
+    choice = question_type == "choice"
+    question = JevQuestion(
+        question_type,
+        str(_binding_or_configuration(bindings, configuration, "question")),
+        None if choice else criteria.get("yes"),
+        None if choice else criteria.get("no"),
+        dict(configuration["options"]) if choice else None,
+    )
+    threshold = float(configuration["threshold"])
+    client = context.jev_client
+    if client is None:
+        from gofer.classifiers.jev_settings import default_jev_client
+
+        client = default_jev_client(context.data_dir)
+    try:
+        result = await client.classify(
+            model=configuration["model"],
+            state=_binding_or_configuration(bindings, configuration, "state"),
+            question=question,
+            threshold=threshold,
+            long_context=bool(configuration["long_context"]),
+            timeout=_duration_seconds(configuration["request_timeout"]),
+            run_id=context.run_id,
+        )
+    except JevError as exc:
+        return HandlerResult(False, {}, _jev_error(exc))
+    return HandlerResult(
+        True,
+        {
+            "label": result.answer.label,
+            "score": result.answer.score,
+            "probabilities": result.answer.probabilities,
+            "question_type": question_type,
+            "threshold": None if choice else threshold,
+            "model": result.model,
+            "requested_model": result.requested_model,
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            "latency_ms": result.latency_ms,
+        },
+    )
+
+
 async def _notification_handler(
     node: Mapping[str, Any], context: RuntimeContext, bindings: ResolvedBindings
 ) -> HandlerResult:
@@ -1005,10 +1269,15 @@ async def _notification_handler(
 
     channel = str(resolved("channel")).lower()
     urgency = str(resolved("urgency")).lower()
-    if channel not in {"desktop", "slack", "teams", "webhook", "email"}:
+    if channel not in {"desktop", "phone", "slack", "teams", "webhook", "email"}:
         raise ValueError(f"Unsupported notification channel: {channel}")
     if urgency not in {"low", "normal", "critical"}:
         raise ValueError(f"Unsupported notification urgency: {urgency}")
+    if channel == "phone":
+        # The notice leaves this computer, so secrets and password inputs are redacted first.
+        title = _redact_sensitive(str(resolved("title")), bindings.sensitive_values)
+        body = _redact_sensitive(str(resolved("body")), bindings.sensitive_values)
+        return await _phone_notice(context, title, body, urgency)
     headers_value = resolved("headers")
     email_to_value = resolved("email_to")
     if not isinstance(headers_value, Mapping):
@@ -1074,6 +1343,43 @@ async def _notification_handler(
             "channel": channel,
             "urgency": urgency,
         },
+    )
+
+
+async def _phone_notice(
+    context: RuntimeContext, title: str, body: str, urgency: str
+) -> HandlerResult:
+    """Store the notice in the computer's alert store; the phone shows it at its next sync.
+
+    ``sent: true`` means the notice was stored, not that a phone has shown it yet.
+    """
+    from gofer.core.phone_alerts import PhoneAlertStore
+
+    store = PhoneAlertStore(context.data_dir)
+    try:
+        await anyio.to_thread.run_sync(
+            lambda: store.add(
+                title=title,
+                body=body,
+                workflow_id=context.workflow_id,
+                workflow_name=context.workflow_name,
+                run_id=context.run_id,
+            )
+        )
+    except (OSError, sqlite3.Error) as exc:
+        return HandlerResult(
+            False,
+            {},
+            RuntimeErrorInfo(
+                "internal",
+                "RATTISH_NOTIFICATION_SEND_FAILED",
+                f"The phone notice could not be stored: {exc}",
+                {"channel": "phone"},
+            ),
+        )
+    return HandlerResult(
+        True,
+        {"sent": True, "title": title, "body": body, "channel": "phone", "urgency": urgency},
     )
 
 
@@ -1303,16 +1609,8 @@ async def _common_llm_task_handler(
         raise ValueError("Common LLM task IR has no provider resolution.")
     subscription_id = runtime_subscription_id(resolution["provider_id"])
     subscription = context.subscriptions.get(subscription_id)
-    if subscription is None:
-        return HandlerResult(
-            False,
-            "",
-            RuntimeErrorInfo(
-                "provider",
-                "RATTISH_PREFLIGHT_PROVIDER_UNAVAILABLE",
-                f"Provider runtime {resolution['provider_id']!r} is unavailable.",
-            ),
-        )
+    if subscription is None or not subscription.is_available():
+        return HandlerResult(False, "", _provider_not_installed(resolution))
     settings = resolve_provider_settings(
         agent_subscription=subscription_id,
         profile_name=configuration["profile"],
@@ -1347,15 +1645,10 @@ async def _common_llm_task_handler(
         provider_settings=settings,
     )
     if not result.success:
-        return HandlerResult(
-            False,
-            result.output,
-            RuntimeErrorInfo(
-                "provider",
-                "RATTISH_RUNTIME_PROVIDER_ERROR",
-                result.message or result.output or f"Provider exited with {result.exit_code}.",
-            ),
-        )
+        reached = _usage_limit_error()
+        if reached is not None:
+            return HandlerResult(False, result.output, reached)
+        return HandlerResult(False, result.output, _provider_call_error(resolution, result))
     output: Any = result.output
     final_result = result
     if structured:
@@ -2193,7 +2486,31 @@ def _find_node(ir: Mapping[str, Any], node_id: str) -> Mapping[str, Any]:
     raise KeyError(f"IR has no node {node_id!r}")
 
 
+def _secret_value(name: str) -> str | None:
+    """``secret["NAME"]``: the saved workflow secret, then the secrets folder file, then
+    the environment variable."""
+    from gofer.rattish.workflow_secrets import workflow_secret_value
+
+    return workflow_secret_value(name, _SECRET_DATA_DIR.get())
+
+
+def _missing_secret_name(binding: Mapping[str, Any]) -> str | None:
+    source = binding["source"]
+    if source["kind"] != "reference" or source["reference"]["root"] != "secret":
+        return None
+    name = str(source["reference"]["symbol"])
+    return None if _secret_value(name) is not None else name
+
+
 def _resolve_bindings(node: Mapping[str, Any], context: RuntimeContext) -> ResolvedBindings:
+    token = _SECRET_DATA_DIR.set(context.data_dir)
+    try:
+        return _resolve_bindings_in(node, context)
+    finally:
+        _SECRET_DATA_DIR.reset(token)
+
+
+def _resolve_bindings_in(node: Mapping[str, Any], context: RuntimeContext) -> ResolvedBindings:
     local: dict[str, Any] = {}
     environment: dict[str, str] = {}
     workflow_inputs: dict[str, Any] = {}
@@ -2210,6 +2527,13 @@ def _resolve_bindings(node: Mapping[str, Any], context: RuntimeContext) -> Resol
                 context.node_errors,
             )
         except (KeyError, IndexError, TypeError) as exc:
+            missing = _missing_secret_name(binding)
+            if missing is not None:
+                from gofer.rattish.workflow_secrets import not_found_message
+
+                raise ValueError(
+                    f"Binding {binding['name']!r} can't start. {not_found_message(missing)}"
+                ) from exc
             raise ValueError(
                 f"Binding {binding['name']!r} could not resolve its source from the "
                 "available runtime data."
@@ -2301,7 +2625,9 @@ def _binding_value(
         elif reference["root"] == "trigger" and reference["symbol"] == "events":
             value = list(trigger_events)
         elif reference["root"] == "secret":
-            value = os.environ[reference["symbol"]]
+            value = _secret_value(str(reference["symbol"]))
+            if value is None:
+                raise KeyError(reference["symbol"])
         elif reference["root"] == "node":
             if reference["channel"] == "output":
                 value = node_outputs[reference["symbol"]]
@@ -2420,6 +2746,14 @@ def _prepare_workflow_inputs(ir: Mapping[str, Any], supplied: Mapping[str, Any])
                 f"Workflow input {name!r} schema cannot be resolved locally or is recursive."
             ) from None
         if error is not None:
+            from gofer.rattish.run_values import _schema_is_password
+
+            if _schema_is_password(declaration["schema"]):
+                # The message quotes the value, which mustn't appear for a password.
+                raise InvalidRattishWorkflowInputError(
+                    f"Workflow input {name!r} is invalid: it fails the schema's "
+                    f"{error.validator!r} rule."
+                )
             raise InvalidRattishWorkflowInputError(
                 f"Workflow input {name!r} is invalid: {error.message}"
             )
@@ -2585,7 +2919,8 @@ def _reference_value(
     elif root == "trigger" and symbol == "events":
         value = list(trigger_events)
     elif root == "secret":
-        value = os.environ.get(str(symbol), _MISSING)
+        found = _secret_value(str(symbol))
+        value = _MISSING if found is None else found
     elif root == "node" and reference["channel"] == "output":
         value = node_outputs.get(symbol, _MISSING)
     elif root == "node" and reference["channel"] == "status":
@@ -2659,6 +2994,7 @@ DEFAULT_NODE_HANDLERS = NodeHandlerRegistry(
         "raticode.file": _file_handler,
         "raticode.folder": _folder_handler,
         "raticode.http_request": _http_request_handler,
+        "raticode.jev": _jev_handler,
         "raticode.local_search": _local_search_handler,
         "raticode.local_vectorize": _local_vectorize_handler,
         "raticode.loop": _loop_handler,

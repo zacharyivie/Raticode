@@ -1,11 +1,12 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { AlertTriangle, BookOpen, Check, Clock, HeartPulse, Flag, Folder, FolderPlus, Maximize2, Minus, Pencil, Plus, ShieldCheck, SquareKanban, X } from "lucide-react";
+import { AlertTriangle, BookOpen, Check, CircleHelp, Clock, LoaderCircle, Play, HeartPulse, Flag, Folder, FolderPlus, Maximize2, Minus, Pencil, Plus, ShieldCheck, SquareKanban, X } from "lucide-react";
 import {
   COLUMNS, COLUMN_LABELS, activityFeed, claimSummary, describeHours, entity, epicProgress, epicState, epicsOfMilestone, formatDate,
   initialsOf, milestoneProgress, milestonesOfProject, milestonesServing, moveRule, needsYou, openTickets,
-  orgMilestoneProgress, projectProgress, startHint, zoneTime, ticketsOfEpic, ago, timeAgo, workerStatus,
+  orgMilestoneProgress, projectProgress, setupSteps, startHint, zoneTime, ticketsOfEpic, ago, timeAgo, workerStatus,
 } from "../lib/organizationModel.js";
 import { approveAllSummary, monthUsage, organizationRequest, plural } from "../lib/organizations.js";
+import { ORGANIZATION_BOARD_FILTERS, ORGANIZATION_FILTER_KEYS, activeFilterCount, resetFilters } from "../lib/boardFilters.js";
 import ApproveAllRequests from "./OrganizationApproveAll.jsx";
 import AutoMode from "./OrganizationAutoMode.jsx";
 import { clockText, daySegments, describeBlock, zoneClock } from "../lib/organizationSchedule.js";
@@ -102,10 +103,10 @@ export function Avatar({ model, id, size }) {
   const worker = model.workers[id];
   if (!worker) {
     const other = { you: ["You", "var(--accent)"], Raticode: ["R", "var(--run)"], Rem: ["Re", "var(--k-decision)"] }[id];
-    return other ? <span className={`oh-av ${size || ""} other`} style={{ background: other[1] }} title={id === "you" ? "You" : id}>{other[0]}</span>
-      : <span className="oh-av" style={{ background: "var(--faint)" }} title="Unassigned">?</span>;
+    return other ? <span className={`oh-av ${size || ""} other`} style={{ background: other[1] }} title={id === "you" ? "You" : id} role="img" aria-label={id === "you" ? "You" : id}>{other[0]}</span>
+      : <span className="oh-av" style={{ background: "var(--faint)" }} title="Unassigned" role="img" aria-label="Unassigned">?</span>;
   }
-  return <span className={`oh-av ${size || ""}`} style={{ background: worker.color }} title={worker.name}>{initialsOf(worker.name)}</span>;
+  return <span className={`oh-av ${size || ""}`} style={{ background: worker.color }} title={worker.name} role="img" aria-label={worker.name}>{initialsOf(worker.name)}</span>;
 }
 
 export function Chip({ model, refId, onOpen, extra = null }) {
@@ -118,12 +119,14 @@ export function Chip({ model, refId, onOpen, extra = null }) {
 
 export function EvidenceBadges({ claims }) {
   const summary = claimSummary(claims);
+  // Each count has an icon and, for screen readers, its words; the tooltip says the same.
+  const badge = (key, count, Icon, words) => count > 0 && <span className={`oh-ev ${key}`} title={`${count} ${words}`}><Icon size={12} aria-hidden="true" />{count}<span className="oh-sr"> {words}</span></span>;
   return <>
-    {summary.ok > 0 && <span className="oh-ev ok" title={`${summary.ok} verified`}><Check size={12} />{summary.ok}</span>}
-    {summary.warn > 0 && <span className="oh-ev warn" title={`${summary.warn} source changed`}><AlertTriangle size={12} />{summary.warn}</span>}
-    {summary.bad > 0 && <span className="oh-ev bad" title={`${summary.bad} failed`}><X size={12} />{summary.bad}</span>}
-    {summary.pending > 0 && <span className="oh-ev pending" title={`${summary.pending} being checked`}>…{summary.pending}</span>}
-    {summary.none > 0 && <span className="oh-ev none" title={`${summary.none} without verified evidence`}>?{summary.none}</span>}
+    {badge("ok", summary.ok, Check, "verified")}
+    {badge("warn", summary.warn, AlertTriangle, "source changed")}
+    {badge("bad", summary.bad, X, "failed")}
+    {badge("pending", summary.pending, LoaderCircle, "being checked")}
+    {badge("none", summary.none, CircleHelp, "without verified evidence")}
   </>;
 }
 
@@ -200,7 +203,33 @@ function Feed({ model, events, onOpen, onBoard }) {
   </section>;
 }
 
-export function OverviewView({ model, events, busy, onOpen, onAct, go }) {
+// A new organization's first steps, shown until it has run once. Each open step goes
+// straight to the place where it's done.
+function GetStarted({ model, onOpen, go, onStart, onAct, busy }) {
+  const steps = setupSteps(model);
+  if (!steps.length || model.runtime.archived) return null;
+  const next = steps.find(step => !step.done);
+  const left = steps.filter(step => !step.done).length;
+  // Gives each listed worker the organization's folders it can use, as the board's People
+  // view would, one worker at a time; a worker changed meanwhile is refused, not overwritten.
+  async function assign(step) {
+    for (const worker of step.assign) {
+      const ok = await onAct("self_work_projects", { employeeId: worker.id, projects: worker.projects, expectedRevision: worker.revision }, `${worker.name} can now work on their own in ${worker.projects.length === 1 ? "the organization's folder" : `${worker.projects.length} folders`}`);
+      if (!ok) return;
+    }
+  }
+  const act = step => (step.assign ? assign(step) : step.start ? onStart() : step.tab ? go(step.tab) : onOpen(step.open));
+  return <section className="oh-panel oh-setup" aria-labelledby="oh-setup-h">
+    <div className="oh-section-head"><h2 id="oh-setup-h">Get started</h2><span className="oh-muted">{left === 1 ? "One step left" : `${left} steps left`}</span></div>
+    <ol>{steps.map((step, index) => <li key={step.id} className={step.done ? "done" : step === next ? "next" : ""}>
+      <span className="oh-step-mark" aria-hidden="true">{step.done ? <Check size={13} /> : index + 1}</span>
+      <span className="what"><b>{step.label}</b>{!step.done && <small>{step.hint}</small>}</span>
+      {step.done ? <span className="oh-sr">Done</span> : <button className={`oh-btn small ${step === next ? "primary" : ""}`} type="button" disabled={Boolean(step.assign) && (busy || !step.assign.length)} onClick={() => act(step)}>{step.start ? <><Play size={13} />Review and start</> : step.assign ? "Give them projects" : step.id === "worker" && step.open !== "new:worker" ? "Open worker" : step.tab ? "Choose folder" : step.id === "ticket" ? "New ticket" : "Add worker"}</button>}
+    </li>)}</ol>
+  </section>;
+}
+
+export function OverviewView({ model, events, busy, onOpen, onAct, go, onStart }) {
   const { config, runtime } = model;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(config.mission || "");
@@ -227,6 +256,7 @@ export function OverviewView({ model, events, busy, onOpen, onAct, go }) {
         <span><b>{Object.keys(model.knowledge).length}</b>notes</span>
       </div>
     </div>
+    <GetStarted model={model} onOpen={onOpen} go={go} onStart={onStart} onAct={onAct} busy={busy} />
     {model.config.autoMode && <AutoMode organization={model.organization} busy={busy} onAct={onAct} />}
     <Timeline model={model} onOpen={onOpen} />
     <div className="oh-grid-2">
@@ -404,7 +434,7 @@ export function ProjectsView({ model, projectId, onProject, onOpen, onBoard, onA
     </nav>
     <div>
       <div className="oh-panel oh-phead"><span className="oh-mark" style={{ background: project.color }}>{initialsOf(project.name)}</span>
-        <div className="oh-phead-text"><h2>{project.name}</h2><div className="meta">{folder && <span><Folder size={13} /> <code>{folder}</code></span>}{project.lead && <span>Lead {model.workers[project.lead]?.name}</span>}{project.checks.length > 0 && <span>{plural(project.checks.length, "check")}{project.autoRunChecks ? ", rerun after every run" : ", run from tickets"}</span>}</div></div>
+        <div className="oh-phead-text"><h2>{project.name}</h2><div className="meta">{folder && <span title={folder}><Folder size={13} aria-hidden="true" /> <span className="oh-sr">Folder </span><code>{folderName(folder)}</code></span>}{project.lead && <span>Lead {model.workers[project.lead]?.name}</span>}{project.checks.length > 0 && <span>{plural(project.checks.length, "check")}{project.autoRunChecks ? ", rerun after every run" : ", run from tickets"}</span>}</div></div>
         <span className="oh-chips">{people.map(id => <Avatar key={id} model={model} id={id} />)}</span>
         <button className="oh-btn" type="button" onClick={() => onOpen(`project:${project.id}`)}><Pencil size={14} />Details</button>
         <button className="oh-btn" type="button" onClick={() => onBoard({ fProject: project.id })}><SquareKanban size={14} />Open on board</button>
@@ -480,6 +510,8 @@ export function IssuesView({ model, filters, setFilters, busy, onOpen, onMove, o
   const tickets = filterTickets(model, filters);
   const epicsInScope = Object.values(model.epics).filter(epic => filters.fProject === "all" || epic.projectId === filters.fProject);
   const set = values => setFilters(current => ({ ...current, ...values }));
+  // The epics board only narrows by project.
+  const filtersOn = activeFilterCount(filters, ORGANIZATION_BOARD_FILTERS, filters.board === "epics" ? ["fProject"] : ORGANIZATION_FILTER_KEYS);
   const drop = column => event => {
     event.preventDefault(); setOver(null); setDragging(false);
     const ticket = model.tickets[event.dataTransfer.getData("text/plain")];
@@ -496,15 +528,16 @@ export function IssuesView({ model, filters, setFilters, busy, onOpen, onMove, o
   const toolbar = <div className="oh-toolbar">
     <div className="oh-seg" role="group" aria-label="Board type"><button type="button" aria-pressed={filters.board === "tickets"} onClick={() => set({ board: "tickets" })}>Tickets</button><button type="button" aria-pressed={filters.board === "epics"} onClick={() => set({ board: "epics" })}>Epics</button></div>
     <label className="oh-sr" htmlFor="oh-f-project">Project</label>
-    <select id="oh-f-project" value={filters.fProject} onChange={event => set({ fProject: event.target.value, fEpic: "all" })}><option value="all">All projects</option>{Object.values(model.projects).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+    <select id="oh-f-project" className={filters.fProject !== "all" ? "oh-filter-on" : ""} value={filters.fProject} onChange={event => set({ fProject: event.target.value, fEpic: "all" })}><option value="all">All projects</option>{Object.values(model.projects).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
     {filters.board === "tickets" && <>
       <label className="oh-sr" htmlFor="oh-f-worker">Worker</label>
-      <select id="oh-f-worker" value={filters.fWorker} onChange={event => set({ fWorker: event.target.value })}><option value="all">Everyone</option>{Object.values(model.workers).map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select>
+      <select id="oh-f-worker" className={filters.fWorker !== "all" ? "oh-filter-on" : ""} value={filters.fWorker} onChange={event => set({ fWorker: event.target.value })}><option value="all">Everyone</option>{Object.values(model.workers).map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select>
       <label className="oh-sr" htmlFor="oh-f-epic">Epic</label>
-      <select id="oh-f-epic" value={filters.fEpic} onChange={event => set({ fEpic: event.target.value })}><option value="all">All epics</option><option value="none">No epic</option>{epicsInScope.map(e => <option key={e.id} value={e.id}>{e.title}</option>)}</select>
-      <label className="oh-toggle"><input type="checkbox" checked={filters.mine} onChange={event => set({ mine: event.target.checked })} />Needs me</label>
+      <select id="oh-f-epic" className={filters.fEpic !== "all" ? "oh-filter-on" : ""} value={filters.fEpic} onChange={event => set({ fEpic: event.target.value })}><option value="all">All epics</option><option value="none">No epic</option>{epicsInScope.map(e => <option key={e.id} value={e.id}>{e.title}</option>)}</select>
+      <label className={`oh-toggle ${filters.mine ? "oh-filter-on" : ""}`}><input type="checkbox" checked={filters.mine} onChange={event => set({ mine: event.target.checked })} />Needs me</label>
       <label className="oh-toggle"><input type="checkbox" checked={filters.group} onChange={event => set({ group: event.target.checked })} />Lanes by epic</label>
     </>}
+    {filtersOn ? <button className="oh-btn small ghost" type="button" data-testid="org-reset-filters" aria-label={`Clear filters, ${filtersOn} on`} onClick={() => setFilters(current => resetFilters(current, ORGANIZATION_BOARD_FILTERS, ORGANIZATION_FILTER_KEYS))}><X size={13} aria-hidden="true" />Clear filters ({filtersOn})</button> : null}
     <span className="grow" /><span className="oh-muted">{filters.board === "tickets" ? plural(tickets.length, "ticket") : ""}</span>
   </div>;
   if (filters.board === "epics") {

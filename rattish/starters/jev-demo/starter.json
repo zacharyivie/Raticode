@@ -1,0 +1,12 @@
+{
+  "starterVersion": 1,
+  "id": "jev-demo",
+  "name": "Jev demo",
+  "summary": "Asks Jev whether a message wants a refund and which team should answer it, then branches on each label and score.",
+  "order": 6,
+  "docsPath": "/docs/starters/jev-demo",
+  "providers": [
+    "jev"
+  ],
+  "secrets": []
+}

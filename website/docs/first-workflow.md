@@ -20,6 +20,8 @@ Raticode rattish create "Hello Raticode" --project ./my-project --format json
 
 Use a real project folder. The reply's `workflow.sourcePath` is the file to edit. Raticode picks the ID, so don't assume it's the name without spaces.
 
+To begin from something that already works instead, pick one of the [starter workflows](./starters/index.md) in **Start from** (from 0.5.5).
+
 ## Edit the source
 
 Replace the contents of the returned `workflow.rattish` with:

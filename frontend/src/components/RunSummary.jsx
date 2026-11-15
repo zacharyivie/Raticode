@@ -2,7 +2,7 @@ import { useState } from "react";
 import { AlertCircle, CheckCircle2, Circle, CircleSlash, Loader2, Square, Unplug, X } from "lucide-react";
 import { distinctWorkflowRunRecords, exactWorkflowRunStopPath, formatRunAge, sortWorkflowRunsNewestFirst, workflowRunSummary } from "../lib/workflowRuns";
 
-const LABELS = { running: "Running", queued: "Queued", submitting: "Submitting", stopping: "Stopping", success: "Succeeded", error: "Failed", stopped: "Stopped", cancelled: "Cancelled", disconnected: "Disconnected", unknown: "Unknown" };
+const LABELS = { running: "Running", queued: "Queued", submitting: "Submitting", stopping: "Stop requested", success: "Succeeded", error: "Failed", stopped: "Stopped", cancelled: "Cancelled", disconnected: "Disconnected", unknown: "Unknown" };
 
 const ACTIVE_STATUSES = new Set(["running", "queued", "submitting", "stopping"]);
 

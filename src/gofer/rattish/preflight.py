@@ -21,6 +21,7 @@ from gofer.core.provider_profiles import (
 from gofer.rattish.diagnostics import RattishDiagnostic, RattishError, SourcePosition, SourceSpan
 from gofer.rattish.project_paths import path_kind, project_path
 from gofer.rattish.prompt_templates import PromptTemplateError, validate_prompt_template
+from gofer.rattish.provider_fallback import provider_choices
 from gofer.rattish.provider_runtime import (
     default_provider_subscriptions,
     runtime_subscription_id,
@@ -29,6 +30,12 @@ from gofer.rattish.runtime import (
     DEFAULT_NODE_HANDLERS,
     NodeHandlerRegistry,
     _workflow_interface_fingerprint,
+)
+from gofer.rattish.workflow_secrets import (
+    WorkflowSecretError,
+    how_to_add,
+    not_found_message,
+    workflow_secret_value,
 )
 from gofer.subscriptions.base import Subscription
 from gofer.utils.paths import get_data_dir
@@ -81,6 +88,20 @@ class PreflightRegistry:
         return self._checks.get((handler_id, check_id))
 
 
+def _secret_problem(name: str, data_dir: Path) -> tuple[str, str, str | None] | None:
+    """Why ``secret[name]`` can't resolve, or None.
+
+    ("missing" | "unreadable", message, the source that failed: "keychain",
+    "secrets folder" or None).
+    """
+    try:
+        if workflow_secret_value(name, data_dir) is not None:
+            return None
+    except WorkflowSecretError as exc:
+        return "unreadable", str(exc), exc.source
+    return "missing", not_found_message(name), None
+
+
 def run_preflight(
     ir: Mapping[str, Any],
     *,
@@ -119,19 +140,25 @@ def run_preflight(
             for reference in _binding_references(source):
                 if reference["root"] != "secret":
                     continue
-                secret_name = reference["symbol"]
-                if secret_name in os.environ or binding["default"]["present"]:
+                secret_name = str(reference["symbol"])
+                problem = _secret_problem(secret_name, context.data_dir)
+                # A default covers a secret nobody set, not a saved one the keychain won't give.
+                if problem is None or (binding["default"]["present"] and problem[0] == "missing"):
                     continue
                 diagnostics.append(
                     RattishDiagnostic(
                         code="RATTISH_PREFLIGHT_SECRET_UNAVAILABLE",
                         severity="error",
                         phase="preflight",
-                        message=f"Environment secret {secret_name!r} is unavailable.",
+                        message=problem[1],
                         file=node["source_span"]["file"],
                         span=_source_span(node["source_span"]),
-                        details={"node": node["id"], "secret": secret_name},
-                        suggestions=(f"Set {secret_name} before running this workflow.",),
+                        details={
+                            "node": node["id"],
+                            "secret": secret_name,
+                            **({"source": problem[2]} if problem[2] else {}),
+                        },
+                        suggestions=(how_to_add(secret_name),),
                     )
                 )
         if not runtime_handlers.supports(node["runtime_handler"]):
@@ -230,17 +257,42 @@ def _may_be_created_upstream(node: Mapping[str, Any]) -> bool:
     return bool(node["readiness"]["needs"])
 
 
-def _agent_provider_available(
-    node: Mapping[str, Any], context: PreflightContext
-) -> PreflightFailure | None:
-    provider_id = node["resolutions"]["provider"]["provider_id"]
+def _provider_installed(provider_id: str, context: PreflightContext) -> tuple[bool, str]:
+    subscription_id: str
     try:
         subscription_id = runtime_subscription_id(provider_id)
     except ValueError:
         subscription_id = provider_id
     subscription = context.subscriptions.get(subscription_id)
-    if subscription is not None and subscription.is_available():
+    return subscription is not None and subscription.is_available(), subscription_id
+
+
+def _agent_provider_available(
+    node: Mapping[str, Any], context: PreflightContext
+) -> PreflightFailure | None:
+    """The step can run when its provider, or any of its fallback providers, is installed.
+
+    A missing primary provider with an installed fallback is a fallback the run will
+    take, which ``fallback-provider-available`` reports as a warning.
+    """
+    choices = provider_choices(node)
+    provider_id = choices[0]["provider_id"]
+    installed, subscription_id = _provider_installed(provider_id, context)
+    if installed or any(
+        _provider_installed(choice["provider_id"], context)[0] for choice in choices[1:]
+    ):
         return None
+    if len(choices) > 1:
+        names = ", ".join(repr(choice["provider_id"]) for choice in choices)
+        return PreflightFailure(
+            "RATTISH_PREFLIGHT_PROVIDER_UNAVAILABLE",
+            f"None of the step's providers ({names}) is installed or available.",
+            {
+                "provider": provider_id,
+                "subscription": subscription_id,
+                "providers": [choice["provider_id"] for choice in choices],
+            },
+        )
     return PreflightFailure(
         "RATTISH_PREFLIGHT_PROVIDER_UNAVAILABLE",
         f"Provider runtime {provider_id!r} is not installed or available.",
@@ -248,15 +300,63 @@ def _agent_provider_available(
     )
 
 
+def _agent_fallback_provider_available(
+    node: Mapping[str, Any], context: PreflightContext
+) -> PreflightFailure | None:
+    """Warn about uninstalled providers in a step that has a fallback list."""
+    choices = provider_choices(node)
+    if len(choices) < 2:
+        return None
+    missing = [
+        index
+        for index, choice in enumerate(choices)
+        if not _provider_installed(choice["provider_id"], context)[0]
+    ]
+    if not missing or len(missing) == len(choices):
+        # All missing is the provider-available error, not a warning on top of it.
+        return None
+    names = ", ".join(repr(choices[index]["provider_id"]) for index in missing)
+    return PreflightFailure(
+        "RATTISH_PREFLIGHT_FALLBACK_PROVIDER_UNAVAILABLE",
+        (
+            f"Provider {names} is not installed or available, so the step will skip it."
+            if len(missing) == 1
+            else f"Providers {names} are not installed or available, so the step will skip them."
+        ),
+        {
+            "providers": [choices[index]["provider_id"] for index in missing],
+            "fallback": [index - 1 for index in missing if index > 0],
+            "primary_missing": 0 in missing,
+        },
+    )
+
+
 def _agent_profile_compatible(
     node: Mapping[str, Any], context: PreflightContext
 ) -> PreflightFailure | None:
-    resolution = node["resolutions"]["provider"]
+    """Every provider in the step's chain must have a usable profile and credentials."""
+    for index, choice in enumerate(provider_choices(node)):
+        failure = _choice_profile_problem(choice, context)
+        if failure is not None:
+            if index:
+                return PreflightFailure(
+                    failure.code,
+                    f"Fallback entry {index} ({choice['provider_id']}): {failure.message}",
+                    {**failure.details, "fallback": index - 1},
+                )
+            return failure
+    return None
+
+
+def _choice_profile_problem(
+    resolution: Mapping[str, Any], context: PreflightContext
+) -> PreflightFailure | None:
+    profile = resolution["profile"]
     try:
         subscription_id = runtime_subscription_id(resolution["provider_id"])
         settings = resolve_provider_settings(
             agent_subscription=subscription_id,
-            profile_name=node["configuration"]["profile"],
+            profile_name=profile,
             operation_model=resolution["model"],
             operation_effort=resolution["effort"],
             data_dir=context.data_dir,
@@ -270,7 +370,7 @@ def _agent_profile_compatible(
         return PreflightFailure(
             "RATTISH_PREFLIGHT_PROFILE_UNAVAILABLE",
             str(exc),
-            {"provider": resolution["provider_id"], "profile": node["configuration"]["profile"]},
+            {"provider": resolution["provider_id"], "profile": profile},
         )
     missing_secrets = unresolved_provider_secret_refs(settings)
     if missing_secrets:
@@ -279,6 +379,21 @@ def _agent_profile_compatible(
             "Provider credentials are unavailable: " + ", ".join(missing_secrets),
             {"secrets": missing_secrets},
         )
+    if settings.local:
+        from gofer.core.local_models import preflight_problem
+
+        problem = preflight_problem(settings)
+        if problem is not None:
+            return PreflightFailure(
+                "RATTISH_PREFLIGHT_PROVIDER_UNAVAILABLE",
+                problem,
+                {
+                    "provider": resolution["provider_id"],
+                    "profile": profile,
+                    "model": settings.model,
+                    "api_base_url": settings.api_base_url,
+                },
+            )
     return None
 
 
@@ -437,11 +552,16 @@ def _approval_store_ready(
 
 
 def _rem_ready(node: Mapping[str, Any], context: PreflightContext) -> PreflightFailure | None:
-    from gofer.ui.rem_workflow import existing_store
+    from gofer.ui.rem_workflow import RemWorkflowError, existing_store
 
     _ = node
     try:
         store = existing_store(context.data_dir)
+    except RemWorkflowError as exc:
+        # A damaged database: the message says to restart Raticode to restore it.
+        return PreflightFailure(
+            "RATTISH_PREFLIGHT_REM_UNAVAILABLE", exc.message, {"path": str(context.data_dir)}
+        )
     except (OSError, sqlite3.Error) as exc:
         return PreflightFailure(
             "RATTISH_PREFLIGHT_REM_UNAVAILABLE",
@@ -468,7 +588,11 @@ def _rem_task_available(
         if store is None:
             raise RemWorkflowError("rem", "", "")
         task_record(store, task_id)
-    except RemWorkflowError:
+    except RemWorkflowError as exc:
+        if exc.code == "RATTISH_REM_UNAVAILABLE":
+            return PreflightFailure(
+                "RATTISH_PREFLIGHT_REM_UNAVAILABLE", exc.message, {"path": str(context.data_dir)}
+            )
         return PreflightFailure(
             "RATTISH_PREFLIGHT_REM_TASK_UNAVAILABLE",
             f"Rem task {task_id!r} doesn't exist or was deleted. Choose another task.",
@@ -767,6 +891,25 @@ def _notification_channel_available(
     )
 
 
+def _notification_phone_paired(
+    node: Mapping[str, Any], context: PreflightContext
+) -> PreflightFailure | None:
+    if any(binding["name"] == "channel" for binding in node["bindings"]):
+        return None
+    if node["configuration"]["channel"] != "phone":
+        return None
+    from gofer.core.phone_alerts import phone_paired
+
+    if phone_paired(context.data_dir):
+        return None
+    return PreflightFailure(
+        "RATTISH_PREFLIGHT_NOTIFICATION_NO_PHONE",
+        "No phone is paired with this computer. The run still stores the notice, "
+        "but no phone will show it.",
+        {"channel": "phone"},
+    )
+
+
 def _read_encoding_supported(
     node: Mapping[str, Any], context: PreflightContext
 ) -> PreflightFailure | None:
@@ -1057,6 +1200,27 @@ def _child_workflow_ready(
     )
 
 
+def _jev_configured(node: Mapping[str, Any], context: PreflightContext) -> PreflightFailure | None:
+    """A saved, turned-on Jev key; checked without reading the keychain or calling Jev."""
+    _ = node
+    from gofer.classifiers.jev_settings import jev_enabled, jev_key_configured
+
+    if not jev_key_configured(context.data_dir):
+        return PreflightFailure(
+            "RATTISH_PREFLIGHT_JEV_NOT_CONFIGURED",
+            "No Jev key is saved. Add one in Settings > Providers > Jev, or run "
+            "`Raticode provider jev set-key`.",
+            {},
+        )
+    if not jev_enabled(context.data_dir):
+        return PreflightFailure(
+            "RATTISH_PREFLIGHT_JEV_DISABLED",
+            "Jev is turned off in Settings > Providers > Jev.",
+            {},
+        )
+    return None
+
+
 def _source_span(value: Mapping[str, Any]) -> SourceSpan:
     return SourceSpan(
         SourcePosition(**value["start"]),
@@ -1068,6 +1232,7 @@ DEFAULT_PREFLIGHT_CHECKS = PreflightRegistry(
     {
         ("raticode.agent", "provider-available"): _agent_provider_available,
         ("raticode.agent", "profile-compatible"): _agent_profile_compatible,
+        ("raticode.agent", "fallback-provider-available"): _agent_fallback_provider_available,
         ("raticode.agent", "prompt-path-readable"): _agent_prompt_path_readable,
         ("raticode.agent", "working-dir-available"): _agent_working_dir_available,
         ("raticode.approval_gate", "approval-store-ready"): _approval_store_ready,
@@ -1082,8 +1247,13 @@ DEFAULT_PREFLIGHT_CHECKS = PreflightRegistry(
         ("raticode.file", "path-readable"): _read_path_readable,
         ("raticode.folder", "path-readable"): _folder_path_readable,
         ("raticode.http_request", "network-target-valid"): _http_network_target_valid,
+        ("raticode.jev", "jev-configured"): _jev_configured,
         ("raticode.common_llm_task", "provider-available"): _agent_provider_available,
         ("raticode.common_llm_task", "profile-compatible"): _agent_profile_compatible,
+        (
+            "raticode.common_llm_task",
+            "fallback-provider-available",
+        ): _agent_fallback_provider_available,
         ("raticode.common_llm_task", "working-dir-available"): _agent_working_dir_available,
         ("raticode.local_vectorize", "source-readable"): _local_vector_source_readable,
         ("raticode.local_vectorize", "index-destination-ready"): _local_vector_destination_ready,
@@ -1094,6 +1264,7 @@ DEFAULT_PREFLIGHT_CHECKS = PreflightRegistry(
         ("raticode.loop", "source-ready"): _loop_source_ready,
         ("raticode.notification", "channel-configured"): _notification_channel_configured,
         ("raticode.notification", "channel-available"): _notification_channel_available,
+        ("raticode.notification", "phone-paired"): _notification_phone_paired,
         ("raticode.prompt_file", "template-readable"): _prompt_template_readable,
         ("raticode.prompt_file", "destination-ready"): _destination_ready,
         ("raticode.prompt_file", "encoding-supported"): _write_encoding_supported,

@@ -47,6 +47,9 @@
 .oh .st-blocked { color: var(--blocked); background: var(--blocked-soft); } .oh .st-done { color: var(--done); background: var(--done-soft); }
 .oh .st-todo, .oh .st-backlog, .oh .st-idle, .oh .st-planned { color: var(--todo); background: var(--todo-soft); }
 .oh .st-paused { color: var(--review); background: var(--review-soft); }
+.oh .st-archived { color: var(--todo); background: var(--todo-soft); }
+/* A running organization's dot breathes, so "Running" reads at a glance without color alone. */
+.oh-state.st-running .oh-dot { animation: oh-pulse 2s ease-in-out infinite; }
 .oh .st-working { color: var(--run); background: var(--run-soft); } .oh .st-needs { color: var(--blocked); background: var(--blocked-soft); }
 .oh-btn { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 11px; border-radius: 7px; border: 1px solid var(--line) !important; background: var(--panel) !important; font-weight: 550; font-size: 12.5px; white-space: nowrap; }
 .oh-btn:hover:not(:disabled) { border-color: var(--line-strong) !important; background: var(--raised) !important; }
@@ -64,16 +67,21 @@
 .oh-search .lbl { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .oh-search kbd { margin-left: auto; font: 11px ui-monospace, monospace; padding: 0 5px; border: 1px solid var(--line); border-radius: 4px; white-space: nowrap; }
 @container oh (max-width: 900px) { .oh-search { min-width: 0; } .oh-search .lbl, .oh-search kbd { display: none; } }
-.oh-tabs { display: flex; gap: 4px; padding: 0 14px; background: var(--panel); border-bottom: 1px solid var(--line); overflow-x: auto; }
+.oh-tabs { display: flex; gap: 4px; padding: 0 14px; background: var(--panel); border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
+.oh-tabs::-webkit-scrollbar { display: none; }
 .oh-tabs button { display: inline-flex; align-items: center; gap: 7px; padding: 10px 10px 9px; border-bottom: 2px solid transparent !important; color: var(--muted); font-weight: 550; white-space: nowrap; }
 .oh-tabs button:hover { color: var(--ink); }
 .oh-tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent) !important; }
+@layer utilities { .oh .oh-tabs button:focus-visible { outline-offset: -3px !important; } }
 .oh-count { min-width: 18px; padding: 0 5px; height: 18px; border-radius: 99px; display: inline-grid; place-items: center; font-size: 11px; font-weight: 700; background: var(--blocked-soft); color: var(--blocked); }
 .oh-view { flex: 1; overflow: auto; padding: 20px 24px 60px; min-height: 0; }
 .oh-view:focus { outline: none; }
 .oh-banner { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; padding: 8px 12px; border-radius: 8px; background: var(--review-soft); color: var(--review); font-weight: 550; }
 .oh-banner.bad { background: var(--blocked-soft); color: var(--blocked); }
-.oh-banner span { flex: 1; }
+.oh-banner span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.oh-banner.stale { background: var(--panel); color: var(--ink); border: 1px solid var(--line-strong); border-left: 3px solid var(--review); font-weight: 500; }
+.oh-banner.stale > svg { color: var(--review); }
+.oh-banner.stale small { display: block; color: var(--muted); font-size: 11.5px; }
 .oh-start { margin-bottom: 18px; }
 .oh-hint-line { color: var(--muted); margin: 10px 2px; }
 
@@ -102,7 +110,15 @@
 .oh-ev.ok { color: var(--done); } .oh-ev.warn { color: var(--review); } .oh-ev.bad { color: var(--blocked); } .oh-ev.none { color: var(--faint); } .oh-ev.pending, .oh-ev.run { color: var(--run); }
 .oh-empty { padding: 18px; text-align: center; color: var(--muted); margin: 0; }
 .oh-blank { display: grid; justify-items: center; gap: 8px; padding: 40px 20px; text-align: center; color: var(--muted); }
-.oh-blank h2 { margin: 0; color: var(--ink); font-size: 16px; }
+.oh-blank h2 { margin: 0; color: var(--ink); font-size: 16px; font-weight: 700; }
+.oh-fail { max-width: 520px; margin: 48px auto 0; }
+.oh-fail > svg { color: var(--blocked); }
+.oh-fail .oh-row { justify-content: center; }
+/* Loading outline: the page's shape in soft blocks while the first read arrives. */
+.oh-skel { display: block; height: 12px; width: 100%; border-radius: 6px; background: var(--todo-soft); animation: oh-pulse 1.4s ease-in-out infinite; flex-shrink: 0; }
+.oh-skel-tabs { display: flex; gap: 22px; align-items: center; height: 41px; padding: 0 24px; }
+.oh-skel-panel { display: grid; gap: 12px; padding: 22px 24px; margin-bottom: 18px; }
+.oh-skel-panel.tall { min-height: 180px; align-content: start; }
 .oh-blank p { margin: 0 0 6px; max-width: 46ch; }
 .oh-add-row { display: flex; align-items: center; gap: 6px; padding: 8px 18px; width: 100%; color: var(--muted); font-weight: 550; border-top: 1px solid var(--line) !important; }
 .oh-add-row:hover { background: var(--raised); color: var(--ink); }
@@ -127,8 +143,17 @@
 .oh-ms-row { display: grid; grid-template-columns: minmax(180px, 1.4fr) 92px minmax(120px, 1fr) minmax(160px, 1.6fr); gap: 14px; align-items: center; padding: 9px 8px; border-radius: 8px; text-align: left; width: 100%; }
 .oh-ms-row:hover { background: var(--raised); }
 .oh-ms-row b { font-weight: 650; }
-.oh-grid-2 { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 18px; }
+.oh-grid-2 { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 18px; align-items: start; }
 .oh-needs, .oh-feed { padding: 16px 18px; }
+.oh-setup { padding: 16px 18px; margin-bottom: 14px; border-left: 3px solid var(--accent); }
+.oh-setup ol { list-style: none; margin: 0; padding: 0; }
+.oh-setup li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 9px 0; border-top: 1px solid var(--line); }
+.oh-setup .what b { display: block; font-weight: 600; }
+.oh-setup .what small { color: var(--muted); }
+.oh-setup li.done .what b { color: var(--muted); font-weight: 500; text-decoration: line-through; }
+.oh-step-mark { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; font-size: 12px; font-weight: 700; border: 1px solid var(--line); color: var(--muted); }
+.oh-setup li.next .oh-step-mark { border-color: var(--accent); color: var(--accent); }
+.oh-setup li.done .oh-step-mark { border-color: transparent; color: var(--done); background: var(--done-soft); }
 .oh-need { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
 .oh-need:first-of-type { border-top: 0; }
 .oh-need .what b { display: block; font-weight: 600; }
@@ -155,7 +180,7 @@
 .oh-plist small { color: var(--muted); }
 .oh-phead { padding: 16px 20px; margin-bottom: 14px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
 .oh-phead-text { flex: 1; min-width: 200px; }
-.oh-phead h2 { margin: 0; font-size: 18px; }
+.oh-phead h2 { margin: 0 0 2px; font-size: 18px; font-weight: 700; }
 .oh-phead .meta { display: flex; gap: 16px; color: var(--muted); font-size: 12px; flex-wrap: wrap; align-items: center; }
 .oh-phead .meta span { display: inline-flex; gap: 4px; align-items: center; }
 .oh-milestone { margin-bottom: 14px; overflow: hidden; }
@@ -179,33 +204,40 @@
 .oh-seg button { padding: 4px 11px; border-radius: 6px; font-weight: 550; color: var(--muted); }
 .oh-seg button[aria-pressed="true"] { background: var(--soft); color: var(--accent); }
 .oh-toolbar select, .oh-kb-tools select, .oh-inline-select { height: 30px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); padding: 0 8px; max-width: 220px; }
-.oh-inline-select { height: 28px; margin-top: 6px; }
+.oh-inline-select { display: block; height: 28px; margin-top: 6px; }
 .oh-toggle { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-weight: 550; }
+/* A filter that narrows the board stands out, so a filter kept from an earlier visit is never a surprise. */
+.oh-toolbar select.oh-filter-on, .oh-toolbar .kb-search.oh-filter-on { border-color: var(--accent); background: var(--soft); color: var(--ink); }
+.oh-toolbar .oh-toggle.oh-filter-on, .oh-toolbar .kb-check.oh-filter-on { color: var(--accent); }
 .oh-legend { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .oh-board-wrap { overflow-x: auto; padding-bottom: 6px; }
 .oh-board { display: grid; grid-template-columns: repeat(5, minmax(210px, 1fr)); gap: 12px; min-width: 1080px; align-items: start; }
 .oh-board.epics { grid-template-columns: repeat(3, minmax(260px, 1fr)); min-width: 820px; }
-.oh-board .col { background: var(--raised); border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; min-height: 140px; }
+.oh-board .col { background: var(--raised); border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; min-height: 140px; min-width: 0; }
 .oh-board .col.lane { min-height: 70px; }
 .oh-board .col.lane-head { min-height: 0; background: none; border: 0; }
 .oh-board .col > header { display: flex; align-items: center; gap: 8px; padding: 10px 12px 6px; font-weight: 650; }
 .oh-board .col > header .n { color: var(--faint); font-weight: 600; font-variant-numeric: tabular-nums; }
-.oh-board .col-body { padding: 4px 8px 8px; display: grid; gap: 7px; align-content: start; flex: 1; border-radius: 8px; transition: background .12s; }
+/* One track exactly as wide as the column. An `auto` track grew to the widest card's longest
+   unbreakable line, so cards spilled over the next column (Done painted over Blocked). */
+.oh-board .col-body { padding: 4px 8px 8px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; align-content: start; flex: 1; border-radius: 8px; transition: background .12s; }
 .oh-board .col-body.over { background: var(--soft); }
 .oh-lane-label { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; margin: 6px 0 -2px; font-weight: 650; }
 .oh-lane-label .oh-bar { max-width: 120px; }
-.oh-card { display: grid; gap: 6px; padding: 9px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; text-align: left; width: 100%; cursor: grab; position: relative; }
+.oh-card { display: grid; gap: 6px; padding: 9px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; text-align: left; width: 100%; min-width: 0; cursor: grab; position: relative; }
 .oh-card:hover { border-color: var(--line-strong); box-shadow: var(--shadow); }
 .oh-card .row1 { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--faint); min-width: 0; }
 .oh-card .row1 .oh-key { white-space: nowrap; }
 .oh-card .row1 > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .oh-card .title { font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
-.oh-card .row3 { display: flex; align-items: center; gap: 10px; font-size: 11.5px; color: var(--muted); }
-.oh-card .row3 > span:not(.oh-av) { display: inline-flex; align-items: center; gap: 3px; }
+/* A narrow column wraps the person, token count and badges onto more lines instead of widening the card. */
+.oh-card .row3 { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 11.5px; color: var(--muted); min-width: 0; }
+.oh-card .row3 > span:not(.oh-av) { display: inline-flex; align-items: center; gap: 3px; min-width: 0; overflow-wrap: anywhere; }
 .oh-card.is-running { border-left: 3px solid var(--run); cursor: default; }
 .oh-card.is-review { border-left: 3px solid var(--review); }
 .oh-card.flagged { border-left: 3px solid var(--blocked); }
-.oh-card .flag { font-size: 11px; color: var(--blocked); font-weight: 600; display: flex; gap: 5px; align-items: center; }
+.oh-card .flag { font-size: 11px; color: var(--blocked); font-weight: 600; display: flex; gap: 5px; align-items: center; min-width: 0; overflow-wrap: anywhere; }
+.oh-card .flag > span { min-width: 0; }
 .oh-card .livebar { height: 3px; border-radius: 99px; background: var(--run-soft); overflow: hidden; }
 .oh-card .livebar i { display: block; width: 40%; height: 100%; background: var(--run); animation: oh-slide 1.6s ease-in-out infinite; }
 @keyframes oh-slide { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
@@ -382,7 +414,20 @@ button.oh-node:hover { box-shadow: var(--shadow); border-color: var(--line-stron
   .oh-view { padding: 16px 14px 60px; }
   .oh-mission p.statement { font-size: 19px; }
 }
-@container oh (max-width: 560px) { .oh-two { grid-template-columns: 1fr; } }
+@container oh (max-width: 560px) {
+  .oh-two { grid-template-columns: 1fr; }
+  /* Small windows: the name gets the room, and sections show their icons with the open one named. */
+  .oh-top { gap: 8px; padding: 8px 10px; }
+  .oh-top .oh-mark, .oh-top .oh-block-pill { display: none; }
+  .oh-tabs { padding: 0 6px; gap: 0; }
+  .oh-tabs button { flex: 1 0 auto; justify-content: center; padding: 10px 8px 9px; }
+  .oh-tabs button[aria-selected="false"] .lbl { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .oh-view { padding: 12px 10px 60px; }
+  .oh-mission { padding: 16px; }
+  .oh-mission .facts { gap: 12px 18px; }
+  .oh-detail-head h2 { font-size: 19px; }
+  .oh-detail-body { padding: 4px 14px 14px; }
+}
 
 /* Details fill the main content, below the tabs */
 .oh-detail { max-width: 980px; margin: 0 auto; display: grid; gap: 10px; }
@@ -393,8 +438,10 @@ button.oh-node:hover { box-shadow: var(--shadow); border-color: var(--line-stron
 .oh-esc-hint { color: var(--faint); font-size: 11.5px; }
 .oh-esc-hint kbd { font: 11px ui-monospace, monospace; padding: 0 5px; border: 1px solid var(--line); border-radius: 4px; }
 .oh-detail-head { display: grid; gap: 8px; padding: 4px 0 12px; border-bottom: 1px solid var(--line); }
-.oh-detail-head h2 { margin: 0; font-size: 22px; line-height: 1.25; letter-spacing: -.01em; overflow-wrap: anywhere; }
-.oh-detail-head h2:focus { outline: none; }
+.oh-detail-head h2 { margin: 0; font-size: 22px; font-weight: 700; line-height: 1.25; letter-spacing: -.01em; overflow-wrap: anywhere; }
+/* Headings and the view take focus only so screen readers land in the right place; they aren't controls.
+   The app's focus ring is an important rule in the utilities layer, so this override lives there too. */
+@layer utilities { .oh :is(h1, h2, h3)[tabindex="-1"]:focus-visible, .oh .oh-view[tabindex="-1"]:focus-visible { outline: none !important; } }
 .oh-detail-body { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 4px 22px 18px; }
 .oh-detail-body > .oh-form { padding-top: 14px; }
 .oh-detail-body .oh-rec { grid-template-columns: 110px minmax(0, 1fr); }
@@ -452,8 +499,8 @@ button.oh-node:hover { box-shadow: var(--shadow); border-color: var(--line-stron
 .oh-card .oh-wait { display: flex; gap: 5px; align-items: center; font-size: 11px; font-weight: 550; color: var(--muted); min-width: 0; }
 .oh-card .oh-wait span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .oh-card .oh-wait.you { color: var(--review); }
-.oh-next { margin: 0; font-weight: 550; }
-.oh-next.run { color: var(--run); } .oh-next.you { color: var(--review); } .oh-next.wait { color: var(--muted); }
+.oh-next-hint { margin: 0; font-weight: 550; }
+.oh-next-hint.run { color: var(--run); } .oh-next-hint.you { color: var(--review); } .oh-next-hint.wait { color: var(--muted); }
 
 /* Working hours: header pill, overview panel and editor. */
 .oh-hours-pill { border: 0 !important; cursor: pointer; }

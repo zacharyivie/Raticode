@@ -579,7 +579,7 @@ publishing on:
 3. Settings > Secrets and variables > Actions > Variables: add the repository variable
    `AUR_PUBLISH` with the value `true`.
 4. Optional: repository variables `AUR_COMMIT_NAME` and `AUR_COMMIT_EMAIL` change the
-   AUR commit author (default: Zack Ivie, publisheddoonk@gmail.com).
+   AUR commit author (default: Zack Ivie, support@raticode.dev).
 
 The AUR asks maintainers to keep checking automated updates by hand, so keep the
 required reviewer and read the run's namcap output before approving. To rotate the

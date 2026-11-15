@@ -11,6 +11,11 @@ import { formatKeybinding } from "./settings.js";
 
 export const VOICE_COMMAND_ID = "voice.dictate";
 export const DEFAULT_VOICE_BINDING = "Mod+Alt+KeyV";
+// Dictate to Rem from any app: a system-wide shortcut, off until Settings > Devices turns
+// it on. It is separate from the in-app shortcut so Hold to talk keeps working inside
+// Raticode (a system-wide key can't tell when it is let go).
+export const ANYWHERE_COMMAND_ID = "voice.dictateAnywhere";
+export const DEFAULT_ANYWHERE_BINDING = "Ctrl+Alt+Space";
 
 // "toggle": press once to start and again to stop. "hold": listen only while held.
 export const DICTATION_MODES = [["toggle", "Press to start and stop"], ["hold", "Hold to talk"]];
@@ -26,9 +31,10 @@ const listeners = new Set();
 let waiting = null;
 
 /**
- * entry: { root: () => Element|null, toggle: () => void, press: () => void,
+ * entry: { root: () => Element|null, toggle: (options?) => void, press: () => void,
  *          release: () => void, available: () => boolean, dictating: () => boolean,
- *          lastUsed: number }
+ *          rem?: () => boolean, lastUsed: number }
+ * rem says the box talks to Rem; only those take dictation from other apps.
  */
 export function registerVoiceComposer(entry) {
   composers.add(entry);
@@ -101,6 +107,87 @@ export function requestVoiceDictation({ reveal = () => {}, waitMs = 1500, stepMs
     };
     later(retry, stepMs);
   });
+}
+
+// Dictation from another app goes to Rem: the Rem box already dictating, else the Rem box
+// you're typing in, else a visible Rem box, else Rem's box even while Rem isn't on screen
+// (its words wait there, or are sent with Send after dictation on). Most recently used first.
+export function pickRemComposer(active = globalThis.document?.activeElement) {
+  const entries = [...composers].filter((entry) => entry.rem?.());
+  const dictating = entries.find((entry) => entry.dictating());
+  if (dictating) return dictating;
+  const usable = entries.filter((entry) => entry.available());
+  const focused = usable.find((entry) => active && entry.root()?.contains?.(active));
+  if (focused) return focused;
+  return usable
+    .map((entry) => ({ entry, shown: visible(entry.root()) }))
+    .sort((left, right) => Number(right.shown) - Number(left.shown) || right.entry.lastUsed - left.entry.lastUsed)[0]?.entry ?? null;
+}
+
+/**
+ * The system-wide shortcut was pressed while Raticode may be in the background: start
+ * dictating into Rem's box, or stop the dictation in progress. Never moves the window
+ * forward or changes what it shows; reveal() only loads Rem's chat when it hasn't been
+ * opened yet. Resolves to { ok, message }; message says why nothing started.
+ */
+export function requestAnywhereDictation({ reveal = () => {}, waitMs = 5000, stepMs = 50 } = {}) {
+  const now = pickRemComposer();
+  if (now) {
+    now.toggle({ anywhere: true });
+    return Promise.resolve({ ok: true });
+  }
+  const busy = [...composers].some((entry) => entry.rem?.() && !entry.available());
+  if (busy) return Promise.resolve({ ok: false, message: "Rem is still answering in the open chat. Try again when it's done." });
+  reveal();
+  return new Promise((resolve) => {
+    const deadline = Date.now() + waitMs;
+    const retry = () => {
+      const entry = pickRemComposer();
+      if (entry) {
+        entry.toggle({ anywhere: true });
+        resolve({ ok: true });
+      } else if (Date.now() >= deadline) {
+        resolve({ ok: false, message: "Rem's chat didn't load. Open Rem in Raticode, then try again." });
+      } else {
+        later(retry, stepMs);
+      }
+    };
+    later(retry, stepMs);
+  });
+}
+
+/** Stops a dictation that was started from another app (the overlay's Stop button). */
+export function stopAnywhereDictation() {
+  const entry = [...composers].find((candidate) => candidate.dictating() && candidate.anywhere?.());
+  entry?.toggle();
+  return Boolean(entry);
+}
+
+// What a dictation started from another app is doing, for the desktop's listening
+// overlay: { phase, global, message, sent }. Never the words.
+const phaseListeners = new Set();
+export function onVoicePhase(listener) {
+  phaseListeners.add(listener);
+  return () => phaseListeners.delete(listener);
+}
+export function announceVoicePhase(state) {
+  for (const listener of phaseListeners) {
+    try { listener(state); } catch { /* A listener's failure doesn't stop dictation. */ }
+  }
+}
+
+// The system-wide shortcut's state from the desktop app, for Settings > Devices.
+let anywhereStatus = null;
+const statusListeners = new Set();
+export function setAnywhereStatus(next) {
+  anywhereStatus = next && typeof next === "object" ? next : null;
+  for (const listener of statusListeners) listener();
+}
+export function useAnywhereStatus() {
+  return useSyncExternalStore((listener) => {
+    statusListeners.add(listener);
+    return () => statusListeners.delete(listener);
+  }, () => anywhereStatus, () => anywhereStatus);
 }
 
 // window.setTimeout, as elsewhere in the app, so tests can drive the wait.

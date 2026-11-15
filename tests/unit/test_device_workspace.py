@@ -491,6 +491,35 @@ def test_phone_read_state_reaches_the_desktop_and_archiving_marks_read(applicati
     assert (remote["archived"], remote["unread"]) == (False, False)
 
 
+def test_phone_delete_permanently_asks_the_desktop_to_purge_the_archive(application, tmp_path):
+    app, peer = application
+    context, meta, shared = share(app, peer, tmp_path)
+    thread = shared["thread_id"]
+    assert not app.workspace.export(peer, thread)["purge_requested"]
+    request = event(
+        "thread.manage",
+        thread_id=thread,
+        payload={"action": "delete_permanently", "expected_revision": 1},
+    )
+    response = app.handle(peer, request)[0]
+    assert response["payload"]["delete_pending"]
+    exported = app.workspace.export(peer, thread)
+    assert exported["delete_requested"] and exported["purge_requested"]
+    assert app.workspace.exchange(peer, meta, [], context, 2)["purge_requested"]
+
+
+def test_phone_plain_delete_keeps_the_archive_copy(application, tmp_path):
+    app, peer = application
+    _context, _meta, shared = share(app, peer, tmp_path)
+    thread = shared["thread_id"]
+    request = event(
+        "thread.manage", thread_id=thread, payload={"action": "delete", "expected_revision": 1}
+    )
+    app.handle(peer, request)
+    exported = app.workspace.export(peer, thread)
+    assert exported["delete_requested"] and not exported["purge_requested"]
+
+
 def test_phone_delete_waits_for_renderer_and_blocks_new_work(application, tmp_path):
     app, peer = application
     context, meta, shared = share(app, peer, tmp_path)

@@ -12,7 +12,10 @@ Raticode is a Python CLI (the `Raticode` command) and desktop workflow studio. W
 # Install for development
 pip install -e ".[dev]"
 
-# Run all tests
+# Run all tests on 8 cores (pytest-xdist, in the dev extras)
+python -m pytest -n 8 --dist worksteal
+
+# Run all tests in one process (also works without pytest-xdist)
 python -m pytest
 
 # Run specific test categories
@@ -29,7 +32,48 @@ mypy src tests
 # Linting and formatting
 ruff check src tests --fix
 ruff format src tests
+
+# Frontend tests, from frontend/ after `nvm use`
+npm test              # unit tests in one process, slow browser and git files beside it
+npm run test:serial   # everything in one process
 ```
+
+### Full test runs
+
+- Parallel runs must give the same results as `python -m pytest`. Tests get their
+  own HOME, data folders and temporary folders from `tests/conftest.py`; use
+  `tmp_path`, port 0 and the isolated data folder rather than shared paths,
+  fixed ports or `tmp_path.parent`. Collection must be the same in every worker,
+  so parametrized IDs can't contain random values. Mark a test
+  `@pytest.mark.serial` only when it can't be isolated: it then runs alone under
+  `-n` (`tests/helpers/serial_tests.py`). Don't drop it.
+- Rich folds output at 80 columns and xdist makes temporary paths longer, so
+  compare paths in CLI output after joining the lines.
+- `npm test` (`frontend/electron/tests/run-tests.cjs`) runs the files in its
+  `SEPARATE` list in their own processes, 2 at a time beside the unit tests.
+  Add a new slow real-browser or git file there. `RATICODE_TEST_JOBS` changes
+  the count.
+- Memory: the backend suite on 8 workers peaked at about 2.3 GB (process RSS),
+  under a 6 GB cap. The frontend run without browsers peaked at about 1.7 GB;
+  nobody has measured it with real browsers yet. Inside a capped scope
+  `npm test` ends with `ℹ memory_peak_mib`.
+- Unattended full runs, such as the nightly, run both suites capped. From the
+  repository root, with the project's `.venv` synced with the `dev` extra:
+
+  ```bash
+  env -u FORCE_COLOR NO_COLOR=1 PYTHONPATH=src systemd-run --user --scope --quiet -p MemoryMax=6G -p MemorySwapMax=0 --setenv=PATH=$PATH .venv/bin/python -m pytest -n 8 --dist worksteal -q -p no:cacheprovider --no-header -rf tests
+  ```
+
+  and from `frontend/`:
+
+  ```bash
+  env -u FORCE_COLOR systemd-run --user --scope --quiet -p MemoryMax=4G -p MemorySwapMax=0 npm test
+  ```
+
+  Keep `RATICODE_TEST_JOBS` at its default of 2 until a run with real browsers
+  records `memory_peak_mib`. Raise it to 3 only if that peak is well under 4096.
+  When `.venv` has no pytest-xdist, drop `-n 8 --dist worksteal`; the suite
+  then runs in one process.
 
 ## Repository layout
 
@@ -51,7 +95,7 @@ ruff format src tests
 
 Layer structure:
 
-- `src/gofer/cli/` - Typer CLI; routes commands to workflow, agent, schedule, and builder command modules.
+- `src/gofer/cli/` - Typer CLI; routes commands to workflow, agent, schedule, and builder command modules. Every CLI call imports every command module, so import the workflow engine, scheduler, agent core, Rattish runtime and other heavy modules inside the command functions that use them. Typer reads each command's option types when the CLI starts, so those types must stay cheap to import. `tests/unit/test_cli_startup_imports.py` fails if SQLAlchemy, APScheduler or NetworkX load at startup.
 - `src/gofer/core/` - Domain logic: operations, graph, workflow, executor, and scheduler.
 - `src/gofer/subscriptions/` - ABC for LLM CLI backends such as Claude Code and Codex. Subclasses primarily override `_build_command()`.
 - `src/gofer/prompts/` - Markdown prompt templates with `{{var}}` interpolation.
@@ -127,6 +171,11 @@ Node step-2:
   fails if a test skips this. Agents put their own scratch files, logs and build
   output in a private folder on disk, not `/tmp`, and delete it when the task ends.
   Keep only what a report cites as evidence.
+- That private folder is outside the repository, for example
+  `~/.cache/<task>-tmp`, never in the main checkout or a worktree (no
+  `TMPDIR=$PWD/.scratch` or `$PWD/../../.scratch`). The main checkout is on the
+  branch the user's app runs from and must stay clean. `tests/conftest.py`
+  refuses to run with a temp folder inside a checkout.
 - A test that starts a Vite dev server passes `cacheDir: testViteCacheDir()`
   from `frontend/electron/tests/test-vite-cache.cjs`. Worktrees link
   `node_modules` to the main checkout, so the default cache is the one the

@@ -30,6 +30,9 @@ function context(platform, signing, packaged = true, smoke = false, packageType 
     RELEASES_URL: "https://github.com/zacharyivie/Raticode/releases",
     isSmokeTest: smoke,
     updateState: state,
+    updateScheduler: null,
+    isNoPublishedVersionsError: () => false,
+    describeUpdateError: (error) => error.message,
     setUpdateState: (patch) => Object.assign(state, patch),
     checkLatestReleaseFallback: async () => { calls.push("manual-check"); return { checking: false }; },
     shell: { openExternal: async (url) => calls.push(url.endsWith(".dmg") ? "mac-installer" : "release-page") },
@@ -173,7 +176,7 @@ function updaterContext(platform) {
     quitAndInstall: () => calls.push("auto-install"),
   });
   const sandbox = {
-    app: { isPackaged: true, getVersion: () => "0.5.4" },
+    app: { isPackaged: true, getVersion: () => "0.5.4", on: () => {} },
     process: { platform, arch: "arm64", resourcesPath: "/resources", execPath: MAC_APP },
     path: path.posix,
     fs: { constants: { W_OK: 2 }, accessSync: () => {}, readFileSync: () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); } },
@@ -183,6 +186,7 @@ function updaterContext(platform) {
     mainWindow: undefined,
     updateState: { available: true, info: { version: "0.5.5" } },
     installUpdateAfterDownload: false,
+    updateScheduler: null,
     isNoPublishedVersionsError: () => false,
     prepareLifecycle: async () => { calls.push("prepare"); return true; },
     stopBackend: () => calls.push("stop-backend"),
@@ -439,4 +443,41 @@ test("the renderer never reports a failed check as up to date", () => {
   assert.deepEqual({ ...sandbox.updateCheckNotice({ available: false, error: "" }) }, { type: "success", message: "Raticode is up to date" });
   assert.equal(sandbox.updateCheckNotice({ available: true, info: { version: "0.5.4" } }).message, "Raticode 0.5.4 is available");
   assert.equal(sandbox.updateCheckNotice({ info: { noReleases: true } }).message, "No published Raticode releases yet");
+});
+
+test("an updater that answers nothing reports a failure instead of up to date", async () => {
+  const { sandbox } = context("linux", "unsigned");
+  sandbox.autoUpdater.checkForUpdates = async () => null;
+  sandbox.updateState.available = false;
+  const state = await sandbox.checkForUpdates();
+  assert.match(state.error, /can't check for updates/);
+  assert.equal(state.checking, false);
+  assert.equal(state.available, false);
+});
+
+test("a manual check goes through the running scheduler so it can't overlap an automatic one", async () => {
+  const { sandbox, calls } = context("linux", "unsigned");
+  sandbox.updateScheduler = { checkNow: async () => { calls.push("shared"); return { shared: true }; } };
+  assert.deepEqual(await sandbox.checkForUpdates(), { shared: true });
+  assert.deepEqual(calls.filter((call) => !call.startsWith("read ")), ["shared"]);
+});
+
+test("a failed check records when GitHub's rate limit resets", async () => {
+  const { sandbox } = context("linux", "unsigned");
+  sandbox.autoUpdater.checkForUpdates = async () => { throw Object.assign(new Error("limited"), { userFacing: true, retryAt: 1_900_000_000_000 }); };
+  const state = await sandbox.checkForUpdates();
+  assert.equal(state.error, "limited");
+  assert.equal(state.retryAt, 1_900_000_000_000);
+});
+
+test("GitHub's rate-limit headers become a retry time", () => {
+  const start = source.indexOf("function updateRetryAt(");
+  const sandbox = {};
+  vm.createContext(sandbox);
+  vm.runInContext(source.slice(start, source.indexOf("function macInstallerUrl(")), sandbox);
+  const response = (status, headers) => ({ status, headers: { get: (name) => headers[name] ?? null } });
+  assert.equal(sandbox.updateRetryAt(response(403, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1900000000" })), 1_900_000_000_000);
+  assert.equal(sandbox.updateRetryAt(response(429, { "retry-after": "120" }), 1000), 121_000);
+  assert.equal(sandbox.updateRetryAt(response(403, {})), 0);
+  assert.equal(sandbox.updateRetryAt(response(500, { "retry-after": "120" })), 0);
 });

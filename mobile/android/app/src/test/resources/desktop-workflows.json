@@ -129,6 +129,114 @@
   "updated_at": "2026-10-31T20:05:22.665477+00:00",
   "workflow_id": "phone-check"
  },
+ "read.inputs": {
+  "controls": {
+   "resume": {
+    "allowed": false,
+    "reason": "There is no run to resume."
+   },
+   "run": {
+    "allowed": true,
+    "reason": ""
+   },
+   "stop": {
+    "allowed": false,
+    "reason": "No run is going right now."
+   }
+  },
+  "description": "1 node, 0 routes.",
+  "earlier_runs": 0,
+  "edges": [],
+  "inputs": [
+   {
+    "default": 3,
+    "description": "",
+    "has_default": true,
+    "kind": "integer",
+    "label": "count",
+    "maximum": 9,
+    "minimum": 1,
+    "name": "count",
+    "required": false,
+    "secret": false
+   },
+   {
+    "default": false,
+    "description": "",
+    "has_default": true,
+    "kind": "boolean",
+    "label": "dry",
+    "name": "dry",
+    "required": false,
+    "secret": false
+   },
+   {
+    "description": "",
+    "has_default": false,
+    "json_type": "object",
+    "kind": "json",
+    "label": "extra",
+    "name": "extra",
+    "required": false,
+    "secret": false
+   },
+   {
+    "choices": [
+     "fast",
+     "safe"
+    ],
+    "default": "safe",
+    "description": "",
+    "has_default": true,
+    "kind": "choice",
+    "label": "mode",
+    "name": "mode",
+    "required": false,
+    "secret": false
+   },
+   {
+    "description": "Where to ship",
+    "has_default": false,
+    "kind": "text",
+    "label": "Target",
+    "name": "target",
+    "required": true,
+    "secret": false
+   },
+   {
+    "description": "",
+    "has_default": true,
+    "kind": "text",
+    "label": "token",
+    "name": "token",
+    "required": false,
+    "secret": true
+   }
+  ],
+  "latest_run": null,
+  "name": "Phone check",
+  "nodes": [
+   {
+    "kind": "bash-command",
+    "label": "work",
+    "node_id": "work"
+   }
+  ],
+  "preview": {
+   "blocking": [],
+   "destructive": [
+    "work: command, filesystem write"
+   ],
+   "warnings": []
+  },
+  "project_name": "Notes",
+  "revision": "sha256:bd0565dcf92068e387fa66c174dbb38cfac08f61ade2880549050077d08dec91",
+  "run": null,
+  "runs": [],
+  "status": "idle",
+  "updated_at": "2026-11-14T19:43:56.677366+00:00",
+  "workflow_id": "phone-check"
+ },
  "read.running": {
   "controls": {
    "resume": {

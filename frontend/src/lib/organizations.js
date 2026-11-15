@@ -247,6 +247,27 @@ export function attentionSummary(tasks = [], runtime = {}) {
   };
 }
 
+// Why Start would leave work waiting: setup gaps first, then the reasons the rehearsal gives
+// for open tickets that can't start, most common first.
+export function startBlockers(organization, preview) {
+  const { config, runtime } = organization;
+  const workers = config.employees || [];
+  const tasks = runtime.tasks || [];
+  const gaps = [];
+  if (!workers.length) gaps.push("There are no workers yet. Add one first.");
+  else if (workers.every(worker => worker.paused)) gaps.push("Every worker is held. Release a hold so someone can work.");
+  if (!(config.projectRoots || []).length) gaps.push("The organization owns no project folder, so workers have nowhere to work.");
+  if (!tasks.some(isOpenTask)) gaps.push("There are no open tickets. Add one in To do with a worker assigned.");
+  const open = new Set(tasks.filter(task => isOpenTask(task) && !task.claim).map(task => task.id));
+  const counts = new Map();
+  for (const row of preview?.tasks || []) {
+    if (row.startSeconds != null || !open.has(row.taskId) || !row.reason) continue;
+    counts.set(row.reason, (counts.get(row.reason) || 0) + 1);
+  }
+  const reasons = [...counts].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([reason, count]) => ({ reason, count }));
+  return { gaps, reasons };
+}
+
 // The current UTC month's company totals.
 export function monthUsage(runtime = {}, now = new Date()) {
   const account = runtime.usage?.[now.toISOString().slice(0, 7)]?.company || {};
@@ -324,7 +345,7 @@ export function activityEntries(events, tasks = []) {
     if (event.kind === "configuration_saved") Object.assign(entry, { text: `Saved configuration revision ${payload.revision}`, detail: payload.reason || "" });
     if (event.kind === "configuration_restored") Object.assign(entry, { text: `Restored revision ${payload.restoredFrom} as revision ${payload.revision}`, detail: payload.reason || "" });
     if (event.kind === "organization_control") entry.text = payload.state === "running" ? "Started work" : "Paused work";
-    if (event.kind === "runtime_recovered") Object.assign(entry, { text: "Paused after Raticode restarted", detail: payload.reason || "" });
+    if (event.kind === "runtime_recovered") Object.assign(entry, { text: payload.kept || String(payload.reason || "").startsWith("Kept running") ? "Kept running after Raticode restarted" : "Paused after Raticode restarted", detail: payload.reason || "" });
     if (event.kind === "consent_requested") Object.assign(entry, { text: "Asked for your approval", detail: payload.summary || "" });
     if (event.kind === "consent_decided") Object.assign(entry, { text: `${payload.decision === "approve" ? "Approved" : "Declined"} Rem's request${payload.decidedBy && payload.decidedBy !== "you" ? ` (${payload.decidedBy})` : ""}`, detail: payload.error || payload.reason || "" });
     if (event.kind === "auto_decision" && payload.auto) Object.assign(entry, { text: `Rem in Auto mode: ${AUTO_DECISION_LABEL[payload.auto.decision] || payload.auto.decision} “${payload.auto.summary || "a request"}”`, detail: [payload.auto.reason, payload.auto.recommendation && `Recommended: ${payload.auto.recommendation}`, payload.auto.error].filter(Boolean).join(" ") });
@@ -336,6 +357,7 @@ export function activityEntries(events, tasks = []) {
     if (event.kind === "organization_archived") entry.text = "Archived the organization";
     if (event.kind === "organization_restored") entry.text = "Restored the organization from the archive";
     if (event.kind === "worktree_created") Object.assign(entry, { text: `Created a worktree for ${taskTitle(payload, tasks)}`, detail: payload.branch ? `Branch ${payload.branch}` : "" });
+    if (event.kind === "worktree_setup") Object.assign(entry, { text: payload.status === "passed" ? `Ran project setup for ${taskTitle(payload, tasks)}` : payload.status === "needs_approval" ? `Project setup for ${taskTitle(payload, tasks)} is waiting for your approval` : `Project setup failed for ${taskTitle(payload, tasks)}`, detail: payload.summary || "" });
     if (event.kind === "worktree_released") Object.assign(entry, { text: `Finished the worktree for ${taskTitle(payload, tasks)}`, detail: payload.branch ? `Branch ${payload.branch}` : "" });
     if (event.kind === "dispatch") Object.assign(entry, { actor: payload.employeeId ? `employee:${payload.employeeId}` : event.actor, text: `Started a turn on ${taskTitle(payload, tasks)}` });
     if (event.kind === "turn_finished") {

@@ -141,6 +141,7 @@ def test_list_summarizes_staff_and_open_work(manager, tmp_path) -> Any:
             "employees": 2,
             "openTasks": 1,
             "waitingRequests": 0,
+            "needsYou": 0,
             "autoMode": False,
             "autoHalt": None,
             "projectRoots": [str(tmp_path)],
@@ -407,9 +408,16 @@ def test_execution_reuses_rem_and_retains_conversation(manager, tmp_path) -> Any
         e["kind"] == "turn_finished" and e["payload"]["taskId"] == task["id"] for e in events
     )
     assert all("/mcp/" not in json.dumps(e) for e in events)
-    from gofer.core.usage_ledger import activity_payload
+    from gofer.core.usage_ledger import activity_payload, usage_db
 
     assert activity_payload(manager.data_dir)["activity"]["calls"] == 1
+    # The call names its run and thread, and the ticket adds up its runs' use.
+    with usage_db(manager.data_dir) as db:
+        row = db.execute("SELECT run_id, thread_id FROM usage_invocations").fetchone()
+    assert row["run_id"] in current["runtime"]["attempts"]
+    assert row["thread_id"] == f"organization:{org['id']}:builder:{task['id']}"
+    usage = call(manager, org, "read")["runtime"]["taskUsage"][task["id"]]
+    assert usage["calls"] == 1 and usage["unknown_calls"] == 1 and usage["total_tokens"] is None
 
 
 def test_restore_cancels_active_turn_and_preserves_tasks(manager, tmp_path) -> Any:

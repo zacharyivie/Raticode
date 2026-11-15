@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import urllib.parse
 from collections.abc import Mapping
@@ -42,6 +43,7 @@ from gofer.rattish.prompt_templates import (
     validate_prompt_template,
 )
 from gofer.rattish.provider_contracts import ProviderContract as ProviderContract
+from gofer.rattish.result_cache import MAX_CACHE_DURATION_SECONDS, cache_duration_seconds
 from gofer.rattish.schema_compat import (
     instance_matches_schema,
     schema_accepts_schema,
@@ -50,7 +52,7 @@ from gofer.rattish.schema_compat import (
 
 IR_SCHEMA_ID = "urn:raticode:rattish:schema:ir-1.json"
 JSON_SCHEMA_ID = "https://json-schema.org/draft/2020-12/schema"
-RATTISH_COMPILER_VERSION = "0.2.1"
+RATTISH_COMPILER_VERSION = "0.2.2"
 
 _COMMON_NODE_FIELDS = {
     "allow-fail",
@@ -238,7 +240,16 @@ class RattishCompiler:
         diagnostics: list[RattishDiagnostic],
     ) -> dict[str, Any]:
         fields = self._field_map(declaration["entries"], context, diagnostics)
-        supported = {"name", "interface-version", "inputs", "outputs", "max-runs", "timeout"}
+        supported = {
+            "name",
+            "interface-version",
+            "inputs",
+            "outputs",
+            "max-runs",
+            "max-tokens",
+            "max-cost-usd",
+            "timeout",
+        }
         for name, field in fields.items():
             if name not in supported:
                 diagnostics.append(
@@ -273,6 +284,12 @@ class RattishCompiler:
             ),
             "max_runs": self._optional_positive_int(
                 fields.get("max-runs"), "max-runs", context, diagnostics
+            ),
+            "max_tokens": self._optional_positive_int(
+                fields.get("max-tokens"), "max-tokens", context, diagnostics
+            ),
+            "max_cost_usd": self._optional_positive_number(
+                fields.get("max-cost-usd"), "max-cost-usd", context, diagnostics
             ),
             "timeout_ms": self._optional_duration(
                 fields.get("timeout"), "timeout", context, diagnostics
@@ -421,15 +438,20 @@ class RattishCompiler:
             else:
                 output_schema, dependencies = workflow_output, workflow_dependencies
             if provider_resolution is not None:
-                dependencies.append(
-                    {
-                        "kind": "provider_contract",
-                        "id": provider_resolution["provider_id"],
-                        "version": provider_resolution["contract_version"],
-                        "path": None,
-                        "fingerprint": provider_resolution["contract_fingerprint"],
-                    }
-                )
+                provider_ids: set[str] = set()
+                for choice in (provider_resolution, *provider_resolution.get("fallback", ())):
+                    if choice["provider_id"] in provider_ids:
+                        continue
+                    provider_ids.add(choice["provider_id"])
+                    dependencies.append(
+                        {
+                            "kind": "provider_contract",
+                            "id": choice["provider_id"],
+                            "version": choice["contract_version"],
+                            "path": None,
+                            "fingerprint": choice["contract_fingerprint"],
+                        }
+                    )
             drafts[node_id] = _NodeDraft(
                 node_id=node_id,
                 declaration=declaration,
@@ -539,6 +561,14 @@ class RattishCompiler:
         diagnostics: list[RattishDiagnostic],
     ) -> None:
         if contract.node_type != "loop":
+            if contract.node_type in {"common-llm-task", "jev"}:
+                self._validate_cache_configuration(
+                    node_id, declaration, contract, configuration, context, diagnostics
+                )
+            if contract.node_type == "jev":
+                self._validate_jev_configuration(
+                    node_id, declaration, configuration, context, diagnostics
+                )
             if contract.node_type == "local-vectorize":
                 chunk_size = configuration.get("chunk_size")
                 overlap = configuration.get("chunk_overlap")
@@ -1328,6 +1358,142 @@ class RattishCompiler:
                 fields[name] = field
         return fields
 
+    def _validate_cache_configuration(
+        self,
+        node_id: str,
+        declaration: Mapping[str, Any],
+        contract: LoadedNodeContract,
+        configuration: Mapping[str, Any],
+        context: CompileContext,
+        diagnostics: list[RattishDiagnostic],
+    ) -> None:
+        """Rules for ``cache`` that Schema Profile 1 can't express."""
+        cache = configuration.get("cache")
+        if cache is None:
+            return
+
+        def problem(message: str) -> None:
+            diagnostics.append(
+                self._diagnostic(
+                    "RATTISH_INVALID_FIELD_VALUE",
+                    "semantic",
+                    message,
+                    declaration["span"],
+                    context,
+                    details={"node": node_id, "field": "cache"},
+                )
+            )
+
+        seconds = cache_duration_seconds(cache)
+        if seconds is not None and seconds > MAX_CACHE_DURATION_SECONDS:
+            problem(f"Node {node_id!r}: cache can be at most 365d.")
+        memory = configuration.get("memory")
+        if contract.node_type == "common-llm-task" and memory not in (None, "none"):
+            problem(
+                f"Node {node_id!r} can't use cache with memory: {memory}, because remembered "
+                "conversation changes each answer. Remove cache or set memory: none."
+            )
+
+    def _validate_jev_configuration(
+        self,
+        node_id: str,
+        declaration: Mapping[str, Any],
+        configuration: Mapping[str, Any],
+        context: CompileContext,
+        diagnostics: list[RattishDiagnostic],
+    ) -> None:
+        """Rules between Jev fields that Schema Profile 1 can't express."""
+        authored = {
+            entry["name"]["canonical"]
+            for entry in declaration["entries"]
+            if entry["kind"] == "field"
+        }
+
+        def problem(code: str, field: str, message: str) -> None:
+            diagnostics.append(
+                self._diagnostic(
+                    code,
+                    "semantic",
+                    message,
+                    declaration["span"],
+                    context,
+                    details={"node": node_id, "field": field},
+                )
+            )
+
+        question_type = configuration.get("question_type")
+        options = configuration.get("options")
+        options = options if isinstance(options, Mapping) else {}
+        criteria = configuration.get("criteria")
+        if question_type == "choice":
+            if not options:
+                problem(
+                    "RATTISH_MISSING_FIELD",
+                    "options",
+                    f"Jev node {node_id!r} asks a choice question, so it needs options.",
+                )
+            elif not 2 <= len(options) <= 255:
+                problem(
+                    "RATTISH_INVALID_FIELD_VALUE",
+                    "options",
+                    f"Jev node {node_id!r} needs 2 to 255 options.",
+                )
+            if any(not str(name).strip() or len(str(name)) > 128 for name in options):
+                problem(
+                    "RATTISH_INVALID_FIELD_VALUE",
+                    "options",
+                    f"Jev node {node_id!r} has an option name that is empty or over 128 "
+                    "characters.",
+                )
+            if isinstance(criteria, Mapping) and criteria:
+                problem(
+                    "RATTISH_INVALID_FIELD_VALUE",
+                    "criteria",
+                    f"Jev node {node_id!r}: criteria is for yes-no questions. Describe each "
+                    "choice in options instead.",
+                )
+            if "threshold" in authored:
+                problem(
+                    "RATTISH_INVALID_FIELD_VALUE",
+                    "threshold",
+                    f"Jev node {node_id!r}: threshold is for yes-no questions. A choice "
+                    "question returns the most likely option; compare score in a route.",
+                )
+        else:
+            if options:
+                problem(
+                    "RATTISH_INVALID_FIELD_VALUE",
+                    "options",
+                    f"Jev node {node_id!r}: options need question-type: choice.",
+                )
+            if not (isinstance(criteria, Mapping) and criteria):
+                diagnostics.append(
+                    RattishDiagnostic(
+                        code="RATTISH_JEV_CRITERIA_MISSING",
+                        severity="warning",
+                        phase="semantic",
+                        message=f"Jev node {node_id!r} has no criteria for yes and no.",
+                        file=context.entrypoint,
+                        span=self._span(declaration["name"]["span"]),
+                        details={"node": node_id},
+                        suggestions=(
+                            "Add criteria with yes and no. Jev answers more reliably when "
+                            "it is told what counts as each.",
+                        ),
+                    )
+                )
+        timeout = configuration.get("request_timeout")
+        if isinstance(timeout, str):
+            match = re.fullmatch(r"([1-9][0-9]*)(ms|s|m)", timeout)
+            if match is not None:
+                scale = {"ms": 0.001, "s": 1, "m": 60}[match.group(2)]
+                if int(match.group(1)) * scale > 60:
+                    problem(
+                        "RATTISH_INVALID_FIELD_VALUE",
+                        "request-timeout",
+                        f"Jev node {node_id!r}: request-timeout can be at most 60s.",
+                    )
+
     def _validate_configuration(
         self,
         node_id: str,
@@ -1355,6 +1521,22 @@ class RattishCompiler:
                 code = "RATTISH_MISSING_FIELD"
             elif error.validator == "additionalProperties":
                 code = "RATTISH_UNKNOWN_FIELD"
+                if contract.node_type == "agent" and "cache" in error.instance:
+                    diagnostics.append(
+                        self._diagnostic(
+                            code,
+                            "semantic",
+                            f"Agent node {node_id!r} can't use cache, because an agent can "
+                            "change files. Use cache on a common-llm-task or jev node.",
+                            declaration["span"],
+                            context,
+                            details={"node": node_id, "path": [], "field": "cache"},
+                        )
+                    )
+                    if set(error.instance) - set(
+                        contract.document["configuration_schema"].get("properties", {})
+                    ) == {"cache"}:
+                        continue
             elif error.validator == "not":
                 code = "RATTISH_MUTUALLY_EXCLUSIVE_FIELDS"
             diagnostics.append(
@@ -3070,14 +3252,7 @@ class RattishCompiler:
             return None
         provider_id = provider_id.lower()
         configuration["provider"] = provider_id
-        provider = next(
-            (
-                value
-                for key, value in context.provider_contracts.items()
-                if key.lower() == provider_id or value.provider_id.lower() == provider_id
-            ),
-            None,
-        )
+        provider = self._provider_contract(provider_id, context)
         if provider is None:
             diagnostics.append(
                 self._diagnostic(
@@ -3098,7 +3273,7 @@ class RattishCompiler:
                 configuration[field_name] = provider.default_model
             elif provider_field == "default_effort":
                 configuration[field_name] = provider.default_effort
-        return {
+        resolution: dict[str, Any] = {
             "provider_id": provider_id,
             "contract_version": provider.version,
             "contract_fingerprint": provider.fingerprint,
@@ -3106,6 +3281,110 @@ class RattishCompiler:
             "effort": configuration["effort"],
             "profile": configuration.get("profile"),
         }
+        if "fallback" not in contract.document["configuration_schema"]["properties"]:
+            return resolution
+        fallback = self._resolve_provider_fallback(
+            node_id, declaration, resolution, configuration, context, diagnostics
+        )
+        if fallback is None:
+            return None
+        resolution["fallback"] = fallback
+        return resolution
+
+    @staticmethod
+    def _provider_contract(provider_id: str, context: CompileContext) -> ProviderContract | None:
+        return next(
+            (
+                value
+                for key, value in context.provider_contracts.items()
+                if key.lower() == provider_id or value.provider_id.lower() == provider_id
+            ),
+            None,
+        )
+
+    def _resolve_provider_fallback(
+        self,
+        node_id: str,
+        declaration: Mapping[str, Any],
+        primary: Mapping[str, Any],
+        configuration: dict[str, Any],
+        context: CompileContext,
+        diagnostics: list[RattishDiagnostic],
+    ) -> list[dict[str, Any]] | None:
+        """Resolve each fallback entry against its own provider contract.
+
+        Defaults come from that entry's provider, never the step's, and every entry is
+        frozen in configuration and in the provider resolution. Entries that are not
+        maps are left for configuration validation to report.
+        """
+        entries = configuration.get("fallback")
+        if not isinstance(entries, list):
+            return []
+        field = next(
+            (
+                entry
+                for entry in declaration["entries"]
+                if entry["kind"] == "field" and entry["name"]["canonical"] == "fallback"
+            ),
+            None,
+        )
+        span = field["value"]["span"] if field is not None else declaration["span"]
+        resolved: list[dict[str, Any]] = []
+        seen = {(primary["provider_id"], primary["profile"], primary["model"], primary["effort"])}
+        unresolved = False
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict) or not isinstance(entry.get("provider"), str):
+                continue
+            provider_id = entry["provider"].lower()
+            entry["provider"] = provider_id
+            provider = self._provider_contract(provider_id, context)
+            if provider is None:
+                diagnostics.append(
+                    self._diagnostic(
+                        "RATTISH_PROVIDER_CONTRACT_UNRESOLVED",
+                        "semantic",
+                        (
+                            f"No compile-time provider contract is available for fallback "
+                            f"provider {provider_id!r}."
+                        ),
+                        span,
+                        context,
+                        details={"node": node_id, "provider": provider_id, "fallback": index},
+                    )
+                )
+                unresolved = True
+                continue
+            entry.setdefault("profile", None)
+            entry.setdefault("model", provider.default_model)
+            entry.setdefault("effort", provider.default_effort)
+            identity = (provider_id, entry["profile"], entry["model"], entry["effort"])
+            if identity in seen:
+                diagnostics.append(
+                    self._diagnostic(
+                        "RATTISH_DUPLICATE_PROVIDER_FALLBACK",
+                        "semantic",
+                        (
+                            f"Fallback entry {index + 1} repeats a provider, profile, model "
+                            "and effort the step already tries."
+                        ),
+                        span,
+                        context,
+                        severity="warning",
+                        details={"node": node_id, "provider": provider_id, "fallback": index},
+                    )
+                )
+            seen.add(identity)
+            resolved.append(
+                {
+                    "provider_id": provider_id,
+                    "contract_version": provider.version,
+                    "contract_fingerprint": provider.fingerprint,
+                    "model": entry["model"],
+                    "effort": entry["effort"],
+                    "profile": entry["profile"],
+                }
+            )
+        return None if unresolved else resolved
 
     def _run_static_diagnostics(
         self,
@@ -3275,6 +3554,34 @@ class RattishCompiler:
                     "RATTISH_INVALID_FIELD_VALUE",
                     "semantic",
                     f"{name} must be a positive integer or none.",
+                    field["value"]["span"],
+                    context,
+                )
+            )
+            return None
+        return value
+
+    def _optional_positive_number(
+        self,
+        field: Mapping[str, Any] | None,
+        name: str,
+        context: CompileContext,
+        diagnostics: list[RattishDiagnostic],
+    ) -> int | float | None:
+        if field is None or field["value"]["kind"] == "none":
+            return None
+        value = self._value(field["value"])
+        if (
+            not isinstance(value, int | float)
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            diagnostics.append(
+                self._diagnostic(
+                    "RATTISH_INVALID_FIELD_VALUE",
+                    "semantic",
+                    f"{name} must be a positive number or none.",
                     field["value"]["span"],
                     context,
                 )
@@ -3597,10 +3904,11 @@ class RattishCompiler:
         context: CompileContext,
         *,
         details: dict[str, Any] | None = None,
+        severity: Literal["error", "warning"] = "error",
     ) -> RattishDiagnostic:
         return RattishDiagnostic(
             code=code,
-            severity="error",
+            severity=severity,
             phase=phase,
             message=message,
             file=context.entrypoint,

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { withBase } from 'vitepress'
 import { allReleasesUrl } from '../../../../data/releases'
+import { supportEmail, supportMailto } from '../../../../data/site'
 
 const repo = 'https://github.com/zacharyivie/Raticode'
 </script>
@@ -21,6 +22,7 @@ const repo = 'https://github.com/zacharyivie/Raticode'
         <a :href="allReleasesUrl">Changelog</a>
         <a :href="repo">GitHub</a>
         <a :href="withBase('/docs/support')">Support</a>
+        <a :href="supportMailto">{{ supportEmail }}</a>
         <a :href="withBase('/docs/privacy')">Privacy</a>
         <a :href="`${repo}/blob/main/LICENSE`">AGPL-3.0</a>
       </nav>

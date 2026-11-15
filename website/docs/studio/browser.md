@@ -61,6 +61,7 @@ If another program connects to Firefox's control connection before Raticode does
 | Developer tools | Yes | No | Firefox's own |
 | Rem can open and control tabs | Yes | Yes | No |
 | Media bar | Yes | Yes | Yes (Linux) |
+| Keeps playing when the browser [changes windows](#move-the-browser-to-its-own-window) | Yes | Yes | Yes |
 
 ### Choose the default browser
 
@@ -84,6 +85,27 @@ Raticode (gecko) is Firefox's own window, with its own tab strip, so the tab bar
 - Gecko tabs saved by an earlier version become that one tab, with their pages inside it.
 - Raticode can't list Firefox's inner tabs or split two of them side by side, because it doesn't control the pages in Firefox's window.
 - For private browsing, use Firefox's **New private window** (`Ctrl+Shift+P`). It opens outside Raticode.
+
+## Move the browser to its own window
+
+**Pop out browser** moves the whole Browser plugin, its tab bar and every tab, into a window of its own. Drag it to another screen like any other window.
+
+- To pop it out, click the square-with-an-arrow button at the right end of the tab bar, or right-click a tab and choose **Pop out browser**. With no tabs open, use **Pop out browser into its own window** under the browser buttons.
+- Raticode's window then says **The browser is in its own window**, with **Show browser window** and **Bring browser back**.
+- To bring it back, click the same tab bar button, choose **Bring browser back** on a tab's menu, or close the browser's window. Every tab comes back to Raticode's window.
+- The window opens where you last left it, at the same size. If that screen isn't connected any more, it opens on the screen Raticode is on. If you unplug its screen while it's open, it moves to a screen that's still connected.
+- Quitting Raticode closes the browser's window. The next time Raticode starts, the browser is back in Raticode's window.
+- If Raticode's window stops responding, closing the browser's window still works after a few seconds. Its pages go back into Raticode's window, and the tab bar follows once Raticode responds again.
+
+Every tab keeps running while the browser changes windows. Pages don't reload, sound and video keep playing, and text you've typed into a page stays.
+
+- **Raticode (chromium)**: the page itself moves to the other window.
+- **Raticode (gecko)**: Firefox's window moves with the browser.
+- **Firefox**, **Chrome**, **Edge**: the browser keeps running and its tabs show in the new window.
+
+Private tabs stay private, and Rem keeps control of the tabs it opened. In the browser's own window, a site's permission requests show above its page, downloads go to your Downloads folder as usual, and **Developer tools** opens for the tab. While the browser has its own window, the tab showing there counts as on screen for the [media bar](#media-bar): the bar in Raticode's window shows only when the playing tab is behind another tab. Shortcuts for the rest of Raticode only work in Raticode's window.
+
+While a menu, a dialog or a tab you're dragging covers part of a Raticode (chromium) page, the page shows as a still picture. It keeps running underneath, and comes back as soon as the menu closes.
 
 ## Private tabs
 

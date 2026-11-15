@@ -212,7 +212,8 @@ export function searchLibrary(documents, { text = "", filters = EMPTY_FILTERS, m
     results.push({ doc, score, matchKind, passages: passages.slice(0, 3), passageCount: passages.length });
   }
   const by = {
-    relevance: (a, b) => b.score - a.score || lower(a.doc.title).localeCompare(lower(b.doc.title)),
+    // Reports marked as replaced by a newer one rank after every current match.
+    relevance: (a, b) => isReplaced(a.doc) - isReplaced(b.doc) || b.score - a.score || lower(a.doc.title).localeCompare(lower(b.doc.title)),
     title: (a, b) => lower(a.doc.title).localeCompare(lower(b.doc.title)),
     modified: (a, b) => (b.doc.dates?.modified || "").localeCompare(a.doc.dates?.modified || ""),
     added: (a, b) => (b.doc.dates?.added || "").localeCompare(a.doc.dates?.added || ""),
@@ -220,6 +221,29 @@ export function searchLibrary(documents, { text = "", filters = EMPTY_FILTERS, m
     published: (a, b) => (b.doc.dates?.published || "0").localeCompare(a.doc.dates?.published || "0"),
   };
   return { parsed, results: results.sort(by[sort] || by.relevance) };
+}
+
+export const isReplaced = doc => Number(Boolean(doc?.replacedBy?.docId));
+// Keeps the order of current results and moves replaced reports after them.
+export function demoteReplaced(results) {
+  return [...results].sort((a, b) => isReplaced(a.doc) - isReplaced(b.doc));
+}
+// The chain of newer reports after doc, ending at the one still current.
+export function newerReports(doc, documents) {
+  const byId = new Map(documents.map(item => [item.id, item]));
+  const chain = [];
+  const seen = new Set([doc.id]);
+  for (let id = doc.replacedBy?.docId; id && byId.has(id) && !seen.has(id); id = byId.get(id).replacedBy?.docId) {
+    seen.add(id);
+    chain.push(byId.get(id));
+  }
+  return chain;
+}
+// A check-by date has arrived when it is today or earlier (local calendar day).
+export function checkByDue(doc, today = new Date()) {
+  if (!doc?.checkBy || doc.replacedBy?.docId) return false;
+  const day = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  return doc.checkBy <= day;
 }
 
 export const MATCH_LABELS = { phrase: "Exact phrase", content: "Matched words", title: "Title or path", meaning: "Related meaning", filter: "Matches filters" };
@@ -325,9 +349,27 @@ export function wordDiff(before = "", after = "") {
 }
 
 export const HEALTH_KINDS = [
-  ["link", "Broken links"], ["metadata", "Missing metadata"], ["extraction", "Extraction problems"], ["duplicate", "Exact duplicates"], ["citation", "Ambiguous citations"],
+  ["link", "Dead links"], ["metadata", "Missing metadata"], ["extraction", "Extraction problems"], ["duplicate", "Exact duplicates"], ["citation", "Ambiguous citations"], ["family", "Replaced reports"], ["review", "Check-by dates"], ["permissions", "Folder access"],
 ];
 
+// Why a link shows in the dead-link list. Only absolute links inside the brain are repaired
+// automatically; the others need a person to choose the right file.
+export const LINK_REASONS = [
+  ["absolute", "Absolute path inside the brain", "Works on this computer, breaks when the brain moves. Make it relative."],
+  ["missing", "Missing file", "Nothing exists at this path."],
+  ["temporary", "Temporary folder", "Points to /tmp or a similar folder that is cleared. Copy the file into the brain."],
+  ["outside", "Outside the brain", "Points to a file outside the brain that no longer exists."],
+];
+export function linkReason(issue) {
+  const id = issue.reason || "missing";
+  return LINK_REASONS.find(([key]) => key === id) || LINK_REASONS[1];
+}
+// Counts per reason, in LINK_REASONS order, for the dead-link list summary.
+export function deadLinkSummary(issues) {
+  const counts = Object.fromEntries(LINK_REASONS.map(([id]) => [id, 0]));
+  for (const issue of issues) if (issue.kind === "link") counts[linkReason(issue)[0]] += 1;
+  return LINK_REASONS.map(([id, label]) => ({ id, label, count: counts[id] })).filter(item => item.count);
+}
 
 export const RECIPES = [
   ["summarize-new", "Summarize newly added documents", "Write a short cited summary for each new document."],

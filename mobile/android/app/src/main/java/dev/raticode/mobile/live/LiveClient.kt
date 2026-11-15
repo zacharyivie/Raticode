@@ -117,6 +117,13 @@ class LiveClient(app: Application,
      */
     var threadReadSync by mutableStateOf(false); private set
     @Volatile private var threadReadAllowed = false
+    /**
+     * Whether the desktop takes Delete permanently, which also removes the thread's conversation
+     * archive copy. Older desktops reject the action, so the phone offers it only after the
+     * desktop's overview reports `thread_purge`.
+     */
+    var threadPurgeSync by mutableStateOf(false); private set
+    @Volatile private var threadPurgeAllowed = false
     /** Latest desktop results by screen key; held in memory only. */
     var desktopViews by mutableStateOf<Map<String, Any>>(emptyMap()); private set
     /** Rem chat search: the words, and what the desktop (or this phone, offline) found for them. */
@@ -225,6 +232,10 @@ class LiveClient(app: Application,
     @Volatile private var noticesFilterAllowed = false
     /** Whether this desktop can send alerts about work this phone didn't start: null until its overview arrives. */
     var remAlertFilter by mutableStateOf<Boolean?>(null); private set
+    /** Whether this desktop's overview advertises the workflow switch in `rem.notices`. An older desktop must never be sent it. */
+    @Volatile private var noticesWorkflowAllowed = false
+    /** Whether this desktop sends workflow messages: null until its overview arrives. */
+    var remAlertWorkflow by mutableStateOf<Boolean?>(null); private set
     private var nextNotices = 0L
     /** The phone-started runs the last read of Rem's tasks found running. Used only on the sync thread. */
     private var progressRuns = emptyList<TaskProgress.Run>()
@@ -242,6 +253,12 @@ class LiveClient(app: Application,
     /** Whether this desktop shows workflows to the phone: null until its overview arrives this session. */
     var workflows by mutableStateOf<Boolean?>(null); private set
     @Volatile private var workflowsAllowed = false
+    /** The desktop answers `workflows.runs`; null until its overview says. */
+    var workflowRuns by mutableStateOf<Boolean?>(null); private set
+    @Volatile private var workflowRunsAllowed = false
+    /** The desktop lists triggers and lets the phone turn them on and off and pause them all; null until its overview says. */
+    var workflowTriggers by mutableStateOf<Boolean?>(null); private set
+    @Volatile private var workflowTriggersAllowed = false
     /** Whether this desktop shows its projects' Git status to the phone: null until its overview arrives this session. */
     var sourceControl by mutableStateOf<Boolean?>(null); private set
     @Volatile private var sourceControlAllowed = false
@@ -655,7 +672,7 @@ class LiveClient(app: Application,
             if (DeviceRoutes.dropTailnetRequests(next)) { store.save(next); saved = next }
         }
         // This desktop may be older than the last one; ask what it supports before polling workflows again.
-        workflowsAllowed = false; noticesAllowed = false; noticesFilterAllowed = false; sourceControlAllowed = false; sourceHistoryAllowed = false; attachmentsAllowed = false
+        workflowsAllowed = false; workflowRunsAllowed = false; workflowTriggersAllowed = false; noticesAllowed = false; noticesFilterAllowed = false; noticesWorkflowAllowed = false; sourceControlAllowed = false; sourceHistoryAllowed = false; attachmentsAllowed = false
         explorerAllowed = false; explorerKnown = false
         developerLogAllowed = false; organizationsV2Allowed = false; organizationsV2Known = false; organizationScheduleAllowed = false; organizationBacklogPullAllowed = false; organizationRequestsAllowed = false; organizationAutoModeAllowed = false; logRequest = null; browserAllowed = false
         kanbanAllowed = false; kanbanParticipantsAllowed = false; kanbanCommentsAllowed = false; kanbanKnown = false; nextSelfWork = 0
@@ -718,7 +735,7 @@ class LiveClient(app: Application,
         check(!stopped)
         activeCandidate = null
         connection = candidate; reconnect = true; failures = 0; mediaChecked = false
-        main.post { connected = true; cantConnect = false; route = candidate.route; workflows = null; sourceControl = null; sourceControlHistory = null; fileExplorer = null
+        main.post { connected = true; cantConnect = false; route = candidate.route; workflows = null; workflowRuns = null; workflowTriggers = null; sourceControl = null; sourceControlHistory = null; fileExplorer = null
             developerLogSupported = null; organizationsV2 = null; organizationSchedule = null; organizationBacklogPull = null; organizationRequests = null; organizationAutoMode = null; organizationRequestResults = null; desktopBrowser = null; kanban = null; kanbanParticipants = null; kanbanComments = null }
         notePhone("info", "Connected to desktop over ${candidate.route}")
         publish()
@@ -1013,6 +1030,7 @@ class LiveClient(app: Application,
             if (ThreadActivity.setRead(next, chosen, read = action != "unread")) { store.save(next); saved = next; publish() }
         }
         if (action in setOf("read", "unread") && !threadReadAllowed) return
+        if (action == "delete_permanently" && !threadPurgeAllowed) return
         var sent = 0
         try {
             for (thread in chosen) {
@@ -1060,7 +1078,7 @@ class LiveClient(app: Application,
         val remWaiting = voiceActive || shareActive
         val screen = if (remWaiting) "rem.home" to JSONObject() else desktopScreen
         if (screen != null && desktopAllowed && now >= nextDesktop && !pendingDesktop(screen.first, screen.second)
-            && (workflowsAllowed || !Workflows.isWorkflowOp(screen.first)) && (sourceControlAllowed || !SourceControl.isOp(screen.first))
+            && (workflowsAllowed || !Workflows.isWorkflowOp(screen.first)) && (workflowRunsAllowed || screen.first != Workflows.RUNS) && (sourceControlAllowed || !SourceControl.isOp(screen.first))
             && (sourceHistoryAllowed || screen.first !in SourceControl.LATER) && (explorerAllowed || !FileExplorer.isOp(screen.first))
             && (developerLogAllowed || screen.first != DeveloperLog.OP) && (organizationsV2Allowed || screen.first != OrganizationModel.NOTE)
             && (browserAllowed || screen.first != DesktopBrowser.TABS) && (kanbanAllowed || !Kanban.isOp(screen.first))
@@ -1143,6 +1161,7 @@ class LiveClient(app: Application,
         if (Workflows.isWorkflowOp(op) && !workflowsAllowed) { requestError = Workflows.UPDATE_DESKTOP; return }
         if (op == DesktopBrowser.OPEN && !browserAllowed) { requestError = DesktopBrowser.UPDATE_DESKTOP; return }
         if ((op == RunPause.PAUSE || op == RunPause.RESUME) && !runPauseAllowed) { requestError = RunPause.UPDATE_DESKTOP; return }
+        if ((op == Workflows.TRIGGER || op == Workflows.PAUSE) && !workflowTriggersAllowed) { requestError = Workflows.UPDATE_TRIGGERS; return }
         val copy = JSONObject(params.toString())
         if (Kanban.isOp(op)) {
             // Tapped before this session's overview answered: it goes once the desktop says it takes it.
@@ -1464,7 +1483,7 @@ class LiveClient(app: Application,
             val next = JSONObject(saved.toString()).apply { remove(NOTICE_CURSOR); remove(NOTICE_MARK); remove(NOTICE_ROUNDS) }
             store.save(next); saved = next
         }
-        val include = RemNotifications.include(app)
+        val include = RemAlertRules.sendable(RemNotifications.include(app), noticesWorkflowAllowed)
         noticeSettling = if (noticesFilterAllowed) RemNotifications.settling(app).filter { it in include } else emptyList()
         queueDesktop("desktop.read", "rem.notices", RemNoticeText.readParams(if (saved.has(NOTICE_CURSOR)) saved.getLong(NOTICE_CURSOR) else null,
             noticesFilterAllowed, include, saved.optString(NOTICE_MARK)))
@@ -1489,7 +1508,7 @@ class LiveClient(app: Application,
         val seen = (0 until (rounds?.length() ?: 0)).map { rounds!!.getString(it) }
         val incoming = RemAlertRules.incoming(read, RemNotifications.include(app), seen, remShown(), settling)
         if (incoming.rounds != seen) state.put(NOTICE_ROUNDS, JSONArray(incoming.rounds))
-        RemNotifications.post(app, incoming.notices, incoming.skipped)
+        RemNotifications.post(app, incoming.notices, incoming.skipped, incoming.dropped)
     }
     /**
      * Sends a reply typed into Rem's alert, like one sent from Rem's chat. It waits in the encrypted outbox until
@@ -1753,6 +1772,13 @@ class LiveClient(app: Application,
             main.post { desktopBusy = desktopBusy - key; desktopErrors = desktopErrors - key; workflowNotice = notice }
             return
         }
+        // Pausing or resuming all triggers answers with a line for the list, which the next read refreshes.
+        if (action && key == Workflows.LIST && Workflows.isPauseAnswer(body)) {
+            nextDesktop = 0
+            val notice = "" to body.optString("message").ifBlank { "Sent to your desktop." }
+            main.post { desktopBusy = desktopBusy - key; desktopErrors = desktopErrors - key; workflowNotice = notice }
+            return
+        }
         body.optString("digest").takeIf { it.isNotBlank() }?.let { desktopDigests[key] = it }
         // An action's short answer must not replace the screen with an empty view; the next read refreshes it.
         if (action && Kanban.isShortAnswer(key, body)) {
@@ -1768,11 +1794,12 @@ class LiveClient(app: Application,
         val view = DesktopViews.parse(key, body)
         when (view) {
             is DesktopOverview -> {
-                mediaAllowed = view.media; fileLinksAllowed = view.fileLinks; workflowsAllowed = view.workflows; richAllowed = view.richResults
-                draftAllowed = view.draftDeltas; reviewRetryAllowed = view.reviewRetry; threadReadAllowed = view.threadRead; runPauseAllowed = view.runPause
+                mediaAllowed = view.media; fileLinksAllowed = view.fileLinks; workflowsAllowed = view.workflows; workflowRunsAllowed = view.workflowRuns; workflowTriggersAllowed = view.workflowTriggers; richAllowed = view.richResults
+                draftAllowed = view.draftDeltas; reviewRetryAllowed = view.reviewRetry; threadReadAllowed = view.threadRead; threadPurgeAllowed = view.threadPurge; runPauseAllowed = view.runPause
                 if (noticesFilterAllowed && !view.remNoticesFilter) dropQueuedNoticeFilters(state)
+                else if (noticesWorkflowAllowed && !view.remNoticesWorkflow) dropQueuedNoticeFilters(state, workflowOnly = true)
                 WakeOnLan.remember(state, view.wakeMac)
-                noticesAllowed = view.remNotices; noticesFilterAllowed = view.remNoticesFilter; nextNotices = 0
+                noticesAllowed = view.remNotices; noticesFilterAllowed = view.remNoticesFilter; noticesWorkflowAllowed = view.remNoticesFilter && view.remNoticesWorkflow; nextNotices = 0
                 tidyAllowed = view.voiceTidy; sourceControlAllowed = view.sourceControl; sourceHistoryAllowed = view.sourceControlHistory
                 attachmentsAllowed = view.attachmentFiles; explorerAllowed = view.fileExplorer; explorerKnown = true
                 developerLogAllowed = view.developerLog; organizationsV2Allowed = view.organizationsV2; organizationsV2Known = true
@@ -1803,9 +1830,10 @@ class LiveClient(app: Application,
                         requestError = if (!organizations) OrganizationModel.UPDATE_DESKTOP else if (op == BacklogPulls.OP) BacklogPulls.UPDATE_DESKTOP
                             else if (op == OrgRequests.OP) OrgRequests.UPDATE_DESKTOP else if (op == AutoMode.OP) AutoMode.UPDATE_DESKTOP else WorkSchedule.UPDATE_DESKTOP }
                 }
-                val supported = view.workflows; val reading = view.threadRead; val alerts = view.remNotices; val alertFilter = view.remNoticesFilter; val git = view.sourceControl; val gitHistory = view.sourceControlHistory
+                val supported = view.workflows; val reading = view.threadRead; val purging = view.threadPurge; val alerts = view.remNotices; val alertFilter = view.remNoticesFilter; val alertWorkflow = view.remNoticesFilter && view.remNoticesWorkflow; val git = view.sourceControl; val gitHistory = view.sourceControlHistory
                 val files = view.fileExplorer
-                main.post { workflows = supported; threadReadSync = reading; remAlerts = alerts; remAlertFilter = alertFilter; sourceControl = git; sourceControlHistory = gitHistory; fileExplorer = files }
+                val allRuns = view.workflowRuns; val triggerSwitches = view.workflowTriggers
+                main.post { workflows = supported; workflowRuns = allRuns; workflowTriggers = triggerSwitches; threadReadSync = reading; threadPurgeSync = purging; remAlerts = alerts; remAlertFilter = alertFilter; remAlertWorkflow = alertWorkflow; sourceControl = git; sourceControlHistory = gitHistory; fileExplorer = files }
                 explorerWaiting?.let { waiting ->
                     explorerWaiting = null
                     // Runs as a later command, after this event's save.
@@ -2019,14 +2047,14 @@ class LiveClient(app: Application,
                     val full = desktopAllowed
                     // Without desktop control the phone can't learn the setting changed, so it keeps nothing.
                     if (!full) WakeOnLan.remember(next, null)
-                    if (!full) { kanbanAllowed = false; kanbanParticipantsAllowed = false; mediaAllowed = false; fileLinksAllowed = false; attachmentsAllowed = false; workflowsAllowed = false; sourceControlAllowed = false; sourceHistoryAllowed = false; explorerAllowed = false; richAllowed = false; mediaChecked = false; remFiles = null; imageQueue.clear(); previewQueue.clear(); browserAllowed = false
-                        draftAllowed = false; reviewRetryAllowed = false; runPauseAllowed = false; homeReplying = false; replyDraft = RemRich.Draft(); threadReadAllowed = false; noticesAllowed = false; noticesFilterAllowed = false
+                    if (!full) { kanbanAllowed = false; kanbanParticipantsAllowed = false; mediaAllowed = false; fileLinksAllowed = false; attachmentsAllowed = false; workflowsAllowed = false; workflowRunsAllowed = false; workflowTriggersAllowed = false; sourceControlAllowed = false; sourceHistoryAllowed = false; explorerAllowed = false; richAllowed = false; mediaChecked = false; remFiles = null; imageQueue.clear(); previewQueue.clear(); browserAllowed = false
+                        draftAllowed = false; reviewRetryAllowed = false; runPauseAllowed = false; homeReplying = false; replyDraft = RemRich.Draft(); threadReadAllowed = false; threadPurgeAllowed = false; noticesAllowed = false; noticesFilterAllowed = false; noticesWorkflowAllowed = false
                         tidyAllowed = false }
                     main.post {
                         remReady = info.getBoolean("rem_ready"); remoteControl = allowed; desktopControl = full
                         if (!allowed) approvals = emptyList()
-                        if (!full) { desktopViews = emptyMap(); desktopBusy = emptySet(); desktopDigests.clear(); mediaProxy = false; fileLinks = false; attachmentFiles = false; workflows = null; sourceControl = null; sourceControlHistory = null; fileExplorer = null; workflowNotice = null
-                            richResults = false; previews = emptyMap(); previewRequested.clear(); reviewRetry = false; runPause = false; remDraft = ""; threadReadSync = false; remAlerts = null; remAlertFilter = null; desktopBrowser = null
+                        if (!full) { desktopViews = emptyMap(); desktopBusy = emptySet(); desktopDigests.clear(); mediaProxy = false; fileLinks = false; attachmentFiles = false; workflows = null; workflowRuns = null; workflowTriggers = null; sourceControl = null; sourceControlHistory = null; fileExplorer = null; workflowNotice = null
+                            richResults = false; previews = emptyMap(); previewRequested.clear(); reviewRetry = false; runPause = false; remDraft = ""; threadReadSync = false; threadPurgeSync = false; remAlerts = null; remAlertFilter = null; remAlertWorkflow = null; desktopBrowser = null
                             remSearch = RemSearchState(); remEarlier = emptyList(); remEarlierCount = null; remEarlierTickets = emptyMap(); remHistoryBusy = false; remHistoryError = "" }
                     }
                 }

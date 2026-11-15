@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -40,6 +42,10 @@ import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
@@ -52,7 +58,10 @@ import java.time.Duration
 import java.time.Instant
 import java.time.OffsetDateTime
 
-/** Workflows on the phone: view the graph, status and runs, and ask the desktop to run, stop or resume. Editing stays on the desktop. */
+/**
+ * Workflows on the phone: view the graph, status and runs, and ask the desktop to run, stop, resume or run again. Each
+ * workflow's triggers can be turned on or off, and all of them paused at once. Editing stays on the desktop.
+ */
 
 /** What the screen around a workflow knows: connection, an action in flight, the latest refusal and the desktop's last answer. */
 internal data class WorkflowScreenState(val online: Boolean, val busy: Boolean, val error: String?, val notice: String?)
@@ -129,21 +138,57 @@ internal fun WorkflowsRow(client: LiveClient, onClick: () -> Unit) {
 
 @RequiresApi(29)
 @Composable
-internal fun WorkflowsPage(client: LiveClient, onBack: (() -> Unit)?) {
+internal fun WorkflowsPage(client: LiveClient, onBack: (() -> Unit)?, openRun: Pair<String, String>? = null, consumeOpenRun: () -> Unit = {}) {
     var open by rememberSaveable { mutableStateOf<String?>(null) }
     var runId by rememberSaveable { mutableStateOf<String?>(null) }
-    val params = if (open == null) JSONObject() else JSONObject().put("workflow_id", open).apply { runId?.let { put("run_id", it) } }
-    val op = if (open == null) Workflows.LIST else Workflows.READ
+    // A tapped workflow message opens its run; one that named no workflow opens the list.
+    LaunchedEffect(openRun) {
+        openRun?.let { (workflow, run) -> open = workflow.ifBlank { null }; runId = run.ifBlank { null }.takeIf { workflow.isNotBlank() }; consumeOpenRun() }
+    }
+    // The All runs tab and its filters, kept while a run opened from it is shown.
+    var allRuns by rememberSaveable { mutableStateOf(false) }
+    var since by rememberSaveable { mutableStateOf("24h") }
+    var status by rememberSaveable { mutableStateOf("") }
+    var only by rememberSaveable { mutableStateOf("") }
+    val showRuns = allRuns && client.workflowRuns == true
+    // input_form tells the desktop this phone shows the Run form, so a workflow that needs inputs can run from here.
+    val params = when {
+        open != null -> JSONObject().put("workflow_id", open).put("input_form", true).apply { runId?.let { put("run_id", it) } }
+        showRuns -> Workflows.runsParams(since, status, only)
+        else -> JSONObject()
+    }
+    val op = if (open != null) Workflows.READ else if (showRuns) Workflows.RUNS else Workflows.LIST
     DisposableEffect(op, params.toString()) { client.openDesktop(op, params); onDispose { client.openDesktop(null) } }
     BackHandler(enabled = open != null) { open = null; runId = null }
     Column(Modifier.fillMaxSize()) {
         if (open == null) {
-            val list = client.desktopViews[Workflows.LIST] as? WorkflowList
             Header("Workflows", if (client.connected) "On your desktop" else "Offline", onBack)
+            if (client.workflowRuns == true) Row(Modifier.padding(horizontal = 16.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(!allRuns, { allRuns = false }, label = { Text("Workflows") }, modifier = Modifier.testTag("workflowsTab"))
+                FilterChip(allRuns, { allRuns = true }, label = { Text("All runs") }, modifier = Modifier.testTag("allRunsTab"))
+            }
             Box(Modifier.weight(1f)) {
-                WorkflowGate(client, Workflows.LIST, "Loading workflows…") {
-                    if (list != null) WorkflowList(list, WorkflowScreenState(client.connected, false, client.desktopErrors[Workflows.LIST], null),
-                        onRetry = client::refreshDesktop) { open = it; runId = null }
+                if (showRuns) {
+                    val key = DesktopViews.key(Workflows.RUNS, params)
+                    WorkflowGate(client, key, "Loading runs…") {
+                        (client.desktopViews[key] as? AllWorkflowRuns)?.let { runs ->
+                            AllRunsList(runs, WorkflowScreenState(client.connected, false, client.desktopErrors[key], null), since, status, only,
+                                onFilter = { s, st, w -> since = s; status = st; only = w }, onRetry = client::refreshDesktop) { run ->
+                                open = run.workflowId; runId = run.run.id
+                            }
+                        }
+                    }
+                } else {
+                    val list = client.desktopViews[Workflows.LIST] as? WorkflowList
+                    WorkflowGate(client, Workflows.LIST, "Loading workflows…") {
+                        val notice = client.workflowNotice?.takeIf { it.first.isEmpty() }?.second
+                        if (list != null) WorkflowList(list, WorkflowScreenState(client.connected, Workflows.LIST in client.desktopBusy,
+                            client.desktopErrors[Workflows.LIST], notice), onRetry = client::refreshDesktop,
+                            onDismissNotice = client::dismissWorkflowNotice,
+                            onPauseTriggers = if (client.workflowTriggers == true) { paused -> client.desktopAction(Workflows.PAUSE, Workflows.pauseAction(paused)) } else null) {
+                            open = it; runId = null
+                        }
+                    }
                 }
             }
         } else {
@@ -158,7 +203,9 @@ internal fun WorkflowsPage(client: LiveClient, onBack: (() -> Unit)?) {
                         val notice = client.workflowNotice?.takeIf { it.first == workflow.id }?.second
                         WorkflowDetail(workflow, runId, WorkflowScreenState(client.connected, key in client.desktopBusy, client.desktopErrors[key], notice),
                             onSelectRun = { runId = it }, onRetry = client::refreshDesktop, onDismissNotice = client::dismissWorkflowNotice,
-                            onAction = { action, run -> client.desktopAction(action, workflowAction(workflow, action, run)) })
+                            onRunWithInputs = { inputs -> client.desktopAction("workflows.run", workflowAction(workflow, "workflows.run", null, inputs)) },
+                            onAction = { action, run -> client.desktopAction(action, workflowAction(workflow, action, run)) },
+                            onTrigger = { trigger, enabled -> client.desktopAction(Workflows.TRIGGER, Workflows.triggerAction(workflow, trigger, enabled)) })
                     }
                 }
             }
@@ -166,9 +213,13 @@ internal fun WorkflowsPage(client: LiveClient, onBack: (() -> Unit)?) {
     }
 }
 
-/** A run names the saved version the phone showed, so a workflow changed on the desktop since is refused rather than run unseen. */
-internal fun workflowAction(workflow: Workflow, action: String, run: String?): JSONObject = JSONObject().put("workflow_id", workflow.id).apply {
+/**
+ * A run names the saved version the phone showed, so a workflow changed on the desktop since is refused rather than run unseen.
+ * Inputs from the Run form go only to a desktop that offered the form, and only for a workflow that has inputs.
+ */
+internal fun workflowAction(workflow: Workflow, action: String, run: String?, inputs: JSONObject? = null): JSONObject = JSONObject().put("workflow_id", workflow.id).apply {
     if (action == "workflows.run") put("expected_revision", workflow.revision)
+    if (action == "workflows.run" && inputs != null && !workflow.inputs.isNullOrEmpty()) put("inputs", inputs)
     run?.let { put("run_id", it) }
 }
 
@@ -215,8 +266,10 @@ internal fun Banner(text: String, color: Color, action: String? = null, onAction
 }
 
 @Composable
-internal fun WorkflowList(list: WorkflowList, state: WorkflowScreenState, onRetry: () -> Unit, onOpen: (String) -> Unit) {
+internal fun WorkflowList(list: WorkflowList, state: WorkflowScreenState, onRetry: () -> Unit, onDismissNotice: () -> Unit = {},
+                         onPauseTriggers: ((Boolean) -> Unit)? = null, onOpen: (String) -> Unit) {
     var filter by rememberSaveable { mutableStateOf("all") }
+    var confirmResume by remember { mutableStateOf(false) }
     val running = list.items.count { it.active }
     val failed = list.items.count { !it.active && (it.latestRun?.status ?: it.status) in setOf("failed", "interrupted") }
     val shown = list.items.filter { when (filter) {
@@ -225,8 +278,12 @@ internal fun WorkflowList(list: WorkflowList, state: WorkflowScreenState, onRetr
         else -> true
     } }.sortedByDescending { it.active }
     Column(Modifier.fillMaxSize()) {
-        WorkflowBanners(state, onRetry)
+        WorkflowBanners(state, onRetry, onDismissNotice)
         LazyColumn(Modifier.fillMaxSize().testTag("workflowList"), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            val pause = list.triggers
+            if (pause != null && onPauseTriggers != null) item {
+                PauseAllTriggers(pause, enabled = state.online && !state.busy) { paused -> if (paused) onPauseTriggers(true) else confirmResume = true }
+            }
             if (list.items.isNotEmpty()) item {
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(filter == "all", { filter = "all" }, label = { Text("All (${list.items.size})") })
@@ -255,15 +312,100 @@ internal fun WorkflowList(list: WorkflowList, state: WorkflowScreenState, onRetr
             if (list.earlier > 0) item { Note("${list.earlier} more ${if (list.earlier == 1) "workflow is" else "workflows are"} on your desktop.") }
         }
     }
+    val pause = list.triggers
+    if (confirmResume && pause != null && onPauseTriggers != null) AlertDialog(onDismissRequest = { confirmResume = false },
+        title = { Text("Resume all triggers?") },
+        text = { Text("${pause.enabled} of ${pause.count} ${if (pause.count == 1) "trigger turns" else "triggers turn"} back on, as each was set, " +
+            "and start workflows on your computer without asking. Scheduled times missed while paused stay skipped.") },
+        confirmButton = { TextButton(onClick = { onPauseTriggers(false); confirmResume = false }, modifier = Modifier.testTag("resumeTriggersConfirm")) { Text("Resume") } },
+        dismissButton = { TextButton(onClick = { confirmResume = false }) { Text("Cancel") } })
 }
+
+/** More › Workflows: one switch over every trigger on the desktop. Pausing keeps each trigger's own setting. */
+@Composable
+private fun PauseAllTriggers(pause: TriggerPause, enabled: Boolean, onChange: (Boolean) -> Unit) {
+    Surface(shape = MaterialTheme.shapes.medium, color = if (pause.paused) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.surface,
+        modifier = Modifier.fillMaxWidth().testTag("pauseAllTriggers")
+            .toggleable(pause.paused, enabled = enabled, role = Role.Switch) { onChange(it) }) {
+        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("Pause all triggers", style = MaterialTheme.typography.titleSmall)
+                Text(pauseText(pause), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Switch(checked = pause.paused, onCheckedChange = null, enabled = enabled)
+        }
+    }
+}
+
+internal fun pauseText(pause: TriggerPause): String = when {
+    pause.paused -> "Paused" + (pause.pausedAt.takeIf { it.isNotBlank() }?.let { " since ${whenText(it, past = true)}" } ?: "") +
+        ". Nothing starts on its own; scheduled times are skipped, not caught up."
+    pause.count == 0 -> "No triggers yet. Add them to a workflow on your computer."
+    else -> "${pause.enabled} of ${pause.count} ${if (pause.count == 1) "trigger" else "triggers"} on."
+}
+
+/**
+ * Every open project's workflow runs, newest first, with time, status and workflow filters. Tapping a run opens it in
+ * its workflow, as the desktop's Workflow runs view opens it in the Studio.
+ */
+@Composable
+internal fun AllRunsList(runs: AllWorkflowRuns, state: WorkflowScreenState, since: String, status: String, workflow: String,
+                         onFilter: (since: String, status: String, workflow: String) -> Unit, onRetry: () -> Unit, onOpen: (AllWorkflowRun) -> Unit) {
+    Column(Modifier.fillMaxSize()) {
+        WorkflowBanners(state, onRetry)
+        LazyColumn(Modifier.fillMaxSize().testTag("allRunsList"), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Workflows.SPANS.forEach { (value, label) -> FilterChip(since == value, { onFilter(value, status, workflow) }, label = { Text(label) }) }
+                    }
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Workflows.STATUS_FILTERS.forEach { (value, label) -> FilterChip(status == value, { onFilter(since, value, workflow) }, label = { Text(label) }) }
+                    }
+                    if (runs.workflows.size > 1 || workflow.isNotBlank()) Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(workflow.isBlank(), { onFilter(since, status, "") }, label = { Text("All workflows") })
+                        runs.workflows.forEach { (id, name) -> FilterChip(workflow == id, { onFilter(since, status, id) }, label = { Text(name.ifBlank { id }, maxLines = 1) }) }
+                    }
+                    if (runs.summary.isNotBlank()) Text(runs.summary, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 4.dp).testTag("allRunsSummary"))
+                }
+            }
+            if (runs.runs.isEmpty()) item { Note("No runs match these filters. Runs from your computer, triggers, this phone and Rem all show up here.") }
+            items(runs.runs, key = { it.workflowId + "/" + it.run.id }) { row ->
+                Surface(onClick = { onOpen(row) }, shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surface,
+                    modifier = Modifier.fillMaxWidth().testTag("run:${row.workflowId}/${row.run.id}")) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (row.project.isNotBlank()) Text(row.project, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(row.workflowName.ifBlank { row.workflowId }, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        WorkflowStatus(row.run.status)
+                        Text(allRunLine(row), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+            if (runs.earlier > 0) item { Note("${runs.earlier} older ${if (runs.earlier == 1) "run matches" else "runs match"}. See them in Workflow runs on your computer.") }
+        }
+    }
+}
+
+/** "Started 5 min ago · took 1 min 15 s · Trigger · 1,200 tokens · $0.30" */
+internal fun allRunLine(row: AllWorkflowRun): String = listOf(
+    row.run.startedAt.takeIf { it.isNotBlank() }?.let { "Started ${whenText(it, past = true)}" }.orEmpty(),
+    durationText(row.run.startedAt, row.run.finishedAt).takeIf { it.isNotBlank() }?.let { if (row.run.active) "running $it" else "took $it" }.orEmpty(),
+    Workflows.startedByText(row.startedBy),
+    row.tokens.takeIf { it.isNotBlank() && it != "0" }?.let { "$it tokens" }.orEmpty(),
+    row.cost.takeIf { it.isNotBlank() && it != "$0" }.orEmpty()).filter { it.isNotBlank() }.joinToString(" · ")
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun WorkflowDetail(workflow: Workflow, selectedRun: String?, state: WorkflowScreenState, onSelectRun: (String?) -> Unit,
-                            onRetry: () -> Unit, onDismissNotice: () -> Unit, onAction: (String, String?) -> Unit) {
+                            onRetry: () -> Unit, onDismissNotice: () -> Unit, onRunWithInputs: (JSONObject) -> Unit = {},
+                            onTrigger: (WorkflowTrigger, Boolean) -> Unit = { _, _ -> }, onAction: (String, String?) -> Unit) {
     var tab by rememberSaveable(workflow.id) { mutableStateOf("graph") }
     var node by remember { mutableStateOf<WorkflowNode?>(null) }
     var confirm by remember { mutableStateOf<Pair<String, String?>?>(null) }
+    var turnOn by remember { mutableStateOf<WorkflowTrigger?>(null) }
+    val tabs = listOf("graph", "steps", "runs") + if (workflow.triggers != null) listOf("triggers") else emptyList()
     val layout = remember(workflow.nodes, workflow.edges) { GraphLayout.of(workflow.nodes, workflow.edges) }
     // The detail shown is for the chosen run only once the desktop sent it.
     val detail = workflow.run?.takeIf { selectedRun == null || it.run.id == selectedRun }
@@ -271,16 +413,23 @@ internal fun WorkflowDetail(workflow: Workflow, selectedRun: String?, state: Wor
     Column(Modifier.fillMaxSize()) {
         WorkflowBanners(state, onRetry, onDismissNotice)
         RunCard(workflow, detail, selectedRun, state, onLatest = { onSelectRun(null) }) { action, run -> confirm = action to run }
-        PrimaryTabRow(selectedTabIndex = listOf("graph", "steps", "runs").indexOf(tab)) {
+        PrimaryTabRow(selectedTabIndex = tabs.indexOf(tab).coerceAtLeast(0)) {
             Tab(tab == "graph", { tab = "graph" }, text = { Text("Graph") })
             Tab(tab == "steps", { tab = "steps" }, text = { Text("Steps") })
             Tab(tab == "runs", { tab = "runs" }, text = { Text(if (workflow.runs.isEmpty()) "Runs" else "Runs (${workflow.runs.size + workflow.earlierRuns})") })
+            workflow.triggers?.let { triggers ->
+                Tab(tab == "triggers", { tab = "triggers" }, text = { Text(if (triggers.isEmpty()) "Triggers" else "Triggers (${triggers.size})") },
+                    modifier = Modifier.testTag("workflowTriggersTab"))
+            }
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when (tab) {
                 "graph" -> if (workflow.nodes.isEmpty()) Note("This workflow has no steps the desktop can show.", Modifier.padding(20.dp))
                     else WorkflowGraph(workflow, layout, statuses, Modifier.fillMaxSize()) { node = it }
                 "steps" -> WorkflowSteps(workflow, layout, statuses) { node = it }
+                "triggers" -> WorkflowTriggers(workflow, enabled = state.online && !state.busy) { trigger, on ->
+                    if (on) turnOn = trigger else onTrigger(trigger, false)
+                }
                 else -> WorkflowRuns(workflow, detail?.run?.id ?: selectedRun) { onSelectRun(it); tab = "graph" }
             }
         }
@@ -288,24 +437,145 @@ internal fun WorkflowDetail(workflow: Workflow, selectedRun: String?, state: Wor
     node?.let { shown ->
         ModalBottomSheet(onDismissRequest = { node = null }) { NodeDetail(workflow, shown, statuses[shown.id]) }
     }
-    confirm?.let { (action, run) ->
+    // Turning a trigger on starts unattended work, so the phone asks first. The desktop refuses it unconfirmed.
+    turnOn?.let { trigger ->
+        AlertDialog(onDismissRequest = { turnOn = null }, title = { Text("Turn on ${trigger.title}?", maxLines = 2, overflow = TextOverflow.Ellipsis) },
+            text = { Text(buildString {
+                append("It starts ${workflow.summary.name.ifBlank { "this workflow" }} on your computer without asking, each time it fires. ")
+                append("Runs use the trigger's saved inputs; approvals and limits still apply.")
+                if (workflow.triggersPaused) append(" All triggers are paused, so it waits until you resume them.")
+            }) },
+            confirmButton = { TextButton(onClick = { onTrigger(trigger, true); turnOn = null }, modifier = Modifier.testTag("triggerOnConfirm")) { Text("Turn on") } },
+            dismissButton = { TextButton(onClick = { turnOn = null }) { Text("Cancel") } })
+    }
+    val form = workflow.inputs.orEmpty()
+    confirm?.takeIf { it.first == "workflows.run" && form.isNotEmpty() }?.let {
+        RunSheet(workflow, form, state, onDismiss = { confirm = null }) { inputs -> onRunWithInputs(inputs); confirm = null }
+    }
+    confirm?.takeUnless { it.first == "workflows.run" && form.isNotEmpty() }?.let { (action, run) ->
         val name = workflow.summary.name.ifBlank { "this workflow" }
+        val failed = action == "workflows.resume" && (detail?.run?.status ?: workflow.runs.firstOrNull { it.id == run }?.status) == "failed"
         AlertDialog(onDismissRequest = { confirm = null }, title = { Text(when (action) {
-            "workflows.run" -> "Run $name?"; "workflows.stop" -> "Stop this run?"; else -> "Resume this run?"
+            "workflows.run" -> "Run $name?"; "workflows.stop" -> "Stop this run?"; Workflows.RERUN -> "Run $name again with the same inputs?"
+            else -> if (failed) "Resume from the failed step?" else "Resume this run?"
         }, maxLines = 2, overflow = TextOverflow.Ellipsis) }, text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(when (action) {
                 "workflows.run" -> "Raticode starts a new run on your computer with the workflow's saved inputs. Its approvals and limits still apply."
                 "workflows.stop" -> "Raticode asks the run to stop on your computer. Steps that already finished stay finished."
-                else -> "Raticode continues the run on your computer from where it stopped. Its approvals and limits still apply."
+                Workflows.RERUN -> "Raticode starts a new run on your computer with the inputs and trigger events this run used, saved on your computer. It runs the workflow as it is now, and its approvals and limits still apply."
+                else -> "Raticode starts a new run on your computer that reuses the steps that finished and continues from where this one stopped. Its approvals and limits still apply."
             })
+            // The steps a resume runs again: the one that failed or was cut off, and those after it as the graph reaches them.
+            if (action == "workflows.resume" && workflow.resumeControl.rerunNodes.isNotEmpty())
+                PreviewList("Runs again", workflow.resumeControl.rerunNodes, MaterialTheme.colorScheme.onSurface)
             // The same preview the desktop shows before its Run button starts anything.
             if (action == "workflows.run") workflow.preview.let { preview ->
                 if (preview.destructive.isNotEmpty()) PreviewList("This run can change things", preview.destructive, MaterialTheme.colorScheme.error)
                 if (preview.warnings.isNotEmpty()) PreviewList("Warnings", preview.warnings, MaterialTheme.colorScheme.tertiary)
             }
         } }, confirmButton = { TextButton(onClick = { onAction(action, run); confirm = null }) { Text(when (action) {
-            "workflows.run" -> "Run"; "workflows.stop" -> "Stop run"; else -> "Resume"
+            "workflows.run" -> "Run"; "workflows.stop" -> "Stop run"; Workflows.RERUN -> "Run again"; else -> "Resume"
         }) } }, dismissButton = { TextButton(onClick = { confirm = null }) { Text("Cancel") } })
+    }
+}
+
+/**
+ * The Run sheet for a workflow that takes inputs: one field per input, from the same schema the desktop's Run dialog
+ * reads, with the desktop's preview below. Problems show under each field before anything is sent; the desktop checks
+ * the values again before it starts the run.
+ */
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@Composable
+internal fun RunSheet(workflow: Workflow, inputs: List<WorkflowInput>, state: WorkflowScreenState, onDismiss: () -> Unit, onRun: (JSONObject) -> Unit) {
+    var drafts by remember(workflow.id, workflow.revision) { mutableStateOf(RunForm.drafts(inputs)) }
+    var errors by remember(workflow.id, workflow.revision) { mutableStateOf<Map<String, String>>(emptyMap()) }
+    val name = workflow.summary.name.ifBlank { "this workflow" }
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(start = 20.dp, end = 20.dp, bottom = 24.dp)
+            .testTag("workflowRunSheet"), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Run $name", style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text("Raticode starts a new run on your computer with these inputs. Its approvals and limits still apply.",
+                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            inputs.forEach { input ->
+                RunInputField(input, drafts[input.name].orEmpty(), errors[input.name]) { value ->
+                    drafts = drafts + (input.name to value); errors = errors - input.name
+                }
+            }
+            workflow.preview.let { preview ->
+                if (preview.destructive.isNotEmpty()) PreviewList("This run can change things", preview.destructive, MaterialTheme.colorScheme.error)
+                if (preview.warnings.isNotEmpty()) PreviewList("Warnings", preview.warnings, MaterialTheme.colorScheme.tertiary)
+            }
+            if (errors.isNotEmpty()) Text("Fix the fields marked above, then run.", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+                Button(enabled = state.online && !state.busy, modifier = Modifier.testTag("workflowRunSend"), onClick = {
+                    val (values, problems) = RunForm.values(inputs, drafts)
+                    errors = problems
+                    if (problems.isEmpty()) onRun(values)
+                }) { Icon(ThreadIcons.Play, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Run") }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun RunInputField(input: WorkflowInput, draft: String, error: String?, onChange: (String) -> Unit) {
+    val label = input.label + if (input.needed) " *" else ""
+    val hint = error ?: when {
+        input.kind == "json" -> RunForm.jsonHint(input)
+        input.hasDefault && draft.isBlank() && input.kind != "boolean" -> "Leave blank to use the workflow's default."
+        else -> null
+    }
+    val supporting: (@Composable () -> Unit)? = listOfNotNull(input.description.takeIf { it.isNotBlank() }, hint).takeIf { it.isNotEmpty() }?.let { lines ->
+        { Text(lines.joinToString("\n")) }
+    }
+    val tag = Modifier.testTag("runInput:${input.name}")
+    when (input.kind) {
+        "boolean" -> Row(tag.fillMaxWidth().toggleable(draft == "true", role = Role.Switch) { onChange(it.toString()) }.padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(label, style = MaterialTheme.typography.bodyLarge)
+                if (input.description.isNotBlank()) Text(input.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Switch(checked = draft == "true", onCheckedChange = null)
+        }
+        "choice" -> Column(tag, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(label, style = MaterialTheme.typography.bodyLarge)
+            if (input.description.isNotBlank()) Text(input.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            val chosen = draft.toIntOrNull()
+            if (input.choices.size <= 6) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                input.choices.forEachIndexed { index, choice ->
+                    FilterChip(chosen == index, { onChange(if (chosen == index && !input.needed) "" else index.toString()) },
+                        label = { Text(RunForm.choiceText(choice), maxLines = 1, overflow = TextOverflow.Ellipsis) })
+                }
+            } else {
+                var open by remember { mutableStateOf(false) }
+                Box {
+                    OutlinedButton(onClick = { open = true }, modifier = Modifier.fillMaxWidth()) {
+                        Text(chosen?.let { input.choices.getOrNull(it) }?.let(RunForm::choiceText) ?: "Choose…", Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    DropdownMenu(open, { open = false }) {
+                        if (!input.needed) DropdownMenuItem(text = { Text("No choice") }, onClick = { onChange(""); open = false })
+                        input.choices.forEachIndexed { index, choice ->
+                            DropdownMenuItem(text = { Text(RunForm.choiceText(choice)) }, onClick = { onChange(index.toString()); open = false })
+                        }
+                    }
+                }
+            }
+            if (error != null) Text(error, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            else if (input.hasDefault && chosen == null) Text("Leave unchosen to use the workflow's default.", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        else -> OutlinedTextField(draft, onChange, tag.fillMaxWidth(), label = { Text(label) }, supportingText = supporting, isError = error != null,
+            singleLine = input.kind == "integer" || input.kind == "number" || input.secret, minLines = if (input.kind == "json") 2 else 1, maxLines = 6,
+            textStyle = if (input.kind == "json") LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace) else LocalTextStyle.current,
+            visualTransformation = if (input.secret) PasswordVisualTransformation() else VisualTransformation.None,
+            keyboardOptions = KeyboardOptions(keyboardType = when {
+                input.secret -> KeyboardType.Password; input.kind == "integer" -> KeyboardType.Number
+                input.kind == "number" -> KeyboardType.Decimal; else -> KeyboardType.Text
+            }, autoCorrectEnabled = input.kind == "text" && !input.secret))
     }
 }
 
@@ -356,7 +626,13 @@ private fun RunCard(workflow: Workflow, detail: WorkflowRunDetail?, selectedRun:
                 val resumable = run != null && !run.active && run.status in setOf("failed", "stopped", "interrupted")
                 if (resumable && active == null) OutlinedButton(onClick = { onAction("workflows.resume", run!!.id) },
                     enabled = ready && workflow.resumeControl.allowed && detail != null, modifier = Modifier.testTag("workflowResume")) {
-                    Icon(ThreadIcons.Resume, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Resume")
+                    Icon(ThreadIcons.Resume, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp))
+                    Text(if (run?.status == "failed") "Resume from failed step" else "Resume")
+                }
+                val rerun = workflow.rerunControl
+                if (rerun != null && run != null && !run.active) OutlinedButton(onClick = { onAction(Workflows.RERUN, run.id) },
+                    enabled = ready && rerun.allowed && detail != null, modifier = Modifier.testTag("workflowRerun")) {
+                    Icon(ThreadIcons.Play, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Run again with the same inputs")
                 }
             }
             // Say why a control is off; a disabled button alone does not explain itself.
@@ -365,6 +641,10 @@ private fun RunCard(workflow: Workflow, detail: WorkflowRunDetail?, selectedRun:
                 if (active == null && !workflow.runControl.allowed) add("Run: " + workflow.runControl.reason.ifBlank { "Your desktop doesn't allow running this workflow from the phone." })
                 if (active == null && run != null && run.status in setOf("failed", "stopped", "interrupted") && !workflow.resumeControl.allowed)
                     add("Resume: " + workflow.resumeControl.reason.ifBlank { "Your desktop can't resume this run." })
+                // Names any password inputs the desktop didn't save, which the phone can't fill in.
+                workflow.rerunControl?.takeIf { run != null && !run.active && !it.allowed }?.let {
+                    add("Run again: " + it.reason.ifBlank { "Your desktop can't run this run again." })
+                }
             }
             reasons.forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("workflowReason")) }
         }
@@ -511,8 +791,51 @@ private fun WorkflowSteps(workflow: Workflow, layout: GraphLayout, statuses: Map
                 }
             }
         }
-        item { Note("Workflows are edited in Raticode on your computer. The phone shows them and can run, stop or resume them.") }
+        item { Note("Workflows are edited in Raticode on your computer. The phone shows them and can run, stop, resume or run them again.") }
     }
+}
+
+/** A workflow's triggers: what starts it, when it next runs and how its last start went, each with its own switch. */
+@Composable
+private fun WorkflowTriggers(workflow: Workflow, enabled: Boolean, onSwitch: (WorkflowTrigger, Boolean) -> Unit) {
+    val triggers = workflow.triggers.orEmpty()
+    LazyColumn(Modifier.fillMaxSize().testTag("workflowTriggers"), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (workflow.triggersPaused) item {
+            Note("All triggers are paused. Each keeps its own switch; resume them all from the Workflows list or in Workflow runs on your computer.")
+        }
+        if (triggers.isEmpty()) item { Note("No triggers. Add a schedule, file watch or webhook to this workflow in Raticode on your computer.") }
+        items(triggers, key = { it.id }) { trigger ->
+            Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth()
+                .testTag("trigger:${trigger.id}").toggleable(trigger.enabled, enabled = enabled, role = Role.Switch) { onSwitch(trigger, it) }) {
+                Row(Modifier.padding(12.dp), verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(trigger.title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(listOf(trigger.kindLabel.takeIf { it != trigger.title }.orEmpty(), trigger.description).filter { it.isNotBlank() }.joinToString(" · "),
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(triggerNextText(trigger, workflow.triggersPaused), style = MaterialTheme.typography.bodySmall,
+                            color = if (trigger.enabled && workflow.triggersPaused) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurface)
+                        trigger.lastResult?.let { last ->
+                            WorkflowStatus(Workflows.triggerStatus(last.status), text = "Last: " + Workflows.triggerResultLabel(last.status) +
+                                (last.at.takeIf { it.isNotBlank() }?.let { " · ${whenText(it, past = true)}" } ?: ""))
+                            if (last.message.isNotBlank()) Text(last.message, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    Switch(checked = trigger.enabled, onCheckedChange = null, enabled = enabled)
+                }
+            }
+        }
+        item { Note("Add or change triggers in Raticode on your computer. Turning one on from here asks first.") }
+    }
+}
+
+/** "Next: in 5 min", "Off", or "Paused with all triggers". */
+internal fun triggerNextText(trigger: WorkflowTrigger, paused: Boolean): String = when {
+    !trigger.enabled -> "Off"
+    paused -> "Paused with all triggers"
+    trigger.nextRunAt.isNotBlank() -> "Next: ${whenText(trigger.nextRunAt)}"
+    trigger.kind == "file" -> "On: runs when its files change"
+    trigger.kind == "webhook" -> "On: runs when its webhook is called"
+    else -> "On"
 }
 
 @Composable

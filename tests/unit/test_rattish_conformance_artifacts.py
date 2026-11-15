@@ -48,6 +48,7 @@ def test_machine_schemas_are_valid_draft_2020_12() -> None:
         "node-contract.schema.json",
         "provider-contract.schema.json",
         "run.schema.json",
+        "test-set.schema.json",
         "workflow-metadata.schema.json",
         "workspace-registry.schema.json",
     }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import ssl
 from unittest.mock import MagicMock
 
@@ -229,3 +230,77 @@ async def test_desktop_notification_failure_includes_env_when_stderr_is_empty(
     assert "DISPLAY=:0" in message
     assert "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus" in message
     assert "XDG_RUNTIME_DIR=/run/user/1000" in message
+
+
+def test_a_decision_survives_the_waiting_run_rewriting_its_request(tmp_path, monkeypatch) -> None:
+    """The run's waiter rewrites the request often; it must never put back an undecided copy."""
+    import threading
+    import time
+
+    from gofer.core import approvals
+    from gofer.core.approvals import ApprovalRequest, ApprovalStore
+
+    store = ApprovalStore(tmp_path)
+    store.create_or_update(ApprovalRequest("flow", "run-1", "gate", "Ship it?"))
+    real_write = approvals._write_request
+    decided: list[str] = []
+    errors: list[Exception] = []
+
+    def decide() -> None:
+        try:
+            decided.append(
+                store.decide("flow", "run-1", "gate", "approved", decided_by="ui").status
+            )
+        except Exception as error:  # noqa: BLE001 - reported below
+            errors.append(error)
+
+    deciding = threading.Thread(target=decide)
+
+    def slow_waiter_write(path, request) -> None:
+        # The user decides while the waiter holds its undecided copy.
+        if request.waiter_pid is not None and not deciding.is_alive() and not decided:
+            deciding.start()
+            time.sleep(0.2)
+        real_write(path, request)
+
+    monkeypatch.setattr(approvals, "_write_request", slow_waiter_write)
+    store.mark_waiting("flow", "run-1", "gate")
+    deciding.join(5)
+
+    assert errors == []
+    assert decided == ["decided"]
+    request = store.get("flow", "run-1", "gate")
+    assert request is not None and request.decision is not None
+    assert request.decision.decision == "approved"
+    assert request.waiter_pid is not None
+
+
+def test_a_timeout_never_replaces_a_decision_made_after_the_read(tmp_path) -> None:
+    from gofer.core.approvals import ApprovalRequest, ApprovalStore
+
+    store = ApprovalStore(tmp_path)
+    store.create_or_update(
+        ApprovalRequest(
+            "flow",
+            "run-1",
+            "gate",
+            "Ship it?",
+            requested_at="2020-01-01T00:00:00+00:00",
+            timeout_seconds=1,
+        )
+    )
+    stale = ApprovalRequest.from_dict(
+        json.loads(store.request_path("flow", "run-1", "gate").read_text())
+    )
+    # Someone decided it on disk; the stale in-memory copy still looks undecided.
+    path = store.request_path("flow", "run-1", "gate")
+    data = json.loads(path.read_text())
+    data["decision"] = {"decision": "approved", "decidedBy": "ui", "notes": ""}
+    path.write_text(json.dumps(data))
+
+    result = store._expire_if_needed(stale)
+
+    assert result.decision is not None and result.decision.decision == "approved"
+    saved = store.get("flow", "run-1", "gate")
+    assert saved is not None and saved.decision is not None
+    assert saved.decision.decision == "approved"

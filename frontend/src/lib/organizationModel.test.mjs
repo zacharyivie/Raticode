@@ -104,6 +104,19 @@ test("needs-you lists Rem's requests, reviews and flagged work; workers show wha
   assert.deepEqual(workerStatus(model, "sage"), ["paused", "Held"]);
 });
 
+test("needs-you leaves out blocked work that waits by itself or for Rem's look in Auto mode", () => {
+  const withBlocked = waitingOn => {
+    const org = organization();
+    org.runtime.tasks = org.runtime.tasks.map(t => (t.id === "t3" ? { ...t, waitingOn } : t));
+    return needsYou(buildModel(org)).map(item => item.type);
+  };
+  assert.deepEqual(withBlocked("rem"), ["request", "review"]);
+  assert.deepEqual(withBlocked("raticode"), ["request", "review"]);
+  assert.deepEqual(withBlocked("you"), ["request", "review", "flag"]);
+  // An older desktop doesn't say who a blocked ticket waits on: it stays flagged.
+  assert.deepEqual(withBlocked(undefined), ["request", "review", "flag"]);
+});
+
 test("knowledge edges combine written and quoted links with suggestions for similar notes", () => {
   const model = buildModel(organization());
   const edges = knowledgeEdges(model);
@@ -251,4 +264,45 @@ test("worker commands spell out characters that would hide what runs", () => {
   assert.deepEqual(visibleCommand("npm test"), { text: "npm test", hidden: 0, lines: 1 });
   assert.deepEqual(visibleCommand("a\u202eb\u200bc\rd\te\nf"), { text: "a⟨U+202E⟩b⟨U+200B⟩c⟨U+000D⟩d\te\nf", hidden: 3, lines: 2 });
   assert.deepEqual(visibleCommand(null), { text: "", hidden: 0, lines: 1 });
+});
+
+test("setup steps lead a new organization to its first run, then disappear", async () => {
+  const { setupSteps } = await import("./organizationModel.js");
+  const fresh = buildModel({ config: { name: "New", employees: [], projectRoots: [] }, runtime: { state: "paused", tasks: [] } });
+  assert.deepEqual(setupSteps(fresh).map(step => [step.id, step.done]), [["worker", false], ["folder", false], ["projects", false], ["ticket", false], ["start", false]]);
+  assert.equal(setupSteps(fresh)[0].open, "new:worker");
+  const held = buildModel({ config: { name: "New", employees: [{ id: "w", name: "W", paused: true }], projectRoots: ["/p"] }, runtime: { state: "paused", tasks: [task("t1", "todo")] } });
+  const steps = setupSteps(held);
+  assert.equal(steps[0].label, "Release a worker's hold");
+  assert.equal(steps[0].open, "worker:w");
+  // A held worker isn't asked to work on its own, so only the hold is left to fix.
+  assert.deepEqual(steps.map(step => step.done), [false, true, true, true, false]);
+  // Once it has run with a worker who has projects, a folder and a ticket, the checklist goes away.
+  const ready = organization(); ready.runtime.attempts = {}; ready.runtime.state = "paused";
+  ready.runtime.selfWorkProjects = { mira: { projects: ["/p"], revision: 1, follows: true } };
+  assert.deepEqual(setupSteps(buildModel(ready)).map(s => s.done), [true, true, true, true, false]);
+  const ran = organization(); ran.runtime.attempts = { a1: { id: "a1", taskId: "t1", startedAt: "2026-11-05T10:00:00Z" } };
+  ran.runtime.selfWorkProjects = { mira: { projects: ["/p"], revision: 1 } };
+  assert.deepEqual(setupSteps(buildModel(ran)), []);
+});
+
+test("an organization whose workers have no projects offers to give them its folders", async () => {
+  const { setupSteps, unassignedWorkers } = await import("./organizationModel.js");
+  // It has run before, but Mira never got projects, so she never works on her own.
+  const ran = organization(); ran.runtime.attempts = { a1: { id: "a1", taskId: "t1", startedAt: "2026-11-05T10:00:00Z" } };
+  const steps = setupSteps(buildModel(ran));
+  const step = steps.find(s => s.id === "projects");
+  assert.equal(step.done, false);
+  assert.match(step.hint, /^Mira Santos has no projects, so they won't check in/);
+  // Held Sage isn't listed; Mira gets the folders her workspace access allows, at her revision.
+  assert.deepEqual(step.assign, [{ id: "mira", name: "Mira Santos", projects: ["/p"], revision: 0 }]);
+  ran.config.employees[0].workspacePaths = ["/other"];
+  assert.deepEqual(unassignedWorkers(ran.config, ran.runtime), []);
+  // A worker that follows the folders while the organization owned none still needs them.
+  ran.config.employees[0].workspacePaths = null;
+  ran.runtime.selfWorkProjects = { mira: { projects: [], revision: 2, follows: true } };
+  assert.deepEqual(unassignedWorkers(ran.config, ran.runtime).map(w => w.revision), [2]);
+  // A user's own narrower pick, even of no folders, is left alone.
+  ran.runtime.selfWorkProjects = { mira: { projects: [], revision: 2, follows: false } };
+  assert.deepEqual(unassignedWorkers(ran.config, ran.runtime), []);
 });

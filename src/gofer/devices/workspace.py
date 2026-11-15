@@ -461,6 +461,7 @@ class DeviceWorkspace:
             "organization_modified": bool(value.get("organization")),
             "title_modified": "auto_title" in value,
             "delete_requested": value.get("delete_requested", False),
+            "purge_requested": value.get("purge_requested", False),
             "metadata": {
                 **value["metadata"],
                 **value.get("organization", {}),
@@ -753,8 +754,11 @@ class DeviceWorkspace:
             previous = value.get("organization", {})
             # Read state is kept apart from placement so either change leaves the other.
             read_state = {k: previous[k] for k in ("unread", "readAt") if k in previous}
-            if action == "delete":
+            if action in {"delete", "delete_permanently"}:
                 value["delete_requested"] = True
+                # The desktop also removes the thread's conversation archive copy.
+                if action == "delete_permanently":
+                    value["purge_requested"] = True
             elif reading:
                 read_state = (
                     {"unread": False, "readAt": stamp} if action == "read" else {"unread": True}

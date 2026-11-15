@@ -72,11 +72,33 @@ project root.
 
 Use a `loop` node for iteration or fan-out. Agent nodes do not own fan-out. Use
 `allow-fail: true` plus a conditional route when an operation failure should be handled by
-the graph. Set explicit workflow or node limits for intentional cycles.
+the graph. Set explicit workflow or node limits for intentional cycles. To cap what a run
+spends on models, set workflow `max-tokens` or `max-cost-usd`; they are checked after each
+call, and `max-cost-usd` ends the run at the first call whose provider reports no cost.
+Inside an agent node, Claude Code gets a spending cap from the run's remaining budget, and
+tokens that Claude Code, OpenCode or Copilot report mid-session stop the node at the limit.
+
+An `agent` or `common-llm-task` node may list up to four `fallback` entries, each a map of
+`provider` and optional `profile`, `model` and `effort`. After `retry-count`, the step moves
+to the next entry only on a provider availability error (rate limit or used-up allowance,
+overloaded service, expired sign-in, CLI not installed), never on a task failure, invalid
+structured output or a usage-limit stop. The fallback starts the step over, like a retry,
+so suggest one only for steps that are safe to rerun.
+
+A `common-llm-task` or `jev` node may set `cache: DURATION` (`30m`, `12h`, `7d`, `2w`, at most
+`365d`) to reuse a saved successful answer while the provider, model, effort, rendered
+prompt, bound inputs, output schema and node settings are unchanged. A cached step makes no
+call and records 0 tokens and $0. Agent nodes can't cache, `cache` can't be combined with
+`memory: run` or `all`, steps that read a secret never cache, and test sets skip the cache.
+Suggest it for repeated questions about the same input; files the model reads aren't part
+of the key.
 
 Provider profiles and secrets are global Raticode configuration. Reference them from
 Rattish, but never write resolved credentials into `workflow.rattish`, prompts, logs, or
-generated files.
+generated files. `secret["NAME"]` reads a value saved in the system keychain, then the
+environment. `Raticode rattish secrets list` shows saved names; only the user saves or
+removes values (Workflow settings > Secrets or `Raticode rattish secrets set NAME`), so when
+preflight reports `RATTISH_PREFLIGHT_SECRET_UNAVAILABLE`, tell the user which name to add.
 
 ## Boundaries
 
@@ -88,6 +110,11 @@ generated files.
 - Schedules, file watches and local webhooks are not Rattish syntax. Set them with
   `Raticode rattish triggers add cron|file|webhook` after the workflow validates, and tell the
   user they fire only while Raticode or its background scheduler is running.
+- Test cases for a workflow go in `<name>.tests.json` beside it (`workflow.tests.json` for a
+  registered workflow), validated by the `testSetSchema` path from `Raticode rattish docs`.
+  `Raticode rattish test <workflow.rattish> --estimate` prints the expected cost without
+  running anything. Running the tests executes the workflow once per case, so it needs the
+  same authorization as a real run.
 - If the user requests a trigger or feature that Rattish 1 does not support, report that
   limitation. Do not create a legacy TOML workflow as a workaround unless the user asks.
 - If the CLI or filesystem is unavailable, provide a Rattish patch and say which validation

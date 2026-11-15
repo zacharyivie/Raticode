@@ -32,13 +32,13 @@ const primaryLabel = computed(() => {
       </a>
 
       <h1 class="hero-title">
-        Build the maze.<br />
-        Let the agents <em>run&nbsp;it.</em>
+        <!-- The space before the break keeps the words apart where phones hide the break. -->
+        Your agents keep working <br />
+        <em>while you&nbsp;sleep.</em>
       </h1>
 
       <p class="hero-lede">
-        Turn the coding work you keep re-prompting into workflows. Rem drafts them, you see every step, and
-        they run on your machine.
+        Self-work, Organizations and scheduled workflows run when you're away.
       </p>
 
       <div class="hero-actions">
@@ -148,10 +148,12 @@ const primaryLabel = computed(() => {
 .hero-title {
   margin: 30px 0 0;
   font-family: var(--rc-font-display);
-  font-size: clamp(3rem, 9.4vw, 7.4rem);
+  /* Sized so "Your agents keep working" stays on one line from tablet width up. */
+  font-size: clamp(2.4rem, 6.8vw, 5.4rem);
   font-weight: 800;
   line-height: 1;
   letter-spacing: -0.03em;
+  text-wrap: balance;
   color: var(--rc-ivory);
   text-shadow: 0 0 80px rgba(143, 130, 255, 0.35);
   animation: rise 1s 0.08s cubic-bezier(0.2, 0.8, 0.2, 1) both;
@@ -187,7 +189,7 @@ const primaryLabel = computed(() => {
 }
 
 .hero-lede {
-  max-width: 640px;
+  max-width: 720px;
   margin: 30px 0 0;
   font-size: clamp(1.06rem, 1.7vw, 1.28rem);
   line-height: 1.6;

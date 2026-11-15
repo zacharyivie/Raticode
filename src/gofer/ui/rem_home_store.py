@@ -163,6 +163,27 @@ def duplicate_notices(messages: list[dict[str, Any]]) -> set[str]:
 # before a search result it opens at.
 MAX_PAGE = 400
 LEAD_IN = 10
+# The newest messages Rem's chat view holds: GET /api/rem/conversation and the phone's
+# home screen read only these. Earlier ones come a page at a time from ``page``.
+CHAT_WINDOW = 200
+
+
+def referenced_messages(
+    db: sqlite3.Connection, messages: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """``messages`` by ID, plus each message a reply among them refers to, read by ID."""
+    known = {m["id"]: m for m in messages}
+    wanted = {
+        m["refers_to"]
+        for m in messages
+        if isinstance(m.get("refers_to"), str) and m["refers_to"] not in known
+    }
+    for identity in sorted(wanted):
+        row = db.execute("SELECT body FROM messages WHERE id=?", (identity,)).fetchone()
+        if row:
+            known[identity] = json.loads(row[0])
+    return known
+
 
 PREVIEW_LENGTH = 280
 _LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
@@ -784,34 +805,105 @@ class RemHomeStore:
             view["dependency"] = after_tasks.evaluate(db, task)
         return view
 
-    def conversation(self) -> dict[str, Any]:
+    def conversation(self, limit: int = CHAT_WINDOW) -> dict[str, Any]:
+        """The newest ``limit`` chat messages, oldest first, and what Rem holds back.
+
+        Only that window is read, newest first by ``seq``, however long the chat is.
+        ``earlier`` counts the stored messages before it; ``page`` reads them. Legacy
+        duplicate notices are left out and replies carry their ``referenced`` preview,
+        looked up by ID when the message they answer is older than the window.
+        """
         with self.read() as db:
-            messages = [
-                json.loads(r["body"]) for r in db.execute("SELECT body FROM messages ORDER BY seq")
-            ]
+            rows = db.execute(
+                "SELECT seq, body FROM messages ORDER BY seq DESC LIMIT ?", (max(0, limit),)
+            ).fetchall()
+            messages = [json.loads(body) for _, body in reversed(rows)]
+            # Counting reads only the sequence index, never the message bodies.
+            earlier = int(
+                db.execute(
+                    "SELECT COUNT(*) FROM messages WHERE seq < ?",
+                    (rows[-1][0] if rows else 2**63 - 1,),
+                ).fetchone()[0]
+            )
             for message in messages:
                 # A failed reply's diagnostic (the decision that failed) stays in this
                 # database for tracing; the apps and Rem's own prompts never need it.
                 message.pop("diagnostic", None)
             hidden = duplicate_notices(messages)
-            known = {m["id"]: m for m in messages}
+            conversation = self.setting(db, "conversation")
+            waiting = [
+                {**item, "role": "user", "request_id": item["id"], "waiting": True}
+                for item in conversation.get("waiting") or []
+            ]
+            known = referenced_messages(db, [*messages, *waiting])
             # After duplicate_notices: it matches cards by their stored text, not state.
             current_cards(db, messages)
-            conversation = self.setting(db, "conversation")
             return {
                 # Waiting messages are listed below, once.
                 "conversation": {k: v for k, v in conversation.items() if k != "waiting"},
                 "messages": with_references([m for m in messages if m["id"] not in hidden], known),
+                "earlier": earlier,
                 # Messages sent while Rem was replying. They join messages when Rem
                 # starts on them, so Rem's history never holds one it hasn't reached.
-                "waiting": with_references(
-                    [
-                        {**item, "role": "user", "request_id": item["id"], "waiting": True}
-                        for item in conversation.get("waiting") or []
-                    ],
-                    known,
-                ),
+                "waiting": with_references(waiting, known),
             }
+
+    def find_message(self, identity: str, *, waiting: bool = False) -> dict[str, Any] | None:
+        """One chat message by ID, as stored, or ``None``.
+
+        With ``waiting``, a message sent while Rem was replying counts too, shaped as
+        ``conversation()`` lists it. The whole chat is never read.
+        """
+        with self.read() as db:
+            row = db.execute("SELECT body FROM messages WHERE id=?", (identity,)).fetchone()
+            if row is not None:
+                message = cast(dict[str, Any], json.loads(row[0]))
+                message.pop("diagnostic", None)
+                return message
+            if not waiting:
+                return None
+            held = self.setting(db, "conversation").get("waiting") or []
+        item = next((m for m in held if isinstance(m, dict) and m.get("id") == identity), None)
+        if item is None:
+            return None
+        return {**item, "role": "user", "request_id": item["id"], "waiting": True}
+
+    def tail(self, limit: int, *, roles: tuple[str, ...] = ()) -> list[dict[str, Any]]:
+        """The newest ``limit`` stored messages, oldest first, optionally only from ``roles``.
+
+        A plain read for callers that need the end of the chat, not what the apps show:
+        no task-card states and no reply previews. Legacy duplicate notices stay out.
+        """
+        query = "SELECT body FROM messages"
+        params: list[Any] = []
+        if roles:
+            query += " WHERE json_extract(body, '$.role') IN (" + ",".join("?" * len(roles)) + ")"
+            params.extend(roles)
+        with self.read() as db:
+            rows = db.execute(
+                query + " ORDER BY seq DESC LIMIT ?", (*params, max(0, limit))
+            ).fetchall()
+        messages = [json.loads(row[0]) for row in reversed(rows)]
+        for message in messages:
+            message.pop("diagnostic", None)
+        hidden = duplicate_notices(messages)
+        return [m for m in messages if m["id"] not in hidden]
+
+    def latest_card_task(self, tasks: AbstractSet[str]) -> str | None:
+        """The task of the newest chat message whose card is for one of ``tasks``.
+
+        Reads back from the newest message and stops at the first match.
+        """
+        if not tasks:
+            return None
+        with self.read() as db:
+            for (task,) in db.execute(
+                "SELECT json_extract(body, '$.work.task_id') FROM messages "
+                "WHERE json_extract(body, '$.work.task_id') IS NOT NULL ORDER BY seq DESC"
+            ):
+                if task in tasks:
+                    return str(task)
+        return None
 
     def messages_after(self, after: int, limit: int = 300) -> dict[str, Any]:
         """Conversation messages stored after sequence ``after``, oldest first, for phone alerts.
@@ -860,7 +952,10 @@ class RemHomeStore:
             return search_messages(db, query, before=before, limit=limit)
 
     def page(self, before: str, *, through: str | None = None, limit: int = 40) -> dict[str, Any]:
-        """Messages stored just before message ``before``, oldest first, for a phone's history.
+        """Messages stored just before message ``before``, oldest first, for earlier chat history.
+
+        Both apps page back through Rem's chat with it: the phone's ``rem.history`` and
+        the desktop's GET /api/rem/history.
 
         With ``through``, the page reaches back to that message and ``LEAD_IN`` more, so a
         search result opens with what led up to it, up to ``MAX_PAGE`` messages. ``earlier``
@@ -891,17 +986,7 @@ class RemHomeStore:
             earlier = int(
                 db.execute("SELECT COUNT(*) FROM messages WHERE seq < ?", (oldest,)).fetchone()[0]
             )
-            wanted = {
-                m["refers_to"]
-                for m in messages
-                if isinstance(m.get("refers_to"), str)
-                and m["refers_to"] not in {n.get("id") for n in messages}
-            }
-            known = {m["id"]: m for m in messages}
-            for identity in wanted:
-                row = db.execute("SELECT body FROM messages WHERE id=?", (identity,)).fetchone()
-                if row:
-                    known[identity] = json.loads(row[0])
+            known = referenced_messages(db, messages)
             current_cards(db, messages)
         for message in messages:
             message.pop("diagnostic", None)

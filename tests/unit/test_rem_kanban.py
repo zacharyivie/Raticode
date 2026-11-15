@@ -36,6 +36,8 @@ class Fake:
         self.hold.set()
         self.failing: set[str] = set()
         self.answers: dict[str, str] = {}
+        # Titles whose workers finish even while ``hold`` is clear.
+        self.released: set[str] = set()
         self.home: RemHome | None = None
 
     def working(self) -> int:
@@ -86,7 +88,8 @@ class Fake:
                 },
             }
             return
-        while not self.hold.is_set():
+        title = kwargs["workflow"]["chatThreadTitle"].removeprefix("Rem task: ")
+        while not self.hold.is_set() and title not in self.released:
             # A stopped or paused turn ends, as a real provider's process does.
             cancel = kwargs.get("cancel_event")
             if cancel is not None and cancel.is_set():
@@ -94,7 +97,6 @@ class Fake:
                 return
             await asyncio.sleep(0.005)
         kwargs["finished"] = True
-        title = kwargs["workflow"]["chatThreadTitle"].removeprefix("Rem task: ")
         if title in self.failing:
             raise ValueError(f"{title} can't be completed without sign-in")
         yield {
@@ -630,11 +632,12 @@ def test_a_failed_ticket_is_blocked_and_followed_up_once_not_in_a_loop(board):
     assert summary == "Picked 1 blocked ticket back up, 1 needs you."
 
 
-def test_unattended_runs_lose_outside_reach(board):
+@pytest.mark.parametrize("provider", ["codex", "claude_code"])
+def test_unattended_runs_lose_outside_reach(board, provider):
     home, fake, project = board
     home.configure(
         {
-            "provider": "codex",
+            "provider": provider,
             "model": "cli-default",
             "projects": [{"root": str(project), "name": "project", "grantId": "g"}],
             "resources": {
@@ -657,6 +660,24 @@ def test_unattended_runs_lose_outside_reach(board):
     # Only Rem's own per-turn sleep tool remains; it reaches nothing outside the run.
     assert [s["name"] for s in resources.get("mcpServers", [])] == ["rem_wait"]
     assert "git push is blocked" in worker["agent_instructions"]
+    # The desktop's task source leaves out fleet and Organizations tools for these.
+    assert workflow["remUnattended"] is True
+    calls = [c for c in fake.calls if "Careful" in c["workflow"]["chatThreadTitle"]]
+    if provider == "codex":
+        # Codex runs in its own sandbox.
+        assert all("claudeSandbox" not in c["workflow"]["remManagedTask"] for c in calls)
+        return
+    # The worker and its reviewer both run Claude Code's shell in the OS sandbox.
+    assert len(calls) >= 2
+    for call in calls:
+        assert call["workflow"]["remManagedTask"]["claudeSandbox"] is True
+        assert "operating-system sandbox" in call["agent_instructions"]
+    assert "The shell can change only this task's project" in worker["agent_instructions"]
+    review = next(c for c in calls if c["workflow"]["remManagedTask"]["readOnly"])
+    scratch = Path(review["trusted_scratch_dir"])
+    assert scratch.is_relative_to(home.data_dir / "rem-work" / "turn-scratch")
+    assert str(scratch) in review["agent_instructions"]
+    assert not scratch.exists()
 
 
 def test_only_one_claim_wins_when_many_try_at_once(board):
@@ -1494,6 +1515,10 @@ def test_settings_validate_and_detect_conflicts(board):
         "saved_enabled": True,
         "max_threads": 2,
         "auto_pull_backlog": False,
+        "session_token_limit": 0,
+        "daily_token_limit": 0,
+        "rate_limit_percent": 0,
+        "auto_approve_proposals": False,
         "idle_minutes": 15,
         "revision": 0,
     }
@@ -1715,7 +1740,12 @@ def test_phone_refuses_a_path_and_is_gated_by_its_device_permission(linked):
 def test_phone_reads_and_changes_self_work_and_clears_the_report(linked):
     _, _, _, send, home, _, _, _ = linked
     view = send("desktop.read", "selfwork.read")["value"]
-    assert view["limits"] == {"max_threads_min": 1, "max_threads_max": 16}
+    assert view["limits"] == {
+        "max_threads_min": 1,
+        "max_threads_max": 16,
+        "token_limit_max": 1_000_000_000_000,
+        "rate_limit_percent_max": 100,
+    }
     changed = send(
         "desktop.action",
         "selfwork.settings",
@@ -1766,3 +1796,26 @@ def test_phone_starting_a_ticket_goes_through_the_same_claim(linked):
     assert ticket(home, "Phone start")["running"]
     fake.hold.set()
     settle(home, "Phone start")
+
+
+def test_tickets_waiting_for_a_merged_duplicate_wait_for_the_kept_ticket(board):
+    from gofer.ui.rem_kanban import get_ticket, move_waiters, put_ticket, wait_ids
+    from gofer.ui.rem_ticket_activity import read_comments
+
+    home, _, _ = board
+    copy = add_proposal(home, "Add voice shortcuts")
+    # The kept ticket itself waits for its copy, so it can't move to waiting for itself.
+    kept = add_proposal(home, "Voice shortcuts", waits_for=[copy["id"]])
+    waiter = add_proposal(home, "Voice shortcut docs", waits_for=[copy["id"]])
+    with home.store.connect() as db:
+        copy = get_ticket(db, copy["id"])
+        copy.update(status="cancelled", duplicate_of=kept["id"], revision=copy["revision"] + 1)
+        put_ticket(db, copy)
+        move_waiters(db, copy, get_ticket(db, kept["id"]))
+
+        assert wait_ids(get_ticket(db, waiter["id"])) == [kept["id"]]
+        moved_notes, _ = read_comments(db, waiter["id"])
+        assert any("Now waits for" in str(note.get("title")) for note in moved_notes)
+        assert wait_ids(get_ticket(db, kept["id"])) == [copy["id"]]
+        kept_notes, _ = read_comments(db, kept["id"])
+        assert any("was cancelled" in str(note.get("title")) for note in kept_notes)

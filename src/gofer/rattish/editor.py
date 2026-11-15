@@ -661,6 +661,14 @@ _STARTER_FIELDS: dict[str, dict[str, Any]] = {
     "file": {"path": "input.txt"},
     "folder": {"path": "output"},
     "http-request": {"url": "https://example.com"},
+    "jev": {
+        "question": "Does this text ask for a refund?",
+        "criteria": {
+            "yes": "The writer asks for money back.",
+            "no": "Anything that doesn't ask for money back.",
+        },
+        "state": "Text to classify, or bind it with with: state: node.ID.output.FIELD",
+    },
     "local-search": {"index-path": ".raticode/index", "query": "search terms"},
     "local-vectorize": {"source-path": "docs", "index-path": ".raticode/index"},
     "loop": {"source": {"type": "count", "count": 1}},

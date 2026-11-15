@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { BookmarkPlus, ChevronDown, Copy, FilePlus2, FolderOpen, Library, ListFilter, MessageSquareQuote, PanelLeft, Plus, Search, SearchX, Sparkles, Star, TriangleAlert, Upload, X, Scale, ScrollText } from "lucide-react";
-import { DATE_FIELDS, DOCUMENT_TYPES, EMPTY_FILTERS, MATCH_LABELS, MATCH_MODES, ORIGINS, READING_STATES, EXTRACTION_STATES, CITATION_FILTERS, SEARCH_IN, SEARCH_MODES, SORTS, activeFilterCount, describeQuery, facetCounts, formatDay, parseQuery, queryText, searchLibrary, typeLabel, dateFieldLabel, readingLabel, originLabel, extractionLabel, citationFilterLabel, parseDateBound, matchesFilters, highlightSegments } from "../lib/secondBrain.js";
-import { useSecondBrain, viewFor, libraryFor, updateSearch, resetSearch, openDocument, toggleSelection, clearSelection, openDialog, addToCollection, evidenceItem, notify, createCollection, navigate, isSampleLibrary } from "../lib/secondBrainStore.js";
+import { DATE_FIELDS, DOCUMENT_TYPES, EMPTY_FILTERS, MATCH_LABELS, MATCH_MODES, ORIGINS, READING_STATES, EXTRACTION_STATES, CITATION_FILTERS, SEARCH_IN, SEARCH_MODES, SORTS, activeFilterCount, describeQuery, facetCounts, formatDay, parseQuery, queryText, searchLibrary, typeLabel, dateFieldLabel, readingLabel, originLabel, extractionLabel, citationFilterLabel, parseDateBound, matchesFilters, highlightSegments, demoteReplaced, checkByDue } from "../lib/secondBrain.js";
+import { useSecondBrain, viewFor, libraryFor, updateSearch, resetSearch, openDocument, toggleSelection, clearSelection, openDialog, addToCollection, evidenceItem, notify, createCollection, navigate, isSampleLibrary, documentById } from "../lib/secondBrainStore.js";
 import { fuseResults } from "../lib/secondBrainGraph.js";
 import { Chip, DraftInput, Empty, Menu, Pill, Popover, Segmented, TypeIcon, Highlight, BrainMark, askRem } from "./SecondBrainParts.jsx";
 import { brainRequest } from "../lib/secondBrainApi.js";
@@ -162,7 +162,7 @@ function NoResults({ brain, brains, library, search, onClear }) {
   </Empty>;
 }
 
-function ResultItem({ result, active, selected, multiBrain, brainOf, collections, onActivate, onOpen, onKeyDown, id }) {
+function ResultItem({ result, active, selected, multiBrain, brainOf, collections, onActivate, onOpen, onKeyDown, id, newerTitle = "" }) {
   const { doc } = result;
   const sourceBrain = brainOf(doc.brainId);
   return <li id={id} role="option" aria-selected={active} className="sb-result" data-active={active || undefined} data-selected={selected || undefined} tabIndex={active ? 0 : -1} onKeyDown={onKeyDown}
@@ -186,6 +186,8 @@ function ResultItem({ result, active, selected, multiBrain, brainOf, collections
         {doc.dates.published ? <span>Published {formatDay(doc.dates.published)}</span> : null}
         {doc.extraction !== "ready" ? <Pill tone={doc.extraction === "failed" ? "danger" : "warning"}>{extractionLabel(doc.extraction)}</Pill> : null}
         {doc.origin === "generated" ? <span>Generated</span> : doc.origin === "agent" ? <span>Saved by an agent</span> : null}
+        {doc.replacedBy?.docId ? <Pill tone="warning">Replaced by {newerTitle || "a newer report"}</Pill> : null}
+        {checkByDue(doc) ? <Pill tone="warning">Check due</Pill> : null}
       </div>
       {result.matchKind !== "filter" ? <div className="sb-passages">
         {result.passages.map(({ block, segments }) => <button key={block.id} type="button" tabIndex={-1} className="sb-passage" onClick={() => openDocument(doc.id, { blockId: block.id })}>
@@ -255,7 +257,8 @@ export default function SearchView({ brain }) {
       seen.add(doc.id);
       related.push({ doc, score: hit.score, matchKind: "meaning", passageCount: 1, passages: [{ block, segments: highlightSegments(block.text, []) }] });
     }
-    return { ...exact, results: search.mode === "semantic" ? related : fuseResults(exact.results, related) };
+    const combined = search.mode === "semantic" ? related : fuseResults(exact.results, related);
+    return { ...exact, results: (search.sort || "relevance") === "relevance" ? demoteReplaced(combined) : combined };
   }, [scopedLibrary, search, semantic, searchKey, meaningEnabled]);
 
   const passageTotal = results.reduce((total, result) => total + result.passageCount, 0);
@@ -315,7 +318,7 @@ export default function SearchView({ brain }) {
           {results.length ? <ul ref={listRef} role="listbox" aria-label="Matching documents" aria-multiselectable="true">
             {grouped.map(([brainId, list]) => <li key={brainId} role="presentation" className="sb-result-group">
               {multiBrain ? <h4><BrainMark brain={store.brains.find(item => item.id === brainId)} size="sm" />{brainNames[brainId]} <small>{list.length}</small></h4> : null}
-              <ul role="presentation">{list.map(result => { position += 1; const index = position; return <ResultItem key={result.doc.id} id={`sb-result-${index}`} result={result} active={index === activeIndex} selected={selection.includes(result.doc.id)} multiBrain={multiBrain}
+              <ul role="presentation">{list.map(result => { position += 1; const index = position; return <ResultItem key={result.doc.id} id={`sb-result-${index}`} result={result} newerTitle={result.doc.replacedBy?.docId ? documentById(store, result.doc.replacedBy.docId)?.title : ""} active={index === activeIndex} selected={selection.includes(result.doc.id)} multiBrain={multiBrain}
                 brainOf={id => store.brains.find(item => item.id === id)} collections={collections} onActivate={() => activate(index)} onOpen={() => activate(index, false)} onKeyDown={event => onKeyDown(event, index)} />; })}</ul>
             </li>)}
           </ul> : <NoResults brain={brain} brains={store.brains} library={scopedLibrary} search={search} onClear={() => updateSearch({ filters: EMPTY_FILTERS })} />}

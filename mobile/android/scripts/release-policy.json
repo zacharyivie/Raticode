@@ -14,11 +14,15 @@
     "android.permission.POST_NOTIFICATIONS",
     "android.permission.POST_PROMOTED_NOTIFICATIONS",
     "android.permission.RECORD_AUDIO",
+    "android.permission.REQUEST_INSTALL_PACKAGES",
     "android.permission.SEND_SMS",
     "android.permission.USE_BIOMETRIC",
     "android.permission.WAKE_LOCK",
     "com.android.alarm.permission.SET_ALARM",
     "dev.raticode.mobile.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+  ],
+  "play_bundle_omits": [
+    "android.permission.REQUEST_INSTALL_PACKAGES"
   ],
   "exported": {
     "androidx.profileinstaller.ProfileInstallReceiver": "android.permission.DUMP",

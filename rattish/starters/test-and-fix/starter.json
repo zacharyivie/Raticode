@@ -1,0 +1,12 @@
+{
+  "starterVersion": 1,
+  "id": "test-and-fix",
+  "name": "Test and fix",
+  "summary": "Runs the tests, lets an agent fix failures, and tests again, up to three fixes.",
+  "order": 4,
+  "docsPath": "/docs/starters/test-and-fix",
+  "providers": [
+    "claude-code"
+  ],
+  "secrets": []
+}

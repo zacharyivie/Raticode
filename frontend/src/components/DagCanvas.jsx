@@ -42,6 +42,7 @@ import {
   Plus,
   RefreshCw,
   Repeat2,
+  RotateCw,
   Route,
   Search,
   Settings2,
@@ -59,9 +60,12 @@ import {
 
 import { apiUrl } from "../lib/api.js";
 import { RattishTriggersSection } from "./RattishTriggersSection.jsx";
+import { WorkflowResultCacheSection } from "./WorkflowResultCacheSection.jsx";
+import { WorkflowSecretsSection } from "./WorkflowSecretsSection.jsx";
 import { DEFAULT_APP_SETTINGS, matchesCommand } from "../lib/settings.js";
 import { Dialog } from "./Dialog.jsx";
 import GraphOutline from "./GraphOutline.jsx";
+import { fallbackLines, providerLabel } from "../lib/providerFallback.js";
 import {
   ProviderModelEffortFields,
   useProviderCapabilities,
@@ -199,6 +203,12 @@ const nodeStyles = {
     accent: "bg-purple-700",
     border: "border-purple-200",
     chip: "bg-purple-50 text-purple-700 border-purple-100",
+  },
+  jev: {
+    icon: ListChecks,
+    accent: "bg-teal-700",
+    border: "border-teal-200",
+    chip: "bg-teal-50 text-teal-700 border-teal-100",
   },
   http_request: {
     icon: Globe2,
@@ -581,6 +591,8 @@ function nodeMetaFromOperation(operation = {}, pathBasePath = "") {
       }`;
     case "http_request":
       return `${operation.method || "GET"} ${operation.url || "url"}`;
+    case "jev":
+      return `${operation.question_type === "choice" ? "choice" : "yes/no"} · ${operation.question || "question"}`;
     case "approval_gate":
       return operation.timeout_seconds
         ? `approval timeout ${operation.timeout_seconds}s`
@@ -1018,6 +1030,7 @@ export default function DagCanvas({
   onReplayRunLog,
   onSettingChange,
   onResumeRunLog,
+  onRerunRunLog,
   onSelectRunLog,
   onStopRunLog,
   onStopWorkflow,
@@ -2716,6 +2729,7 @@ export default function DagCanvas({
                   onShowLatest={onLoadLatestLog}
                   onReplayRun={onReplayRunLog}
                   onResumeRun={onResumeRunLog}
+                  onRerunRun={onRerunRunLog}
                   onStopRun={onStopRunLog}
                   selectedNodeId={selectedNodeId}
                 />
@@ -3469,7 +3483,14 @@ function getNodeStatuses(nodes, runResult, logText, runNodes = {}, runEvents = [
   // The run summary accounts for concurrent activations of the same node.
   for (const [nodeId, nodeRun] of Object.entries(runNodes ?? {})) {
     const status = normalizeRunStatus(nodeRun?.status);
-    if (status) statuses[nodeId] = status === "success" && nodeRun?.data?.reused ? "reused" : status;
+    if (status) {
+      statuses[nodeId] =
+        status === "success" && nodeRun?.data?.reused
+          ? "reused"
+          : status === "success" && nodeRun?.cached
+            ? "cached"
+            : status;
+    }
   }
 
   if (runResult?.nodeOutputs) {
@@ -3504,6 +3525,8 @@ function normalizeRunStatus(status) {
   if (status === "stopped") return "stopped";
   if (status === "skipped") return "skipped";
   if (status === "reused") return "reused";
+  // A result reused from the result cache: no model call, 0 tokens and $0.
+  if (status === "cached") return "cached";
   return null;
 }
 
@@ -3545,6 +3568,7 @@ function ToolbarRunSelector({
   menu = false,
   onOpenChange,
   onReplayRun,
+  onRerunRun,
   onResumeRun,
   onSelectRun,
   onShowLatest,
@@ -3621,6 +3645,7 @@ function ToolbarRunSelector({
               run={selectedRun}
               selectedNodeId={selectedNodeId}
               onReplayRun={onReplayRun}
+              onRerunRun={onRerunRun}
               onResumeRun={onResumeRun}
             />
           ) : null}
@@ -3662,7 +3687,9 @@ function ToolbarRunSelector({
                       <div className="truncate text-[11px] text-muted">{run.id}</div>
                     </div>
                   </button>
-                  {run.status === "running" ? (
+                  {run.status === "running" && run.stopRequested ? (
+                    <StopRequestedLabel />
+                  ) : run.status === "running" ? (
                     <button
                       className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line bg-white text-red-600 transition hover:border-red-200 hover:bg-red-50"
                       title="Stop this run"
@@ -3738,15 +3765,39 @@ export function RunTimelinePanel({
     [displayText, timelineRows],
   );
   const resolvedRetentionSettings = retentionDraft;
-  const updateRetentionSetting = (key, value) => {
-    const parsed = Number.parseInt(value, 10);
-    const nextSettings = {
-      ...resolvedRetentionSettings,
-      [key]: Number.isNaN(parsed) ? 0 : Math.max(0, parsed),
-    };
+  // Each field keeps its typed text while focused and saves on blur or Enter. Saving on
+  // every keystroke stored passing values such as 2 on the way to 200, and clearing a
+  // field saved 0, and the automatic clean-up after each run deletes by those values.
+  const [retentionEdits, setRetentionEdits] = useState({});
+  const retentionFieldValue = (key) =>
+    retentionEdits[key] ?? String(resolvedRetentionSettings[key]);
+  const editRetentionSetting = (key, value) =>
+    setRetentionEdits((current) => ({ ...current, [key]: value }));
+  const commitRetentionSetting = (key) => {
+    const typed = retentionEdits[key];
+    setRetentionEdits((current) => {
+      const rest = { ...current };
+      delete rest[key];
+      return rest;
+    });
+    if (typed === undefined) return;
+    const parsed = Number.parseInt(typed, 10);
+    // An empty or unreadable field goes back to the saved value instead of 0.
+    if (Number.isNaN(parsed)) return;
+    const value = Math.max(0, parsed);
+    if (value === resolvedRetentionSettings[key]) return;
+    const nextSettings = { ...resolvedRetentionSettings, [key]: value };
     setRetentionDraft(nextSettings);
     onRetentionSettingsChange?.(nextSettings);
   };
+  const retentionFieldProps = (key) => ({
+    value: retentionFieldValue(key),
+    onChange: (event) => editRetentionSetting(key, event.target.value),
+    onBlur: () => commitRetentionSetting(key),
+    onKeyDown: (event) => {
+      if (event.key === "Enter") commitRetentionSetting(key);
+    },
+  });
   const pruneWithRetention = (dryRun) => {
     setRetentionOpen(false);
     onPruneRuns?.({
@@ -3905,9 +3956,16 @@ export function RunTimelinePanel({
                                 {formatRunLabel(run)}
                               </div>
                               <div className="truncate text-[11px] text-muted">{run.id}</div>
+                              {run.usage?.calls ? (
+                                <div className="truncate text-[11px] text-muted">
+                                  Tokens {run.usage.tokensLabel} · est. cost {run.usage.costLabel}
+                                </div>
+                              ) : null}
                             </div>
                           </button>
-                          {run.status === "running" ? (
+                          {run.status === "running" && run.stopRequested ? (
+                            <StopRequestedLabel />
+                          ) : run.status === "running" ? (
                             <button
                               className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line bg-white text-red-600 transition hover:border-red-200 hover:bg-red-50"
                               title="Stop this run"
@@ -3961,7 +4019,9 @@ export function RunTimelinePanel({
                 {retentionOpen ? (
                   <div className="absolute right-0 top-9 z-50 w-[280px] rounded-lg border border-line bg-white p-3 text-xs shadow-panel">
                     <div className="font-semibold text-ink">Retention</div>
-                    <div className="mt-1 text-muted">Preview cleanup before pruning logs.</div>
+                    <div className="mt-1 text-muted">
+                      Older runs are removed after each run. Preview or prune now.
+                    </div>
                     <div className="mt-3 grid gap-2">
                       <label className="grid gap-1">
                         <span className="font-medium text-muted">Keep latest runs</span>
@@ -3969,10 +4029,7 @@ export function RunTimelinePanel({
                           className="h-8 rounded-md border border-line px-2 text-ink outline-none focus:border-brand"
                           min="0"
                           type="number"
-                          value={resolvedRetentionSettings.keepLast}
-                          onChange={(event) =>
-                            updateRetentionSetting("keepLast", event.target.value)
-                          }
+                          {...retentionFieldProps("keepLast")}
                         />
                       </label>
                       <label className="grid gap-1">
@@ -3981,10 +4038,7 @@ export function RunTimelinePanel({
                           className="h-8 rounded-md border border-line px-2 text-ink outline-none focus:border-brand"
                           min="0"
                           type="number"
-                          value={resolvedRetentionSettings.keepDays}
-                          onChange={(event) =>
-                            updateRetentionSetting("keepDays", event.target.value)
-                          }
+                          {...retentionFieldProps("keepDays")}
                         />
                       </label>
                       <label className="grid gap-1">
@@ -3993,10 +4047,7 @@ export function RunTimelinePanel({
                           className="h-8 rounded-md border border-line px-2 text-ink outline-none focus:border-brand"
                           min="0"
                           type="number"
-                          value={resolvedRetentionSettings.keepFailedDays}
-                          onChange={(event) =>
-                            updateRetentionSetting("keepFailedDays", event.target.value)
-                          }
+                          {...retentionFieldProps("keepFailedDays")}
                         />
                       </label>
                     </div>
@@ -4137,7 +4188,16 @@ export function RunTimelinePanel({
                     <>
                       <td className="px-3 py-2 font-mono text-[11px] text-muted">
                         <div className={expanded ? "whitespace-pre-wrap" : "truncate"}>
-                          {row.status || "-"}
+                          {row.cached ? (
+                            <span
+                              className="rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 font-sans text-[10px] font-semibold text-sky-700 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-300"
+                              title="Reused a saved answer from the result cache: no model call, 0 tokens, $0"
+                            >
+                              Cached
+                            </span>
+                          ) : (
+                            row.status || "-"
+                          )}
                         </div>
                       </td>
                       <td className="px-3 py-2 font-mono text-[11px] text-muted">
@@ -4180,16 +4240,30 @@ export function RunTimelinePanel({
   );
 }
 
-function RunHistoryActions({ onReplayRun, onResumeRun, run, selectedNodeId }) {
+function RunHistoryActions({ onReplayRun, onRerunRun, onResumeRun, run, selectedNodeId }) {
   const finished = run?.id && run.status !== "running";
   // Omitting onResumeRun hides resume actions for runs the backend cannot resume.
   // Rattish runs say whether they can resume, and resume only where they stopped.
   const resume = run?.resume;
   const canResume = finished && Boolean(onResumeRun) && (!resume || resume.allowed);
   const canReplay = finished && run?.hasTriggerReplay;
-  if (!onResumeRun && !run?.hasTriggerReplay) return null;
+  // Rattish runs say whether their saved inputs and trigger events can start a new run.
+  const rerun = onRerunRun ? run?.rerun : null;
+  if (!onResumeRun && !run?.hasTriggerReplay && !rerun) return null;
   return (
     <div className="grid gap-1 border-b border-line bg-slate-50 px-2 py-2">
+      {rerun ? (
+        <button
+          className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-xs font-medium text-ink transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
+          disabled={!rerun.allowed}
+          title={rerun.allowed ? "Start a new run of the workflow as it is now, with this run's inputs and trigger events" : rerun.reason}
+          type="button"
+          onClick={() => onRerunRun(run.id)}
+        >
+          <RotateCw size={13} />
+          <span className="truncate">Run again with the same inputs</span>
+        </button>
+      ) : null}
       {onResumeRun ? <>
       <button
         className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-xs font-medium text-ink transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
@@ -4239,6 +4313,9 @@ function RunHistoryActions({ onReplayRun, onResumeRun, run, selectedNodeId }) {
 }
 
 export function UsageSummaryStrip({ summary }) {
+  if (summary && typeof summary.tokensLabel === "string") {
+    return <RunUsageStrip usage={summary} />;
+  }
   const totals = summary?.totals;
   const calls = Number(totals?.agent_calls ?? 0);
   if (!summary || !totals || !calls) return null;
@@ -4264,6 +4341,49 @@ export function UsageSummaryStrip({ summary }) {
           </span>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+// A Rattish run's tokens and estimated cost. Labels come from the backend so that a value
+// no provider reported reads "unknown" everywhere, never $0.
+export function RunUsageStrip({ usage }) {
+  if (!usage?.calls && !usage?.cachedResults) return null;
+  const limits = [
+    usage.limits?.maxTokens != null ? `max-tokens ${formatInteger(usage.limits.maxTokens)}` : "",
+    usage.limits?.maxCostUsd != null ? `max-cost-usd ${usage.limits.maxCostUsd}` : "",
+  ].filter(Boolean);
+  const nodes = Object.entries(usage.nodes ?? {}).filter(([, item]) => item?.calls);
+  return (
+    <div
+      className="border-b border-line bg-slate-50 px-3 py-2 text-xs text-slate-700 dark:bg-[#252526] dark:text-[#cccccc]"
+      data-testid="run-usage"
+    >
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span className="font-semibold text-ink dark:text-white">Model usage</span>
+        <span>{usage.calls} {usage.calls === 1 ? "call" : "calls"}</span>
+        {usage.cachedResults ? (
+          <span title="Answers reused from the result cache. They made no model call and count as 0 tokens and $0.">
+            {usage.cachedResults} cached
+          </span>
+        ) : null}
+        <span>Tokens {usage.tokensLabel}</span>
+        <span title="As reported by the provider. Unknown when the provider doesn't report cost.">
+          Estimated cost {usage.costLabel}
+        </span>
+        {limits.length ? <span className="text-muted">Limits: {limits.join(", ")}</span> : null}
+      </div>
+      {nodes.length > 1 ? (
+        <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted">
+          {nodes.map(([nodeId, item]) => (
+            <span key={nodeId}>
+              <span className="font-medium text-slate-700 dark:text-[#cccccc]">{nodeId}</span>
+              {": "}
+              tokens {item.tokensLabel}, cost {item.costLabel}
+            </span>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -4358,6 +4478,7 @@ function parseTimelineRows(events = []) {
       fanOut: fanOut === "" ? "" : String(fanOut),
       message: event?.message ?? "",
       node: event?.nodeId ?? "",
+      cached: event?.status === "cached",
       status: String(event?.status ?? "").replaceAll("_", " "),
     };
   });
@@ -4386,6 +4507,16 @@ function parseLogPayload(payload) {
   };
 }
 
+// Shown in place of Stop until the run ends. Its owner may be another process,
+// such as the background trigger scheduler, which stops it on its next check.
+function StopRequestedLabel() {
+  return (
+    <span className="shrink-0 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-800" role="status">
+      Stop requested
+    </span>
+  );
+}
+
 function RunStatusDot({ status }) {
   if (["running", "started", "retried"].includes(status)) {
     return <Loader2 className="shrink-0 animate-spin text-blue-500" size={13} />;
@@ -4398,6 +4529,8 @@ function RunStatusDot({ status }) {
       ? "bg-emerald-500"
       : status === "reused"
         ? "bg-teal-500"
+      : status === "cached"
+        ? "bg-sky-500"
       : status === "error"
         ? "bg-red-500"
         : status === "allowed_failure"
@@ -4406,6 +4539,13 @@ function RunStatusDot({ status }) {
           ? "bg-amber-500"
           : "bg-slate-400";
   return <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${color}`} />;
+}
+
+function cachedLabel(cachedAt) {
+  const date = cachedAt ? new Date(cachedAt) : null;
+  return date && !Number.isNaN(date.getTime())
+    ? `Yes, answer saved ${date.toLocaleString()}`
+    : "Yes";
 }
 
 function RunNodeInspector({ nodeRun }) {
@@ -4455,10 +4595,22 @@ function RunNodeInspector({ nodeRun }) {
           ["Duration", formatSeconds(nodeRun.durationSeconds)],
           ["Exit code", nodeRun.exitCode ?? ""],
           ["Attempts", attempts.length || ""],
+          [nodeRun.status === "success" ? "Answered by" : "Provider", providerLabel(nodeRun.provider)],
+          ["Model calls", nodeRun.usage?.calls || ""],
+          ["Tokens", nodeRun.usage?.calls || nodeRun.cached ? nodeRun.usage?.tokensLabel ?? "0" : ""],
+          ["Estimated cost", nodeRun.usage?.calls || nodeRun.cached ? nodeRun.usage?.costLabel ?? "$0" : ""],
           ["Reused", data.reused ? "Yes" : ""],
+          ["Cached", nodeRun.cached ? cachedLabel(nodeRun.cachedAt) : ""],
           ["Message", data.message ?? nodeRun.message ?? ""],
         ]}
       />
+      {fallbackLines(nodeRun.fallbacks).length ? (
+        <ul className="space-y-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200" data-testid="run-node-fallbacks" aria-label="Provider switches">
+          {fallbackLines(nodeRun.fallbacks).map((line, index) => (
+            <li key={index}>{line}</li>
+          ))}
+        </ul>
+      ) : null}
       {fanOut ? (
         <KeyValueRows
           rows={[
@@ -5049,6 +5201,7 @@ function NodeStatusBadge({ status }) {
     stopped: "border-amber-200 bg-amber-50 text-amber-700",
     skipped: "border-slate-200 bg-slate-50 text-slate-500",
     reused: "border-teal-200 bg-teal-50 text-teal-700",
+    cached: "border-sky-200 bg-sky-50 text-sky-700",
     disconnected: "border-slate-200 bg-slate-50 text-slate-500",
   }[status];
 
@@ -5508,6 +5661,32 @@ function RattishInspector({
                   setWorkflowField("max-runs", value ? String(value) : "none", { source: true })
                 }
               />
+              <NumberField
+                label="Max tokens per run"
+                min="1"
+                placeholder="None"
+                value={workflowFields["max-tokens"]?.value ?? ""}
+                onChange={(value) =>
+                  value
+                    ? setWorkflowField("max-tokens", String(value), { source: true })
+                    : onMutate?.([{ kind: "remove_field", target: "workflow", field: "max-tokens" }])
+                }
+              />
+              <TextField
+                commitOnBlur
+                label="Max estimated cost per run (USD)"
+                placeholder="None, or 2.50"
+                value={workflowFields["max-cost-usd"]?.source ?? ""}
+                onChange={(value) =>
+                  value.trim()
+                    ? setWorkflowField("max-cost-usd", value.trim(), { source: true })
+                    : onMutate?.([{ kind: "remove_field", target: "workflow", field: "max-cost-usd" }])
+                }
+              />
+              <p className="text-xs leading-5 text-muted">
+                Limits are checked after each model call ends, so a call already running can take
+                a run past them. A provider that doesn&apos;t report cost ends a run that has a cost limit.
+              </p>
             </InspectorSection>
             <InspectorSection title="Public interface">
               <TextareaField
@@ -5533,6 +5712,8 @@ function RattishInspector({
               showInputs={Boolean(workflowFields.inputs)}
               workflowId={document?.workflowId}
             />
+            <WorkflowSecretsSection active={!collapsed} workflowId={document?.workflowId} />
+            <WorkflowResultCacheSection active={!collapsed} workflowId={document?.workflowId} />
           </div>
         )}
       </div>
@@ -5594,7 +5775,7 @@ function RattishContractField({ authored, field, onChange, onReset, schema, valu
       </div>
     );
   }
-  const longText = ["body", "command", "content", "instructions", "prompt", "template"].some(
+  const longText = ["body", "command", "content", "instructions", "prompt", "question", "state", "template"].some(
     (part) => field.includes(part),
   );
   return (
@@ -5617,6 +5798,8 @@ function RattishContractField({ authored, field, onChange, onReset, schema, valu
 
 // How a node behaves where its contract fields alone don't say.
 const rattishNodeHelp = {
+  jev:
+    "Asks Jev one yes/no or multiple-choice question about State and returns label and score, so routes can branch on node.ID.output.label. Bind State with with: state: in Code. The text is sent to TypeSafe. Save a key in Settings > Providers first.",
   "rem-prompt":
     "Sends the prompt to Rem's chat and passes Rem's reply to the next steps. Unless Allow actions is on, Rem only answers: it won't start, change, remember or send anything for this workflow. Wait for tasks waits for any work Rem starts.",
   "rem-task":
@@ -7653,6 +7836,7 @@ function Inspector({
                 value={operation.channel ?? "desktop"}
                 options={[
                   ["desktop", "Desktop"],
+                  ["phone", "Phone"],
                   ["slack", "Slack"],
                   ["teams", "Microsoft Teams"],
                   ["webhook", "Webhook"],
@@ -8517,7 +8701,7 @@ function ProviderProfileEditor({
   );
 }
 
-function profileEditorDraft(profile, subscription) {
+export function profileEditorDraft(profile, subscription) {
   return {
     name: profile?.name ?? "",
     subscription: profile?.subscription ?? subscription ?? "codex",
@@ -8531,11 +8715,23 @@ function profileEditorDraft(profile, subscription) {
     mcp_servers: profile?.mcp_servers ?? [],
     env: profile?.env ?? {},
     secret_refs: profile?.secret_refs ?? {},
+    // Fields this editor doesn't show, such as a local model server's address and key
+    // name, go back unchanged so saving here doesn't turn the profile into another kind.
+    preserved: {
+      subscription: profile?.subscription,
+      fields: Object.fromEntries(PRESERVED_PROFILE_FIELDS
+        .filter((key) => profile?.[key] !== undefined && profile?.[key] !== null)
+        .map((key) => [key, profile[key]])),
+    },
   };
 }
 
-function profilePayloadFromDraft(draft) {
+const PRESERVED_PROFILE_FIELDS = ["local", "api_base_url", "api_key_env", "api_key_secret", "organization", "provider_options"];
+
+export function profilePayloadFromDraft(draft) {
   const payload = {
+    // A different subscription is a different kind of profile; its old fields don't apply.
+    ...(draft.subscription === draft.preserved?.subscription ? draft.preserved.fields : {}),
     name: draft.name.trim(),
     subscription: draft.subscription,
   };

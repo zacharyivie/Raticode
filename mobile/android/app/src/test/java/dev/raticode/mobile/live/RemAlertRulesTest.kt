@@ -6,6 +6,7 @@ import dev.raticode.mobile.live.RemAlertRules.Sender
 import dev.raticode.mobile.live.RemAlertRules.State
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -222,5 +223,97 @@ class RemAlertRulesTest {
         assertEquals(listOf("proposals"), switches.settling)
         switches.setFilter(RemAlertRules.FINISHED, true)
         assertEquals(listOf("finished", "proposals"), switches.settling)
+    }
+
+    @Test fun workflowMessagesAreTheirOwnSwitchAndAlert() {
+        assertEquals("workflow", RemAlertRules.WORKFLOW)
+        assertTrue(RemAlertRules.WORKFLOW in RemAlertRules.FILTERS)
+        // A desktop that doesn't advertise workflow messages is never sent the switch.
+        val on = listOf(RemAlertRules.NEEDS_YOU, RemAlertRules.WORKFLOW)
+        assertEquals(listOf("needs_you"), RemAlertRules.sendable(on, workflowSupported = false))
+        assertEquals(on, RemAlertRules.sendable(on, workflowSupported = true))
+        val message = notice("workflow-3", RemAlertRules.WORKFLOW, RemAlertRules.WORKFLOW)
+            .copy(title = "Backup **done**", body = "12 files", workflowId = "nightly backup/1", runId = "run-9", workflowName = "Nightly")
+        val own = notice("r1", "reply")
+        // Only the workflow switch lets one through, and Rem's chat on screen doesn't hold it back.
+        assertEquals(listOf("r1"), RemAlertRules.incoming(read(own, message), listOf(RemAlertRules.FINISHED), emptyList(), false).notices.map { it.id })
+        assertEquals(listOf("r1", "workflow-3"), RemAlertRules.incoming(read(own, message), on, emptyList(), false).notices.map { it.id })
+        assertEquals(listOf("workflow-3"), RemAlertRules.incoming(read(own, message), on, emptyList(), chatOpen = true).notices.map { it.id })
+        // It gets an alert of its own instead of a line in Rem's conversation.
+        val (chat, workflows) = RemAlertRules.split(listOf(own, message))
+        assertEquals(listOf("r1"), chat.map { it.id })
+        assertEquals(listOf("workflow-3"), workflows.map { it.id })
+        // Generic unless the user shows Rem's words; the tap target is the run either way.
+        val generic = RemAlertRules.workflowAlert(message, showText = false, now = 5)
+        assertEquals(RemAlertRules.WORKFLOW_GENERIC, generic.title)
+        assertFalse("12 files" in generic.text || "Backup" in generic.text || "Nightly" in generic.text)
+        val shown = RemAlertRules.workflowAlert(message, showText = true, now = 5)
+        assertEquals("Backup done", shown.title)
+        assertEquals("12 files", shown.text)
+        assertEquals("nightly backup/1" to "run-9", RemAlertRules.parseWorkflowTarget(shown.target))
+        assertEquals(generic.target, shown.target)
+        assertEquals("workflow-3", shown.key)
+        // No title falls back to the workflow's name.
+        assertEquals("Nightly", RemAlertRules.workflowAlert(message.copy(title = ""), showText = true, now = 5).title)
+        assertEquals(RemAlertRules.WORKFLOW_GENERIC, RemAlertRules.lines(listOf(message), 0, showText = false, now = 1).single().text)
+    }
+
+    @Test fun workflowTargetsRoundTripAndRejectOtherDestinations() {
+        val target = RemAlertRules.workflowTarget("a/b c", "")
+        assertEquals("a/b c" to "", RemAlertRules.parseWorkflowTarget(target))
+        assertNull(RemAlertRules.parseWorkflowTarget(null))
+        assertNull(RemAlertRules.parseWorkflowTarget("rem"))
+        assertNull(RemAlertRules.parseWorkflowTarget("workflow/only-one-part"))
+        assertNull(RemAlertRules.parseWorkflowTarget("8b0c6f2e-thread"))
+    }
+
+    @Test fun workflowMessagesGroupByWorkflowUnderACountingSummary() {
+        fun wf(id: String, workflow: String, name: String, run: String = "run-1", more: Int = 0) =
+            notice(id, RemAlertRules.WORKFLOW, RemAlertRules.WORKFLOW).copy(title = "Step $id", body = "secret $id", workflowId = workflow, runId = run, workflowName = name, moreFromRun = more)
+        val notices = listOf(wf("w1", "nightly", "Nightly backup"), wf("w2", "report", "Report"), wf("w3", "nightly", "Nightly backup", "run-2"))
+        val groups = RemAlertRules.workflowGroups(notices, showText = true, now = 5)
+        // One group per workflow, in the order each first appears, so the first group's summary is the one that sounds.
+        assertEquals(listOf(listOf("w1", "w3"), listOf("w2")), groups.map { group -> group.alerts.map { it.key } })
+        assertEquals(RemAlertRules.workflowGroup(notices[0]), groups[0].key)
+        assertTrue(groups[0].key != groups[1].key)
+        // Each child still opens its own run.
+        assertEquals(listOf("nightly" to "run-1", "nightly" to "run-2"), groups[0].alerts.map { RemAlertRules.parseWorkflowTarget(it.target) })
+
+        // The summary counts what's showing in the group plus the new alerts; an alert shown again isn't counted twice.
+        val summary = RemAlertRules.workflowSummary(groups[0], listOf(RemAlertRules.Shown("old-1"), RemAlertRules.Shown("w1")), showText = true)
+        assertEquals("3 messages from Nightly backup", summary.title)
+        assertEquals(3, summary.count)
+        assertEquals("nightly" to "run-2", RemAlertRules.parseWorkflowTarget(summary.target))
+        assertEquals("1 message from Report", RemAlertRules.workflowSummary(groups[1], emptyList(), showText = true).title)
+        // Without Rem's words the summary doesn't name the workflow.
+        val generic = RemAlertRules.workflowSummary(RemAlertRules.workflowGroups(notices, showText = false, now = 5)[0], emptyList(), showText = false)
+        assertEquals("2 workflow messages", generic.title)
+        assertFalse("Nightly" in generic.title + generic.text)
+    }
+
+    @Test fun aRunsFoldedNoticeKeepsOneAlertAndCountsWhatItStandsFor() {
+        val first = notice("workflow-30", RemAlertRules.WORKFLOW, RemAlertRules.WORKFLOW)
+            .copy(title = "", body = "And 4 more from this run.", workflowId = "nightly", runId = "run-1", workflowName = "Nightly", moreFromRun = 4)
+        val later = first.copy(id = "workflow-41", body = "And 9 more from this run.", moreFromRun = 9)
+        val a = RemAlertRules.workflowAlert(first, showText = false, now = 5)
+        val b = RemAlertRules.workflowAlert(later, showText = false, now = 5)
+        // A later count replaces the earlier alert instead of adding one.
+        assertEquals(a.key, b.key)
+        assertEquals("And 9 more from this run. Tap to open it.", b.text)
+        assertEquals("nightly" to "run-1", RemAlertRules.parseWorkflowTarget(b.target))
+        val group = RemAlertRules.workflowGroups(listOf(later), showText = false, now = 5).single()
+        val summary = RemAlertRules.workflowSummary(group, listOf(RemAlertRules.Shown("workflow-1"), RemAlertRules.Shown(a.key, 4)), showText = false)
+        assertEquals(11, summary.count)
+    }
+
+    @Test fun droppedWorkflowMessagesAlertOnlyWithTheSwitchOn() {
+        val gap = RemNotices(5, emptyList(), 0, false, "n1.0.-.9", dropped = 7)
+        assertEquals(7, RemAlertRules.incoming(gap, listOf(RemAlertRules.WORKFLOW), emptyList(), chatOpen = true).dropped)
+        assertEquals(0, RemAlertRules.incoming(gap, listOf(RemAlertRules.FINISHED), emptyList(), false).dropped)
+        // A switch just turned on doesn't report a gap from before it.
+        assertEquals(0, RemAlertRules.incoming(gap, listOf(RemAlertRules.WORKFLOW), emptyList(), false, settling = listOf(RemAlertRules.WORKFLOW)).dropped)
+        assertNull(RemAlertRules.missed(0))
+        assertEquals("1 workflow message was deleted on your computer before this phone got it.", RemAlertRules.missed(1))
+        assertEquals("7 workflow messages were deleted on your computer before this phone got them.", RemAlertRules.missed(7))
     }
 }

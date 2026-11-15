@@ -51,6 +51,16 @@ test("activity collapses provider updates per turn and names actors", () => {
   assert.equal(actorLabel("Rem:thread"), "Rem");
   assert.equal(actorLabel("user"), "You");
 });
+test("a restart entry says whether the organization paused or kept running", () => {
+  const entries = activityEntries([
+    { sequence: 1, actor: "system", kind: "runtime_recovered", payload: { reason: "Started paused; nothing was interrupted", kept: false, interrupted: 0 } },
+    { sequence: 2, actor: "system", kind: "runtime_recovered", payload: { reason: "Kept running after a restart; 1 interrupted ticket waits for review", kept: true, interrupted: 1 } },
+    { sequence: 3, actor: "system", kind: "runtime_recovered", payload: { reason: "Kept running after a restart; interrupted work requires review" } },
+  ]);
+  // Newest first.
+  assert.deepEqual(entries.map(entry => entry.text), ["Kept running after Raticode restarted", "Kept running after Raticode restarted", "Paused after Raticode restarted"]);
+  assert.equal(entries[2].detail, "Started paused; nothing was interrupted");
+});
 test("formatting helpers keep small costs visible and pluralize counts", () => {
   assert.equal(formatUsd(0), "$0.00");
   assert.equal(formatUsd(0.0042), "$0.0042");
@@ -245,4 +255,27 @@ test("the activity log says what Rem decided in Auto mode and why it stopped", a
   assert.match(decided.detail, /Recommended: Use workspace-write\./);
   assert.equal(halted.text, "Auto mode stopped the organization");
   assert.match(halted.detail, /To continue: Sign in\./);
+});
+
+test("the Start sheet says why nothing would run: setup gaps, then ticket reasons by count", async () => {
+  const { startBlockers } = await import("./organizations.js");
+  const empty = startBlockers({ config: { employees: [], projectRoots: [] }, runtime: { tasks: [] } }, { tasks: [] });
+  assert.deepEqual(empty.gaps, [
+    "There are no workers yet. Add one first.",
+    "The organization owns no project folder, so workers have nowhere to work.",
+    "There are no open tickets. Add one in To do with a worker assigned.",
+  ]);
+  assert.deepEqual(empty.reasons, []);
+  const organization = {
+    config: { employees: [{ id: "a", paused: true }], projectRoots: ["/p"] },
+    runtime: { tasks: [{ id: "t1", status: "todo" }, { id: "t2", status: "todo" }, { id: "t3", status: "backlog" }, { id: "t4", status: "done" }, { id: "t5", status: "todo" }] },
+  };
+  const preview = { tasks: [
+    { taskId: "t1", reason: "Employee is held" }, { taskId: "t2", reason: "Employee is held" },
+    { taskId: "t3", reason: "Backlog: move it to To do" }, { taskId: "t4", reason: "done" },
+    { taskId: "t5", reason: "Ready", startSeconds: 0 },
+  ] };
+  const result = startBlockers(organization, preview);
+  assert.deepEqual(result.gaps, ["Every worker is held. Release a hold so someone can work."]);
+  assert.deepEqual(result.reasons, [{ reason: "Employee is held", count: 2 }, { reason: "Backlog: move it to To do", count: 1 }]);
 });

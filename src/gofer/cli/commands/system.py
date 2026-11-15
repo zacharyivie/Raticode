@@ -220,6 +220,55 @@ def _usage_text(data: dict[str, Any]) -> str:
 # Projects --------------------------------------------------------------------------
 
 
+@projects_app.command("setup")
+def project_setup(
+    project: Path | None = typer.Argument(
+        None,
+        help="Project folder. Leave it out to list setups waiting for your approval.",
+    ),
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Show a project's worktree setup and whether you approved it.
+
+    The setup lives in .raticode/worktree-setup.json. Approve it in the app, where
+    its commands are shown in full.
+    """
+    current = session("projects setup", output, endpoint, token_file, data_dir)
+
+    def fetch(backend: Backend, out: Output) -> Any:
+        if project is None:
+            return backend.request("GET", "/worktree-setup/pending").get("pending", [])
+        return backend.request(
+            "GET", "/worktree-setup", query={"project": str(project.expanduser().resolve())}
+        )
+
+    def text(data: Any) -> str:
+        if isinstance(data, list):
+            rows = [
+                [str(p.get("projectPath") or ""), str(p.get("seenAt") or "")[:19]] for p in data
+            ]
+            return table(rows, ["PROJECT", "SEEN"]) or "No setups are waiting for approval."
+        states = {
+            "none": "No setup file.",
+            "approved": "Approved. New worktrees run it.",
+            "changed": "Changed since you approved it; new worktrees run the approved version.",
+            "unapproved": "Not approved yet; new worktrees skip it.",
+            "invalid": "The setup file is invalid: "
+            + str((data.get("file") or {}).get("error") or ""),
+        }
+        lines = [f"{data['project']}: {states.get(data['state'], data['state'])}"]
+        effective = (data.get("file") or {}).get("effective") or {}
+        for label, key in (("Runs", "setup"), ("Links", "link"), ("Copies", "copy")):
+            for item in effective.get(key) or []:
+                lines.append(f"  {label}: {item}")
+        return "\n".join(lines)
+
+    finish(current, fetch, text)
+
+
 @projects_app.command("list")
 def list_projects(
     output: opts.Output = opts.OutputFormat.json,

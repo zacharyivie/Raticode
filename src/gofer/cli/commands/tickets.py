@@ -28,9 +28,27 @@ selfwork_app = typer.Typer(
 )
 
 COLUMNS = ("backlog", "todo", "in_progress", "done", "cancelled")
-SELF_WORK_SETTINGS = ("enabled", "max_threads", "auto_pull_backlog")
+SELF_WORK_SETTINGS = (
+    "enabled",
+    "max_threads",
+    "auto_pull_backlog",
+    "session_token_limit",
+    "daily_token_limit",
+    "rate_limit_percent",
+    "auto_approve_proposals",
+)
+AUTO_APPROVE_WARNING = (
+    "With auto-approval on, ideas Rem's self-work research finds go to Backlog already "
+    "approved, for as long as self-work runs, without you reading them first; with backlog "
+    "pulling on, Rem then works on them. Proposals already waiting still need you. Add "
+    "--confirm-auto-approve to turn it on."
+)
 _ORG = typer.Option(None, "--org", help="Organization ID, for an organization's ticket")
 _REVISION = typer.Option(..., "--expected-revision", help="The ticket's revision from `show`")
+_WAITS_HELP = (
+    "A ticket this one waits for, by key such as REM-3 or by ID; repeat for several. "
+    "Self-work skips the ticket until all of them are Done."
+)
 
 
 def _board(client: ApiClient) -> dict[str, Any]:
@@ -73,10 +91,27 @@ def _line(ticket: dict[str, Any]) -> str:
     flags = (
         " (proposal)" if ticket.get("proposed") else " (running)" if ticket.get("running") else ""
     )
+    waits = [w for w in ticket.get("waits_for") or [] if w.get("status") != "done"]
+    if waits:
+        flags += " (waits for " + ", ".join(w.get("key") or w["title"] for w in waits) + ")"
     return (
         f"{ticket.get('key') or ticket['ticket_id']:<10} {ticket['status']:<11} "
         f"r{ticket['revision']:<3} {where}: {ticket['title']}{flags}"
     )
+
+
+def _waits_lines(ticket: dict[str, Any]) -> list[str]:
+    """What a ticket waits for, and the notice when one of them was cancelled."""
+    waits = ticket.get("waits_for") or []
+    if not waits:
+        return []
+    lines = [
+        "Waits for: "
+        + "; ".join(f"{w.get('key') or w['ticket_id']} {w['title']} ({w['status']})" for w in waits)
+    ]
+    if ticket.get("wait_notice"):
+        lines.append(f"Notice: {ticket['wait_notice']}")
+    return lines
 
 
 def _comment_line(entry: dict[str, Any]) -> str:
@@ -136,9 +171,17 @@ def show(
 ) -> None:
     """Show a ticket with its comments and status history."""
 
+    from gofer.core.usage_ledger import usage_label
+
     def body(client: ApiClient, out: Output) -> CommandResult:
         timeline = client.post("/rem/kanban/timeline", _address(client, ticket, organization))
-        lines = [_line(timeline["ticket"]), "", timeline["ticket"].get("description") or ""]
+        lines = [
+            _line(timeline["ticket"]),
+            f"Usage: {usage_label(timeline['ticket'].get('usage'))}",
+            *_waits_lines(timeline["ticket"]),
+            "",
+            timeline["ticket"].get("description") or "",
+        ]
         lines.extend(map(_comment_line, timeline.get("comments") or []))
         return CommandResult(data=timeline, text="\n".join(lines))
 
@@ -155,6 +198,7 @@ def create(
     kind: str | None = typer.Option(None, "--type", help="research, maintain, develop or errand"),
     project: Path | None = typer.Option(None, "--project", help="Open project folder"),
     done_when: str | None = typer.Option(None, "--done-when", help="How to tell it's finished"),
+    waits_for: list[str] | None = typer.Option(None, "--waits-for", help=_WAITS_HELP),
     organization: str | None = _ORG,
     assignee: str | None = typer.Option(None, "--assignee", help="rem, or a worker ID with --org"),
     request: opts.RequestId = None,
@@ -186,6 +230,8 @@ def create(
                 payload["done_when"] = done_when
         if assignee:
             payload["assignee_id"] = assignee
+        if waits_for:
+            payload["waits_for"] = list(waits_for)
         return _act(client, payload, f"Created “{title}”.", request_id=identity)
 
     backend.run(
@@ -204,13 +250,17 @@ def edit(
     kind: str | None = typer.Option(None, "--type"),
     project: Path | None = typer.Option(None, "--project"),
     done_when: str | None = typer.Option(None, "--done-when"),
+    waits_for: list[str] | None = typer.Option(
+        None, "--waits-for", help=_WAITS_HELP + " Replaces the whole list."
+    ),
+    clear_waits: bool = typer.Option(False, "--clear-waits", help="Stop waiting for other tickets"),
     organization: str | None = _ORG,
     output: opts.Output = opts.OutputFormat.json,
     endpoint: opts.EndpointUrl = None,
     token_file: opts.TokenFile = None,
     data_dir: opts.DataDir = None,
 ) -> None:
-    """Change a ticket's title, description, priority, type, project or finish line."""
+    """Change a ticket's title, description, priority, type, project, finish line or waits."""
 
     def body(client: ApiClient, out: Output) -> CommandResult:
         changes: dict[str, Any] = {}
@@ -226,6 +276,10 @@ def edit(
             changes["project_dir"] = str(project.expanduser().resolve())
         if done_when is not None:
             changes["done_when"] = done_when
+        if waits_for and clear_waits:
+            raise backend.invalid("Use --waits-for or --clear-waits, not both.")
+        if waits_for or clear_waits:
+            changes["waits_for"] = list(waits_for or [])
         if not changes:
             raise backend.invalid("Change at least one field.")
         payload = {"action": "edit", **_address(client, ticket, organization), **changes}
@@ -439,10 +493,16 @@ def _status(view: dict[str, Any]) -> CommandResult:
         f"{state['todo_remaining']} to do, {state['proposals_waiting']} proposals waiting. "
         f"Settings r{settings['revision']}: enabled={settings['enabled']}, "
         f"max_threads={settings['max_threads']}, auto_pull_backlog={settings['auto_pull_backlog']}"
+        + "".join(f", {key}={settings[key]}" for key in SELF_WORK_SETTINGS[3:] if key in settings)
     )
     schedule = view.get("schedule") or {}
     if "saved_enabled" in settings and settings["saved_enabled"] != settings["enabled"]:
         text += f" (switch saved as {'on' if settings['saved_enabled'] else 'off'})"
+    if settings.get("auto_approve_proposals"):
+        text += (
+            f"\nAuto-approval is on: {state.get('auto_approved_session', 0)} "
+            "tickets approved by self-work this session."
+        )
     if schedule.get("active"):
         window = schedule["active"]
         text += f"\nWindow {window['id']}: {window['label']}, {window['after_label']}."
@@ -505,6 +565,37 @@ def selfwork_set(
     enabled: bool | None = typer.Option(None, "--enabled/--disabled"),
     max_threads: int | None = typer.Option(None, "--max-threads", min=1),
     auto_pull: bool | None = typer.Option(None, "--auto-pull-backlog/--no-auto-pull-backlog"),
+    session_tokens: int | None = typer.Option(
+        None,
+        "--session-token-limit",
+        min=0,
+        help="Start no new work past this many tokens in one self-work session; 0 is no limit",
+    ),
+    daily_tokens: int | None = typer.Option(
+        None,
+        "--daily-token-limit",
+        min=0,
+        help="Start no new work past this many self-work tokens in a day; 0 is no limit",
+    ),
+    rate_percent: int | None = typer.Option(
+        None,
+        "--rate-limit-percent",
+        min=0,
+        max=100,
+        help="Start no new work while a stored rate-limit window of Rem's provider is at "
+        "or above this percent; 0 is no limit",
+    ),
+    auto_approve: bool | None = typer.Option(
+        None,
+        "--auto-approve/--no-auto-approve",
+        help="Let self-work approve the backlog tickets its research finds, until self-work "
+        "ends, instead of waiting for you; turning it on needs --confirm-auto-approve",
+    ),
+    confirm_auto_approve: bool = typer.Option(
+        False,
+        "--confirm-auto-approve",
+        help="Confirm you want self-work to approve its own tickets without asking you",
+    ),
     output: opts.Output = opts.OutputFormat.json,
     endpoint: opts.EndpointUrl = None,
     token_file: opts.TokenFile = None,
@@ -515,12 +606,25 @@ def selfwork_set(
     def body(client: ApiClient, out: Output) -> CommandResult:
         backend.require_user("change Rem's self-work settings")
         wanted: dict[str, Any] = {}
+        if auto_approve is not None:
+            if auto_approve and not confirm_auto_approve:
+                raise backend.invalid(AUTO_APPROVE_WARNING)
+            wanted["auto_approve_proposals"] = auto_approve
+            if auto_approve:
+                wanted["confirm_auto_approve"] = True
         if enabled is not None:
             wanted["enabled"] = enabled
         if max_threads is not None:
             wanted["max_threads"] = max_threads
         if auto_pull is not None:
             wanted["auto_pull_backlog"] = auto_pull
+        for key, value in (
+            ("session_token_limit", session_tokens),
+            ("daily_token_limit", daily_tokens),
+            ("rate_limit_percent", rate_percent),
+        ):
+            if value is not None:
+                wanted[key] = value
         if not wanted:
             raise backend.invalid("Change at least one setting.")
         return _put_settings(client, wanted, expected_revision)
@@ -647,7 +751,8 @@ def selfwork_export(
 
     def body(client: ApiClient, out: Output) -> None:
         settings = _self_work(client)["settings"]
-        wanted = {key: settings[key] for key in SELF_WORK_SETTINGS}
+        # An older backend has no limit settings; export what it has.
+        wanted = {key: settings[key] for key in SELF_WORK_SETTINGS if key in settings}
         # The switch as saved, not as a timed window shows it right now.
         wanted["enabled"] = settings.get("saved_enabled", settings["enabled"])
         out.stdout.write(json.dumps(wanted, indent=2) + "\n")
@@ -662,6 +767,12 @@ def selfwork_apply(
     expected_revision: int | None = typer.Option(
         None, "--expected-revision", help="Refuse if the settings changed since this revision"
     ),
+    confirm_auto_approve: bool = typer.Option(
+        False,
+        "--confirm-auto-approve",
+        help="Needed when the file turns auto-approval on: self-work then approves its own "
+        "backlog tickets without asking you",
+    ),
     output: opts.Output = opts.OutputFormat.json,
     endpoint: opts.EndpointUrl = None,
     token_file: opts.TokenFile = None,
@@ -673,10 +784,19 @@ def selfwork_apply(
         backend.require_user("change Rem's self-work settings")
         wanted = backend.read_json_file(file)
         if not isinstance(wanted, dict) or not wanted or set(wanted) - set(SELF_WORK_SETTINGS):
-            raise backend.invalid("The file holds enabled, max_threads and auto_pull_backlog only.")
+            raise backend.invalid(
+                "The file holds only these settings: " + ", ".join(SELF_WORK_SETTINGS)
+            )
+        current = _self_work(client)["settings"]
+        if wanted.get("auto_approve_proposals") is True and not current.get(
+            "auto_approve_proposals"
+        ):
+            if not confirm_auto_approve:
+                raise backend.invalid(AUTO_APPROVE_WARNING)
+            wanted["confirm_auto_approve"] = True
         revision = expected_revision
         if revision is None:
-            revision = int(_self_work(client)["settings"]["revision"])
+            revision = int(current["revision"])
         return _put_settings(client, wanted, revision)
 
     backend.run("selfwork apply", output, (endpoint, token_file, data_dir), body)

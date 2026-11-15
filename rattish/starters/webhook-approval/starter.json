@@ -1,0 +1,15 @@
+{
+  "starterVersion": 1,
+  "id": "webhook-approval",
+  "name": "Webhook approval",
+  "summary": "A local webhook call waits for your approval, then runs a command with the request body.",
+  "order": 3,
+  "docsPath": "/docs/starters/webhook-approval",
+  "providers": [],
+  "secrets": [],
+  "trigger": {
+    "kind": "webhook",
+    "description": "Start it from another program on this computer.",
+    "command": "Raticode rattish triggers add webhook WORKFLOW_PATH"
+  }
+}

@@ -6,17 +6,18 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from gofer.cli.commands._legacy import refuse_rattish
 from gofer.cli.output import emit_json, format_option, wants_json
-from gofer.core.scheduler import WorkflowScheduler
-from gofer.core.workflow import AgenticWorkflow
 from gofer.utils.paths import get_data_dir
-from gofer.utils.process import build_subprocess_env
+
+if TYPE_CHECKING:
+    from gofer.core.scheduler import WorkflowScheduler
+    from gofer.core.workflow import AgenticWorkflow
 
 app = typer.Typer(
     help=(
@@ -42,6 +43,8 @@ def _pid_file() -> Path:
 
 
 def _get_scheduler(db: Path) -> WorkflowScheduler:
+    from gofer.core.scheduler import WorkflowScheduler
+
     db.parent.mkdir(parents=True, exist_ok=True)
     return WorkflowScheduler(db_path=db)
 
@@ -65,6 +68,9 @@ def add(
     db: Path | None = typer.Option(None, "--db"),
 ) -> None:
     """Add a workflow to the schedule."""
+    from gofer.cli.commands._legacy import refuse_rattish
+    from gofer.core.workflow import AgenticWorkflow
+
     refuse_rattish(
         str(workflow_file),
         None,
@@ -122,6 +128,8 @@ def start(
     db: Path | None = typer.Option(None, "--db"),
 ) -> None:
     """Start the scheduler (background by default)."""
+    from gofer.utils.process import build_subprocess_env
+
     db_path = db or _default_db()
 
     if foreground:

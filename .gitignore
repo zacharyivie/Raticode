@@ -68,6 +68,37 @@ wireframes/
 *.swp
 *.swo
 
+# Empty read-only mount points Claude Code's sandbox puts in the folder it
+# starts in while a sandboxed command runs (Raticode removes any a stopped turn
+# leaves). None of these is part of the repository.
+/.bashrc
+/.bash_profile
+/.profile
+/.zshrc
+/.zprofile
+/.gitconfig
+/.gitmodules
+/.ripgreprc
+/.mcp.json
+/.idea
+/.vscode
+/.claude/settings.json
+/.claude/settings.local.json
+/.claude/agents
+/.claude/commands
+/.claude/hooks
+/.claude/skills
+/.claude/workflows
+/.claude/routines
+/.claude/output-styles
+/.claude/launch.json
+/.claude/scheduled_tasks.json
+/.claude/loop.md
+
+# Test scratch folders an agent made inside the checkout. Keep TMPDIR outside
+# the repository: tests/conftest.py refuses to run with it inside.
+/.scratch*/
+
 # Environment
 .env
 .env.local

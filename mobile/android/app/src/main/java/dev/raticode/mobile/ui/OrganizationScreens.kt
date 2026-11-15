@@ -31,6 +31,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.font.FontFamily
@@ -158,8 +159,9 @@ internal fun OrganizationsPage(client: LiveClient, onBack: (() -> Unit)? = null,
             DesktopGate(client, "organizations.list", "Loading organizations…") {
                 @Suppress("UNCHECKED_CAST") val list = client.desktopViews["organizations.list"] as? List<OrganizationSummary> ?: emptyList()
                 LazyColumn(Modifier.fillMaxSize().testTag("organizationList"), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    if (list.isEmpty()) item { Note("No organizations yet. Create one in Raticode on your computer.") }
-                    items(list, key = { it.id }) { org ->
+                    if (list.isEmpty()) item { Note("No organizations yet. Create one in Organizations in Raticode on your computer: it only needs a name.") }
+                    // Archived organizations go last; the ones that need you are easy to spot.
+                    items(list.sortedBy { it.archived }, key = { it.id }) { org ->
                         Card({ open = org.id }) {
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 Avatar(org.name, org.id, 40.dp)
@@ -169,8 +171,14 @@ internal fun OrganizationsPage(client: LiveClient, onBack: (() -> Unit)? = null,
                                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     if (org.projects.isNotEmpty()) Text(org.projects.joinToString(", "), style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    if (!org.archived && org.state != "running" && org.pauseReason.isNotBlank() && org.pauseReason != "Paused by you")
+                                        Text(org.pauseReason, style = MaterialTheme.typography.labelSmall, color = orgColors(OrgTone.WAIT).first, maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis)
                                 }
-                                StatePill(org.state)
+                                Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    StatePill(org.state, org.archived)
+                                    if (!org.archived && org.needsYou > 0) Pill("${org.needsYou} need you", OrgTone.WAIT, Modifier.testTag("orgNeedsYou-${org.id}"))
+                                }
                             }
                         }
                     }
@@ -200,12 +208,10 @@ private fun OrganizationHome(client: LiveClient, id: String, onBack: () -> Unit)
     val org = client.desktopViews[key] as? Organization
     var tab by rememberSaveable { mutableStateOf("org") }
     var stack by rememberSaveable { mutableStateOf(listOf<String>()) }
-    // Board filters, kept while you look at a ticket and come back.
-    var boardProject by rememberSaveable { mutableStateOf("") }
-    var boardWorker by rememberSaveable { mutableStateOf("") }
-    var needsMe by rememberSaveable { mutableStateOf(false) }
-    // The board column on screen, kept while a ticket or a new-ticket page is open.
-    var boardColumn by rememberSaveable { mutableStateOf("todo") }
+    // This organization's board filters and column, saved on this phone so they come back after leaving it or closing the app.
+    val context = LocalContext.current
+    var savedFilters by remember(id) { mutableStateOf(BoardFilterPrefs.organization(context, id)) }
+    fun setFilters(next: OrganizationBoardFilters) { if (next != savedFilters) { savedFilters = next; BoardFilterPrefs.save(context, id, next) } }
     var confirm by remember { mutableStateOf<String?>(null) }
     val top = stack.lastOrNull()
     val noteId = top?.takeIf { it.startsWith("note:") }?.removePrefix("note:")
@@ -221,7 +227,7 @@ private fun OrganizationHome(client: LiveClient, id: String, onBack: () -> Unit)
     val nav = remember { OrgNav({ stack = stack + it }, { stack = stack.dropLast(1) }) { t -> tab = t; stack = emptyList() } }
     nav.push = { stack = stack + it }; nav.pop = { stack = stack.dropLast(1) }
     nav.tab = { t -> tab = t; stack = emptyList() }
-    nav.board = { project, worker -> boardProject = project; boardWorker = worker; needsMe = false; tab = "issues"; stack = emptyList() }
+    nav.board = { project, worker -> setFilters(savedFilters.copy(project = project, worker = worker, needsMe = false)); tab = "issues"; stack = emptyList() }
 
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 8.dp, top = 6.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -233,13 +239,14 @@ private fun OrganizationHome(client: LiveClient, id: String, onBack: () -> Unit)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (org != null) StatePill(org.state, org.plan?.archived == true)
                     org?.plan?.hours?.takeIf { it.mode == "scheduled" }?.let { h -> Pill(if (h.open) "Working hours" else "Off hours", if (h.open) OrgTone.RUN else OrgTone.IDLE) }
-                    Text(when { !client.connected -> "Offline"; key in client.desktopBusy -> "Saving…"; else -> "" }, style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (!client.connected) Pill("Offline", OrgTone.BAD, Modifier.testTag("orgOffline"))
+                    else if (key in client.desktopBusy) Text("Saving…", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             if (org != null && org.plan?.archived != true) TextButton(enabled = !busy, onClick = { confirm = if (org.state == "running") "pause" else "start" },
                 modifier = Modifier.testTag("orgControl")) { Text(if (org.state == "running") "Pause" else "Start") }
         }
+        OrgStateStrip(client, key, org != null)
         Box(Modifier.weight(1f)) {
             DesktopGate(client, key, "Loading this organization…") {
                 when {
@@ -253,6 +260,8 @@ private fun OrganizationHome(client: LiveClient, id: String, onBack: () -> Unit)
                     }
                     else -> {
                         val plan = org.plan!!
+                        // A saved project or worker that is gone shows everything for that filter; the others stay.
+                        val boardFilters = BoardFilters.live(savedFilters, org, plan)
                         val attention = remember(org) { OrganizationModel.needsYou(org, plan).size }
                         Column(Modifier.fillMaxSize()) {
                             PrimaryScrollableTabRow(TABS.indexOfFirst { it.first == tab }.coerceAtLeast(0), edgePadding = 8.dp,
@@ -271,8 +280,7 @@ private fun OrganizationHome(client: LiveClient, id: String, onBack: () -> Unit)
                                     top == null -> when (tab) {
                                         "org" -> OverviewTab(client, org, plan, nav, busy)
                                         "projects" -> ProjectsTab(org, plan, nav)
-                                        "issues" -> IssuesTab(client, org, plan, nav, busy, boardProject, boardWorker, needsMe, boardColumn,
-                                            onColumn = { boardColumn = it }, onFilters = { p, w, n -> boardProject = p; boardWorker = w; needsMe = n })
+                                        "issues" -> IssuesTab(client, org, plan, nav, busy, boardFilters, onFilters = ::setFilters)
                                         "workers" -> WorkersTab(org, plan, nav)
                                         else -> KnowledgeTab(org, plan, nav, busy)
                                     }
@@ -296,12 +304,34 @@ private fun OrganizationHome(client: LiveClient, id: String, onBack: () -> Unit)
     confirm?.let { kind ->
         val name = org?.name ?: "this organization"
         AlertDialog(onDismissRequest = { confirm = null }, title = { Text(if (kind == "start") "Start $name?" else "Pause $name?") },
-            text = { Text(if (kind == "start") "Workers pick up To do tickets that are ready, within your limits and working hours. An organization with full-access workers starts only from your computer, where you can review them."
-                else "Running tickets stop and go back to To do. Nothing new starts until you start it again.") },
+            text = {
+                val gaps = if (kind == "start" && org != null) OrganizationModel.startGaps(org) else emptyList()
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(if (kind == "start") "Workers pick up To do tickets that are ready, within your limits and working hours. An organization with full-access workers starts only from your computer, where you can review them."
+                        else "Running tickets stop and go back to To do. Nothing new starts until you start it again.")
+                    if (gaps.isNotEmpty()) Text("Nothing will run yet: ${gaps.joinToString(" ")}", color = orgColors(OrgTone.WAIT).first,
+                        style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("orgStartGaps"))
+                }
+            },
             confirmButton = { TextButton(modifier = Modifier.testTag("orgConfirm"), onClick = {
                 client.desktopAction("organizations.control", JSONObject().put("organization_id", id).put("state", if (kind == "start") "running" else "paused")); confirm = null
             }) { Text(if (kind == "start") "Start" else "Pause") } },
             dismissButton = { TextButton(onClick = { confirm = null }) { Text("Cancel") } })
+    }
+}
+
+/** Says when the page shows older information, because the phone is offline or the last read failed, and offers a retry. */
+@RequiresApi(29)
+@Composable
+private fun OrgStateStrip(client: LiveClient, key: String, loaded: Boolean) {
+    val text = OrganizationModel.staleText(client.connected, loaded, client.desktopErrors[key]) ?: return
+    val (ink, _) = orgColors(OrgTone.WAIT)
+    Surface(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth().testTag("orgStale").semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite }) {
+        Row(Modifier.padding(start = 16.dp, end = 8.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(8.dp).clip(CircleShape).background(ink))
+            Text(text, Modifier.weight(1f).padding(horizontal = 10.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall)
+            if (client.connected) TextButton(onClick = { client.dismissDesktopError(key); client.refreshDesktop() }, modifier = Modifier.testTag("orgRetry")) { Text("Try again") }
+        }
     }
 }
 
@@ -354,6 +384,8 @@ private fun OverviewTab(client: LiveClient, org: Organization, plan: OrgPlan, na
                 Fact("${plan.notes.size}", "Notes") { nav.tab("knowledge") }
             }
         }
+        val steps = OrganizationModel.setupSteps(org, plan)
+        if (steps.isNotEmpty() && !plan.archived) item { GetStartedCard(steps, nav) }
         plan.autoHalt?.let { halt -> item { AutoHaltCard(halt) } }
         if (plan.autoHalt == null && org.pauseReason.isNotBlank() && org.state != "running") item { Note(org.pauseReason.let { if (it.startsWith("Paused")) it else "Paused: $it" }) }
         // Requests Rem's Auto mode review decides are shown but don't count as needing you.
@@ -419,6 +451,33 @@ private fun OverviewTab(client: LiveClient, org: Organization, plan: OrgPlan, na
             }
         }
         item { Note("Mission, milestones, workers' settings and folders are edited in Organizations on your computer.", Modifier.padding(top = 12.dp)) }
+    }
+}
+
+/** A new organization's first steps. Workers and folders are set up on the computer; tickets can be added here. */
+@Composable
+private fun GetStartedCard(steps: List<OrganizationModel.SetupStep>, nav: OrgNav) {
+    val next = steps.firstOrNull { !it.done }
+    Card(null, Modifier.testTag("orgGetStarted"), stripe = orgColors(OrgTone.ACCENT).first) {
+        Text("Get started", style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
+        steps.forEachIndexed { index, step ->
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                val (ink, fill) = orgColors(if (step.done) OrgTone.DONE else if (step == next) OrgTone.ACCENT else OrgTone.IDLE)
+                Box(Modifier.size(22.dp).clip(CircleShape).background(fill), contentAlignment = Alignment.Center) {
+                    Text(if (step.done) "✓" else "${index + 1}", style = MaterialTheme.typography.labelSmall, color = ink)
+                }
+                Column(Modifier.weight(1f)) {
+                    Text(step.label + if (step.done) ", done" else "", style = MaterialTheme.typography.bodyMedium,
+                        color = if (step.done) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface)
+                    if (!step.done) Text(step.hint, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (!step.done) when (step.id) {
+                    "ticket" -> TextButton(onClick = { nav.push("new:ticket") }) { Text("Add") }
+                    "worker" -> if (!step.desktopOnly) TextButton(onClick = { nav.tab("workers") }) { Text("Workers") }
+                    "start" -> Text("Tap Start above", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
     }
 }
 
@@ -748,10 +807,12 @@ private fun EpicPage(org: Organization, plan: OrgPlan, epicId: String, nav: OrgN
 @RequiresApi(29)
 @OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
-private fun IssuesTab(client: LiveClient, org: Organization, plan: OrgPlan, nav: OrgNav, busy: Boolean, project: String, worker: String, needsMe: Boolean,
-                      column: String, onColumn: (String) -> Unit, onFilters: (String, String, Boolean) -> Unit) {
-    val pager = rememberPagerState(initialPage = OrganizationModel.COLUMNS.indexOf(column).coerceAtLeast(0)) { OrganizationModel.COLUMNS.size }
-    LaunchedEffect(pager.currentPage) { onColumn(OrganizationModel.COLUMNS[pager.currentPage]) }
+private fun IssuesTab(client: LiveClient, org: Organization, plan: OrgPlan, nav: OrgNav, busy: Boolean, filters: OrganizationBoardFilters,
+                      onFilters: (OrganizationBoardFilters) -> Unit) {
+    val (project, worker, needsMe) = filters
+    val pager = rememberPagerState(initialPage = OrganizationModel.COLUMNS.indexOf(filters.column).coerceAtLeast(0)) { OrganizationModel.COLUMNS.size }
+    val current by rememberUpdatedState(filters)
+    LaunchedEffect(pager.currentPage) { OrganizationModel.COLUMNS[pager.currentPage].let { if (it != current.column) onFilters(current.copy(column = it)) } }
     val scope = rememberCoroutineScope()
     var moving by remember { mutableStateOf<OrganizationTask?>(null) }
     val filtered = org.tasks.filter { t ->
@@ -763,10 +824,12 @@ private fun IssuesTab(client: LiveClient, org: Organization, plan: OrgPlan, nav:
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             ChoiceMenu(plan.projects.firstOrNull { it.id == project }?.name ?: "All projects", "Project",
-                listOf("" to "All projects") + plan.projects.map { it.id to it.name }, project, MENU) { onFilters(it, worker, needsMe) }
+                listOf("" to "All projects") + plan.projects.map { it.id to it.name }, project, MENU.testTag("orgProjectFilter"), active = project.isNotEmpty()) { onFilters(filters.copy(project = it)) }
             ChoiceMenu(org.employees.firstOrNull { it.id == worker }?.name ?: "All workers", "Worker",
-                listOf("" to "All workers") + org.employees.map { it.id to it.name }, worker, MENU) { onFilters(project, it, needsMe) }
-            FilterChip(needsMe, { onFilters(project, worker, !needsMe) }, label = { Text("Needs me") })
+                listOf("" to "All workers") + org.employees.map { it.id to it.name }, worker, MENU.testTag("orgWorkerFilter"), active = worker.isNotEmpty()) { onFilters(filters.copy(worker = it)) }
+            FilterChip(needsMe, { onFilters(filters.copy(needsMe = !needsMe)) }, label = { Text("Needs me") }, modifier = Modifier.testTag("orgNeedsMe"))
+            if (filters.active > 0) TextButton(onClick = { onFilters(filters.cleared()) }, modifier = Modifier.testTag("orgClearFilters")
+                .semantics { contentDescription = "Clear filters, ${filters.active} on" }) { Text("Clear filters") }
         }
         // One column at a time; swipe or tap a column's name to move between them.
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {

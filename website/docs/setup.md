@@ -69,4 +69,57 @@ Workflow agent nodes can also call the OpenAI or Anthropic API directly through 
 - Keep API keys in environment variables or supported secret references.
 - The Rattish source picks the provider, model and effort. A profile supplies deployment settings such as environment values and secret references, and doesn't override the model choices in the source.
 
+## Local model servers
+
+New in 0.5.5. Workflow agent nodes can use a model server you run yourself, such as [Ollama](https://ollama.com/), llama.cpp's `llama-server` or LM Studio, through its OpenAI-compatible API. Raticode doesn't bundle or install a model server and doesn't download models: install and start the server, and load or pull a model in it, first.
+
+Add the server in **Settings > Providers** under **Local model servers**: give the profile a name, enter the server's address and choose **Add server**. **Check server** lists the models it has. Or use the command line:
+
+```bash
+Raticode provider profile create ollama --local --api-base-url http://127.0.0.1:11434/v1
+Raticode provider profile check ollama
+```
+
+`--api-base-url` defaults to Ollama's `http://127.0.0.1:11434/v1`. llama.cpp's `llama-server` usually listens on `http://127.0.0.1:8080/v1` and LM Studio on `http://127.0.0.1:1234/v1`. The address ends in the API's `/v1` path.
+
+- **On this computer** (`localhost` or a `127.x.x.x` or `::1` address), the server needs no API key, and Raticode never sends it your OpenAI key.
+- **On another computer**, Raticode still asks for a key and shows a warning: prompts, any file text in them and the model's replies travel over the network. In Settings the key goes into the system keychain as a [workflow secret](./workflows/inputs.md#secrets); on the command line, save it with `Raticode rattish secrets set NAME` and pass `--api-key-secret NAME`, or name an environment variable with `--api-key-env`. Use HTTPS or a network you trust.
+- Raticode's network rules normally block local and private addresses. A local model server profile lets Raticode reach the one host it names, and nothing else.
+
+In a workflow, an [agent node](./nodes/agent.md) uses the `openai-api` provider, the profile, and a model ID exactly as the server lists it:
+
+```rattish
+Rattish: 1
+
+Workflow:
+  name: Local summary
+  max-cost-usd: 0.01
+
+Node summarize:
+  type: agent
+  provider: openai-api
+  profile: ollama
+  model: qwen3:8b
+  prompt: Summarize in one sentence why local models keep data on this computer.
+```
+
+Always set `model`. Without it the node uses the `openai-api` default, `gpt-5-mini`, which a local server doesn't have.
+
+What to expect:
+
+- **Preflight** asks the server for its model list (`GET /v1/models`) before the run. It fails if the server doesn't answer or doesn't list the model, and names the models it does list. With Ollama, `llama3.2` and `llama3.2:latest` are the same model, but `qwen3` isn't `qwen3:8b`.
+- **The call** goes to the server's chat completions API (`POST /v1/chat/completions`). The model answers the prompt only: like other direct API profiles it has no tools, so it can't read files or run commands. A call may take up to 10 minutes before it times out, since a model on a CPU can be slow to load. A node's `timeout` can only shorten that; to allow longer, raise the profile's own timeout.
+- **Cost** is recorded as a known $0, so a workflow's `max-cost-usd` keeps working and never ends the run for a local call.
+- **Tokens** come from the server's response when it reports them. Ollama does: tested with Ollama 0.34.2 and `qwen3:8b`, preflight accepted `qwen3:8b` as listed and each call reported its input and output tokens, so `max-tokens` works. A thinking model's reasoning counts as output tokens.
+- **If a server doesn't report tokens**, the run's token total reads as unknown, and a workflow with `max-tokens` ends after that server's first call with a "didn't report how many tokens" `budget` error (`RATTISH_TOKEN_LIMIT_UNCHECKABLE`). Use `max-cost-usd` alone, or leave `max-tokens` out, for such a server. See [Workflow limits](./workflows/rattish.md#workflow-limits).
+
+## Jev key for classifier nodes
+
+The [jev node](./nodes/jev.md) asks TypeSafe's Jev classifier yes/no and multiple-choice questions (from 0.5.5). It needs its own TypeSafe API key:
+
+1. Open **Settings > Providers** and find **Classification models**.
+2. Paste the key under **Jev (TypeSafe)**, choose **Save**, then **Check key**.
+
+Or run `Raticode provider jev set-key`, which asks for the key without showing it. The key goes into your system keychain, never an environment variable. See [Jev classifier](./workflows/jev.md).
+
 Next: [Providers, models and effort](./rem/providers.md) and [Agent nodes](./nodes/agent.md).

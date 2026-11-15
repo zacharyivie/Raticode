@@ -64,7 +64,8 @@ import { Dialog } from "./Dialog.jsx";
 import MarkdownContent from "./MarkdownContent.jsx";
 import IntegratedBrowser, { HtmlModeToggle } from "./IntegratedBrowser.jsx";
 import GeckoBrowser from "./GeckoBrowser.jsx";
-import { BrowserEngineBadge, BrowserFamilyChooser, BrowserGroupNewTab, BrowserTabNotice, useBrowserEngineStatus } from "./BrowserTabControls.jsx";
+import { BrowserEngineBadge, BrowserFamilyChooser, BrowserGroupNewTab, BrowserTabNotice, BrowserWindowToggle, useBrowserEngineStatus } from "./BrowserTabControls.jsx";
+import { useBrowserHost } from "../lib/browserHost.js";
 import { browserFamilyChoices, geckoTabPath, groupBrowserTabPaths, groupedBrowserPaths } from "../lib/browserTabs.js";
 import { pendingRemApprovals } from "../lib/browserUi.js";
 import { WEB_BROWSER_OPTIONS, webBrowserEngine } from "../lib/browserEngines.js";
@@ -138,6 +139,12 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
 }, ref) {
   const browserVariant = variant === "browser";
   const browserStatus = useBrowserEngineStatus(browserVariant);
+  // The Browser can move to a window of its own; listeners follow it there.
+  const browserHost = useBrowserHost();
+  const hostWindow = browserHost.window || window;
+  const toggleBrowserWindow = useCallback(() => {
+    void (browserHost.poppedOut ? browserHost.popIn() : browserHost.popOut());
+  }, [browserHost]);
   const [browserNotice, setBrowserNotice] = useState(null);
   const dismissBrowserNotice = useCallback(() => setBrowserNotice(null), []);
   const textEditorRefs = useRef(new Map());
@@ -445,13 +452,14 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
     function dismissWithEscape(event) {
       if (event.key === "Escape") setTabMenu(null);
     }
-    window.addEventListener("pointerdown", dismissMenu);
-    window.addEventListener("keydown", dismissWithEscape);
+    const view = hostWindow;
+    view.addEventListener("pointerdown", dismissMenu);
+    view.addEventListener("keydown", dismissWithEscape);
     return () => {
-      window.removeEventListener("pointerdown", dismissMenu);
-      window.removeEventListener("keydown", dismissWithEscape);
+      view.removeEventListener("pointerdown", dismissMenu);
+      view.removeEventListener("keydown", dismissWithEscape);
     };
-  }, [tabMenu]);
+  }, [hostWindow, tabMenu]);
 
   useEffect(() => {
     setAppliedNavigationRequest(navigationRequest);
@@ -524,18 +532,20 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
 
   useEffect(() => {
     if (!active) return undefined;
-    window.addEventListener("keydown", handleWorkspaceKeyDown, true);
-    return () => window.removeEventListener("keydown", handleWorkspaceKeyDown, true);
+    const view = hostWindow;
+    view.addEventListener("keydown", handleWorkspaceKeyDown, true);
+    return () => view.removeEventListener("keydown", handleWorkspaceKeyDown, true);
   });
 
   function handleWorkspaceKeyDown(event) {
     if (event.defaultPrevented) return;
     const target = event.target;
+    const hostDocument = hostWindow.document || document;
     const targetIsDocument = !target
-      || target === window
-      || target === document
-      || target === document.body
-      || target === document.documentElement;
+      || target === hostWindow
+      || target === hostDocument
+      || target === hostDocument.body
+      || target === hostDocument.documentElement;
     if (!targetIsDocument && !workspaceRef.current?.contains(target)) return;
     if (target?.closest?.("[role='dialog'], [role='menu'], [data-terminal-workspace]")) return;
     const action = codeWorkspaceShortcutAction(event, {
@@ -772,6 +782,9 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
           onChoose={openBrowserTabIn}
           onOpen={browserStatus.refresh}
         />
+      ) : null}
+      {browserVariant && !isSplit && browserHost.available ? (
+        <BrowserWindowToggle className="ml-auto" poppedOut={browserHost.poppedOut} onToggle={toggleBrowserWindow} />
       ) : null}
       {browserVariant ? null : <EditorTabsMenu
         activePath={activeForGroup}
@@ -1061,6 +1074,11 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
                 })}
               </div>
               {browserNotice ? <div className="mt-3 overflow-hidden rounded-md border border-line text-left"><BrowserTabNotice notice={browserNotice} onDismiss={dismissBrowserNotice} /></div> : null}
+              {browserHost.available ? (
+                <button type="button" className="mt-4 text-xs font-semibold text-muted underline-offset-2 hover:text-ink hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand" onClick={toggleBrowserWindow}>
+                  {browserHost.poppedOut ? "Bring browser back to Raticode's window" : "Pop out browser into its own window"}
+                </button>
+              ) : null}
             </div>
           </div>
         ) : !currentPath ? emptyContent || (
@@ -1130,6 +1148,14 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
             disabled={workflowTabs[tabMenu.path] ? !onDuplicateWorkflowTab : openPaths.length < 2}
             onClick={() => void splitEditorTab(tabMenu.path, side)}
           >Split {side}</button>)}
+          {browserVariant && browserHost.available ? (
+            <button
+              className="flex h-7 w-full items-center rounded px-2 text-left hover:bg-slate-100"
+              role="menuitem"
+              type="button"
+              onClick={() => { setTabMenu(null); toggleBrowserWindow(); }}
+            >{browserHost.poppedOut ? "Bring browser back" : "Pop out browser"}</button>
+          ) : null}
           <div className="my-1 border-t border-line" role="separator" />
           <button
             ref={tabMenuFirstActionRef}

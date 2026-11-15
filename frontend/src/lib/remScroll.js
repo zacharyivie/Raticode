@@ -40,3 +40,39 @@ export function wheelLeavesEnd(event, stream) {
   }
   return true;
 }
+
+// The chat's message rows, top to bottom (none where the page can't be queried).
+const messageRows = stream => [...(stream.querySelectorAll?.("[data-message-id]") || [])];
+
+// How long Rem's chat holds your place after earlier messages load: long enough for the
+// new rows, and rows just scrolled into view, to lay out at their real height.
+export const HOLD_PLACE_MS = 2000;
+
+// Where you are reading: the first message whose top is in view, and how far that top is
+// from the chat's top. Earlier messages are added above it without moving it. A message
+// cut off at the top isn't used, because its own height can still change as it lays out,
+// which would move the one you are reading. With none in view, the cut-off one is used.
+export function readingPlace(stream, now = Date.now()) {
+  if (!stream?.getBoundingClientRect) return null;
+  const view = stream.getBoundingClientRect();
+  let cut = null;
+  for (const node of messageRows(stream)) {
+    const box = node.getBoundingClientRect();
+    if (box.bottom <= view.top) continue;
+    const place = { id: node.getAttribute("data-message-id"), offset: box.top - view.top, until: now + HOLD_PLACE_MS };
+    if (box.top >= view.top - 0.5) return box.top < view.bottom ? place : cut || place;
+    cut ||= place;
+  }
+  return cut;
+}
+
+// Scrolls so the message `place` names is back where it was. Measured from that message,
+// not from the end: messages added above it can still change size after they lay out.
+export function restoreReadingPlace(stream, place) {
+  if (!stream?.getBoundingClientRect || !place) return;
+  // Querying every row is fine here: it runs only while a page has just been added.
+  const node = messageRows(stream).find(item => item.getAttribute("data-message-id") === place.id);
+  if (!node) return;
+  const moved = node.getBoundingClientRect().top - stream.getBoundingClientRect().top - place.offset;
+  if (Math.abs(moved) >= 0.5) stream.scrollTop += moved;
+}

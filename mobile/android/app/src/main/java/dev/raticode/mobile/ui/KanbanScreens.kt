@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -26,6 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.font.FontFamily
@@ -70,10 +72,10 @@ internal fun KanbanPage(client: LiveClient, tab: String, onTab: (String) -> Unit
     var top by rememberSaveable { mutableStateOf<String?>(null) }
     // A ticket pill in Rem's chat opens its ticket here; one no longer on the board says so on its page.
     LaunchedEffect(openTicket) { if (openTicket != null) { top = TICKET + openTicket; onTicketOpened() } }
-    var scope by rememberSaveable { mutableStateOf(Kanban.ALL) }
-    var assignee by rememberSaveable { mutableStateOf(Kanban.ANY) }
-    var column by rememberSaveable { mutableStateOf("todo") }
-    var projectFilter by rememberSaveable { mutableStateOf(Kanban.ALL) }
+    // The board's filters and column, saved on this phone so they come back after leaving the board or closing the app.
+    val context = LocalContext.current
+    var saved by remember { mutableStateOf(BoardFilterPrefs.global(context)) }
+    fun setFilters(next: GlobalBoardFilters) { if (next != saved) { saved = next; BoardFilterPrefs.save(context, next) } }
     // An open ticket reads its history, which carries the ticket too; older desktops keep reading the board.
     val history = top?.takeIf { it.startsWith(TICKET) && client.kanbanComments == true }?.removePrefix(TICKET)?.let(Kanban::timelineParams)
     val op = if (history != null) Kanban.TIMELINE else if (top != null || tab != KanbanTabs.SELF) Kanban.BOARD else Kanban.SELF_WORK
@@ -82,12 +84,14 @@ internal fun KanbanPage(client: LiveClient, tab: String, onTab: (String) -> Unit
     BackHandler(enabled = top != null) { top = null }
     val busy = op in client.desktopBusy || Kanban.BOARD in client.desktopBusy || !client.connected
     val board = client.desktopViews[Kanban.BOARD] as? KanbanBoard
+    // A saved organization, person or project that is gone shows everything for that filter; the others stay.
+    val filters = board?.let { BoardFilters.live(saved, it) } ?: saved
     val open = top
     Column(Modifier.fillMaxSize().testTag("kanbanPage")) {
         when {
             open == NEW -> KanbanNewTicket(client, board, busy) { top = null }
             open.orEmpty().startsWith(PERSON) -> KanbanPersonPage(client, board, open!!.removePrefix(PERSON), busy, onTicket = { top = TICKET + it },
-                onBoard = { p -> val (s, a) = Kanban.boardFilterFor(p); scope = s; assignee = a; projectFilter = Kanban.ALL; column = "todo"; onTab(KanbanTabs.BOARD); top = null }) { top = null }
+                onBoard = { p -> val (s, a) = Kanban.boardFilterFor(p); setFilters(filters.copy(scope = s, assignee = a, project = Kanban.ALL, column = "todo")); onTab(KanbanTabs.BOARD); top = null }) { top = null }
             open != null -> KanbanTicketPage(client, board, open.removePrefix(TICKET), busy, onOrganization, onPerson = { top = PERSON + it }) { top = null }
             else -> {
                 val status = when { !client.connected -> "Offline"; board == null -> "On your computer"
@@ -115,8 +119,7 @@ internal fun KanbanPage(client: LiveClient, tab: String, onTab: (String) -> Unit
                             KanbanTabs.PEOPLE -> if (board != null) PeopleTab(client, board) { top = PERSON + it }
                             KanbanTabs.SELF -> SelfWorkContent(client, busy, showSettings = false, onSettings = onSelfWorkSettings,
                                 projectsEnabled = board?.let { Kanban.person(it, Kanban.REM) } != null, onProjects = { top = PERSON + Kanban.REM }) { top = TICKET + it }
-                            else -> if (board != null) BoardTab(client, board, busy, scope, assignee, projectFilter, column, onColumn = { column = it },
-                                onFilters = { s, a, p -> scope = s; assignee = a; projectFilter = p }, onOpen = { top = TICKET + it }) { top = NEW }
+                            else -> if (board != null) BoardTab(client, board, busy, filters, onFilters = ::setFilters, onOpen = { top = TICKET + it }) { top = NEW }
                         }
                     }
                 }
@@ -154,22 +157,29 @@ private fun KanbanUnsupported(client: LiveClient) {
 @OptIn(ExperimentalFoundationApi::class)
 @RequiresApi(29)
 @Composable
-private fun BoardTab(client: LiveClient, board: KanbanBoard, busy: Boolean, scope: String, assignee: String, project: String, column: String, onColumn: (String) -> Unit,
-                     onFilters: (String, String, String) -> Unit, onOpen: (String) -> Unit, onNew: () -> Unit) {
-    val pager = rememberPagerState(initialPage = Kanban.COLUMNS.indexOf(column).coerceAtLeast(0)) { Kanban.COLUMNS.size }
-    LaunchedEffect(pager.currentPage) { onColumn(Kanban.COLUMNS[pager.currentPage]) }
+private fun BoardTab(client: LiveClient, board: KanbanBoard, busy: Boolean, filters: GlobalBoardFilters,
+                     onFilters: (GlobalBoardFilters) -> Unit, onOpen: (String) -> Unit, onNew: () -> Unit) {
+    val (scope, assignee, project) = filters
+    val pager = rememberPagerState(initialPage = Kanban.COLUMNS.indexOf(filters.column).coerceAtLeast(0)) { Kanban.COLUMNS.size }
+    val current by rememberUpdatedState(filters)
+    LaunchedEffect(pager.currentPage) { Kanban.COLUMNS[pager.currentPage].let { if (it != current.column) onFilters(current.copy(column = it)) } }
     val tasks = rememberCoroutineScope()
     var moving by remember { mutableStateOf<KanbanTicket?>(null) }
     val shown = remember(board, scope, assignee, project) { Kanban.shown(board, scope, assignee, project) }
     val projects = Kanban.projectFilters(board)
     val scopes = Kanban.scopes(board)
-    val filters = Kanban.assigneeFilters(board, scope)
+    val people = Kanban.assigneeFilters(board, scope)
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            ChoiceMenu(scopes.firstOrNull { it.first == scope }?.second ?: "Everything", "Whose tickets", scopes, scope, MENU) { onFilters(it, Kanban.ANY, project) }
-            ChoiceMenu(filters.firstOrNull { it.first == assignee }?.second ?: "Anyone", "Assigned to", filters, assignee, MENU) { onFilters(scope, it, project) }
-            if (projects.isNotEmpty()) ChoiceMenu(projects.firstOrNull { it.first == project }?.second ?: "Any project", "Project", projects, project, MENU.testTag("kanbanProjectFilter")) { onFilters(scope, assignee, it) }
+            ChoiceMenu(scopes.firstOrNull { it.first == scope }?.second ?: "Everything", "Whose tickets", scopes, scope, MENU.testTag("kanbanScopeFilter"), active = scope != Kanban.ALL) {
+                onFilters(filters.copy(scope = it, assignee = Kanban.ANY)) }
+            ChoiceMenu(people.firstOrNull { it.first == assignee }?.second ?: "Anyone", "Assigned to", people, assignee, MENU.testTag("kanbanAssigneeFilter"), active = assignee != Kanban.ANY) {
+                onFilters(filters.copy(assignee = it)) }
+            if (projects.isNotEmpty()) ChoiceMenu(projects.firstOrNull { it.first == project }?.second ?: "Any project", "Project", projects, project, MENU.testTag("kanbanProjectFilter"),
+                active = project != Kanban.ALL) { onFilters(filters.copy(project = it)) }
+            if (filters.active > 0) TextButton(onClick = { onFilters(filters.cleared()) }, modifier = Modifier.testTag("kanbanClearFilters")
+                .semantics { contentDescription = "Clear filters, ${filters.active} on" }) { Text("Clear filters") }
         }
         // One column at a time; swipe or tap a column's name to move between them.
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -225,7 +235,11 @@ private fun KanbanCard(ticket: KanbanTicket, onOpen: () -> Unit, onMove: (() -> 
                 Text(ticket.title, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium), maxLines = 3, overflow = TextOverflow.Ellipsis)
                 // Paused isn't stuck: a calm pill in words, and its reason without the red.
                 if (paused) Pill(RunPause.label(ticket.paused), OrgTone.WAIT, Modifier.testTag("kanbanPaused"))
+                if (ticket.autoApproved) Pill("Auto-approved", OrgTone.IDLE, Modifier.testTag("kanbanCardAutoApproved"))
                 if (block.isNotBlank()) Text(block, style = MaterialTheme.typography.bodySmall, color = if (paused) MaterialTheme.colorScheme.onSurfaceVariant else orgColors(OrgTone.BAD).first, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                // A cancelled ticket it waits for needs the user; otherwise a quiet line says what comes first.
+                if (ticket.waitNotice.isNotBlank()) Text(ticket.waitNotice, Modifier.testTag("kanbanCardWaitNotice"), style = MaterialTheme.typography.bodySmall, color = orgColors(OrgTone.WAIT).first, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                else Kanban.waitsLine(ticket).takeIf { it.isNotBlank() }?.let { Text(it, Modifier.testTag("kanbanCardWaits"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis) }
                 if (ticket.running) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp).semantics { contentDescription = "Running" }, color = orgColors(OrgTone.RUN).first)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.weight(1f)) { AssigneeLine(ticket) }
@@ -367,6 +381,7 @@ private fun ColumnScope.KanbanTicketPage(client: LiveClient, board: KanbanBoard?
                     Pill(ticket.owner, if (ticket.isRem) OrgTone.ACCENT else OrgTone.IDLE)
                     when { ticket.proposed -> Pill("Proposed", OrgTone.WAIT)
                         else -> Kanban.column(ticket)?.let { Pill(Kanban.COLUMN_LABELS[it].orEmpty(), columnTone(it)) } }
+                    if (ticket.autoApproved) Pill("Auto-approved", OrgTone.IDLE, Modifier.testTag("kanbanAutoApproved"))
                     if (ticket.running) Pill("Running", OrgTone.RUN)
                     if (ticket.paused.isNotBlank()) Pill(RunPause.label(ticket.paused), OrgTone.WAIT)
                     if (ticket.priority in setOf("critical", "high")) Pill(ticket.priority.replaceFirstChar { it.uppercase() }, if (ticket.priority == "critical") OrgTone.BAD else OrgTone.WAIT)
@@ -375,6 +390,10 @@ private fun ColumnScope.KanbanTicketPage(client: LiveClient, board: KanbanBoard?
                 Kanban.outsideProject(ticket).takeIf { it.isNotBlank() }?.let { Text(it, Modifier.testTag("kanbanOutsideProject"), style = MaterialTheme.typography.bodySmall, color = orgColors(OrgTone.WAIT).first) }
                 Kanban.blockText(ticket).takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodyMedium,
                     color = if (ticket.paused.isNotBlank()) MaterialTheme.colorScheme.onSurface else orgColors(OrgTone.BAD).first) }
+                if (ticket.autoApproved) {
+                    Note("Approved by self-work, not by you, because auto-approval is on in Settings › Rem self-work. Edit, move or cancel it like any ticket.")
+                    if (ticket.proposalReason.isNotBlank()) { SectionTitle("Why Rem suggests it"); ChatMarkdown(ticket.proposalReason, compact = true) }
+                }
                 if (ticket.proposed) {
                     if (ticket.proposalReason.isNotBlank()) { SectionTitle("Why Rem proposes it"); ChatMarkdown(ticket.proposalReason, compact = true) }
                     if (ticket.duplicateOf.isNotBlank()) Pill("Might duplicate ${ticket.duplicateOf}", OrgTone.WAIT)
@@ -399,6 +418,7 @@ private fun ColumnScope.KanbanTicketPage(client: LiveClient, board: KanbanBoard?
                     OutlinedButton(onClick = { moving = true }, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp).testTag("kanbanMoveOpen")) { Text("Move to another column") }
                     if (!ticket.isRem) TextButton(onClick = { onOrganization(ticket.organizationId) }, modifier = Modifier.heightIn(min = 48.dp).testTag("kanbanOpenOrg")) { Text("Open ${ticket.organizationName.ifBlank { "this organization" }}") }
                 }
+                WaitsSection(client, board, ticket, busy)
                 // Both can run long; they fold like long messages so the actions above stay close.
                 if (ticket.summary.isNotBlank()) { SectionTitle("Last result"); FoldableText(toggleColor = MaterialTheme.colorScheme.primary) { ChatMarkdown(ticket.summary, compact = true) } }
                 if (ticket.description.isNotBlank()) { SectionTitle("Details"); FoldableText(toggleColor = MaterialTheme.colorScheme.primary) { ChatMarkdown(ticket.description, compact = true) } }
@@ -415,6 +435,37 @@ private fun ColumnScope.KanbanTicketPage(client: LiveClient, board: KanbanBoard?
             text = { Text("The ticket is created there and Rem's copy closes.") },
             confirmButton = { TextButton(modifier = Modifier.testTag("kanbanHandOverConfirm"), enabled = client.connected, onClick = { client.desktopAction(Kanban.TICKET, Kanban.assignParams(ticket, choice)); handOver = null }) { Text("Hand over") } },
             dismissButton = { TextButton(onClick = { handOver = null }) { Text("Cancel") } })
+    }
+}
+
+/** What a ticket waits for, its notice when one of them was cancelled, and the controls to change the list. */
+@RequiresApi(29)
+@Composable
+private fun WaitsSection(client: LiveClient, board: KanbanBoard?, ticket: KanbanTicket, busy: Boolean) {
+    val editable = Kanban.canEditWaits(ticket)
+    val choices = if (editable && board != null) Kanban.waitChoices(board, ticket) else emptyList()
+    if (ticket.waitsFor.isEmpty() && choices.isEmpty()) return
+    val ids = ticket.waitsFor.map { it.id }
+    Column(Modifier.fillMaxWidth().testTag("kanbanWaits"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        SectionTitle("Waits for")
+        if (ticket.waitNotice.isNotBlank()) Text(ticket.waitNotice, Modifier.testTag("kanbanWaitNotice"), style = MaterialTheme.typography.bodyMedium, color = orgColors(OrgTone.WAIT).first)
+        if (ticket.waitsFor.isEmpty()) Note("Nothing. Choose a ticket that has to be Done first.")
+        ticket.waitsFor.forEach { wait ->
+            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (wait.key.isNotBlank()) Text(wait.key, style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(wait.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    color = if (wait.status == "done") MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface)
+                Pill(Kanban.STATUS_LABELS[wait.status] ?: if (wait.status == "removed") "Removed" else wait.status,
+                    when (wait.status) { "done" -> OrgTone.IDLE; "cancelled", "removed" -> OrgTone.WAIT; else -> OrgTone.ACCENT })
+                if (editable) IconButton(onClick = { client.desktopAction(Kanban.TICKET, Kanban.waitsParams(ticket, ids - wait.id)) }, enabled = !busy,
+                    modifier = Modifier.testTag("kanbanWaitRemove")) { Icon(Icons.Filled.Close, "Stop waiting for ${wait.key.ifBlank { wait.title }}") }
+            }
+        }
+        if (choices.isNotEmpty()) ChoiceMenu(if (ticket.waitsFor.isEmpty()) "Wait for a ticket…" else "Also wait for…", "Wait for another ticket",
+            choices.map { it.id to "${it.key} ${it.title}" }, "", Modifier.heightIn(min = 48.dp).testTag("kanbanWaitAdd"), enabled = !busy) { id ->
+            client.desktopAction(Kanban.TICKET, Kanban.waitsParams(ticket, ids + id))
+        }
+        if (ticket.waitsFor.isNotEmpty() && ticket.isRem) Note("Self-work starts this only after every ticket here is Done. You can still start it yourself.")
     }
 }
 
@@ -614,6 +665,13 @@ internal fun SelfWorkBody(view: SelfWorkView, board: KanbanBoard?, busy: Boolean
         if (chosen != settings.maxThreads) onChange(Kanban.settingsParams(settings, maxThreads = chosen))
     }
     val shownMax = pendingMax ?: settings.maxThreads
+    var confirmingAutoApprove by remember { mutableStateOf(false) }
+    if (confirmingAutoApprove) AlertDialog(onDismissRequest = { confirmingAutoApprove = false }, modifier = Modifier.testTag("selfWorkAutoApproveConfirm"),
+        title = { Text("Let Rem approve tickets it proposes?") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { Kanban.autoApproveWarning(view).forEach { Text(it) } } },
+        confirmButton = { TextButton(onClick = { confirmingAutoApprove = false; onChange(Kanban.settingsParams(settings, autoApprove = true)) },
+            modifier = Modifier.testTag("selfWorkAutoApproveTurnOn")) { Text("Turn on") } },
+        dismissButton = { TextButton(onClick = { confirmingAutoApprove = false }) { Text("Keep asking me") } })
     LazyColumn(Modifier.fillMaxSize().testTag("selfWork"), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {
             val state = view.state
@@ -702,6 +760,13 @@ internal fun SelfWorkBody(view: SelfWorkView, board: KanbanBoard?, busy: Boolean
                 SwitchRow("Pull work from Backlog", Kanban.autoPullDetail(view), settings.autoPull, !busy && view.state.boardEnabled, "selfWorkAutoPull") {
                     onChange(Kanban.settingsParams(settings, autoPull = it))
                 }
+                // Only from a desktop that has it; turning it on asks first, turning it off doesn't.
+                settings.autoApprove?.let { on ->
+                    HorizontalDivider()
+                    SwitchRow("Approve its own backlog tickets", Kanban.autoApproveDetail(view), on, !busy && view.state.boardEnabled, "selfWorkAutoApprove") {
+                        if (it) confirmingAutoApprove = true else onChange(Kanban.settingsParams(settings, autoApprove = false))
+                    }
+                }
             }
         }
         item { SectionTitle("Running report") }
@@ -713,7 +778,7 @@ internal fun SelfWorkBody(view: SelfWorkView, board: KanbanBoard?, busy: Boolean
                 item { SectionTitle("Tickets added · ${report.ticketsAdded.size}") }
                 items(report.ticketsAdded, key = { "added:${it.organizationId}/${it.id}" }) { t ->
                     val found = board?.tickets?.firstOrNull { it.id == t.id && (t.organizationId.isBlank() || it.organizationId == t.organizationId) }
-                    ReportRow(t.title, listOfNotNull(t.organizationName.ifBlank { "Rem" }, if (t.proposed) "To approve" else null, t.at.takeIf { it.isNotBlank() }?.let { whenText(it, past = true) }).joinToString(" · "),
+                    ReportRow(t.title, listOfNotNull(t.organizationName.ifBlank { "Rem" }, if (t.proposed) "To approve" else if (t.autoApproved) "Approved by self-work" else null, t.at.takeIf { it.isNotBlank() }?.let { whenText(it, past = true) }).joinToString(" · "),
                         found?.let { { onTicket(it.uid) } })
                 }
             }

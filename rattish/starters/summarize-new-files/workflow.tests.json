@@ -1,0 +1,48 @@
+{
+  "testSetVersion": 1,
+  "cases": [
+    {
+      "id": "two-new-files",
+      "name": "Summarizes two new files into a digest",
+      "inputs": {
+        "folder": ".raticode/summarize-new-files/fixtures/inbox",
+        "pattern": "*.md",
+        "summaries-folder": ".raticode/summarize-new-files/logs/test-summaries",
+        "remember-files": false
+      },
+      "checks": [
+        {"type": "text", "label": "Finds both files", "target": "nodes.collect.stdout", "contains": "new-files: 2"},
+        {"type": "text", "label": "Saves a dated digest", "target": "nodes.save-digest.stdout", "matches": "test-summaries/[0-9-]+\\.md"},
+        {"type": "command", "label": "The digest lists the files it covers", "target": "nodes.save-digest.stdout", "command": "read -r digest && grep -q 'meeting-notes.md' \"$digest\" && grep -q 'invoice-question.md' \"$digest\""},
+        {"type": "judge", "label": "Useful summary", "target": "nodes.summarize", "criteria": "Has a section for each of the two files: planning meeting notes and an overdue invoice question. Mentions that the invoice needs a reply and that the release moved to 21 March. Invents no facts."}
+      ]
+    },
+    {
+      "id": "nothing-new",
+      "name": "Stops without calling a model when no file matches",
+      "inputs": {
+        "folder": ".raticode/summarize-new-files/fixtures/inbox",
+        "pattern": "*.nothing",
+        "summaries-folder": ".raticode/summarize-new-files/logs/test-summaries",
+        "remember-files": false
+      },
+      "checks": [
+        {"type": "text", "label": "Finds nothing", "target": "nodes.collect.stdout", "contains": "new-files: 0"},
+        {"type": "text", "label": "Says so", "target": "nodes.nothing-new.stdout", "contains": "No new files"},
+        {"type": "json", "label": "Calls no model", "target": "nodes.summarize", "exists": false}
+      ]
+    },
+    {
+      "id": "missing-folder",
+      "name": "Fails clearly when the folder doesn't exist",
+      "inputs": {
+        "folder": ".raticode/summarize-new-files/fixtures/no-such-folder",
+        "summaries-folder": ".raticode/summarize-new-files/logs/test-summaries"
+      },
+      "expectStatus": "failed",
+      "checks": [
+        {"type": "json", "label": "Calls no model", "target": "nodes.summarize", "exists": false}
+      ]
+    }
+  ]
+}

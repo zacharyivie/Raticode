@@ -1,0 +1,17 @@
+{
+  "starterVersion": 1,
+  "id": "daily-report",
+  "name": "Daily report",
+  "summary": "Runs a shell command, has an agent write a short report on its output, and saves it as a dated file.",
+  "order": 2,
+  "docsPath": "/docs/starters/daily-report",
+  "providers": [
+    "claude-code"
+  ],
+  "secrets": [],
+  "trigger": {
+    "kind": "cron",
+    "description": "Run every weekday morning.",
+    "command": "Raticode rattish triggers add cron WORKFLOW_PATH --cron \"0 9 * * 1-5\""
+  }
+}

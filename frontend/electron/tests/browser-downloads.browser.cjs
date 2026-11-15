@@ -99,7 +99,7 @@ app.whenReady().then(async () => {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}/`;
 
-  const window = new BrowserWindow({ width: 1000, height: 700, show: true, webPreferences: { webviewTag: true, contextIsolation: true } });
+  const window = new BrowserWindow({ width: 1000, height: 700, show: true, webPreferences: { contextIsolation: true } });
   const store = createBrowserStore(path.join(profile, "browser"), { writeDelayMs: 0 });
   const browsers = createBrowserSessions({
     app,
@@ -113,30 +113,20 @@ app.whenReady().then(async () => {
     resolvePath: () => { throw new Error("No files in this test."); },
     store,
     quarantineDir: path.join(profile, "browser", "quarantine"),
+    // Raticode (chromium) tabs are views the main process makes.
+    WebContentsView: electron.WebContentsView,
+    preloadPath: path.join(__dirname, "..", "browser-preload.cjs"),
   });
   browsers.install();
-  window.webContents.on("will-attach-webview", (event, webPreferences, params) => {
-    if (!browsers.isPendingAttach(window.webContents.id, params)) event.preventDefault();
-    webPreferences.preload = path.join(__dirname, "..", "browser-preload.cjs");
-    webPreferences.contextIsolation = true;
-    webPreferences.sandbox = true;
-  });
-  window.webContents.on("did-attach-webview", (_event, guest) => browsers.hardenGuest(guest));
   await window.loadURL("data:text/html,<body style='margin:0'>");
   const event = { sender: window.webContents };
 
   async function openTab(options) {
+    const before = new Set(electron.webContents.getAllWebContents().map((contents) => contents.id));
     const state = browsers.createBrowser(event, options);
-    const attached = new Promise((resolve) => window.webContents.once("did-attach-webview", (_e, guest) => resolve(guest)));
-    await window.webContents.executeJavaScript(`(() => {
-      const view = document.createElement("webview");
-      view.partition = ${JSON.stringify(state.partition)};
-      view.src = ${JSON.stringify(state.src)};
-      view.style.cssText = "width:100%;height:300px";
-      document.body.append(view);
-    })()`);
-    const guest = await attached;
-    browsers.browserAction(event, { action: "adopt", id: state.id, webContentsId: guest.id });
+    const guest = electron.webContents.getAllWebContents().find((contents) => !before.has(contents.id) && contents.getType() === "window");
+    browsers.browserAction(event, { action: "adopt", id: state.id, webContentsId: -1 });
+    browsers.browserAction(event, { action: "place", id: state.id, x: 0, y: 0, width: 1000, height: 300, visible: true });
     if (guest.isLoading() || guest.getURL() !== base) await new Promise((resolve) => guest.once("did-finish-load", resolve));
     return { id: state.id, guest };
   }

@@ -18,13 +18,15 @@
       "memory": {"enum": ["none", "run", "all"]},
       "output_schema": {"type": ["object", "null"]},
       "output_schema_path": {"type": ["string", "null"], "x-rattish-type": "Path"},
-      "repair_attempts": {"type": "integer", "minimum": 0, "maximum": 3}
+      "repair_attempts": {"type": "integer", "minimum": 0, "maximum": 3},
+      "cache": {"type": ["string", "null"], "pattern": "^[1-9][0-9]*(s|m|h|d|w)$"},
+      "fallback": {"type": "array", "maxItems": 4, "items": {"type": "object", "properties": {"provider": {"type": "string", "minLength": 1, "x-rattish-role": "provider_id"}, "profile": {"type": ["string", "null"]}, "model": {"type": "string", "minLength": 1}, "effort": {"type": "string", "minLength": 1}}, "required": ["provider"], "additionalProperties": false}}
     },
     "required": ["provider"],
     "allOf": [{"not": {"properties": {"output_schema": {"type": "object"}, "output_schema_path": {"type": "string"}}, "required": ["output_schema", "output_schema_path"]}}],
     "additionalProperties": false
   },
-  "defaults": {"task": "summarize", "target": "", "instructions": "", "profile": null, "working_dir": ".", "memory": "none", "output_schema": null, "output_schema_path": null, "repair_attempts": 0},
+  "defaults": {"task": "summarize", "target": "", "instructions": "", "profile": null, "working_dir": ".", "memory": "none", "output_schema": null, "output_schema_path": null, "repair_attempts": 0, "cache": null, "fallback": []},
   "computed_defaults": {
     "model": {"source": "provider_contract", "field": "default_model", "description": "Resolve and freeze the provider default model."},
     "effort": {"source": "provider_contract", "field": "default_effort", "description": "Resolve and freeze the provider default effort."}
@@ -36,6 +38,7 @@
   "preflight_checks": [
     {"id": "provider-available", "severity": "error", "description": "The selected provider runtime must be installed and available."},
     {"id": "profile-compatible", "severity": "error", "description": "A selected deployment profile must exist and support the provider."},
+    {"id": "fallback-provider-available", "severity": "warning", "description": "Each fallback provider should be installed and available, so the step can switch to it."},
     {"id": "working-dir-available", "severity": "error", "description": "The working directory must exist and be accessible."}
   ],
   "static_diagnostics": []

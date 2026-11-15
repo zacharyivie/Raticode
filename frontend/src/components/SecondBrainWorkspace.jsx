@@ -65,7 +65,7 @@ export default function SecondBrainWorkspace({ onClose, assistant = {}, memorySe
     const ids = new Set(documents.map(doc => doc.id));
     return {
       inbox: documents.filter(doc => doc.inbox).length,
-      health: store.health.filter(issue => ids.has(issue.docId)).length,
+      health: store.health.filter(issue => issue.brainId ? issue.brainId === brain?.id : ids.has(issue.docId)).length,
     };
   }, [store.documents, store.health, brain?.id]);
   const tasks = store.tasks.filter(task => task.brainId === brain?.id || !task.brainId);

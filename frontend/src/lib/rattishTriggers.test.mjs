@@ -5,6 +5,7 @@ import {
   draftFromTrigger,
   emptyTriggerDraft,
   isProblemStatus,
+  pauseSummary,
   schedulerSummary,
   triggerBodyFromDraft,
   triggerDetail,
@@ -33,6 +34,18 @@ test("scheduler summary says plainly when nothing will fire", () => {
   assert.equal(
     schedulerSummary({ running: true, owner: "background" }).text,
     "Running in the background scheduler",
+  );
+});
+
+test("a pause over all triggers wins over the scheduler line and says how resuming works", () => {
+  const paused = schedulerSummary({ running: true, owner: "app", paused: true });
+  assert.equal(paused.paused, true);
+  assert.match(paused.text, /^All triggers are paused\./);
+  assert.equal(pauseSummary({ pause: { paused: false }, triggers: 0, enabled: 0 }), "No triggers yet.");
+  assert.equal(pauseSummary({ pause: { paused: false }, triggers: 1, enabled: 1 }), "1 of 1 trigger on.");
+  assert.match(
+    pauseSummary({ pause: { paused: true, pausedAt: null }, triggers: 4, enabled: 3 }),
+    /^Paused\. Cron times are skipped, not caught up\. Resuming turns back on the 3 of 4 that were on\.$/,
   );
 });
 

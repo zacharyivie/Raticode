@@ -100,7 +100,7 @@ test('a destroyed window comes back hidden, and opening it from the tray maximiz
   const window = { on: (name, callback) => { handlers[name] = callback; },
     webContents: { on: (name, callback) => { contentHandlers[name] = callback; } } };
   const context = {
-    mainWindow: window, window, terminalOwnerId: 1, browsers: { closeForOwner() {} }, closeTerminalsForOwner() {},
+    mainWindow: window, window, terminalOwnerId: 1, browsers: { closeForOwner() {} }, browserWindow: () => ({ destroy() {} }), closeTerminalsForOwner() {},
     isQuitting: false, isSmokeTest: false, lastWindowArgs: ['http://127.0.0.1:43210', 'token'], Date,
     setTimeout: callback => timers.push(callback), createWindow: (...args) => created.push(args),
   };

@@ -5,3 +5,7 @@ Node example:
   type: agent
   provider: codex
   prompt: Review the current change.
+  fallback:
+    -
+      provider: claude-code
+      effort: medium

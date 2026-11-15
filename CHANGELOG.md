@@ -3,6 +3,151 @@
 This file records the major user-facing changes in Raticode. Releases through
 version 0.1.3 used an earlier product name.
 
+## 0.5.5 - 2026-11-15
+
+Changes since the `v0.5.4` tag. Raticode Mobile 0.35.0 ships alongside it from
+its own `mobile-v0.35.0` tag.
+
+### Added
+
+- Raticode checks for updates on startup and every 10 minutes, on the desktop
+  and the phone, and reminds you at most once a day. The phone can update
+  itself: **Update Raticode** downloads the signed APK, checks its hash,
+  version and signing key, then hands it to Android's installer. Copies from
+  Google Play update through Play.
+- Projects can commit `.raticode/worktree-setup.json` with commands and files
+  to link or copy. Rem, Organizations and Swarms run it in every new worktree
+  once you approve it for the project. Approval covers the setup file's text,
+  not the package scripts or setup scripts its commands run.
+- Ticket sheets show a branch's full patch. Line comments go back to the
+  worker, and **Accept** lands the branch after a clean-merge check; only you
+  can press it.
+- Every ticket shows its token usage, and self-work can stop at a token limit
+  per session or per day, or at a provider rate-limit percentage. You can let
+  self-work approve the Backlog tickets it proposes (off by default, and only
+  you can turn it on).
+- Board filters stay set on the Global board and each organization's board,
+  on the desktop and the phone, after leaving the page or restarting.
+- Second Brain backs up each brain on a schedule to a folder outside it,
+  verifies every copy and keeps the last few. Revised reports are grouped into
+  families, older copies can be marked replaced, report links survive moving
+  the brain, and Library health lists and repairs dead links. Opened brains
+  are made private to your account.
+- Pop the Browser out into its own window, on another screen if you like, and
+  bring it back. Every tab keeps running while it moves.
+- Dictate to Rem from any app with a system-wide shortcut (Ctrl+Alt+Space,
+  opt-in in Settings > Devices).
+- Show Rem a screen or window you pick, for one message, only when you ask
+  (opt-in in Settings > Devices). The picture is kept in memory for that one
+  reply.
+- Workflows can ask Jev yes/no and multiple-choice questions and branch on the
+  answer with the new `jev` node. The Jev key lives only in the system
+  keychain.
+- Test sets for workflows: `Raticode rattish test` and a Tests tab in Studio
+  run input cases and check each result.
+- Delete a thread's conversation archive copy for good, and optionally purge
+  archive copies of deleted threads after 7, 30 or 90 days.
+- Unattended Claude Code work (self-work and reviews) runs in an
+  operating-system sandbox and is blocked, before any tokens are spent, when
+  the sandbox can't start.
+- raticode.dev publishes a security.txt, and every contact address is now
+  support@raticode.dev.
+- Five starter workflows ship with the app (summarize new files, a daily
+  report, a webhook approval gate, a test-and-fix loop and a conditional
+  notification), plus a Jev demo. Start a new workflow from one in the Studio
+  or with `Raticode rattish create --from`.
+- Workflow secrets can be saved in the system keychain from **Workflow
+  settings > Secrets** or `Raticode rattish secrets`, and values are never
+  shown. `secret["NAME"]` reads the keychain first, then the environment
+  variable, so existing setups keep working.
+- Headless servers without a keychain can read the Jev key, Organizations and
+  webhook secrets, usage credentials and workflow secrets from a read-only
+  folder of owner-only files (`serve --headless --secrets-dir`, or systemd
+  credentials). Agents can't see that folder.
+- Every workflow run shows its tokens and estimated cost per run and per step,
+  and a workflow can cap a run with `max-tokens` and `max-cost-usd`. Claude
+  Code steps get a spending cap from what is left of the budget.
+- Agent and LLM task steps can list fallback providers to switch to when
+  their provider is rate-limited, out of allowance, overloaded, signed out or
+  not installed.
+- Agent steps can use a model server you run yourself, such as Ollama, through
+  a local model server profile, with no API key and $0 recorded cost.
+- LLM task and Jev steps can reuse a saved answer for a set time with
+  `cache: 7d`, and **Clear cache** or `Raticode rattish cache clear` empties
+  it.
+- One **Workflow runs** view lists every workflow's runs with how each
+  started, status, cost and filters, on the desktop, with
+  `Raticode rattish runs --all` and on the phone.
+- Runs started with inputs or by a trigger can be resumed, and a run can be
+  run again with the same inputs, on the desktop, the phone and the command
+  line. Password inputs are never saved and are asked for again.
+- Old Rattish runs are cleaned up after every run using each workflow's saved
+  retention settings, and `Raticode rattish prune` previews or deletes them.
+  Running runs, runs waiting on an approval and runs being resumed are never
+  removed.
+- **Pause all triggers** on the desktop, the phone and the command line, and
+  turn single triggers on or off from the phone. Each trigger keeps its own
+  setting.
+- **Stop** reaches runs the background trigger scheduler started, from the
+  app, the phone or `Raticode rattish stop`, even with no backend running.
+- Workflows can send a message to your paired phone with the notification
+  node's `channel: phone`. Messages are grouped by workflow, buzz once per
+  sync, and a single run can't flood the phone.
+- The phone can run workflows that take inputs, with a form like the
+  desktop's, and resume a failed run from the failed step.
+- Rem's database is backed up at startup and daily (3 verified copies kept)
+  and restored automatically when it's damaged; the damaged files are moved
+  aside, never deleted. `Raticode rem restore-db` restores a chosen copy.
+- Board tickets can wait for other tickets, and self-work leaves a waiting
+  ticket alone until those are done.
+- Opening a project lists every `workflow.rattish` in it at any depth, such
+  as Raticode's own starters, not only those in `.raticode`. Each shows its
+  folder, and `Raticode rattish list --project` does the same from the command
+  line.
+
+### Changed
+
+- Organizations are easier to start: a name is enough, a Get started
+  checklist leads the way, and Start says why nothing could run. Runs that
+  fail on a passing provider problem retry by themselves, Auto mode reviews
+  stuck tickets, and quitting Raticode mid-run parks the ticket instead of
+  cancelling it. Rem needs your approval before it gives workers a Second
+  Brain folder.
+- Your own tasks pause exactly one self-work task each, lowest priority first,
+  and paused work resumes as soon as a thread is free. Self-work keeps
+  researching in rounds during long sessions.
+- Raticode commands start about three times faster.
+- Rem's desktop chat opens with its newest 200 messages and loads older ones
+  on request, so a long chat stays fast.
+- Organization workers get the organization's project folders from the start
+  and keep running after Raticode restarts, and a crash or provider outage no
+  longer stalls their check-ins.
+- The workflow list loads about 8 times faster, and an unchanged
+  Organizations tab costs almost nothing to refresh.
+
+### Fixed
+
+- The phone app no longer crashes when a Firefox extension updates its toolbar
+  and page buttons (a crash in Raticode Mobile 0.34.0).
+- Desktop dictation keeps capitals and punctuation right where tidied rounds
+  join.
+- Second Brain no longer rebuilds the whole library every 2.5 seconds while
+  nothing has changed.
+- A finished task no longer ends blocked when another job deletes a temporary
+  file during its review, and stuck tickets Rem still has to look at no longer
+  count as needing you.
+- Unattended runs no longer leave empty placeholder files in your project.
+- Workflow approvals decided while a run waits are no longer lost, a run left
+  behind by a restart no longer looks alive when its process number is reused
+  (now on Windows too), webhook bodies a run can't store get a clear 400, and
+  impossible cron dates are refused when saved.
+- Project files in Rem and organization worktrees no longer show up as fake
+  workflows.
+- A workflow file read for the first time since it was saved no longer goes
+  missing from the Workflows list as "changed during discovery".
+- Board cards stay inside their own column, and an opened task's long text,
+  paths and buttons wrap inside the task sheet.
+
 ## 0.5.4 - 2026-11-12
 
 Changes since the `v0.5.3` tag. Raticode Mobile 0.34.0 ships alongside it as

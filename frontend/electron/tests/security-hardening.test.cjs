@@ -537,6 +537,8 @@ test("native selection, file project lookup and settings do not wait for backend
     mainWindow: null, resolvePickerDefaultPath: () => inside,
     dialog: { showOpenDialog: async () => ({ canceled: false, filePaths: [file] }) },
     remSettings: () => ({}), app: { getPath: () => inside },
+    // Choosing an archive folder checks archive retention, which is off unless the user sets an age.
+    retentionRuns: 0, runArchiveRetention: () => { context.retentionRuns += 1; },
   };
   for (const name of ["resolveExactPath", "pathHandle", "nearestProjectRoot"]) context[name] = mainFunction(name, context);
   assert.equal((await mainFunction("selectPath", context)(null)).path, file);
@@ -545,6 +547,7 @@ test("native selection, file project lookup and settings do not wait for backend
   for (const key of ["archiveFolder", "secondBrainRoot"]) {
     assert.equal((await mainFunction("configureRem", context)(null, { key, value: outside, grantId: "expired" }))[key], outside);
   }
+  assert.equal(context.retentionRuns, 1, "only the archive folder change rechecks retention");
 });
 
 test("a sibling worktree can be created, selected and checked out without prior approval", async (t) => {

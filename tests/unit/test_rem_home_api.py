@@ -608,3 +608,31 @@ def test_polled_runs_name_each_check_they_answer(api):
     assert words == "Opens in a spreadsheet"
     shown = request("GET", "/api/rem/tasks").json()["tasks"][0]["active_run"]
     assert shown["criteria"] == [{"id": new, "result": "unknown", "description": words}]
+
+
+def test_a_screenshot_message_fits_the_body_limit_and_is_kept_in_memory(api):
+    """Show Rem your screen: a screenshot of a few MB goes with the message, never to disk."""
+    import base64
+
+    request, service = api
+    picture = b"\x89PNG\r\n\x1a\n" + b"screenshot-bytes" * (200 * 1024)
+    assert len(picture) > 1_048_576  # Larger than the usual API body limit.
+    body = {
+        "request_id": "screen-1",
+        "body": "What's on my screen?",
+        "screen_image": {"name": "Terminal", "data": base64.b64encode(picture).decode()},
+    }
+    response = request("POST", "/api/rem/messages", body=body)
+    assert response.status == 200, response.json()
+    assert set(service.screen_images) == {"screen-1"}
+    message = request("GET", "/api/rem/conversation").json()["messages"][0]
+    assert message["screen_capture"] == "Terminal" and "screen_image" not in message
+    stored = b"".join(p.read_bytes() for p in service.data_dir.rglob("*") if p.is_file())
+    assert b"screenshot-bytes" not in stored
+    # A malformed picture is refused with a plain reason.
+    bad = request(
+        "POST",
+        "/api/rem/messages",
+        body={"request_id": "screen-2", "body": "x", "screen_image": {"name": "x", "data": "!!"}},
+    )
+    assert bad.status == 400 and "isn't readable" in bad.json()["error"]

@@ -1,7 +1,7 @@
-import { writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { defineConfig, type HeadConfig } from 'vitepress'
-import { siteLocation } from '../data/site'
+import { securityTxt, securityTxtPath, siteLocation } from '../data/site'
 import { homeStructuredData, lastChanged, markdownFor, pageUrl, repo, socialImage } from './seo'
 import { docsSidebar } from './sidebar'
 
@@ -81,9 +81,14 @@ export default defineConfig({
     return head
   },
 
-  // robots.txt must name the sitemap by its full address, so it is written per build.
+  // robots.txt must name the sitemap by its full address, and security.txt its own address
+  // and an expiry date, so both are written per build. The Pages upload step must include
+  // hidden files, or .well-known/ is left out of the published site.
   buildEnd({ outDir }) {
     writeFileSync(join(outDir, 'robots.txt'), `User-agent: *\nAllow: /\n\nSitemap: ${siteUrl}sitemap.xml\n`)
+    const securityFile = join(outDir, securityTxtPath)
+    mkdirSync(dirname(securityFile), { recursive: true })
+    writeFileSync(securityFile, securityTxt(siteUrl))
   },
 
   themeConfig: {

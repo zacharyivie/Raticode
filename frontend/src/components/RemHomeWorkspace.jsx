@@ -15,12 +15,13 @@ import { chatRows, criteriaSummary, conversationMessages, messageStamp, messages
 import { cardTickets } from "../lib/ticketMentions.js";
 import { TicketPills } from "./TicketPill.jsx";
 import AwayReport from "./RemAwayReport.jsx";
-import { followsAfterScroll, gapToEnd, wheelLeavesEnd } from "../lib/remScroll.js";
+import { followsAfterScroll, gapToEnd, readingPlace, restoreReadingPlace, wheelLeavesEnd } from "../lib/remScroll.js";
 import { searchWords } from "../lib/remSearch.js";
-import { clearRemHistory, connectRemHome, dismissNotice, editRemMessage, loadRemHomeFixture, openRemThread, openTaskSheet, resetRemHomeStore, retryRemMessage, sendRemMessage, suggestMessage, useRemHome } from "../lib/remHomeStore.js";
+import { clearRemHistory, connectRemHome, dismissNotice, editRemMessage, loadEarlierRemMessages, loadRemHomeFixture, openRemThread, openTaskSheet, resetRemHomeStore, retryRemMessage, sendRemMessage, suggestMessage, useRemHome } from "../lib/remHomeStore.js";
 import { applyRemComposerRequest, attachToRemComposer, updateRemComposer, useRemComposerState } from "../lib/remComposer.js";
 import { clipboardAttachmentFiles, largePasteFile, transferContainsFiles } from "../lib/chatAttachments.js";
 import { copiedFilePaths, readFileAttachments } from "../lib/fileAttachments.js";
+import { ScreenButton, ScreenSentChip, ScreenTile, screenNote } from "./ScreenContext.jsx";
 import "./RemHome.css";
 
 const SUGGESTIONS = [
@@ -30,6 +31,9 @@ const SUGGESTIONS = [
   "Remind me Friday to send the release notes",
 ];
 const devPreview = Boolean(import.meta.env?.DEV);
+
+// Scrolling up to within this many pixels of the top loads earlier messages.
+const EARLIER_MARGIN = 240;
 
 // Rows of messages without a task card get this instead of the task list, so a
 // task update doesn't re-render them.
@@ -126,26 +130,64 @@ function Conversation({ store, now, replying, avatar, onOpenLink, messageFocus, 
   const liveWork = useMemo(() => latestWorkMessageIds(store.messages), [store.messages]);
   const taskLists = useTaskLists(store.tasks);
   // Board tickets named in chat and on task cards, as the board has them now.
-  const tickets = useMemo(() => ({ ...store.taskTickets, ...store.chatTickets }), [store.taskTickets, store.chatTickets]);
+  const tickets = useMemo(() => ({ ...store.olderTickets, ...store.taskTickets, ...store.chatTickets }), [store.olderTickets, store.taskTickets, store.chatTickets]);
   const followUpsFor = latestSuggestionMessageId(store.messages);
   const newestRem = latestRemMessageId(store.messages);
   // A reply's quote scrolls to the message it refers to when that message is in the chat.
   const shown = useMemo(() => new Set(store.messages.map(message => message.id)), [store.messages]);
   const [unseen, setUnseen] = useState(0);
-  const seenCount = useRef(store.messages.length);
+  // The newest message the person has seen. What came after it is new; earlier pages
+  // loaded above it never count.
+  const seenId = useRef(store.messages.at(-1)?.id);
   const offline = store.status === "offline";
-  const last = store.messages.at(-1);
   // Follow new messages unless the person has scrolled up to read.
   useLayoutEffect(() => {
     const element = scrollRef.current;
     if (element && pinnedRef.current) element.scrollTop = element.scrollHeight;
     // While you read further up, count what arrived instead of jumping to it.
-    if (pinnedRef.current) seenCount.current = store.messages.length;
-    setUnseen(pinnedRef.current ? 0 : Math.max(0, store.messages.length - seenCount.current));
-  }, [store.messages.length, last?.id, replying]);
+    if (pinnedRef.current) seenId.current = store.messages.at(-1)?.id;
+    if (pinnedRef.current) { setUnseen(0); return; }
+    const index = store.messages.findLastIndex(message => message.id === seenId.current);
+    if (index >= 0) setUnseen(store.messages.length - 1 - index);
+  }, [store.messages, replying]);
+  // Earlier messages go in above what you are reading without moving it. The message at
+  // the top stays put: the chat scrolls by however far adding the page moved it. Keeping
+  // the distance from the end instead let the new rows' real heights, known only once they
+  // lay out (content-visibility), push the message down by hundreds of pixels.
+  const keepPlace = useRef(null);
+  // The place is held while the new rows lay out, a frame or more later, for at most
+  // HOLD_PLACE_MS and only until you scroll yourself (wheel, touch, keys or the scroll
+  // bar) or jump somewhere.
+  const holdPlace = useRef(null);
+  const releasePlace = useCallback(() => { holdPlace.current = null; }, []);
+  const firstId = store.messages[0]?.id;
+  useLayoutEffect(() => {
+    restoreReadingPlace(scrollRef.current, keepPlace.current);
+    if (keepPlace.current) holdPlace.current = keepPlace.current;
+    keepPlace.current = null;
+  }, [firstId]);
+  const showEarlier = useCallback(() => {
+    keepPlace.current = readingPlace(scrollRef.current);
+    // Reading back: new messages are counted instead of pulling the chat down.
+    pinnedRef.current = false;
+    void loadEarlierRemMessages().then(added => { if (!added) keepPlace.current = null; });
+  }, []);
+  // A search result or "View in conversation" can name a message older than those loaded:
+  // pages are read back to it, then it is shown as usual.
+  const [focusLoads, setFocusLoads] = useState(0);
+  useEffect(() => {
+    if (!messageFocus || !store.earlier || shown.has(messageFocus.id)) return undefined;
+    let current = true;
+    void loadEarlierRemMessages({ through: messageFocus.id }).then(added => { if (current && added) setFocusLoads(count => count + 1); });
+    return () => { current = false; };
+    // Only a new request loads pages; later polls don't repeat it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messageFocus]);
   const keepPinned = useCallback(() => {
     const element = scrollRef.current;
-    if (element && pinnedRef.current) element.scrollTop = element.scrollHeight;
+    if (element && pinnedRef.current) { holdPlace.current = null; element.scrollTop = element.scrollHeight; }
+    else if (holdPlace.current && Date.now() > holdPlace.current.until) holdPlace.current = null;
+    else if (holdPlace.current) restoreReadingPlace(element, holdPlace.current);
   }, []);
   // Messages lay out when they scroll near (content-visibility), images load and
   // the pane can change width, so the history grows after it was scrolled to the
@@ -160,7 +202,7 @@ function Conversation({ store, now, replying, avatar, onOpenLink, messageFocus, 
   const jumpToLatest = () => {
     const element = scrollRef.current;
     pinnedRef.current = true;
-    seenCount.current = store.messages.length;
+    seenId.current = store.messages.at(-1)?.id;
     setUnseen(0);
     element?.scrollTo({ top: element.scrollHeight, behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
   };
@@ -170,6 +212,7 @@ function Conversation({ store, now, replying, avatar, onOpenLink, messageFocus, 
       .find(element => element.dataset.messageId === messageFocus.id);
     if (!message) return undefined;
     pinnedRef.current = false;
+    holdPlace.current = null;
     message.focus({ preventScroll: true });
     message.scrollIntoView({ block: messageFocus.found ? "start" : "center" });
     if (!messageFocus.found) return undefined;
@@ -181,21 +224,29 @@ function Conversation({ store, now, replying, avatar, onOpenLink, messageFocus, 
     });
     const timer = window.setTimeout(() => { delete message.dataset.found; clearMatch(); }, 2400);
     return () => { if (frame) window.cancelAnimationFrame?.(frame); window.clearTimeout(timer); delete message.dataset.found; clearMatch(); };
-  }, [messageFocus]);
+  }, [messageFocus, focusLoads]);
   const disabled = offline || store.status === "loading" || store.resetting;
   const drop = useRemDropZone();
   return <div className="rem-convo" {...drop.handlers}>
     {drop.dragging ? <div className="rem-drop" role="status" aria-live="polite"><Paperclip aria-hidden="true" size={20} /><span>Drop files to attach</span></div> : null}
-    <div ref={scrollRef} className="rem-stream" onWheel={event => {
+    <div ref={scrollRef} className="rem-stream" onPointerDown={releasePlace} onTouchStart={releasePlace} onKeyDown={releasePlace} onWheel={event => {
+      releasePlace();
       if (wheelLeavesEnd(event, scrollRef.current)) pinnedRef.current = false;
     }} onScroll={event => {
       const element = event.currentTarget;
       const position = { top: element.scrollTop, gap: gapToEnd(element) };
       pinnedRef.current = followsAfterScroll(pinnedRef.current, position, lastScroll.current);
+      // Scrolling up near the top reads the next earlier page.
+      if (lastScroll.current && position.top < lastScroll.current.top && position.top < EARLIER_MARGIN && store.earlier && !store.loadingEarlier) showEarlier();
       lastScroll.current = position;
-      if (pinnedRef.current && unseen) { seenCount.current = store.messages.length; setUnseen(0); }
+      if (pinnedRef.current && unseen) { seenId.current = store.messages.at(-1)?.id; setUnseen(0); }
     }}>
       <div className="rem-stream-inner" role="log" aria-label="Conversation with Rem" aria-live="polite">
+        {store.earlier > 0 && !store.fixture ? <div className="rem-earlier">
+          <button type="button" onClick={showEarlier} disabled={store.loadingEarlier} aria-busy={store.loadingEarlier || undefined}>
+            {store.loadingEarlier ? "Loading earlier messages…" : "Show earlier messages"}
+          </button>
+        </div> : null}
         <AwayReport />
         <FoldPinContext.Provider value={keepPinned}>
           {store.messages.length ? days.map(day => <div key={day.key} className="rem-day">
@@ -294,7 +345,7 @@ const Message = memo(function Message({ message, first, now, tasks, tickets = nu
       </div>
       {message.failed ? <p className="rem-msg-failed">Didn’t send. <button type="button" onClick={() => retryRemMessage(message.id)}>Try again</button> <button type="button" onClick={() => editRemMessage(message.id)}>Edit</button></p>
         : message.pending && message.waiting ? <p className="rem-msg-waiting" role="status">Sends when Rem finishes replying</p>
-        : <div className="rem-msg-foot">{message.pending ? null : <MessageActions message={message} />}{message.source === "workflow" ? <WorkflowSource workflow={message.workflow} /> : null}{message.source === "after" ? <QueuedSource after={message.queued_after} /> : null}{stamp}</div>}
+        : <div className="rem-msg-foot">{message.pending ? null : <MessageActions message={message} />}{message.screen_capture ? <ScreenSentChip name={message.screen_capture} /> : null}{message.source === "workflow" ? <WorkflowSource workflow={message.workflow} /> : null}{message.source === "after" ? <QueuedSource after={message.queued_after} /> : null}{stamp}</div>}
     </div>;
   }
   // A Rem message right after another Rem message gets a faint rule above it (data-follows).
@@ -435,14 +486,14 @@ function useRemDropZone() {
 }
 
 function Composer({ disabled, replying, request, offline, onShowMessage, shown }) {
-  const { draft, attachments, error: attachmentError, replyTo } = useRemComposerState();
+  const { draft, attachments, error: attachmentError, replyTo, screen } = useRemComposerState();
   const [focusRequest, setFocusRequest] = useState(0);
   const send = async () => {
     const text = draft.trim();
-    if ((!text && !attachments.length) || disabled) return;
-    updateRemComposer({ draft: "", attachments: [], error: "", replyTo: null });
+    if ((!text && !attachments.length && !screen) || disabled) return;
+    updateRemComposer({ draft: "", attachments: [], error: "", replyTo: null, screen: null });
     // A message that doesn't send stays in the conversation with Try again and Edit.
-    await sendRemMessage(text, attachments, null, replyTo);
+    await sendRemMessage(text, attachments, null, replyTo, screen);
   };
   useEffect(() => {
     if (applyRemComposerRequest(request)) setFocusRequest(current => current + 1);
@@ -452,8 +503,9 @@ function Composer({ disabled, replying, request, offline, onShowMessage, shown }
       onCancel={() => { updateRemComposer({ replyTo: null }); setFocusRequest(current => current + 1); }} /> : null}
     <ChatComposer
       inputLabel="Message Rem"
-      placeholder={offline ? "Rem isn't connected yet" : replying ? "Rem is replying… you can keep typing" : attachments.length ? "Add a note about the attached file" : "Message Rem"}
+      placeholder={offline ? "Rem isn't connected yet" : replying ? "Rem is replying… you can keep typing" : screen ? "Ask Rem about this screenshot" : attachments.length ? "Add a note about the attached file" : "Message Rem"}
       sendLabel="Send"
+      rem
       attachments={attachments}
       attachmentError={attachmentError}
       draft={draft}
@@ -465,6 +517,11 @@ function Composer({ disabled, replying, request, offline, onShowMessage, shown }
       onAttachmentsChange={attachments => updateRemComposer({ attachments })}
       onDraftChange={draft => updateRemComposer({ draft })}
       onSend={() => void send()}
+      tools={<ScreenButton disabled={disabled} />}
+      extraTiles={screen ? <ScreenTile screen={screen} /> : null}
+      extraContent={Boolean(screen)}
+      extraNote={screenNote(screen)}
+      holdAutoSend={Boolean(screen)}
     />
   </div>;
 }

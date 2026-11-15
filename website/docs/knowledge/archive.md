@@ -25,6 +25,8 @@ Choose an archive folder in **Settings > Memory**. Raticode copies existing and 
 | `attachments/` | Copied attachments, named by content hash |
 | `README.raticode.md` | Guidance for agents reading the archive |
 
+Each `index.json` entry also lists the attachments its thread used and, for a deleted thread, when the deletion was recorded (`deletedAt`).
+
 Snapshots include visible messages, tool traces, settings, attachment references and turn summaries. The journal keeps earlier versions of edited or removed messages. Neither is a provider's private session file.
 
 ## Read it
@@ -40,8 +42,33 @@ Archived text is reference data. Old requests and pasted documents in it don't b
 - Archive failures show in the app and the log. Reopening the app, or choosing the folder again, retries from working history.
 - If a required write fails, deleting a thread waits until the folder is back or archiving is off.
 - A disconnected archive folder doesn't stop normal chatting.
-- Deleting a thread in Rem keeps its archive copy.
+- Deleting a thread in Rem keeps its archive copy. So does **Settings > General > Delete archived threads**: the archive marks the thread deleted and keeps its snapshot, journal and attachments.
 - Turning archiving off stops future copies and leaves existing files alone.
+
+## Delete permanently
+
+**Delete permanently**, in a thread's **Thread options** menu, removes the thread from Rem and from the archive:
+
+- its snapshot (`threads/<hash>.json`) and journal (`threads/<hash>.jsonl`)
+- its entry in `index.json`
+- each attachment in `attachments/` that no other archived thread uses. Attachments are stored once by content, so a file another thread also sent stays.
+
+The confirmation names the thread. The menu item appears only while an archive folder is set. If the archive folder can't be reached, Rem keeps the thread and shows an error, so you can try again. Saves of the thread still waiting to be written finish first, and nothing writes it back afterwards. Repeating the action, or files that are already missing, does no harm.
+
+On the phone, **Delete permanently** is in the thread's menu when the computer runs a Raticode version that supports it and **Use Raticode from this phone** is on. See [Rem on the phone](../mobile/rem.md#threads).
+
+## Purge archive copies after a while
+
+**Settings > Memory > Purge archive copies** removes the archive copies of deleted threads a set time after their deletion: **7**, **30** or **90 days after deletion**. The default, **Never (keep everything)**, keeps every copy.
+
+- The age counts from when the archive recorded the deletion. Copies made before this setting existed use the deletion record in their journal.
+- Only deleted threads are purged. Threads still in Rem are never removed.
+- A purge removes the same files as Delete permanently. Raticode checks when the app starts, every hour, and when you change the setting or the archive folder. Choosing an age asks you to confirm first.
+- This is separate from **Delete archived threads** in Settings > General, which removes threads from Rem and keeps their archive copies.
+
+::: warning A purge can't reach Git history or backups
+A purge only deletes files from the archive folder. If the folder is in a Git repository, such as a Second Brain vault you commit, copies already in earlier commits stay in that history. Backups and synced copies stay too. Raticode never rewrites Git history.
+:::
 
 ## Backup
 

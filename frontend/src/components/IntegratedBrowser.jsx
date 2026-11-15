@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useBrowserHost } from "../lib/browserHost.js";
 import {
   ArrowLeft,
   ArrowRight,
@@ -48,6 +49,7 @@ import { askRemPageText } from "../lib/browserAskRem.js";
 import { createTabRecovery, hangAction, HANG_GRACE_MS } from "../lib/browserRecovery.js";
 import { browserChromeShortcutAction } from "../lib/browserShortcuts.js";
 import { attachFirefoxView } from "../lib/firefoxStreamView.js";
+import { attachBrowserView } from "../lib/browserViewSlot.js";
 import { engineLabel, isStreamedEngine, withArticle } from "../lib/browserEngines.js";
 import {
   addressWithCompletion,
@@ -57,7 +59,6 @@ import {
   trimHistoryForSession,
 } from "../lib/browserUi.js";
 
-const USER_PARTITION = "persist:raticode-browser";
 const HISTORY_SAVE_DELAY_MS = 800;
 
 export default function IntegratedBrowser({
@@ -140,7 +141,26 @@ export default function IntegratedBrowser({
   const recoveryRef = useRef(null);
   if (!recoveryRef.current) recoveryRef.current = createTabRecovery();
   const [keepsStopping, setKeepsStopping] = useState(false);
-  const windowVisible = useWindowVisible();
+  // The window the Browser is in: Raticode's, or the Browser's own window.
+  const host = useBrowserHost();
+  const hostWindow = host.window || window;
+  const hostWindowRef = useRef(hostWindow);
+  hostWindowRef.current = hostWindow;
+  const windowVisible = useWindowVisible(host.document);
+  // Builds this tab's view again, in whichever window the Browser is now in.
+  const attachViewRef = useRef(null);
+  // What a Raticode (chromium) tab's view needs to follow its slot.
+  const hostNameRef = useRef("main");
+  hostNameRef.current = host.poppedOut ? "popout" : "main";
+  const dragActiveRef = useRef(dragActive);
+  dragActiveRef.current = dragActive;
+  const viewOptions = (adoptClientId, onUpdate) => ({
+    clientId: adoptClientId,
+    onUpdate,
+    host: () => hostNameRef.current,
+    shown: () => activeRef.current,
+    covered: () => dragActiveRef.current,
+  });
   const [state, setState] = useState({
     canGoBack: false,
     canGoForward: false,
@@ -189,25 +209,29 @@ export default function IntegratedBrowser({
       runCommand(command);
     });
     if (agentSessionId) {
-      // Raticode created this session for Rem. Closing the tab destroys the
-      // view, which ends the session; a remount only attaches a new view.
+      // Raticode created this session for Rem. Closing the tab lets its view
+      // go, which ends the session; a remount only draws its slot again.
       sessionIdRef.current = agentSessionId;
       const onAgentUpdate = (partialState) => {
         if (disposed || sessionIdRef.current !== agentSessionId) return;
         setState((current) => ({ ...current, ...partialState }));
         onStateChangeRef.current?.(partialState);
       };
-      if (isStreamedEngine(agentEngine)) {
-        attachFirefoxView(bridge, agentSessionId, containerRef.current, webviewRef, { clientId, onUpdate: onAgentUpdate, engine: agentEngine, label: engineLabel(agentEngine) });
-      } else {
-        attachBrowserWebview(bridge, agentSessionId, containerRef.current, webviewRef, "about:blank", agentPartition || "persist:raticode-rem", onAgentUpdate, clientId, setFullscreen);
-      }
+      attachViewRef.current = () => {
+        if (isStreamedEngine(agentEngine)) {
+          attachFirefoxView(bridge, agentSessionId, containerRef.current, webviewRef, { clientId, onUpdate: onAgentUpdate, engine: agentEngine, label: engineLabel(agentEngine) });
+        } else {
+          attachBrowserView(bridge, agentSessionId, containerRef.current, webviewRef, viewOptions(clientId, onAgentUpdate));
+        }
+      };
+      attachViewRef.current();
       setState((current) => ({ ...current, id: agentSessionId }));
       return () => {
         disposed = true;
         unsubscribeState?.();
         unsubscribeCommand?.();
         sessionIdRef.current = "";
+        attachViewRef.current = null;
         webviewRef.current?.remove?.();
         webviewRef.current = null;
       };
@@ -235,9 +259,14 @@ export default function IntegratedBrowser({
           setState((current) => ({ ...current, ...partialState }));
           onStateChangeRef.current?.(partialState);
         };
-        // A Firefox, Chrome or Edge tab streams its page from that browser.
-        if (isStreamedEngine(nextState?.engine)) attachFirefoxView(bridge, createdId, containerRef.current, webviewRef, { onUpdate, engine: nextState.engine, label: engineLabel(nextState.engine) });
-        else attachBrowserWebview(bridge, createdId, containerRef.current, webviewRef, nextState?.src, nextState?.partition || USER_PARTITION, onUpdate, "", setFullscreen);
+        // A Firefox, Chrome or Edge tab streams its page from that browser. A
+        // Raticode (chromium) tab's page is a view the main process lays over
+        // this tab's slot, in whichever window the Browser is in.
+        attachViewRef.current = () => {
+          if (isStreamedEngine(nextState?.engine)) attachFirefoxView(bridge, createdId, containerRef.current, webviewRef, { onUpdate, engine: nextState.engine, label: engineLabel(nextState.engine) });
+          else attachBrowserView(bridge, createdId, containerRef.current, webviewRef, viewOptions("", onUpdate));
+        };
+        attachViewRef.current();
         const cleanState = { ...(nextState ?? {}) };
         delete cleanState.src;
         delete cleanState.partition;
@@ -258,6 +287,7 @@ export default function IntegratedBrowser({
       unsubscribeCommand?.();
       const id = sessionIdRef.current || createdId;
       sessionIdRef.current = "";
+      attachViewRef.current = null;
       webviewRef.current?.remove?.();
       webviewRef.current = null;
       if (id) void bridge.close(id).catch(() => {});
@@ -266,9 +296,34 @@ export default function IntegratedBrowser({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentEngine, agentPartition, agentSessionId, bridge, clientId, localPath, discarded]);
 
+  // Moving to another window. A Raticode (chromium) page is a view that just
+  // follows its slot there, still running. A Firefox, Chrome or Edge tab draws
+  // its frames in the new window, so it lets go of its drawing first.
+  const register = host.register;
+  useEffect(() => register({
+    detach: () => {
+      const view = webviewRef.current;
+      if (!view || !isStreamedEngine(view.dataset?.engine)) return;
+      webviewRef.current = null;
+      view.remove?.();
+    },
+  }), [register]);
+  const hostKeyRef = useRef(host.key);
+  useEffect(() => {
+    if (hostKeyRef.current === host.key) return;
+    hostKeyRef.current = host.key;
+    if (!webviewRef.current && sessionIdRef.current) attachViewRef.current?.();
+    else webviewRef.current?.place?.();
+  }, [host.key]);
+
+  // A page's own full screen (a video's button) fills the window with the page.
+  useEffect(() => {
+    setFullscreen(state.fullscreen === true);
+  }, [state.fullscreen]);
+
   function openFind() {
     setFindOpen(true);
-    window.requestAnimationFrame(() => {
+    hostWindowRef.current.requestAnimationFrame(() => {
       findInputRef.current?.focus();
       findInputRef.current?.select();
     });
@@ -300,23 +355,24 @@ export default function IntegratedBrowser({
   // Rem's tabs report their size so hidden ones still lay out at desktop size.
   useEffect(() => {
     const container = containerRef.current;
-    if (!agentSessionId || !bridge?.viewport || !container || typeof ResizeObserver !== "function") return undefined;
+    const view = hostWindow;
+    if (!agentSessionId || !bridge?.viewport || !container || typeof view?.ResizeObserver !== "function") return undefined;
     let frame = 0;
     // Hidden tabs measure 0x0. Rem then lays the page out at a desktop size.
     const report = () => {
-      window.cancelAnimationFrame(frame);
-      frame = window.requestAnimationFrame(() => {
+      view.cancelAnimationFrame(frame);
+      frame = view.requestAnimationFrame(() => {
         void bridge.viewport(agentSessionId, container.clientWidth, container.clientHeight).catch(() => {});
       });
     };
-    const observer = new ResizeObserver(report);
+    const observer = new view.ResizeObserver(report);
     observer.observe(container);
     report();
     return () => {
-      window.cancelAnimationFrame(frame);
+      view.cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [agentSessionId, bridge, state.ready]);
+  }, [agentSessionId, bridge, hostWindow, state.ready]);
 
   useEffect(() => {
     const id = sessionIdRef.current;
@@ -446,9 +502,9 @@ export default function IntegratedBrowser({
       };
       void Promise.resolve(calls[action]?.()).catch(() => {});
     }
-    window.addEventListener("keydown", handleBrowserChromeShortcut, true);
-    return () => window.removeEventListener("keydown", handleBrowserChromeShortcut, true);
-  }, [active, bridge, state.loading, state.ready]);
+    hostWindow.addEventListener("keydown", handleBrowserChromeShortcut, true);
+    return () => hostWindow.removeEventListener("keydown", handleBrowserChromeShortcut, true);
+  }, [active, bridge, hostWindow, state.loading, state.ready]);
 
   useEffect(() => {
     if (!addressFocused) setAddressDraft(displayBrowserUrl(state.url));
@@ -467,7 +523,7 @@ export default function IntegratedBrowser({
     // Rem's tabs never take keyboard focus on their own.
     if (agentSessionId) return undefined;
     if (!active || state.error || !state.id || (!state.ready && !focusLocationOnCreatePendingRef.current)) return undefined;
-    const frame = window.requestAnimationFrame(() => {
+    const frame = hostWindow.requestAnimationFrame(() => {
       const id = sessionIdRef.current;
       const webview = webviewRef.current;
       if (focusLocationOnCreatePendingRef.current) {
@@ -490,11 +546,13 @@ export default function IntegratedBrowser({
         if (activeRef.current && sessionIdRef.current === id) webview?.focus?.();
       });
     });
-    return () => window.cancelAnimationFrame(frame);
-  }, [active, agentSessionId, bridge, state.error, state.id, state.ready]);
+    return () => hostWindow.cancelAnimationFrame(frame);
+  }, [active, agentSessionId, bridge, hostWindow, state.error, state.id, state.ready]);
 
+  // A dragged tab shows the page as a picture, so the drop zones over it work.
   useEffect(() => {
     if (webviewRef.current) webviewRef.current.style.pointerEvents = dragActive ? "none" : "";
+    webviewRef.current?.place?.();
   }, [dragActive, state.id]);
 
   useEffect(() => {
@@ -1048,70 +1106,6 @@ function browserInputLooksLikeUrl(input) {
     || /^[\w.-]+\.[a-z]{2,}(?::\d+)?(?:[/?#]|$)/i.test(input);
 }
 
-function attachBrowserWebview(bridge, sessionId, container, webviewRef, src, partition, onUpdate, clientId = "", onFullscreen = () => {}) {
-  if (!container || typeof document.createElement !== "function") return;
-  const element = document.createElement("webview");
-  element.setAttribute("partition", partition || USER_PARTITION);
-  element.setAttribute("plugins", "true");
-  // The main process decides what each pop-up becomes; without this
-  // attribute window.open and target=_blank would silently do nothing.
-  element.setAttribute("allowpopups", "");
-  if (bridge.preloadPath) element.setAttribute("preload", bridge.preloadPath);
-  element.setAttribute("src", src || "about:blank");
-  element.style.position = "absolute";
-  element.style.inset = "0";
-  element.style.width = "100%";
-  element.style.height = "100%";
-  const emit = (partialState) => {
-    if (webviewRef.current !== element) return;
-    let history = {};
-    try {
-      history = { canGoBack: element.canGoBack(), canGoForward: element.canGoForward() };
-    } catch {
-      // History methods are unavailable until the webview attaches.
-    }
-    onUpdate?.({ ...history, ...partialState });
-  };
-  element.addEventListener("did-start-loading", () => emit({ error: "", loading: true }));
-  element.addEventListener("did-stop-loading", () => emit({ loading: false }));
-  const isDisplayableUrl = (url) => typeof url === "string" && !url.startsWith("data:");
-  element.addEventListener("did-navigate", (event) => {
-    emit(isDisplayableUrl(event.url) ? { favicon: "", title: "", url: event.url } : {});
-  });
-  element.addEventListener("did-navigate-in-page", (event) => {
-    if (event.isMainFrame && isDisplayableUrl(event.url)) emit({ url: event.url });
-  });
-  element.addEventListener("page-title-updated", (event) => emit({ title: event.title }));
-  element.addEventListener("page-favicon-updated", (event) => {
-    emit({ favicon: browserFaviconUrl(event.favicons) });
-  });
-  element.addEventListener("did-fail-load", (event) => {
-    if (!event.isMainFrame || event.errorCode === -3) return;
-    emit({ error: `${event.errorDescription}: ${event.validatedURL}`, loading: false });
-  });
-  element.addEventListener("enter-html-full-screen", () => onFullscreen(true));
-  element.addEventListener("leave-html-full-screen", () => onFullscreen(false));
-  const handleDomReady = () => {
-    element.removeEventListener("dom-ready", handleDomReady);
-    if (webviewRef.current !== element || !bridge.adopt) return;
-    void bridge.adopt(sessionId, element.getWebContentsId(), clientId)
-      .then((adoptedState) => {
-        if (adoptedState && webviewRef.current === element) onUpdate?.(adoptedState);
-      })
-      .catch((error) => {
-        if (webviewRef.current !== element) return;
-        console.error("Integrated browser adopt failed:", error);
-        emit({
-          error: error instanceof Error ? error.message : "Could not attach the browser view.",
-          loading: false,
-        });
-      });
-  };
-  element.addEventListener("dom-ready", handleDomReady);
-  webviewRef.current = element;
-  container.appendChild(element);
-}
-
 export function browserSessionEventMatches(sessionId, event) {
   return Boolean(sessionId && event?.id === sessionId);
 }
@@ -1129,13 +1123,15 @@ export function isIntegratedBrowserShortcut(event) {
 
 // Whether Raticode's window is showing. A minimized or hidden window counts as
 // away, like a tab that isn't in front.
-function useWindowVisible() {
-  const [visible, setVisible] = useState(() => typeof document === "undefined" || document.visibilityState !== "hidden");
+function useWindowVisible(hostDocument) {
+  const target = hostDocument || (typeof document === "undefined" ? undefined : document);
+  const [visible, setVisible] = useState(() => !target || target.visibilityState !== "hidden");
   useEffect(() => {
-    if (typeof document === "undefined") return undefined;
-    const update = () => setVisible(document.visibilityState !== "hidden");
-    document.addEventListener("visibilitychange", update);
-    return () => document.removeEventListener("visibilitychange", update);
-  }, []);
+    if (!target) return undefined;
+    const update = () => setVisible(target.visibilityState !== "hidden");
+    update();
+    target.addEventListener("visibilitychange", update);
+    return () => target.removeEventListener("visibilitychange", update);
+  }, [target]);
   return visible;
 }

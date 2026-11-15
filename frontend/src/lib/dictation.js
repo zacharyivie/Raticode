@@ -4,6 +4,10 @@
 
 /** No new words for this long pauses listening, so the microphone isn't left on unattended. Words stay. */
 export const QUIET_MS = 45_000;
+/** Dictation started from another app ends like a phone assistant's: this long after the last new words... */
+export const ANYWHERE_QUIET_AFTER_WORDS_MS = 6_000;
+/** ...or this long when nothing has been said yet. */
+export const ANYWHERE_QUIET_BEFORE_WORDS_MS = 15_000;
 
 export function joinWords(...parts) {
   return parts.map((part) => String(part ?? "").trim()).filter(Boolean).join(" ");

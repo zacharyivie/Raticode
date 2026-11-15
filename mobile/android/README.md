@@ -151,6 +151,21 @@ Each one opens Rem's chat with the project, the file's path inside it, the lines
 
 Line numbers appear when the phone can tell which lines you picked. A word that appears on several lines is settled by where you long-pressed it. Rendered Markdown shows only the words, because it has no line numbers of its own; switch to the source to include them. HTML and SVG previews have no Ask Rem. Files whose names look like they hold secrets, such as `.env` or a private key, offer no Ask Rem and their contents stay on the computer, as before. Needs no desktop update.
 
+### Update Raticode, workflow inputs, runs and messages, board filters and an extension crash fix, 0.35.0
+
+- **Update Raticode**: the app checks GitHub for a newer `mobile-v` release while it is on screen and every 10 minutes, downloads the signed APK, checks its size, SHA-256, version and signing certificate, then hands it to Android's installer. 0.34.0 can't update itself, so 0.35.0 is the last version you install by hand. The Google Play build updates through Play and leaves out the install permission. Needs no desktop update. Tested with unit tests; a real install from GitHub is untested.
+- Board filters stay set on the Global board and each organization's board after leaving the page or restarting.
+- A Firefox extension that updates its toolbar and page buttons no longer crashes the app (a crash in 0.34.0).
+- With Raticode 0.5.5 on the computer: **Delete permanently** for a thread's archive copy, and the self-work switch that approves its own Backlog tickets. With an older computer the phone doesn't offer them.
+- With a computer that has it: tickets that wait for other tickets. A card shows **Waits for:**, and a ticket's page lists them under **Waits for**, where you add or remove one; a cancelled one shows a notice instead. Tested with unit tests against an answer from the desktop's own handler; the emulator and a real phone are untested.
+- With Raticode 0.5.5 on the computer, in **More › Workflows**:
+  - **Run** opens a form for a workflow's inputs, like the desktop's. Password inputs are masked and their defaults stay on the computer.
+  - A failed run offers **Resume from failed step**, and any run offers **Run again with the same inputs**. Password inputs it can't refill send you to the computer.
+  - **All runs** lists every workflow's runs, newest first, with filters and a step that switched to a fallback provider marked.
+  - A workflow's **Triggers** tab turns each trigger on or off, and one switch pauses all of them. Turning one on or resuming asks first.
+  - Each feature appears only when the computer offers it, so an older computer keeps today's screens. Tested with unit tests and protocol fixtures; the emulator and a real phone are untested.
+- **Workflow messages**: a workflow's notification node with `channel: phone` shows up as an alert that opens its run. Messages are grouped by workflow, only the first summary in a sync makes a sound, and a run that sends more than 20 shows one "And N more" alert. Turn it on under **Also alert me about**. Needs Raticode 0.5.5 on the computer.
+
 ### Long text goes to Rem as a file, 0.34.0
 
 - A Rem message from the phone holds 4,000 characters. Pasting 2,000 characters or more into Rem's message box, or a shorter paste that would pass the limit, attaches the text as a file named after its first words (`pasted-text-meeting-notes.txt`) instead of filling the message. What you typed stays in the box.

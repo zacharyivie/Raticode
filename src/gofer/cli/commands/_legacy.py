@@ -11,11 +11,11 @@ from pathlib import Path
 
 import typer
 
-from gofer.rattish.workspaces import list_registered_workflows
-
 
 def resolve_rattish_source(name: str, data_dir: Path | None) -> Path | None:
     """Return the Rattish entrypoint for a .rattish path, workflow folder, or registered ID."""
+    from gofer.rattish.workspaces import list_registered_workflows
+
     path = Path(name).expanduser()
     if path.suffix == ".rattish" and path.is_file():
         return path

@@ -248,8 +248,19 @@ async function main() {
   await click("Project folders"); await wait("document.querySelectorAll('.org-directory li').length === 2");
   assert.ok(await evaluate(`document.querySelector('.org-directory li').textContent.includes(${JSON.stringify(thirdProject)})`));
   fs.writeFileSync(path.join(artifacts, "owned-projects-desktop.png"), (await win.webContents.capturePage()).toPNG());
-  await click("New organization"); await field("Organization name", "Unassigned studio"); await click("Create organization");
+  await click("New organization"); await field("Organization name", "Unassigned studio");
+  // Creating needs only a name; an optional first worker saves a step, and the rest folds away.
+  assert.equal(await evaluate("[...document.querySelectorAll('.org-form details')].some(d => d.querySelector('summary').textContent.startsWith('More settings') && !d.open)"), true);
+  assert.equal(await evaluate("[...document.querySelectorAll('label span')].some(s => s.textContent === 'Change reason')"), false);
+  await field("First worker's name", "Ada"); await field("First worker's title", "Engineer");
+  await click("Create organization");
   await wait("document.querySelector('.org-toolbar h2')?.textContent === 'Unassigned studio'");
+  await wait("document.querySelector('.org-person strong')?.textContent === 'Ada'");
+  // With no folder and no tickets, Start says why nothing would run before you confirm.
+  await click("Start work"); await wait("document.querySelector('.org-start-blocked')?.textContent.includes('No ticket can start yet')");
+  assert.ok(await evaluate("document.querySelector('.org-start-blocked').textContent.includes('owns no project folder')"));
+  assert.ok(await evaluate("document.querySelector('.org-start-blocked').textContent.includes('no open tickets')"));
+  await click("Not now");
   await click("Project folders"); await wait("document.querySelector('.org-empty h3')?.textContent === 'No projects assigned'");
   await wait("document.querySelectorAll('.org-sidebar-list button').length === 3");
   // New operating controls use the same real backend, without live provider calls.

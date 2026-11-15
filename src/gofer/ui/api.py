@@ -118,19 +118,31 @@ from gofer.rattish.editor import (
 )
 from gofer.rattish.parser import parse_rattish_recovering
 from gofer.rattish.preflight import run_preflight
+from gofer.rattish.run_retention import (
+    DEFAULT_RETENTION_SETTINGS,
+    RETENTION_SETTINGS_FILE,
+    coerce_retention_settings,
+    prune_run_records,
+)
 from gofer.rattish.run_service import (
     RattishResumeRefused,
     RattishRunArtifactError,
     RattishRunResult,
+    StartedBy,
     effective_run_status,
     new_run_id,
+    rerun_rattish_run,
+    rerun_refusal,
     resume_rattish_run,
     resume_refusal,
     resume_rerun_nodes,
     resumed_child,
     resumed_run_id,
     run_rattish_file,
+    run_stop_requested,
+    stop_rattish_runs,
 )
+from gofer.rattish.run_values import withheld_input_names
 from gofer.rattish.storage import migrate_legacy_directory, workflow_owned_directory
 from gofer.rattish.trigger_service import TriggerRun, run_in_process
 from gofer.rattish.triggers import TriggerStore
@@ -139,7 +151,7 @@ from gofer.rattish.workspaces import (
     RegisteredWorkflow,
     create_registered_workflow,
     delete_registered_workflow,
-    discover_registered_workflows,
+    discover_project_workflows,
     find_registered_workflow,
     list_registered_workflows,
     update_registered_workflow_name,
@@ -153,6 +165,7 @@ from gofer.subscriptions.direct_api import AnthropicApiSubscription, OpenAiApiSu
 from gofer.ui.chat import delete_workflow_chat_prompt, workflow_chat_prompt_path
 from gofer.utils.atomic_output import atomic_binary_output
 from gofer.utils.brand_compat import LEGACY_WORKSPACE_DIRECTORIES
+from gofer.utils.data_folders import is_managed_data_folder
 from gofer.utils.logging import get_logger
 from gofer.utils.paths import get_data_dir
 from gofer.utils.run_state import (
@@ -239,8 +252,6 @@ RUN_NODE_OUTPUTS_SUFFIX = ".outputs.json"
 RUN_EVENTS_SUFFIX = ".events.json"
 RUN_SUMMARY_SUFFIX = ".summary.json"
 RUN_TRIGGER_SUFFIX = ".trigger.json"
-RETENTION_SETTINGS_FILE = "retention.json"
-DEFAULT_RETENTION_SETTINGS = {"keepDays": 14, "keepFailedDays": 30, "keepLast": 100}
 INDEX_VERSION = 1
 WORKFLOW_INDEX_PAYLOAD_VERSION = 5
 WORKFLOW_INDEX_FILE = "workflows.json"
@@ -278,8 +289,12 @@ def list_workflow_payloads(
     workflow_index = _read_workflow_index(base)
     index_entries = _workflow_index_entries(workflow_index)
     index_changed = False
-    # Managed worktrees and dependencies are not legacy workflow registries.
+    # Dependencies and checkouts are not legacy workflow registries at any depth.
     excluded = {"workspaces", "node_modules", ".git", ".venv", "venv", ".agents", "__pycache__"}
+    # Raticode's own folders (Rem and organization worktrees, scratch, logs, trash) only
+    # hold project files such as pyproject.toml, never legacy workflows. They are pruned
+    # at the top of the data folder only, so a user's own subfolder with the same name
+    # is still scanned.
     unreadable_paths: list[Path] = []
 
     def report_skip(path: Path, exc: OSError) -> None:
@@ -303,19 +318,27 @@ def list_workflow_payloads(
             unreadable_paths.append(path)
 
     workflow_paths: list[Path] = []
-    for directory, children, files in os.walk(base, onerror=traversal_error, followlinks=False):
+    walk_root = os.fspath(base)
+    for directory, children, files in os.walk(
+        walk_root, onerror=traversal_error, followlinks=False
+    ):
         check_cancelled()
-        children[:] = sorted(name for name in children if name not in excluded)
+        at_top = directory == walk_root
+        children[:] = sorted(
+            name
+            for name in children
+            if name not in excluded and not (at_top and is_managed_data_folder(name))
+        )
         workflow_paths.extend(Path(directory) / name for name in files if name.endswith(".toml"))
     workflow_paths.sort()
     for path in workflow_paths:
         check_cancelled()
         index_key = _workflow_index_key(base, path)
         try:
-            before = path.stat()
+            before = _file_identity(path)
             cached = _workflow_index_payload(base, index_entries.get(index_key), path)
             if cached is not None:
-                if path.stat() != before:
+                if _file_identity(path) != before:
                     raise OSError(errno.EAGAIN, "Workflow changed")
                 workflows.append(cached)
                 continue
@@ -330,7 +353,7 @@ def list_workflow_payloads(
             else:
                 payload = workflow_to_payload(workflow, path, source_base=base)
             entry = _workflow_index_entry(path, payload)
-            if path.stat() != before:
+            if _file_identity(path) != before:
                 raise OSError(errno.EAGAIN, "Workflow changed")
         except OSError as exc:
             report_skip(path, exc)
@@ -405,6 +428,36 @@ def create_registered_workflow_payload(
     return _registered_rattish_payload(registered, base)
 
 
+def create_workflow_from_starter_payload(
+    starter_id: str,
+    name: str,
+    project_root: Path,
+    *,
+    registry_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Copy a starter workflow into the project and return its studio summary."""
+    from gofer.rattish.starters import create_workflow_from_starter
+
+    base = _data_dir(registry_dir)
+    try:
+        registered = create_workflow_from_starter(
+            project_root, starter_id, name or None, registry_dir=base
+        )
+    except (RattishWorkspaceError, RattishArtifactError, RattishError) as exc:
+        raise WorkflowCreateError(str(exc)) from exc
+    return _registered_rattish_payload(registered, base)
+
+
+def starter_workflows_payload() -> dict[str, Any]:
+    """The starter workflows the new-workflow dialog offers."""
+    from gofer.rattish.starters import list_starters
+
+    try:
+        return {"starters": [starter.to_payload() for starter in list_starters()]}
+    except RattishWorkspaceError as exc:
+        raise WorkflowCreateError(str(exc)) from exc
+
+
 def open_project_payload(
     project_root: Path,
     *,
@@ -415,7 +468,7 @@ def open_project_payload(
     check_cancelled()
     base = _data_dir(registry_dir)
     try:
-        registered = discover_registered_workflows(
+        discovery = discover_project_workflows(
             project_root, registry_dir=base, check_cancelled=check_cancelled
         )
     except RattishWorkspaceError as exc:
@@ -430,7 +483,7 @@ def open_project_payload(
             f"Unable to discover project workflows: {reason}. Retry on refresh."
         ) from exc
     workflows = []
-    for workflow in registered:
+    for workflow in discovery.workflows:
         check_cancelled()
         workflows.append(_registered_rattish_payload(workflow, base))
         # Compilation is synchronous; discard its result and stop before the next file.
@@ -438,6 +491,8 @@ def open_project_payload(
     return {
         "projectRoot": str(project_root.expanduser().resolve()),
         "workflows": workflows,
+        # True when the folder walk stopped at its depth or size limit.
+        "discoveryLimited": discovery.limited,
     }
 
 
@@ -560,6 +615,8 @@ def _registered_rattish_payload(
         "projectRoot": str(workflow.project_root),
         "projectName": workflow.project_root.name or str(workflow.project_root),
         "workflowRoot": str(workflow.workflow_root),
+        "relativeFolder": workflow.relative_folder,
+        "managed": workflow.managed,
         "schedule": None,
         "watch": None,
         "parameters": {},
@@ -698,6 +755,24 @@ def upsert_provider_profile_payload(
     return {"profile": provider_profile_ui_payload(profile)}
 
 
+def check_provider_profile_payload(
+    name: str,
+    model: Any = None,
+    data_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Ask a local model server profile's server for its models. Never returns the key."""
+    from gofer.core.local_models import check_local_server
+
+    try:
+        validate_provider_profile_name(name)
+        if model is not None and not isinstance(model, str):
+            raise ValueError("model must be a string")
+        result = check_local_server(name, model=model or None, data_dir=_data_dir(data_dir))
+    except ValueError as exc:
+        raise ProviderProfileError(str(exc)) from exc
+    return {"check": result.to_json()}
+
+
 def delete_provider_profile_payload(
     name: str,
     data_dir: Path | None = None,
@@ -779,6 +854,13 @@ def _write_workflow_index(base: Path, entries: dict[str, Any]) -> None:
         )
     except OSError:
         return
+
+
+def _file_identity(path: Path) -> tuple[int, int, int, int]:
+    """What says a file was replaced or rewritten. Not its access time, which reading it
+    moves on most Linux disks, so a fresh workflow isn't skipped as changed."""
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
 
 
 def _file_index_stat(path: Path) -> dict[str, Any]:
@@ -1626,7 +1708,9 @@ async def run_workflow_payload(
     inputs: dict[str, Any] | None = None,
     background: bool = False,
     expected_revision: str | None = None,
+    started_by: StartedBy | None = None,
 ) -> dict[str, Any]:
+    """Start a run. ``started_by`` is recorded on Rattish runs; see ``run_rattish_file``."""
     base = _data_dir(data_dir)
     registered = _registered_rattish_workflow(workflow_id, base)
     if registered is not None:
@@ -1650,6 +1734,7 @@ async def run_workflow_payload(
                 supplied_inputs,
                 trigger_context,
                 expected_revision,
+                started_by=started_by,
             )
         run_id = new_run_id()
         cancel_event = threading.Event()
@@ -1665,6 +1750,7 @@ async def run_workflow_payload(
                 run_id=run_id,
                 cancel_event=cancel_event,
                 expected_revision=expected_revision,
+                started_by=started_by,
             )
         except (RattishArtifactError, RattishError, RattishRunArtifactError, OSError) as exc:
             raise WorkflowRunError(str(exc)) from exc
@@ -1809,11 +1895,14 @@ async def resume_workflow_payload(
     trigger_context: dict[str, Any] | None = None,
     background: bool = False,
     expected_revision: str | None = None,
+    started_by: StartedBy | None = None,
+    inputs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resume a run. A Rattish run resumes as a new run; see ``resume_rattish_run``.
 
-    ``background`` and ``expected_revision`` apply to Rattish runs, which accept
-    none of the legacy node options.
+    ``background``, ``expected_revision`` and ``inputs`` apply to Rattish runs, which
+    accept none of the legacy node options. ``inputs`` holds the password inputs the
+    run didn't save (its resume state lists them as ``needsInputs``).
     """
     if from_node and only_node:
         raise WorkflowRunError("fromNode and onlyNode cannot be used together")
@@ -1839,6 +1928,8 @@ async def resume_workflow_payload(
                 None,
                 expected_revision,
                 resume_from=document,
+                started_by=started_by,
+                given_inputs=inputs,
             )
         cancel_event = threading.Event()
         resumed_id = new_run_id()
@@ -1853,6 +1944,8 @@ async def resume_workflow_payload(
                 run_id=resumed_id,
                 cancel_event=cancel_event,
                 expected_revision=expected_revision,
+                started_by=started_by,
+                resume_inputs=inputs or None,
             )
         except (
             RattishResumeRefused,
@@ -1866,6 +1959,8 @@ async def resume_workflow_payload(
             with _active_run_lock:
                 _active_rattish_runs.pop(active_key, None)
         return _rattish_run_payload(result, include_log_text=False)
+    if inputs:
+        raise WorkflowRunError("Only Rattish runs take inputs when they resume.")
     return await run_workflow_payload(
         workflow_id,
         data_dir,
@@ -1879,6 +1974,85 @@ async def resume_workflow_payload(
             force=force,
         ),
     )
+
+
+def rattish_run_workflow_id(run_id: str, data_dir: Path | None = None) -> str:
+    """The registered workflow a Rattish run belongs to. Run IDs are unique."""
+    base = _data_dir(data_dir)
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id) is None:
+        raise WorkflowRunError(f"Invalid run ID {run_id!r}.")
+    for workflow in list_registered_workflows(registry_dir=base):
+        try:
+            directory = _rattish_run_directory(base, workflow.workflow_id)
+        except WorkflowLogError:
+            continue
+        if (directory / f"{run_id}.json").is_file():
+            return workflow.workflow_id
+    raise WorkflowRunError(f"Run {run_id!r} was not found in any registered workflow.")
+
+
+async def rerun_workflow_payload(
+    run_id: str,
+    data_dir: Path | None = None,
+    *,
+    workflow_id: str | None = None,
+    inputs: dict[str, Any] | None = None,
+    background: bool = False,
+    started_by: StartedBy | None = None,
+) -> dict[str, Any]:
+    """Run a Rattish workflow again with one run's saved inputs and trigger events.
+
+    ``inputs`` holds only the password inputs that run didn't save (its ``rerun``
+    state lists them as ``needsInputs``). The new run uses the current source.
+    """
+    base = _data_dir(data_dir)
+    workflow_id = workflow_id or rattish_run_workflow_id(run_id, base)
+    registered = _registered_rattish_workflow(workflow_id, base)
+    if registered is None:
+        raise WorkflowRunError("Only Rattish workflow runs can be run again with their inputs.")
+    try:
+        document = _read_rattish_run_artifact(_rattish_run_artifact_path(base, workflow_id, run_id))
+    except WorkflowLogError as exc:
+        raise WorkflowRunError(str(exc)) from exc
+    if background:
+        return await _start_rattish_background_run(
+            workflow_id,
+            registered.entrypoint,
+            base,
+            {},
+            None,
+            None,
+            started_by=started_by,
+            rerun_from=document,
+            given_inputs=inputs,
+        )
+    new_id = new_run_id()
+    cancel_event = threading.Event()
+    active_key = (*_run_key(base, workflow_id), new_id)
+    with _active_run_lock:
+        _active_rattish_runs[active_key] = cancel_event
+    try:
+        result = await rerun_rattish_run(
+            registered.entrypoint,
+            document,
+            data_dir=base,
+            inputs=inputs,
+            run_id=new_id,
+            cancel_event=cancel_event,
+            started_by=started_by or "manual",
+        )
+    except (
+        RattishResumeRefused,
+        RattishArtifactError,
+        RattishError,
+        RattishRunArtifactError,
+        OSError,
+    ) as exc:
+        raise WorkflowRunError(str(exc)) from exc
+    finally:
+        with _active_run_lock:
+            _active_rattish_runs.pop(active_key, None)
+    return _rattish_run_payload(result, include_log_text=False)
 
 
 async def trigger_workflow_payload(
@@ -1941,6 +2115,7 @@ async def trigger_workflow_payload(
         dry_run=False,
         trigger_context=trigger_context,
         inputs=run_inputs,
+        started_by="trigger",
     )
     log_path_value = run.get("logPath")
     run_id = Path(str(log_path_value)).name if log_path_value else None
@@ -2116,7 +2291,14 @@ async def _start_rattish_background_run(
     trigger_context: dict[str, Any] | None,
     expected_revision: str | None,
     resume_from: Mapping[str, Any] | None = None,
+    started_by: StartedBy | None = None,
+    rerun_from: Mapping[str, Any] | None = None,
+    given_inputs: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Start a run, a resume (``resume_from``) or a rerun (``rerun_from``) on a thread.
+
+    ``given_inputs`` are the password inputs a resumed or rerun run didn't save.
+    """
     run_id = new_run_id()
     cancel_event = threading.Event()
     acknowledged = threading.Event()
@@ -2142,6 +2324,19 @@ async def _start_rattish_background_run(
                     cancel_event=cancel_event,
                     on_started=started,
                     expected_revision=expected_revision,
+                    started_by=started_by,
+                    resume_inputs=given_inputs or None,
+                )
+            elif rerun_from is not None:
+                run = await rerun_rattish_run(
+                    source,
+                    rerun_from,
+                    data_dir=base,
+                    inputs=given_inputs,
+                    run_id=run_id,
+                    cancel_event=cancel_event,
+                    on_started=started,
+                    started_by=started_by or "manual",
                 )
             else:
                 run = await run_rattish_file(
@@ -2153,6 +2348,7 @@ async def _start_rattish_background_run(
                     cancel_event=cancel_event,
                     on_started=started,
                     expected_revision=expected_revision,
+                    started_by=started_by,
                 )
             result["run"] = _rattish_run_payload(run)
         except Exception as exc:
@@ -2230,6 +2426,8 @@ def stop_workflow_run_payload(
             rattish_cancel = _active_rattish_runs.get((*_run_key(base, workflow_id), run_id))
         if rattish_cancel is not None:
             rattish_cancel.set()
+            # The marker also lets Runs show "Stop requested" until the run ends.
+            _request_rattish_stop(base, workflow_id, run_id, strict=False)
             return {
                 "workflowId": workflow_id,
                 "runId": run_id,
@@ -2237,12 +2435,31 @@ def stop_workflow_run_payload(
                 "message": "Stop requested",
             }
         if _registered_rattish_workflow(workflow_id, base) is not None:
+            # Another process, such as `rattish triggers start`, may own the run.
+            stopped = bool(_request_rattish_stop(base, workflow_id, run_id))
             return {
                 "workflowId": workflow_id,
                 "runId": run_id,
-                "stopped": False,
-                "message": "This run is no longer active in the connected runner.",
+                "stopped": stopped,
+                "message": "Stop requested" if stopped else "This run is no longer running.",
             }
+    elif _registered_rattish_workflow(workflow_id, base) is not None:
+        key = _run_key(base, workflow_id)
+        with _active_run_lock:
+            local = {
+                active[2]: event
+                for active, event in _active_rattish_runs.items()
+                if active[:2] == key
+            }
+        for event in local.values():
+            event.set()
+        asked = {*local, *_request_rattish_stop(base, workflow_id)}
+        return {
+            "workflowId": workflow_id,
+            "stopped": bool(asked),
+            "runIds": sorted(asked),
+            "message": "Stop requested" if asked else "No active run",
+        }
     if run_id is None:
         _disable_run_continuously(workflow_id, base)
     if run_id:
@@ -2285,6 +2502,19 @@ def stop_workflow_run_payload(
         cancel_event.set()
     request_workflow_stop(workflow_id, base)
     return {"workflowId": workflow_id, "stopped": True}
+
+
+def _request_rattish_stop(
+    base: Path, workflow_id: str, run_id: str | None = None, *, strict: bool = True
+) -> list[str]:
+    """Write stop markers that whichever process runs these runs will see."""
+    try:
+        return stop_rattish_runs(base, workflow_id, run_id)
+    except (OSError, ValueError, RattishRunArtifactError) as exc:
+        if strict and run_id is not None:
+            raise WorkflowUpdateError(f"Could not ask the run to stop: {exc}") from exc
+        log.warning("Could not ask runs of %s to stop: %s", workflow_id, exc)
+        return []
 
 
 def _disable_run_continuously(workflow_id: str, data_dir: Path) -> None:
@@ -3142,6 +3372,8 @@ def _rattish_resume_states(
             "allowed": reason is None,
             "reason": reason or "",
             "rerunNodes": resume_rerun_nodes(document) if reason is None else [],
+            # Password inputs the run didn't save; Resume asks for them again.
+            "needsInputs": withheld_input_names(document) if reason is None else [],
         }
     return states
 
@@ -3164,6 +3396,11 @@ def _rattish_ui_run_status(document: Mapping[str, Any]) -> str:
     return str(status) if status in {"running", "stopped"} else "error"
 
 
+def _rattish_stop_requested(document: Mapping[str, Any], path: Path) -> bool:
+    """A running run some process has asked to stop; it shows until the run ends."""
+    return document["status"] == "running" and run_stop_requested(path)
+
+
 def _rattish_run_summary(
     document: Mapping[str, Any],
     path: Path,
@@ -3176,14 +3413,47 @@ def _rattish_run_summary(
         "logPath": str(path),
         "status": _rattish_ui_run_status(document),
         "awaitingApproval": awaiting_approval and document["status"] == "running",
+        "stopRequested": _rattish_stop_requested(document, path),
         "startedAt": document.get("started_at"),
         "finishedAt": None if document["status"] == "running" else document.get("finished_at"),
         "durationSeconds": float(document.get("duration_ms", 0)) / 1000,
         "triggerType": "manual",
+        "startedBy": rattish_run_started_by(document),
         "hasTriggerReplay": False,
         "resumedFrom": (document.get("resumed_from") or {}).get("run_id"),
+        "rerunOf": document.get("rerun_of"),
+        "usage": _rattish_run_usage(document, nodes=False),
+        "rerun": rattish_rerun_state(document),
         **({"resume": dict(resume)} if resume is not None else {}),
     }
+
+
+def rattish_rerun_state(document: Mapping[str, Any]) -> dict[str, Any]:
+    """Whether a run can be run again with its saved inputs, and what must be given again."""
+    reason = rerun_refusal(document)
+    return {
+        "allowed": reason is None,
+        "reason": reason or "",
+        "needsInputs": withheld_input_names(document) if reason is None else [],
+    }
+
+
+def rattish_run_started_by(document: Mapping[str, Any]) -> str:
+    """How a run started. Runs saved before this was recorded count trigger events."""
+    saved = document.get("started_by")
+    if isinstance(saved, str) and saved:
+        return saved
+    return "trigger" if document.get("trigger_event_count") else "manual"
+
+
+def _rattish_run_usage(document: Mapping[str, Any], *, nodes: bool = True) -> Any:
+    """A run's tokens and estimated cost, or None for a run saved before usage tracking."""
+    from gofer.rattish.run_usage import usage_payload
+
+    payload = usage_payload(document.get("usage"))
+    if payload is not None and not nodes:
+        payload.pop("nodes", None)
+    return payload
 
 
 def latest_workflow_log_payload(workflow_id: str, data_dir: Path | None = None) -> dict[str, Any]:
@@ -3191,8 +3461,19 @@ def latest_workflow_log_payload(workflow_id: str, data_dir: Path | None = None) 
     _validate_storage_workflow_id(workflow_id, WorkflowLogError)
     rattish_paths = _rattish_run_artifact_paths(base, workflow_id)
     if rattish_paths:
-        path = rattish_paths[0]
-        return _rattish_artifact_ui_payload(_read_rattish_run_artifact(path), path)
+        # One unreadable record must not hide the newest readable run.
+        for skipped, path in enumerate(rattish_paths):
+            try:
+                document = _read_rattish_run_artifact(path)
+            except WorkflowLogError:
+                continue
+            return {**_rattish_artifact_ui_payload(document, path), "skippedRuns": skipped}
+        return {
+            "workflowId": workflow_id,
+            "logPath": None,
+            "logText": "",
+            "skippedRuns": len(rattish_paths),
+        }
     limits = _workflow_resource_limits(workflow_id, base)
     log_dir = _workflow_storage_dir(base, "logs", workflow_id, error_cls=WorkflowLogError)
     if not log_dir.exists():
@@ -3551,7 +3832,14 @@ def list_workflow_run_logs_payload(
     base = _data_dir(data_dir)
     rattish_paths = _rattish_run_artifact_paths(base, workflow_id)
     if rattish_paths:
-        documents = [(_read_rattish_run_artifact(path), path) for path in rattish_paths]
+        # Skip unreadable records, as one bad run must not hide the whole list.
+        documents = []
+        for path in rattish_paths:
+            try:
+                documents.append((_read_rattish_run_artifact(path), path))
+            except WorkflowLogError:
+                continue
+        skipped_runs = len(rattish_paths) - len(documents)
         # A run blocked on an approval gate is still running, but the UI says why it waits.
         awaiting_ids = (
             {request.run_id for request in ApprovalStore(base).list_pending(workflow_id)}
@@ -3595,6 +3883,7 @@ def list_workflow_run_logs_payload(
             "workflowId": workflow_id,
             "runs": selected,
             "pagination": {"offset": page_offset, "limit": page_limit, "total": total},
+            "skippedRuns": skipped_runs,
         }
     log_dir = _workflow_storage_dir(
         base,
@@ -3730,6 +4019,7 @@ def rattish_resume_state_payload(
             "allowed": False,
             "reason": f"This run was already resumed as run {child}. Resume that run instead.",
             "rerunNodes": [],
+            "needsInputs": [],
         }
     return state
 
@@ -3791,6 +4081,7 @@ def workflow_run_log_payload(
                 "logText": payload["logText"],
                 "runEvents": payload["runEvents"],
                 "runNodes": payload["runNodes"],
+                "usage": payload["usage"],
             }
         return payload
     limits = _workflow_resource_limits(workflow_id, base)
@@ -3849,38 +4140,29 @@ def prune_workflow_run_logs_payload(
         keep_last = saved_settings.get("keepLast")
         keep_days = saved_settings.get("keepDays")
         keep_failed_days = saved_settings.get("keepFailedDays")
-    rattish_paths = _rattish_run_artifact_paths(base, workflow_id)
-    if rattish_paths:
-        runs = [
-            _rattish_run_summary(_read_rattish_run_artifact(path), path) for path in rattish_paths
-        ]
-        retained_ids = {str(run["id"]) for run in runs[: max(0, keep_last or 0)]}
-        now = datetime.now(UTC)
-        rattish_candidates: list[dict[str, Any]] = []
-        for run in runs:
-            if str(run["id"]) in retained_ids:
-                continue
-            started = _parse_run_datetime(run.get("startedAt"))
-            threshold = keep_failed_days if run["status"] == "error" else keep_days
-            if threshold is None:
-                continue
-            if started is not None and started >= now - timedelta(days=max(0, threshold)):
-                continue
-            rattish_candidates.append(run)
-        rattish_deleted: list[str] = []
-        if not dry_run:
-            paths_by_id = {path.stem: path for path in rattish_paths}
-            for run in rattish_candidates:
-                run_id = str(run["id"])
-                path = paths_by_id.get(run_id)
-                if path is not None:
-                    path.unlink(missing_ok=True)
-                    rattish_deleted.append(run_id)
+    rattish_directory = _rattish_run_directory(base, workflow_id)
+    if _rattish_run_artifact_paths(base, workflow_id):
+        # Shared with automatic retention, so both protect the same runs.
+        try:
+            result = prune_run_records(
+                base,
+                workflow_id,
+                rattish_directory,
+                keep_last=keep_last,
+                keep_days=keep_days,
+                keep_failed_days=keep_failed_days,
+                dry_run=dry_run,
+            )
+        except OSError as exc:
+            raise WorkflowLogError(f"Could not prune runs of {workflow_id}: {exc}") from exc
         return {
             "workflowId": workflow_id,
             "dryRun": dry_run,
-            "runs": rattish_candidates,
-            "deleted": rattish_deleted,
+            "runs": [
+                _rattish_run_summary(record.document, record.path) for record in result.candidates
+            ],
+            "deleted": result.deleted,
+            "skippedRuns": result.skipped,
         }
     log_dir = _workflow_storage_dir(base, "logs", workflow_id, error_cls=WorkflowLogError)
     if not log_dir.exists():
@@ -3937,12 +4219,7 @@ def _retention_settings_path(base: Path) -> Path:
 
 
 def _coerce_retention_settings(value: Any) -> dict[str, int]:
-    source = value if isinstance(value, dict) else {}
-    settings: dict[str, int] = {}
-    for key, default in DEFAULT_RETENTION_SETTINGS.items():
-        raw = source.get(key, default)
-        settings[key] = max(0, int(raw)) if isinstance(raw, int | float) else default
-    return settings
+    return coerce_retention_settings(value)
 
 
 def _read_retention_document(base: Path) -> dict[str, Any]:
@@ -5665,6 +5942,9 @@ def _rattish_artifact_ui_payload(document: Mapping[str, Any], path: Path) -> dic
         run_nodes[node_id] = {
             "nodeId": node_id,
             "reused": bool(record.get("reused_from_run_id")),
+            # The output came from the result cache: no provider call, 0 tokens and $0.
+            "cached": bool(record.get("cached_at")),
+            "cachedAt": record.get("cached_at"),
             "status": record_status,
             "outcome": record["outcome"],
             "startedAt": record["started_at"],
@@ -5694,6 +5974,9 @@ def _rattish_artifact_ui_payload(document: Mapping[str, Any], path: Path) -> dic
             "data": {"message": error_message},
             "activationCounts": counts,
             "activationSummary": _rattish_activation_summary(counts),
+            # Which provider answered (or last failed) and each switch to a fallback.
+            "provider": record.get("provider") or previous.get("provider"),
+            "fallbacks": [*previous.get("fallbacks", []), *(record.get("fallbacks") or [])],
         }
         if (
             _RATTISH_STATUS_SEVERITY.get(str(previous.get("status")), -1)
@@ -5730,6 +6013,10 @@ def _rattish_artifact_ui_payload(document: Mapping[str, Any], path: Path) -> dic
             activationLineageId=event["activationLineageId"],
             activationGroupId=event["activationGroupId"],
         )
+    usage = _rattish_run_usage(document)
+    for node_id, node_usage in ((usage or {}).get("nodes") or {}).items():
+        if node_id in run_nodes:
+            run_nodes[node_id]["usage"] = node_usage
     return {
         "workflowId": document["workflow"]["id"],
         "runId": document["run_id"],
@@ -5737,6 +6024,7 @@ def _rattish_artifact_ui_payload(document: Mapping[str, Any], path: Path) -> dic
         if document["status"] in {"running", "interrupted"}
         else document["status"] == "passed",
         "status": ui_status,
+        "stopRequested": _rattish_stop_requested(document, path),
         "logPath": str(path),
         "logText": json.dumps(document, ensure_ascii=False, indent=2, default=str),
         "nodeOutputs": node_outputs,
@@ -5748,6 +6036,8 @@ def _rattish_artifact_ui_payload(document: Mapping[str, Any], path: Path) -> dic
         "rattishRun": document,
         "graphSnapshot": _rattish_run_graph_snapshot(document),
         "resumedFrom": (document.get("resumed_from") or {}).get("run_id"),
+        "rerunOf": document.get("rerun_of"),
+        "usage": usage,
     }
 
 
@@ -5761,6 +6051,11 @@ def _rattish_event_message(event: Mapping[str, Any], error_message: str | None =
         return f"Activation {event.get('run_number')} retrying."
     if event_type == "node_stopped":
         return f"Activation {event.get('run_number')} stopped."
+    if event_type == "node_completed" and event.get("cached"):
+        return (
+            f"Activation {event.get('run_number')} used a cached result "
+            "(no model call, 0 tokens, $0)."
+        )
     if event_type == "node_completed":
         return f"Activation {event.get('run_number')} {event.get('outcome')}."
     if event_type == "workflow_completed":
@@ -5811,9 +6106,12 @@ def _rattish_ui_events(document: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "runNumber": event.get("run_number"),
                 "fanOutItem": {"index": int(iteration[-1])} if iteration else None,
                 "outcome": event.get("outcome"),
+                "cached": bool(event.get("cached")),
                 "status": (
-                    "retried"
-                    if event["type"] == "node_retried"
+                    "cached"
+                    if event.get("cached") and event.get("outcome") == "success"
+                    else "retried"
+                    if event["type"] in {"node_retried", "node_fell_back"}
                     else "stopped"
                     if event["type"] == "node_stopped" or event.get("status") == "stopped"
                     else "completed"

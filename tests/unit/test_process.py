@@ -4,6 +4,7 @@ import os
 import shutil
 import sys
 import threading
+from pathlib import Path
 
 import anyio
 import pytest
@@ -785,3 +786,29 @@ def test_browser_service_still_found_after_credentials_are_sealed(
     assert "GOFER_BROWSER_ADMIN_TOKEN" not in os.environ
     service = desktop_browser_service()
     assert service is not None and service.admin_token == "c" * 64
+
+
+def test_children_are_never_pointed_at_the_secrets_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """systemd's $CREDENTIALS_DIRECTORY is stripped like the desktop's tokens."""
+    from gofer.utils import process
+
+    folder = str(tmp_path / "creds")
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", folder)
+    assert "CREDENTIALS_DIRECTORY" not in process.build_subprocess_env()
+    # Not from an override or a copied parent env either.
+    copied = process.build_subprocess_env(
+        {"CREDENTIALS_DIRECTORY": folder, "PATH": "/usr/bin"}, inherit_parent=False
+    )
+    assert "CREDENTIALS_DIRECTORY" not in copied
+    assert copied["PATH"] == "/usr/bin"
+
+    # Sealing it early keeps it when the rest are sealed later.
+    monkeypatch.setenv("GOFER_UI_API_TOKEN", "desktop-api-token")
+    process.seal_credential_env(("CREDENTIALS_DIRECTORY",))
+    assert "CREDENTIALS_DIRECTORY" not in os.environ
+    assert os.environ["GOFER_UI_API_TOKEN"] == "desktop-api-token"
+    process.seal_credential_env()
+    assert process.credential_env("CREDENTIALS_DIRECTORY") == folder
+    assert process.credential_env("GOFER_UI_API_TOKEN") == "desktop-api-token"

@@ -421,6 +421,13 @@ SECRET_OPTION_EXCEPTIONS = {
     # The name of a stored secret, not its value.
     ("provider profile create", "--api-key-secret"),
     ("provider profile edit", "--api-key-secret"),
+    # Caps on how many AI tokens self-work may use, not sign-in tokens.
+    ("selfwork set", "--session-token-limit"),
+    ("selfwork set", "--daily-token-limit"),
+    # A folder of owner-only secret files; the values never go on the command line.
+    ("serve", "--secrets-dir"),
+    ("ui serve", "--secrets-dir"),
+    ("doctor", "--secrets-dir"),
 }
 
 

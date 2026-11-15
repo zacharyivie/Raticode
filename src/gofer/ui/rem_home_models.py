@@ -514,6 +514,11 @@ class TicketRequest(BaseModel):
     type: Literal["research", "maintain", "develop", "errand"] | None = None
     project_dir: str | None = None
     done_when: str | None = Field(default=None, max_length=1000)
+    # Keys or IDs of tickets on the same board that must be Done before self-work starts
+    # this one. On edit, the full new list; an empty list clears it.
+    waits_for: list[Annotated[str, Field(max_length=128)]] | None = Field(
+        default=None, max_length=20
+    )
 
     @model_validator(mode="after")
     def enough_to_act(self) -> TicketRequest:
@@ -571,8 +576,8 @@ class SelfWorkRequest(BaseModel):
     ``start`` (now when absent) until ``end``, or ``until`` the tasks running now finish.
     ``stop_at`` ends the self-work running now at ``end``. ``cancel_schedule`` drops the
     windows. ``report`` posts what self-work did in its current or last period. The thread
-    limit, backlog pulling and Rem's projects never change here. The backend applies it and
-    writes the result into the reply.
+    limit, backlog pulling, auto-approval and Rem's projects never change here. The backend
+    applies it and writes the result into the reply.
     """
 
     model_config = ConfigDict(extra="forbid")

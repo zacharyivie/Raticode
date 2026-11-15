@@ -177,6 +177,11 @@
 .rem-day { display: flex; flex-direction: column; gap: 4px; }
 .rem-day-label { display: flex; justify-content: center; margin: 18px 0 8px; }
 .rem-day-label span { padding: 2px 10px; border-radius: 999px; color: var(--rem-muted); font-size: 11px; font-weight: 500; }
+/* Show earlier messages: the chat holds its newest messages and reads older ones on request. */
+.rem-earlier { display: flex; justify-content: center; margin: 4px 0 6px; }
+.rem-earlier button { padding: 5px 12px; border: 1px solid var(--rem-line); border-radius: 999px; background: transparent; color: var(--rem-muted); font-size: 12px; }
+.rem-earlier button:hover:not(:disabled) { border-color: var(--rem-accent); color: var(--rem-accent); }
+.rem-earlier button:disabled { cursor: progress; opacity: .75; }
 
 .rem-msg { display: flex; gap: 10px; align-items: flex-start; }
 /* Off-screen messages skip style, layout and paint until they scroll near, so a
@@ -318,16 +323,19 @@
 .rem-sheet-title::placeholder { color: var(--rem-ink); opacity: .55; }
 .rem-sheet-tickets { margin: -6px 0 18px; }
 .rem-sheet-tickets h4 { margin: 0 0 6px; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--rem-muted); }
-.rem-sheet-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 14px 12px; }
+.rem-sheet-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 14px 12px; overflow-wrap: anywhere; }
 .rem-sheet-gone { padding: 24px 16px; color: var(--rem-muted); }
 
-.rem-status { --tone: var(--rem-muted); --tone-soft: var(--rem-raised); display: grid; gap: 10px; margin-bottom: 18px; padding: 12px 14px; border: 1px solid var(--rem-soft-line); border-radius: 12px; background: var(--rem-raised); }
+/* One column no wider than the card. An automatic column grew to the longest
+   unbroken word, such as a path in the run summary, and every row of the card,
+   checks and buttons included, ran past the sheet's edge. */
+.rem-status { --tone: var(--rem-muted); --tone-soft: var(--rem-raised); display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; margin-bottom: 18px; padding: 12px 14px; border: 1px solid var(--rem-soft-line); border-radius: 12px; background: var(--rem-raised); }
 .rem-status[data-tone=active] { --tone: var(--rem-accent); }
 .rem-status[data-tone=success] { --tone: var(--rem-success); }
 .rem-status[data-tone=attention] { --tone: var(--rem-attention); background: var(--rem-attention-soft); border-color: transparent; }
 .rem-status[data-tone=danger] { --tone: var(--rem-danger); background: var(--rem-danger-soft); border-color: transparent; }
 .rem-status-line { display: flex; align-items: center; gap: 8px; color: var(--tone); }
-.rem-status-line strong { font-size: 13px; font-weight: 600; }
+.rem-status-line strong { min-width: 0; font-size: 13px; font-weight: 600; }
 .rem-status-line small { margin-left: auto; color: var(--rem-muted); font-size: 11.5px; white-space: nowrap; }
 .rem-status-note { margin: 0; font-size: 12px; color: var(--rem-muted); }
 .rem-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 0; padding: 0; list-style: none; }
@@ -338,15 +346,15 @@
 .rem-steps li[data-state=current]::before { background: linear-gradient(90deg, var(--rem-accent) 50%, var(--rem-soft-line) 50%); background-size: 200% 100%; animation: rem-progress 1.6s ease-in-out infinite alternate; }
 @keyframes rem-progress { from { background-position: 100% 0; } to { background-position: 30% 0; } }
 @media (prefers-reduced-motion: reduce) { .rem-steps li[data-state=current]::before { animation: none; background: var(--rem-accent); opacity: .6; } }
-.rem-checks { display: grid; gap: 10px; padding: 10px 0 2px; border-top: 1px solid var(--rem-soft-line); }
-.rem-check-group { --check-tone: var(--rem-muted); display: grid; gap: 6px; }
+.rem-checks { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 10px 0 2px; border-top: 1px solid var(--rem-soft-line); }
+.rem-check-group { --check-tone: var(--rem-muted); display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
 .rem-check-group[data-outcome=failed] { --check-tone: var(--rem-danger); }
 .rem-check-group[data-outcome=unresolved] { --check-tone: var(--rem-attention); }
 .rem-check-group[data-outcome=passed] { --check-tone: var(--rem-success); }
 .rem-check-group h4, .rem-check-group summary { margin: 0; color: var(--check-tone); font-size: 11.5px; font-weight: 600; letter-spacing: .02em; }
 .rem-check-group summary { cursor: pointer; width: fit-content; }
 .rem-check-group[open] summary { margin-bottom: 6px; }
-.rem-check-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.rem-check-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin: 0; padding: 0; list-style: none; }
 .rem-check { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 8px; align-items: start; }
 .rem-check-icon { margin-top: 2px; color: var(--check-tone); }
 .rem-check-body { display: grid; gap: 3px; min-width: 0; }
@@ -356,15 +364,15 @@
 .rem-check-more { justify-self: start; padding: 0; color: var(--rem-accent); font-size: 11.5px; font-weight: 500; }
 .rem-check-more:hover { text-decoration: underline; }
 .rem-status-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.rem-status-link { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 6px 0 10px; border: 1px solid var(--rem-soft-line); border-radius: 7px; background: var(--rem-panel); color: var(--rem-accent); font-size: 12px; font-weight: 500; }
+.rem-status-link { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 28px; padding: 3px 6px 3px 10px; text-align: left; border: 1px solid var(--rem-soft-line); border-radius: 7px; background: var(--rem-panel); color: var(--rem-accent); font-size: 12px; font-weight: 500; }
 .rem-status-link:hover { border-color: var(--rem-accent); }
-.rem-status-control { display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 8px; border-radius: 7px; color: var(--rem-muted); font-size: 12px; font-weight: 500; }
+.rem-status-control { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; min-height: 28px; padding: 3px 8px; text-align: left; border-radius: 7px; color: var(--rem-muted); font-size: 12px; font-weight: 500; }
 .rem-status-control:hover:not(:disabled) { background: rgb(var(--color-ink) / .07); color: var(--rem-ink); }
 .rem-status-control[data-action=stop]:hover:not(:disabled) { background: var(--rem-danger-soft); color: var(--rem-danger); }
 .rem-status-control:disabled { opacity: .45; }
 
-.rem-sheet-form { display: grid; gap: 18px; }
-.rem-field { display: grid; gap: 7px; }
+.rem-sheet-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; }
+.rem-field { display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; }
 .rem-field > label, .rem-field-label { font-size: 12px; font-weight: 600; color: var(--rem-ink); }
 .rem-field textarea, .rem-field select, .rem-field input:not([type=time]) { width: 100%; border: 1px solid var(--rem-line); border-radius: 10px; background: var(--rem-raised) !important; color: var(--rem-ink); font-size: 13px; }
 .rem-field textarea { min-height: 92px; padding: 9px 12px; resize: vertical; line-height: 1.5; }
@@ -391,17 +399,17 @@
 .rem-inline-field input:not([type=time]) { flex: 1; }
 .rem-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 /* Start after: the tasks a one-time task waits for, and where each one stands. */
-.rem-after-list, .rem-waits-for { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.rem-after-list, .rem-waits-for { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; margin: 0; padding: 0; list-style: none; }
 .rem-after-list li { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 2px 4px 2px 10px; border: 1px solid var(--rem-soft-line); border-radius: 10px; background: var(--rem-raised); color: var(--rem-muted); }
-.rem-after-list li > span { flex: 1; font-size: 12.5px; }
+.rem-after-list li > span { flex: 1; min-width: 0; font-size: 12.5px; }
 .rem-after-list li > button:last-child:not(.rem-after-open) { display: grid; place-items: center; width: 26px; height: 26px; border: 0; border-radius: 7px; background: transparent; color: var(--rem-muted); cursor: pointer; }
 .rem-after-list li > button:last-child:not(.rem-after-open):hover { background: rgb(var(--color-ink) / .07); color: var(--rem-ink); }
-.rem-after-open { flex: 1; min-width: 0; padding: 0; border: 0; background: none; color: var(--rem-ink); font: inherit; font-size: 13px; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.rem-after-open { flex: 1; min-width: 0; padding: 0; border: 0; background: none; color: var(--rem-ink); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
 .rem-after-open:hover { text-decoration: underline; }
 .rem-after-open:focus-visible { outline: 2px solid var(--rem-accent); outline-offset: 2px; border-radius: 4px; }
 .rem-waits-for li { display: grid; gap: 1px; font-size: 12.5px; }
 .rem-waits-for li .rem-after-open { font-weight: 600; }
-.rem-waits-for li .rem-after-condition { overflow: hidden; color: var(--rem-ink); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.rem-waits-for li .rem-after-condition { color: var(--rem-ink); font-weight: 600; }
 .rem-waits-for li > span { color: var(--rem-muted); }
 .rem-waits-for li[data-tone=success] > span { color: var(--rem-success); }
 .rem-waits-for li[data-tone=attention] > span { color: var(--rem-attention); }
@@ -451,7 +459,7 @@
 .rem-task-updates ol { list-style: none; margin: 12px 0 0; padding: 0; }
 .rem-task-updates li { padding: 12px 0; border-top: 1px solid rgb(var(--color-line)); }
 .rem-task-updates time { display: block; color: rgb(var(--color-muted)); font-size: 12px; }
-.rem-update-message { display: block; text-align: left; color: inherit; background: none; border: 0; padding: 6px 0; line-height: 1.5; cursor: pointer; }
+.rem-update-message { display: block; max-width: 100%; text-align: left; color: inherit; background: none; border: 0; padding: 6px 0; line-height: 1.5; cursor: pointer; }
 .rem-update-message:hover { text-decoration: underline; }
 .rem-msg[data-message-id]:focus { outline: 2px solid rgb(var(--color-brand)); outline-offset: 6px; border-radius: 8px; }
 .rem-stream .rem-msg[data-message-id]:focus { outline-offset: 2px; }

@@ -173,9 +173,45 @@ object OrganizationModel {
         plan?.requests?.forEach { items += NeedsYou.Request(it) }
         val board = org.tasks.filter { columnOf(it.status) != null }
         board.filter { columnOf(it.status) == "review" }.forEach { items += NeedsYou.Review(it) }
-        board.filter { columnOf(it.status) !in setOf("review", "done") }.forEach { t -> flag(t).takeIf { it.isNotBlank() }?.let { items += NeedsYou.Flag(t, it) } }
+        // Blocked work that waits by itself or for Rem's Auto mode look isn't flagged for attention by the desktop.
+        board.filter { columnOf(it.status) !in setOf("review", "done") && (it.status != "blocked" || it.attention) }
+            .forEach { t -> flag(t).takeIf { it.isNotBlank() }?.let { items += NeedsYou.Flag(t, it) } }
         org.employees.forEach { e -> plan?.workers?.get(e.id)?.stalled?.takeIf { it.isNotBlank() }?.let { items += NeedsYou.Stalled(e, it) } }
         return items
+    }
+
+    /** One of a new organization's first steps. [desktopOnly] steps are done in Raticode on the computer. */
+    data class SetupStep(val id: String, val label: String, val hint: String, val done: Boolean, val desktopOnly: Boolean = false)
+
+    /** A new organization's first steps, in order. Empty once it has run with a worker, a folder and a ticket. */
+    fun setupSteps(org: Organization, plan: OrgPlan?): List<SetupStep> {
+        val ran = org.state == "running" || (plan?.usage?.runs ?: 0) > 0 || org.tasks.any { it.status !in setOf("backlog", "todo", "cancelled") }
+        val held = org.employees.isNotEmpty() && org.employees.all { it.paused }
+        val steps = listOf(
+            if (held) SetupStep("worker", "Release a worker's hold", "Every worker is held, so nobody would pick up work.", false)
+            else SetupStep("worker", "Add a worker", "Add one in Organizations on your computer.", org.employees.isNotEmpty(), desktopOnly = true),
+            SetupStep("folder", "Give it a project folder", "Workers only change folders the organization owns. Choose one on your computer.",
+                org.projects.isNotEmpty(), desktopOnly = true),
+            SetupStep("ticket", "Add a first ticket", "Put it in To do with a worker assigned, and it runs when you start.", org.tasks.isNotEmpty()),
+            SetupStep("start", "Start the organization", "It stays paused until you start it.", ran),
+        )
+        return if (ran && steps.take(3).all { it.done }) emptyList() else steps
+    }
+
+    /** What would leave Start with nothing to run, in words. Empty when work can start. */
+    fun startGaps(org: Organization): List<String> = buildList {
+        if (org.employees.isEmpty()) add("There are no workers yet.")
+        else if (org.employees.all { it.paused }) add("Every worker is held.")
+        if (org.projects.isEmpty()) add("It owns no project folder.")
+        if (org.tasks.none { it.status !in setOf("done", "cancelled") }) add("There are no open tickets.")
+    }
+
+    /** Why the page may be out of date, in words, or null when it's current. Nothing loaded yet is the loading screen's job. */
+    fun staleText(connected: Boolean, loaded: Boolean, error: String?): String? = when {
+        !loaded -> null
+        !connected -> "Offline. This is the last you saw from your computer. Reconnect to make changes."
+        error != null -> "Couldn't refresh: ${error.trim().removeSuffix(".")}. This is the last update from your computer."
+        else -> null
     }
 
     /** Where a ticket may move on the phone's board, and why not. Done always goes through review. */

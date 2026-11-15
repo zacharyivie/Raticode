@@ -166,9 +166,11 @@ JSON keys and array indexes.
 
 `trigger.events` is the immutable list of event objects supplied when the run starts.
 Looping over those events uses a Loop node with `source.type: trigger-events`; fields from
-one iteration are read through `node.<loop-id>.output`. `secret["EXACT_ENV_NAME"]` names an
-environment value without reading it during compilation. Secret names are case-sensitive,
-must use bracket notation, and lower to IR without their resolved values.
+one iteration are read through `node.<loop-id>.output`. `secret["EXACT_NAME"]` names a
+deployment secret without reading it during compilation. At run time the host reads a value
+saved in its secret store (Raticode uses the system keychain) first, then the environment
+variable with the same name. Secret names are case-sensitive, must use bracket notation, and
+lower to IR without their resolved values.
 
 Rattish 1 does not define `workflow.*` or `loop.*` aliases. Workflow inputs use `input.*`.
 Called workflow outputs and Loop iteration values use `node.<node-id>.output.*`.

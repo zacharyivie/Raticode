@@ -43,6 +43,13 @@ It's read-only: stage, commit, push, pull and switch branches on the computer. S
 
 The **Orgs** tab shows each [organization](../advanced/organizations.md) with its **Organization**, **Projects**, **Issues**, **Workers** and **Knowledge** sections.
 
+- The list marks each organization that is waiting on you with **N need you** (Rem's requests, results to review, blocked tickets and plans to approve), shows why a paused one stopped, such as a reached limit, and puts archived ones last.
+- A new organization's **Organization** page shows **Get started** until it has run once. Add workers and project folders in Raticode on your computer; **Add** opens a new ticket here.
+- **Start** asks you to confirm and says when nothing will run yet: no workers, every worker held, no project folder or no open tickets.
+- You create organizations in Raticode on your computer. It only needs a name.
+- **Issues** keeps each organization's project, worker and **Needs me** filters, and the column you were on, after you leave it or close the app. A filter that's on is highlighted, and **Clear filters** turns them off. A removed project or worker falls back to all.
+- An open organization shows **Offline** beside its state while the phone isn't connected. A strip under the header says when the page shows older information: offline, or after a refresh failed. After a failed refresh, **Try again** asks your computer again.
+
 **Organization** shows the [work schedule](../advanced/organizations.md#work-schedule): the block on now and its focus, the next block and when it starts, warnings about gaps, and which block each running worker started under.
 
 - Tap the card to change blocks, their cadence (daily, weekly, monthly or quarterly), times, keywords and time zone.
@@ -62,9 +69,11 @@ The **Auto mode** card turns [Auto mode](../advanced/organizations.md#auto-mode)
 
 - Add a ticket for Rem or an organization, assign it, or hand one of Rem's tickets to an organization.
 - Long-press a ticket to move it.
+- The filters, the column you were on and the open section (**Board**, **Proposed**, **People** or **Self-work**) stay after you leave the board or close the app. A filter that's on is highlighted, and **Clear filters** turns them off. If a saved organization, person or project is gone, that filter shows everything again and the others stay. The phone keeps its own filters, separate from your computer's.
 - Open a ticket for **History and comments**: each status change with its reason, oldest first, and comments from you, Rem and workers. Long results stay folded until you tap **Show the full text**. Add a comment at the bottom.
 - Offline, a ticket shows the history you last loaded. An older computer asks you to update it instead.
 - Tapping a ticket pill in Rem's chat opens that ticket here. A ticket no longer on the board says so.
+- A ticket that [waits for other tickets](../rem/board.md#tickets-that-wait-for-other-tickets) shows **Waits for:** on its card. Its page lists them in **Waits for**, where you add one with **Wait for a ticket…** or remove one with its **×**. If one was cancelled, the card and page show a notice instead. An older computer sends no list, so nothing shows.
 
 The board also has:
 
@@ -79,6 +88,7 @@ The board also has:
 **Desktop settings › Rem self-work** holds them, so they work even when the board is off on the computer.
 
 - Turn self-work on or off, set the maximum threads, and choose whether Rem pulls from Backlog when To do is empty. Telling Rem "turn on self-work" or "stop self-work" changes the same switch.
+- **Approve its own backlog tickets** lets self-work's new ideas go to Backlog already approved until self-work ends, instead of waiting for you. Turning it on shows what it allows and asks you to confirm; turning it off doesn't. Those tickets carry an **Auto-approved** badge on the board and on their page, and the report says how many it approved. A computer without this setting shows no switch. See [Let Rem approve its own tickets](../rem/board.md#let-rem-approve-its-own-tickets).
 - The status line says how many self-work tasks are paused to make room for your work.
 - See the report. **Where Rem can work** opens the board's **People**.
 - Rem's chat shows what happened while you were away, with a task card for each job.
@@ -93,12 +103,63 @@ An older computer without the board shows an update note instead. See [Global bo
 
 ## Workflows
 
-**More › Workflows** lists the workflows in your open projects. Open one to see its graph, steps and run history.
+**More › Workflows** lists the workflows in your open projects. Open one to see its graph, steps, run history and [triggers](#triggers).
 
-- **Run**, **Stop** and **Resume** ask first, then run on the computer with its usual checks.
+- **Run**, **Stop**, **Resume** and **Run again with the same inputs** ask first, then run on the computer with its usual checks.
+- **Stop** reaches a run however it started, including one the computer's background trigger scheduler started. The run shows **Stop requested** until it ends.
 - You can't edit workflows from the phone.
-- Start workflows that need inputs on the computer.
-- Rattish runs can't be resumed yet.
+- When a workflow is missing a [secret](../workflows/inputs.md#secrets), the reason under **Run** names it and says where to add it on the computer. Secret values never travel to the phone, and the phone can't save them.
+
+### All runs
+
+::: info New in 0.35.0
+The **All runs** list needs Raticode Mobile 0.35.0 and Raticode 0.5.5. With an older computer, the tab doesn't appear.
+:::
+
+**All runs** at the top of **More › Workflows** lists the runs of every workflow in your open projects, newest first, like the computer's [Workflow runs](../studio/runs.md#every-workflow-s-runs) view. Each run shows its workflow, status, when it started, how long it took, whether it was started by hand, a trigger, the phone or Rem, and its tokens and estimated cost. Chips filter by time (24 hours, 7 days, 30 days or all time), status and workflow, and the line above the list totals what matches. Tap a run to open it in its workflow. The phone shows the newest 60 runs; older ones are on the computer. A run whose model step moved to a [fallback provider](../nodes/agent.md#fallback-providers) reads **switched provider**, and in the run's steps that step says which provider it left, why, and which one answered. That needs Raticode 0.5.5 on the computer; the phone app needs no update.
+
+### Run with inputs
+
+::: info New in 0.35.0
+Filling in a workflow's inputs on the phone is new and needs Raticode Mobile 0.35.0 and Raticode 0.5.5. With an older computer, start workflows that need inputs on the computer.
+:::
+
+When a workflow has [inputs](../workflows/inputs.md), **Run** opens a sheet with a field for each one. The fields come from the same input schema as the computer's Run dialog:
+
+- text, whole numbers and numbers
+- a yes/no switch
+- a row of choices, or a menu when there are more than six
+- a JSON box for lists, objects and anything else
+
+Fields start at the workflow's defaults. Leave an optional field blank to use its default. An input whose schema says `"format": "password"` is masked, and its default stays on the computer.
+
+**Run** marks any field that needs fixing, such as a missing required value, a number out of range or JSON that doesn't parse, and sends nothing until they're fixed. The computer then checks the values against the schema again before anything starts. They also go through the same [suspicious-request check](pairing.md#suspicious-requests-lock-the-phone) as everything else the phone sends.
+
+### Resume and run again
+
+When a run failed, **Resume from failed step** starts a new run on the computer. It reuses the steps that finished and runs the failed step again, then the steps after it. A stopped or interrupted run shows **Resume** and continues from where it stopped. The confirmation lists the steps that run again.
+
+::: info New in 0.35.0
+**Run again with the same inputs**, and resuming runs started with inputs or by a trigger, need Raticode Mobile 0.35.0 and Raticode 0.5.5. With an older computer, the **Run again** button doesn't appear and runs started with inputs can't be resumed.
+:::
+
+**Run again with the same inputs** starts a new run of the workflow as it is now, with the inputs and trigger events the shown run used. The computer keeps those values in the run's folder; they never travel to the phone. See [Saved inputs and trigger events](../studio/runs.md#saved-inputs-and-trigger-events).
+
+The computer decides whether a run can be resumed or run again. When it can't, the reason shows under the buttons. The computer doesn't save password inputs (`"format": "password"`), and the phone can't fill them in when it resumes or runs again, so for such a run the reason names those inputs: use **Resume** or **Run again** on the computer, where the app asks for them.
+
+### Triggers
+
+::: info New in 0.35.0
+Triggers on the phone need Raticode Mobile 0.35.0 and Raticode 0.5.5. With an older computer, the **Triggers** tab and the pause switch don't appear.
+:::
+
+A workflow's **Triggers** tab lists its [triggers](../workflows/triggers.md): each one's kind (schedule, file change or webhook) and what it watches, when it next runs, and how its last start went, such as **Succeeded**, **Failed** or **Skipped**, with the computer's reason. A webhook's address and token stay on the computer.
+
+- Each trigger has its own switch. Turning one off happens at once.
+- Turning one on asks first, because it then starts the workflow on your computer without asking each time it fires. Like everything the phone sends, it goes through the [suspicious-request check](pairing.md#suspicious-requests-lock-the-phone), so a locked phone can't turn triggers back on. The computer refuses an unconfirmed request.
+- Adding, changing and deleting triggers stays on the computer.
+
+**Pause all triggers** at the top of **More › Workflows** pauses every trigger on the computer, the same switch as in its Workflow runs view. Pausing happens at once; resuming asks first and says how many triggers come back on. Each trigger keeps its own switch, so resuming restores exactly the ones that were on. While paused, the computer records scheduled times as skipped and doesn't catch them up. See [Pause all triggers](../workflows/triggers.md#pause-all-triggers).
 
 ## Approvals and swarms
 

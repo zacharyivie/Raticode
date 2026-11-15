@@ -21,6 +21,7 @@ from jsonschema.exceptions import ValidationError  # type: ignore[import-untyped
 
 from gofer.rattish.contracts import canonical_json_bytes
 from gofer.rattish.migration import migrate_source as _migrate_source
+from gofer.rattish.project_scan import path_is_in_skipped_directory, scan_project_workflows
 from gofer.utils.atomic_output import (
     atomic_binary_output,
     mkdir_without_links,
@@ -85,6 +86,25 @@ class RegisteredWorkflow:
     entrypoint: Path
     created_at: str
 
+    @property
+    def managed(self) -> bool:
+        """Whether the workflow lives in the project's .raticode folder.
+
+        Managed workflows keep their compiled builds, run records and agent memory in
+        their own git-ignored folder. Workflows found elsewhere in a project keep them in
+        the app's data folder, so running one never writes into the project's source.
+        """
+        return _is_managed_workspace(self)
+
+    @property
+    def relative_folder(self) -> str:
+        """The workflow's folder relative to its project, with / separators."""
+        try:
+            relative = self.workflow_root.relative_to(self.project_root)
+        except ValueError:
+            return str(self.workflow_root)
+        return relative.as_posix() if relative.parts else "."
+
     def to_payload(self) -> dict[str, Any]:
         return {
             "id": self.workflow_id,
@@ -92,6 +112,8 @@ class RegisteredWorkflow:
             "projectRoot": str(self.project_root),
             "projectName": self.project_root.name or str(self.project_root),
             "workflowRoot": str(self.workflow_root),
+            "relativeFolder": self.relative_folder,
+            "managed": self.managed,
             "sourcePath": str(self.entrypoint),
             "createdAt": self.created_at,
         }
@@ -238,13 +260,39 @@ def install_registered_workflow(
         raise
 
 
+@dataclass(frozen=True, slots=True)
+class ProjectDiscovery:
+    """Workflows registered for one project, and whether the folder walk hit a limit."""
+
+    workflows: tuple[RegisteredWorkflow, ...]
+    limited: bool = False
+
+
 def discover_registered_workflows(
     project_root: Path,
     *,
     registry_dir: Path | None = None,
     check_cancelled: Callable[[], None] = lambda: None,
 ) -> tuple[RegisteredWorkflow, ...]:
-    """Register only .raticode/<workflow-name>/workflow.rattish entrypoints."""
+    """Register every workflow in a project: see discover_project_workflows."""
+    return discover_project_workflows(
+        project_root, registry_dir=registry_dir, check_cancelled=check_cancelled
+    ).workflows
+
+
+def discover_project_workflows(
+    project_root: Path,
+    *,
+    registry_dir: Path | None = None,
+    check_cancelled: Callable[[], None] = lambda: None,
+) -> ProjectDiscovery:
+    """Register .raticode/<name>/workflow.rattish and every other workflow.rattish below.
+
+    The rest of the project is walked without following links and without entering
+    dependency, build, cache or Raticode worktree folders (see project_scan). Registrations
+    of workflows found outside .raticode whose file is gone are removed, so renaming or
+    deleting one doesn't leave a broken entry behind.
+    """
     check_cancelled()
     project_root = project_root.expanduser().resolve()
     if not project_root.is_dir():
@@ -253,7 +301,7 @@ def discover_registered_workflows(
     workspace_root = project_root / WORKSPACE_DIRECTORY
     if workspace_root.is_symlink():
         raise RattishWorkspaceError("The workflow workspace must not be a symbolic link")
-    candidates: set[Path] = set()
+    managed_candidates: set[Path] = set()
     if workspace_root.is_dir():
         for workflow_root in workspace_root.iterdir():
             check_cancelled()
@@ -261,30 +309,43 @@ def discover_registered_workflows(
                 continue
             entrypoint = workflow_root / WORKFLOW_ENTRYPOINT
             if entrypoint.is_file() and not entrypoint.is_symlink():
-                candidates.add(entrypoint)
+                managed_candidates.add(entrypoint)
 
     check_cancelled()
     registry_root = (registry_dir or get_data_dir()).expanduser().resolve()
+    scan = scan_project_workflows(
+        project_root,
+        data_dir=registry_root,
+        check_cancelled=check_cancelled,
+    )
+    project_candidates = [path for path in scan.entrypoints if path not in managed_candidates]
+
+    check_cancelled()
     document = _read_registry(registry_root)
     existing = [_registered_workflow(item) for item in document["workflows"]]
     existing_by_source = {workflow.entrypoint.resolve(): workflow for workflow in existing}
     discovered: list[RegisteredWorkflow] = []
-    changed = False
+    changed = _forget_missing_project_workflows(document, project_root, set(project_candidates))
 
-    for entrypoint in sorted(candidates):
+    # Managed workflows go first so their folder names keep the plain IDs.
+    for entrypoint in [*sorted(managed_candidates), *project_candidates]:
         check_cancelled()
         workflow_root = entrypoint.parent
         registered = existing_by_source.get(entrypoint)
         if registered is not None:
             discovered.append(registered)
             continue
-        workflow_name = workflow_root.name
-        workflow_id = _allocate_workflow_id(
-            _slugify(workflow_name),
-            document,
-            project_root,
-            existing_workspace=workflow_root,
-        )
+        managed = entrypoint in managed_candidates
+        workflow_name = workflow_root.name or project_root.name or "workflow"
+        if managed:
+            workflow_id = _allocate_workflow_id(
+                _slugify(workflow_name),
+                document,
+                project_root,
+                existing_workspace=workflow_root,
+            )
+        else:
+            workflow_id = _allocate_project_workflow_id(document, project_root, workflow_root)
         registered = RegisteredWorkflow(
             workflow_id=workflow_id,
             name=workflow_name,
@@ -301,7 +362,33 @@ def discover_registered_workflows(
     check_cancelled()
     if changed:
         _write_registry(registry_root, document)
-    return tuple(discovered)
+    return ProjectDiscovery(tuple(discovered), scan.limited)
+
+
+def _forget_missing_project_workflows(
+    document: dict[str, Any], project_root: Path, found: set[Path]
+) -> bool:
+    """Drop this project's registrations outside .raticode whose file no longer exists.
+
+    Only a missing file counts: a registration the walk skipped, for example past a
+    limit or in an unreadable folder, stays.
+    """
+    kept = []
+    for item in document["workflows"]:
+        workflow = _registered_workflow(item)
+        if (
+            Path(item["project_root"]) == project_root
+            and not _is_managed_workspace(workflow)
+            and workflow.entrypoint.name == WORKFLOW_ENTRYPOINT
+            and workflow.entrypoint not in found
+            and not os.path.lexists(workflow.entrypoint)
+        ):
+            continue
+        kept.append(item)
+    if len(kept) == len(document["workflows"]):
+        return False
+    document["workflows"] = kept
+    return True
 
 
 def list_registered_workflows(
@@ -559,6 +646,36 @@ def _allocate_workflow_id(
         suffix += 1
 
 
+# Workflow IDs may be 128 characters; leave room for a numeric suffix.
+_MAX_ALLOCATED_ID_LENGTH = 100
+
+
+def _allocate_project_workflow_id(
+    document: dict[str, Any], project_root: Path, workflow_root: Path
+) -> str:
+    """Pick a stable ID for a workflow found outside .raticode.
+
+    The folder name comes first (jev-demo), then the folder's path in the project
+    (rattish-starters-jev-demo), then that path with a number. IDs are kept in the
+    registry, so a workflow keeps its ID once it has one.
+    """
+    relative = workflow_root.relative_to(project_root)
+    folder = workflow_root.name if relative.parts else project_root.name
+    candidates = [_trim_id(_slugify(folder or "workflow"))]
+    if len(relative.parts) > 1:
+        candidates.append(_trim_id(_slugify("-".join(relative.parts))))
+    registered_ids = {str(item["id"]).lower() for item in document["workflows"]}
+    for candidate in candidates:
+        managed_folder = project_root / WORKSPACE_DIRECTORY / candidate
+        if candidate not in registered_ids and not managed_folder.exists():
+            return candidate
+    return _allocate_workflow_id(candidates[-1], document, project_root)
+
+
+def _trim_id(slug: str) -> str:
+    return slug[:_MAX_ALLOCATED_ID_LENGTH].rstrip("-") or "workflow"
+
+
 def _registered_workflow(item: dict[str, Any]) -> RegisteredWorkflow:
     return RegisteredWorkflow(
         workflow_id=item["id"],
@@ -571,16 +688,38 @@ def _registered_workflow(item: dict[str, Any]) -> RegisteredWorkflow:
 
 
 def _registered_workflow_is_in_workspace(workflow: RegisteredWorkflow) -> bool:
+    """Whether a registration still points at a workflow this project may list and run.
+
+    Either .raticode/<name>/workflow.rattish, or a workflow.rattish found elsewhere in the
+    project, reached without any link and outside the folders discovery skips.
+    """
     project_root = workflow.project_root.expanduser().resolve()
     workflow_root = workflow.workflow_root.expanduser().resolve()
     entrypoint = workflow.entrypoint.expanduser().resolve()
-    return (
-        workflow_root.parent == project_root / WORKSPACE_DIRECTORY
-        and entrypoint == workflow_root / WORKFLOW_ENTRYPOINT
-        and not workflow.workflow_root.is_symlink()
-        and not workflow.entrypoint.is_symlink()
-        and not (project_root / WORKSPACE_DIRECTORY).is_symlink()
-    )
+    if (
+        entrypoint != workflow_root / WORKFLOW_ENTRYPOINT
+        or workflow.workflow_root.is_symlink()
+        or workflow.entrypoint.is_symlink()
+    ):
+        return False
+    if workflow_root.parent == project_root / WORKSPACE_DIRECTORY:
+        return not (project_root / WORKSPACE_DIRECTORY).is_symlink()
+    return _is_project_workflow(workflow, project_root, entrypoint)
+
+
+def _is_project_workflow(
+    workflow: RegisteredWorkflow, project_root: Path, entrypoint: Path
+) -> bool:
+    # The stored path must already be canonical: a link anywhere along it would make
+    # resolve() differ, which is how a link out of the project is refused.
+    stored = workflow.entrypoint.expanduser()
+    if not stored.is_absolute() or stored != entrypoint:
+        return False
+    try:
+        relative = entrypoint.relative_to(project_root)
+    except ValueError:
+        return False
+    return not path_is_in_skipped_directory(relative) and entrypoint.is_file()
 
 
 def _workflow_metadata_path(workflow: RegisteredWorkflow) -> Path:

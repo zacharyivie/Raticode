@@ -1,6 +1,9 @@
 import { samePath, uniquePaths, pathKey } from "./workspacePaths.js";
 export const READ_THREAD_LIMIT = 7;
 export const ARCHIVE_RETENTION_OPTIONS = [["never", "Never"], ["7", "After 7 days"], ["30", "After 30 days"], ["90", "After 90 days"]];
+// Purging archive copies of deleted threads. "never" keeps everything and is the default.
+export const ARCHIVE_GIT_LIMIT = "A purge only changes the archive folder. It can't remove copies already in Git commits or other backups.";
+export const ARCHIVE_PURGE_OPTIONS = [["never", "Never (keep everything)"], ["7", "7 days after deletion"], ["30", "30 days after deletion"], ["90", "90 days after deletion"]];
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 // Index entries carry every field needed to group threads without reading metadata.

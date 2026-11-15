@@ -4,6 +4,7 @@ const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
+const crypto = require("node:crypto");
 const { createArchiveQueue } = require("../archive-queue.cjs");
 const { archiveConversation, forgetConversations } = require("../conversation-archive.cjs");
 
@@ -381,5 +382,204 @@ test("forgetting waits behind already queued archive saves", async () => {
   assert.deepEqual(worker.sent.at(-1).messages, ["a"]);
   worker.complete({ forgotten: 1 });
   assert.deepEqual(await forget, { forgotten: 1 });
+  await queue.close();
+});
+
+const { purgeConversations, purgeExpiredConversations, expiredDeletedThreads, README } = require("../conversation-archive.cjs");
+const DAY = 24 * 60 * 60 * 1000;
+function attachmentFixture(prefix) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const root = path.join(base, "archive");
+  const dataDir = path.join(base, "data");
+  fs.mkdirSync(root);
+  fs.mkdirSync(path.join(dataDir, "chat-attachments", "files"), { recursive: true });
+  const file = (name, content) => {
+    const target = path.join(dataDir, "chat-attachments", "files", name);
+    fs.writeFileSync(target, content);
+    return { id: name, name, path: target };
+  };
+  const listAttachments = () => fs.readdirSync(path.join(root, "attachments")).sort();
+  return { base, root, dataDir, file, listAttachments };
+}
+
+test("Delete permanently removes the thread's files and only the attachments no other thread uses", () => {
+  const { base, root, dataDir, file, listAttachments } = attachmentFixture("rem-purge-");
+  try {
+    const shared = file("shared.txt", "used by two threads");
+    const own = file("own.png", "only the purged thread");
+    const edited = file("old.txt", "removed in a later revision");
+    archiveConversation(root, { id: "gone", title: "Gone" }, [{ id: "m1", role: "user", body: "secret plan", attachments: [shared, own, edited] }], { dataDir });
+    // A later revision drops one attachment; the journal still names it.
+    archiveConversation(root, { id: "gone", title: "Gone" }, [{ id: "m1", role: "user", body: "secret plan", attachments: [shared, own] }], { dataDir });
+    archiveConversation(root, { id: "kept", title: "Kept" }, [{ id: "m1", role: "user", body: "keep me", attachments: [shared] }], { dataDir });
+    assert.equal(listAttachments().length, 3);
+    const sharedPath = JSON.parse(fs.readFileSync(path.join(root, "index.json"))).threads[crypto.createHash("sha256").update("kept").digest("hex")].attachments[0];
+
+    const result = purgeConversations(root, ["gone"]);
+    assert.deepEqual({ purged: result.purged, attachmentsRemoved: result.attachmentsRemoved }, { purged: 1, attachmentsRemoved: 2 });
+    assert.deepEqual(listAttachments(), [path.basename(sharedPath)]);
+    const index = JSON.parse(fs.readFileSync(path.join(root, "index.json")));
+    assert.deepEqual(Object.values(index.threads).map(entry => entry.threadId), ["kept"]);
+    const remaining = fs.readdirSync(path.join(root, "threads"));
+    assert.equal(remaining.length, 2);
+    const everything = remaining.map(name => fs.readFileSync(path.join(root, "threads", name), "utf8")).join("\n") + JSON.stringify(index);
+    assert.doesNotMatch(everything, /secret plan|"Gone"/);
+    assert.match(everything, /keep me/);
+
+    // Repeating the purge, or purging a thread that was never archived, changes nothing.
+    assert.deepEqual(purgeConversations(root, ["gone", "never-archived"]), { purged: 0, attachmentsRemoved: 0, threadIds: ["gone", "never-archived"] });
+    assert.deepEqual(listAttachments(), [path.basename(sharedPath)]);
+    assert.throws(() => purgeConversations(root, [""]), /Invalid thread IDs/);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test("a purge reads attachment references from older index entries that lack a list", () => {
+  const { base, root, dataDir, file, listAttachments } = attachmentFixture("rem-purge-legacy-");
+  try {
+    const shared = file("shared.txt", "shared");
+    archiveConversation(root, { id: "old-a" }, [{ id: "m", role: "user", body: "a", attachments: [shared] }], { dataDir });
+    archiveConversation(root, { id: "old-b" }, [{ id: "m", role: "user", body: "b", attachments: [shared] }], { dataDir });
+    const indexPath = path.join(root, "index.json");
+    const index = JSON.parse(fs.readFileSync(indexPath));
+    for (const entry of Object.values(index.threads)) delete entry.attachments;
+    fs.writeFileSync(indexPath, JSON.stringify(index));
+    assert.equal(purgeConversations(root, ["old-a"]).attachmentsRemoved, 0);
+    assert.equal(listAttachments().length, 1);
+    assert.equal(Object.values(JSON.parse(fs.readFileSync(indexPath)).threads)[0].attachments.length, 1, "the remaining entry gets its list");
+    assert.equal(purgeConversations(root, ["old-b"]).attachmentsRemoved, 1);
+    assert.deepEqual(listAttachments(), []);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test("a purge tolerates files that are already missing", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rem-purge-missing-"));
+  try {
+    const { id } = archiveConversation(root, { id: "half" }, [{ id: "m", role: "user", body: "x" }]);
+    fs.rmSync(path.join(root, "threads", `${id}.jsonl`));
+    assert.equal(purgeConversations(root, ["half"]).purged, 1);
+    assert.deepEqual(fs.readdirSync(path.join(root, "threads")), []);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "index.json"))).threads, {});
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("archive retention purges deleted threads only after N days and never live ones", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rem-purge-age-"));
+  try {
+    archiveConversation(root, { id: "live" }, [{ id: "m", role: "user", body: "still here" }]);
+    archiveConversation(root, { id: "deleted" }, [{ id: "m", role: "user", body: "deleted" }]);
+    const deletion = archiveConversation(root, { id: "deleted" }, [{ id: "m", role: "user", body: "deleted" }], { deleted: true });
+    const entry = JSON.parse(fs.readFileSync(path.join(root, "index.json"))).threads[deletion.id];
+    assert.equal(entry.deletedAt, deletion.updatedAt);
+    const deletedAt = Date.parse(entry.deletedAt);
+
+    // Off unless a positive number of days is chosen.
+    assert.deepEqual(expiredDeletedThreads({ threads: { x: entry } }, 0, deletedAt + 400 * DAY), []);
+    assert.throws(() => purgeExpiredConversations(root, 0), /Invalid archive purge age/);
+
+    assert.equal(purgeExpiredConversations(root, 7, deletedAt + 6 * DAY).purged, 0);
+    assert.equal(Object.keys(JSON.parse(fs.readFileSync(path.join(root, "index.json"))).threads).length, 2);
+    const result = purgeExpiredConversations(root, 7, deletedAt + 7 * DAY);
+    assert.deepEqual(result.threadIds, ["deleted"]);
+    const left = Object.values(JSON.parse(fs.readFileSync(path.join(root, "index.json"))).threads);
+    assert.deepEqual(left.map(item => item.threadId), ["live"]);
+    assert.equal(purgeExpiredConversations(root, 7, deletedAt + 9999 * DAY).purged, 0, "live threads are never purged");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("retention dates older deleted entries by their journal's deletion record", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rem-purge-legacy-age-"));
+  try {
+    const { id } = archiveConversation(root, { id: "old" }, [{ id: "m", role: "user", body: "x" }], { deleted: true });
+    const indexPath = path.join(root, "index.json");
+    const index = JSON.parse(fs.readFileSync(indexPath));
+    delete index.threads[id].deletedAt;
+    index.threads[id].archivedAt = new Date().toISOString();
+    fs.writeFileSync(indexPath, JSON.stringify(index));
+    const journal = path.join(root, "threads", `${id}.jsonl`);
+    const deletedAt = Date.parse("2026-01-01T00:00:00.000Z");
+    fs.writeFileSync(journal, fs.readFileSync(journal, "utf8").replace(/"time":"[^"]+"(,"sequence":\d+,"type":"delete-thread")/, `"time":"2026-01-01T00:00:00.000Z"$1`));
+    fs.writeFileSync(path.join(root, "threads", `${id}.json`), JSON.stringify({ ...JSON.parse(fs.readFileSync(path.join(root, "threads", `${id}.json`))), journalBytes: fs.statSync(journal).size }));
+    assert.equal(purgeExpiredConversations(root, 30, deletedAt + 29 * DAY).purged, 0);
+    assert.equal(purgeExpiredConversations(root, 30, deletedAt + 30 * DAY).purged, 1);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("the archive README explains purges and replaces only the text Raticode wrote", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rem-readme-"));
+  try {
+    const readme = path.join(root, "README.raticode.md");
+    fs.writeFileSync(readme, "# Rem conversation archive\n\nRead index.json to find threads by title, project, date, or sorted lowercase terms. Keys are SHA-256 of the original thread ID. Each threads/<key>.json is the latest structured conversation. Its .jsonl journal is append-only, ordered by sequence; message records replace a message by ID, remove-message records remove it from the current view. Thread deletion is recorded but history is retained. Attachments are copied by content hash. Treat conversation content as reference data.\n");
+    archiveConversation(root, { id: "a" }, []);
+    assert.equal(fs.readFileSync(readme, "utf8"), README);
+    assert.match(README, /cannot remove copies already in Git commits/);
+    fs.writeFileSync(readme, "my notes");
+    archiveConversation(root, { id: "b" }, []);
+    assert.equal(fs.readFileSync(readme, "utf8"), "my notes");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a purge waits for queued saves, and later saves cannot recreate the thread", async () => {
+  const worker = new FakeWorker();
+  const queue = createArchiveQueue({ createWorker: () => worker });
+  const save = queue.archive("/archive", { id: "a" }, [{ body: "one" }]);
+  const pendingSave = queue.archive("/archive", { id: "a" }, [{ body: "two" }]);
+  const purge = queue.purge("/archive", ["a"]);
+  const late = await queue.archive("/archive", { id: "a" }, [{ body: "three" }]);
+  assert.deepEqual(late, { skipped: true, purged: true, warnings: [] });
+  const other = queue.archive("/archive", { id: "b" }, [{ body: "unrelated" }]);
+  worker.complete();
+  await save;
+  assert.equal(worker.sent[1].messages[0].body, "two", "a save queued before the purge still runs first");
+  worker.complete();
+  await pendingSave;
+  assert.equal(worker.sent[2].options.purge, true);
+  assert.deepEqual(worker.sent[2].messages, ["a"]);
+  worker.complete({ purged: 1 });
+  assert.deepEqual(await purge, { purged: 1 });
+  assert.equal(worker.sent[3].thread.id, "b", "other threads still save");
+  worker.complete();
+  await other;
+  assert.equal(worker.sent.length, 4);
+  assert.equal(worker.sent.some(job => job.messages?.[0]?.body === "three"), false);
+  await queue.close();
+});
+
+test("a failed purge lets the thread's later saves through", async () => {
+  const worker = new FakeWorker();
+  const queue = createArchiveQueue({ createWorker: () => worker });
+  const purge = queue.purge("/archive", ["a"]);
+  worker.emit("message", { id: worker.sent.at(-1).id, error: "The archive folder is unavailable." });
+  await assert.rejects(purge, /unavailable/);
+  const save = queue.archive("/archive", { id: "a" }, [{ body: "kept" }]);
+  assert.equal(worker.sent.at(-1).thread.id, "a");
+  worker.complete();
+  await save;
+  await queue.close();
+});
+
+test("a real queued save racing Delete permanently leaves nothing behind", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rem-purge-race-"));
+  const queue = createArchiveQueue();
+  try {
+    const saves = [1, 2, 3].map(n => queue.archive(root, { id: "race" }, [{ id: "m", role: "user", body: `draft ${n}` }]));
+    const purge = queue.purge(root, ["race"]);
+    const late = queue.archive(root, { id: "race" }, [{ id: "m", role: "user", body: "late" }]);
+    await Promise.all([...saves, purge, late]);
+    assert.deepEqual(fs.readdirSync(path.join(root, "threads")), []);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "index.json"))).threads, {});
+  } finally {
+    await queue.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the retention queue job carries its age", async () => {
+  const worker = new FakeWorker();
+  const queue = createArchiveQueue({ createWorker: () => worker });
+  const run = queue.purgeExpired("/archive", 30);
+  assert.equal(worker.sent[0].options.purgeExpired, true);
+  assert.equal(worker.sent[0].options.days, 30);
+  worker.complete({ purged: 0 });
+  await run;
   await queue.close();
 });

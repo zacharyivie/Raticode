@@ -1,0 +1,41 @@
+{
+  "testSetVersion": 1,
+  "cases": [
+    {
+      "id": "alert",
+      "name": "Notifies when the output matches",
+      "inputs": {
+        "check-command": "echo 'ALERT: backup is 3 days old'",
+        "title": "Raticode starter test: backup alert"
+      },
+      "checks": [
+        {"type": "text", "label": "The check found the problem", "target": "nodes.check.stdout", "contains": "backup is 3 days old"},
+        {"type": "json", "label": "Sends the notification", "target": "nodes.notify-desktop.title", "equals": "Raticode starter test: backup alert"},
+        {"type": "json", "label": "Doesn't report all clear", "target": "nodes.all-clear", "exists": false}
+      ]
+    },
+    {
+      "id": "all-clear",
+      "name": "Stays quiet when the output doesn't match",
+      "inputs": {"check-command": "echo 'ok: backup is 2 hours old'"},
+      "checks": [
+        {"type": "text", "label": "Reports all clear", "target": "nodes.all-clear.stdout", "contains": "No alert"},
+        {"type": "json", "label": "Sends nothing", "target": "nodes.notify-desktop", "exists": false},
+        {"type": "json", "label": "Posts nothing", "target": "nodes.post-webhook", "exists": false}
+      ]
+    },
+    {
+      "id": "failed-check",
+      "name": "Notifies when the check command itself fails",
+      "inputs": {
+        "check-command": "echo 'cannot reach backup server' >&2; exit 2",
+        "alert-pattern": "ALERT|exited with code",
+        "title": "Raticode starter test: check failed"
+      },
+      "checks": [
+        {"type": "text", "label": "Notes the exit code", "target": "nodes.check.stdout", "contains": "exited with code 2"},
+        {"type": "json", "label": "Sends the notification", "target": "nodes.notify-desktop", "exists": true}
+      ]
+    }
+  ]
+}

@@ -23,6 +23,7 @@ READ_ACTIONS = {
     "knowledge_search",
     "knowledge_read",
     "ticket_changes",
+    "ticket_patch",
     "repository",
 } | READ_OPERATIONS
 
@@ -215,6 +216,17 @@ ACTION_HELP = {
     "ticket_changes": (
         "taskId. The ticket's branch, commits and changed files, plus its shared repository "
         "changes."
+    ),
+    "ticket_patch": (
+        "taskId. The ticket branch's full patch (each changed file before and after, "
+        "including the worker's uncommitted files), the base branch it lands in, whether it "
+        "merges cleanly, and its landed record."
+    ),
+    "land": (
+        "User-only taskId, expectedRevision, patchRevision (from ticket_patch), optional body. "
+        "Lands the ticket's branch in its base branch after a clean-merge check and accepts "
+        "the review. On a conflict nothing changes and the conflicting files are returned. "
+        "Rem, Auto mode and workers can't land; ask the user to accept from the ticket."
     ),
     "repository": (
         "No parameters. The organization's shared repository: whether it's on, its folder, "

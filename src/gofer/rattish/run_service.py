@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -37,6 +39,17 @@ from gofer.rattish.contracts import canonical_json_bytes
 from gofer.rattish.diagnostics import RattishError
 from gofer.rattish.preflight import PreflightRegistry, PreflightResult, run_preflight
 from gofer.rattish.provider_runtime import default_provider_subscriptions
+from gofer.rattish.result_cache import ResultCache
+from gofer.rattish.run_usage import USAGE_LIMIT_CODES, RunUsageMeter
+from gofer.rattish.run_values import (
+    SavedValuesUnavailable,
+    merge_withheld_inputs,
+    plan_saved_values,
+    read_saved_values,
+    remove_orphaned_values,
+    saved_values_refusal,
+    write_saved_values,
+)
 from gofer.rattish.runtime import (
     DEFAULT_NODE_HANDLERS,
     InvalidRattishWorkflowInputError,
@@ -44,14 +57,18 @@ from gofer.rattish.runtime import (
     RuntimeErrorInfo,
     _prepare_workflow_inputs,
 )
-from gofer.rattish.storage import migrate_legacy_directory, registered_source_root
+from gofer.rattish.storage import (
+    migrate_legacy_directory,
+    registered_source_root,
+    workflow_owned_directory,
+)
 from gofer.rattish.workflow_runtime import (
     NodeRunRecord,
     WorkflowExecutionResult,
     execute_workflow,
 )
 from gofer.subscriptions.base import Subscription
-from gofer.utils.atomic_output import atomic_binary_output
+from gofer.utils.atomic_output import atomic_binary_output, unlink_without_links
 from gofer.utils.paths import get_data_dir
 
 RUN_ARTIFACT_VERSION = 1
@@ -60,6 +77,10 @@ _active_rattish_ids_lock = threading.Lock()
 RunStatus = Literal[
     "passed", "failed", "preflight_failed", "invalid_inputs", "running", "stopped", "interrupted"
 ]
+# How a run started: the app or command line, a trigger, the paired phone, or Rem
+# (including its workers and organization agents). Saved as ``started_by``.
+StartedBy = Literal["manual", "trigger", "phone", "rem"]
+STARTED_BY: frozenset[str] = frozenset({"manual", "trigger", "phone", "rem"})
 
 
 class RattishRunArtifactError(RuntimeError):
@@ -91,6 +112,119 @@ def is_rattish_run_active(run_id: str) -> bool:
         return run_id in _active_rattish_ids
 
 
+_WINDOWS = sys.platform == "win32"
+# Enough to read a process's exit code and times, and granted for most processes,
+# including elevated ones the same user started.
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_STILL_ACTIVE = 259
+
+
+@functools.cache
+def _kernel32() -> Any:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined, unused-ignore]
+    # Handles are pointer-sized; the default int result type would cut them in half.
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    filetime = ctypes.POINTER(wintypes.FILETIME)
+    kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE, filetime, filetime, filetime, filetime]
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return kernel32
+
+
+def _windows_process_state(pid: int) -> tuple[bool, str | None]:
+    """Whether a Windows process is going, and a token for when it started.
+
+    Only queries the process. ``os.kill`` must never be used for this on Windows,
+    where any signal number terminates the target.
+    """
+    if not _WINDOWS or pid <= 0 or pid > 0xFFFFFFFF:
+        return False, None
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = _kernel32()
+    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        # No such process, or one this user may not query, which a runner never is.
+        return False, None
+    try:
+        code = wintypes.DWORD()
+        # A process that exited with code 259 reads as going while another
+        # program still holds a handle to it; Raticode runners never exit so.
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False, None
+        if code.value != _STILL_ACTIVE:
+            return False, None
+        created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+        if not kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(created),
+            ctypes.byref(exited),
+            ctypes.byref(kernel),
+            ctypes.byref(user),
+        ):
+            return True, None
+        # Creation time in 100 ns steps since 1601, the same for the life of
+        # the process and different for any later process given its PID.
+        return True, f"win:{(created.dwHighDateTime << 32) | created.dwLowDateTime}"
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def process_is_running(pid: int, start_token: object = None) -> bool:
+    """Whether ``pid`` names a process that is still going, and the same one.
+
+    When ``start_token`` is the string ``process_start_token`` gave for the
+    runner, a different process that has since been given the PID counts as
+    gone. Never signals the process.
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    if _WINDOWS:
+        alive, current = _windows_process_state(pid)
+        if not alive:
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        current = process_start_token(pid) if isinstance(start_token, str) else None
+    # Another program got the runner's PID, usually after a restart.
+    return not (isinstance(start_token, str) and current is not None and current != start_token)
+
+
+def process_start_token(pid: int) -> str | None:
+    """Something that tells this process apart from a later one given the same PID.
+
+    A PID is reused once its process ends, often right after a restart, so a run
+    record only names a live runner when this matches too. Linux and Windows;
+    elsewhere the PID check stands alone.
+    """
+    if _WINDOWS:
+        return _windows_process_state(pid)[1]
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    # Field 22, the start time in clock ticks since boot, comes after the
+    # parenthesized command name, which may itself contain spaces or brackets.
+    fields = stat[stat.rfind(")") + 2 :].split()
+    if len(fields) < 20 or not boot_id:
+        return None
+    return f"{boot_id}:{fields[19]}"
+
+
 def effective_run_status(document: Mapping[str, Any]) -> str:
     """A saved status, with a run whose runner is gone reported as interrupted."""
     status = str(document.get("status"))
@@ -103,13 +237,7 @@ def effective_run_status(document: Mapping[str, Any]) -> str:
         return (
             "running" if is_rattish_run_active(str(document.get("run_id", ""))) else "interrupted"
         )
-    if os.name == "nt":
-        # Windows os.kill(pid, 0) terminates a process. A foreign owner
-        # cannot be reconciled by this runner; report unknown instead.
-        return "interrupted"
-    try:
-        os.kill(pid, 0)
-    except (OSError, ProcessLookupError):
+    if not process_is_running(pid, document.get("runner_start")):
         return "interrupted"
     return "running"
 
@@ -124,6 +252,38 @@ RESUMABLE_STATUSES = frozenset({"failed", "stopped", "interrupted"})
 # Errors the reused results themselves cause; replaying them ends the same way.
 _DETERMINISTIC_ERROR_KINDS = frozenset({"workflow_control", "budget", "output_validation"})
 _resuming: set[tuple[str, str]] = set()
+
+
+def is_rattish_run_being_resumed(data_dir: Path, workflow_id: str, run_id: str) -> bool:
+    """Whether any Raticode process is resuming that run now.
+
+    Before the resumed run saves its first record, only its resume claim shows it.
+    """
+    key = (workflow_id, run_id)
+    with _active_rattish_ids_lock:
+        if key in _resuming:
+            return True
+    path = _resume_lock_path(data_dir, key)
+    if sys.platform == "win32" or not path.exists():
+        return False
+    try:
+        descriptor = os.open(path, os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        # flock locks belong to one open file, so this fails while any holder,
+        # this process included, keeps the claim.
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    finally:
+        os.close(descriptor)
+    return False
+
+
+def _resume_lock_path(data_dir: Path, key: tuple[str, str]) -> Path:
+    name = hashlib.sha256("\0".join(key).encode("utf-8")).hexdigest()
+    return data_dir / "radish" / "resume-locks" / f"{name}.lock"
 
 
 def resume_refusal(document: Mapping[str, Any], ir: Mapping[str, Any] | None) -> str | None:
@@ -143,6 +303,11 @@ def resume_refusal(document: Mapping[str, Any], ir: Mapping[str, Any] | None) ->
     if status not in RESUMABLE_STATUSES:
         return "This run can't be resumed."
     error = document.get("error") or {}
+    if error.get("code") in USAGE_LIMIT_CODES:
+        return (
+            "This run ended at its max-tokens or max-cost-usd limit. Raise or remove the "
+            "limit, then start a new run."
+        )
     if (
         error.get("kind") in _DETERMINISTIC_ERROR_KINDS
         or error.get("code") == "RATTISH_RUN_RECORD_INVALID"
@@ -151,15 +316,11 @@ def resume_refusal(document: Mapping[str, Any], ir: Mapping[str, Any] | None) ->
             "This run ended because of how the workflow is built, so resuming it would "
             "end the same way. Fix the workflow and start a new run."
         )
-    if document.get("input_names"):
-        return (
-            "This run was started with inputs, and their values aren't saved. "
-            "Start a new run instead."
-        )
-    if document.get("trigger_event_count"):
-        return (
-            "This run was started by an event whose details aren't saved. Start a new run instead."
-        )
+    # Inputs and trigger events come from the run's saved values (see run_values).
+    # Withheld password inputs don't refuse: whoever resumes gives them again.
+    values_refusal = saved_values_refusal(document)
+    if values_refusal is not None:
+        return values_refusal
     snapshot = document.get("compiled_snapshot")
     if not isinstance(snapshot, Mapping):
         return "This run was saved by an older version of Raticode and can't be resumed."
@@ -202,7 +363,7 @@ def resume_rerun_nodes(document: Mapping[str, Any]) -> list[str]:
             event.get("activation_lineage_id"),
             event.get("run_number"),
         )
-        if event.get("type") in {"node_started", "node_retried"}:
+        if event.get("type") in {"node_started", "node_retried", "node_fell_back"}:
             open_activations[key] = str(event.get("node_id"))
         elif event.get("type") == "node_completed":
             open_activations.pop(key, None)
@@ -277,6 +438,59 @@ async def resume_rattish_run(
             _resuming.discard(key)
 
 
+def rerun_refusal(document: Mapping[str, Any]) -> str | None:
+    """Why this run can't be run again with the same inputs, or None.
+
+    Run again starts a new run of the workflow as it is now, with the run's saved
+    inputs and trigger events. Withheld password inputs don't refuse; the caller
+    gives them again (``withheld_input_names``).
+    """
+    if str(document.get("status")) == "invalid_inputs":
+        return "This run's inputs were invalid, so they weren't saved. Start a new run instead."
+    return saved_values_refusal(document)
+
+
+async def rerun_rattish_run(
+    source_path: Path,
+    document: Mapping[str, Any],
+    *,
+    data_dir: Path | None = None,
+    inputs: Mapping[str, Any] | None = None,
+    **options: Any,
+) -> RattishRunResult:
+    """Run a workflow again with a saved run's inputs and trigger events.
+
+    ``inputs`` holds only the password inputs the run didn't save. The new run
+    uses the current source and records ``rerun_of``. Raises
+    ``RattishResumeRefused`` with the reason when the values can't be used.
+    """
+    refusal = rerun_refusal(document)
+    if refusal is not None:
+        raise RattishResumeRefused(refusal)
+    resolved_data_dir = data_dir or get_data_dir()
+    record = _run_path(
+        resolved_data_dir,
+        str(document["workflow"]["id"]),
+        str(document["run_id"]),
+        source_path=source_path.expanduser().resolve(),
+    )
+    try:
+        saved = read_saved_values(record, document)
+        merged = merge_withheld_inputs(saved, inputs)
+    except SavedValuesUnavailable as exc:
+        raise RattishResumeRefused(str(exc)) from None
+    # A rerun is started by whoever asked for it, even when it replays trigger events.
+    options.setdefault("started_by", "manual")
+    return await run_rattish_file(
+        source_path,
+        data_dir=resolved_data_dir,
+        workflow_inputs=merged,
+        trigger_events=list(saved.trigger_events) or None,
+        rerun_of=str(document["run_id"]),
+        **options,
+    )
+
+
 @contextmanager
 def _resume_claim(data_dir: Path, key: tuple[str, str]) -> Iterator[None]:
     """Hold one run's resume against every Raticode process, not only this one.
@@ -285,10 +499,9 @@ def _resume_claim(data_dir: Path, key: tuple[str, str]) -> Iterator[None]:
     The OS releases a file lock when its holder exits, so a crash never leaves
     the run impossible to resume.
     """
-    root = data_dir / "radish" / "resume-locks"
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    name = hashlib.sha256("\0".join(key).encode("utf-8")).hexdigest()
-    descriptor = os.open(root / f"{name}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    path = _resume_lock_path(data_dir, key)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         try:
             if sys.platform == "win32":
@@ -305,6 +518,98 @@ def _resume_claim(data_dir: Path, key: tuple[str, str]) -> Iterator[None]:
                 msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
     finally:
         os.close(descriptor)
+
+
+# Cross-process stop. The CLI, triggers (`rattish triggers start` or the app's own
+# scheduler), the desktop backend and `rattish run` can each own a run, and only the
+# owner holds its cancel event. Anyone else asks it to stop with a marker file beside
+# the run record; the owner's stop watcher sees it and ends the run as "stopped".
+_STOP_MARKER_POLL_SECONDS = 0.25
+_STOP_SCAN_LIMIT = 200
+_RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def run_stop_marker(record: Path) -> Path:
+    """The stop request file for the run saved at ``record``."""
+    # Writes and removals refuse linked parents, so name the folder by its real path.
+    return record.parent.resolve() / f"{record.stem}.stop"
+
+
+def run_stop_requested(record: Path) -> bool:
+    """Whether some process has asked the run saved at ``record`` to stop."""
+    try:
+        return run_stop_marker(record).is_file()
+    except OSError:
+        return False
+
+
+def _clear_run_stop(record: Path) -> None:
+    try:
+        unlink_without_links(run_stop_marker(record))
+    except OSError:
+        pass
+
+
+def _record_is_running(record: Path) -> bool:
+    try:
+        document = json.loads(record.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return isinstance(document, dict) and effective_run_status(document) == "running"
+
+
+def request_run_stop(record: Path) -> bool:
+    """Ask the run saved at ``record`` to stop, whichever process runs it.
+
+    Returns False when the run isn't going. The owner removes the marker after it
+    saves its final record, so a request that races the run's own ending is
+    withdrawn here rather than left behind.
+    """
+    if not _record_is_running(record):
+        return False
+    with atomic_binary_output(run_stop_marker(record)) as output:
+        output.write(b"stop requested\n")
+    if _record_is_running(record):
+        return True
+    _clear_run_stop(record)
+    return False
+
+
+def rattish_run_directory(data_dir: Path, workflow_id: str) -> Path:
+    """Where a workflow's run records are saved, found by workflow ID alone."""
+    from gofer.core.workflow import validate_workflow_id
+
+    safe_id = validate_workflow_id(workflow_id)
+    base = data_dir.expanduser().resolve()
+    directory = workflow_owned_directory(safe_id, base, "logs")
+    return directory if directory is not None else base / "radish" / "runs" / safe_id
+
+
+def stop_rattish_runs(data_dir: Path, workflow_id: str, run_id: str | None = None) -> list[str]:
+    """Ask one run, or every running run, of a workflow to stop; return the IDs asked.
+
+    Works without a backend: it only reads run records and writes stop markers.
+    Raises ValueError for an invalid workflow or run ID.
+    """
+    directory = rattish_run_directory(data_dir, workflow_id)
+    if run_id is not None:
+        if not _RUN_ID_PATTERN.fullmatch(run_id):
+            raise ValueError(f"Invalid run ID {run_id!r}.")
+        records = [directory / f"{run_id}.json"]
+    else:
+        try:
+            records = sorted(directory.glob("*.json"), reverse=True)[:_STOP_SCAN_LIMIT]
+        except OSError:
+            records = []
+    return [record.stem for record in records if request_run_stop(record)]
+
+
+@contextmanager
+def _clearing_run_stop(record: Path) -> Iterator[None]:
+    try:
+        yield
+    finally:
+        _clear_run_stop(record)
 
 
 @contextmanager
@@ -333,11 +638,25 @@ async def run_rattish_file(
     on_started: Callable[[RattishRunResult], None] | None = None,
     expected_revision: str | None = None,
     resume_from: Mapping[str, Any] | None = None,
+    started_by: StartedBy | None = None,
+    resume_inputs: Mapping[str, Any] | None = None,
+    rerun_of: str | None = None,
+    use_result_cache: bool = True,
 ) -> RattishRunResult:
     """Run one source file through the same boundary used by CLI and Studio.
 
-    Use ``resume_rattish_run`` to pass ``resume_from``, the saved run to resume.
+    Use ``resume_rattish_run`` to pass ``resume_from``, the saved run to resume, and
+    ``resume_inputs``, the password inputs that run didn't save. ``rerun_rattish_run``
+    passes ``rerun_of``. Every run saves its inputs and trigger events beside its
+    record (see ``run_values``) so it can be resumed or run again.
+    ``started_by`` records how the run started (see ``STARTED_BY``); without it, a
+    run with trigger events counts as triggered and any other as manual.
+    ``use_result_cache=False`` runs every node even when it has ``cache:``; test sets
+    use it so a case always checks fresh answers.
     """
+    origin: StartedBy = started_by or ("trigger" if trigger_events else "manual")
+    if origin not in STARTED_BY:
+        raise ValueError(f"Unknown run origin {origin!r}.")
     started_at = datetime.now(UTC).isoformat()
     started_clock = time.monotonic()
     resolved_data_dir = data_dir or get_data_dir()
@@ -354,6 +673,20 @@ async def run_rattish_file(
         refusal = resume_refusal(resume_from, compiled.ir)
         if refusal is not None:
             raise RattishResumeRefused(refusal)
+        earlier_record = _run_path(
+            resolved_data_dir,
+            compiled.ir["workflow"]["id"],
+            str(resume_from["run_id"]),
+            source_path=compiled.source_path,
+        )
+        try:
+            saved = read_saved_values(earlier_record, resume_from)
+            workflow_inputs = merge_withheld_inputs(saved, resume_inputs)
+        except SavedValuesUnavailable as exc:
+            raise RattishResumeRefused(str(exc)) from None
+        trigger_events = saved.trigger_events or None
+    elif resume_inputs:
+        raise ValueError("resume_inputs only applies to a resumed run.")
     resumed: dict[str, Any] | None = (
         {"run_id": str(resume_from["run_id"]), "rerun_nodes": resume_rerun_nodes(resume_from)}
         if resume_from is not None
@@ -371,14 +704,34 @@ async def run_rattish_file(
         handlers=runtime_handlers,
     )
     run_id = run_id or new_run_id()
-    with _track_rattish_run(run_id):
+    usage = RunUsageMeter.for_ir(compiled.ir, run_id)
+    path = _run_path(
+        resolved_data_dir,
+        compiled.ir["workflow"]["id"],
+        run_id,
+        source_path=compiled.source_path,
+    )
+    # Exits after the final record is saved, so a stop request never outlives its run.
+    with _track_rattish_run(run_id), _clearing_run_stop(path):
         supplied_inputs = dict(workflow_inputs or {})
-        path = _run_path(
-            resolved_data_dir,
-            compiled.ir["workflow"]["id"],
-            run_id,
-            source_path=compiled.source_path,
-        )
+        values, values_summary = plan_saved_values(compiled.ir, supplied_inputs, trigger_events)
+        values_written = False
+
+        def save_values() -> None:
+            # Before the live record, so an interrupted run can still be resumed.
+            nonlocal values_written, values_summary
+            if values is None or values_written:
+                return
+            try:
+                write_saved_values(path, run_id, values)
+                values_written = True
+            except OSError as exc:
+                assert values_summary is not None
+                values_summary = {
+                    **values_summary,
+                    "saved": False,
+                    "reason": f"They couldn't be written: {exc.strerror or exc}.",
+                }
 
         execution: WorkflowExecutionResult | None = None
         live: dict[str, Any] | None = None
@@ -387,6 +740,7 @@ async def run_rattish_file(
         if deployment.ready:
             try:
                 _prepare_workflow_inputs(compiled.ir, supplied_inputs)
+                save_values()
                 live = _run_document(
                     run_id=run_id,
                     status="running",
@@ -400,9 +754,16 @@ async def run_rattish_file(
                     duration_ms=0,
                     resumed=resumed,
                     trigger_event_count=len(trigger_events or ()),
+                    usage=usage,
+                    started_by=origin,
+                    saved_values=values_summary,
+                    rerun_of=rerun_of,
                 )
                 live["events"] = live["events"][:1]
                 live["runner_pid"] = os.getpid()
+                runner_start = process_start_token(os.getpid())
+                if runner_start is not None:
+                    live["runner_start"] = runner_start
                 _write_json_atomic(path, live)
                 if on_started is not None:
                     on_started(RattishRunResult(live, path, compiled, deployment))
@@ -419,6 +780,7 @@ async def run_rattish_file(
                         live["runs"].append(_node_run_document(record))
                         if record.result.outcome == "success":
                             live["latest_node_outputs"][record.node_id] = record.result.output
+                    live["usage"] = usage.snapshot()
                     live["duration_ms"] = round((time.monotonic() - started_clock) * 1000)
                     try:
                         _write_json_atomic(path, live)
@@ -433,16 +795,32 @@ async def run_rattish_file(
                             f"to the run record: {exc}"
                         ) from exc
 
+                stop_seen = False
+
+                def stop_wanted(*, check_marker: bool) -> bool:
+                    nonlocal stop_seen
+                    if (cancel_event is not None and cancel_event.is_set()) or (
+                        check_marker and run_stop_requested(path)
+                    ):
+                        stop_seen = True
+                    return stop_seen
+
                 async def watch_stop(scope: anyio.CancelScope) -> None:
-                    while cancel_event is not None and not cancel_event.is_set():
+                    # The cancel event is this process's Stop; the marker is anyone else's.
+                    next_marker_check = 0.0
+                    while True:
+                        now = time.monotonic()
+                        check_marker = now >= next_marker_check
+                        if check_marker:
+                            next_marker_check = now + _STOP_MARKER_POLL_SECONDS
+                        if stop_wanted(check_marker=check_marker):
+                            break
                         await anyio.sleep(0.05)
-                    if cancel_event is not None:
-                        scope.cancel()
+                    scope.cancel()
 
                 async with anyio.create_task_group() as group:
-                    if cancel_event is not None:
-                        group.start_soon(watch_stop, group.cancel_scope)
-                    if cancel_event is None or not cancel_event.is_set():
+                    group.start_soon(watch_stop, group.cancel_scope)
+                    if not stop_wanted(check_marker=True):
                         execution = await execute_workflow(
                             compiled.ir,
                             workflow_inputs=supplied_inputs,
@@ -455,9 +833,13 @@ async def run_rattish_file(
                             on_node_event=publish_node_event,
                             replay=list((resume_from or {}).get("runs") or []),
                             replay_source=resumed["run_id"] if resumed else None,
+                            usage_meter=usage,
+                            result_cache=(
+                                ResultCache(resolved_data_dir) if use_result_cache else None
+                            ),
                         )
                     group.cancel_scope.cancel()
-                stopped = execution is None and cancel_event is not None and cancel_event.is_set()
+                stopped = execution is None and stop_seen
             except InvalidRattishWorkflowInputError as exc:
                 input_error = RuntimeErrorInfo(
                     "configuration",
@@ -479,6 +861,9 @@ async def run_rattish_file(
 
         finished_at = datetime.now(UTC).isoformat()
         status = "stopped" if stopped else _run_status(deployment, execution, input_error)
+        if status == "preflight_failed":
+            # Its inputs were never checked; keep them so it can run again once fixed.
+            save_values()
         _cancel_pending_approvals(resolved_data_dir, compiled.ir["workflow"]["id"], run_id, status)
         document = _run_document(
             run_id=run_id,
@@ -493,6 +878,11 @@ async def run_rattish_file(
             duration_ms=round((time.monotonic() - started_clock) * 1000),
             resumed=resumed,
             trigger_event_count=len(trigger_events or ()),
+            usage=usage,
+            started_by=origin,
+            # Invalid inputs aren't kept: there is nothing to resume or run again.
+            saved_values=None if status == "invalid_inputs" else values_summary,
+            rerun_of=rerun_of,
         )
         if live is not None:
             # Keep the observed event order and completed work even after cancellation.
@@ -539,7 +929,29 @@ async def run_rattish_file(
                 )
             )
             _write_json_atomic(path, document)
+        await _apply_retention_after_run(
+            resolved_data_dir, compiled.ir["workflow"]["id"], path, run_id
+        )
+        # Saved inputs of runs deleted without delete_run_files go now.
+        remove_orphaned_values(path.parent)
         return RattishRunResult(document, path, compiled, deployment)
+
+
+async def _apply_retention_after_run(
+    data_dir: Path, workflow_id: str, path: Path, run_id: str
+) -> None:
+    """Clean up old runs of this workflow under its saved retention settings.
+
+    Runs once the final record is saved, for runs started from anywhere. The run
+    that just settled is kept, since its caller still reads its record. Shielded
+    so a stopped run still settles and still returns its result.
+    """
+    from gofer.rattish.run_retention import apply_run_retention
+
+    with anyio.CancelScope(shield=True):
+        await anyio.to_thread.run_sync(
+            lambda: apply_run_retention(data_dir, workflow_id, path.parent, keep_run_ids=(run_id,))
+        )
 
 
 def _cancel_pending_approvals(data_dir: Path, workflow_id: str, run_id: str, status: str) -> None:
@@ -616,6 +1028,10 @@ def _run_document(
     duration_ms: int,
     resumed: dict[str, Any] | None = None,
     trigger_event_count: int = 0,
+    usage: RunUsageMeter | None = None,
+    started_by: StartedBy | None = None,
+    saved_values: Mapping[str, Any] | None = None,
+    rerun_of: str | None = None,
 ) -> dict[str, Any]:
     ir = compiled.ir
     runs = [_node_run_document(record) for record in execution.runs] if execution else []
@@ -670,6 +1086,14 @@ def _run_document(
         "error": _runtime_error_document(error),
         "trigger_event_count": trigger_event_count,
     }
+    if usage is not None:
+        document["usage"] = usage.snapshot()
+    if started_by is not None:
+        document["started_by"] = started_by
+    if saved_values is not None:
+        document["saved_values"] = dict(saved_values)
+    if rerun_of is not None:
+        document["rerun_of"] = rerun_of
     if resumed is not None:
         document["resumed_from"] = dict(resumed)
     return document
@@ -690,6 +1114,14 @@ def _node_run_document(record: NodeRunRecord) -> dict[str, Any]:
     }
     if record.reused_from is not None:
         document["reused_from_run_id"] = record.reused_from
+    if record.result.cached_at is not None:
+        document["cached_at"] = record.result.cached_at
+    if record.result.provider is not None:
+        document["provider"] = dict(record.result.provider)
+    if record.result.fallbacks:
+        document["fallbacks"] = [dict(item) for item in record.result.fallbacks]
+    if record.usage is not None:
+        document["usage"] = dict(record.usage)
     return document
 
 

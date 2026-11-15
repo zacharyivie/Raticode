@@ -7,7 +7,8 @@ import { focusRemComposer } from "./remHomeStore.js";
 // to another plugin. It stays out of the Rem store so typing doesn't re-render
 // the sidebar, and out of App's chunk because only Rem's view needs it.
 // replyTo is the preview of the message being replied to, sent as refers_to.
-const emptyComposer = () => ({ draft: "", attachments: [], error: "", replyTo: null });
+// screen is a screenshot for this one message (screenContext.js), kept only in memory.
+const emptyComposer = () => ({ draft: "", attachments: [], error: "", replyTo: null, screen: null });
 let composer = emptyComposer();
 let appliedRequest = 0;
 const listeners = new Set();
@@ -50,6 +51,7 @@ export function applyRemComposerRequest(request) {
   appliedRequest = request.id;
   if (typeof request.text === "string") updateRemComposer({ draft: request.text });
   if (request.attachments?.length) updateRemComposer({ attachments: request.attachments });
+  if (request.screen) updateRemComposer({ screen: request.screen });
   if ("replyTo" in request) updateRemComposer({ replyTo: request.replyTo || null });
   return true;
 }
@@ -58,4 +60,9 @@ export function applyRemComposerRequest(request) {
 export function replyToRemMessage(reference) {
   updateRemComposer({ replyTo: reference });
   focusRemComposer();
+}
+
+// A screenshot for the next message replaces any earlier one: one picture per message.
+export function setRemScreen(screen) {
+  updateRemComposer({ screen: screen || null, error: "" });
 }

@@ -52,6 +52,11 @@ def plan_worktree(
         base = _git(project, "rev-parse", "--verify", "HEAD")
     except WorktreeError:
         return None
+    try:
+        # The branch the work came from: accepting the ticket lands it there.
+        base_branch = _git(project, "symbolic-ref", "--short", "-q", "HEAD")
+    except WorktreeError:
+        base_branch = ""
     slug = re.sub(r"[^a-z0-9]+", "-", str(run["recipe"].get("title") or "task").lower())
     slug = slug.strip("-")[:40] or "task"
     checkout = data_dir / folder / str(run["id"])
@@ -61,14 +66,18 @@ def plan_worktree(
         "repository": str(top),
         "branch": f"{branch_prefix}/{slug}-{str(run['id'])[:8]}",
         "base": base,
+        **({"base_branch": base_branch} if base_branch else {}),
     }
 
 
-def ensure_worktree(worktree: dict[str, str]) -> None:
-    """Create the checkout, reusing its branch when Rem restarts mid-run."""
+def ensure_worktree(worktree: dict[str, str]) -> bool:
+    """Create the checkout, reusing its branch when Rem restarts mid-run.
+
+    Returns True when it made a new checkout, which then needs the project's setup.
+    """
     checkout = Path(worktree["checkout"])
     if checkout.exists():
-        return
+        return False
     checkout.parent.mkdir(parents=True, exist_ok=True)
     repository = worktree["repository"]
     _git(repository, "worktree", "prune")
@@ -85,6 +94,7 @@ def ensure_worktree(worktree: dict[str, str]) -> None:
             str(checkout),
             worktree["base"],
         )
+    return True
 
 
 def release_worktree(worktree: dict[str, str], title: str, *, label: str = "Rem") -> str:
@@ -131,5 +141,6 @@ def release_worktree(worktree: dict[str, str], title: str, *, label: str = "Rem"
         return ""
     return (
         f"Another task was changing this project at the same time, so this work ran in a "
-        f"temporary worktree. Its changes are on branch {branch}; merge it when you're ready."
+        f"temporary worktree. Its changes are on branch {branch}. Review and land them from "
+        "the task's ticket on the Kanban board, or merge the branch yourself."
     )

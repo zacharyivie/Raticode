@@ -302,6 +302,8 @@ def test_release_security_gates_are_mandatory_and_publish_provenance() -> None:
     assert "--locked" in build["Install Python dependencies"]["run"]
     filesystem_tests = build["Test platform filesystem security"]
     assert "test_native_filesystem_security.py" in filesystem_tests["run"]
+    # The only place the Windows run liveness check meets a real Windows process.
+    assert "test_rattish_process_liveness.py" in filesystem_tests["run"]
     native_tests = build["Test native terminal and Electron security on packaged runtime version"]
     assert native_tests["run"] == "npm run test:platform"
     assert "if" not in native_tests

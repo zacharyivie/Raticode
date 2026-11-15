@@ -64,7 +64,7 @@ function setup(options = {}) {
   const states = [];
   const gecko = createGeckoWindow({
     dataDir,
-    getWindow: () => window,
+    getWindow: options.getWindow ? (host) => options.getWindow(host, window) : () => window,
     createClient: () => client,
     findExecutable: () => "/usr/bin/firefox",
     findProfiles: options.findProfiles || (() => []),
@@ -175,6 +175,35 @@ test("the window follows the slot, hides when asked, and reports its screen posi
   client.emit("event", unmapped(77));
   await gecko.handle("place", { x: 0, y: 0, width: 400, height: 300, visible: true });
   assert.deepEqual(client.named("map").at(-1), ["map", 77]);
+  gecko.close();
+});
+
+test("Firefox's window follows the Browser into its own window and back without restarting", async (t) => {
+  const popout = Object.assign(new EventEmitter(), { isDestroyed: () => false, getNativeWindowHandle: () => { const b = Buffer.alloc(4); b.writeUInt32LE(600, 0); return b; } });
+  let popoutOpen = true;
+  const context = setup({ getWindow: (host, main) => (host === "popout" && popoutOpen ? popout : main) });
+  t.after(context.done);
+  await started(context);
+  const { client, gecko, processes } = context;
+  client.emit("event", mapped(77));
+  assert.deepEqual(client.named("reparent").at(-1).slice(0, 3), ["reparent", 77, HOST]);
+  await gecko.handle("place", { x: 0, y: 36, width: 800, height: 600, visible: true, host: "popout" });
+  assert.deepEqual(client.named("reparent").at(-1), ["reparent", 77, 600, 0, 36]);
+  assert.equal(gecko.parentWindow, 600);
+  // Placing again in the same window doesn't move it again.
+  const moves = client.named("reparent").length;
+  await gecko.handle("place", { x: 0, y: 40, width: 800, height: 600, visible: true, host: "popout" });
+  assert.equal(client.named("reparent").length, moves);
+  // Before the Browser's window closes, Firefox's window goes back to Raticode's, hidden.
+  await gecko.rehost("main");
+  assert.deepEqual(client.named("reparent").at(-1).slice(0, 3), ["reparent", 77, HOST]);
+  assert.deepEqual(client.named("unmap").at(-1), ["unmap", 77]);
+  // A late message naming the closing window can't pull it back in.
+  popoutOpen = false;
+  await gecko.handle("place", { visible: false, host: "popout" });
+  assert.equal(gecko.parentWindow, HOST);
+  assert.equal(processes.length, 1, "Firefox never restarted");
+  assert.deepEqual(processes[0].signals, []);
   gecko.close();
 });
 

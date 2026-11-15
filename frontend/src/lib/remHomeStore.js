@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { apiUrl } from "./api.js";
 import { uploadChatAttachments } from "./chatAttachments.js";
+import { encodeScreen } from "./screenContext.js";
 import { startPolling } from "./refresh.js";
 import { conversationRepository } from "./conversationRepository.js";
 import { mergeInServerOrder } from "./conversationCache.js";
@@ -22,7 +23,10 @@ function sameTickets(next, current) {
 function initialState() {
   // chatTickets and taskTickets: board tickets named in chat and on task cards, by key,
   // as the board has them now. Only these keys show as ticket pills.
-  return { status: "loading", error: "", contextIssue: "", conversation: null, messages: [], tasks: [], chatTickets: NO_TICKETS, taskTickets: NO_TICKETS, fixture: false, resetting: false, notice: "", sheet: null, composerRequest: null, messageRequest: null };
+  // messages: what the chat shows, oldest first: `older` (pages read with Show earlier
+  // messages), then the server's newest window, then unsent messages. `earlier` counts
+  // the stored messages before the first one shown; olderTickets are the pages' tickets.
+  return { status: "loading", error: "", contextIssue: "", conversation: null, messages: [], older: [], earlier: 0, loadingEarlier: false, tasks: [], chatTickets: NO_TICKETS, taskTickets: NO_TICKETS, olderTickets: NO_TICKETS, fixture: false, resetting: false, notice: "", sheet: null, composerRequest: null, messageRequest: null };
 }
 
 // Files attached in Rem's chat upload to this chat attachment thread.
@@ -47,6 +51,10 @@ const threadSyncFailures = new Map();
 // "unchanged" for a matching version, so a poll while nothing happens downloads,
 // parses and re-renders nothing. Older backends send no version.
 let versions = { conversation: "", tasks: "" };
+// The newest messages the server last sent (GET /api/rem/conversation sends only these).
+// When the window moves on while earlier pages are loaded, the messages it let go of
+// join `older`, so no gap opens between the pages and the window.
+let serverWindow = [];
 const threadVersions = new Map();
 // Task threads last seen running, so a finish between polls still counts as completion.
 const runningThreads = new Set();
@@ -236,9 +244,7 @@ export async function refreshRemHome() {
         error: "",
         ...(conversation.unchanged ? {} : {
           conversation: conversation.conversation ?? current.conversation,
-          // Keep optimistic messages until the server reports their request. Messages sent
-          // while Rem was replying, from here or a phone, wait on the server and show as waiting.
-          messages: mergeMessages([...(conversation.messages ?? []), ...(conversation.waiting ?? []).map(message => ({ ...message, pending: true, waiting: true }))], current.messages),
+          ...windowedMessages(conversation, current),
           chatTickets: sameTickets(conversation.tickets, current.chatTickets),
         }),
         ...(tasks.unchanged ? {} : { tasks: mergeTasks(tasks.tasks ?? [], current.tasks), taskTickets: sameTickets(tasks.tickets, current.taskTickets) }),
@@ -309,6 +315,71 @@ export function mergeTasks(server, current = []) {
     return old && JSON.stringify(old) === JSON.stringify(task) ? old : task;
   });
 }
+// The chat after a poll: earlier pages that are still next to the server's window, the
+// window, then messages waiting on the server and unsent ones.
+function windowedMessages(conversation, current) {
+  const window = conversation.messages ?? [];
+  const inWindow = new Set(window.map(message => message.id));
+  // History cleared elsewhere (another window or a phone) starts a new conversation.
+  const cleared = Boolean(current.conversation?.id && conversation.conversation?.id && conversation.conversation.id !== current.conversation.id);
+  let older = cleared ? [] : current.older;
+  let earlier = Number(conversation.earlier) || 0;
+  if (older.length) {
+    // Messages the window moved past stay, oldest first, after the loaded pages.
+    const start = window.length ? serverWindow.findIndex(message => message.id === window[0].id) : serverWindow.length;
+    if (start < 0) {
+      // So much arrived at once that the window skipped past what was loaded; start over.
+      older = [];
+    } else {
+      const kept = new Set(older.map(message => message.id));
+      older = [...older, ...serverWindow.slice(0, start).filter(message => !inWindow.has(message.id) && !kept.has(message.id))]
+        .filter(message => !inWindow.has(message.id));
+      earlier = current.earlier;
+    }
+  }
+  serverWindow = window;
+  // Keep optimistic messages until the server reports their request. Messages sent
+  // while Rem was replying, from here or a phone, wait on the server and show as waiting.
+  const server = [...older, ...window, ...(conversation.waiting ?? []).map(message => ({ ...message, pending: true, waiting: true }))];
+  return { older, earlier, messages: mergeMessages(server, current.messages), ...(older.length ? {} : { olderTickets: NO_TICKETS }) };
+}
+
+// Reads the page of Rem's chat before the oldest message shown (GET /api/rem/history,
+// the desktop's side of the phone's rem.history). With `through`, pages back until that
+// message is shown, such as a search result. Returns whether anything was added.
+export async function loadEarlierRemMessages({ through = null } = {}) {
+  if (state.fixture || state.resetting || state.loadingEarlier || !state.earlier) return false;
+  const generation = historyGeneration;
+  set({ loadingEarlier: true });
+  let added = 0;
+  try {
+    while (state.earlier > 0 && !(through && state.messages.some(message => message.id === through))) {
+      const first = state.messages.find(message => !message.pending && !message.failed);
+      if (!first) break;
+      const params = new URLSearchParams({ before: first.id });
+      if (through) params.set("through", through);
+      const page = await request(`/history?${params}`);
+      if (generation !== historyGeneration || state.resetting) return false;
+      const fresh = (page.messages ?? []).filter(message => !state.messages.some(shown => shown.id === message.id));
+      added += fresh.length;
+      set(current => ({
+        ...current,
+        older: [...fresh, ...current.older],
+        messages: [...fresh, ...current.messages],
+        earlier: Number(page.earlier) || 0,
+        olderTickets: page.tickets && Object.keys(page.tickets).length ? { ...current.olderTickets, ...page.tickets } : current.olderTickets,
+      }));
+      // A page that adds nothing would ask for the same page again.
+      if (!through || !fresh.length) break;
+    }
+  } catch (error) {
+    if (generation === historyGeneration) notify(error.status === 404 ? "That part of Rem's chat is no longer stored." : `Couldn't load earlier messages. ${error.message}`);
+  } finally {
+    if (generation === historyGeneration) set({ loadingEarlier: false });
+  }
+  return added > 0;
+}
+
 function mergeMessages(server, current) {
   const known = new Set(server.map(message => message.request_id).filter(Boolean));
   // Messages the server didn't change keep their objects, so their rows stay cached.
@@ -375,12 +446,16 @@ async function command(run, failure, conflict = "") {
 }
 
 // `reference` is the preview of the message this one replies to (replyTarget in remRich.js).
-export async function sendRemMessage(body, attachments = [], retryId = null, reference = null) {
+// `screen` is a screenshot from Show Rem your screen (screenContext.js). It is held here
+// only until Rem accepts the message, so Try again can send it again; Rem uses it for one
+// reply and the message keeps only its name (screen_capture).
+export async function sendRemMessage(body, attachments = [], retryId = null, reference = null, screen = null) {
   const text = body.trim();
-  if (!text && !attachments.length) return false;
+  if (!text && !attachments.length && !screen) return false;
   const id = retryId || requestId("rem-msg");
   const link = reference?.id ? { refers_to: reference.id, referenced: reference } : {};
-  const pending = { id, request_id: id, role: "user", body: text, created_at: new Date().toISOString(), pending: true, ...(attachments.length ? { attachments } : {}), ...link };
+  const shown = screen ? { screen, screen_capture: screen.name } : {};
+  const pending = { id, request_id: id, role: "user", body: text, created_at: new Date().toISOString(), pending: true, ...(attachments.length ? { attachments } : {}), ...shown, ...link };
   set(current => ({ ...current, messages: [...current.messages, pending] }));
   if (state.fixture) {
     set(current => ({
@@ -396,12 +471,14 @@ export async function sendRemMessage(body, attachments = [], retryId = null, ref
     // Uploaded references replace local files, so a retry doesn't upload them again.
     const uploaded = await uploadChatAttachments(attachments, REM_ATTACHMENT_THREAD);
     if (uploaded !== attachments) patchMessage(id, { attachments: uploaded });
-    const payload = { request_id: id, body: text, ...(uploaded.length ? { attachments: uploaded } : {}), ...(link.refers_to ? { refers_to: link.refers_to } : {}) };
+    const payload = { request_id: id, body: text, ...(uploaded.length ? { attachments: uploaded } : {}), ...(link.refers_to ? { refers_to: link.refers_to } : {}), ...(screen ? { screen_image: await encodeScreen(screen) } : {}) };
     return whenRemIsFree(id, () => request("/messages", { method: "POST", body: payload }));
   }, "Rem didn't get that."));
   sendQueue = turn.catch(() => {});
   const result = await turn;
   if (!result) patchMessage(id, { pending: false, waiting: false, failed: true });
+  // Rem has the picture now; this window lets go of it.
+  else if (screen) patchMessage(id, { screen: null });
   return Boolean(result);
 }
 
@@ -433,14 +510,14 @@ export function retryRemMessage(id) {
   const message = state.messages.find(item => item.id === id);
   if (!message) return;
   set(current => ({ ...current, messages: current.messages.filter(item => item.id !== id) }));
-  void sendRemMessage(message.body, message.attachments || [], message.request_id || message.id, message.referenced);
+  void sendRemMessage(message.body, message.attachments || [], message.request_id || message.id, message.referenced, message.screen || null);
 }
 
 // Moves an unsent message back into the composer to change it before sending.
 export function editRemMessage(id) {
   const message = state.messages.find(item => item.id === id);
   if (!message) return;
-  set(current => ({ ...current, messages: current.messages.filter(item => item.id !== id), composerRequest: { text: message.body, attachments: message.attachments || [], replyTo: message.referenced || null, id: ++sequence } }));
+  set(current => ({ ...current, messages: current.messages.filter(item => item.id !== id), composerRequest: { text: message.body, attachments: message.attachments || [], replyTo: message.referenced || null, screen: message.screen || null, id: ++sequence } }));
 }
 
 export async function sendManagedRemInstruction(threadId, body) {
@@ -574,6 +651,7 @@ export async function clearRemHistory() {
     storage.setItem("gofer-flow-chat-threads", JSON.stringify(index.filter(entry => !removed.has(entry.id))));
     configuredContext = "";
     versions = { conversation: "", tasks: "" };
+    serverWindow = [];
     contextPending = Promise.resolve();
     pendingClear = null;
     storage.removeItem("gofer-flow-rem-reset-pending");
@@ -603,13 +681,14 @@ export async function openRemThread(threadId) {
   window.dispatchEvent(new CustomEvent("gofer:rem-open-thread", { detail: { threadId } }));
 }
 
-export function resetRemHomeStore() { ++historyGeneration; stopPolling?.(); stopPolling = null; state = initialState(); configuredContext = ""; versions = { conversation: "", tasks: "" }; threadVersions.clear(); mirroredThreads.clear(); finishedThreadVersions.clear(); runningThreads.clear(); clearedThreads.clear(); pendingClear = null; emit(); }
+export function resetRemHomeStore() { ++historyGeneration; stopPolling?.(); stopPolling = null; state = initialState(); configuredContext = ""; versions = { conversation: "", tasks: "" }; serverWindow = []; threadVersions.clear(); mirroredThreads.clear(); finishedThreadVersions.clear(); runningThreads.clear(); clearedThreads.clear(); pendingClear = null; emit(); }
 // Explicit fixtures for tests, the visual harness and development previews.
 // Production never seeds sample tasks or messages.
 export async function loadRemHomeFixture(scene = "busy") {
   stopPolling?.();
   stopPolling = null;
   versions = { conversation: "", tasks: "" };
+  serverWindow = [];
   const sample = await import("./remHomeSample.js");
   set({ ...initialState(), status: "ready", fixture: true, ...sample.remHomeScene(scene) });
 }

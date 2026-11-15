@@ -4,16 +4,20 @@ import org.json.JSONObject
 
 /**
  * One thing for this phone's alerts. [kind] is `reply` or `task_update` for Rem's chat messages, `proposals` for one self-work
- * round's batch and `organization` for an organization's task. [reason] is the alert switch it counts under, empty when it
- * counts because this phone asked for the work.
+ * round's batch, `organization` for an organization's task and `workflow` for a message a workflow sent to the phone. [reason] is
+ * the alert switch it counts under, empty when it counts because this phone asked for the work. A workflow message names its
+ * [workflowId] and [runId], which a tap opens. [moreFromRun] is set on a run's one "And N more from this run" notice: N, the
+ * messages past the desktop's per-run cap that it stands for.
  */
-data class RemNotice(val id: String, val kind: String, val body: String, val createdAt: String, val title: String, val needsUser: Boolean, val reason: String = "")
+data class RemNotice(val id: String, val kind: String, val body: String, val createdAt: String, val title: String, val needsUser: Boolean, val reason: String = "",
+                     val workflowId: String = "", val runId: String = "", val workflowName: String = "", val moreFromRun: Int = 0)
 
 /**
  * The desktop's `rem.notices` answer. [cursor] is the last message position it read; [more] means read again at once.
  * [mark] is the desktop's opaque position in everything that isn't a Rem chat message; empty when the read carried no filter.
+ * [dropped] counts workflow messages the desktop deleted, to keep its newest 500, before this phone read them.
  */
-data class RemNotices(val cursor: Long, val notices: List<RemNotice>, val skipped: Int, val more: Boolean, val mark: String = "")
+data class RemNotices(val cursor: Long, val notices: List<RemNotice>, val skipped: Int, val more: Boolean, val mark: String = "", val dropped: Int = 0)
 
 /**
  * What Rem's chat alerts say. The desktop picks which messages count; the phone decides what an alert shows.
@@ -25,7 +29,8 @@ object RemNoticeText {
     /** Messages kept in one alert's history, including the user's replies. */
     const val HISTORY = 12
     private const val MARK_MAX = 256
-    private val KINDS = setOf("task_update", "proposals", "organization")
+    private const val COUNT_MAX = 1_000_000
+    private val KINDS = setOf("task_update", "proposals", "organization", RemAlertRules.WORKFLOW)
 
     /**
      * The `rem.notices` request. Only a desktop whose overview advertises the filter gets [include] or [mark], and only while
@@ -47,19 +52,29 @@ object RemNoticeText {
         val list = json.optJSONArray("notices")
         val notices = (0 until minOf(list?.length() ?: 0, MAX)).map { list!!.getJSONObject(it) }.map {
             val kind = it.optString("kind").takeIf { name -> name in KINDS } ?: "reply"
-            val reason = if (kind == "proposals") RemAlertRules.PROPOSALS else it.optString("reason").takeIf { name -> name in RemAlertRules.FILTERS }.orEmpty()
+            val reason = when (kind) {
+                "proposals" -> RemAlertRules.PROPOSALS
+                RemAlertRules.WORKFLOW -> RemAlertRules.WORKFLOW
+                else -> it.optString("reason").takeIf { name -> name in RemAlertRules.FILTERS }.orEmpty()
+            }
+            val workflow = kind == RemAlertRules.WORKFLOW
             RemNotice(it.getString("id").take(128), kind, it.optString("body").take(1500), it.optString("created_at").take(80),
-                it.optString("title").take(160), it.optBoolean("needs_user"), reason)
+                it.optString("title").take(160), it.optBoolean("needs_user") && !workflow, reason,
+                if (workflow) it.optString("workflow_id").take(200) else "", if (workflow) it.optString("run_id").take(128) else "",
+                if (workflow) it.optString("workflow_name").take(160) else "",
+                if (workflow) it.optInt("more_from_run").coerceIn(0, COUNT_MAX) else 0)
         }
         // An opaque position can't be shortened, so one that is too long counts as none.
         val mark = (json.opt("mark") as? String)?.takeIf { it.length <= MARK_MAX }.orEmpty()
-        return RemNotices(cursor, notices, json.optInt("skipped").coerceIn(0, 100_000), json.optBoolean("more"), mark)
+        return RemNotices(cursor, notices, json.optInt("skipped").coerceIn(0, 100_000), json.optBoolean("more"), mark,
+            json.optInt("dropped").coerceIn(0, COUNT_MAX))
     }
 
     /** The alert line for one message. */
     fun line(notice: RemNotice, showText: Boolean): String {
         val generic = when {
             notice.kind == "proposals" -> "Proposals are waiting"
+            notice.kind == RemAlertRules.WORKFLOW -> RemAlertRules.WORKFLOW_GENERIC
             notice.reason == RemAlertRules.NEEDS_YOU -> "A task needs you"
             notice.reason == RemAlertRules.FINISHED -> "A task finished"
             notice.kind == "task_update" && notice.needsUser -> "A task needs you"
@@ -96,14 +111,19 @@ object RemNoticeText {
     fun millis(createdAt: String): Long? = runCatching { java.time.OffsetDateTime.parse(createdAt).toInstant().toEpochMilli() }.getOrNull()
 }
 
-/** Drops queued `rem.notices` reads that carry the filter, for a desktop that has stopped advertising it. */
-internal fun dropQueuedNoticeFilters(state: JSONObject): Boolean {
+/**
+ * Drops queued `rem.notices` reads that carry the filter, for a desktop that has stopped advertising it. With [workflowOnly],
+ * drops only the reads that name the workflow switch, for a desktop that still takes the filter but not that switch.
+ */
+internal fun dropQueuedNoticeFilters(state: JSONObject, workflowOnly: Boolean = false): Boolean {
     val outbox = state.optJSONArray("outbox") ?: return false
     val kept = org.json.JSONArray()
     for (i in 0 until outbox.length()) {
         val event = JSONObject(outbox.getString(i))
         val payload = event.optJSONObject("payload")
-        val filtered = event.optString("type") == "desktop.read" && payload?.optString("op") == "rem.notices" && payload.optJSONObject("params")?.has("include") == true
+        val include = payload?.optJSONObject("params")?.optJSONArray("include")
+        val named = include != null && (!workflowOnly || (0 until include.length()).any { include.optString(it) == RemAlertRules.WORKFLOW })
+        val filtered = event.optString("type") == "desktop.read" && payload?.optString("op") == "rem.notices" && named
         if (!filtered) kept.put(outbox.getString(i))
     }
     if (kept.length() == outbox.length()) return false

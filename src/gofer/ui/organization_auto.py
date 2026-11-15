@@ -2,13 +2,17 @@
 
 An organization with ``autoMode`` on (only the user turns it on or off) sends its
 waiting requests to a Rem review step: consent requests Rem's own tools made, plans and
-proposals waiting for approval, and finished tickets waiting for the user's review. Rem
+proposals waiting for approval, finished tickets waiting for the user's review (or for a
+worker reviewer that can't or didn't review them), and tickets Raticode blocked after a
+failed, interrupted or rejected run (``organization_recovery.rem_may_reopen``). Rem
 reads each one in context and decides:
 
 - ``approve``: apply it as asked.
 - ``modify``: apply it with safer parameters (JSON-pointer ``changes`` to the request, or
   ``ticketChanges`` to a ticket before approving its plan).
 - ``decline``: close it with a reason and, where it helps, a recommended safer change.
+  Declining to reopen a blocked ticket leaves it for the user with what they must do,
+  and is the one point where the user is alerted about it.
 - ``halt``: pause the organization with a specific reason and leave the request for the
   user. Only for a dangerous action Rem can't remedy short of stopping everything, or
   when going on without the user is literally impossible.
@@ -54,7 +58,10 @@ INSTRUCTED_ACTOR = "Rem:user-instruction"
 MAX_DECISIONS = 30
 # Provider failures in a row before the organization halts because Rem can't review.
 MAX_FAILURES = 3
-RETRY_SECONDS = (30, 120, 300)
+# Temporary failures (rate limits, overloaded or unreachable services) get more tries,
+# spread over about an hour, before Rem's review counts as unavailable.
+MAX_TEMPORARY_FAILURES = 7
+RETRY_SECONDS = (30, 120, 300, 600, 900, 1200)
 # Plans, proposals and reviews turned into requests in one pass.
 MAX_QUEUED = 10
 
@@ -179,7 +186,12 @@ def _task(org: dict[str, Any], request: dict[str, Any]) -> dict[str, Any] | None
 def config_risks(before: dict[str, Any], after: dict[str, Any]) -> tuple[list[str], list[str]]:
     """Dangerous parts of a configuration change, and parts only the user may make."""
     from gofer.ui.organization_store import DANGEROUS_PERMISSION_MODES
-    from gofer.ui.organizations import COMPANY_CAPS, OPEN_ENDED_LIMITS, _loosened
+    from gofer.ui.organizations import (
+        COMPANY_CAPS,
+        OPEN_ENDED_LIMITS,
+        _loosened,
+        second_brain_widened,
+    )
 
     danger: list[str] = []
     user_only: list[str] = []
@@ -223,6 +235,9 @@ def config_risks(before: dict[str, Any], after: dict[str, Any]) -> tuple[list[st
         user_only.append("raise or remove initiative limits")
     if set(after.get("projectRoots", [])) - set(before.get("projectRoots", [])):
         danger.append("add project folders")
+    if second_brain_widened(before, after):
+        # Its tool reads and writes that folder outside the workers' sandbox.
+        danger.append("give workers a Second Brain folder they can read and write")
     targets = {t.get("id"): t for t in before.get("executionTargets", [])}
     if any(targets.get(t.get("id")) != t for t in after.get("executionTargets", [])):
         danger.append("add or change places outside this computer where work runs")
@@ -346,6 +361,14 @@ How to decide:
   "hintsCleared" saying why none of that happens; otherwise decline or modify it.
 - Plans and proposals: approving lets workers run that ticket. Reviews: approving accepts
   the result as done; declining sends it back to its worker with your reason.
+- Blocked tickets ("unblock"): Raticode stopped the ticket after a run failed, was
+  interrupted, ended without an answer, or a worker reviewer rejected it. Read its block
+  reason and last comments. Approve to reopen it into To do when its worker can likely
+  get it done now (a passing error, an interrupted run, feedback it can act on); the run
+  counts against its limits as usual. Decline when trying again would fail the same way
+  or needs something only the user can give (sign-in, credentials, a missing tool, a
+  decision outside the charter): the ticket stays blocked and the user is told, so put
+  exactly what the user must do in "reason". Declining one ticket never needs a halt.
 """
 
 
@@ -401,12 +424,16 @@ def _brief(org: dict[str, Any], request: dict[str, Any], found: dict[str, list[s
             "description": str(task.get("description") or "")[:6000],
             "doneWhen": task.get("doneWhen"),
             "status": task.get("status"),
+            "blockReason": task.get("blockReason") or "",
+            "runsUsed": task.get("turns"),
+            "runLimit": config.get("maxTaskTurns"),
             "assignee": task.get("assignee"),
+            "reviewer": task.get("reviewer"),
             "revision": task.get("revision"),
             "evidence": str(task.get("evidence") or "")[:4000],
             "lastComments": [
                 {"actor": c.get("actor"), "body": str(c.get("body") or "")[:1500]}
-                for c in (task.get("comments") or [])[-4:]
+                for c in [c for c in (task.get("comments") or []) if c.get("kind") != "status"][-6:]
             ],
         }
     return RULES + "\nThe request and its context:\n" + json.dumps(context, indent=1)
@@ -606,6 +633,7 @@ def ask_rem(
 def queue_ticket_approvals(manager: OrganizationManager, project: str, oid: str) -> int:
     """Turn plans, proposals and reviews waiting for the user into requests for Rem."""
     from gofer.ui.organization_backlog import proposal_waiting
+    from gofer.ui.organization_recovery import rem_unblock_pending, worker_reviews
 
     made: list[str] = []
 
@@ -638,15 +666,23 @@ def queue_ticket_approvals(manager: OrganizationManager, project: str, oid: str)
             elif (
                 task["status"] == "in_review"
                 and not task.get("claim")
-                and task.get("reviewer") not in employees
+                and (task.get("reviewer") not in employees or not worker_reviews(current, task))
             ):
                 kind, action = "review", "review"
                 summary = f"Accept the result of “{task['title']}”"
+            elif task["status"] == "blocked" and rem_unblock_pending(current, task):
+                kind, action = "unblock", "reopen"
+                summary = (
+                    f"Reopen “{task['title']}”, blocked: "
+                    + str(task.get("blockReason") or "")[:160]
+                )
             if not kind:
                 continue
             params: dict[str, Any] = {"taskId": task["id"], "expectedRevision": task["revision"]}
             if action == "review":
                 params.update(decision="accept", body="")
+            elif action == "reopen":
+                params["status"] = "todo"
             rid = f"auto-{task['id'][:8]}-{task['revision']}-{len(requests)}"
             requests[rid] = {
                 "id": rid,
@@ -852,6 +888,17 @@ def apply_decision(
                 )
             except (ValueError, StopIteration) as exc:
                 error = str(exc)
+        elif not error and task_id and kind == "unblock" and decision.get("stale"):
+            # The ticket changed after it was asked about; it's asked about again fresh.
+            pass
+        elif not error and task_id and kind == "unblock":
+            _note_on_ticket(
+                manager,
+                project,
+                oid,
+                task_id,
+                f"Rem (Auto mode) left this blocked for you: {note}",
+            )
         elif not error and task_id:
             _note_on_ticket(
                 manager,
@@ -862,6 +909,8 @@ def apply_decision(
             )
         if not error and kind == "plan" and task_id:
             _mark_reviewed(manager, project, oid, task_id)
+        if not error and kind == "unblock" and task_id and not decision.get("stale"):
+            _escalate(manager, project, oid, task_id, note)
         return _record(manager, project, oid, request, decision, applied=not error, error=error)
     override: dict[str, Any] | None = decision.get("params")
     error = ""
@@ -904,7 +953,54 @@ def apply_decision(
         )
     except (OrganizationConflict, ValueError, StopIteration) as exc:
         error = str(exc)
+    if not error and kind == "unblock" and task_id:
+        _reopened(manager, project, oid, task_id, note)
     return _record(manager, project, oid, request, decision, applied=not error, error=error)
+
+
+def _reopened(
+    manager: OrganizationManager, project: str, oid: str, task_id: str, note: str
+) -> None:
+    """Count Rem's reopen of a blocked ticket and say why on it."""
+
+    def count(current: dict[str, Any]) -> dict[str, Any]:
+        reopens = current["runtime"].setdefault("autoReopens", {})
+        reopens[task_id] = int(reopens.get(task_id, 0)) + 1
+        return {"taskId": task_id, "reopens": reopens[task_id]}
+
+    manager.store.mutate(project, oid, AUTO_ACTOR, "auto_reopened", count)
+    _note_on_ticket(manager, project, oid, task_id, f"Rem (Auto mode) reopened this: {note}")
+
+
+def _escalate(manager: OrganizationManager, project: str, oid: str, task_id: str, why: str) -> None:
+    """Tell the user a blocked ticket needs them, now that Rem decided it does.
+
+    The ticket's own move to Blocked didn't alert while Rem still had to look at it
+    (``rem_will_reopen``); this event carries the alert instead.
+    """
+
+    from gofer.ui.organization_recovery import blocked_spell
+
+    def mark(current: dict[str, Any]) -> dict[str, Any]:
+        task = next((t for t in current["runtime"]["tasks"] if t["id"] == task_id), None)
+        if task is None or task["status"] != "blocked":
+            return {}
+        # Rem looked at this blocked spell; a comment on it doesn't make Rem look again.
+        current["runtime"].setdefault("autoUnblocked", {})[task_id] = blocked_spell(task)
+        return {
+            "taskId": task_id,
+            "reason": why[:600],
+            "taskChanges": [
+                {
+                    "taskId": task_id,
+                    "title": task["title"][:200],
+                    "from": "blocked",
+                    "to": "blocked",
+                }
+            ],
+        }
+
+    manager.store.mutate(project, oid, AUTO_ACTOR, "auto_escalated", mark)
 
 
 def _leave_for_user(
@@ -952,7 +1048,10 @@ def _failed(
         return {}
 
     manager.store.mutate(project, oid, AUTO_ACTOR, "auto_review_failed", count)
-    if failures and failures[0] >= MAX_FAILURES:
+    from gofer.ui.rem_home import transient
+
+    allowed = MAX_TEMPORARY_FAILURES if transient(exc) else MAX_FAILURES
+    if failures and failures[0] >= allowed:
         return _halt(
             manager,
             project,
@@ -1000,6 +1099,7 @@ def review_one(
                 ).replace(" Left waiting: decline it.", "")
                 + " Closed so it can be asked again.",
                 "recommendation": "",
+                "stale": True,
             },
         )
     found = assess(manager, project, org, live)
@@ -1085,6 +1185,8 @@ def needs_review(org: dict[str, Any]) -> bool:
         return False
     if any(waits_on_rem(org, r) for r in (org["runtime"].get("consentRequests") or {}).values()):
         return True
+    from gofer.ui.organization_recovery import rem_unblock_pending, worker_reviews
+
     reviewed = org["runtime"].get("autoReviewed") or {}
     employees = {e["id"] for e in org["config"]["employees"]}
     return any(
@@ -1097,11 +1199,23 @@ def needs_review(org: dict[str, Any]) -> bool:
             or (
                 t["status"] == "in_review"
                 and not t.get("claim")
-                and t.get("reviewer") not in employees
+                and (t.get("reviewer") not in employees or not worker_reviews(org, t))
             )
         )
+        or (t["status"] == "blocked" and rem_unblock_pending(org, t))
         for t in org["runtime"]["tasks"]
     )
+
+
+def rem_will_reopen(org: dict[str, Any], task: dict[str, Any]) -> bool:
+    """Whether Rem's Auto mode review still has to look at this blocked ticket.
+
+    Until it has, the user isn't alerted about it: Rem reopens it or, by declining,
+    leaves it for the user and alerts them then (``_escalate``).
+    """
+    from gofer.ui.organization_recovery import rem_unblock_pending
+
+    return auto_on(org) and rem_unblock_pending(org, task)
 
 
 # Turning Auto mode on or off -------------------------------------------------------------

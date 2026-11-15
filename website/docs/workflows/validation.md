@@ -45,7 +45,7 @@ Preflight checks the current machine every time it runs. Typical failures:
 - Bash or Python isn't installed
 - A script or file can't be read
 - A provider executable is missing, or a profile doesn't fit
-- A secret value is missing
+- A secret is neither saved in Raticode nor set in the environment, or the keychain holding it is locked. The message names it and says how to [add it](./inputs.md#secrets).
 - A destination can't be written
 
 A valid workflow can still fail preflight on another machine, and a signed-in provider can't fix a source error. Passing preflight doesn't prove a network request will succeed or that an agent will do what you meant.

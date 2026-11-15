@@ -67,6 +67,20 @@ class OSSecretStore:
         except Exception:
             raise StorageError("protected_store_write_failed") from None
 
+    def delete(self, account: str) -> None:
+        """Remove an entry; an entry that is already gone counts as removed."""
+        try:
+            from keyring.errors import PasswordDeleteError
+
+            try:
+                self._backend.delete_password(self._service, account)
+            except PasswordDeleteError:
+                pass
+            if self.get(account) is not None:
+                raise StorageError("protected_store_write_failed")
+        except Exception:
+            raise StorageError("protected_store_write_failed") from None
+
 
 @dataclass(frozen=True)
 class Identity:

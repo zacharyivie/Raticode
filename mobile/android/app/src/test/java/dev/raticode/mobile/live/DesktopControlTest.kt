@@ -88,6 +88,9 @@ class DesktopControlTest {
         // Read state is sent to the desktop only when its overview says it accepts it.
         assertFalse((DesktopViews.parse("overview", JSONObject()) as DesktopOverview).threadRead)
         assertTrue((DesktopViews.parse("overview", JSONObject().put("thread_read", true)) as DesktopOverview).threadRead)
+        // Older desktops reject delete_permanently, so the phone offers it only when the overview says so.
+        assertFalse((DesktopViews.parse("overview", JSONObject()) as DesktopOverview).threadPurge)
+        assertTrue((DesktopViews.parse("overview", JSONObject().put("thread_purge", true)) as DesktopOverview).threadPurge)
         // Image reads have their own screen key and are a known operation in desktop results.
         assertEquals(ChatImages.KEY + "https://example.com/cat.jpg", DesktopViews.key("media.image", JSONObject().put("url", "https://example.com/cat.jpg")))
         IncomingValidation.validate(result(part(op = "media.image")))

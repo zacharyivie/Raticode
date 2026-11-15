@@ -81,8 +81,10 @@ class FakeContents extends EventEmitter {
   }
   downloadURL(url) { this.downloads.push(url); }
   go(index) { this.index = index; this.url = this.entries[index].url; this.emit("did-navigate", {}, this.url); }
-  getType() { return "webview"; }
-  isDestroyed() { return false; }
+  getType() { return "window"; }
+  isDestroyed() { return this.destroyed === true; }
+  close() { if (this.destroyed) return; this.destroyed = true; this.emit("destroyed"); }
+  async capturePage() { return { isEmpty: () => false, toJPEG: () => Buffer.from("jpeg") }; }
   setBackgroundColor() {}
   setBackgroundThrottling(value) { this.throttling = value; }
   setZoomFactor(value) { this.zoom = value; }
@@ -94,6 +96,8 @@ class FakeContents extends EventEmitter {
   focus() {}
   async loadURL(url) {
     this.loaded.push(url);
+    // As in Chromium, a page's first navigation replaces its initial blank entry.
+    if (this.entries.length === 1 && this.entries[0].url === "about:blank") this.entries = [];
     this.entries = [...this.entries.slice(0, this.index + 1), { url, title: "" }];
     this.index = this.entries.length - 1;
     this.url = url;
@@ -107,6 +111,41 @@ class FakeContents extends EventEmitter {
   input(type = "mouseDown") { this.emit("input-event", {}, { type }); }
 }
 
+// A Raticode (chromium) tab's view, as browser-sessions.cjs makes it.
+function fakeViewClass(owner, profiles, contentsById, created, hooks = {}) {
+  return class FakeView {
+    constructor({ webPreferences }) {
+      this.webPreferences = webPreferences;
+      this.webContents = new FakeContents({ host: owner, profile: profiles[webPreferences.partition] });
+      this.bounds = null;
+      this.visible = true;
+      contentsById.set(this.webContents.id, this.webContents);
+      created.push(this);
+      // A test's set-up for the page, before Raticode wires it up.
+      const prepare = hooks.prepare;
+      hooks.prepare = null;
+      prepare?.(this.webContents);
+    }
+    setBounds(bounds) { this.bounds = { ...bounds }; }
+    setVisible(value) { this.visible = value; }
+    setBackgroundColor(value) { this.background = value; }
+  };
+}
+
+function fakeWindow(name) {
+  const children = [];
+  return {
+    name,
+    children,
+    destroyed: false,
+    isDestroyed() { return this.destroyed; },
+    contentView: {
+      addChildView(view) { if (view.parentWindow && view.parentWindow !== this.owner) view.parentWindow.contentView.removeChildView(view); if (!children.includes(view)) children.push(view); view.parentWindow = this.owner; },
+      removeChildView(view) { const index = children.indexOf(view); if (index >= 0) children.splice(index, 1); },
+    },
+  };
+}
+
 function harness({ policy, dialog: dialogOverrides = {}, openWith = null, logs = null, firefox = null, chrome = null, chromium = {}, quarantine = "", beforeInstall = null, resolvePath = null } = {}) {
   const profiles = Object.fromEntries(Object.values(PARTITIONS).map((name) => [name, new FakeProfile(name)]));
   const owner = Object.assign(new EventEmitter(), {
@@ -117,7 +156,13 @@ function harness({ policy, dialog: dialogOverrides = {}, openWith = null, logs =
     getZoomFactor: () => 1,
     focus() {},
   });
-  const mainWindow = { isDestroyed: () => false, webContents: owner };
+  const mainWindow = Object.assign(fakeWindow("main"), { webContents: owner });
+  mainWindow.contentView.owner = mainWindow;
+  const popout = fakeWindow("popout");
+  popout.contentView.owner = popout;
+  let popoutOpen = false;
+  const views = [];
+  const viewHooks = {};
   const contentsById = new Map();
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "browser-sessions-"));
   const downloads = path.join(directory, "Downloads");
@@ -159,34 +204,36 @@ function harness({ policy, dialog: dialogOverrides = {}, openWith = null, logs =
     chrome,
     chromium,
     privateCleanupDelayMs: 1,
+    WebContentsView: fakeViewClass(owner, profiles, contentsById, views, viewHooks),
+    preloadPath: "/app/browser-preload.cjs",
+    getHostWindow: (host) => (host === "popout" && popoutOpen ? popout : null),
     ...(logs ? { log: (level, message) => logs.push([level, message]) } : {}),
   });
   beforeInstall?.(store);
   browsers.install();
   if (policy) browsers.setPolicy(null, policy);
   const event = { sender: owner };
+  // The main process makes each tab's view; the studio then draws its slot.
   function open(options, prepare = () => {}) {
+    viewHooks.prepare = prepare;
     const state = browsers.createBrowser(event, options);
-    const contents = new FakeContents({ host: owner, profile: profiles[state.partition] });
-    // A webview has already started loading its src when the studio adopts it.
-    if (state.src !== "about:blank") {
-      contents.url = state.src;
-      contents.entries = [{ url: state.src, title: "" }];
-    }
-    contentsById.set(contents.id, contents);
-    prepare(contents);
-    browsers.browserAction(event, { id: state.id, action: "adopt", webContentsId: contents.id });
-    return { state, contents, id: state.id };
+    viewHooks.prepare = null;
+    const view = views.at(-1);
+    const contents = view?.webContents;
+    // The tab's first page counts as loaded, as a webview's src did; tests look at later loads.
+    if (contents) contents.loaded = [];
+    browsers.browserAction(event, { id: state.id, action: "adopt", webContentsId: -1 });
+    return { state, contents, view, id: state.id };
   }
   function openRem(threadOwner = "agent-0123456789") {
     const session = browsers.openAgentTab({ agent: threadOwner, label: "Rem" });
-    const contents = new FakeContents({ host: owner, profile: profiles[PARTITIONS.rem] });
-    contentsById.set(contents.id, contents);
-    browsers.browserAction(event, { id: session.id, action: "adopt", webContentsId: contents.id });
-    return { session, contents, id: session.id };
+    const view = views.at(-1);
+    const contents = view.webContents;
+    browsers.browserAction(event, { id: session.id, action: "adopt", webContentsId: -1 });
+    return { session, contents, view, id: session.id };
   }
   const sent = (channel) => owner.sent.filter(([name]) => name === channel).map(([, payload]) => payload);
-  return { app, browsers, profiles, owner, event, open, openRem, sent, store, directory, downloads, opened, contentsById, messages, menus };
+  return { app, browsers, profiles, owner, event, open, openRem, sent, store, directory, downloads, opened, contentsById, messages, menus, views, mainWindow, popout, setPopoutOpen: (value) => { popoutOpen = value; } };
 }
 
 test("tabs present a consistent Chromium identity and Electron's own to Google sign-in", async () => {
@@ -231,11 +278,28 @@ test("tabs present a consistent Chromium identity and Electron's own to Google s
   assert.equal(cleared.requestHeaders["sec-ch-ua-arch"], undefined);
 });
 
+test("a reloaded or crashed studio closes the tabs it had instead of leaving them running", () => {
+  const { open, owner } = harness();
+  const first = open({ url: "https://one.example/" });
+  const second = open({ url: "https://two.example/", private: true });
+  // The studio's own in-page navigation keeps every tab.
+  owner.emit("did-start-navigation", { isMainFrame: true, isSameDocument: true });
+  owner.emit("did-start-navigation", { isMainFrame: false, isSameDocument: false });
+  assert.equal(first.contents.isDestroyed(), false);
+  owner.emit("did-start-navigation", { isMainFrame: true, isSameDocument: false });
+  assert.equal(first.contents.isDestroyed(), true);
+  assert.equal(second.contents.isDestroyed(), true);
+  // The restored tabs are new, and a renderer crash closes them too.
+  const restored = open({ url: "https://one.example/" });
+  owner.emit("render-process-gone", {}, { reason: "crashed" });
+  assert.equal(restored.contents.isDestroyed(), true);
+});
+
 test("tabs, previews and Rem use separate profiles", () => {
   const { browsers, open, openRem, profiles, directory, owner, event, contentsById } = harness();
   const web = open({ url: "example.com" });
   assert.equal(web.state.partition, PARTITIONS.user);
-  assert.equal(web.state.src, "https://example.com/");
+  assert.equal(web.contents.getURL(), "https://example.com/");
   const file = path.join(directory, "report.html");
   fs.writeFileSync(file, "<h1>Report</h1>");
   assert.equal(open({ path: file }).state.partition, PARTITIONS.preview);
@@ -243,14 +307,20 @@ test("tabs, previews and Rem use separate profiles", () => {
   const rem = openRem();
   assert.equal(rem.contents.session, profiles[PARTITIONS.rem]);
   assert.equal(profiles[PARTITIONS.user].userAgent.includes("Electron"), false);
-  // A webview may only attach with the profile its session was created for.
-  const pending = browsers.createBrowser(event, { url: "https://example.org/" });
-  assert.equal(browsers.isPendingAttach(owner.id, { src: "https://example.org/", partition: PARTITIONS.rem }), false);
-  assert.equal(browsers.isPendingAttach(owner.id, { src: "https://example.org/", partition: PARTITIONS.user }), true);
-  assert.equal(browsers.isPendingAttach(owner.id, { src: "about:blank", partition: "persist:other" }), false);
-  const wrong = new FakeContents({ host: owner, profile: profiles[PARTITIONS.rem] });
+  // Each view is made in its tab's profile, locked down, and no <webview> may attach.
+  assert.equal(web.view.webPreferences.partition, PARTITIONS.user);
+  assert.equal(rem.view.webPreferences.partition, PARTITIONS.rem);
+  assert.equal(open({ url: "https://p.test/", private: true }).view.webPreferences.partition, PARTITIONS.private);
+  assert.deepEqual(
+    Object.fromEntries(["sandbox", "contextIsolation", "nodeIntegration", "nodeIntegrationInSubFrames", "webSecurity", "allowRunningInsecureContent", "webviewTag", "preload"].map((key) => [key, web.view.webPreferences[key]])),
+    { sandbox: true, contextIsolation: true, nodeIntegration: false, nodeIntegrationInSubFrames: false, webSecurity: true, allowRunningInsecureContent: false, webviewTag: false, preload: "/app/browser-preload.cjs" },
+  );
+  assert.equal(browsers.isPendingAttach(owner.id, { src: "about:blank", partition: PARTITIONS.user }), false);
+  // A tab can't adopt a page it didn't make.
+  const wrong = new FakeContents({ host: owner, profile: profiles[PARTITIONS.user] });
   contentsById.set(wrong.id, wrong);
-  assert.throws(() => browsers.browserAction(event, { id: pending.id, action: "adopt", webContentsId: wrong.id }), /wrong profile/);
+  assert.equal(browsers.browserAction(event, { id: web.id, action: "adopt", webContentsId: wrong.id }).id, web.id);
+  assert.equal(web.contents.isDestroyed(), false);
 });
 
 const privateSettle = () => new Promise((resolve) => setTimeout(resolve, 20));
@@ -840,9 +910,56 @@ test("restored tabs replay their saved history", async () => {
   const { open } = harness();
   const entries = [{ url: "https://a.test/", title: "A" }, { url: "https://b.test/", title: "B", pageState: "state" }, { url: "javascript:alert(1)" }];
   const tab = open({ url: "https://b.test/", history: { entries, index: 1 } });
-  assert.equal(tab.state.src, "about:blank");
+  assert.deepEqual(tab.contents.loaded, [], "the view restores history instead of loading the page");
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(tab.contents.restored, { entries: entries.slice(0, 2), index: 1 });
+});
+
+test("a tab's view follows its slot into the Browser's own window and back, still the same page", async () => {
+  const { browsers, event, open, openRem, owner, mainWindow, popout, setPopoutOpen } = harness();
+  const tab = open({ url: "https://a.test/" });
+  const rem = openRem();
+  // Made hidden in Raticode's window, at a desktop size.
+  assert.deepEqual(mainWindow.children, [tab.view, rem.view]);
+  assert.equal(tab.view.visible, false);
+  assert.deepEqual(tab.view.bounds, { x: 0, y: 0, width: 1280, height: 800 });
+  // Only the page that owns the tab can place it.
+  assert.throws(() => browsers.browserAction({ sender: { id: 99 } }, { id: tab.id, action: "place", x: 0, y: 0, width: 10, height: 10, visible: true }), /not found/);
+  // Shown where the studio says, in the studio's zoom.
+  owner.getZoomFactor = () => 1.25;
+  assert.deepEqual(browsers.browserAction(event, { id: tab.id, action: "place", x: 8, y: 40.4, width: 800, height: 600, visible: true, host: "main" }), { placed: true, shown: true });
+  assert.deepEqual(tab.view.bounds, { x: 10, y: 51, width: 1000, height: 750 });
+  assert.equal(tab.view.visible, true);
+  // Into the Browser's own window: the same contents, nothing reloaded.
+  setPopoutOpen(true);
+  const loads = tab.contents.loaded.length;
+  browsers.browserAction(event, { id: tab.id, action: "place", x: 0, y: 36, width: 900, height: 640, visible: true, host: "popout" });
+  assert.deepEqual(popout.children, [tab.view]);
+  assert.equal(mainWindow.children.includes(tab.view), false);
+  assert.equal(tab.contents.loaded.length, loads);
+  assert.equal(tab.contents.isDestroyed(), false);
+  // Hidden keeps its size, so the page doesn't lay out again.
+  browsers.browserAction(event, { id: tab.id, action: "place", x: 0, y: 0, width: 0, height: 0, visible: false, host: "popout" });
+  assert.equal(tab.view.visible, false);
+  assert.deepEqual(tab.view.bounds, { x: 0, y: 45, width: 1125, height: 800 });
+  // A picture of the page for when Raticode draws over it.
+  assert.match((await browsers.browserAction(event, { id: tab.id, action: "view-snapshot" })).snapshot, /^data:image\/jpeg;base64,/);
+  // The window closing hands its views back to Raticode's, hidden.
+  browsers.returnViews(popout);
+  assert.deepEqual(popout.children, []);
+  assert.ok(mainWindow.children.includes(tab.view));
+  // A window that has gone falls back to Raticode's.
+  setPopoutOpen(false);
+  browsers.browserAction(event, { id: rem.id, action: "place", x: 0, y: 0, width: 400, height: 300, visible: true, host: "popout" });
+  assert.ok(mainWindow.children.includes(rem.view));
+  // Closing the tab closes its page and takes its view away.
+  browsers.browserAction(event, { id: tab.id, action: "close" });
+  assert.equal(tab.contents.isDestroyed(), true);
+  assert.equal(mainWindow.children.includes(tab.view), false);
+  // A page that ends by itself ends its tab.
+  const other = open({ url: "https://b.test/" });
+  other.contents.close();
+  assert.equal(browsers.browserAction(event, { id: other.id, action: "adopt", webContentsId: -1 }).closed, true);
 });
 
 test("open in default browser accepts web pages and local HTML only", async () => {

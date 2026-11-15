@@ -243,12 +243,25 @@ def _notice_line(notice: dict[str, Any]) -> str:
     return f"{notice['reason']}: {notice.get('title') or notice.get('body', '')}"
 
 
+def _dropped_notice(count: int) -> dict[str, Any]:
+    """An event saying workflow notices were removed before the read reached them."""
+    plural = "message was" if count == 1 else "messages were"
+    return {
+        "kind": "dropped",
+        "reason": "workflow",
+        "dropped": count,
+        "title": f"{count} workflow {plural} removed before this read",
+    }
+
+
 def notices(
     cursor: str = typer.Option(
         "", "--cursor", help="The cursor from the last read; without it, only the cursor"
     ),
     include: str = typer.Option(
-        "", "--include", help="Comma list of needs_you, finished, proposals (default: all)"
+        "",
+        "--include",
+        help="Comma list of needs_you, finished, proposals, workflow (default: all)",
     ),
     watch: bool = typer.Option(False, "--watch", help="Keep reading and print each alert"),
     timeout: opts.Timeout = None,
@@ -260,6 +273,11 @@ def notices(
 ) -> None:
     """Alerts for anything that needs you: stuck or finished tasks, proposals, organizations.
 
+    workflow alerts are the notices notification nodes with channel: phone stored for
+    the phone; each names its workflow_id and run_id. A run past 20 notices has one
+    notice with more_from_run set instead, and dropped counts workflow notices removed
+    from the computer's store (it keeps the newest 500) before this read reached them.
+
     The first read without --cursor returns no alerts, only the cursor to start from, so
     a new script isn't flooded with history. Use `rem tasks list --needs-you` for what is
     waiting right now.
@@ -268,7 +286,9 @@ def notices(
     def body(client: ApiClient, out: Output) -> CommandResult:
         if not watch:
             found = client.get("/rem/notices", query={"cursor": cursor, "include": include})
-            lines = [*map(_notice_line, found["notices"]), f"cursor {found['cursor']}"]
+            gone = int(found.get("dropped") or 0)
+            shown = [*([_dropped_notice(gone)] if gone else []), *found["notices"]]
+            lines = [*map(_notice_line, shown), f"cursor {found['cursor']}"]
             return CommandResult(data=found, text="\n".join(lines))
         position = cursor
 
@@ -276,7 +296,9 @@ def notices(
             nonlocal position
             found = client.get("/rem/notices", query={"cursor": position, "include": include})
             position = found["cursor"]
-            return [{**n, "cursor": position} for n in found["notices"]], bool(found["more"])
+            gone = int(found.get("dropped") or 0)
+            events = [*([_dropped_notice(gone)] if gone else []), *found["notices"]]
+            return [{**n, "cursor": position} for n in events], bool(found["more"])
 
         printed = _stream(out, read, opts.timeout_value(timeout), interval)
         return CommandResult(data={"events": printed, "cursor": position})

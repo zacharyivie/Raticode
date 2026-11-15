@@ -80,6 +80,71 @@ def test_workflow_discovery_prunes_worktrees_and_dependencies(tmp_path: Path) ->
     assert payload["errors"] == []
 
 
+def _plant_project_checkout(folder: Path) -> None:
+    folder.mkdir(parents=True)
+    (folder / "pyproject.toml").write_text('[project]\nname = "app"\n')
+    (folder / "ruff.toml").write_text("line-length = 100\n")
+
+
+def test_workflow_discovery_skips_rem_and_organization_worktrees(tmp_path: Path) -> None:
+    _plant_project_checkout(tmp_path / "rem-worktrees" / "run-1")
+    _plant_project_checkout(tmp_path / "organization-shared-worktrees" / "org-1" / "task-1")
+    _plant_project_checkout(tmp_path / "organization-worktrees" / "task-2")
+    for folder in (
+        "rem-work/turn-scratch/turn-1",
+        "organization-runs/run-2",
+        "chat-attachments/thread",
+        "chat-something-new/thread",
+        "trash/old",
+        "second-brains/brain",
+        "logs/flow",
+        "command-slots/bin",
+    ):
+        _plant_project_checkout(tmp_path / folder)
+
+    payload = list_workflow_payloads(tmp_path)
+
+    assert payload["workflows"] == []
+    assert payload["errors"] == []
+
+
+def test_rattish_workflow_named_like_a_project_file_still_lists(tmp_path: Path) -> None:
+    app_data = tmp_path / "app-data"
+    project = tmp_path / "project"
+    project.mkdir()
+    _plant_project_checkout(app_data / "rem-worktrees" / "run-1")
+    _plant_project_checkout(app_data / "organization-shared-worktrees" / "org-1" / "task-1")
+    create_registered_workflow_payload("pyproject", project, registry_dir=app_data)
+
+    payload = list_workflow_payloads(app_data)
+
+    assert [(w["id"], w["sourceFormat"]) for w in payload["workflows"]] == [
+        ("pyproject", "rattish")
+    ]
+    assert payload["errors"] == []
+
+
+def test_workflow_discovery_still_finds_legacy_toml_in_user_folders(tmp_path: Path) -> None:
+    create_workflow_payload("Daily", tmp_path)
+    user_folder = tmp_path / "my-flows"
+    user_folder.mkdir()
+    create_workflow_payload("Weekly", user_folder)
+    # Only the data folder's own top-level folders are Raticode's. A user's subfolder
+    # that happens to share a name is still scanned.
+    nested_logs = user_folder / "logs"
+    nested_logs.mkdir()
+    create_workflow_payload("Nested", nested_logs)
+
+    payload = list_workflow_payloads(tmp_path)
+
+    assert sorted((w["id"], w["sourcePath"]) for w in payload["workflows"]) == [
+        ("daily", "daily.toml"),
+        ("nested", "my-flows/logs/nested.toml"),
+        ("weekly", "my-flows/weekly.toml"),
+    ]
+    assert payload["errors"] == []
+
+
 @pytest.mark.parametrize(
     ("error_number", "reason", "preserve_index"),
     [
@@ -1268,6 +1333,30 @@ working_dir = "."
     assert workflow["name"] == "Empty With Agent"
     assert workflow["nodes"] == []
     assert workflow["edges"] == []
+
+
+def test_list_workflow_payloads_ignores_access_time_changed_by_reading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # On relatime filesystems (most Linux disks) the first read after a write moves the
+    # file's access time. That is not a change to the workflow, so it isn't skipped.
+    path = tmp_path / "flow.toml"
+    path.write_text('[workflow]\nid = "flow"\nname = "Flow"\n', encoding="utf-8")
+    real_from_file = api_module.AgenticWorkflow.from_file
+
+    def read_and_touch_access_time(source: Path) -> object:
+        workflow = real_from_file(source)
+        stat = source.stat()
+        os.utime(source, ns=(stat.st_atime_ns + 5_000_000_000, stat.st_mtime_ns))
+        return workflow
+
+    monkeypatch.setattr(api_module.AgenticWorkflow, "from_file", read_and_touch_access_time)
+
+    result = list_workflow_payloads(tmp_path)
+
+    assert [workflow["id"] for workflow in result["workflows"]] == ["flow"]
+    assert result["errors"] == []
 
 
 def test_list_workflow_payloads_uses_index_for_large_cached_workspace(
@@ -3802,7 +3891,7 @@ def test_project_discovery_reports_real_filesystem_failure(
     def fail(*args: Any, **kwargs: Any) -> Any:
         raise PermissionError("secret backend detail")
 
-    monkeypatch.setattr(api_module, "discover_registered_workflows", fail)
+    monkeypatch.setattr(api_module, "discover_project_workflows", fail)
     with pytest.raises(WorkflowCreateError, match="permission denied") as error:
         open_project_payload(tmp_path)
     assert "secret" not in str(error.value)

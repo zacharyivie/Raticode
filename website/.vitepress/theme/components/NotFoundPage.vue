@@ -2,6 +2,7 @@
 import { onMounted } from 'vue'
 import { useData, withBase } from 'vitepress'
 import { newAddress } from '../oldAddress'
+import { supportEmail, supportMailto } from '../../../data/site'
 
 // Shown for any address the site doesn't have. GitHub Pages serves 404.html, which the
 // config marks noindex, and VitePress renders this in the browser.
@@ -33,6 +34,7 @@ const links = [
       <li v-for="link in links" :key="link.href">
         <a :href="withBase(link.href)">{{ link.text }}</a>: {{ link.detail }}
       </li>
+      <li><a :href="supportMailto">{{ supportEmail }}</a>: email for help</li>
     </ul>
   </div>
 </template>

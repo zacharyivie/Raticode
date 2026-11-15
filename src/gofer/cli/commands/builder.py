@@ -3,9 +3,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Literal, cast
-
-import networkx as nx
+from typing import TYPE_CHECKING, Literal, cast
 
 try:
     import questionary
@@ -18,33 +16,12 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from gofer.core.agent import AgentConfig
-from gofer.core.graph import CycleError, EdgeConditionType, EdgeConfig, GraphNode
-from gofer.core.operations import (
-    AgentOperation,
-    BashCommandOperation,
-    CopyFileOperation,
-    CountFanSource,
-    DeleteFileOperation,
-    DirectoryFanSource,
-    FanSource,
-    InfiniteFanSource,
-    LoopOperation,
-    MoveFileOperation,
-    OpenResourceOperation,
-    Operation,
-    OperationType,
-    PythonScriptOperation,
-    ReadFileOperation,
-    ShellScriptOperation,
-    TabularFanSource,
-    TriggerEventsFanSource,
-    WriteFileOperation,
-)
-from gofer.core.workflow import AgenticWorkflow, ScheduleConfig, WatchConfig, WorkflowConfig
-from gofer.utils.agent_helpers import resolve_prompt, unique_agent_id
 from gofer.utils.paths import get_data_dir
-from gofer.utils.registry import list_all_agents
+
+if TYPE_CHECKING:
+    from gofer.core.graph import GraphNode
+    from gofer.core.operations import FanSource, Operation
+    from gofer.core.workflow import AgenticWorkflow, WorkflowConfig
 
 console = Console()
 
@@ -54,6 +31,8 @@ class WorkflowBuilder:
         self._workflow: AgenticWorkflow | None = None
 
     def run(self) -> AgenticWorkflow | None:
+        from gofer.core.workflow import AgenticWorkflow
+
         console.print(Panel("[bold]Workflow Builder[/bold]", expand=False))
         config = self._ask_metadata()
         if config is None:
@@ -71,6 +50,8 @@ class WorkflowBuilder:
     # ── phases ───────────────────────────────────────────────────────────────
 
     def _ask_metadata(self) -> WorkflowConfig | None:
+        from gofer.core.workflow import ScheduleConfig, WatchConfig, WorkflowConfig
+
         name = questionary.text("Workflow name:").ask()
         if not name:
             return None
@@ -192,6 +173,25 @@ class WorkflowBuilder:
             console.print("[yellow]No nodes added.[/yellow]")
 
     def _ask_one_node(self) -> None:
+        from gofer.core.agent import AgentConfig
+        from gofer.core.graph import GraphNode
+        from gofer.core.operations import (
+            AgentOperation,
+            BashCommandOperation,
+            CopyFileOperation,
+            DeleteFileOperation,
+            LoopOperation,
+            MoveFileOperation,
+            OpenResourceOperation,
+            OperationType,
+            PythonScriptOperation,
+            ReadFileOperation,
+            ShellScriptOperation,
+            WriteFileOperation,
+        )
+        from gofer.utils.agent_helpers import resolve_prompt, unique_agent_id
+        from gofer.utils.registry import list_all_agents
+
         assert self._workflow is not None
         node_id = questionary.text("Node ID:").ask()
         if not node_id:
@@ -439,6 +439,14 @@ class WorkflowBuilder:
             console.print(f"  [green]✓[/green] Added node '{node_id}'")
 
     def _ask_fan_source(self, required: bool = False) -> FanSource | None:
+        from gofer.core.operations import (
+            CountFanSource,
+            DirectoryFanSource,
+            InfiniteFanSource,
+            TabularFanSource,
+            TriggerEventsFanSource,
+        )
+
         if (
             not required
             and not questionary.confirm(
@@ -510,6 +518,10 @@ class WorkflowBuilder:
         return None
 
     def _ask_edges(self) -> None:
+        import networkx as nx
+
+        from gofer.core.graph import CycleError, EdgeConditionType, EdgeConfig
+
         assert self._workflow is not None
         console.print("\n[bold]Define edges[/bold]")
         node_ids = list(self._workflow.graph._nodes.keys())
@@ -585,6 +597,8 @@ class WorkflowBuilder:
                 console.print(f"  [red]✗[/red] {exc}")
 
     def _preview_dag(self) -> None:
+        from gofer.core.graph import EdgeConditionType
+
         assert self._workflow is not None
         console.print()
         generations = self._workflow.graph.topological_generations()

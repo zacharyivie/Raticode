@@ -156,7 +156,7 @@ jobs:
         run: uv sync --locked --extra dev --extra xlsx --group dev
 
       - name: Test platform filesystem security
-        run: uv run --locked pytest tests/unit/test_atomic_output.py tests/unit/test_native_filesystem_security.py tests/unit/test_resource_security.py tests/unit/test_rattish_workspaces.py
+        run: uv run --locked pytest tests/unit/test_atomic_output.py tests/unit/test_native_filesystem_security.py tests/unit/test_resource_security.py tests/unit/test_rattish_workspaces.py tests/unit/test_rattish_process_liveness.py
 
       - name: Set up Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0

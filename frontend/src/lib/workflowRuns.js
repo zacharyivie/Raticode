@@ -9,6 +9,8 @@ export function normalizeWorkflowRunStatus(run) {
   if (status === "canceled") return "cancelled";
   if (status === "claimed") return "running";
   if (status === "cancel_requested") return "stopping";
+  // Any process can ask a run to stop; it keeps running until its owner ends it.
+  if (status === "running" && run.stopRequested) return "stopping";
   if (status) return status;
   return run.success === true ? "success" : run.success === false ? "error" : "unknown";
 }
@@ -127,7 +129,7 @@ const LIST_STATUS = {
   submitting: { label: "Starting", tone: "running" },
   queued: { label: "Queued", tone: "running" },
   running: { label: "Running", tone: "running" },
-  stopping: { label: "Stopping", tone: "running" },
+  stopping: { label: "Stop requested", tone: "running" },
   success: { label: "Succeeded", tone: "success" },
   error: { label: "Failed", tone: "error" },
   stopped: { label: "Stopped", tone: "warning" },

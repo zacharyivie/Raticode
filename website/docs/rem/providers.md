@@ -48,7 +48,11 @@ Changing provider or model keeps the Raticode thread.
 
 ## Workflow providers
 
-[Agent](../nodes/agent.md) nodes set their provider and model in `workflow.rattish`, not from Rem's picker. Workflow API profiles and coding CLI subscriptions are configured separately, so an API profile doesn't automatically work in Rem chat. See [Provider setup](../setup.md).
+[Agent](../nodes/agent.md) nodes set their provider and model in `workflow.rattish`, not from Rem's picker. Workflow API profiles and coding CLI subscriptions are configured separately, so an API profile doesn't automatically work in Rem chat. The same goes for [local model servers](../setup.md#local-model-servers) such as Ollama: they're for workflow agent nodes, not Rem chat. See [Provider setup](../setup.md).
+
+## Classification models
+
+Jev, TypeSafe's yes/no and multiple-choice classifier, has its own card under **Classification models** in **Settings > Providers** (from 0.5.5). It isn't a coding provider: it answers a question with a label and a score instead of writing text, so it never appears in Rem's model picker, Organizations or agent nodes. Workflows use it through the [jev node](../nodes/jev.md). See [Jev classifier](../workflows/jev.md).
 
 ## Usage and billing
 

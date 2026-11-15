@@ -1,7 +1,7 @@
 /* global __dirname, process, console, clearTimeout, setTimeout, window, document, KeyboardEvent, Event, HTMLInputElement */
 require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
 const { testViteCacheDir } = require("../electron/tests/test-vite-cache.cjs");
-const { app, BrowserWindow, ipcMain, clipboard, dialog, session: electronSession, Menu, shell, webContents } = require("electron");
+const { app, BrowserWindow, WebContentsView, ipcMain, clipboard, dialog, session: electronSession, Menu, shell, webContents } = require("electron");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -49,6 +49,8 @@ app.whenReady().then(async () => {
     app, Menu, clipboard, dialog, shell, session: electronSession, webContents,
     getMainWindow: () => win, resolvePath: value => value, platform: "darwin",
     store: createBrowserStore(browserData), quarantineDir: path.join(browserData, "quarantine"),
+    // Tabs are views the main process owns, as in the app; the studio draws their slot.
+    WebContentsView, preloadPath: path.join(frontend, "electron/browser-preload.cjs"),
   });
   const data = { "/fixture/sample.ts": "const value: number = 1;\nconsole.log(value);\n", "/fixture/sample.py": "print(  'python')\n" };
   function handle(channel, action) { ipcMain.handle(channel, security.secureHandler(action)); }
@@ -78,7 +80,7 @@ app.whenReady().then(async () => {
   const evaluate = fn => win.webContents.executeJavaScript(`Promise.resolve((${fn})()).then(value => value instanceof Node || value instanceof NodeList ? true : value)`);
   async function waitFor(fn) { for (let i = 0; i < 300; i++) { if (await evaluate(`() => Promise.resolve((${fn})()).then(Boolean)`)) return; await new Promise(resolve => setTimeout(resolve, 50)); } console.log(await evaluate(() => ({ body: document.body.textContent.slice(-2000), ready: window.fixtureReady, state: window.fileStateFixture }))); console.log(errors); throw Error(`Timed out waiting for ${fn}`); }
   console.log("Waiting for editors and guest");
-  await waitFor(() => window.fileStateFixture && !window.fileStateFixture.loading && document.querySelector("webview"));
+  await waitFor(() => window.fileStateFixture && !window.fileStateFixture.loading && document.querySelector('[data-testid="browser-view-slot"]'));
   // Utility typography must still override the authored input font reset.
   const styleDefaults = await evaluate(() => {
     const probe = document.createElement("div");
@@ -115,7 +117,7 @@ app.whenReady().then(async () => {
   await waitFor(() => window.monacoFixture.editor.getEditors()[0].getValue().includes("native paste sentinel"));
   await evaluate(() => window.flushDrafts());
   await win.webContents.reload();
-  await waitFor(() => window.fileStateFixture?.dirty && document.querySelector("webview"));
+  await waitFor(() => window.fileStateFixture?.dirty && document.querySelector('[data-testid="browser-view-slot"]'));
   assert.ok(await evaluate(() => window.monacoFixture.editor.getEditors()[0].getValue().includes("native paste sentinel")));
   // Type-aware worker operates on the real file URI and diagnoses an incompatible assignment.
   assert.ok(await evaluate(async () => {
@@ -126,6 +128,9 @@ app.whenReady().then(async () => {
   }));
   await evaluate(() => { document.documentElement.dataset.reducedMotion = "true"; });
   await waitFor(() => !window.monacoFixture.editor.getEditors()[0].getOption(window.monacoFixture.editor.EditorOption.smoothScrolling));
+  // The browser tab is a separate view that keeps keyboard focus after it loads; give it
+  // back to the studio, as clicking the studio does, before testing the studio's own keys.
+  win.webContents.focus();
   // Menu keys open, traverse, and restore focus.
   assert.ok(await evaluate(async () => {
     const trigger = document.querySelector('[data-menu-trigger="Edit"]'); trigger.focus(); trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true })); await new Promise(resolve => setTimeout(resolve, 50));
@@ -186,7 +191,7 @@ app.whenReady().then(async () => {
   await evaluate(() => document.querySelector('[data-menu-trigger="Edit"]').click());
   // Production browser IPC and found-in-page events, including Cmd+F dispatched in the guest.
   await waitFor(() => [...document.querySelectorAll('section[aria-label="Integrated browser"] button')].some(button => button.getAttribute("aria-label") === "Find in Page" && !button.disabled));
-  const guest = webContents.getAllWebContents().find(contents => contents.getType() === "webview");
+  const guest = webContents.getAllWebContents().find(contents => contents.getType() === "window" && contents !== win.webContents && !contents.isDestroyed());
   guest.focus(); guest.sendInputEvent({ type: "keyDown", keyCode: "F", modifiers: ["meta"] }); guest.sendInputEvent({ type: "keyUp", keyCode: "F", modifiers: ["meta"] });
   await waitFor(() => document.querySelector('[aria-label="Find text in page"]'));
   await evaluate(() => { const field = document.querySelector('[aria-label="Find text in page"]'); const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set; setter.call(field, "needle"); field.dispatchEvent(new Event("input", { bubbles: true })); });

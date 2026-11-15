@@ -10,8 +10,10 @@ import os
 import re
 import sqlite3
 import subprocess
+import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -22,10 +24,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from gofer.core.prompt_envelope import AgentResources
 from gofer.core.provider_permissions import provider_permission_args
+from gofer.core.usage_ledger import ledger_mark, organization_ticket_usage
 from gofer.ui.organization_hours import OperatingHours
 from gofer.ui.organization_schedule import WorkSchedule
-from gofer.ui.rem_ticket_activity import note_organization_transitions
+from gofer.ui.rem_ticket_activity import WAITING_REASONS, note_organization_transitions
 from gofer.utils.process import build_subprocess_env
+
+# Block reasons that clear by themselves, so the ticket doesn't wait on the user.
+SELF_CLEARING = frozenset({"dependencies", *WAITING_REASONS})
 
 
 def project_identity(value: str) -> tuple[str, str]:
@@ -99,6 +105,55 @@ def event_digest(previous: str, oid: str, at: str, actor: str, kind: str, body: 
 
 # Matching events one phone alert read looks at; it reads again for the rest.
 ALERT_EVENTS = 300
+
+
+def _change_triggers() -> str:
+    """Triggers that raise an organization's change counter on every write to its data.
+
+    Readers compare the counter instead of decoding the organization to see whether
+    anything changed. A write that leaves a row as it was (the WHERE body != excluded.body
+    upserts) touches no row, so it doesn't count.
+    """
+    tables = {
+        "organizations": "id",
+        "organization_tasks": "organization",
+        "organization_comments": "organization",
+        "organization_records": "organization",
+    }
+    statements = []
+    for table, column in tables.items():
+        for event, row in (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")):
+            oid = f"{row}.{column}"
+            # No INSERT OR IGNORE: an upsert's own conflict handling would override it
+            # inside the trigger and fail on the existing counter.
+            statements.append(
+                f"CREATE TRIGGER IF NOT EXISTS {table}_changed_{event.lower()} "
+                f"AFTER {event} ON {table} BEGIN "
+                f"INSERT INTO organization_changes SELECT {oid}, 0 WHERE NOT EXISTS "
+                f"(SELECT 1 FROM organization_changes WHERE organization={oid}); "
+                f"UPDATE organization_changes SET version=version + 1 "
+                f"WHERE organization={oid}; END;"
+            )
+    return "\n".join(
+        [
+            "CREATE TABLE IF NOT EXISTS organization_changes ("
+            "organization TEXT PRIMARY KEY, version INTEGER NOT NULL);",
+            *statements,
+        ]
+    )
+
+
+CHANGE_COUNTER_SQL = _change_triggers()
+
+
+@dataclass
+class _Snapshot:
+    """A decoded organization at one change count, and its ticket usage once asked for."""
+
+    version: int
+    org: dict[str, Any]
+    # (ledger key, usage by task ID), recomputed when the usage ledger moves.
+    usage: tuple[tuple[str, tuple[int, int]], dict[str, dict[str, Any]]] | None = None
 
 
 def now() -> str:
@@ -176,15 +231,57 @@ def task_root(config: dict[str, Any], task: dict[str, Any]) -> str:
 
 
 def self_work_assignment(runtime: dict[str, Any], employee_id: str) -> dict[str, Any]:
-    """The projects assigned to a worker for self-work, with their revision."""
+    """The projects assigned to a worker for self-work, with their revision.
+
+    ``follows`` means the user gave the worker all of the organization's folders it can
+    use, so it keeps all of them as folders are added or removed.
+    """
     saved = runtime.get("selfWorkProjects", {}).get(employee_id) or {}
-    return {"projects": list(saved.get("projects", [])), "revision": int(saved.get("revision", 0))}
+    return {
+        "projects": list(saved.get("projects", [])),
+        "revision": int(saved.get("revision", 0)),
+        "follows": bool(saved.get("follows")),
+    }
 
 
 def assignable_roots(config: dict[str, Any], employee: dict[str, Any]) -> list[str]:
     """Projects this worker can be given: its organization's, within its workspace grants."""
     grants = employee.get("workspacePaths")
     return [r for r in config.get("projectRoots", []) if grants is None or r in grants]
+
+
+def follow_projects(config: dict[str, Any], runtime: dict[str, Any], employee_ids: Any) -> None:
+    """Give these workers every organization folder they can use, now and as folders change.
+
+    Only the user's own create or add-worker action calls this, so worker projects stay
+    the user's choice.
+    """
+    saved = runtime.setdefault("selfWorkProjects", {})
+    for employee in config.get("employees", []):
+        if employee["id"] in employee_ids:
+            previous = self_work_assignment(runtime, employee["id"])
+            saved[employee["id"]] = {
+                "projects": assignable_roots(config, employee),
+                "revision": previous["revision"] + 1,
+                "follows": True,
+            }
+
+
+def refresh_followers(config: dict[str, Any], runtime: dict[str, Any]) -> None:
+    """Keep following workers on all of the organization's folders after a change, and drop
+    the assignments of workers that were removed."""
+    saved = runtime.get("selfWorkProjects")
+    if not saved:
+        return
+    employees = {e["id"]: e for e in config.get("employees", [])}
+    for eid in list(saved):
+        if eid not in employees:
+            saved.pop(eid)
+            continue
+        entry = self_work_assignment(runtime, eid)
+        projects = assignable_roots(config, employees[eid])
+        if entry["follows"] and projects != entry["projects"]:
+            saved[eid] = {"projects": projects, "revision": entry["revision"] + 1, "follows": True}
 
 
 def self_work_roots(org: dict[str, Any], employee_id: str) -> list[str]:
@@ -214,9 +311,11 @@ def has_assignment(org: dict[str, Any], employee_id: str) -> bool:
     A worker with chosen projects is bounded to them for everything it does. A worker saved
     before projects were assigned keeps its old reach, the organization's projects within its
     workspace access, for the tickets it is given, but doesn't work on its own until the user
-    assigns its projects.
+    assigns its projects. A worker that follows the organization's folders while it owns none
+    the worker can use isn't bounded yet either.
     """
-    return bool(self_work_assignment(org["runtime"], employee_id)["revision"] > 0)
+    saved = self_work_assignment(org["runtime"], employee_id)
+    return saved["revision"] > 0 and bool(saved["projects"] or not saved["follows"])
 
 
 class Employee(BaseModel):
@@ -634,8 +733,12 @@ class Task(BaseModel):
     worktree: dict[str, str] | None = None
     # The removed worktree's branch, kept so finished work stays inspectable.
     releasedWorktree: dict[str, str] | None = None
+    # The user's Accept landed the ticket's branch: branch, baseBranch, commit, how, at.
+    landed: dict[str, Any] | None = None
     # The ticket's worktree of the organization's shared repository, while it is open.
     sharedWorktree: dict[str, str] | None = None
+    # What the project's worktree setup did in the task's worktree (worktree_setup.py).
+    worktreeSetup: dict[str, Any] | None = None
     # A heartbeat check-in Raticode created, not work someone planned.
     heartbeat: bool = False
     # Created during a check-in, so it stays within its assignee's self-work projects.
@@ -660,6 +763,12 @@ class OrganizationStore:
     def __init__(self, data_dir: Path) -> None:
         self.path = data_dir / "organizations.sqlite3"
         self._anchor_heads: dict[str, int] = {}
+        # Read versions name this store's start too, so a database restored from a backup
+        # while Raticode was closed never repeats a version a client already saw.
+        self._boot = uuid4().hex[:8]
+        # One decoded copy per organization, with its change counter and ticket usage.
+        self._snapshots: dict[str, _Snapshot] = {}
+        self._snapshot_lock = threading.Lock()
         data_dir.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
             db.executescript("""
@@ -716,6 +825,7 @@ class OrganizationStore:
             for column in ("digest", "previous_digest"):
                 if column not in columns:
                     db.execute(f"ALTER TABLE organization_events ADD COLUMN {column} TEXT")
+            db.executescript(CHANGE_COUNTER_SQL)
 
         self._migrate_project_ownership()
         with self.connect() as db:
@@ -853,13 +963,65 @@ class OrganizationStore:
             rows = db.execute(
                 "SELECT o.id, o.revision, o.config, o.runtime, "
                 "(SELECT COUNT(*) FROM organization_tasks t WHERE t.organization=o.id "
-                "AND t.status NOT IN ('done','cancelled')) AS open_tasks "
+                "AND t.status NOT IN ('done','cancelled')) AS open_tasks, "
+                # Tickets waiting on the user: results to review and plans to approve.
+                # Blocked work is counted below, by the same rule as the Needs you panel.
+                "(SELECT COUNT(*) FROM organization_tasks t WHERE t.organization=o.id "
+                "AND (t.status='in_review' OR (t.status NOT IN ('done','cancelled','blocked') "
+                "AND json_extract(t.body,'$.approvalRequired')=1 "
+                "AND json_extract(t.body,'$.approvedRevision') IS NULL))) AS waiting_tasks "
                 "FROM organizations o ORDER BY o.rowid"
             ).fetchall()
+            blocked_rows = db.execute(
+                "SELECT organization, status, body FROM organization_tasks WHERE status='blocked'"
+            ).fetchall()
+            # Status entries say when each ticket was blocked, which tells whether Rem
+            # already looked at this blocked spell.
+            moves: dict[tuple[str, str], list[Any]] = {}
+            for comment in db.execute(
+                "SELECT c.organization, c.task, c.body FROM organization_comments c "
+                "JOIN organization_tasks t ON t.organization=c.organization AND t.id=c.task "
+                "WHERE t.status='blocked' AND json_extract(c.body,'$.kind')='status' "
+                "ORDER BY c.organization, c.task, c.position"
+            ):
+                moves.setdefault((comment["organization"], comment["task"]), []).append(
+                    json.loads(comment["body"])
+                )
+        blocked: dict[str, list[dict[str, Any]]] = {}
+        for item in blocked_rows:
+            task = Task.model_validate(json.loads(item["body"])).model_dump()
+            task.update(
+                status=item["status"],
+                comments=moves.get((item["organization"], task["id"]), []),
+            )
+            blocked.setdefault(item["organization"], []).append(task)
         result = []
         for row in rows:
             config = json.loads(row["config"])
             runtime = json.loads(row["runtime"])
+            waiting_requests = sum(
+                1
+                for r in (runtime.get("consentRequests") or {}).values()
+                if r.get("status") == "pending"
+                and _recent(r.get("at"))
+                and not (
+                    config.get("autoMode")
+                    and not runtime.get("autoHalt")
+                    and r.get("route") != "user"
+                )
+            )
+            # Blocked work waits on the user unless it waits by itself (a Start, working
+            # hours, other tickets, its next automatic try) or, in Auto mode, for Rem's
+            # look first: diagnostics' attention rule (blocked_needs_user).
+            from gofer.ui.organization_operations import blocked_needs_user
+
+            view = {"config": config, "runtime": runtime}
+            waiting_blocked = sum(
+                1
+                for task in blocked.get(row["id"], [])
+                if blocked_needs_user(view, task)
+                or (task.get("approvalRequired") and task.get("approvedRevision") is None)
+            )
             result.append(
                 {
                     "id": row["id"],
@@ -873,17 +1035,10 @@ class OrganizationStore:
                     "openTasks": row["open_tasks"],
                     # Rem's requests still waiting for the user (they expire after a day).
                     # In Auto mode, requests Rem's review decides don't count.
-                    "waitingRequests": sum(
-                        1
-                        for r in (runtime.get("consentRequests") or {}).values()
-                        if r.get("status") == "pending"
-                        and _recent(r.get("at"))
-                        and not (
-                            config.get("autoMode")
-                            and not runtime.get("autoHalt")
-                            and r.get("route") != "user"
-                        )
-                    ),
+                    "waitingRequests": waiting_requests,
+                    # Everything that waits on the user: Rem's requests plus tickets
+                    # to review, unblock or approve.
+                    "needsYou": waiting_requests + row["waiting_tasks"] + waiting_blocked,
                     "autoMode": bool(config.get("autoMode")),
                     "autoHalt": runtime.get("autoHalt") or None,
                 }
@@ -903,8 +1058,125 @@ class OrganizationStore:
         }
 
     def get(self, project: str, oid: str) -> dict[str, Any]:
+        return self.get_versioned(project, oid)[1]
+
+    def get_versioned(self, project: str, oid: str) -> tuple[int, dict[str, Any]]:
+        """The organization and its change count, read from one database snapshot."""
         with self.connect() as db:
-            return self._get(db, project, oid)
+            db.execute("BEGIN")
+            count = self._change_count(db, oid)
+            return count, self._get(db, project, oid)
+
+    @staticmethod
+    def _change_count(db: sqlite3.Connection, oid: str) -> int:
+        row = db.execute(
+            "SELECT version FROM organization_changes WHERE organization=?", (oid,)
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def version_label(self, count: int) -> str:
+        """The version a read reports for a change count."""
+        return f"{self._boot}-{count}"
+
+    def read_version(self, oid: str) -> str:
+        """The organization's current read version, from its change counter alone."""
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT COALESCE(c.version, 0) AS version FROM organizations o "
+                "LEFT JOIN organization_changes c ON c.organization=o.id WHERE o.id=?",
+                (oid,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("Organization not found")
+        return self.version_label(int(row["version"]))
+
+    def run_state(self, oid: str) -> tuple[str, bool]:
+        """The organization's state and whether it's archived, from its own row only."""
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT json_extract(runtime,'$.state') AS state, "
+                "json_extract(runtime,'$.archived') AS archived FROM organizations WHERE id=?",
+                (oid,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("Organization not found")
+        return str(row["state"]), bool(row["archived"])
+
+    def turn_status(self, oid: str, run_id: str | None) -> tuple[Any, str, bool]:
+        """What an employee turn's revocation check needs: generation, state, and whether
+        a task still holds the run's claim (always true without a run)."""
+        with self.connect() as db:
+            db.execute("BEGIN")
+            row = db.execute(
+                "SELECT json_extract(runtime,'$.generation') AS generation, "
+                "json_extract(runtime,'$.state') AS state FROM organizations WHERE id=?",
+                (oid,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Organization not found")
+            claimed = (
+                run_id is None
+                or db.execute(
+                    "SELECT 1 FROM organization_tasks WHERE organization=? "
+                    "AND json_extract(body,'$.claim')=? LIMIT 1",
+                    (oid, run_id),
+                ).fetchone()
+                is not None
+            )
+        return row["generation"], str(row["state"]), claimed
+
+    def snapshots(self) -> list[dict[str, Any]]:
+        """Every organization, decoded once per change and shared between readers.
+
+        The Kanban board, Auto mode's review check and Rem's organization requests read
+        these copies, so they must never change them. An organization is decoded again
+        only after its change counter moves.
+        """
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT o.id, COALESCE(c.version, 0) AS version FROM organizations o "
+                "LEFT JOIN organization_changes c ON c.organization=o.id ORDER BY o.rowid"
+            ).fetchall()
+        with self._snapshot_lock:
+            cached = {row["id"]: self._snapshots.get(row["id"]) for row in rows}
+        fresh: dict[str, _Snapshot] = {}
+        for row in rows:
+            entry = cached[row["id"]]
+            if entry is None or entry.version != row["version"]:
+                try:
+                    count, org = self.get_versioned("", row["id"])
+                except ValueError:
+                    continue  # Removed since the list was read.
+                entry = _Snapshot(count, org)
+            fresh[row["id"]] = entry
+        with self._snapshot_lock:
+            for oid in set(self._snapshots) - set(cached):
+                del self._snapshots[oid]
+            for oid, entry in fresh.items():
+                current = self._snapshots.get(oid)
+                if current is None or current.version <= entry.version:
+                    self._snapshots[oid] = entry
+        return [entry.org for entry in fresh.values()]
+
+    def ticket_usage(self, org: dict[str, Any], data_dir: Path | None = None) -> dict[str, Any]:
+        """Each ticket's model use for a copy from ``snapshots``, kept until the organization
+        or the usage ledger changes. Other copies are counted afresh."""
+        data_dir = data_dir or self.path.parent
+        with self._snapshot_lock:
+            entry = self._snapshots.get(org["id"])
+        if entry is None or entry.org is not org:
+            return organization_ticket_usage(org, data_dir)
+        mark = ledger_mark(data_dir)
+        if mark is None:
+            return organization_ticket_usage(org, data_dir)
+        key = (str(data_dir), mark)
+        kept = entry.usage
+        if kept is not None and kept[0] == key:
+            return kept[1]
+        # Read after the mark, so a call recorded meanwhile only makes the next read redo it.
+        totals = organization_ticket_usage(org, data_dir)
+        entry.usage = (key, totals)
+        return totals
 
     def _get(self, db: sqlite3.Connection, project: str, oid: str) -> dict[str, Any]:
         row = db.execute("SELECT * FROM organizations WHERE id=?", (oid,)).fetchone()
@@ -1018,7 +1290,11 @@ class OrganizationStore:
         actor: str,
         reason: str,
         tasks: list[dict[str, Any]] | None = None,
+        *,
+        follow: bool = False,
     ) -> dict[str, Any]:
+        """Save a new organization, paused. ``follow`` gives every worker the
+        organization's folders; only the user's own create sets it."""
         config = {"projectRoots": [project] if project else [], **config}
         validated = OrganizationConfig.model_validate(config).model_dump()
         if validated["autoMode"] and actor != "user":
@@ -1034,6 +1310,8 @@ class OrganizationStore:
         for task in work:
             self.validate_task(task, validated, work)
         runtime = {"state": "paused", "tasks": work, "heartbeats": {}, "generation": 0}
+        if follow:
+            follow_projects(validated, runtime, {e["id"] for e in validated["employees"]})
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute(
@@ -1055,7 +1333,11 @@ class OrganizationStore:
         reason: str,
         restored_from: int | None = None,
         dry_run: bool = False,
+        *,
+        follow_new: bool = False,
     ) -> dict[str, Any]:
+        """Save a new configuration. ``follow_new`` gives workers it adds the organization's
+        folders; only the user's own save sets it."""
         validated = OrganizationConfig.model_validate(config).model_dump()
         self._warm_project_ownership(validated)
         with self.connect() as db:
@@ -1158,6 +1440,9 @@ class OrganizationStore:
                         }
                     )
             note_organization_transitions(current, statuses, "system")
+            if follow_new:
+                follow_projects(validated, runtime, set(new_employees) - set(old_employees))
+            refresh_followers(validated, runtime)
             self._write_runtime(db, oid, runtime)
             self._revision(db, oid, validated, actor, reason, restored_from)
         return self.get(project, oid)

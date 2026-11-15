@@ -1,11 +1,12 @@
 import SecondBrainProvider, { ResearchProviderContext, useResearchSelection } from "./SecondBrainProvider.jsx";
 import { useContext, useEffect, useMemo, useRef, useState } from "react";
-import { CircleCheck, ClipboardPaste, CopyCheck, FileWarning, FolderOpen, Globe, Inbox, Library, Link2, Pencil, Play, Plus, Quote, RefreshCw, ScanText, Tags, Trash2, Unlink, FilePlus2, Repeat, CalendarClock, HardDrive } from "lucide-react";
+import { CircleCheck, ClipboardPaste, CopyCheck, FileWarning, FolderOpen, Globe, Inbox, Library, Link2, Pencil, Play, Plus, Quote, RefreshCw, ScanText, Tags, Trash2, Unlink, FilePlus2, Repeat, CalendarClock, HardDrive, LockKeyhole, Layers, Wrench } from "lucide-react";
 import { formatDay, formatTime, extractionLabel } from "../lib/secondBrain.js";
-import { HEALTH_KINDS, RECIPES } from "../lib/secondBrain.js";
-import { useSecondBrain, openDocument, openDialog, updateDocument, addToCollection, evidenceItem, resolveHealth, startTask, saveJob, removeJob, removeDocument, updateBrain, notify, navigate, uid, backfillProvenance } from "../lib/secondBrainStore.js";
+import { HEALTH_KINDS, RECIPES, deadLinkSummary, linkReason } from "../lib/secondBrain.js";
+import { useSecondBrain, openDocument, openDialog, updateDocument, addToCollection, evidenceItem, resolveHealth, startTask, saveJob, removeJob, removeDocument, updateBrain, notify, navigate, uid, backfillProvenance, restrictBrainAccess, refreshLibrary } from "../lib/secondBrainStore.js";
 import { DraftInput, Empty, Menu, Pill, ProgressBar, TypeIcon } from "./SecondBrainParts.jsx";
 import JobSourceRules from "./SecondBrainJobSources.jsx";
+import { BackupSettings } from "./SecondBrainBackups.jsx";
 import { defaultJobSourceRules, describeJobSources, jobScopeLabel, jobSourceRules, jobSourceRulesError } from "../lib/secondBrainJobSources.js";
 
 export function InboxView({ brain }) {
@@ -37,7 +38,7 @@ export function InboxView({ brain }) {
   </div>;
 }
 
-const FIX_ICONS = { link: Unlink, metadata: Pencil, extraction: ScanText, duplicate: CopyCheck, citation: Quote };
+const FIX_ICONS = { link: Unlink, metadata: Pencil, extraction: ScanText, duplicate: CopyCheck, citation: Quote, family: Layers, review: CalendarClock, permissions: LockKeyhole };
 const HEALTH_PAGE_SIZE = 15;
 
 function HealthProblemList({ issues, documents, selected, onSelect, onFix }) {
@@ -60,10 +61,10 @@ function HealthProblemList({ issues, documents, selected, onSelect, onFix }) {
     return () => { active = false; observer.disconnect(); };
   }, [hasMore, limit, issues.length]);
   return <>
-    <ul ref={list} className="sb-rows sb-health-rows">{issues.slice(0, limit).map(issue => { const doc = documents.get(issue.docId); const Icon = FIX_ICONS[issue.kind]; return <li key={issue.id} className="sb-row">
-      <input type="checkbox" aria-label={`Select problem in ${doc?.title}`} checked={selected.has(issue.id)} onChange={() => onSelect(issue.id)} />
+    <ul ref={list} className="sb-rows sb-health-rows">{issues.slice(0, limit).map(issue => { const doc = documents.get(issue.docId); const Icon = FIX_ICONS[issue.kind]; const title = doc ? doc.title : "Brain folder"; return <li key={issue.id} className="sb-row">
+      <input type="checkbox" aria-label={`Select problem in ${title}`} checked={selected.has(issue.id)} onChange={() => onSelect(issue.id)} />
       <Icon size={16} aria-hidden="true" className="sb-row-icon" />
-      <div className="sb-row-main"><button type="button" className="sb-row-title" onClick={() => openDocument(issue.docId)}>{doc?.title}</button><p><span className="sb-mono">{doc?.path}</span></p><p>{issue.detail}</p></div>
+      <div className="sb-row-main">{doc ? <button type="button" className="sb-row-title" onClick={() => openDocument(issue.docId)}>{doc.title}</button> : <strong className="sb-row-title">{title}</strong>}<p><span className="sb-mono">{doc ? doc.path : issue.path}</span></p><p>{issue.detail}</p></div>
       <div className="sb-row-actions"><span className="sb-row-kind">{HEALTH_KINDS.find(([id]) => id === issue.kind)?.[1]}</span><button type="button" className="sb-button" onClick={() => onFix(issue)}>{issue.fix}</button></div>
     </li>; })}</ul>
     <div className="sb-health-pagination">
@@ -73,10 +74,35 @@ function HealthProblemList({ issues, documents, selected, onSelect, onFix }) {
   </>;
 }
 
+// The dead-link list: every link problem with the note it is in, the link as written and why.
+function DeadLinkList({ issues, documents, selected, onSelect, onFix }) {
+  const [limit, setLimit] = useState(HEALTH_PAGE_SIZE);
+  const summary = deadLinkSummary(issues);
+  return <>
+    <p className="sb-hint sb-dead-link-summary" role="status">{summary.map(item => `${item.count} ${item.label.toLowerCase()}`).join(" · ")}</p>
+    <div className="sb-table-wrap" role="region" aria-label="Dead links" tabIndex={0}><table className="sb-table sb-dead-links">
+      <thead><tr><th scope="col"><span className="sr-only">Select</span></th><th scope="col">Note</th><th scope="col">Link</th><th scope="col">Reason</th><th scope="col"><span className="sr-only">Fix</span></th></tr></thead>
+      <tbody>{issues.slice(0, limit).map(issue => { const doc = documents.get(issue.docId); const [reason, label, hint] = linkReason(issue); return <tr key={issue.id} data-reason={reason}>
+        <td><input type="checkbox" aria-label={`Select link in ${doc?.title || "note"}`} checked={selected.has(issue.id)} onChange={() => onSelect(issue.id)} /></td>
+        <th scope="row">{doc ? <button type="button" className="sb-link" onClick={() => openDocument(issue.docId)}>{doc.title}</button> : "Unknown note"}<small className="sb-mono">{doc?.path}</small></th>
+        <td><code className="sb-mono">{issue.target}</code></td>
+        <td><Pill tone={reason === "absolute" ? "neutral" : "warning"}>{label}</Pill><small>{hint}</small></td>
+        <td><div className="sb-row-actions"><button type="button" className="sb-mini-button" onClick={() => onFix(issue)}>{issue.fix}</button></div></td>
+      </tr>; })}</tbody>
+    </table></div>
+    <div className="sb-health-pagination">
+      <p className="sb-hint">Showing {Math.min(limit, issues.length)} of {issues.length} dead links</p>
+      {limit < issues.length ? <button type="button" className="sb-button" onClick={() => setLimit(limit + HEALTH_PAGE_SIZE)}>Show {Math.min(HEALTH_PAGE_SIZE, issues.length - limit)} more links</button> : null}
+    </div>
+  </>;
+}
+
 export function HealthView({ brain }) {
   const store = useSecondBrain();
+  // Links and folder permissions are rechecked at most once a minute; opening this page checks them now.
+  useEffect(() => { void refreshLibrary({ recheck: true }); }, [brain.id]);
   const documents = useMemo(() => new Map(store.documents.map(doc => [doc.id, doc])), [store.documents]);
-  const issues = useMemo(() => store.health.filter(issue => documents.get(issue.docId)?.brainId === brain.id), [store.health, documents, brain.id]);
+  const issues = useMemo(() => store.health.filter(issue => (issue.brainId || documents.get(issue.docId)?.brainId) === brain.id), [store.health, documents, brain.id]);
   const counts = useMemo(() => { const result = {}; for (const issue of issues) result[issue.kind] = (result[issue.kind] || 0) + 1; return result; }, [issues]);
   const [kind, setKind] = useState("");
   const [selected, setSelected] = useState([]);
@@ -87,20 +113,26 @@ export function HealthView({ brain }) {
     else if (issue.kind === "extraction") openDialog("encoding", { docId: issue.docId, issueId: issue.id });
     else if (issue.kind === "metadata") openDialog("edit-metadata", { docId: issue.docId });
     else if (issue.kind === "duplicate") openDialog("duplicate", { issue });
+    else if (issue.kind === "link" && issue.reason === "absolute") openDialog("absolute-links");
     else if (issue.kind === "link") openDialog("locate-link", { issue });
+    else if (issue.kind === "permissions") void restrictBrainAccess(brain.id);
+    else if (issue.kind === "family") openDialog("replace-suggestion", { issue });
+    else if (issue.kind === "review") openDialog("check-by", { docId: issue.docId });
     else if (issue.kind === "citation") { const report = store.reports.find(item => item.citations.some(citation => citation.state === "relocate" && citation.docId === issue.docId)); const citation = report?.citations.find(item => item.state === "relocate" && item.docId === issue.docId); if (report && citation) { navigate("reports", { reportId: report.id }); openDialog("relocate", { citation, reportId: report.id, issueId: issue.id }); } }
   };
   const selectedIssues = issues.filter(issue => selectedIds.has(issue.id));
   const ocrBatch = selectedIssues.filter(issue => issue.kind === "extraction" && documents.get(issue.docId)?.extraction === "ocr");
+  const absoluteNotes = new Set(issues.filter(issue => issue.kind === "link" && (issue.reason === "absolute" || issue.absolute)).map(issue => issue.docId)).size;
   return <div className="sb-page">
-    <div className="sb-page-head"><div><h3>Library health</h3><p>Problems that keep documents out of search or make citations hard to trust. Fix them in batches; your folder structure stays as it is.</p></div>
+    <div className="sb-page-head"><div><h3>Library health</h3><p>Problems that keep documents out of search, make citations hard to trust or let other accounts on this computer read the brain, plus older report versions to retire and reports due for a check. Fix them in batches; your folder structure stays as it is.</p></div>
       <button type="button" className="sb-button" onClick={() => startTask({ kind: "index", label: "Checking library health", steps: ["Scanning links", "Checking metadata", "Comparing content hashes", "Resolving citations"],  })}><RefreshCw size={14} />Check again</button></div>
     <div className="sb-kpis" role="group" aria-label="Problem counts">
       <button type="button" aria-pressed={!kind} onClick={() => setKind("")}><strong>{issues.length}</strong><span>All problems</span></button>
       {HEALTH_KINDS.map(([id, label]) => { const Icon = FIX_ICONS[id]; return <button key={id} type="button" aria-pressed={kind === id} onClick={() => setKind(kind === id ? "" : id)}><strong>{counts[id] || 0}</strong><span><Icon size={13} aria-hidden="true" />{label}</span></button>; })}
     </div>
     {selected.length ? <div className="sb-bulk"><strong>{selected.length} selected</strong>{ocrBatch.length ? <button type="button" className="sb-mini-button" onClick={() => openDialog("ocr", { docIds: ocrBatch.map(issue => issue.docId), issueIds: ocrBatch.map(issue => issue.id) })}><ScanText size={13} />Run OCR on {ocrBatch.length}</button> : null}<button type="button" className="sb-mini-button" onClick={() => { resolveHealth(selected); setSelected([]); notify("Ignored. These problems stay hidden until the documents change."); }}>Ignore</button></div> : null}
-    {visible.length ? <HealthProblemList key={`${brain.id}:${kind}`} issues={visible} documents={documents} selected={selectedIds} onSelect={id => setSelected(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id])} onFix={fix} /> : <Empty icon={CircleCheck} title={kind ? "Nothing to fix here" : "Your library looks healthy"}>Links resolve, documents are searchable and citations point to one passage.</Empty>}
+    {absoluteNotes ? <div className="sb-inline-note sb-callout" role="status"><Wrench size={15} aria-hidden="true" /><div><strong>{absoluteNotes} note{absoluteNotes === 1 ? " links" : "s link"} to files in this brain by absolute path.</strong><p>Those links break when the brain moves or syncs to another computer. The repair rewrites them as relative paths. Links to /tmp or outside the brain stay as they are.</p></div><button type="button" className="sb-button" onClick={() => openDialog("absolute-links")}>Preview repair</button></div> : null}
+    {kind === "link" && visible.length ? <DeadLinkList key={brain.id} issues={visible} documents={documents} selected={selectedIds} onSelect={id => setSelected(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id])} onFix={fix} /> : visible.length ? <HealthProblemList key={`${brain.id}:${kind}`} issues={visible} documents={documents} selected={selectedIds} onSelect={id => setSelected(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id])} onFix={fix} /> : <Empty icon={CircleCheck} title={kind ? "Nothing to fix here" : "Your library looks healthy"}>Links resolve, documents are searchable and citations point to one passage.</Empty>}
     <section className="sb-index-panel"><h4>Search index</h4><dl className="sb-facts">
       {[["State", brain.index.state === "updating" ? `Updating · ${brain.index.progress}%` : "Up to date"], ["Documents", brain.index.documents.toLocaleString()], ["Passages", brain.index.passages.toLocaleString()], ["Waiting for extraction", brain.index.pending], ["Extraction failed", brain.index.failed], ["Generation", `#${brain.index.generation} · as of ${new Date(brain.index.asOf).toLocaleTimeString()}`]].map(([term, value]) => <div key={term}><dt>{term}</dt><dd>{value}</dd></div>)}
     </dl>{brain.index.state === "updating" ? <ProgressBar value={brain.index.progress} label="Index progress" /> : null}<p className="sb-hint">Search keeps answering from the last published generation while new documents are processed.</p></section>
@@ -174,6 +206,7 @@ export function BrainSettingsView({ brain }) {
       <label className="sb-field"><span>Name</span><DraftInput label="Brain name" value={brain.name} onCommit={name => name.trim() && updateBrain(brain.id, { name: name.trim() })} /></label>
       <div className="sb-field"><span>Folder</span><div className="sb-path-row"><code className="sb-mono">{brain.root}</code><button type="button" className="sb-mini-button" onClick={() => window.goferDesktop?.workspace?.revealPath?.(brain.root)}><FolderOpen size={12} />Reveal</button><button type="button" className="sb-mini-button" onClick={() => openDialog("locate", { brainId: brain.id })}>Change…</button></div><small>Moving the folder keeps the brain’s identity. Choose its new location here.</small></div>
     </section>
+    <BackupSettings brain={brain} />
     <section><h4>Library metadata</h4>
       <fieldset className="sb-checklist"><legend className="sb-sr-only">Where library metadata is stored</legend>
         <label><input type="radio" name="sb-metadata" checked={settings.metadata === "portable"} onChange={() => set({ metadata: "portable" })} /><span>Store in the brain folder<small>Collections, citations and saved searches live in <code className="sb-mono">.raticode/</code> and travel with the folder.</small></span></label>

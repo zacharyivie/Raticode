@@ -1,0 +1,32 @@
+{
+  "testSetVersion": 1,
+  "cases": [
+    {
+      "id": "healthy-build",
+      "name": "Reports on a command that succeeded",
+      "inputs": {
+        "command": "printf 'build: ok\\ntests: 42 passed, 0 failed\\ndeploy: staging updated\\n'",
+        "reports-folder": ".raticode/daily-report/logs/test-reports"
+      },
+      "checks": [
+        {"type": "text", "label": "Records the exit code", "target": "nodes.collect.stdout", "contains": "exit-code: 0"},
+        {"type": "text", "label": "Passes the output on", "target": "nodes.collect.stdout", "contains": "42 passed"},
+        {"type": "command", "label": "Saves today's report file", "target": "nodes.save-report.stdout", "command": "read -r report && test -s \"$report\" && case \"$report\" in *test-reports/*.md) exit 0;; *) exit 1;; esac"},
+        {"type": "judge", "label": "Accurate report", "target": "nodes.write-report", "criteria": "Says the build and deploy succeeded and that 42 tests passed. Reports no failures. Under 250 words."}
+      ]
+    },
+    {
+      "id": "failed-command",
+      "name": "Reports a command that failed instead of stopping",
+      "inputs": {
+        "command": "echo 'error: disk quota exceeded on /var/backups' >&2; exit 3",
+        "reports-folder": ".raticode/daily-report/logs/test-reports"
+      },
+      "checks": [
+        {"type": "text", "label": "Records the failure", "target": "nodes.collect.stdout", "contains": "exit-code: 3"},
+        {"type": "text", "label": "Keeps the error text", "target": "nodes.collect.stdout", "contains": "disk quota exceeded"},
+        {"type": "judge", "label": "Flags the failure", "target": "nodes.write-report", "criteria": "Says the command failed with exit code 3 because the disk quota was exceeded on /var/backups, and flags it as needing attention."}
+      ]
+    }
+  ]
+}

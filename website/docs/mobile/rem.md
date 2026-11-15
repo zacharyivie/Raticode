@@ -82,7 +82,7 @@ A task that [waits for other tasks](../rem/home.md#start-a-task-after-another) s
 - Tell Rem "turn on self-work", "stop self-work" or "is self-work on?", typed or by voice, and the reply says what it is now. See [Turn it on or off from the chat](../rem/board.md#turn-it-on-or-off-from-the-chat).
 - Tell Rem "self-work until 7 PM" or "self-work from 11 PM to 7 AM" to set a [timed window](../rem/board.md#timed-self-work). **Desktop settings › Rem self-work** shows the running window, planned ones and the last period; the switch ends a running window. Set or cancel windows in the chat or on the computer.
 - When self-work stops, Rem's [report](../rem/board.md#the-report-when-self-work-stops) shows in the chat with each task and how it went. Tap one to open it.
-- When you ask for work while self-work fills Rem's threads, self-work pauses to make room; its cards read **Paused for your work**. See [Your work comes first](../rem/board.md#your-work-comes-first).
+- When you ask for work while self-work fills Rem's threads, the lowest-priority self-work task pauses for each task of yours that doesn't fit; its cards read **Paused for your work**, and it picks up again as soon as a thread is free. See [Your work comes first](../rem/board.md#your-work-comes-first).
 - Work Rem started on its own during self-work shows in the chat with its task cards, and jobs started together are grouped under one line. Its alerts come from **Proposals are waiting**, **A task finishes** and **A task needs you**, once each.
 
 ## Threads
@@ -90,6 +90,7 @@ A task that [waits for other tasks](../rem/home.md#start-a-task-after-another) s
 **Threads** has the desktop's sections: **Pinned**, **Unread**, **Read**, **Running** and **Archived**, with search across saved messages.
 
 - **Select several:** long-press a thread, then mark them read or unread, pin, archive, restore or delete them.
+- **Delete permanently:** in a thread's menu, removes the thread and its copy in the computer's [conversation archive](../knowledge/archive.md#delete-permanently). It shows when the computer's Raticode supports it and **Use Raticode from this phone** is on. Copies already committed to Git stay.
 - **Start a thread:** send from the list. The computer names it from your first message. Before sending, pick Global or a project, and the provider, model, effort and permissions.
 - **Thread tools:** **Thread settings > Resources** turns the thread's tools, skills and MCP servers on or off.
 - In a thread, earlier long replies fold to **Show more**, and the newest starts open.
@@ -151,7 +152,8 @@ Shared text can contain instructions you didn't write. Check it before sending: 
 In the phone's connection settings, under **Background & notifications**:
 
 - **Rem chat notifications:** Rem's replies and task updates on requests from this phone, with a **Reply** button. Alerts stay generic unless you turn on **Show Rem's words**.
-- **Also alert me about:** **A task needs you** (any task, wherever it started), **A task finishes**, and **Proposals are waiting** (once per self-work round). These need an up-to-date computer.
+- **Also alert me about:** **A task needs you** (any task, wherever it started), **A task finishes**, **Proposals are waiting** (once per self-work round), and **Workflow messages**, which a workflow sends with a [notification](../nodes/notification.md#phone-notices) node set to `channel: phone`. These need an up-to-date computer.
+- **Workflow messages:** each one is its own alert that opens the run in **Workflows** when you tap it. Messages from the same workflow are grouped under one summary, such as "4 messages from Nightly backup", and only the summary makes a sound, once per sync. A run that sends more than 20 messages shows one "And N more from this run" alert for the rest. If your computer deleted messages before the phone read them (it keeps the newest 500), a quiet alert says how many were missed. It says only "A workflow sent a message" unless **Show Rem's words** is on, when it shows the message's title and text. A run from a trigger while the computer's window is closed reaches the phone at its next sync. Workflow messages are new in Raticode Mobile 0.35.0 and need Raticode 0.5.5 on the computer.
 - **Quiet hours:** silence alerts for a time range without losing them.
 - **Desktop response notifications:** a generic alert when any reply arrives.
 - **Progress:** with background sync on, a task you start from the phone shows its progress in one ongoing notification, as a Live Update on Android 16.1 and newer.

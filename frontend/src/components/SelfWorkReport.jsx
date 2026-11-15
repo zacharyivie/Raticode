@@ -2,7 +2,7 @@
 export default function SelfWorkReport({ report, title = "Report", limit = 40 }) {
   const items = [
     ...report.work_done.map(item => ({ key: `w-${item.at}-${item.title}`, at: item.at, title: item.title, detail: item.summary, tone: item.state })),
-    ...report.tickets_added.map(item => ({ key: `a-${item.at}-${item.title}`, at: item.at, title: item.title, detail: item.proposed ? "Proposed for your approval" : item.organization_name ? `Added to ${item.organization_name}` : "Added to Rem's board", tone: "added" })),
+    ...report.tickets_added.map(item => ({ key: `a-${item.at}-${item.title}`, at: item.at, title: item.title, detail: item.proposed ? "Proposed for your approval" : item.auto_approved ? "Approved by self-work" : item.organization_name ? `Added to ${item.organization_name}` : "Added to Rem's board", tone: "added" })),
     ...report.duplicates_merged.map(item => ({ key: `d-${item.at}-${item.title}`, at: item.at, title: item.title, detail: `Merged into “${item.kept_title}”`, tone: "merged" })),
   ].sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, limit);
   // With nothing else to report, the summary is already the latest note.

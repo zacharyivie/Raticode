@@ -1,11 +1,13 @@
 import SecondBrainProvider, { useResearchSelection } from "./SecondBrainProvider.jsx";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AlertTriangle, CircleCheck, FolderOpen, Library, ShieldCheck, Sparkles, FileArchive, Files, Quote } from "lucide-react";
 import { formatBytes, parseDateBound, searchLibrary, wordDiff, formatDay, formatTime } from "../lib/secondBrain.js";
-import { useSecondBrain, viewFor, closeDialog, openDialog, createBrain, removeBrain, updateBrain, createCollection, updateCollection, addToCollection, navigate, saveSearch, documentById, blockById, updateReportCitation, updateClaim, updateReport, updateDocument, resolveHealth, startTask, notify, openDocument, captureSource, libraryFor, uid, getState, isSampleLibrary } from "../lib/secondBrainStore.js";
+import { useSecondBrain, viewFor, closeDialog, openDialog, createBrain, removeBrain, updateBrain, createCollection, updateCollection, addToCollection, navigate, saveSearch, documentById, blockById, updateReportCitation, updateClaim, updateReport, updateDocument, confirmReplacement, resolveHealth, startTask, notify, openDocument, captureSource, libraryFor, uid, getState, isSampleLibrary, previewAbsoluteLinks } from "../lib/secondBrainStore.js";
 import { brainRequest } from "../lib/secondBrainApi.js";
 import { DraftInput, Modal, Segmented, TypeIcon, askRem } from "./SecondBrainParts.jsx";
 import { ReportBuilder, reportsAffectedBy } from "./SecondBrainReports.jsx";
+import { useBackupEstimate } from "./SecondBrainBackups.jsx";
+import { archiveLabel, packageFit } from "../lib/secondBrainBackups.js";
 
 const basename = path => path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "";
 async function browse(options, current) {
@@ -107,6 +109,11 @@ function ExportBrain({ purpose: initialPurpose = "complete", collectionId, onClo
   const [collection, setCollection] = useState(collectionId || collections[0]?.id || "");
   const [snapshots, setSnapshots] = useState(true);
   const [verify, setVerify] = useState(true);
+  const estimate = useBackupEstimate(brain.id);
+  const [conversations, setConversations] = useState(null);
+  // Leave the archive out by default when the whole package would not fit.
+  const includeConversations = conversations ?? (estimate ? packageFit(estimate, true).fits : true);
+  const fit = packageFit(estimate, includeConversations);
   const [destination, setDestination] = useState(`${store.capabilities?.home || ""}/${brain.name.toLowerCase().replace(/\s+/g, "-")}.zip`);
   const reports = store.reports.filter(report => report.brainId === brain.id && (purpose !== "collection" || report.collectionId === collection));
   const options = [
@@ -117,14 +124,17 @@ function ExportBrain({ purpose: initialPurpose = "complete", collectionId, onClo
   const size = store.documents.filter(doc => doc.brainId === brain.id).reduce((sum, doc) => sum + doc.size, 0);
   const snapshotSize = new TextEncoder().encode(JSON.stringify(store.documents.filter(doc => doc.brainId === brain.id).map(doc => doc.versions))).length;
   return <Modal wide title={`Export ${brain.name}`} description="Choose what the export is for. Each option includes different data." onClose={onClose}
-    footer={<Footer onCancel={onClose} confirm="Export" disabled={purpose === "collection" && !collection} note={`Estimated size ${formatBytes(size + (snapshots && purpose !== "documents" ? snapshotSize : 0))}`} onConfirm={() => { onClose(); void startTask({ kind: "export", label: `Exporting ${brain.name}`, destination, purpose, collectionId: collection, snapshots, verify }); }} />}>
+    footer={<Footer onCancel={onClose} confirm="Export" disabled={purpose === "collection" && !collection} note={`Estimated size ${formatBytes((purpose !== "collection" && fit ? fit.size : size) + (snapshots && purpose !== "documents" ? snapshotSize : 0))}`} onConfirm={() => { onClose(); void startTask({ kind: "export", label: `Exporting ${brain.name}`, destination, purpose, collectionId: collection, snapshots, verify, conversations: includeConversations }); }} />}>
     <div className="sb-option-cards" role="radiogroup" aria-label="Export purpose">{options.map(([id, title, text, Icon]) => <label key={id} className="sb-option-card" data-checked={purpose === id || undefined}><input type="radio" name="sb-export" checked={purpose === id} onChange={() => setPurpose(id)} /><Icon size={18} aria-hidden="true" /><strong>{title}</strong><small>{text}</small></label>)}</div>
     {purpose === "collection" ? <label className="sb-field"><span>Collection</span><select value={collection} onChange={event => setCollection(event.target.value)}>{collections.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label> : null}
     {purpose !== "documents" ? <>
       <label className="sb-check"><input type="checkbox" checked={snapshots} onChange={event => setSnapshots(event.target.checked)} />Include optional source history (+{formatBytes(snapshotSize)})</label>
       {!snapshots && reports.length ? <p className="sb-inline-note" data-tone="warning"><AlertTriangle size={14} aria-hidden="true" />Versions used by {reports.length} report{reports.length === 1 ? "" : "s"} are always retained. Other source history will be omitted.</p> : null}
     </> : <p className="sb-hint">Collections, citations and report provenance are not included. Use Export complete brain to keep them.</p>}
+    {purpose !== "collection" && estimate?.archives?.length ? <label className="sb-check"><input type="checkbox" checked={includeConversations} onChange={event => setConversations(event.target.checked)} />{archiveLabel(estimate)}</label> : null}
+    {purpose === "complete" && fit && !fit.fits ? <p className="sb-inline-note" data-tone="warning"><AlertTriangle size={14} aria-hidden="true" /><span>This package would be {formatBytes(fit.size)}, over the {formatBytes(fit.limit)} limit, so the export would fail.</span></p> : null}
     {purpose === "complete" ? <label className="sb-check"><input type="checkbox" checked={verify} onChange={event => setVerify(event.target.checked)} />Verify that the package restores (recommended for backups)</label> : null}
+    {purpose === "complete" ? <p className="sb-hint">For regular copies, set up scheduled backups in Brain settings.</p> : null}
     <PathField label="Save package as" directory={false} save value={destination} onChange={setDestination} />
     <p className="sb-hint"><ShieldCheck size={12} aria-hidden="true" /> Never exported: search indexes, downloaded models, absolute paths from this computer, folder access grants and credentials.</p>
   </Modal>;
@@ -230,12 +240,12 @@ function FindSupport({ claim, reportId, onClose }) {
 function EditMetadata({ docId, onClose }) {
   const store = useSecondBrain();
   const doc = documentById(store, docId);
-  const [draft, setDraft] = useState({ title: doc.title, author: doc.author || "", published: doc.dates.published || "", tags: doc.tags.join(", "), url: doc.source?.url || "", doi: doc.source?.doi || "" });
+  const [draft, setDraft] = useState({ title: doc.title, author: doc.author || "", published: doc.dates.published || "", tags: doc.tags.join(", "), url: doc.source?.url || "", doi: doc.source?.doi || "", checkBy: doc.checkBy || "" });
   const invalidDate = draft.published && parseDateBound(draft.published) === null;
   const set = patch => setDraft({ ...draft, ...patch });
   return <Modal title="Edit metadata" description={doc.path} onClose={onClose}
     footer={<Footer onCancel={onClose} confirm="Save" disabled={invalidDate || !draft.title.trim()} onConfirm={() => {
-      updateDocument(docId, current => ({ title: draft.title.trim(), author: draft.author.trim(), tags: draft.tags.split(",").map(tag => tag.trim().toLowerCase()).filter(Boolean), dates: { ...current.dates, published: draft.published ? parseDateBound(draft.published) : "" }, source: draft.url || draft.doi ? { ...current.source, url: draft.url, doi: draft.doi, domain: (() => { try { return new URL(draft.url).hostname.replace(/^www\./, ""); } catch { return current.source?.domain || ""; } })() } : current.source }));
+      updateDocument(docId, current => ({ checkBy: draft.checkBy, title: draft.title.trim(), author: draft.author.trim(), tags: draft.tags.split(",").map(tag => tag.trim().toLowerCase()).filter(Boolean), dates: { ...current.dates, published: draft.published ? parseDateBound(draft.published) : "" }, source: draft.url || draft.doi ? { ...current.source, url: draft.url, doi: draft.doi, domain: (() => { try { return new URL(draft.url).hostname.replace(/^www\./, ""); } catch { return current.source?.domain || ""; } })() } : current.source }));
       if (draft.author.trim() && draft.published) resolveHealth(getState().health.filter(issue => issue.docId === docId && issue.kind === "metadata").map(issue => issue.id));
       onClose(); notify("Metadata saved.");
     }} note="Stored in library metadata." />}>
@@ -246,6 +256,7 @@ function EditMetadata({ docId, onClose }) {
       <label className="sb-field"><span>Tags</span><input value={draft.tags} placeholder="comma, separated" onChange={event => set({ tags: event.target.value })} /></label>
       <label className="sb-field"><span>Source URL</span><input value={draft.url} placeholder="https://" onChange={event => set({ url: event.target.value })} /></label>
       <label className="sb-field"><span>DOI</span><input value={draft.doi} placeholder="10.xxxx/…" onChange={event => set({ doi: event.target.value })} /></label>
+      <label className="sb-field"><span>Check by (optional)</span><input type="date" value={draft.checkBy} onChange={event => set({ checkBy: event.target.value })} /><small>Library health reminds you to check this report again on this day.</small></label>
     </div>
   </Modal>;
 }
@@ -271,6 +282,31 @@ function Duplicate({ issue, onClose }) {
   return <Modal wide title="Exact duplicates" description="These files have identical content. Raticode doesn't assume they are the same document, so citations stay attached to the copy they name." onClose={onClose}
     footer={<><button type="button" className="sb-button" onClick={() => { resolveHealth(issue.id); onClose(); notify("Both copies kept as independent documents."); }}>Keep both</button><button type="button" className="sb-button sb-primary" onClick={() => { updateDocument(b.id, { extraction: "ready", excluded: true }); resolveHealth(issue.id); onClose(); notify(`Excluded ${b.path} from search. The file was not deleted.`); }}>Exclude the copy from search</button></>}>
     <div className="sb-diff">{[a, b].map(doc => <div key={doc.id}><h4><TypeIcon type={doc.type} size={14} />{doc.title}<small className="sb-mono">{doc.path}</small></h4><dl className="sb-facts">{[["Added", formatDay(doc.dates.added)], ["Modified", formatDay(doc.dates.modified)], ["Version", doc.version], ["Cited by", `${(libraryFor(store).citedBy[doc.id] || []).length} items`]].map(([term, value]) => <div key={term}><dt>{term}</dt><dd>{value}</dd></div>)}</dl></div>)}</div>
+  </Modal>;
+}
+
+function ReplaceSuggestion({ issue, onClose }) {
+  const store = useSecondBrain();
+  const older = documentById(store, issue.docId);
+  const newer = documentById(store, issue.newerId);
+  const family = (store.families || []).find(item => item.id === issue.familyId);
+  if (!older || !newer) return null;
+  const facts = doc => [["Modified", formatDay(doc.dates.modified)], ["Added", formatDay(doc.dates.added)], ["Passages", doc.blocks.length], ["Cited by", `${(libraryFor(store).citedBy[doc.id] || []).length} items`]];
+  return <Modal wide title="Is this an older version?" description={`These reports share ${Math.round((issue.share || 0) * 100)}% of their long passages. Marking the older one as replaced keeps both files as they are. Search lists it after current reports and names the newer one.`} onClose={onClose}
+    footer={<><span className="sb-footer-note">Stored in this brain’s library metadata.</span><button type="button" className="sb-button" onClick={() => { resolveHealth(issue.id); onClose(); notify("Kept both as current reports."); }}>Not an older version</button><button type="button" className="sb-button sb-primary" onClick={() => { confirmReplacement(older.id, newer.id); onClose(); notify(`Marked “${older.title}” as replaced by “${newer.title}”. No files were changed.`); }}>Mark as replaced</button></>}>
+    <div className="sb-diff">{[["Older", older], ["Newer", newer]].map(([label, doc]) => <div key={doc.id}><h4><TypeIcon type={doc.type} size={14} />{label}: {doc.title}<small className="sb-mono">{doc.path}</small></h4><dl className="sb-facts">{facts(doc).map(([term, value]) => <div key={term}><dt>{term}</dt><dd>{value}</dd></div>)}</dl></div>)}</div>
+    {family && family.members.length > 2 ? <p className="sb-hint">This family has {family.members.length} reports. After you answer, Library health suggests the next one.</p> : null}
+  </Modal>;
+}
+
+function CheckBy({ docId, onClose }) {
+  const store = useSecondBrain();
+  const doc = documentById(store, docId);
+  const [next, setNext] = useState("");
+  if (!doc) return null;
+  return <Modal title="Mark report checked" description={`“${doc.title}” was due for a check on ${formatDay(doc.checkBy)}.`} onClose={onClose}
+    footer={<Footer onCancel={onClose} confirm={next ? "Save next date" : "Mark checked"} onConfirm={() => { updateDocument(docId, { checkBy: next }); onClose(); notify(next ? `Next check on ${formatDay(next)}.` : "Marked checked."); }} note="Stored in library metadata." />}>
+    <label className="sb-field"><span>Next check-by date (optional)</span><input type="date" value={next} onChange={event => setNext(event.target.value)} /><small>Leave empty to stop reminding you about this report.</small></label>
   </Modal>;
 }
 
@@ -304,6 +340,30 @@ function LocateLink({ issue, onClose }) {
   return <Modal title="Fix broken link" description={issue.detail} onClose={onClose}
     footer={<Footer onCancel={onClose} confirm="Update link" disabled={!path.trim()} onConfirm={() => { onClose(); void startTask({ kind: "repair-link", docId: issue.docId, old: issue.target, target: path }); }} />}>
     <label className="sb-field"><span>New path inside this brain</span><input value={path} onChange={event => setPath(event.target.value)} placeholder="Architecture/package-format-v2.md" /></label>
+  </Modal>;
+}
+
+// The one-time repair: a read-only preview first, then a task that applies exactly that count.
+function AbsoluteLinks({ onClose }) {
+  const [preview, setPreview] = useState(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let active = true;
+    previewAbsoluteLinks().then(result => { if (active) setPreview(result); }).catch(failure => { if (active) setError(failure.message); });
+    return () => { active = false; };
+  }, []);
+  const count = preview?.count || 0;
+  const kept = (preview?.temporary || 0) + (preview?.outside || 0);
+  return <Modal wide title="Make absolute links relative" description="Rewrites links that use a full path to a file in this brain so they are relative to the note. Nothing changes until you apply it." onClose={onClose}
+    footer={<Footer onCancel={onClose} confirm={count ? `Rewrite ${count} link${count === 1 ? "" : "s"}` : "Nothing to rewrite"} disabled={!count} onConfirm={() => { onClose(); void startTask({ kind: "repair-absolute-links", label: `Making ${count} links relative`, expected: count }); }} />}>
+    {error ? <p role="alert" className="sb-hint">{error}</p> : !preview ? <p className="sb-hint" role="status">Counting links…</p> : <>
+      <p role="status"><strong>{count}</strong> absolute link{count === 1 ? "" : "s"} in <strong>{preview.documents}</strong> note{preview.documents === 1 ? "" : "s"} point inside this brain.{preview.missingTargets ? ` ${preview.missingTargets} of them point to files that no longer exist; they become relative but stay in the dead-link list.` : ""}</p>
+      {kept ? <p className="sb-hint">{kept} link{kept === 1 ? "" : "s"} to /tmp or outside the brain stay as written ({preview.temporary} temporary, {preview.outside} outside). Fix those one at a time from the dead-link list.</p> : null}
+      {count ? <div className="sb-table-wrap" role="region" aria-label="Links the repair changes" tabIndex={0}><table className="sb-table sb-dead-links"><thead><tr><th scope="col">Note</th><th scope="col">Now</th><th scope="col">After</th></tr></thead>
+        <tbody>{preview.changes.slice(0, 100).map((change, index) => <tr key={`${change.docId}:${index}`}><th scope="row" className="sb-mono">{change.path}</th><td><code className="sb-mono">{change.old}</code></td><td><code className="sb-mono">{change.new}</code>{change.targetExists ? null : <small>File missing</small>}</td></tr>)}</tbody></table></div> : null}
+      {count > 100 ? <p className="sb-hint">Showing the first 100 of {count} changes.</p> : null}
+      <p className="sb-hint">The task checks the count again before writing and stops if the notes changed since this preview. Running it again finds nothing to change.</p>
+    </>}
   </Modal>;
 }
 
@@ -384,9 +444,12 @@ export default function SecondBrainDialogs({ provider }) {
   if (kind === "edit-metadata") return <EditMetadata {...props} onClose={close} />;
   if (kind === "capture") return <Capture {...props} onClose={close} />;
   if (kind === "duplicate") return <Duplicate {...props} onClose={close} />;
+  if (kind === "replace-suggestion") return <ReplaceSuggestion {...props} onClose={close} />;
+  if (kind === "check-by") return <CheckBy {...props} onClose={close} />;
   if (kind === "ocr") return <Ocr {...props} onClose={close} />;
   if (kind === "encoding") return <Encoding {...props} onClose={close} />;
   if (kind === "locate-link") return <LocateLink {...props} onClose={close} />;
+  if (kind === "absolute-links") return <AbsoluteLinks onClose={close} />;
   if (kind === "bibliography") return <Bibliography {...props} onClose={close} />;
   return null;
 }

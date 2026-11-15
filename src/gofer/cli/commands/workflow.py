@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import json
 import os
@@ -9,7 +8,7 @@ import shutil
 import sys
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote
 
 import typer
@@ -18,111 +17,14 @@ from rich.table import Table
 
 from gofer.cli.client import CliError, ExitCode, in_agent_session, read_secret_file
 from gofer.cli.commands import rattish as rattish_commands
-from gofer.cli.commands._legacy import refuse_rattish, resolve_rattish_source
 from gofer.cli.output import emit_json, format_option, json_alias_option, wants_json
-from gofer.core.agent import AgentConfig
-from gofer.core.approvals import ApprovalRequest, ApprovalStore
-from gofer.core.bundles import (
-    BundleError,
-    export_workflow_bundle,
-    import_workflow_bundle,
-    preview_workflow_bundle,
-)
-from gofer.core.executor import ResumeOptions, WorkflowExecutor
-from gofer.core.graph import EdgeConditionType, EdgeConfig, GraphNode
-from gofer.core.operations import (
-    AgentOperation,
-    ApprovalGateOperation,
-    BashCommandOperation,
-    BreakOperation,
-    CommonLlmTaskOperation,
-    CopyFileOperation,
-    CountFanSource,
-    DeleteFileOperation,
-    DirectoryFanSource,
-    FailOperation,
-    FileOperation,
-    FolderOperation,
-    HttpRequestOperation,
-    HttpRetryPolicy,
-    InfiniteFanSource,
-    LocalSearchOperation,
-    LocalVectorizeOperation,
-    LoopOperation,
-    MoveFileOperation,
-    NotificationOperation,
-    OpenResourceOperation,
-    Operation,
-    OperationType,
-    PassOperation,
-    PromptFileOperation,
-    PythonScriptOperation,
-    ReadFileOperation,
-    ShellScriptOperation,
-    StartOperation,
-    TabularFanSource,
-    TriggerEventsFanSource,
-    WriteFileOperation,
-)
-from gofer.core.planner import build_execution_plan, plan_to_json
-from gofer.core.revisions import (
-    WorkflowRevisionError,
-    capture_workflow_revision,
-    diff_workflow_revision,
-    list_workflow_revisions,
-    restore_workflow_revision,
-)
-from gofer.core.run_outputs import write_run_node_outputs_payload
-from gofer.core.secrets import workflow_secret_readiness
-from gofer.core.structured_output import OutputFieldOperator
-from gofer.core.templates import (
-    create_workflow_from_template,
-    list_workflow_templates,
-    preview_workflow_template,
-)
-from gofer.core.usage import summarize_node_outputs
-from gofer.core.validation import validate_workflow_file
-from gofer.core.workflow import (
-    AgenticWorkflow,
-    ScheduleConfig,
-    WatchConfig,
-    WorkflowConfig,
-    masked_workflow_parameters,
-    resolve_workflow_parameters,
-)
-from gofer.rattish.workspaces import list_registered_workflows
-from gofer.subscriptions.acp_providers import AcpSubscription
-from gofer.subscriptions.antigravity import AntigravitySubscription
-from gofer.subscriptions.claude_code import ClaudeCodeSubscription
-from gofer.subscriptions.cli_providers import CliSubscription
-from gofer.subscriptions.codex import CodexSubscription
-from gofer.subscriptions.direct_api import AnthropicApiSubscription, OpenAiApiSubscription
-from gofer.ui.api import (
-    WorkflowAlreadyExistsError,
-    WorkflowBundleError,
-    WorkflowCreateError,
-    WorkflowLogError,
-    WorkflowTriggerError,
-    WorkflowUpdateError,
-    delete_workflow_payload,
-    duplicate_workflow_payload,
-    export_rattish_bundle_payload,
-    import_rattish_bundle_payload,
-    import_workflow_payload,
-    latest_workflow_log_payload,
-    list_workflow_payloads,
-    list_workflow_run_logs_payload,
-    prune_workflow_run_logs_payload,
-    rename_workflow_payload,
-    replay_workflow_trigger_payload,
-    trigger_workflow_payload,
-    workflow_run_log_payload,
-    write_run_summary_payload,
-)
-from gofer.ui.chat import delete_workflow_chat_prompt
 from gofer.utils.paths import get_data_dir
-from gofer.utils.registry import find_workflow
-from gofer.utils.run_state import clear_workflow_stop, request_workflow_stop, workflow_stop_path
+
+if TYPE_CHECKING:
+    from gofer.core.approvals import ApprovalRequest, ApprovalStore
+    from gofer.core.operations import Operation
+    from gofer.core.workflow import AgenticWorkflow
+    from gofer.subscriptions.base import Subscription
 
 app = typer.Typer(
     help=(
@@ -139,18 +41,27 @@ app.add_typer(logs_app, name="logs")
 console = Console()
 err_console = Console(stderr=True)
 
-_SUBSCRIPTIONS = {
-    "claude_code": ClaudeCodeSubscription(),
-    "codex": CodexSubscription(),
-    **{provider: CliSubscription(provider) for provider in ("cursor", "copilot", "opencode")},
-    "antigravity": AntigravitySubscription(),
-    "grok": AcpSubscription("grok"),
-    "openai_api": OpenAiApiSubscription(),
-    "anthropic_api": AnthropicApiSubscription(),
-}
+
+def _subscriptions() -> dict[str, Subscription]:
+    """Build the provider runtimes on first use; loading them slows every command."""
+    cached: dict[str, Subscription] | None = globals().get("_SUBSCRIPTIONS")
+    if cached is None:
+        from gofer.cli.commands._subscriptions import cli_subscriptions
+
+        cached = globals()["_SUBSCRIPTIONS"] = cli_subscriptions()
+    return cached
+
+
+def __getattr__(name: str) -> Any:
+    if name == "_SUBSCRIPTIONS":
+        return _subscriptions()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _write_cli_run_artifacts(result: Any, limits: Any, base: Path) -> None:
+    from gofer.core.run_outputs import write_run_node_outputs_payload
+    from gofer.ui.api import write_run_summary_payload
+
     if result.log_path is None:
         return
     write_run_node_outputs_payload(result, limits)
@@ -159,6 +70,9 @@ def _write_cli_run_artifacts(result: Any, limits: Any, base: Path) -> None:
 
 def _resolve_workflow(name: str, data_dir: Path | None) -> AgenticWorkflow:
     """Resolve a workflow name/ID or file path."""
+    from gofer.core.workflow import AgenticWorkflow
+    from gofer.utils.registry import find_workflow
+
     path = Path(name)
     if path.suffix == ".toml" and path.exists():
         return AgenticWorkflow.from_file(path)
@@ -168,6 +82,8 @@ def _resolve_workflow(name: str, data_dir: Path | None) -> AgenticWorkflow:
 
 def _resolve_rattish_source(name: str, data_dir: Path | None) -> Path | None:
     """Return the Rattish entrypoint for a .rattish path, workflow folder, or registered ID."""
+    from gofer.cli.commands._legacy import resolve_rattish_source
+
     return resolve_rattish_source(name, data_dir)
 
 
@@ -221,6 +137,8 @@ def _command_name() -> str:
 
 def _refuse_rattish(name: str, data_dir: Path | None) -> None:
     """Exit 2 with the Rattish alternative when a TOML-only command gets a Rattish workflow."""
+    from gofer.cli.commands._legacy import refuse_rattish
+
     command = _command_name()
     hint = _RATTISH_EQUIVALENTS.get(command, "Raticode rattish --help")
     refuse_rattish(name, data_dir, f"workflow {command}", hint)
@@ -228,6 +146,8 @@ def _refuse_rattish(name: str, data_dir: Path | None) -> None:
 
 def _rattish_workflow_id(name: str, data_dir: Path | None) -> str | None:
     """The registered ID of a Rattish workflow named by ID, folder or source path."""
+    from gofer.rattish.workspaces import list_registered_workflows
+
     source = _resolve_rattish_source(name, data_dir)
     if source is None:
         return None
@@ -251,6 +171,8 @@ def _rattish_workflow_id(name: str, data_dir: Path | None) -> str | None:
 
 def _resolve_workflow_with_path(name: str, data_dir: Path | None) -> tuple[AgenticWorkflow, Path]:
     """Resolve a workflow and the TOML path that should be updated."""
+    from gofer.core.workflow import AgenticWorkflow
+
     _refuse_rattish(name, data_dir)
     path = Path(name)
     if path.suffix == ".toml":
@@ -838,6 +760,14 @@ def _fan_source_from_options(
     fan_max_concurrency: int,
     fan_fail_fast: bool,
 ) -> Any | None:
+    from gofer.core.operations import (
+        CountFanSource,
+        DirectoryFanSource,
+        InfiniteFanSource,
+        TabularFanSource,
+        TriggerEventsFanSource,
+    )
+
     if fan_source is None:
         return None
     normalized = fan_source.replace("_", "-")
@@ -972,6 +902,35 @@ def _operation_from_options(
     notification_expected_statuses: list[int],
     notification_network_allowlist: list[str],
 ) -> Operation:
+    from gofer.core.operations import (
+        AgentOperation,
+        ApprovalGateOperation,
+        BashCommandOperation,
+        BreakOperation,
+        CommonLlmTaskOperation,
+        CopyFileOperation,
+        DeleteFileOperation,
+        FailOperation,
+        FileOperation,
+        FolderOperation,
+        HttpRequestOperation,
+        HttpRetryPolicy,
+        LocalSearchOperation,
+        LocalVectorizeOperation,
+        LoopOperation,
+        MoveFileOperation,
+        NotificationOperation,
+        OpenResourceOperation,
+        OperationType,
+        PassOperation,
+        PromptFileOperation,
+        PythonScriptOperation,
+        ReadFileOperation,
+        ShellScriptOperation,
+        StartOperation,
+        WriteFileOperation,
+    )
+
     normalized = node_type.replace("-", "_")
     match normalized:
         case OperationType.START:
@@ -1289,6 +1248,15 @@ def run(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Execute a workflow by name or file path."""
+    import asyncio
+
+    from gofer.core.executor import WorkflowExecutor
+    from gofer.core.operations import OperationType
+    from gofer.core.planner import build_execution_plan
+    from gofer.core.workflow import masked_workflow_parameters, resolve_workflow_parameters
+    from gofer.ui.api import list_workflow_run_logs_payload
+    from gofer.utils.run_state import workflow_stop_path
+
     rattish_source = _resolve_rattish_source(workflow, data_dir)
     if rattish_source is not None:
         workflow_inputs = {
@@ -1357,7 +1325,7 @@ def run(
     result = asyncio.run(
         WorkflowExecutor(
             wf,
-            _SUBSCRIPTIONS,
+            _subscriptions(),
             dry_run=dry_run,
             log_base_dir=base / "logs",
             workflow_path=workflow_path,
@@ -1474,6 +1442,14 @@ def trigger(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Trigger a workflow through its configured webhook/API trigger."""
+    import asyncio
+
+    from gofer.ui.api import (
+        WorkflowTriggerError,
+        replay_workflow_trigger_payload,
+        trigger_workflow_payload,
+    )
+
     _refuse_rattish(workflow, data_dir)
     try:
         token = _webhook_token(token_file, token)
@@ -1540,6 +1516,11 @@ def resume(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Resume a failed or stopped workflow run."""
+    import asyncio
+
+    from gofer.core.executor import ResumeOptions, WorkflowExecutor
+    from gofer.utils.run_state import workflow_stop_path
+
     if from_node and only_node:
         raise typer.BadParameter("--from-node and --only-node cannot be used together")
     rattish_source = _resolve_rattish_source(workflow, data_dir)
@@ -1571,7 +1552,7 @@ def resume(
     result = asyncio.run(
         WorkflowExecutor(
             wf,
-            _SUBSCRIPTIONS,
+            _subscriptions(),
             log_base_dir=base / "logs",
             workflow_path=workflow_path,
             data_dir=profile_data_dir,
@@ -1651,6 +1632,9 @@ def plan(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Preview execution order, fan-out, provider calls, and side effects."""
+    from gofer.core.planner import build_execution_plan, plan_to_json
+    from gofer.core.workflow import masked_workflow_parameters, resolve_workflow_parameters
+
     json_output = wants_json(output_format, json_output)
     rattish_source = _resolve_rattish_source(workflow, data_dir)
     if rattish_source is not None:
@@ -1709,6 +1693,13 @@ def usage(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Show LLM usage summaries for recent workflow runs."""
+    from gofer.core.usage import summarize_node_outputs
+    from gofer.ui.api import (
+        WorkflowLogError,
+        list_workflow_run_logs_payload,
+        workflow_run_log_payload,
+    )
+
     json_output = wants_json(output_format, json_output)
     try:
         workflow_id, base = _workflow_log_context(workflow, data_dir)
@@ -1799,6 +1790,8 @@ def secrets(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Show required workflow secrets and whether they are available locally."""
+    from gofer.core.secrets import workflow_secret_readiness
+
     _refuse_rattish(workflow, data_dir)
     json_output = wants_json(output_format, json_output)
     try:
@@ -1846,6 +1839,8 @@ def stop(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Request that a running legacy TOML workflow stop."""
+    from gofer.utils.run_state import request_workflow_stop
+
     _refuse_rattish(workflow, data_dir)
     try:
         wf, path = _resolve_workflow_with_path(workflow, data_dir)
@@ -1902,6 +1897,11 @@ def _resume_decided_approval(
     request: ApprovalRequest,
     data_dir: Path | None,
 ) -> None:
+    import asyncio
+
+    from gofer.core.executor import WorkflowExecutor
+    from gofer.core.workflow import AgenticWorkflow
+
     if request.decision is None or _approval_waiter_is_live(request):
         return
     workflow_path = Path(request.workflow_path) if request.workflow_path else None
@@ -1915,7 +1915,7 @@ def _resume_decided_approval(
         result = asyncio.run(
             WorkflowExecutor(
                 workflow,
-                _SUBSCRIPTIONS,
+                _subscriptions(),
                 log_base_dir=(data_dir or workflow_path.parent) / "logs",
                 workflow_path=workflow_path,
                 data_dir=data_dir or get_data_dir(),
@@ -1966,6 +1966,8 @@ def approvals(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """List approval gates."""
+    from gofer.core.approvals import ApprovalStore
+
     as_json = wants_json(output_format)
     store = ApprovalStore(data_dir)
     all_loaded_requests = store.list_requests(workflow)
@@ -2031,6 +2033,8 @@ def _decide_legacy_approval(
     notes: str,
     data_dir: Path | None,
 ) -> None:
+    from gofer.core.approvals import ApprovalStore
+
     verb = "approve" if decision == "approved" else "reject"
     if in_agent_session():
         # A workflow, provider or Rem worker must not decide its own gate. The same
@@ -2141,6 +2145,9 @@ def validate(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Validate a workflow by name or file path."""
+    from gofer.core.planner import build_execution_plan
+    from gofer.core.validation import validate_workflow_file
+
     json_output = wants_json(output_format, json_output)
     rattish_source = _resolve_rattish_source(workflow, data_dir)
     if rattish_source is not None:
@@ -2228,6 +2235,17 @@ def import_workflow(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Import a workflow TOML file, a legacy bundle, or a Rattish .raticode archive."""
+    from gofer.core.bundles import BundleError, import_workflow_bundle
+    from gofer.core.revisions import capture_workflow_revision
+    from gofer.core.workflow import AgenticWorkflow
+    from gofer.ui.api import (
+        WorkflowAlreadyExistsError,
+        WorkflowBundleError,
+        WorkflowCreateError,
+        import_rattish_bundle_payload,
+        import_workflow_payload,
+    )
+
     base = data_dir or get_data_dir()
     if not source.exists():
         err_console.print(f"[red]{source} not found[/red]")
@@ -2301,6 +2319,9 @@ def export_workflow(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Export a workflow and related local files into a portable bundle."""
+    from gofer.core.bundles import BundleError, export_workflow_bundle
+    from gofer.ui.api import WorkflowBundleError, export_rattish_bundle_payload
+
     rattish_id = _rattish_workflow_id(workflow, data_dir)
     if rattish_id is not None:
         if notes:
@@ -2331,6 +2352,8 @@ def preview_import_workflow(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Preview a workflow bundle import without writing files."""
+    from gofer.core.bundles import BundleError, preview_workflow_bundle
+
     try:
         plan = preview_workflow_bundle(source, data_dir=data_dir)
     except BundleError as exc:
@@ -2348,6 +2371,8 @@ def history(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """List workflow revisions."""
+    from gofer.core.revisions import WorkflowRevisionError, list_workflow_revisions
+
     _refuse_rattish(workflow, data_dir)
     json_output = wants_json(output_format, json_output)
     base = data_dir or get_data_dir()
@@ -2383,6 +2408,8 @@ def diff(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Show a revision diff against the current workflow."""
+    from gofer.core.revisions import WorkflowRevisionError, diff_workflow_revision
+
     _refuse_rattish(workflow, data_dir)
     json_output = wants_json(output_format, json_output)
     base = data_dir or get_data_dir()
@@ -2409,6 +2436,8 @@ def restore(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Restore a workflow revision, validating before replacement."""
+    from gofer.core.revisions import WorkflowRevisionError, restore_workflow_revision
+
     _refuse_rattish(workflow, data_dir)
     base = data_dir or get_data_dir()
     try:
@@ -2427,6 +2456,14 @@ def restore(
     console.print(f"[green]{action}[/green] {payload['workflowId']} → {payload['path']}")
 
 
+def _warn_skipped_runs(payload: Any) -> None:
+    skipped = payload.get("skippedRuns") if isinstance(payload, dict) else None
+    if isinstance(skipped, int) and skipped > 0:
+        err_console.print(
+            f"[yellow]Skipped {skipped} run record(s) that couldn't be read.[/yellow]"
+        )
+
+
 @logs_app.command("latest")
 def logs_latest(
     workflow: str = typer.Argument(..., help="Workflow ID or path to TOML file"),
@@ -2434,6 +2471,8 @@ def logs_latest(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Print the latest run log for a workflow."""
+    from gofer.ui.api import WorkflowLogError, latest_workflow_log_payload
+
     try:
         workflow_id, base = _workflow_log_context(workflow, data_dir)
         payload = latest_workflow_log_payload(workflow_id, base)
@@ -2441,6 +2480,7 @@ def logs_latest(
         err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
+    _warn_skipped_runs(payload)
     log_path = payload.get("logPath")
     if not log_path:
         console.print(f"No run logs found for [bold]{workflow_id}[/bold].")
@@ -2464,6 +2504,8 @@ def logs_list(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """List run logs for a workflow."""
+    from gofer.ui.api import WorkflowLogError, list_workflow_run_logs_payload
+
     json_output = wants_json(output_format, json_output)
     try:
         workflow_id, base = _workflow_log_context(workflow, data_dir)
@@ -2480,6 +2522,7 @@ def logs_list(
         err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
+    _warn_skipped_runs(payload)
     if json_output:
         sys.stdout.write(json.dumps(payload, default=str))
         sys.stdout.write("\n")
@@ -2527,6 +2570,8 @@ def logs_show(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Print a specific workflow run log."""
+    from gofer.ui.api import WorkflowLogError, workflow_run_log_payload
+
     try:
         workflow_id, base = _workflow_log_context(workflow, data_dir)
         payload = workflow_run_log_payload(
@@ -2572,6 +2617,8 @@ def logs_prune(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Preview or prune old workflow run logs and sidecar files."""
+    from gofer.ui.api import WorkflowLogError, prune_workflow_run_logs_payload
+
     json_output = wants_json(output_format, json_output)
     try:
         workflow_id, base = _workflow_log_context(workflow, data_dir)
@@ -2587,6 +2634,7 @@ def logs_prune(
         err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
+    _warn_skipped_runs(payload)
     if json_output:
         sys.stdout.write(json.dumps(payload, default=str))
         sys.stdout.write("\n")
@@ -2642,6 +2690,8 @@ def set_info(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Update top-level workflow settings without opening an editor."""
+    from gofer.core.workflow import WorkflowConfig
+
     try:
         wf, path = _resolve_workflow_with_path(workflow, data_dir)
     except KeyError as exc:
@@ -2673,6 +2723,8 @@ def set_schedule(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Add or replace a workflow cron schedule."""
+    from gofer.core.workflow import ScheduleConfig
+
     try:
         wf, path = _resolve_workflow_with_path(workflow, data_dir)
     except KeyError as exc:
@@ -2715,6 +2767,8 @@ def set_watch(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Add or replace workflow file/folder watcher settings."""
+    from gofer.core.workflow import WatchConfig
+
     _refuse_rattish(workflow, data_dir)
     try:
         wf, workflow_path = _resolve_workflow_with_path(workflow, data_dir)
@@ -2775,6 +2829,8 @@ def add_agent(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Add or replace an agent config in a workflow."""
+    from gofer.core.agent import AgentConfig
+
     _refuse_rattish(workflow, data_dir)
     try:
         wf, path = _resolve_workflow_with_path(workflow, data_dir)
@@ -3056,6 +3112,8 @@ def add_node(
     Machine-readable options and operation fields: Raticode schema --command
     workflow.add-node and Raticode schema --operation TYPE.
     """
+    from gofer.core.graph import GraphNode
+
     _refuse_rattish(workflow, data_dir)
     _warn_literal_secret(notification_smtp_password, "--notification-smtp-password")
     try:
@@ -3232,6 +3290,9 @@ def add_edge(
 
     Machine-readable options and fields: Raticode schema --command workflow.add-edge.
     """
+    from gofer.core.graph import EdgeConditionType, EdgeConfig
+    from gofer.core.structured_output import OutputFieldOperator
+
     _refuse_rattish(workflow, data_dir)
     try:
         wf, path = _resolve_workflow_with_path(workflow, data_dir)
@@ -3283,6 +3344,8 @@ def list_workflows(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """List all workflows in the data directory."""
+    from gofer.ui.api import list_workflow_payloads
+
     json_output = wants_json(output_format, json_output)
     base = data_dir or get_data_dir()
     payload = list_workflow_payloads(base)
@@ -3367,6 +3430,10 @@ def rm(
 
     When a headless backend is running for this data folder, the backend deletes it.
     """
+    from gofer.ui.api import WorkflowUpdateError, delete_workflow_payload
+    from gofer.ui.chat import delete_workflow_chat_prompt
+    from gofer.utils.run_state import clear_workflow_stop
+
     rattish_id = _rattish_workflow_id(workflow, data_dir)
     if rattish_id is not None:
         if not yes:
@@ -3428,6 +3495,12 @@ def rename(
 
     When a headless backend is running for this data folder, the backend renames it.
     """
+    from gofer.ui.api import (
+        WorkflowAlreadyExistsError,
+        WorkflowUpdateError,
+        rename_workflow_payload,
+    )
+
     sent = _through_backend(
         data_dir, "POST", f"/workflows/{quote(workflow, safe='')}/rename", {"name": name}
     )
@@ -3454,6 +3527,13 @@ def duplicate(
 
     When a headless backend is running for this data folder, the backend makes the copy.
     """
+    from gofer.ui.api import (
+        WorkflowAlreadyExistsError,
+        WorkflowCreateError,
+        WorkflowUpdateError,
+        duplicate_workflow_payload,
+    )
+
     sent = _through_backend(
         data_dir, "POST", f"/workflows/{quote(workflow, safe='')}/duplicate", {"name": name}
     )
@@ -3477,6 +3557,7 @@ def build(
 ) -> None:
     """Interactively build a workflow via a guided wizard."""
     from gofer.cli.commands.builder import WorkflowBuilder
+    from gofer.core.revisions import capture_workflow_revision
 
     wf = WorkflowBuilder().run()
     if wf is None:
@@ -3512,6 +3593,13 @@ def create(
     ),
 ) -> None:
     """Create a new workflow scaffold in the data directory."""
+    from gofer.core.revisions import capture_workflow_revision
+    from gofer.core.templates import (
+        create_workflow_from_template,
+        list_workflow_templates,
+        preview_workflow_template,
+    )
+
     if list_templates:
         table = Table(title="Workflow templates")
         table.add_column("Name")
@@ -3635,6 +3723,16 @@ def recipe_watch_folder_summarize(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Create a folder watcher workflow that fans changed files into an agent summarizer."""
+    from gofer.core.agent import AgentConfig
+    from gofer.core.graph import GraphNode
+    from gofer.core.operations import (
+        AgentOperation,
+        LoopOperation,
+        OperationType,
+        TriggerEventsFanSource,
+    )
+    from gofer.core.workflow import AgenticWorkflow, WatchConfig, WorkflowConfig
+
     workflow_id = _slugify(name)
     base = data_dir or get_data_dir()
     workflow_path = output or base / f"{workflow_id}.toml"

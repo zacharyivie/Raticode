@@ -30,7 +30,18 @@ Optional, on a computer with both files in one folder:
 
 ### Updates
 
-The app doesn't update itself. To update, download the newer APK and install it over the old one; pairing and history stay. Android installs it only when both are signed with the same certificate. A copy you built yourself is signed with a different key: uninstall it first, which deletes its pairing and history.
+Raticode Mobile 0.34.0 doesn't update itself: download the newer APK and install it over the old one; pairing and history stay. Android installs it only when both are signed with the same certificate. A copy you built yourself is signed with a different key: uninstall it first, which deletes its pairing and history.
+
+**Update Raticode (from 0.35.0).** From Raticode Mobile 0.35.0 the app updates itself from GitHub, so you only download an APK by hand once:
+
+- **Checks.** While Raticode is on screen, it asks GitHub for a newer phone release (`mobile-vX.Y.Z`) when it opens and every 10 minutes, one request at a time. It reuses GitHub's answer when nothing changed, backs off after failures and waits out GitHub's rate limit. There's no background service, so a phone that doesn't open Raticode isn't checked. **Raticode Mobile updates** on the **Desktop** page (or on the pairing screen before you pair) shows your version, the last check or what went wrong, and **Check now**.
+- **Update Raticode.** The button downloads the signed APK (about 175 MB) into Raticode's private storage with a progress bar. **Pause download** keeps what arrived, and the next tap continues from there; a dropped connection does the same. On mobile data or a metered network it asks first. The first time, Android asks you to allow Raticode to **install unknown apps**; turn it on, come back, and the update continues.
+- **Verification before install.** HTTPS only, and only the release's own `raticode-mobile-X.Y.Z.apk`. The release's `apk-checks.json` must describe a signed APK of that version; the download must match its size and SHA-256 (and GitHub's own checksum when it reports one); and Android must read it as Raticode Mobile with the promised, newer version code, signed with the published release certificate that also signed your copy. A copy signed with another key, such as a development build, is told so before anything downloads. A mismatch deletes the file and nothing is installed. Android's installer then asks you to confirm.
+- **Child lock and App lock.** The install confirmation never opens over either lock; it waits until the lock is gone. A tap on the reminder notification opens Raticode under the lock, like every Raticode notification.
+- **Google Play.** A copy installed from Google Play shows **Open Google Play** instead and updates there. The Play build doesn't include the install permission.
+- **Daily reminder.** When you aren't on the newest version, Raticode shows one banner and one notification a day, the first time you use the app that day (after App lock, if it's on). The notification uses its own quiet **Raticode updates** category, which you can turn off in Android settings without affecting Rem's alerts. A new reminder replaces the old one, days away add up to one reminder for the newest version, and **Not now** hides both until tomorrow. Installing the update clears them.
+
+Not yet tried on a physical phone: a real signed update installing over an older signed copy.
 
 ::: info Status
 - **Google Play:** being prepared. Signed releases also include an Android App Bundle, `raticode-mobile-X.Y.Z.aab`, for Play. The app isn't on Google Play yet. The [privacy policy](../privacy.md#raticode-mobile) covers both.

@@ -34,6 +34,8 @@ The first representative set covers the contracts that force the most reusable b
 - `break.json` closes one explicitly named loop lineage without cancelling work already
   running in that lineage.
 - `workflow.json` derives its inputs and output from a versioned child interface.
+- `jev.json` asks TypeSafe's hosted Jev classifier one yes/no or multiple-choice question
+  and returns a fixed `label` and `score` that routes can compare.
 - `rem-prompt.json` and `rem-task.json` hand a prompt or an existing task run to Rem and
   wait for its reply or the run's final state.
 

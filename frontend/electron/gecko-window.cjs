@@ -108,11 +108,13 @@ function createGeckoWindow({
   let pageFocused = false;
   let title = "";
   let lastError = "";
-  let placement = { x: 0, y: 0, width: 0, height: 0, visible: false, cutouts: [] };
+  let placement = { x: 0, y: 0, width: 0, height: 0, visible: false, cutouts: [], host: "main" };
+  // The X window Firefox's window currently sits in: Raticode's, or the Browser's own window.
+  let parentId = 0;
+  const watchedWindows = new WeakSet();
   let shapeMajor = 0;
   let shaped = false;
   let pageClicks = 0;
-  let watchedWindow = null;
   let resolveWindow = null;
   const considering = new Set();
   // For the media bar; reads only what this Firefox publishes to the desktop.
@@ -170,7 +172,7 @@ function createGeckoWindow({
   // Display ---------------------------------------------------------------------------
 
   function hostWindow() {
-    const window = getWindow();
+    const window = getWindow(placement.host);
     if (!window || window.isDestroyed()) throw new Error("Raticode's window isn't open.");
     return window;
   }
@@ -257,7 +259,8 @@ function createGeckoWindow({
   function adopt(window) {
     adopted = window;
     client.selectInput(window, MASK.PropertyChange | MASK.StructureNotify);
-    client.reparentWindow(window, hostId(), placement.x, placement.y);
+    parentId = hostId();
+    client.reparentWindow(window, parentId, placement.x, placement.y);
     client.grabClicks(window);
     watchHost();
     apply();
@@ -277,15 +280,28 @@ function createGeckoWindow({
 
   function watchHost() {
     const window = hostWindow();
-    if (watchedWindow === window) return;
-    watchedWindow = window;
-    window.on("move", () => tellPosition());
-    // Keyboard focus goes back to the page when Raticode is switched back to.
-    window.on("focus", () => { if (adopted && pageFocused && placement.visible) client?.setInputFocus(adopted); });
+    if (watchedWindows.has(window)) return;
+    watchedWindows.add(window);
+    const current = () => { try { return hostWindow() === window; } catch { return false; } };
+    window.on("move", () => { if (current()) tellPosition(); });
+    // Keyboard focus goes back to the page when its window is switched back to.
+    window.on("focus", () => { if (current() && adopted && pageFocused && placement.visible) client?.setInputFocus(adopted); });
+  }
+
+  // Firefox keeps running while its window moves between Raticode's window and
+  // the Browser's own window, so its pages don't reload and media keeps playing.
+  function followHost() {
+    let target = 0;
+    try { target = hostId(); } catch { return; }
+    if (target === parentId) return;
+    parentId = target;
+    client.reparentWindow(adopted, target, placement.x, placement.y);
+    watchHost();
   }
 
   function apply() {
     if (!adopted || !client) return;
+    followHost();
     // Without the SHAPE extension a menu over the page can only be shown by
     // hiding the page.
     const hidden = !placement.visible || placement.width < 1 || placement.height < 1 || (placement.cutouts.length > 0 && !shapeMajor);
@@ -317,9 +333,23 @@ function createGeckoWindow({
     const whole = (value) => (Number.isFinite(value) ? Math.round(value) : 0);
     const width = Math.max(0, whole(next.width));
     const height = Math.max(0, whole(next.height));
-    placement = { x: whole(next.x), y: whole(next.y), width, height, visible: next.visible === true, cutouts: cutoutsWithin(next.cutouts, width, height) };
+    placement = {
+      x: whole(next.x), y: whole(next.y), width, height, visible: next.visible === true,
+      cutouts: cutoutsWithin(next.cutouts, width, height), host: next.host === "popout" ? "popout" : "main",
+    };
     apply();
     return { placed: Boolean(adopted) };
+  }
+
+  // Before the Browser's own window closes: X destroys every window inside a
+  // window that closes, so Firefox's goes back into Raticode's first. The reply
+  // to a round trip means the X server has done the move.
+  async function rehost(host = "main") {
+    placement = { ...placement, visible: false, cutouts: [], host: host === "popout" ? "popout" : "main" };
+    apply();
+    if (!adopted || !client) return { placed: false };
+    try { await client.translate(adopted, client.root); } catch { /* Firefox's window has just closed. */ }
+    return { placed: true };
   }
 
   function focusApp() {
@@ -493,6 +523,7 @@ function createGeckoWindow({
       case "open": return open(options.url);
       case "new-tab": return newTab();
       case "place": return place(options);
+      case "rehost": return rehost(options.host);
       case "focus-app": return focusApp();
       case "media-control": return media.control(options.command);
       case "stop": await stop(); return status();
@@ -514,7 +545,7 @@ function createGeckoWindow({
     client = null;
   }
 
-  return { close, events, handle, status, get adoptedWindow() { return adopted; } };
+  return { close, events, handle, rehost, status, get adoptedWindow() { return adopted; }, get parentWindow() { return parentId; } };
 }
 
 module.exports = { NEW_TAB_PAGE, PROFILE_PREFS, WINDOW_CLASS, createGeckoWindow, cutoutsWithin, pageAddress, supportProblem };

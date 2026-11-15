@@ -1,6 +1,6 @@
 ---
 title: Node reference
-description: Pick one of the 24 built-in Rattish node types, and see the fields every node shares.
+description: Pick one of the 25 built-in Rattish node types, and see the fields every node shares.
 pageClass: docs-layout
 ---
 
@@ -44,6 +44,12 @@ Pick a node by what it does. Each node's page has a complete example, its fields
 | [rem-prompt](./rem-prompt.md) | Ask Rem and use its reply |
 | [rem-task](./rem-task.md) | Run one of Rem's tasks and wait for its result |
 | [http-request](./http-request.md) | Call a service and expose its response |
+
+## Classification
+
+| Node | Purpose |
+| --- | --- |
+| [jev](./jev.md) | Ask Jev a yes/no or multiple-choice question and route on the label (from 0.5.5) |
 
 ## Local retrieval
 

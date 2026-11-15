@@ -16,12 +16,20 @@ from gofer.utils.atomic_output import (
 
 
 def registered_workflow_root(workflow_id: str, registry_dir: Path) -> Path | None:
-    """Return the canonical workspace for a registered workflow ID."""
+    """Return the canonical workspace for a registered workflow ID.
+
+    Only workflows in a project's .raticode folder own one. A workflow found elsewhere in
+    a project returns None, so its builds, run records and agent memory go to the app's
+    data folder instead of the project's source tree.
+    """
     from gofer.rattish.workspaces import RattishWorkspaceError, find_registered_workflow
 
     try:
         workflow = find_registered_workflow(workflow_id, registry_dir=registry_dir)
     except RattishWorkspaceError:
+        return None
+    if not workflow.managed:
+        # Found elsewhere in the project: its run files stay in the app's data folder.
         return None
     return workflow.workflow_root.expanduser().resolve()
 
@@ -37,6 +45,8 @@ def registered_source_root(source_path: Path, registry_dir: Path) -> Path | None
         return None
     for workflow in workflows:
         if workflow.entrypoint.expanduser().resolve() == resolved_source:
+            if not workflow.managed:
+                return None
             return workflow.workflow_root.expanduser().resolve()
     return None
 

@@ -107,6 +107,10 @@ return resolved path components. `prompt-file` returns `path`, `content`, `promp
 interpolation `inputs`. `open-resource` returns its resolved `target` and concrete
 `resource_type`.
 
+`jev` returns a fixed, closed object. Routes branch on its top-level `label` (a String) and
+`score` (a Number from 0 to 1), for example `when node.triage.output.label == "yes"` or
+`when node.triage.output.score >= 0.8`.
+
 ## Agent outputs
 
 An Agent without `output-schema` or `output-schema-path` has this output schema:

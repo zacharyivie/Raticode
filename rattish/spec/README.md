@@ -36,7 +36,7 @@ The first machine-readable artifacts now live beside the specification:
 - [`../schemas/diagnostic.schema.json`](../schemas/diagnostic.schema.json) defines compiler,
   preflight, runtime, and export diagnostics.
 - [`../schemas/run.schema.json`](../schemas/run.schema.json) defines persisted execution
-  results and node-completion events.
+  results, node-completion events and the run's model usage per node.
 - [`../schemas/workspace-registry.schema.json`](../schemas/workspace-registry.schema.json)
   defines persistent cross-project workflow discovery records.
 - [`../schemas/workflow-metadata.schema.json`](../schemas/workflow-metadata.schema.json)
@@ -98,7 +98,9 @@ crash cut off (`resumed_from.rerun_nodes`, which may have partly run), and the w
 to. Live work is held until nothing more can be replayed. After that a record is still reused
 for a matching start, but never in a lineage where live work has completed, since that work's
 results may differ. `resumed_from.reused_runs` and `not_reused_runs` count the outcome. Budgets
-count reused records like any other run; the workflow timeout starts again.
+count reused records like any other run; the workflow timeout starts again. Usage limits
+(`max-tokens`, `max-cost-usd`) count only the calls the resumed run makes itself, and a run that
+ended at one of them can't be resumed.
 
 A run is refused, with a sentence that says why, when:
 
@@ -107,13 +109,30 @@ A run is refused, with a sentence that says why, when:
 - its error comes from the workflow itself (`workflow_control`, `budget` or
   `output_validation` errors, or `RATTISH_RUN_RECORD_INVALID`), so a replay would end the same
   way;
-- it had inputs or trigger events, whose values aren't saved (`trigger_event_count`);
+- it had inputs or trigger events and their values weren't saved: it ran before Raticode
+  saved them (no `saved_values`), or they were too large (`saved_values.saved` is `false`);
 - it has no `compiled_snapshot`, the source or compilation fingerprint changed since, or the
   source no longer compiles;
 - an agent with `memory: run` has a reused record, because that memory isn't saved;
 - another run already resumed it (resume that run instead), or a resume of it is in progress.
   A resume whose steps never started (`preflight_failed` or `invalid_inputs`) redid nothing and
   doesn't count; it keeps `resumed_from` as history.
+
+### Saved inputs and trigger events
+
+A run that takes inputs or trigger events saves them beside its artifact as
+`<run_id>.inputs`, created owner-only (0600). The artifact's `saved_values` names the saved
+inputs, the `withheld_inputs` and the number of `trigger_events`. An input whose schema
+contains `format: password` is never saved and is listed as withheld; workflow secrets are read
+from the secret store at run time and are never inputs. Up to 256 trigger events are saved, and
+a webhook body up to 1 MiB. A run whose values don't fit saves none of them: `saved` is `false`
+with a `reason`. Runs with `invalid_inputs` keep nothing. Deleting a run deletes its
+`.inputs` file.
+
+Resume uses the saved values. Whoever resumes gives each withheld input again; nothing else may
+be supplied. **Run again** (`rattish runs rerun RUN_ID`) starts a new run of the current source
+with the same saved values and names the earlier run in `rerun_of`. It works for a run with any
+status except `invalid_inputs`.
 
 Resume runs preflight and honours the active-run limit, approvals and `expected_revision` like
 a new run. The legacy `--from-node`, `--only-node`, `--skip-cache` and `--force` options are

@@ -66,6 +66,25 @@ for kind, fixture, mutations in (
     ('event', 'desktop.read.files-text', [lambda e: e['payload'].update(op='files.write'), lambda e: e.update(type='desktop.action')]),
     ('event', 'desktop.action.files-open', [lambda e: e['payload'].update(op='files.rename'), lambda e: e.update(type='desktop.read'),
                                             lambda e: e.update(thread_id=e['request_id'])]),
+    # A workflow run carries typed inputs as named values, and no other fields.
+    ('event', 'desktop.action.workflows-run-inputs', [lambda e: e['payload']['params'].update(inputs=['staging']),
+                                                      lambda e: e['payload']['params'].update(command='sh'),
+                                                      lambda e: e['payload']['params'].update(path='/etc/passwd')]),
+    # Alert reads name switches from a fixed list, workflow messages included, and an opaque bounded position.
+    ('event', 'desktop.read.rem-notices-workflow', [lambda e: e['payload']['params'].update(include=['workflow', 'workflow']),
+                                                    lambda e: e['payload']['params'].update(include=['shell']),
+                                                    lambda e: e['payload']['params'].update(include=[]),
+                                                    lambda e: e['payload']['params'].update(mark='x' * 257)]),
+    # Run again names the run only; the desktop keeps the inputs and never takes values here.
+    ('event', 'desktop.action.workflows-rerun', [lambda e: e['payload']['params'].update(inputs={'token': 'x'}),
+                                                 lambda e: e['payload']['params'].pop('run_id'),
+                                                 lambda e: e['payload']['params'].update(path='/etc/passwd')]),
+    # Turning a trigger on or off, or pausing them all, carries yes/no values and IDs only.
+    ('event', 'desktop.action.workflows-trigger', [lambda e: e['payload']['params'].update(enabled='yes'),
+                                                   lambda e: e['payload']['params'].update(config={'expression': '* * * * *'}),
+                                                   lambda e: e['payload']['params'].pop('trigger_id')]),
+    ('event', 'desktop.action.workflows-triggers-pause', [lambda e: e['payload']['params'].update(paused=1),
+                                                          lambda e: e['payload']['params'].update(trigger_id='trg_1')]),
     ('event', 'desktop.result', [lambda e: e['payload'].update(parts=0), lambda e: e['payload'].update(body='x' * 24001),
                                  lambda e: e['payload'].update(code='crash')]),
     # Thread activity is display state: a boolean and a bounded timestamp, nothing more.

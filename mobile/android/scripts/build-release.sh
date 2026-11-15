@@ -45,7 +45,7 @@ if [[ ! -x "$ANDROID_HOME/build-tools/$build_tools/apksigner" ]]; then
   exit 2
 fi
 
-./gradlew assembleRelease bundleRelease lintRelease --console=plain --max-workers=2
+./gradlew assembleRelease bundlePlay lintRelease --console=plain --max-workers=2
 # Version, SDK levels, debuggable flag, backups, cleartext, permissions, exported
 # components, 16 KB native alignment and the signature (or its deliberate absence).
 python3 scripts/release-candidate.py check-apk --signing "$mode"

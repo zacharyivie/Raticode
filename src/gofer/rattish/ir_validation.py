@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-from collections import Counter
+import threading
+from collections import Counter, OrderedDict
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -89,6 +91,13 @@ class ValidatedRattishIR(_FrozenDict):
     @classmethod
     def _from_validated(cls, document: Mapping[str, Any]) -> ValidatedRattishIR:
         return cls(document, _validation_token=cls._VALIDATION_TOKEN)
+
+
+def copy_validated_ir(ir: ValidatedRattishIR) -> ValidatedRattishIR:
+    """Return a separate frozen copy of IR that already passed validation."""
+    if not isinstance(ir, ValidatedRattishIR):
+        raise InvalidRattishIrError("Only validated Rattish IR can be copied as validated.")
+    return ValidatedRattishIR._from_validated(ir)
 
 
 def validate_ir_versions(document: Mapping[str, Any]) -> None:
@@ -219,14 +228,15 @@ def validate_ir_invariants(document: Mapping[str, Any]) -> None:
 
         provider = node["resolutions"]["provider"]
         if provider is not None:
-            provider_identity = (
-                "provider_contract",
-                provider["provider_id"],
-                provider["contract_version"],
-                provider["contract_fingerprint"],
-            )
-            if provider_identity not in dependencies:
-                _invalid(f"node {node_id!r} has no matching provider-contract dependency")
+            for choice in (provider, *provider.get("fallback", ())):
+                provider_identity = (
+                    "provider_contract",
+                    choice["provider_id"],
+                    choice["contract_version"],
+                    choice["contract_fingerprint"],
+                )
+                if provider_identity not in dependencies:
+                    _invalid(f"node {node_id!r} has no matching provider-contract dependency")
 
         workflow = node["resolutions"]["workflow"]
         if workflow is not None:
@@ -354,11 +364,40 @@ def _predicate_matches_success(predicate: Mapping[str, Any]) -> bool:
     return False
 
 
+# Content hashes of embedded schemas that already passed validate_schema. Only
+# successes are kept; the check depends on nothing but the schema's content.
+_VALID_SCHEMA_LIMIT = 1024
+_valid_schema_hashes: OrderedDict[bytes, None] = OrderedDict()
+_valid_schema_lock = threading.Lock()
+
+
+def _schema_content_hash(schema: Mapping[str, Any]) -> bytes | None:
+    try:
+        encoded = json.dumps(
+            schema, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        ).encode("utf-8")
+    except (TypeError, ValueError, RecursionError, UnicodeError):
+        return None
+    return hashlib.sha256(encoded).digest()
+
+
 def _validate_schema(schema: Mapping[str, Any], owner: str) -> None:
+    content_hash = _schema_content_hash(schema)
+    if content_hash is not None:
+        with _valid_schema_lock:
+            if content_hash in _valid_schema_hashes:
+                _valid_schema_hashes.move_to_end(content_hash)
+                return
     try:
         validate_schema(dict(schema))
     except StructuredOutputError as exc:
         _invalid(f"{owner} contains an invalid JSON Schema: {exc}")
+    if content_hash is None:
+        return
+    with _valid_schema_lock:
+        _valid_schema_hashes[content_hash] = None
+        while len(_valid_schema_hashes) > _VALID_SCHEMA_LIMIT:
+            _valid_schema_hashes.popitem(last=False)
 
 
 def _validate_reference(reference: Mapping[str, Any], known_nodes: set[str], owner: str) -> None:

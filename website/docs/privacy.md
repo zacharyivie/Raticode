@@ -19,8 +19,11 @@ Raticode has no account, no sign-up and no Raticode server. Neither this website
 
 - Projects, workflows, threads, run history and settings stay in your project folders and Raticode's data folder on your computer. [Permissions and local data](./advanced/security.md) lists where.
 - Rem and agent nodes send your prompts and the files you give them to the AI provider you set up, under that provider's account and terms. See [Provider setup](./setup.md).
-- **Check for updates at startup** (in **Settings > General**, on by default) asks GitHub whether a newer release exists. Turn it off to check by hand.
+- **Check for updates** (in **Settings > General**, on by default) asks GitHub whether a newer release exists when Raticode starts and, from 0.5.5, every 10 minutes while it runs. GitHub sees your IP address and Raticode's version. Turn it off to check by hand.
 - Web pages you open in the integrated browser, HTTP request nodes and the tools you connect contact the sites and services you point them at.
+- [jev nodes](./nodes/jev.md) (from 0.5.5) send their question and the text they classify to TypeSafe's Jev service, under your TypeSafe account and terms. Nothing is sent until you save a Jev key and run such a node.
+- Dictation records only after you press the microphone button or a dictation shortcut, including **Dictate to Rem from any app** (off by default), and a listening panel or the message box shows while it records. Speech is recognized on your computer; audio and the words heard are never logged. [Dictation](./rem/attachments.md#dictate-a-message) explains where the words go.
+- **Show Rem your screen** (off by default) takes one screenshot only when you click the screen button in Rem's message box or press its shortcut, and shows it there so you can remove it before sending. It goes to Rem's chat provider for that one reply, isn't saved or logged, and the chat keeps only the screen's or window's name. Raticode never captures your screen in the background. See [Show Rem your screen](./rem/attachments.md#show-rem-your-screen).
 - When the app crashes, it shows the crash report on screen. **Open an issue** opens a pre-filled GitHub issue in your browser for you to read and edit, and nothing is sent unless you submit it.
 
 ## Raticode Mobile
@@ -55,7 +58,8 @@ What your computer does next, such as passing your words to an AI provider, foll
 | Camera | Scanning the pairing QR code. Chat photos come from your camera app |
 | Microphone | Voice mode and dictation, recognized on the phone; web pages ask each time |
 | Phone and SMS | Calls and texts you dictate to people you saved, after a countdown you can cancel. Texts go directly only while Raticode is your digital assistant; otherwise a draft opens. Raticode never reads texts, call logs or contacts |
-| Notifications | Rem's replies, alerts and task progress |
+| Notifications | Rem's replies, alerts and task progress, and at most one update reminder a day |
+| Install unknown apps (from Raticode Mobile 0.35.0) | **Update Raticode** hands the verified update to Android's installer, which asks you to confirm. Android asks you to allow it first. The Google Play build doesn't have it |
 | Biometrics | App lock and child lock ask Android to confirm it's you. Raticode only gets yes or no |
 | Network and foreground services | Syncing with your computer while you choose, and keeping browser audio playing |
 
@@ -64,6 +68,7 @@ The app has no location permission, and web pages asking for your location are r
 ### Other services the app can contact
 
 - **Websites you open** in the built-in browsers, over your phone's own connection. The browsers check pages with Google Safe Browsing, and the engines (Android WebView and Mozilla GeckoView) may fetch their own security updates.
+- **GitHub**, from Raticode Mobile 0.35.0, while Raticode is on screen: every 10 minutes it reads the list of phone release tags (usually an unchanged answer), and the release details when one is newer. **Update Raticode** downloads the APK and its release checks from GitHub. GitHub sees your IP address and the app's version.
 - **Mozilla's add-ons site** (addons.mozilla.org), when you search for or import Firefox add-ons. Your search words or the collection name are sent.
 - **Your phone's speech service**, only if you tap **Download offline speech**, to fetch its language model.
 - **Other apps** you open from a card or command, such as your dialer, messaging, maps, calendar or clock. They handle what you do there.
@@ -84,4 +89,4 @@ Every change to this policy is public in [this page's history on GitHub](https:/
 
 ## Questions
 
-Ask on [Support](./support.md).
+Email [support@raticode.dev](mailto:support@raticode.dev), or see [Support](./support.md).

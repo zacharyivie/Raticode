@@ -246,6 +246,14 @@ class GoferUiRequestHandler:
         if method == "GET" and not action:
             pass
 
+    def _dispatch_rattish_secrets(self, method, path, query):
+        if method == "GET" and not action:
+            pass
+
+    def _dispatch_worktree_setup(self, method, path, query):
+        if method == "POST" and action == "approve":
+            pass
+
     def _dispatch_GET(self):
         if parsed.path == "/api/health":
             pass
@@ -282,6 +290,7 @@ def test_reader_finds_a_newly_added_route() -> None:
         "GET /api/rem/kanban",
         "GET /api/swarms",
         "GET /api/rattish/triggers",
+        "POST /api/worktree-setup/approve",
     } <= before
     after = _routes('if parsed.path == "/api/brand-new":\n            pass')
     assert after - before == {"GET /api/brand-new"}

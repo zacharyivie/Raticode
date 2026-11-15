@@ -135,6 +135,9 @@
 .org-form-disclosure { border-block-end: 1px solid rgb(var(--color-line)); padding: 7px 0; }
 .org-form-disclosure > summary { font-weight: 550; }
 .org-form-disclosure[open] { padding-bottom: 18px; }
+.org-first-worker { border: 1px solid rgb(var(--color-line)); border-radius: 6px; padding: 10px 14px 12px; margin: 0; display: grid; gap: 8px; }
+.org-first-worker legend { padding: 0 6px; font-weight: 600; }
+.org-first-worker legend small { font-weight: 400; color: rgb(var(--color-muted)); margin-left: 4px; }
 .org-collection-entry { border-left: 2px solid rgb(var(--color-line)); padding: 0 16px 16px; margin: 16px 0; }
 .org-banner { display: flex; align-items: center; gap: 10px; padding: 10px 24px; border-bottom: 1px solid rgb(var(--color-line)); font-size: 12px; }
 .org-banner > span { flex: 1; }
@@ -364,6 +367,10 @@ button.org-chart-person:hover { background: var(--org-soft); border-radius: 6px;
 .org-start:focus-visible { outline: 2px solid var(--org-accent); outline-offset: 2px; }
 .org-start-facts { margin: 12px 0 16px; padding-left: 18px; display: grid; gap: 6px; font-size: 13px; line-height: 1.55; list-style: disc; }
 .org-start .org-banner { border: 0; padding-inline: 0; }
+.org-start-blocked { margin: 0 0 14px; padding: 10px 12px; border-left: 3px solid var(--org-warning, var(--review)); font-size: 13px; line-height: 1.5; }
+.org-start-blocked strong { display: flex; gap: 6px; align-items: center; color: var(--org-warning, var(--review)); }
+.org-start-blocked ul { margin: 6px 0; padding-left: 18px; list-style: disc; display: grid; gap: 3px; }
+.org-start-blocked small { opacity: .8; }
 .org-request strong { font-weight: 650; }
 .org-warning-text { color: var(--org-warning); }
 .org-attempt { padding: 8px 0; border-bottom: 1px solid rgb(var(--color-line)); }

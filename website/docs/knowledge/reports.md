@@ -33,6 +33,14 @@ Name the subject, audience and destination together, for example: "Review the so
 - With no project selected, use Second Brain with a configured folder, or select a project first.
 - A failed save means no document was saved.
 
+### Links in saved reports
+
+Both tools check the file links in a report as it's saved, so they keep working when the folder moves or syncs to another computer.
+
+- A link that uses a full path, or a `file://` address, to a file inside the folder is saved as a path relative to the report. For example, `/home/you/notes/Assets/chart.png` in `Reports/Topic/` becomes `../../Assets/chart.png`. Symbolic links and `..` are resolved first.
+- A link to `/tmp` or another temporary folder, or to a file outside the folder, is saved as written. The save result lists a warning for it, because the file can disappear or won't exist on another computer. Copy the file into the folder and link to the copy.
+- Web addresses, `#anchors` and links inside Markdown code are left alone. A warning never blocks the save.
+
 ## Portable HTML
 
 Rem writes a complete document with its CSS embedded, and the reader keeps that styling.

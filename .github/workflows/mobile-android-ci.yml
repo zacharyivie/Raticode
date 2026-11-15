@@ -99,7 +99,7 @@ jobs:
 
       # No RATICODE_RELEASE_* signing variables exist here, so the release APK and bundle are unsigned.
       - name: Build, test and lint debug and release
-        run: ./gradlew assembleDebug testDebugUnitTest lintDebug assembleRelease bundleRelease lintRelease --console=plain
+        run: ./gradlew assembleDebug testDebugUnitTest lintDebug assembleRelease bundlePlay lintRelease --console=plain
 
       - name: Check the debug APK carries version.properties
         run: |

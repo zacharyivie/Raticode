@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
-import { Building2, Check, ExternalLink, FolderX, PauseCircle, Play, Plus, Search, Sparkles, X } from "lucide-react";
-import { COLUMNS, PRIORITIES, canDropOn, columnTickets, filterTickets, findRequestedTicket, modeLabel, onKanbanTicket, ownerFilters, participantOf, pausedLabel, saveParticipant, scopeNote, selfWorkLine, sendTicket, takeKanbanTicket, useKanban } from "../lib/remKanban.js";
+import { useCallback, useEffect, useState } from "react";
+import { Building2, Check, ExternalLink, FolderX, Gauge, Hourglass, PauseCircle, Play, Plus, Search, Sparkles, TriangleAlert, X } from "lucide-react";
+import { COLUMNS, PRIORITIES, STATUS_LABELS, canDropOn, canEditWaits, columnTickets, filterTickets, findRequestedTicket, modeLabel, onKanbanTicket, ownerFilters, participantOf, pausedLabel, saveParticipant, scopeNote, selfWorkLine, sendTicket, takeKanbanTicket, usageSentence, usageShort, useKanban, waitChoices, waitsChange, waitsLine } from "../lib/remKanban.js";
 import { openRemThread } from "../lib/remHomeStore.js";
+import { GLOBAL_BOARD, GLOBAL_BOARD_FILTERS, GLOBAL_FILTER_KEYS, activeFilterCount, liveGlobalFilters, resetFilters, useBoardFilters } from "../lib/boardFilters.js";
 import KanbanPeople, { PersonAvatar } from "./KanbanPeople.jsx";
 import TicketTimeline from "./TicketTimeline.jsx";
+import TicketPatchReview from "./TicketPatchReview.jsx";
 import "./OrganizationHome.css";
 import "./Kanban.css";
 
@@ -11,14 +13,16 @@ import "./Kanban.css";
 export default function KanbanWorkspace() {
   const kanban = useKanban();
   const { board, selfWork, error, setError, run } = kanban;
-  const [owner, setOwner] = useState("all");
-  const [query, setQuery] = useState("");
-  const [closed, setClosed] = useState(false);
+  // Who, what and how the board shows, kept on this computer across visits and restarts.
+  const live = useCallback(value => liveGlobalFilters(value, board), [board]);
+  const [filters, setFilters] = useBoardFilters(GLOBAL_BOARD, GLOBAL_BOARD_FILTERS, live);
+  const { owner, query, closed, view, person } = filters;
+  const setView = next => setFilters({ view: next });
+  const setPerson = next => setFilters(current => ({ person: typeof next === "function" ? next(current.person) : next }));
+  const filtersOn = activeFilterCount(filters, GLOBAL_BOARD_FILTERS, GLOBAL_FILTER_KEYS);
   const [selected, setSelected] = useState("");
   const [creating, setCreating] = useState(false);
   const [over, setOver] = useState("");
-  const [view, setView] = useState("board");
-  const [person, setPerson] = useState("");
   // A ticket pill in Rem's chat opened the board on one ticket.
   const [requested, setRequested] = useState(takeKanbanTicket);
   useEffect(() => onKanbanTicket(() => setRequested(takeKanbanTicket())), []);
@@ -26,12 +30,11 @@ export default function KanbanWorkspace() {
     if (!requested || !board) return;
     const { ticket, missing } = findRequestedTicket(board, requested);
     if (ticket) {
-      setView("board");
-      if (!["backlog", "todo", "in_progress", "in_review", "blocked"].includes(ticket.status)) setClosed(true);
+      setFilters(["backlog", "todo", "in_progress", "in_review", "blocked"].includes(ticket.status) ? { view: "board" } : { view: "board", closed: true });
       setSelected(ticket.ticket_id);
     } else setError(missing);
     setRequested(null);
-  }, [requested, board, setError]);
+  }, [requested, board, setError, setFilters]);
   const participants = board?.participants || [];
   const focused = participants.find(item => item.participant_id === person) || null;
   const tickets = filterTickets(board?.tickets, { owner, query, closed, participant: focused });
@@ -63,13 +66,14 @@ export default function KanbanWorkspace() {
       {!board ? <p className="oh-loading" role="status">Loading the board…</p> : view === "people" ? null : <div className="oh-view kb-view">
         <div className="oh-toolbar">
           <label className="oh-sr" htmlFor="kb-owner">Show tickets from</label>
-          <select id="kb-owner" value={owner} onChange={event => setOwner(event.target.value)}>{ownerFilters(board).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
-          <label className="kb-search"><Search size={13} aria-hidden="true" /><span className="oh-sr">Search tickets</span><input value={query} placeholder="Search tickets" onChange={event => setQuery(event.target.value)} /></label>
+          <select id="kb-owner" className={owner !== GLOBAL_BOARD_FILTERS.owner ? "oh-filter-on" : ""} value={owner} onChange={event => setFilters({ owner: event.target.value })}>{ownerFilters(board).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
+          <label className={`kb-search ${query ? "oh-filter-on" : ""}`}><Search size={13} aria-hidden="true" /><span className="oh-sr">Search tickets</span><input value={query} placeholder="Search tickets" onChange={event => setFilters({ query: event.target.value })} /></label>
           <div className="kb-stack" role="group" aria-label="Show one person's tickets">
-            {participants.slice(0, 10).map(item => <button key={item.participant_id} type="button" aria-pressed={person === item.participant_id} title={item.organization_name ? `${item.name}, ${item.organization_name}` : item.name} onClick={() => setPerson(current => current === item.participant_id ? "" : item.participant_id)}><PersonAvatar person={item} /></button>)}
+            {(focused && !participants.slice(0, 10).includes(focused) ? [...participants.slice(0, 9), focused] : participants.slice(0, 10)).map(item => <button key={item.participant_id} type="button" aria-pressed={person === item.participant_id} title={item.organization_name ? `${item.name}, ${item.organization_name}` : item.name} onClick={() => setPerson(current => current === item.participant_id ? "" : item.participant_id)}><PersonAvatar person={item} /></button>)}
             {participants.length > 10 ? <button className="kb-more" type="button" onClick={() => setView("people")}>+{participants.length - 10}</button> : null}
           </div>
-          <label className="kb-check"><input type="checkbox" checked={closed} onChange={event => setClosed(event.target.checked)} />Closed</label>
+          <label className={`kb-check ${closed ? "oh-filter-on" : ""}`}><input type="checkbox" checked={closed} onChange={event => setFilters({ closed: event.target.checked })} />Closed</label>
+          {filtersOn ? <button className="oh-btn small ghost kb-reset" type="button" data-testid="kanban-reset-filters" aria-label={`Clear filters, ${filtersOn} on`} onClick={() => setFilters(current => resetFilters(current, GLOBAL_BOARD_FILTERS, GLOBAL_FILTER_KEYS))}><X size={13} aria-hidden="true" />Clear filters ({filtersOn})</button> : null}
           <span className="grow" />
           <span className="oh-muted">{tickets.length} {tickets.length === 1 ? "ticket" : "tickets"}{board.earlier ? `, ${board.earlier} older not shown` : ""}</span>
         </div>
@@ -85,13 +89,14 @@ export default function KanbanWorkspace() {
         </div></div>
       </div>}
     </div>
-    {current ? <TicketSheet ticket={current} board={board} act={act} onClose={() => setSelected("")} /> : null}
+    {current ? <TicketSheet key={current.ticket_id} ticket={current} board={board} act={act} apply={response => run(async () => response)} onClose={() => setSelected("")} /> : null}
     {creating && board ? <NewTicket board={board} act={act} onClose={() => setCreating(false)} /> : null}
   </div>;
 }
 
 function Card({ ticket, person, onOpen }) {
   const note = scopeNote(ticket);
+  const waits = waitsLine(ticket);
   return <article className={`oh-card ${ticket.running ? "is-running" : ""} ${ticket.status === "blocked" && !ticket.paused ? "flagged" : ""} ${ticket.paused ? "is-paused" : ""}`} draggable={!ticket.running && !ticket.proposed}
     onDragStart={event => { event.dataTransfer.setData("text/plain", ticket.ticket_id); event.dataTransfer.effectAllowed = "move"; }}
     onClick={onOpen} onKeyDown={event => { if (event.key === "Enter") onOpen(); }} tabIndex={0} role="button" aria-label={`${ticket.key} ${ticket.title}`}>
@@ -99,19 +104,31 @@ function Card({ ticket, person, onOpen }) {
     <div className="title">{ticket.title}</div>
     {ticket.status === "blocked" && ticket.block_reason ? <div className="flag"><span>{ticket.block_reason}</span></div> : null}
     {note ? <div className="kb-scope" title={note}><FolderX size={12} aria-hidden="true" /><span>{note}</span></div> : null}
+    {ticket.wait_notice ? <div className="kb-wait-notice" title={ticket.wait_notice} data-testid="ticket-wait-notice"><TriangleAlert size={12} aria-hidden="true" /><span>{ticket.wait_notice}</span></div>
+      : waits ? <div className="kb-waits" title={ticket.waits_for.filter(item => item.status !== "done").map(item => `${item.key} ${item.title}`).join("\n")} data-testid="ticket-waits"><Hourglass size={12} aria-hidden="true" /><span>{waits}</span></div> : null}
     {ticket.skip_reason ? <div className="kb-scope" title={ticket.skip_reason}><FolderX size={12} aria-hidden="true" /><span>Rem left this out: {ticket.skip_reason}</span></div> : null}
     {ticket.running ? <div className="livebar" aria-hidden="true"><i /></div> : null}
     <div className="row3">
       {person ? <PersonAvatar person={person} small /> : <span className="oh-av" style={{ background: "var(--faint)" }} title="Unassigned">?</span>}
       {ticket.scope === "rem" ? <span>Rem</span> : <span><Building2 size={12} />{ticket.assignee || ticket.organization_name}</span>}
       <span className="grow" />
+      {usageShort(ticket.usage) ? <span className="kb-usage" title={usageSentence(ticket.usage)} data-testid="ticket-usage"><Gauge size={11} aria-hidden="true" />{usageShort(ticket.usage)}</span> : null}
       {ticket.proposed ? <span className="kb-proposed"><Sparkles size={11} />Your approval</span> : null}
+      {ticket.auto_approved ? <span className="kb-auto" title="Self-work approved this on its own; you haven't reviewed it"><Sparkles size={11} aria-hidden="true" />Auto-approved</span> : null}
       {ticket.paused ? <span className="kb-paused"><PauseCircle size={11} aria-hidden="true" />{pausedLabel(ticket.paused)}</span> : null}
     </div>
   </article>;
 }
 
-function TicketSheet({ ticket, board, act, onClose }) {
+// A finished ticket's work is on a branch: an organization ticket's own, or the one its
+// Rem run recorded. Its sheet shows the patch while nothing is running on it.
+const hasPatch = ticket => !ticket.running && !ticket.proposed && ticket.status !== "cancelled"
+  && (ticket.scope === "organization" ? Boolean(ticket.branch) : Boolean(ticket.run_id) && ["done", "blocked"].includes(ticket.status));
+// Accept and change requests: Rem's finished or blocked tickets, an organization's in review or done.
+const canDecide = ticket => (ticket.scope === "organization" ? ["in_review", "done"] : ["done", "blocked"]).includes(ticket.status) && !ticket.paused;
+
+function TicketSheet({ ticket, board, act, apply, onClose }) {
+  const [reviewing, setReviewing] = useState(false);
   const projects = board.participants.find(item => item.kind === "rem")?.assignable || [];
   const note = scopeNote(ticket);
   const [reason, setReason] = useState("");
@@ -124,7 +141,7 @@ function TicketSheet({ ticket, board, act, onClose }) {
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
   }, [onClose]);
-  return <aside className="kb-sheet" aria-label={`Ticket ${ticket.key}`}>
+  return <aside className={`kb-sheet ${reviewing ? "is-reviewing" : ""}`} aria-label={`Ticket ${ticket.key}`}>
     <header className="kb-sheet-head"><span className="oh-key">{ticket.key}</span><span className="grow" /><button className="oh-btn icon ghost" type="button" aria-label="Close" onClick={onClose}><X size={15} /></button></header>
     <h2>{ticket.title}</h2>
     <p className="oh-sheet-sub"><span className={`oh-pill st-${ticket.status === "in_progress" ? "running" : ticket.status}`}>{COLUMNS.find(([key]) => key === ticket.status)?.[1] || ticket.status}</span><span>{ticket.scope === "rem" ? "Rem" : ticket.organization_name}</span>{ticket.assignee && ticket.scope !== "rem" ? <span>{ticket.assignee}</span> : null}{ticket.project ? <span>{ticket.project}</span> : null}</p>
@@ -135,11 +152,18 @@ function TicketSheet({ ticket, board, act, onClose }) {
         {[...new Set([...projects, ...(ticket.project_dir ? [ticket.project_dir] : [])])].map(root => <option key={root} value={root}>{projectLabel(board, root)}</option>)}
       </select></label> : null}
     {ticket.description ? <p className="kb-description">{ticket.description}</p> : null}
+    <WaitsFor ticket={ticket} board={board} act={act} />
+    {ticket.auto_approved ? <p className="kb-auto-note" role="note" data-testid="ticket-auto-approved"><Sparkles size={13} aria-hidden="true" /><span>Approved by self-work, not by you, because auto-approval is on in Settings &gt; Rem. Edit, move or cancel it like any ticket.</span></p> : null}
     {ticket.proposal_reason ? <div className="kb-section"><h3>Why Rem suggests this</h3><p>{ticket.proposal_reason}</p></div> : null}
     {ticket.skip_reason ? <div className="kb-section"><h3>Why Rem left this out</h3><p>{ticket.skip_reason}</p></div> : null}
     {ticket.summary ? <div className="kb-section"><h3>Result</h3><p>{ticket.summary}</p></div> : null}
     {ticket.block_reason ? <div className="kb-section"><h3>{ticket.paused ? pausedLabel(ticket.paused) : "Blocked"}</h3><p>{ticket.block_reason}</p></div> : null}
+    {ticket.usage ? <div className="kb-section" data-testid="ticket-usage-detail"><h3>Usage</h3><p>{usageSentence(ticket.usage)}</p></div> : null}
     {ticket.thread_id ? <button className="oh-btn" type="button" onClick={() => openRemThread(ticket.thread_id)}><ExternalLink size={13} />Open its thread</button> : null}
+    {hasPatch(ticket) ? <div className="kb-section"><h3>Changes</h3>
+      <TicketPatchReview key={ticket.ticket_id} ticket={ticket} worker={ticket.scope === "rem" ? "Rem" : ticket.assignee || "the worker"} decide={canDecide(ticket)}
+        expanded={reviewing} onExpand={setReviewing} onUpdated={response => { if (response?.board) apply(response); }} />
+    </div> : null}
     {ticket.proposed ? <div className="kb-actions">
       <button className="oh-btn primary" type="button" onClick={() => act({ ...base, action: "approve" })}><Check size={14} />Approve for To do</button>
       <label className="oh-sr" htmlFor="kb-decline">Reason (optional)</label>
@@ -169,6 +193,33 @@ function TicketSheet({ ticket, board, act, onClose }) {
     </div></div> : null}
     <TicketTimeline ticket={ticket} />
   </aside>;
+}
+
+// What a ticket waits for, with its notice, and the controls to change the list.
+function WaitsFor({ ticket, board, act }) {
+  const editable = canEditWaits(ticket);
+  const listed = ticket.waits_for || [];
+  const choices = editable ? waitChoices(board, ticket) : [];
+  if (!listed.length && !choices.length) return null;
+  const ids = listed.map(item => item.ticket_id);
+  return <div className="kb-section kb-waits-section" data-testid="ticket-waits-for">
+    <h3>Waits for</h3>
+    {ticket.wait_notice ? <p className="kb-wait-notice" role="note"><TriangleAlert size={13} aria-hidden="true" /><span>{ticket.wait_notice}</span></p> : null}
+    {listed.length ? <ul className="kb-wait-list">
+      {listed.map(item => <li key={item.ticket_id} className={item.status === "done" ? "is-done" : ""}>
+        {item.key ? <span className="oh-key">{item.key}</span> : null}
+        <span className="kb-wait-title">{item.title}</span>
+        <span className={`oh-pill st-${item.status === "in_progress" ? "running" : item.status}`}>{STATUS_LABELS[item.status] || (item.status === "removed" ? "Removed" : item.status)}</span>
+        {editable ? <button className="oh-btn icon ghost small" type="button" aria-label={`Stop waiting for ${item.key || item.title}`} title="Stop waiting for this" onClick={() => act(waitsChange(ticket, ids.filter(id => id !== item.ticket_id)))}><X size={13} /></button> : null}
+      </li>)}
+    </ul> : <p className="kb-hint">Nothing. Choose a ticket that has to be Done first.</p>}
+    {editable && choices.length ? <label className="kb-field"><span className="oh-sr">Wait for another ticket</span>
+      <select className="kb-input" value="" data-testid="ticket-add-wait" onChange={event => { if (event.target.value) act(waitsChange(ticket, [...ids, event.target.value])); }}>
+        <option value="">{listed.length ? "Also wait for…" : "Wait for a ticket…"}</option>
+        {choices.map(other => <option key={other.ticket_id} value={other.ticket_id}>{other.key} {other.title}</option>)}
+      </select></label> : null}
+    {listed.length && ticket.scope === "rem" ? <p className="kb-hint">Self-work starts this only after every ticket here is Done. You can still start it yourself.</p> : null}
+  </div>;
 }
 
 const projectLabel = (board, root) => board.projects.find(project => project.root === root)?.name || root;

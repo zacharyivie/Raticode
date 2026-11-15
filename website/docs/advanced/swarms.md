@@ -68,7 +68,7 @@ The run also pauses when:
 
 ## Workspaces and Git
 
-- **Git projects:** managed assignments can use separate review worktrees, which keeps each change reviewable.
+- **Git projects:** managed assignments can use separate review worktrees, which keeps each change reviewable. A project's approved [setup file](../studio/worktree-setup.md) runs in each new assignment and check worktree.
 - **Folders without Git:** writers share the workspace and take turns.
 - Worktrees prevent some file conflicts. They don't isolate shell processes or a provider's own sub-agents at the operating-system level.
 - Agents get no write access to Raticode's data folder, which holds the swarm records and other agents' worktrees.

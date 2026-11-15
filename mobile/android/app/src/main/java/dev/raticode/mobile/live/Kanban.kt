@@ -43,6 +43,9 @@ object Kanban {
     val STATUS_LABELS = mapOf("backlog" to "Backlog", "todo" to "To do", "in_progress" to "In progress", "in_review" to "In review",
         "blocked" to "Blocked", "done" to "Done", "cancelled" to "Cancelled")
     val PRIORITIES = listOf("low" to "Low", "medium" to "Medium", "high" to "High", "critical" to "Critical")
+    private val OPEN = setOf("backlog", "todo", "in_progress", "in_review", "blocked")
+    /** The most tickets one ticket may wait for, as on the desktop. */
+    const val MAX_WAITS = 20
 
     fun isOp(op: String) = op in READS || op in ACTIONS
     fun isComment(op: String, params: JSONObject) = op == TICKET && params.optString("action") == "comment"
@@ -155,6 +158,29 @@ object Kanban {
             else -> OrganizationModel.Move.Allowed(column, reopen = ticket.status in setOf("done", "blocked", "cancelled"))
         }
     }
+
+    // Waiting for other tickets ---------------------------------------------------------------------------------------
+
+    /** The card's line: what the ticket still waits for, or empty once every one of them is Done. */
+    fun waitsLine(ticket: KanbanTicket): String {
+        val left = ticket.waitsFor.filter { it.status != "done" }
+        if (left.isEmpty()) return ""
+        return "Waits for: " + left.first().title.ifBlank { left.first().key } + if (left.size > 1) " and ${left.size - 1} more" else ""
+    }
+
+    /** Whether the user can change what a ticket waits for. An organization changes a ticket's plan only while it isn't running. */
+    fun canEditWaits(ticket: KanbanTicket) = !ticket.proposed && ticket.status in OPEN &&
+        (ticket.isRem || (!ticket.running && ticket.paused.isBlank()))
+
+    /** Tickets this one could also wait for: the same owner's, not itself, not listed already and not cancelled, by number. */
+    fun waitChoices(board: KanbanBoard, ticket: KanbanTicket): List<KanbanTicket> {
+        val listed = ticket.waitsFor.map { it.id }.toSet()
+        return board.tickets.filter { it.id != ticket.id && it.id !in listed && it.scope == ticket.scope && it.organizationId == ticket.organizationId &&
+            it.status != "cancelled" && it.key.isNotBlank() }.sortedBy { it.key.substringAfterLast('-').toIntOrNull() ?: Int.MAX_VALUE }
+    }
+
+    /** The edit that replaces the whole list; the desktop refuses loops and tickets from another board. */
+    fun waitsParams(ticket: KanbanTicket, ids: List<String>) = address(ticket, "edit").put("waits_for", JSONArray(ids.distinct().take(MAX_WAITS)))
 
     fun blockText(ticket: KanbanTicket) = when {
         ticket.status != "blocked" -> ""
@@ -308,11 +334,13 @@ object Kanban {
     fun decideParams(ticket: KanbanTicket, approve: Boolean, reason: String = "") = address(ticket, if (approve) "approve" else "decline")
         .apply { if (!approve && reason.isNotBlank()) put("reason", reason.trim().take(1000)) }
 
-    fun settingsParams(settings: SelfWorkSettings, enabled: Boolean? = null, maxThreads: Int? = null, autoPull: Boolean? = null) =
+    /** [autoApprove] true is sent only after the user confirmed what it allows, so it carries that confirmation. */
+    fun settingsParams(settings: SelfWorkSettings, enabled: Boolean? = null, maxThreads: Int? = null, autoPull: Boolean? = null, autoApprove: Boolean? = null) =
         JSONObject().put("expected_revision", settings.revision).apply {
             enabled?.let { put("enabled", it) }
             maxThreads?.let { put("max_threads", it) }
             autoPull?.let { put("auto_pull_backlog", it) }
+            autoApprove?.let { put("auto_approve_proposals", it); if (it) put("confirm_auto_approve", true) }
         }
 
     fun seenParams(report: SelfWorkReport) = JSONObject().put("updated_at", report.updatedAt)
@@ -340,6 +368,21 @@ object Kanban {
         if (!view.state.boardEnabled) "Needs the Kanban board. It's off on your computer, so Rem doesn't take tickets."
         else afterTodos(view.settings.autoPull)
 
+    /** What auto-approval does now, under its switch. */
+    fun autoApproveDetail(view: SelfWorkView): String {
+        if (!view.state.boardEnabled) return "Needs the Kanban board. It's off on your computer, so Rem makes no tickets."
+        if (view.settings.autoApprove != true) return "Off: ideas from Rem's research wait in Backlog for your approval."
+        val then = if (view.settings.autoPull) "Rem ranks them and works on the best ones." else "They wait in Backlog until you move them, or turn on backlog pulling."
+        return "On: new ideas go to Backlog approved, marked Auto-approved, until self-work ends (${view.state.autoApprovedSession} this session). $then"
+    }
+
+    /** What turning auto-approval on allows, shown before the user confirms it. */
+    fun autoApproveWarning(view: SelfWorkView) = listOf(
+        "While you're away, tickets Rem's research proposes go to Backlog already approved, for as long as self-work runs, without you reading them first.",
+        if (view.settings.autoPull) "Backlog pulling is on, so Rem will also work on them, inside its projects and limits."
+        else "Backlog pulling is off, so they wait in Backlog until you move them or turn pulling on.",
+        "Ideas already waiting for you stay yours to decide. Rem still can't mark its own tickets Done, and you can edit or cancel any ticket it approved.")
+
     /** What self-work does without the board, or null while the board is on. */
     fun boardOffNote(view: SelfWorkView) = if (view.state.boardEnabled) null
         else "The Kanban board is off on your computer, so Rem leaves tickets alone. It researches its projects and lists the ideas in the report."
@@ -353,12 +396,14 @@ object Kanban {
     fun reportHeadline(report: SelfWorkReport?): String {
         if (report == null || !report.unseen || report.isEmpty) return ""
         val toApprove = report.ticketsAdded.count { it.proposed }
+        val autoApproved = report.ticketsAdded.count { it.autoApproved }
         val finished = report.workDone.count { it.state == "done" }
         val blocked = report.workDone.count { it.state == "blocked" }
         val researched = report.workDone.count { it.state == "researched" }
         val parts = listOfNotNull(
             report.ticketsAdded.size.takeIf { it > 0 }?.let { "$it ${if (it == 1) "ticket" else "tickets"} added" },
             toApprove.takeIf { it > 0 }?.let { "$it to approve" },
+            autoApproved.takeIf { it > 0 }?.let { "$it auto-approved" },
             finished.takeIf { it > 0 }?.let { "$it done" },
             researched.takeIf { it > 0 }?.let { "$it researched" },
             blocked.takeIf { it > 0 }?.let { "$it ${if (it == 1) "needs" else "need"} you" },
@@ -383,7 +428,11 @@ object Kanban {
         t.optString("priority", "medium").let { if (it == "urgent") "critical" else it }, t.optString("assignee_id"), t.optString("assignee"), t.optBoolean("proposed"), t.optString("proposal_reason"),
         t.optString("duplicate_of"), t.optString("created_by"), t.optString("created_at"), t.optString("updated_at"), t.optLong("revision", 1),
         t.optBoolean("running"), t.optString("block_reason"), t.optString("summary"), t.optString("type"), t.optString("project"), t.optString("project_id"), t.optString("self_work_scope"),
-        RunPause.by(t.optString("paused")))
+        RunPause.by(t.optString("paused")), t.optBoolean("auto_approved"),
+        // An older desktop sends none of these, and the ticket waits for nothing.
+        t.objects("waits_for").take(MAX_WAITS).map { w -> TicketWait(w.optString("ticket_id").take(128), w.optString("key").takeIf { TicketMentions.KEY.matches(it) }.orEmpty(),
+            w.optString("title").take(200), w.optString("status").take(20)) }.filter { it.id.isNotBlank() },
+        t.optBoolean("waiting"), t.optString("wait_notice").take(1200))
 
     fun parseSelfWork(json: JSONObject): SelfWorkView {
         val s = json.optJSONObject("settings"); val l = json.optJSONObject("limits"); val st = json.optJSONObject("state"); val r = json.optJSONObject("report")
@@ -393,7 +442,9 @@ object Kanban {
             SelfWorkSettings(s?.optBoolean("enabled") == true, (s?.optInt("max_threads", low) ?: low), s?.optBoolean("auto_pull_backlog") == true,
                 s?.optInt("idle_minutes", 15) ?: 15, s?.optLong("revision", 0) ?: 0,
                 // An older desktop has no windows, so the saved switch is the one in effect.
-                (s?.opt("saved_enabled") as? Boolean) ?: (s?.optBoolean("enabled") == true)),
+                (s?.opt("saved_enabled") as? Boolean) ?: (s?.optBoolean("enabled") == true),
+                // An older desktop can't approve self-work's tickets, so the phone shows no switch.
+                s?.opt("auto_approve_proposals") as? Boolean),
             SelfWorkLimits(low, high),
             SelfWorkState(st?.optString("mode", "off") ?: "off", st?.optInt("active_threads") ?: 0, st?.optInt("todo_remaining") ?: 0,
                 st?.optString("last_prompt_at").orEmpty(), st?.optString("starts_at").orEmpty(), st?.optString("detail").orEmpty(),
@@ -401,10 +452,10 @@ object Kanban {
                 st?.takeIf { it.has("assigned_projects") }?.optInt("assigned_projects"), st?.optInt("outside_projects") ?: 0,
                 // An older desktop doesn't say, and always worked with the board.
                 st?.optBoolean("board_enabled", true) ?: true,
-                st?.optInt("paused_threads") ?: 0, st?.optInt("paused_for_you") ?: 0),
+                st?.optInt("paused_threads") ?: 0, st?.optInt("paused_for_you") ?: 0, st?.optInt("auto_approved_session") ?: 0),
             r?.let { report -> SelfWorkReport(report.optString("since"), report.optString("updated_at"), report.optBoolean("unseen"), report.optString("summary"),
                 report.objects("tickets_added").map { ReportTicket(it.optString("ticket_id"), it.optString("title"), it.optString("scope"),
-                    it.optString("organization_id"), it.optString("organization_name"), it.optBoolean("proposed"), it.optString("at")) },
+                    it.optString("organization_id"), it.optString("organization_name"), it.optBoolean("proposed"), it.optString("at"), it.optBoolean("auto_approved")) },
                 report.objects("work_done").map { ReportWork(it.optString("ticket_id"), it.optString("title"), it.optString("state"), it.optString("summary"),
                     it.optString("thread_id"), it.optString("at")) },
                 report.objects("duplicates_merged").map { ReportMerged(it.optString("ticket_id"), it.optString("title"), it.optString("kept_title"), it.optString("reason"), it.optString("at")) },
@@ -450,6 +501,8 @@ object Kanban {
     private fun JSONObject.strings(key: String): List<String> = optJSONArray(key)?.let { a -> (0 until a.length()).map { a.optString(it) }.filter { it.isNotBlank() } }.orEmpty()
 }
 
+/** A ticket another one waits for. [status] is a board status, or `removed` when it no longer exists. */
+data class TicketWait(val id: String, val key: String, val title: String, val status: String)
 /** One ticket's history from the desktop, oldest first. [earlier] counts older entries left out. [ticket] is the ticket as the desktop has it now. */
 data class TicketTimeline(val ticket: KanbanTicket?, val comments: List<TicketComment>, val earlier: Int, val canComment: Boolean)
 /** A status change, with its reason from the run or review, or a comment. [author] is `system`, `rem`, `user` or `worker`. */
@@ -475,7 +528,15 @@ data class KanbanTicket(val id: String, val scope: String, val organizationId: S
                         /** Whether self-work can take it: `assigned`, `unassigned`, `unavailable` or `no_project`. Empty on organization tickets. */
                         val selfWorkScope: String = "",
                         /** Its task is paused: "user", or "priority" when self-work made way for the user's own work. */
-                        val paused: String = "") {
+                        val paused: String = "",
+                        /** Self-work approved it on its own, with auto-approval on; the user hasn't reviewed it. */
+                        val autoApproved: Boolean = false,
+                        /** Tickets on the same board that must be Done before self-work, or its organization, starts this one. */
+                        val waitsFor: List<TicketWait> = emptyList(),
+                        /** True while any of [waitsFor] isn't Done. */
+                        val waiting: Boolean = false,
+                        /** Set when one of [waitsFor] was cancelled or removed; the ticket stays put until the user decides. */
+                        val waitNotice: String = "") {
     val isRem get() = scope == Kanban.SCOPE_REM
     /** Ticket IDs are unique only within their organization; this one is unique on the board. */
     val uid get() = "$organizationId/$id"
@@ -503,7 +564,9 @@ data class KanbanParticipant(val id: String, val kind: String, val name: String,
  * returns to after the window.
  */
 data class SelfWorkSettings(val enabled: Boolean, val maxThreads: Int, val autoPull: Boolean, val idleMinutes: Int, val revision: Long,
-                            val savedEnabled: Boolean = enabled)
+                            val savedEnabled: Boolean = enabled,
+                            /** Whether self-work approves its own backlog tickets; null from a desktop that can't. Only the user turns it on. */
+                            val autoApprove: Boolean? = null)
 /**
  * A timed self-work window. [endAt] is empty when it ends on a condition: [until] `running_done` waits for the tasks that ran
  * when it was set. [afterEnd] is `restore`, `on` or `off`. The labels come formatted from the desktop and show as they are.
@@ -530,8 +593,11 @@ data class SelfWorkState(val mode: String, val activeThreads: Int, val todoRemai
                          /** Self-work tasks paused now; they hold no thread. */
                          val pausedThreads: Int = 0,
                          /** Of those, the ones that made way for the user's own work and resume on their own. */
-                         val pausedForYou: Int = 0)
-data class ReportTicket(val id: String, val title: String, val scope: String, val organizationId: String, val organizationName: String, val proposed: Boolean, val at: String)
+                         val pausedForYou: Int = 0,
+                         /** Tickets self-work approved on its own this session. */
+                         val autoApprovedSession: Int = 0)
+data class ReportTicket(val id: String, val title: String, val scope: String, val organizationId: String, val organizationName: String, val proposed: Boolean, val at: String,
+                        val autoApproved: Boolean = false)
 data class ReportWork(val ticketId: String, val title: String, val state: String, val summary: String, val threadId: String, val at: String)
 data class ReportMerged(val ticketId: String, val title: String, val keptTitle: String, val reason: String, val at: String)
 data class ReportNote(val text: String, val at: String)

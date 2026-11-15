@@ -5,9 +5,9 @@ until an end instant, or until the user's tasks running when it was set have fin
 one runs, self-work counts as on whatever the Settings > Rem switch says, and it starts work
 straight away unless the user asked it to wait for 15 quiet minutes as usual. When it ends,
 self-work starts nothing new; work it already started finishes as it would after the switch
-is turned off, and self-work that made way for the user's work stays paused until self-work
-is on again. The switch then goes back to what it was (``after_end: restore``), or to on or
-off when the user said so.
+is turned off, and self-work that made way for the user's work picks up as soon as a thread is
+free, since it had already started. The switch then goes back to what it was
+(``after_end: restore``), or to on or off when the user said so.
 
 Everything is stored as UTC instants in one setting (``self_work_schedule``) and moved along
 by self-work's tick under Rem's lease, so a restart, a daylight-saving change or a second
@@ -690,7 +690,15 @@ def build_report(
         key(r.get("ticket_id")) or str(r.get("title") or "") for r in added if r.get("proposed")
     ]
     tickets_created = [
-        key(r.get("ticket_id")) or str(r.get("title") or "") for r in added if not r.get("proposed")
+        key(r.get("ticket_id")) or str(r.get("title") or "")
+        for r in added
+        if not r.get("proposed") and not r.get("auto_approved")
+    ]
+    # Ideas self-work approved on its own, with auto-approval on.
+    auto_approved = [
+        key(r.get("ticket_id")) or str(r.get("title") or "")
+        for r in added
+        if r.get("auto_approved")
     ]
     tickets_moved = sorted(
         {
@@ -711,6 +719,7 @@ def build_report(
         tickets_created=len(tickets_created),
         tickets_moved=len(tickets_moved),
         proposals=len(proposals),
+        auto_approved=len(auto_approved),
         duplicates_merged=len(merged),
     )
     return {
@@ -722,6 +731,7 @@ def build_report(
         "items": [{k: v for k, v in item.items() if k != "new"} for item in items][-REPORT_ITEMS:],
         "tickets_created": [c for c in tickets_created if c][:20],
         "proposals": [p for p in proposals if p][:20],
+        "auto_approved": [a for a in auto_approved if a][:20],
         "tickets_moved": [key(t) for t in tickets_moved if key(t)][:20],
     }
 
@@ -729,7 +739,14 @@ def build_report(
 def empty(report: dict[str, Any]) -> bool:
     counts = report["counts"]
     return not report["items"] and not any(
-        counts[k] for k in ("tickets_created", "tickets_moved", "proposals", "duplicates_merged")
+        counts.get(k)
+        for k in (
+            "tickets_created",
+            "tickets_moved",
+            "proposals",
+            "auto_approved",
+            "duplicates_merged",
+        )
     )
 
 
@@ -750,6 +767,8 @@ def summary(report: dict[str, Any]) -> str:
         parts.append(f"{counts['stopped']} stopped")
     if counts["tickets_created"]:
         parts.append(f"added {_count(counts['tickets_created'], 'ticket')}")
+    if counts.get("auto_approved"):
+        parts.append(f"auto-approved {_count(counts['auto_approved'], 'ticket')}")
     if counts["proposals"]:
         parts.append(f"proposed {counts['proposals']} for your approval")
     if counts["tickets_moved"]:
@@ -798,6 +817,8 @@ def report_text(report: dict[str, Any], clock: datetime, ended_by: str) -> str:
         )
     if report["tickets_created"]:
         lines.append("- Added: " + ", ".join(report["tickets_created"]))
+    if report.get("auto_approved"):
+        lines.append("- Approved by self-work on its own: " + ", ".join(report["auto_approved"]))
     if report["proposals"]:
         lines.append("- Proposed for your approval: " + ", ".join(report["proposals"]))
     if report["counts"]["running"] and ended_by != "request":

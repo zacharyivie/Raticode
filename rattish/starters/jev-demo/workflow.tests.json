@@ -1,0 +1,48 @@
+{
+  "testSetVersion": 1,
+  "cases": [
+    {
+      "id": "refund",
+      "name": "A clear refund request takes the refund branch",
+      "inputs": {"message": "My order arrived with a cracked screen. Please refund my payment."},
+      "checks": [
+        {"type": "json", "label": "Jev answers yes", "target": "nodes.wants-refund.label", "equals": "yes"},
+        {"type": "json", "label": "Asked as a yes/no question", "target": "nodes.wants-refund.question_type", "equals": "yes-no"},
+        {"type": "text", "label": "Takes the refund branch", "target": "nodes.refund.stdout", "contains": "Refund request (label yes"},
+        {"type": "json", "label": "Doesn't ask which team", "target": "nodes.pick-team", "exists": false}
+      ]
+    },
+    {
+      "id": "bug-report",
+      "name": "A crash report goes to the bugs team",
+      "inputs": {"message": "The app crashes with an error every time I tap the Settings button."},
+      "checks": [
+        {"type": "json", "label": "Jev answers no", "target": "nodes.wants-refund.label", "equals": "no"},
+        {"type": "json", "label": "Jev picks bugs", "target": "nodes.pick-team.label", "equals": "bugs"},
+        {"type": "json", "label": "Asked as a choice question", "target": "nodes.pick-team.question_type", "equals": "choice"},
+        {"type": "json", "label": "Has a probability per option", "target": "nodes.pick-team.probabilities.shipping", "exists": true},
+        {"type": "text", "label": "Takes the bug branch", "target": "nodes.bug-report.stdout", "contains": "Bug report for the bugs team"}
+      ]
+    },
+    {
+      "id": "shipping",
+      "name": "A late parcel goes to the shipping team",
+      "inputs": {"message": "Where is my parcel? The tracking page hasn't changed in a week."},
+      "checks": [
+        {"type": "json", "label": "Jev answers no", "target": "nodes.wants-refund.label", "equals": "no"},
+        {"type": "text", "label": "Sends it to shipping", "target": "nodes.send-to-team.stdout", "contains": "Send to the shipping team"},
+        {"type": "json", "label": "Not a bug report", "target": "nodes.bug-report", "exists": false}
+      ]
+    },
+    {
+      "id": "not-sure",
+      "name": "An answer below sure-score goes to a person",
+      "inputs": {"message": "Thanks, the new version looks great.", "sure-score": 1},
+      "checks": [
+        {"type": "json", "label": "Jev answers no", "target": "nodes.wants-refund.label", "equals": "no"},
+        {"type": "text", "label": "Asks a person to pick the team", "target": "nodes.pick-team-by-hand.stdout", "contains": "a person should pick the team"},
+        {"type": "json", "label": "Sends it nowhere on its own", "target": "nodes.send-to-team", "exists": false}
+      ]
+    }
+  ]
+}

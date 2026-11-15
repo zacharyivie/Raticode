@@ -131,14 +131,14 @@ These work as in [What Rem remembers](../rem/home.md#what-rem-remembers). Text t
 
 ```bash
 Raticode rem notices
-Raticode rem notices --cursor c1.1532.40.12
+Raticode rem notices --cursor c1.1532.40.12.7
 Raticode rem notices --watch --include needs_you
 ```
 
-`notices` returns what needs you or finished since a cursor: Rem tasks that need your answer or finished, self-work proposals waiting for approval, and organization work.
+`notices` returns what needs you or finished since a cursor: Rem tasks that need your answer or finished, self-work proposals waiting for approval, organization work, and workflow messages, the notices a [notification](../nodes/notification.md) node with `channel: phone` stored for your phone.
 
 - The first read returns no alerts, only the cursor to start from, so a new script doesn't get the whole history. Save the answer's `cursor` and pass it next time.
-- `--include` picks from `needs_you`, `finished` and `proposals`.
+- `--include` picks from `needs_you`, `finished`, `proposals` and `workflow`. A `workflow` alert names its `workflow_id` and `run_id`; read that run with `Raticode rattish logs WORKFLOW_ID RUN_ID`. After a run's first 20 notices, its one "And N more from this run" alert has `more_from_run` set to N. `dropped` counts workflow notices deleted before this read reached them (the computer keeps the newest 500); `--watch` prints them as one alert with `"kind": "dropped"`.
 - For what's waiting right now, use `rem tasks list --needs-you` or `tickets list --proposals`.
 
 ## Rem's settings
@@ -162,6 +162,9 @@ Raticode tickets show REM-12
 Raticode tickets create --title "Fix flaky test" --project ~/code/app --status backlog --request-id t-123
 Raticode tickets create --title "Write the launch post" --org ORG_ID --assignee WORKER_ID
 Raticode tickets edit REM-12 --expected-revision 2 --priority high
+Raticode tickets create --title "Starter workflows" --waits-for REM-3 --waits-for REM-4
+Raticode tickets edit REM-12 --expected-revision 3 --waits-for REM-9
+Raticode tickets edit REM-12 --expected-revision 4 --clear-waits
 Raticode tickets move REM-12 todo --expected-revision 3
 Raticode tickets assign REM-12 --expected-revision 4 --to-org ORG_ID
 Raticode tickets comment REM-12 "Seen on CI twice"
@@ -174,7 +177,9 @@ Raticode tickets projects ~/code/app ~/code/site --expected-revision 2
 - Name a ticket by key, such as `REM-12`, or by ID.
 - An organization's ticket needs `--org ORG_ID` when it isn't on the board's first page.
 - `list` also returns the board's organizations, participants and projects, with the revisions `projects` needs.
+- `show` prints the ticket's [usage](../rem/board.md#usage-on-each-ticket): its runs' tokens, and how many calls a provider didn't report. Each ticket in `list` has the same `usage` object.
 - Moving a ticket to `in_progress` starts Rem on it now, as on the board.
+- `--waits-for` lists the tickets that must be Done first, by key or ID; repeat it for several. On `edit` it replaces the whole list, and `--clear-waits` empties it. A loop or a ticket from another board is refused. `list` marks a waiting ticket with `(waits for REM-3)`, and `show` prints the list and any notice about a cancelled one. See [Tickets that wait for other tickets](../rem/board.md#tickets-that-wait-for-other-tickets).
 
 ## Self-work
 
@@ -189,16 +194,33 @@ Raticode selfwork window --until-running-done --then off
 Raticode selfwork window --cancel WINDOW_ID
 Raticode selfwork report --period
 Raticode selfwork set --expected-revision 3 --enabled --max-threads 2 --no-auto-pull-backlog
+Raticode selfwork set --expected-revision 4 --session-token-limit 500000 --rate-limit-percent 80
+Raticode selfwork set --expected-revision 5 --auto-approve --confirm-auto-approve
+Raticode selfwork set --expected-revision 6 --no-auto-approve
 Raticode selfwork export > self-work.json
 Raticode selfwork apply --file self-work.json
 ```
 
 - `status` shows whether self-work is on, what it's doing, how many of its tasks are paused, and its settings.
 - `on` and `off` flip only the switch, like telling Rem "turn on self-work". `set` changes several settings at once and needs `--expected-revision`.
+- `--session-token-limit`, `--daily-token-limit` and `--rate-limit-percent` set the [self-work limits](../rem/board.md#self-work-limits); 0 turns one off. `status` shows them, and why self-work stopped starting new work when a limit is reached.
+- `--auto-approve` turns on [auto-approval](../rem/board.md#let-rem-approve-its-own-tickets): self-work's new ideas go to Backlog approved until self-work ends. It also needs `--confirm-auto-approve`; without it the command explains what the setting allows and changes nothing. `apply` needs the same flag when its file turns auto-approval on. `--no-auto-approve` turns it off. `status` shows how many tickets self-work approved this session.
 - `report` is the running report described in [Self-work](../rem/board.md#self-work). `report --period` prints the [report of the last self-work period](../rem/board.md#the-report-when-self-work-stops).
 - `window` sets a [timed window](../rem/board.md#timed-self-work), like telling Rem. `--date YYYY-MM-DD` picks the day, `--timezone` names a zone (the computer's by default) and `--then restore|on|off` sets the switch afterwards. `status` shows the windows with their IDs, and `--cancel` ends or drops one.
 - `apply` takes the file `export` writes. It checks the current revision unless the file has `expected_revision`.
 - Self-work spends provider allowance while nobody is watching, so turn it on deliberately on a remote box.
+
+## Restore Rem's database
+
+`Raticode rem restore-db` works on the files directly, without the backend, so quit Raticode first. It refuses while a running Raticode holds Rem.
+
+```bash
+Raticode rem restore-db --list --format json
+Raticode rem restore-db
+Raticode rem restore-db --snapshot rem-home-20261114-030000Z.sqlite3
+```
+
+Without `--snapshot` it restores the newest copy that still passes SQLite's check. The current files are moved aside, never deleted, and Rem posts what was restored in its chat on the next start. Raticode does the same on its own when it finds the database damaged at startup. See [Rem's database backups](../knowledge/second-brain.md#rem-s-database-backups).
 
 ## What only you can do
 
@@ -207,7 +229,7 @@ The app keeps these decisions for you:
 - approving or declining Rem's proposals
 - marking a ticket done by hand
 - choosing which projects Rem and workers may take tickets from
-- changing Rem's and self-work's settings
+- changing Rem's and self-work's settings, including letting self-work approve its own tickets
 
 The backend applies its usual rules to these commands. A proposal still has to be approved before it moves, and declined tickets stay declined.
 

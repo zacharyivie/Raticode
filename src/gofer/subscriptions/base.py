@@ -14,6 +14,7 @@ from gofer.core.agent import AgentResult
 from gofer.core.provider_profiles import ResolvedProviderSettings
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS
 from gofer.core.thoughts import summarize_thought
+from gofer.core.usage_context import LiveCall
 from gofer.subscriptions.usage import track_invocation
 from gofer.utils.process import env_with_executable_on_path, stream_subprocess
 from gofer.utils.protocol import ProtocolLines, ProtocolRecordLimitError, retained_text
@@ -52,6 +53,14 @@ class Subscription(ABC):
         protocol_error: str | None = None
         provider_error: str | None = None
         local_limit_error = False
+        # Inside a workflow run, usage reported mid-turn counts toward the run's limits,
+        # and the run can stop this call through the event it watches.
+        live = LiveCall(
+            str(getattr(self, "provider", type(self).__name__)),
+            provider_settings.model if provider_settings else None,
+            cancel_event,
+        )
+        live_state: dict[str, Any] = {}
 
         def observe_line(line: str) -> None:
             nonlocal final_message, protocol_error, provider_error
@@ -60,6 +69,11 @@ class Subscription(ABC):
                 if line.lstrip().startswith(("{", "[")):
                     protocol_error = "Provider emitted malformed JSON output"
                 return
+            if live.observer is not None:
+                for payload in payloads:
+                    live_usage = self._live_usage(payload, live_state)
+                    if live_usage:
+                        live.report(live_usage)
             for payload in payloads:
                 if payload.get("type") in {"error", "turn.failed"} or payload.get("is_error"):
                     error = payload.get("error")
@@ -78,6 +92,10 @@ class Subscription(ABC):
                     # "Reconnecting... 1/5" before a call it retried and completed.
                     provider_error = None
             candidate, metadata = self._parse_provider_output(line, "")
+            if any(payload.get("type") in TERMINAL_RECORDS for payload in payloads):
+                # The turn's own totals replace the per-message usage seen before them,
+                # which counted as partial only because the turn hadn't ended yet.
+                protocol_usage.pop("partial", None)
             protocol_usage.update(metadata)
             if candidate != line:
                 final_message = retained_text(candidate)
@@ -98,7 +116,7 @@ class Subscription(ABC):
             )
             source = stream_subprocess(
                 cmd,
-                cancel_event=cancel_event,
+                cancel_event=live.cancel_event,
                 cwd=working_dir,
                 env=env_with_executable_on_path(cmd[0], env),
                 timeout=timeout,
@@ -162,16 +180,22 @@ class Subscription(ABC):
             observe_line(protocol.buffer)
         message, usage_metadata = self._parse_provider_output(stdout, stderr)
         message = (
-            (protocol_error if local_limit_error else None)
+            (live.stop_message() if live.stopped else None)
+            or (protocol_error if local_limit_error else None)
             or provider_error
             or (stderr.strip() if returncode else None)
             or protocol_error
             or final_message
             or message
         )
-        if provider_error or protocol_error:
+        if provider_error or protocol_error or live.stopped:
             returncode = returncode or 1
         usage_metadata.update(protocol_usage)
+        if live.usage and (
+            usage_metadata.get("partial") is True or "total_tokens" not in usage_metadata
+        ):
+            # Without the turn's final totals, what it reported while running counts.
+            usage_metadata.update(live.usage)
         return AgentResult(
             agent_id="",
             success=returncode == 0,
@@ -182,6 +206,13 @@ class Subscription(ABC):
             message=message,
             usage_metadata=usage_metadata,
         )
+
+    def _live_usage(self, payload: dict[str, Any], state: dict[str, Any]) -> dict[str, Any] | None:
+        """The turn's usage so far after one streamed record, for providers that report it.
+
+        ``state`` is private to one call. The default reports nothing until the call ends.
+        """
+        return None
 
     def _stdin_bytes(self, prompt: str) -> bytes:
         """What a prompt_via_stdin provider reads on stdin: the prompt text by default."""

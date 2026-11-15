@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 binary_path="${1:-${repo_root}/dist/Raticode}"
 output_dir="${2:-${repo_root}/frontend/release}"
 package_name="raticode-cli"
-maintainer="Raticode <maintainers@raticode.local>"
+maintainer="Raticode <support@raticode.dev>"
 # Earlier releases shipped this package as gofer-flow-cli with a gof command.
 previous_package_name="gofer-flow-cli"
 description="Command line workflow automation tool for Raticode"

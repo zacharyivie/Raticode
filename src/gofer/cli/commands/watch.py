@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from gofer.cli.output import emit_json, format_option, wants_json
-from gofer.core.watcher import WorkflowWatcher
-from gofer.core.workflow import AgenticWorkflow
 from gofer.utils.paths import get_data_dir
+
+if TYPE_CHECKING:
+    from gofer.core.watcher import WorkflowWatcher
+    from gofer.core.workflow import AgenticWorkflow
 
 app = typer.Typer(
     help=(
@@ -28,6 +31,8 @@ def _workflow_files(data_dir: Path) -> list[Path]:
 
 
 def _sync_watchers(data_dir: Path, watcher: WorkflowWatcher) -> int:
+    from gofer.core.workflow import AgenticWorkflow
+
     count = 0
     for path in _workflow_files(data_dir):
         try:
@@ -71,6 +76,8 @@ def list_watchers(
     data_dir: Path | None = typer.Option(None, "--data-dir", help="Raticode data directory"),
 ) -> None:
     """List workflows in the data directory that have file/folder watchers."""
+    from gofer.core.workflow import AgenticWorkflow
+
     as_json = wants_json(output_format)
     base = data_dir or get_data_dir()
     table = Table("ID", "Path", "Glob", "Mode", "Concurrency", "Recursive", "Debounce")
@@ -124,6 +131,8 @@ def start(
     ),
 ) -> None:
     """Run file/folder watchers in the foreground."""
+    from gofer.core.watcher import WorkflowWatcher
+
     base = data_dir or get_data_dir()
     watcher = WorkflowWatcher(poll_interval_seconds=poll_interval)
     count = _sync_watchers(base, watcher)

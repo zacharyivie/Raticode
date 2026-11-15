@@ -49,6 +49,8 @@ BIN_ENV = "RATICODE_COMMAND_SLOTS_BIN"
 HELD_ENV = "RATICODE_COMMAND_SLOT_HELD"
 LABEL_ENV = "RATICODE_COMMAND_SLOT_LABEL"
 ACTIVITY_ENV = "RATICODE_COMMAND_ACTIVITY"
+# Set for commands inside Claude Code's sandbox, which can't reach systemd.
+SANDBOX_ENV = "RATICODE_COMMAND_SANDBOX"
 # Set when the provider process runs inside Raticode's systemd slice.
 SLICE_ENV = "RATICODE_AGENT_SLICE"
 SLICE = "raticode.slice"
@@ -642,22 +644,24 @@ def last_activity(root: Path, thread_id: str) -> float | None:
         return None
 
 
+def claude_hook_settings(root: Path) -> dict[str, Any]:
+    """Claude Code settings that route shell calls through the hook."""
+    hook = root / "hooks" / "claude-pre-tool-use"
+    return {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [{"type": "command", "command": str(hook), "timeout": 30}],
+                }
+            ]
+        }
+    }
+
+
 def claude_settings(root: Path) -> str:
     """Claude Code ``--settings`` JSON that routes shell calls through the hook."""
-    hook = root / "hooks" / "claude-pre-tool-use"
-    return json.dumps(
-        {
-            "hooks": {
-                "PreToolUse": [
-                    {
-                        "matcher": "Bash",
-                        "hooks": [{"type": "command", "command": str(hook), "timeout": 30}],
-                    }
-                ]
-            }
-        },
-        separators=(",", ":"),
-    )
+    return json.dumps(claude_hook_settings(root), separators=(",", ":"))
 
 
 _systemd_lock = threading.Lock()
@@ -1053,7 +1057,13 @@ def run(kind: str, argv: list[str]) -> int:
             # Without the systemd slice, a lower priority keeps the desktop responsive.
             with contextlib.suppress(OSError):
                 os.nice(5)
-        limit = command_memory_limit() if env.get(SLICE_ENV) == SLICE else None
+        # A sandboxed command can't ask systemd for a scope of its own. It still
+        # runs inside the provider's scope in the slice, which has its own limits.
+        limit = (
+            command_memory_limit()
+            if env.get(SLICE_ENV) == SLICE and not env.get(SANDBOX_ENV)
+            else None
+        )
         try:
             return _run_child(argv, env, limit=limit, notify=notify)
         finally:

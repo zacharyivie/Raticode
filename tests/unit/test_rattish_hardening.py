@@ -1252,3 +1252,28 @@ Node index:
     assert rebuilt.output["status"] == "updated"
     assert full_reads == [second_path]
     assert "beta changed" in index_path.read_text(encoding="utf-8")
+
+
+def test_a_rejected_password_input_is_not_quoted_in_the_error() -> None:
+    def ir(schema: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "workflow": {
+                "inputs": [
+                    {
+                        "name": "token",
+                        "schema": schema,
+                        "default": {"present": False},
+                        "required": True,
+                    }
+                ]
+            }
+        }
+
+    password = {"type": "string", "format": "password", "minLength": 12}
+    with pytest.raises(rattish_runtime.InvalidRattishWorkflowInputError) as caught:
+        rattish_runtime._prepare_workflow_inputs(ir(password), {"token": "hunter2"})
+    assert "hunter2" not in str(caught.value) and "minLength" in str(caught.value)
+    # Other inputs still say what was wrong with the value.
+    plain = {"type": "string", "minLength": 12}
+    with pytest.raises(rattish_runtime.InvalidRattishWorkflowInputError, match="hunter2"):
+        rattish_runtime._prepare_workflow_inputs(ir(plain), {"token": "hunter2"})

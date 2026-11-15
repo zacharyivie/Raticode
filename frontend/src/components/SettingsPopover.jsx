@@ -34,6 +34,8 @@ import SelfWorkSettings from "./SelfWorkSettings.jsx";
 import ProviderSettings from "./ProviderSettings.jsx";
 import CommitMessageSettings from "./CommitMessageSettings.jsx";
 import VoiceTidySettings from "./VoiceTidySettings.jsx";
+import DictateAnywhereSettings from "./DictateAnywhereSettings.jsx";
+import ScreenContextSettings from "./ScreenContextSettings.jsx";
 import SpeechEngineSettings from "./SpeechEngineSettings.jsx";
 import UsageDashboard from "./UsageDashboard.jsx";
 import PairedDevices from "./PairedDevices.jsx";
@@ -66,6 +68,7 @@ import {
   formatKeybinding,
   keybindingConflictIds,
   saveAppSettings,
+  settingBinding,
 } from "../lib/settings.js";
 import {
   DEFAULT_PLUGIN_SETTINGS,
@@ -289,7 +292,7 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
     element: <SettingRow key={key} label={label} description={description} stacked={options.stacked}>{element}</SettingRow>,
     searchText: `${label} ${description}`,
   });
-  if (category === "providers") return [{ searchText: "Providers enabled disabled executable coding harness path apps models allowed denied", element: <ProviderSettings key="providers" providerState={providerState} /> }];
+  if (category === "providers") return [{ searchText: "Providers enabled disabled executable coding harness path apps models allowed denied classification classifier Jev TypeSafe API key local model server Ollama llama.cpp LM Studio", element: <ProviderSettings key="providers" providerState={providerState} /> }];
   if (category === "usage") return [{ searchText: "Usage tokens allowance limits remaining quotas credits billing spend accounts providers history refresh", element: <UsageDashboard key="usage" /> }];
   if (category === "developer") return [
     { searchText: "Developer diagnostics application log logs logging errors warnings debug info filter connection app data storage version backend restart tools", element: <DeveloperSettings key="developer" /> },
@@ -298,7 +301,7 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
       element: <FeaturePreviewSettings key="feature-preview" settings={settings} onChange={onChange} />,
     },
   ];
-  if (category === "memory") return [{ searchText: "Rem memory conversation archive folder Second Brain knowledge notes reports HTML Markdown theme gallery generation provider model effort screenshot", element: <RemMemorySettings audioInputDeviceId={settings.devices.audioInputId} key="memory" value={settings.memory} onChange={onChange} providerState={providerState} /> }];
+  if (category === "memory") return [{ searchText: "Rem memory conversation archive folder purge retention delete permanently Git Second Brain knowledge notes reports HTML Markdown theme gallery generation provider model effort screenshot", element: <RemMemorySettings audioInputDeviceId={settings.devices.audioInputId} key="memory" value={settings.memory} onChange={onChange} providerState={providerState} /> }];
   if (category === "general") return [
     row("dataDir", "Application data directory", "Stores global Raticode state, run artifacts, and registries.", (
       <PathControl value={appControls.dataDir} onChoose={appControls.onChooseDataDirectory} />
@@ -312,7 +315,7 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
     row("executionMode", "Default run target", "Start runs locally or send them to the runner queue.", (
       <SelectControl value={settings.general.executionMode} onChange={(value) => onChange("general.executionMode", value)} options={[["local", "Local"], ["remote", "Runner queue"]]} />
     )),
-    row("updates", "Check for updates at startup", "Ask the desktop updater for a new release when the app starts.", (
+    row("updates", "Check for updates", "Look for a new release on startup and every 10 minutes, and remind you once a day when you aren't on the newest version.", (
       <SwitchControl checked={settings.general.checkForUpdates} onChange={(value) => onChange("general.checkForUpdates", value)} />
     )),
     row("archivedThreadRetention", "Delete archived threads", "Permanently delete archived Rem threads with no activity for this long. A configured conversation archive keeps a copy.", (
@@ -340,6 +343,14 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
     row("dictationAutoSend", "Send after dictation", "For hands-free use: sends the message as soon as your words are ready. When off, they wait in the message box for you to edit and send. Words that couldn't be tidied always wait.", (
       <SwitchControl label="Send after dictation" checked={settings.devices.dictationAutoSend} onChange={(value) => onChange("devices.dictationAutoSend", value)} />
     )),
+    {
+      searchText: "Dictate to Rem from any app global system-wide shortcut hotkey background minimized unfocused voice assistant listen Wayland portal",
+      element: <DictateAnywhereSettings key="dictate-anywhere" enabled={settings.devices.dictateAnywhere} binding={settingBinding(settings, "voice.dictateAnywhere")} onChange={onChange} />,
+    },
+    {
+      searchText: "Show Rem your screen screenshot screen capture window focused ask about my screen share display privacy Wayland portal macOS screen recording",
+      element: <ScreenContextSettings key="screen-context" enabled={settings.devices.screenContext} anywhere={settings.devices.dictateAnywhere} binding={settingBinding(settings, "voice.askAboutScreen")} onChange={onChange} />,
+    },
     row("speech", "Speech recognition", "Turns dictation into text on this computer, using the speech recognizer built into the operating system where there is one.", (
       <SpeechEngineSettings />
     ), { stacked: true }),
@@ -1055,10 +1066,19 @@ function KeybindingControl({ binding, command, conflict = "", onChange }) {
   const [pendingChord, setPendingChord] = useState("");
   const chordTimeoutRef = useRef(null);
 
+  // While a key is being recorded, the system-wide dictation shortcut lets keys through,
+  // so pressing it here records it instead of starting dictation.
+  const systemWide = command.scope === "system";
+  function startRecording() {
+    if (systemWide) void window.goferDesktop?.globalDictation?.suspend?.(true);
+    setRecording(true);
+  }
+
   function stopRecording() {
     window.clearTimeout(chordTimeoutRef.current);
     chordTimeoutRef.current = null;
     setPendingChord("");
+    if (systemWide && recording) void window.goferDesktop?.globalDictation?.suspend?.(false);
     setRecording(false);
   }
 
@@ -1082,7 +1102,7 @@ function KeybindingControl({ binding, command, conflict = "", onChange }) {
           title={conflict ? `Also assigned to ${conflict}` : undefined}
           type="button"
           onBlur={stopRecording}
-          onClick={() => setRecording(true)}
+          onClick={startRecording}
           onKeyDown={(event) => {
             if (!recording) return;
             event.preventDefault();
@@ -1162,7 +1182,7 @@ function categoryKeywords(category) {
     providers: "providers enabled disabled executable coding harness path apps default model reasoning effort",
     usage: "usage tokens allowance limits remaining quotas credits billing spend accounts providers history refresh",
     assistant: "self-work self work idle away max threads backlog auto pull research report kanban commit messages auto commit template format default scope current directory global projects rem provider model effort chat faster speed codex claude conversation skills tools mcp servers resources swarm access teams runs",
-    memory: "rem memory conversation archive folder second brain knowledge notes reports html markdown",
+    memory: "rem memory conversation archive folder purge retention delete permanently git second brain knowledge notes reports html markdown",
     developer: "developer diagnostics application log logs logging errors warnings debug info filter connection app data storage version backend restart tools feature preview experimental",
     layout: "width pane sidebar panel inspector arrangement preset position side left right swap mirror dock chat rem files explorer project activity bar terminal tab editor startup open hidden compact narrow reset",
     plugins: "plugins sidebar rail activity bar icons order reorder drag lock unlock show hide enable disable",
@@ -1170,6 +1190,7 @@ function categoryKeywords(category) {
 }
 
 function scopeLabel(scope) {
+  if (scope === "system") return "Works in every app when turned on in Devices";
   return scope === "global" ? "Works anywhere" : `When ${scope} is focused`;
 }
 

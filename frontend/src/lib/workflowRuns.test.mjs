@@ -59,6 +59,18 @@ test("queue cancellation uses the queue identity, while an acknowledged stop sta
   assert.equal(records[0].unread, true);
 });
 
+test("a run another process was asked to stop shows Stop requested until it ends", () => {
+  // Stop from the phone, the CLI or another window reaches the run's own process; the
+  // backend reports stopRequested on the still-running run.
+  let records = mergeWorkflowRunRecords([], [{ id: "triggered", status: "running", stopRequested: true, startedAt: "2026-11-14T10:00:00Z" }], atlas);
+  assert.equal(records[0].status, "stopping");
+  assert.equal(exactWorkflowRunStopPath(records[0]), null);
+  const listed = workflowListStatus({ id: "digest" }, records);
+  assert.deepEqual([listed.key, listed.label], ["stopping", "Stop requested"]);
+  records = mergeWorkflowRunRecords(records, [{ id: "triggered", status: "stopped", stopRequested: false }], atlas);
+  assert.equal(records[0].status, "stopped");
+});
+
 test("submission without an acknowledged execution cannot expose Stop", () => {
   assert.equal(exactWorkflowRunStopPath({ workflowId: "digest", runId: "pending", status: "submitting" }), null);
 });

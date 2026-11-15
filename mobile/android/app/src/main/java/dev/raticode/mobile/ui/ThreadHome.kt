@@ -55,13 +55,14 @@ internal fun permissionLabel(mode: String) = when (mode) {
 
 @Composable
 internal fun ChoiceMenu(label: String, description: String, choices: List<Pair<String, String>>, selected: String,
-                        modifier: Modifier = Modifier, enabled: Boolean = true, onChoose: (String) -> Unit) {
+                        modifier: Modifier = Modifier, enabled: Boolean = true, active: Boolean = false, onChoose: (String) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     Box(modifier) {
+        // An [active] filter narrows what is shown; it stands out so a filter kept from an earlier visit is never a surprise.
         TextButton(onClick = { expanded = true }, enabled = enabled && choices.isNotEmpty(),
-            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
+            colors = ButtonDefaults.textButtonColors(contentColor = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface),
             contentPadding = PaddingValues(horizontal = 8.dp), modifier = Modifier.fillMaxWidth()
-                .semantics { contentDescription = description }) {
+                .semantics { contentDescription = description; if (active) stateDescription = "Filter on" }) {
             Text(label, Modifier.weight(1f, fill = false), maxLines = 1, overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.labelMedium)
             Icon(ThreadIcons.ExpandMore, null, Modifier.size(16.dp))
@@ -113,6 +114,7 @@ internal fun ThreadHome(client: LiveClient, onOpen: (String, String?) -> Unit, o
     var edited by remember { mutableStateOf(false) }
     val creating = client.creatingThread
     var deleteId by remember { mutableStateOf<String?>(null) }
+    var purgeId by remember { mutableStateOf<String?>(null) }
     // Selected threads, by ID. A long press starts selecting; Back or the close button ends it.
     var selected by rememberSaveable { mutableStateOf(listOf<String>()) }
     var deleteSelection by remember { mutableStateOf<List<String>?>(null) }
@@ -226,7 +228,7 @@ internal fun ThreadHome(client: LiveClient, onOpen: (String, String?) -> Unit, o
                 items(client.searchResults.filter { project.isBlank() || client.threadContexts[it.thread]?.project == project }, key = { it.thread }) { result ->
                     ThreadRow(client, result.thread, result.title, result.snippet, onOpen = {
                         client.openSearchResult(result); onOpen(result.thread, result.message)
-                    }, onDelete = { deleteId = result.thread })
+                    }, onDelete = { deleteId = result.thread }, onDeletePermanently = { purgeId = result.thread })
                 }
                 if (client.searchHasMore) item { TextButton(onClick = { client.searchThreads(query, more = true) }, enabled = !client.searching) { Text("Show more matches") } }
             } else {
@@ -237,7 +239,7 @@ internal fun ThreadHome(client: LiveClient, onOpen: (String, String?) -> Unit, o
                 fun rows(list: List<ThreadEntry>, archived: Boolean = false) = items(list, key = { it.id }) { entry ->
                     ThreadRow(client, entry.id, entry.title, archived = archived, selected = entry.id in selection, selecting = selecting,
                         onSelect = { selected = ThreadSelection.toggle(selection, entry.id).toList() },
-                        onOpen = { onOpen(entry.id, null) }, onDelete = { deleteId = entry.id })
+                        onOpen = { onOpen(entry.id, null) }, onDelete = { deleteId = entry.id }, onDeletePermanently = { purgeId = entry.id })
                 }
                 // Tapping a section's name selects all of its threads, as on desktop.
                 fun selectAll(list: List<ThreadEntry>) = { selected = ThreadSelection.section(selection, list.map { it.id }).toList() }
@@ -339,6 +341,14 @@ internal fun ThreadHome(client: LiveClient, onOpen: (String, String?) -> Unit, o
             confirmButton = { TextButton(onClick = { if (info != null) client.manageThread(id, "delete", info.revision); deleteId = null }) { Text("Delete") } },
             dismissButton = { TextButton(onClick = { deleteId = null }) { Text("Cancel") } })
     }
+    purgeId?.let { id ->
+        val info = client.threadContexts[id]
+        AlertDialog(onDismissRequest = { purgeId = null }, title = { Text("Delete permanently?") },
+            text = { Text(ThreadSelection.permanentDeleteMessage(client.threads.firstOrNull { it.first == id }?.second.orEmpty())) },
+            confirmButton = { TextButton(onClick = { if (info != null) client.manageThread(id, "delete_permanently", info.revision); purgeId = null }) {
+                Text("Delete permanently", color = MaterialTheme.colorScheme.error) } },
+            dismissButton = { TextButton(onClick = { purgeId = null }) { Text("Cancel") } })
+    }
 }
 
 // Collapsible groups keep their header visible so their count and status stay readable.
@@ -386,7 +396,7 @@ internal fun threadDate(value: String): String = runCatching {
 @Composable
 private fun ThreadRow(client: LiveClient, id: String, title: String, snippet: String = "", archived: Boolean? = null,
                       selected: Boolean = false, selecting: Boolean = false, onSelect: (() -> Unit)? = null,
-                      onOpen: () -> Unit, onDelete: () -> Unit) {
+                      onOpen: () -> Unit, onDelete: () -> Unit, onDeletePermanently: () -> Unit = {}) {
     val info = client.threadContexts[id]
     var menu by remember { mutableStateOf(false) }
     val enabled = info?.canManage == true && !info.deletePending
@@ -448,6 +458,8 @@ private fun ThreadRow(client: LiveClient, id: String, title: String, snippet: St
                     menu = false; info?.let { client.manageThread(id, "restore", it.revision) }
                 })
                 DropdownMenuItem(text = { Text("Delete thread", color = MaterialTheme.colorScheme.error) }, onClick = { menu = false; onDelete() })
+                if (client.threadPurgeSync) DropdownMenuItem(text = { Text("Delete permanently", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.SemiBold) },
+                    onClick = { menu = false; onDeletePermanently() })
             }
         }
     }

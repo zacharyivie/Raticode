@@ -75,6 +75,8 @@ The Workflow block lowers into `workflow`:
 | `name` | `name` | Preserve decoded string content. |
 | `interface-version` | `interface_version` | Positive integer, or `null` when no public version was declared. |
 | `max-runs` | `max_runs` | Positive integer, or `null` for `none` and omission. |
+| `max-tokens` | `max_tokens` | Positive integer, or `null` for `none` and omission. |
+| `max-cost-usd` | `max_cost_usd` | Positive Number in US dollars, or `null` for `none` and omission. |
 | `timeout` | `timeout_ms` | Duration converted to integer milliseconds, or `null`. |
 | `inputs` | `inputs` | Canonical names, resolved schemas, required flags, and explicit defaults. |
 | `outputs` | `outputs` | Canonical names, resolved references, and embedded schemas. |
@@ -90,8 +92,44 @@ records this as active-processing time, but IR version 1 does not yet persist co
 or resume an interrupted run. A future durable runner must checkpoint consumed time and
 must not count time while the background service or computer is stopped.
 
-An omitted workflow `max-runs` or `timeout` becomes JSON null. Rattish 1 imposes no hidden
-run or time limit.
+An omitted workflow `max-runs`, `max-tokens`, `max-cost-usd` or `timeout` becomes JSON null.
+Rattish 1 imposes no hidden run, usage or time limit.
+
+### Usage limits
+
+The runtime counts every provider call made while a node of the run executes, including
+calls made by a child workflow, structured-output repairs and retries. A child workflow's
+calls count toward the calling run's node. Tokens are the total the provider reported. Cost
+is the estimated cost the provider reported for the call (for example Claude Code's
+`total_cost_usd`); Raticode has no price table and never computes cost from tokens. A value no
+provider reported is unknown: it stays `null` and is never counted as zero. `rem-prompt` and
+`rem-task` nodes hand their work to Rem, whose calls belong to Rem's own task; the run doesn't
+count them and its limits don't cover them.
+
+`max_tokens` and `max_cost_usd` are checked after each provider call ends. When the run's
+known total is over a limit, the run ends with a `budget` error,
+`RATTISH_TOKEN_LIMIT_EXCEEDED` or `RATTISH_COST_LIMIT_EXCEEDED`. With a limit set, a call
+that didn't report the value the limit counts also ends the run, with
+`RATTISH_TOKEN_LIMIT_UNCHECKABLE` or `RATTISH_COST_LIMIT_UNCHECKABLE`, because the run can no
+longer be kept under the limit. A crossed limit stops retries and structured-output repairs
+from making more calls and cancels running nodes.
+
+Inside an agent node, a provider session can make many model calls. A runtime that can cap
+or watch a session does so:
+
+- A provider with its own spending cap starts each call with the run's remaining
+  `max_cost_usd` budget, less headroom (Raticode passes Claude Code `--max-budget-usd` at 90%
+  of the remaining budget). When the provider stops at that cap, the run ends with
+  `RATTISH_COST_LIMIT_EXCEEDED`, and the node's error is the same `budget` error rather than
+  a provider failure.
+- A provider that reports usage during the call has it added to the run's total as it
+  arrives. Once the total passes a limit, the runtime stops the call and the run ends with
+  the matching `budget` error.
+- A provider that reports usage only when the call ends is checked then.
+
+Calls already running when a limit is crossed are cancelled, and what they used still
+counts. Usage arrives in steps and calls running at the same time share the remaining
+budget, so a run can still end past its limit.
 
 ## Common node fields
 

@@ -64,7 +64,7 @@ Create a Rattish workflow in this project that writes a short text report.
 Validate it and check preflight. Do not execute it yet.
 ```
 
-[Your first workflow](./first-workflow.md) builds one that writes two local files and calls no provider. Workflow sources live in `.raticode/<workflow-id>/workflow.rattish`.
+[Your first workflow](./first-workflow.md) builds one that writes two local files and calls no provider. Workflow sources live in `.raticode/<workflow-id>/workflow.rattish`. From 0.5.5, Raticode also lists any other `workflow.rattish` in the project; see [Workflows anywhere in the project](./studio/projects.md#workflows-anywhere-in-the-project).
 
 ## 6. Validate, review, then run
 

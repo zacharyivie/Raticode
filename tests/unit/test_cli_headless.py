@@ -400,8 +400,10 @@ def test_headless_serve_writes_private_files_and_loads_rem_settings(
         headless.read_owner_token(data_dir, environ={"RATICODE_AGENT_SESSION": "1"})
 
     server.shutdown()
+    # Shutdown removes the endpoint file, then the token file; wait for both, so a slow
+    # machine doesn't look between the two removals.
     deadline = time.monotonic() + 10
-    while endpoint_path.exists() and time.monotonic() < deadline:
+    while (endpoint_path.exists() or token_path.exists()) and time.monotonic() < deadline:
         time.sleep(0.05)
     assert not endpoint_path.exists() and not token_path.exists()
 
@@ -422,6 +424,50 @@ def test_headless_token_file_input(tmp_path, headless_serve) -> None:
     assert server.api_token == "m" * 48
     assert not (data_dir / "headless" / "owner-token").exists()
     assert json.loads((data_dir / "headless" / "endpoint.json").read_text())["tokenFile"] is None
+
+
+def test_headless_reads_the_jev_key_from_the_secrets_folder(
+    tmp_path, headless_serve, monkeypatch, caplog
+) -> None:
+    from gofer.classifiers import jev_settings
+    from gofer.core import secrets_folder
+
+    def no_keychain() -> Any:
+        raise RuntimeError("protected_store_unavailable")
+
+    monkeypatch.setattr(jev_settings, "_secret_store", no_keychain)
+    monkeypatch.setattr(secrets_folder, "keychain_available", lambda: False)
+    data_dir = tmp_path / "data"
+    folder = tmp_path / "credentials"
+    folder.mkdir(mode=0o700)
+    (folder / "jev-key").write_text("jev-folder-key-0123456789\n", encoding="utf-8")
+    (folder / "jev-key").chmod(0o600)
+    # As systemd would start it: no option, just $CREDENTIALS_DIRECTORY.
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(folder))
+    caplog.set_level("INFO", logger="gofer")
+
+    server = headless_serve(data_dir)
+    token = (data_dir / "headless" / "owner-token").read_text(encoding="utf-8").strip()
+    status, jev = _request(server, "GET", "/api/classifiers/jev", token)
+    assert status == 200 and jev["configured"] is True
+    assert jev["keySource"] == "secrets folder"
+    assert jev_settings.read_jev_key(data_dir) == "jev-folder-key-0123456789"
+    endpoint = json.loads((data_dir / "headless" / "endpoint.json").read_text())
+    assert endpoint["secretsDir"] == str(folder)
+    assert "CREDENTIALS_DIRECTORY" not in os.environ
+
+    # Saving still needs the keychain, and the error names the option.
+    status, error = _request(
+        server, "POST", "/api/classifiers/jev/key", token, {"key": "other-key-0123456789"}
+    )
+    assert status == 400 and "--secrets-dir" in json.dumps(error)
+    assert (folder / "jev-key").read_text(encoding="utf-8") == "jev-folder-key-0123456789\n"
+
+    log = caplog.text
+    assert "jev-folder-key" not in log
+    assert f"secrets folder {folder}" in log
+    assert "Unavailable: Phone pairing" in log
+    assert "Unavailable: Usage reporting credentials" in log
 
 
 def test_agent_tokens_are_hashed_and_limited(tmp_path, headless_serve, monkeypatch) -> None:
@@ -517,6 +563,34 @@ def test_agent_tokens_are_hashed_and_limited(tmp_path, headless_serve, monkeypat
     assert status == 400 and "Only the user" in refused["error"]
     org = server.organizations.store.get(str(data_dir), org_id)
     assert org["runtime"]["state"] == "paused"
+
+    # Folders inside Raticode's data need no desktop grant, but only for the owner: an
+    # agent token can't hand them to an organization (security review B-O7).
+    inside = data_dir / "agent-root"
+    inside.mkdir()
+    for body in (
+        {
+            "action": "create",
+            "params": {"config": {"name": "Inside", "projectRoots": [str(inside)]}},
+        },
+        {
+            "action": "configure",
+            "organizationId": org_id,
+            "params": {
+                "config": {**org["config"], "projectRoots": [str(inside)]},
+                "expectedRevision": org["revision"],
+                "reason": "Move it",
+            },
+        },
+    ):
+        status, payload = _request(
+            server, "POST", "/api/organizations", agent, {"projectRoot": str(data_dir), **body}
+        )
+        assert status == 403, payload
+        assert payload["code"] == "agent_token_forbidden"
+    assert [o["config"]["name"] for o in server.organizations.store.list_organizations()] == [
+        "Acme"
+    ]
 
     revoked = _invoke("tokens", "revoke", "ci", "--data-dir", str(data_dir))
     assert revoked.exit_code == 0, revoked.output

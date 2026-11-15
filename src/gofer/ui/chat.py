@@ -36,8 +36,9 @@ from watchdog.events import (
 from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
+from gofer.core.command_slots import ACTIVITY_ENV as COMMAND_ACTIVITY_ENV
 from gofer.core.command_slots import ROOT_ENV as COMMAND_SLOTS_ROOT_ENV
-from gofer.core.command_slots import claude_settings
+from gofer.core.command_slots import claude_hook_settings
 from gofer.core.command_slots import turn_environment as command_slot_environment
 from gofer.core.prompt_envelope import (
     AgentResources,
@@ -60,7 +61,7 @@ from gofer.core.provider_permissions import provider_permission_args
 from gofer.core.provider_preferences import provider_preference
 from gofer.core.rem_library import skill_folder, with_library_resources
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS, ResourceLimits
-from gofer.core.usage_ledger import track_chat_usage
+from gofer.core.usage_ledger import track_chat_usage, usage_scope
 from gofer.rattish.artifacts import (
     RattishArtifactError,
     rattish_assistant_skill_path,
@@ -80,6 +81,7 @@ from gofer.subscriptions.cli_providers import (
     stream_cli,
 )
 from gofer.subscriptions.codex import codex_exec_input
+from gofer.ui import claude_sandbox
 from gofer.ui.browser_tools import releases_browser_access, with_agent_browser
 from gofer.ui.chat_media import ChatMediaError, resolve_chat_attachment
 from gofer.ui.chat_sessions import ChatSession, with_chat_session
@@ -1274,6 +1276,11 @@ async def run_workflow_chat(
     }
 
 
+CLAUDE_SANDBOX_BLOCKED = (
+    "Blocked: this unattended run needs Claude Code's sandbox, which can't start."
+)
+
+
 def codex_scratch_command(command: list[str], scratch: Path) -> list[str]:
     """Make the scratch folder Codex's only writable workspace.
 
@@ -1426,6 +1433,16 @@ async def stream_workflow_chat(
     resolved_data_dir = (data_dir or get_data_dir()).resolve()
     resolved_working_dir = _chat_working_dir(workflow, working_dir or resolved_data_dir)
     limits = _limits_from_workflow(workflow, resource_limits)
+    managed_task = (workflow or {}).get("remManagedTask") or {}
+    sandboxed = provider == "claude_code" and managed_task.get("claudeSandbox") is True
+    if sandboxed:
+        # Checked before anything runs, so no tokens are spent on a turn that
+        # can't start. Claude Code's failIfUnavailable setting backs this up.
+        reason = claude_sandbox.unavailable_reason()
+        if reason:
+            raise ChatProviderError(f"{CLAUDE_SANDBOX_BLOCKED} {reason}")
+        # Claude Code lets sandboxed commands write to every --add-dir folder.
+        trust_data_dir = False
     resolved_working_dir.mkdir(parents=True, exist_ok=True)
     gofer_cli_path = ensure_local_gofer_cli(resolved_data_dir)
     try:
@@ -1454,6 +1471,7 @@ async def stream_workflow_chat(
             working_dir=resolved_working_dir,
             limits=limits,
             cancel_event=cancel_event,
+            scope=usage_scope(workflow, conversation_id),
         )
     elif _session.handoff or (not _session.resumed and len(messages) > 1):
         # Compact history imported from another provider or re-sent to a new
@@ -1491,6 +1509,7 @@ async def stream_workflow_chat(
             cancel_event=cancel_event,
             token_budget=handoff_token_budget(provider, model),
             additional_tokens=estimate_tokens(request_prompt),
+            scope=usage_scope(workflow, conversation_id),
         )
         messages = [*history, *messages[latest_user:]]
     if cancel_event is not None and cancel_event.is_set():
@@ -1558,9 +1577,46 @@ async def stream_workflow_chat(
             else None
         ),
     )
+    claude_settings: dict[str, Any] = {}
     if slot_env and provider == "claude_code" and _claude_allows_shell(command):
         # Lets the hook queue tests that PATH wrappers can't see, like .venv/bin/pytest.
-        command += ["--settings", claude_settings(Path(slot_env[COMMAND_SLOTS_ROOT_ENV]))]
+        claude_settings.update(claude_hook_settings(Path(slot_env[COMMAND_SLOTS_ROOT_ENV])))
+    sandbox_env: dict[str, str] = {}
+    if sandboxed:
+        read_only_turn = managed_task.get("readOnly") is True
+        scratch = trusted_scratch_dir
+        if scratch is not None:
+            scratch.mkdir(parents=True, exist_ok=True)
+            sandbox_env = claude_sandbox.sandbox_environment(scratch, read_only=read_only_turn)
+        slots_root = Path(slot_env[COMMAND_SLOTS_ROOT_ENV]) if slot_env else None
+        activity = slot_env.get(COMMAND_ACTIVITY_ENV)
+        claude_settings.update(
+            claude_sandbox.sandbox_settings(
+                root=resolved_working_dir,
+                data_dir=resolved_data_dir,
+                read_only=read_only_turn,
+                writable=[
+                    scratch,
+                    # Queued tests report progress and take a place in line here.
+                    Path(activity).parent if activity else None,
+                    slots_root / "queue" if slots_root else None,
+                    # A worktree's commits go to the repository's shared .git folder.
+                    None if read_only_turn else claude_sandbox.git_common_dir(resolved_working_dir),
+                ],
+                # Wrappers, slot locks and queue settings; not the hook, which
+                # Claude Code runs outside the sandbox.
+                visible=[slots_root / name for name in ("bin", "slots", "config.json")]
+                if slots_root
+                else [],
+                protected=[
+                    path
+                    for path in _unique_existing_directories(extra_paths)
+                    if path.resolve() != resolved_working_dir.resolve()
+                ],
+            )
+        )
+    if claude_settings:
+        command += ["--settings", json.dumps(claude_settings, separators=(",", ":"))]
 
     native_id = _session.native_id if _session else None
     # OpenCode options must precede the "--" that ends its --file values.
@@ -1588,6 +1644,7 @@ async def stream_workflow_chat(
     if (workflow or {}).get("remBlockGitPush") is True:
         # Organization employees (and other managed agents) may commit but never push.
         process_env.update(git_push_blocked_environment())
+    process_env.update(sandbox_env)
     if trusted_scratch_dir is not None and provider == "codex" and permission_mode == "read-only":
         # Read-only Codex sandboxes have nowhere to write temp files or caches,
         # so checks like pytest and mypy fail. Run from a private scratch folder
@@ -1595,7 +1652,7 @@ async def stream_workflow_chat(
         trusted_scratch_dir.mkdir(parents=True, exist_ok=True)
         command = codex_scratch_command(command, trusted_scratch_dir)
         process_cwd = trusted_scratch_dir
-        process_env = {**slot_env, **scratch_environment(trusted_scratch_dir)}
+        process_env = {**process_env, **scratch_environment(trusted_scratch_dir)}
 
     project_root = _chat_project_root(workflow)
     project_tracker = _ChatProjectTracker(project_root)
@@ -1841,6 +1898,8 @@ async def stream_workflow_chat(
     except OSError as exc:
         project_tracker.close()
         raise ChatProviderError(f"Could not prepare '{binary}' CLI: {exc}") from exc
+    # The sandbox leaves empty mount points in the folder Claude Code starts in.
+    stub_root = claude_sandbox.track_mount_stubs(process_cwd) if sandboxed else None
     try:
         exec_command, stdin = _prompt_via_stdin(provider, exec_command)
         provider_stream: AsyncIterator[Any] = stream_subprocess(
@@ -2017,6 +2076,9 @@ async def stream_workflow_chat(
         close_stream = getattr(provider_stream, "aclose", None)
         if close_stream is not None:
             await close_stream()
+        if stub_root is not None:
+            if removed := claude_sandbox.release_mount_stubs(stub_root):
+                log.info("Removed %d sandbox mount points from %s", len(removed), stub_root)
         project_tracker.close()
         if private_config is not None:
             shutil.rmtree(private_config, ignore_errors=True)
@@ -3284,6 +3346,7 @@ async def _compact_chat_messages_if_needed(
     cancel_event: threading.Event | None = None,
     token_budget: int | None = None,
     additional_tokens: int = 0,
+    scope: dict[str, str | None] | None = None,
 ) -> tuple[list[dict[str, str]], bool]:
     if not messages:
         return messages, False
@@ -3341,6 +3404,7 @@ async def _compact_chat_messages_if_needed(
                 working_dir=working_dir,
                 limits=limits,
                 cancel_event=cancel_event,
+                scope=scope,
             )
         )
     summary = "\n\n".join(summaries)
@@ -3378,6 +3442,7 @@ async def _summarize_chat_messages(
     working_dir: Path,
     limits: ResourceLimits,
     cancel_event: threading.Event | None = None,
+    scope: dict[str, str | None] | None = None,
 ) -> str:
     if provider in ACP_PROVIDERS | {"antigravity"}:
         return _fallback_chat_summary(messages)
@@ -3431,6 +3496,7 @@ async def _summarize_chat_messages(
             metadata=usage_metadata,
             data_dir=data_dir,
             status="cancelled" if cancel_event and cancel_event.is_set() else usage_status,
+            **(scope or {}),
         )
     if returncode != 0:
         return _fallback_chat_summary(messages)

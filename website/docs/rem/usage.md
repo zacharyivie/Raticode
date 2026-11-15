@@ -33,6 +33,8 @@ Filter by coding apps, API profiles or all accounts.
 
 Pick the last 24 hours, 7, 30 or 90 days. Figures come from what providers report, or from supported estimates. Tracking starts when records exist; earlier work isn't rebuilt.
 
+From 0.5.5, every [jev node](../nodes/jev.md) call adds a **Jev (TypeSafe)** row, including calls that failed. TypeSafe bills the input tokens shown; output tokens are free.
+
 ## Costs
 
 - Unknown cost stays unknown.

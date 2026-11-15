@@ -28,7 +28,7 @@ export function socialImage(siteUrl: string) {
     url: `${siteUrl}brand/social-card.jpg`,
     width: 1200,
     height: 630,
-    alt: 'Raticode: build the maze, let the agents run it. A local studio for agentic coding workflows, with a workflow graph and run timeline from the desktop app.',
+    alt: "Raticode: your agents keep working while you sleep. Self-work, Organizations and scheduled workflows run when you're away. Beside it, a workflow graph and run timeline from the desktop app.",
   }
 }
 

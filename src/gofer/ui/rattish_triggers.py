@@ -96,6 +96,27 @@ def preview_trigger_payload(body: dict[str, Any]) -> dict[str, Any]:
     return {"nextRuns": preview_cron(str(body.get("expression") or ""), timezone)}
 
 
+def trigger_pause_payload(base: Path) -> dict[str, Any]:
+    """Whether every trigger is paused, and how many triggers that covers."""
+    store = TriggerStore(base)
+    triggers = store.list_triggers()
+    return {
+        "pause": store.pause_state().to_payload(),
+        "triggers": len(triggers),
+        "enabled": sum(1 for item in triggers if item.enabled),
+        "scheduler": scheduler_status(store),
+    }
+
+
+def set_trigger_pause_payload(base: Path, body: dict[str, Any]) -> dict[str, Any]:
+    """Pause or resume all triggers. Each trigger keeps its own on/off setting."""
+    paused = body.get("paused")
+    if not isinstance(paused, bool):
+        raise TriggerError("Paused must be true or false.")
+    TriggerStore(base).set_paused(paused)
+    return trigger_pause_payload(base)
+
+
 def set_start_at_login_payload(base: Path, body: dict[str, Any]) -> dict[str, Any]:
     enabled = body.get("enabled")
     if not isinstance(enabled, bool):

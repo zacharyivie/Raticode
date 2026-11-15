@@ -9,13 +9,14 @@ import { browserTabOpening, viewedBrowserMedia, withBrowserTabEngines } from "..
 import { fetchChatTurn } from "../lib/chatTransport.js";
 import { previousRemModelSelection, remModelSelection, remModelSwitchBanner } from "../lib/remModelSelection.js";
 import { pathKey, samePath, pathWithin, uniquePaths, pathValue, withPathValue, replacePathPrefix, pathMatchesChange } from "../lib/workspacePaths.js";
-import { archiveRetentionDays, expiredArchivedThreads, cachedThreadScopes, organizeThreads, threadIndexEntry } from "../lib/threadActivity.js";
+import { ARCHIVE_GIT_LIMIT, archiveRetentionDays, expiredArchivedThreads, cachedThreadScopes, organizeThreads, threadIndexEntry } from "../lib/threadActivity.js";
 import { loadEditorSession, saveEditorSession, loadWorkflowDraft, saveWorkflowDraft } from "../lib/editorSession.js";
 import brandCompat from "../lib/brandCompat.js";
 import { createConversationCache } from "../lib/conversationCache.js";
 import { loadConversationMessages } from "../lib/conversationStorage.js";
 import { conversationRepository, pageStart } from "../lib/conversationRepository.js";
 import ThreadSearch from "../components/ThreadSearch.jsx";
+import UpdateReminderBanner from "../components/UpdateReminderBanner.jsx";
 import { ThreadList as ThreadListView, ThreadSections as ThreadSectionsView } from "../components/ThreadSections.jsx";
 import { threadActionPatch } from "../lib/threadSelection.js";
 import ThreadHistoryMatch from "../components/ThreadHistoryMatch.jsx";
@@ -76,30 +77,36 @@ const ExportWorkflowDialog = lazy(() => import("../components/WorkflowDialogs.js
 const WorkflowListItem = lazy(() => import("../components/WorkflowListItem.jsx"));
 const ChatSources = lazy(() => import("../components/ChatSources.jsx"));
 import { Dialog } from "../components/Dialog.jsx";
+import SavedInputsPrompt from "../components/SavedInputsPrompt.jsx";
 import BrowserMediaBar from "../components/BrowserMediaBar.jsx";
 const KanbanWorkspace = lazy(() => import("../components/KanbanWorkspace.jsx"));
+const WorkflowRunsView = lazy(() => import("../components/WorkflowRunsView.jsx"));
 const OrganizationHome = lazy(() => import("../components/OrganizationHome.jsx"));
 const SecondBrainWorkspace = lazy(() => import("../components/SecondBrainWorkspace.jsx"));
 const RemHomeWorkspace = lazy(() => import("../components/RemHomeWorkspace.jsx"));
 const SwarmWorkspace = lazy(() => import("../components/SwarmWorkspace.jsx"));
 const CodeFileExplorer = lazy(() => import("../components/CodeFileExplorer.jsx"));
 const CodeWorkspace = lazy(() => import("../components/CodeWorkspace.jsx"));
+const BrowserWindowHost = lazy(() => import("../components/BrowserWindowHost.jsx"));
 import { applyCodeFilesystemChange } from "../lib/codeEditorSessions.js";
 import { resolveMarkdownFileLinkTarget, markdownFileLinkTarget } from "../lib/fileLinks.js";
 import MarkdownContent from "../components/MarkdownContent.jsx";
 import ChatComposer, { MessageAttachments } from "../components/ChatComposer.jsx";
 const SettingsPopover = lazy(() => import("../components/SettingsPopover.jsx"));
 import { commandSlotSettings, defaultSettingsSnapshot, normalizeAppSettings } from "../lib/settings.js";
-import { VOICE_COMMAND_ID, requestVoiceDictation, setDictationAutoSend, setDictationMode, setVoiceBinding } from "../lib/voiceShortcut.js";
-import { BROWSER_CONTENT, EDITOR_CONTENT, initialMainContent, pluginAvailable, pluginEnabled, pluginHasPane, resolveMainContent, resolvePluginActivity, withPluginPreview } from "../lib/plugins.js";
+import { SCREEN_COMMAND_ID, screenFromCapture, setScreenContextEnabled, setScreenStatus } from "../lib/screenContext.js";
+import { ANYWHERE_COMMAND_ID, VOICE_COMMAND_ID, onVoicePhase, pickRemComposer, requestAnywhereDictation, requestVoiceDictation, setAnywhereStatus, setDictationAutoSend, setDictationMode, setVoiceBinding, stopAnywhereDictation, voiceShortcutLabel } from "../lib/voiceShortcut.js";
+import { BROWSER_CONTENT, EDITOR_CONTENT, WORKFLOW_RUNS_CONTENT, initialMainContent, pluginAvailable, pluginEnabled, pluginHasPane, resolveMainContent, resolvePluginActivity, withPluginPreview } from "../lib/plugins.js";
 import RaticodeMark from "../components/RaticodeMark.jsx";
 import RatFaceIcon from "../components/RatFaceIcon.jsx";
 import { createPortal } from "react-dom";
 import { createRemHost, RemSlot } from "../components/RemSlot.jsx";
 import UnifiedBottomPanel from "../components/UnifiedBottomPanel.jsx";
-import { useWorkflowRunRegistry } from "../lib/useWorkflowRunRegistry.js";
+import { listedRattishWorkflows, useWorkflowRunRegistry } from "../lib/useWorkflowRunRegistry.js";
 import { initialWorkflowParameters, normalizeWorkflowFilesystemAccess } from "../lib/workflowRunSetup.js";
 import { exactWorkflowRunStopPath, workflowListStatus, workflowRunProblems, workflowRunSummary } from "../lib/workflowRuns.js";
+import { workflowFolderLabel } from "../lib/workflowFolder.js";
+import { WORKFLOW_RUNS_EVENT, openWorkflowRuns, reviewRecord } from "../lib/allWorkflowRuns.js";
 import {
   ProviderModelEffortFields,
   useProviderCapabilities,
@@ -495,6 +502,19 @@ export default function App() {
     window.addEventListener("gofer:kanban-open", open);
     return () => window.removeEventListener("gofer:kanban-open", open);
   }, []);
+  // Every workflow's runs, opened from the workflows sidebar or Rem's away card. Each
+  // open carries its own filters, such as the time the user went away.
+  const workflowRunsOpen = mainContent === WORKFLOW_RUNS_CONTENT;
+  const [workflowRunsRequest, setWorkflowRunsRequest] = useState(null);
+  useEffect(() => {
+    const open = (event) => {
+      const { since, status, workflow } = event?.detail || {};
+      setWorkflowRunsRequest(since || status || workflow ? { ...(since ? { since } : {}), ...(status ? { status } : {}), ...(workflow ? { workflow } : {}) } : null);
+      setMainContent(WORKFLOW_RUNS_CONTENT);
+    };
+    window.addEventListener(WORKFLOW_RUNS_EVENT, open);
+    return () => window.removeEventListener(WORKFLOW_RUNS_EVENT, open);
+  }, []);
   // Rem's backend learns whether the board is shown: with it off, self-work uses no tickets.
   const kanbanBoardOn = pluginEnabled(settings.plugins, "kanban");
   useEffect(() => {
@@ -635,6 +655,8 @@ export default function App() {
   const [dirtyWorkflowsById, setDirtyWorkflowsById] = useState({});
   const [saveStatesByWorkflowId, setSaveStatesByWorkflowId] = useState({});
   const [topBarNotice, setTopBarNotice] = useState({ type: "", message: "" });
+  // Password inputs a Rattish run didn't save, asked for again before Resume or Run again.
+  const [savedInputsPrompt, setSavedInputsPrompt] = useState(null);
   const [updateNotice, setUpdateNotice] = useState({ type: "", message: "" });
   const [runPreview, setRunPreview] = useState(null);
   const [queueState, setQueueState] = useState({ runners: [], runs: [], error: "" });
@@ -710,6 +732,8 @@ export default function App() {
   // commands such as Find and Close tab.
   const browserWorkspaceRef = useRef(null);
   const browserContentOpenRef = useRef(false);
+  // The Browser plugin can live in a window of its own; it is in view there.
+  const [browserPoppedOut, setBrowserPoppedOut] = useState(false);
   const activeWorkspaceRef = useMemo(() => ({ get current() { return (browserContentOpenRef.current ? browserWorkspaceRef : rattishEditorRef).current; } }), []);
   const previewCodePathRef = useRef("");
   const codeNavigationSequenceRef = useRef(0);
@@ -747,7 +771,7 @@ export default function App() {
   const organizationOpen = mainContent === "organizations" && Boolean(selectedOrganization);
   const browserContentOpen = mainContent === BROWSER_CONTENT;
   browserContentOpenRef.current = browserContentOpen;
-  const editorContentOpen = !remHomeOpen && !secondBrainOpen && !swarmOpen && !organizationOpen && !kanbanOpen && !browserContentOpen;
+  const editorContentOpen = !remHomeOpen && !secondBrainOpen && !swarmOpen && !organizationOpen && !kanbanOpen && !browserContentOpen && !workflowRunsOpen;
   const codeWorkspaceWorkflow = workflows.find(item => samePath(item.sourcePath, activeCodePath)) ?? activeWorkflow ?? browsingWorkspace;
   // Rem's chat looks the same in the main area and in the side pane.
   const remHomeProps = {
@@ -999,6 +1023,83 @@ export default function App() {
     setDictationMode(settings.devices?.dictationMode);
     setDictationAutoSend(settings.devices?.dictationAutoSend);
   }, [settings]);
+
+  // Dictate to Rem from any app: the desktop app registers the system-wide shortcut while
+  // Settings > Devices has it on, and reports whether it could.
+  const anywhereEnabled = settings.devices?.dictateAnywhere === true;
+  const anywhereBinding = settingBinding(settings, ANYWHERE_COMMAND_ID);
+  // Show Rem your screen: the Screen button in Rem's box, and the "Ask Rem about your screen"
+  // shortcut while Dictate to Rem from any app is also on. Off by default.
+  const screenEnabled = settings.devices?.screenContext === true;
+  const screenBinding = settingBinding(settings, SCREEN_COMMAND_ID);
+  useEffect(() => {
+    const bridge = window.goferDesktop?.screenContext;
+    setScreenContextEnabled(screenEnabled && Boolean(bridge?.configure));
+    if (!bridge?.configure) {
+      setScreenStatus(screenEnabled ? { unavailable: true } : null);
+      return undefined;
+    }
+    let cancelled = false;
+    void Promise.resolve(bridge.configure({ enabled: screenEnabled, shortcut: anywhereEnabled, binding: screenBinding }))
+      .then((status) => { if (!cancelled) setScreenStatus(status); }, () => { if (!cancelled) setScreenStatus({ enabled: screenEnabled, error: "Raticode couldn't set up screenshots." }); });
+    return () => { cancelled = true; };
+  }, [screenEnabled, anywhereEnabled, screenBinding]);
+  useEffect(() => {
+    const bridge = window.goferDesktop?.globalDictation;
+    if (!bridge?.configure) {
+      setAnywhereStatus(anywhereEnabled ? { unavailable: true } : null);
+      return undefined;
+    }
+    let cancelled = false;
+    void Promise.resolve(bridge.configure({ enabled: anywhereEnabled, binding: anywhereBinding, label: voiceShortcutLabel(anywhereBinding) }))
+      .then((status) => { if (!cancelled) setAnywhereStatus(status); }, () => { if (!cancelled) setAnywhereStatus({ enabled: anywhereEnabled, error: "Raticode couldn't set up the shortcut." }); });
+    return () => { cancelled = true; };
+  }, [anywhereEnabled, anywhereBinding]);
+  // The shortcut was pressed in another app: dictate into Rem's chat without bringing the
+  // window forward. Rem's chat loads (unseen) if it hasn't been opened yet.
+  const remPluginOnForVoice = pluginEnabled(settings.plugins, "rem");
+  useEffect(() => {
+    const bridge = window.goferDesktop?.globalDictation;
+    if (!bridge?.onTrigger) return undefined;
+    const report = (state) => { void Promise.resolve(bridge.report?.(state)).catch(() => {}); };
+    const stopPhases = onVoicePhase(report);
+    const stopTrigger = bridge.onTrigger((message) => {
+      if (message?.action === "stop") {
+        stopAnywhereDictation();
+        return;
+      }
+      if (message?.action === "screen") {
+        // "Ask Rem about your screen": the screenshot goes in Rem's box, then dictation starts
+        // (or carries on). It always waits there to be checked before it is sent.
+        if (!remPluginOnForVoice) {
+          report({ phase: "error", global: true, message: "Turn on the Rem plugin in Settings > Plugins to show Rem your screen." });
+          return;
+        }
+        const screen = screenFromCapture(message.capture, { fromShortcut: true });
+        if (!screen) {
+          report({ phase: "error", global: true, message: "The screenshot is too large to send to Rem." });
+          return;
+        }
+        void import("../lib/remComposer.js").then(({ setRemScreen }) => {
+          setRemScreen(screen);
+          if (pickRemComposer()?.dictating()) return;
+          return requestAnywhereDictation({ reveal: () => setRemMounted(true) }).then((result) => {
+            if (!result.ok) report({ phase: "error", global: true, message: `${result.message} The screenshot is waiting in Rem's message box.` });
+          });
+        });
+        return;
+      }
+      if (message?.action !== "toggle") return;
+      if (!remPluginOnForVoice) {
+        report({ phase: "error", global: true, message: "Turn on the Rem plugin in Settings > Plugins to dictate to Rem." });
+        return;
+      }
+      void requestAnywhereDictation({ reveal: () => setRemMounted(true) }).then((result) => {
+        if (!result.ok) report({ phase: "error", global: true, message: result.message });
+      });
+    });
+    return () => { stopPhases(); stopTrigger?.(); };
+  }, [remPluginOnForVoice]);
 
   useEffect(() => {
     function runShortcutAction(action) {
@@ -2095,12 +2196,7 @@ export default function App() {
       if (pathKey(projectRoot) !== pathKey(activeProjectRootRef.current) || projectGeneration !== projectOpenRequestRef.current || requestId !== workflowLoadRequestRef.current) return;
       const payloadDataDir = payload.dataDir ?? "";
       setPromptAgentIds(payload.promptAgentIds ?? []);
-      const listedWorkflows = payload.workflows ?? [];
-      const nextWorkflows = listedWorkflows
-        .filter(
-          (workflow) =>
-            payload.authoringLanguage !== "rattish" || workflow.sourceFormat === "rattish",
-        )
+      const nextWorkflows = listedRattishWorkflows(payload)
         .filter((workflow) => !deletedWorkflowIdsRef.current.has(workflow.id))
         .map((workflow) => summarizeWorkflow(workflow, payloadDataDir));
       setWorkflows((current) => {
@@ -2322,9 +2418,24 @@ export default function App() {
     return unsubscribe;
   }, []);
 
+  // The main process checks on startup and every 10 minutes while this setting is on.
   useEffect(() => {
-    if (settings.general.checkForUpdates) checkForUpdates({ silent: true });
+    const enabled = Boolean(settings.general.checkForUpdates);
+    if (window.goferUpdates?.setAutomatic) {
+      window.goferUpdates.setAutomatic(enabled).then((nextState) => {
+        if (nextState) setUpdateState((current) => ({ ...current, ...nextState }));
+      }).catch(() => {});
+    } else if (enabled) {
+      checkForUpdates({ silent: true });
+    }
   }, [checkForUpdates, settings.general.checkForUpdates]);
+
+  const dismissUpdateReminder = useCallback(() => {
+    setUpdateState((current) => ({ ...current, reminder: null }));
+    window.goferUpdates?.dismissReminder?.().then((nextState) => {
+      if (nextState) setUpdateState((current) => ({ ...current, ...nextState }));
+    }).catch(() => {});
+  }, []);
 
   async function applyUpdate(update) {
     if (!window.goferUpdates) return;
@@ -2382,7 +2493,7 @@ export default function App() {
       const nextText = payload.log?.logText ?? "";
       const nextPath = payload.log?.logPath ?? null;
       const nextNodeOutputs = payload.log?.nodeOutputs ?? null;
-      const nextUsageSummary = payload.log?.usageSummary ?? null;
+      const nextUsageSummary = payload.log?.usageSummary ?? payload.log?.usage ?? null;
       const nextRunEvents = payload.log?.runEvents ?? [];
       const nextRunNodes = payload.log?.runNodes ?? {};
       setLogState((current) => {
@@ -2506,7 +2617,9 @@ export default function App() {
         nodeOutputsMaxBytes: silent
           ? current.nodeOutputsMaxBytes
           : (payload.log?.nodeOutputsMaxBytes ?? null),
-        usageSummary: silent ? current.usageSummary : (payload.log?.usageSummary ?? null),
+        usageSummary: silent
+          ? current.usageSummary
+          : (payload.log?.usageSummary ?? payload.log?.usage ?? null),
         runEvents: payload.log?.runEvents ?? (silent ? current.runEvents : []),
         runNodes: payload.log?.runNodes ?? (silent ? current.runNodes : {}),
         selectedRunId: runId,
@@ -2985,7 +3098,7 @@ export default function App() {
         nodeOutputs: payload.run?.nodeOutputs ?? null,
         nodeOutputsTruncated: Boolean(payload.run?.nodeOutputsTruncated),
         nodeOutputsMaxBytes: payload.run?.nodeOutputsMaxBytes ?? null,
-        usageSummary: payload.run?.usageSummary ?? null,
+        usageSummary: payload.run?.usageSummary ?? payload.run?.usage ?? null,
         runEvents: payload.run?.runEvents ?? [],
         runNodes: payload.run?.runNodes ?? {},
         runs: logState.runs,
@@ -3082,17 +3195,60 @@ export default function App() {
     }
   }
 
+  function askForSavedInputs(action, workflowId, names) {
+    if (!names?.length) return Promise.resolve({});
+    const specs = workflows.find((workflow) => workflow.id === workflowId)?.inputs ?? {};
+    return new Promise((resolve) => {
+      setSavedInputsPrompt({
+        action,
+        names,
+        resolve: (values) => {
+          setSavedInputsPrompt(null);
+          resolve(values ? savedInputValues(values, specs) : null);
+        },
+      });
+    });
+  }
+
+  async function rerunWorkflowRunLog(workflowId, runId) {
+    if (!workflowId || !runId) return;
+    const rerun = logState.runs?.find((run) => run.id === runId)?.rerun;
+    const inputs = await askForSavedInputs("Run again", workflowId, rerun?.needsInputs);
+    if (!inputs) return;
+    setRunState({ running: true, workflowId, error: "", result: null, resumingRunId: runId });
+    try {
+      const request = workflowRerunRequest(workflowId, runId, inputs);
+      const response = await fetch(request.url, request.options);
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || `Workflow API returned ${response.status}`);
+      }
+      setRunState({ running: false, workflowId, error: "", result: payload.run });
+      recordWorkflowRun(workflows.find((workflow) => workflow.id === workflowId) ?? { id: workflowId }, payload.run);
+      void runRegistry.refresh();
+      setTopBarNotice({ type: "success", message: "Started again with the same inputs" });
+      void loadRunLogs(workflowId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to run the workflow again";
+      setRunState({ running: false, workflowId, error: message, result: null });
+      loadRunLogs(workflowId, { silent: true });
+    }
+  }
+
   async function resumeWorkflowRunLog(workflowId, runId, options = {}) {
     if (!workflowId || !runId) return;
     // Rattish runs resume as a new background run; steps cut off mid-run start over.
     const resume = logState.runs?.find((run) => run.id === runId)?.resume;
     const rerun = resume?.rerunNodes ?? [];
     if (resume && rerun.length && !window.confirm(`Resume this run? These steps run again: ${rerun.join(", ")}.`)) return;
+    // Password inputs the run didn't save; its other inputs and trigger events are reused.
+    const inputs = resume ? await askForSavedInputs("Resume", workflowId, resume.needsInputs) : {};
+    if (!inputs) return;
 
     setRunState({ running: true, workflowId, error: "", result: null, resumingRunId: runId });
     setLogState((current) => ({ ...current, loading: true, error: "" }));
     try {
-      const request = workflowResumeRequest(workflowId, runId, resume ? { background: true } : options);
+      const request = workflowResumeRequest(workflowId, runId, resume ? { background: true, inputs } : options);
       const response = await fetch(request.url, request.options);
       const payload = await response.json();
       if (!response.ok) {
@@ -3115,7 +3271,7 @@ export default function App() {
         nodeOutputs: payload.run?.nodeOutputs ?? null,
         nodeOutputsTruncated: Boolean(payload.run?.nodeOutputsTruncated),
         nodeOutputsMaxBytes: payload.run?.nodeOutputsMaxBytes ?? null,
-        usageSummary: payload.run?.usageSummary ?? null,
+        usageSummary: payload.run?.usageSummary ?? payload.run?.usage ?? null,
         runEvents: payload.run?.runEvents ?? [],
         runNodes: payload.run?.runNodes ?? {},
         runs: logState.runs,
@@ -3155,7 +3311,7 @@ export default function App() {
         nodeOutputs: runPayload.nodeOutputs ?? null,
         nodeOutputsTruncated: Boolean(runPayload.nodeOutputsTruncated),
         nodeOutputsMaxBytes: runPayload.nodeOutputsMaxBytes ?? null,
-        usageSummary: runPayload.usageSummary ?? null,
+        usageSummary: runPayload.usageSummary ?? runPayload.usage ?? null,
         runEvents: runPayload.runEvents ?? [],
         runNodes: runPayload.runNodes ?? {},
         runs: logState.runs,
@@ -3220,6 +3376,7 @@ export default function App() {
         body: JSON.stringify({
           name,
           template: options.template || undefined,
+          starter: options.starter || undefined,
           projectRoot: options.projectRoot,
           projectGrantId: options.projectGrantId || undefined,
         }),
@@ -3608,7 +3765,12 @@ export default function App() {
 
   async function deleteWorkflow(workflow) {
     if (!workflow) return;
-    if (!window.confirm(`Delete workflow "${workflow.name}"?`)) return;
+    const folder = workflowFolderLabel(workflow);
+    // A workflow found outside .raticode shares its folder with project files.
+    const detail = folder
+      ? `\n\nThis deletes workflow.rattish and workflow.metadata.json in ${folder}. Other files in that folder stay.`
+      : "";
+    if (!window.confirm(`Delete workflow "${workflow.name}"?${detail}`)) return;
 
     try {
       setCreateState({ saving: false, error: "" });
@@ -3962,6 +4124,7 @@ export default function App() {
         onSelectRunLog={(runId) => { setPinnedRun({ workflowId: target.id, runId }); void loadRunLog(target.id, runId); }}
         onStopRunLog={(runId) => stopWorkflowRunLog(target.id, runId)}
         onResumeRunLog={(runId, options) => resumeWorkflowRunLog(target.id, runId, options)}
+        onRerunRunLog={(runId) => rerunWorkflowRunLog(target.id, runId)}
         onReplayRunLog={(runId, triggerId) => replayWorkflowTriggerLog(target.id, runId, triggerId)}
         onSettingChange={changeSetting} onImportWorkflow={importWorkflow}
         onExportWorkflow={() => exportWorkflow(target)} onRunWorkflow={() => runWorkflowNow(target)}
@@ -4125,6 +4288,11 @@ export default function App() {
         onToggleTheme={() => changeSetting("appearance.theme", theme === "dark" ? "light" : "dark")}
         onMenuAction={runGlobalMenuAction}
       />
+      <UpdateReminderBanner
+        updateState={updateState}
+        onUpdate={() => { dismissUpdateReminder(); applyUpdate(updateState); }}
+        onDismiss={dismissUpdateReminder}
+      />
       <div className="studio-panes flex h-full min-h-0 min-w-0 flex-1 overflow-hidden" data-project-side={settings.layout.projectPaneSide} data-assistant-side={settings.layout.assistantPaneSide}>
       {<WorkflowSidebar
         activity={sidebarActivity}
@@ -4221,6 +4389,7 @@ export default function App() {
         {organizationOpen ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading organization...</p>}><OrganizationHome key={selectedOrganization.id} rootPath={swarmProjectRoot} projectOptions={recentProjectRoots} organizationId={selectedOrganization.id} defaults={settings.assistant} memorySettings={settings.memory} onSelect={id => setSelectedOrganization({ id })} onClose={() => setSelectedOrganization(null)} /></Suspense> : null}
         {secondBrainOpen ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading Second Brain...</p>}><SecondBrainWorkspace assistant={settings.assistant} memorySettings={settings.memory} onClose={showEditorContent} /></Suspense> : null}
         {kanbanOpen ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading the board...</p>}><KanbanWorkspace /></Suspense> : null}
+        {workflowRunsOpen ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading workflow runs...</p>}><WorkflowRunsView request={workflowRunsRequest} onOpenRun={run => void reviewWorkflowRun(reviewRecord(run))} onClose={showEditorContent} /></Suspense> : null}
         {remHomeOpen ? <RemSlot host={remHost} /> : null}
         {swarmOpen ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading swarm...</p>}><SwarmWorkspace projectPaths={mergeRecentProjects(activeProjectRoot ? [activeProjectRoot] : [], recentProjectRoots).map(root => pathValue(lastWorktreeByProject, root) || root)} selectedAgentId={selectedSwarm.agentId} defaults={settings.assistant} key={`${swarmProjectRoot}:${selectedSwarm.id}`} rootPath={swarmProjectRoot} swarmId={selectedSwarm.id} onSelect={(id) => setSelectedSwarm({ id, projectRoot: swarmProjectRoot })} onClose={() => setSelectedSwarm(null)} /></Suspense> : null}
         <div className={`${editorContentOpen ? "flex" : "hidden"} min-h-0 flex-1 flex-col`}>
@@ -4297,13 +4466,15 @@ export default function App() {
             </Suspense>
         </div>
         {/* The Browser plugin. Its tabs stay mounted while another area is in
-            front, so pages keep playing and keep their place. */}
+            front, so pages keep playing and keep their place. It can also move
+            to a window of its own (BrowserWindowHost). */}
         <div className={`${browserContentOpen ? "flex" : "hidden"} min-h-0 flex-1 flex-col`}>
             <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading browser...</p>}>
+            <BrowserWindowHost onPoppedOutChange={setBrowserPoppedOut}>
             <CodeWorkspace
               ref={browserWorkspaceRef}
               variant="browser"
-              active={browserContentOpen}
+              active={browserContentOpen || browserPoppedOut}
               activePath={activeBrowserPath}
               openPaths={browserOpenPaths}
               browserTabs={browserTabs}
@@ -4325,10 +4496,17 @@ export default function App() {
               onOpenBrowser={(options) => openIntegratedBrowser(undefined, options)}
               onOpenPath={(path) => void openRecentCodeFile(path)}
             />
+            </BrowserWindowHost>
             </Suspense>
         </div>
         {pinnedRun ? <div className="flex items-center justify-between border-t border-line px-3 py-1 text-[11px] text-muted"><span className="truncate">Run logs · {pinnedRun.workflowName} · {pinnedRun.runId}</span><button type="button" onClick={() => setPinnedRun(null)}>Unpin logs</button></div> : null}
         <UnifiedBottomPanel
+          testsProps={{
+            workflowId: activeWorkflow?.sourceFormat === "rattish" ? activeWorkflow.id : "",
+            workflowName: activeWorkflow?.name ?? "",
+            refreshKey: rattishSessions[activeWorkflow?.id]?.document?.savedRevision ?? "",
+            dirty: Boolean(rattishSessions[activeWorkflow?.id]?.document?.dirty),
+          }}
           runsProps={{ records: visibleRunRecords, projectPath: activeProjectRoot, onReview: reviewWorkflowRun, onStop: runRegistry.stop, onRefresh: runRegistry.refresh, loading: runRegistry.loading, connectionError: runRegistry.error }}
           diagnostics={panelDiagnostics}
           onSettingChange={changeSetting}
@@ -4463,6 +4641,14 @@ export default function App() {
           onExecutionModeChange={(mode) => changeSetting("general.executionMode", mode)}
           queueState={queueState}
         /></Suspense>
+      ) : null}
+      {savedInputsPrompt ? (
+        <SavedInputsPrompt
+          action={savedInputsPrompt.action}
+          names={savedInputsPrompt.names}
+          onCancel={() => savedInputsPrompt.resolve(null)}
+          onSubmit={(values) => savedInputsPrompt.resolve(values)}
+        />
       ) : null}
       <CreateWorkflowDialog
         defaultProjectRoot={panelProjectRoot}
@@ -4925,10 +5111,42 @@ export function workflowRunRequest(
   };
 }
 
+// Text from the password prompt, typed by each input's schema: strings stay text,
+// anything else is read as JSON when it parses.
+export function savedInputValues(values, specs = {}) {
+  const typed = {};
+  for (const [name, value] of Object.entries(values)) {
+    const type = specs[name]?.type;
+    if (!type || type === "string" || type === "enum") {
+      typed[name] = value;
+      continue;
+    }
+    try {
+      typed[name] = JSON.parse(value);
+    } catch {
+      typed[name] = value;
+    }
+  }
+  return typed;
+}
+
+export function workflowRerunRequest(workflowId, runId, inputs = {}) {
+  return {
+    url: apiUrl(`/rattish/runs/${encodeURIComponent(runId)}/rerun`),
+    options: {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ workflowId, background: true, inputs }),
+    },
+  };
+}
+
 export function workflowResumeRequest(
   workflowId,
   runId,
-  { background, force = false, fromNode = null, onlyNode = null, skipCache = false, triggerContext = {} } = {},
+  { background, force = false, fromNode = null, onlyNode = null, skipCache = false, triggerContext = {}, inputs = {} } = {},
 ) {
   return {
     url: apiUrl(
@@ -4939,7 +5157,11 @@ export function workflowResumeRequest(
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(background ? { background } : { force, fromNode, onlyNode, skipCache, triggerContext }),
+      body: JSON.stringify(
+        background
+          ? { background, ...(Object.keys(inputs ?? {}).length ? { inputs } : {}) }
+          : { force, fromNode, onlyNode, skipCache, triggerContext },
+      ),
     },
   };
 }
@@ -5324,15 +5546,26 @@ export function WorkflowSidebar({
             onSelectProject={onSelectProject}
             onRemoveRecentProject={onRemoveRecentProject}
             workflowsHeader={
-              <button
-                className="flex h-9 w-full items-center justify-center gap-2 rounded-lg bg-brand px-3 text-xs font-semibold text-white transition hover:bg-indigo-700"
-                title="New Workflow"
-                type="button"
-                onClick={onCreate}
-              >
-                <Plus size={15} />
-                New Workflow
-              </button>
+              <div className="flex flex-col gap-1">
+                <button
+                  className="flex h-9 w-full items-center justify-center gap-2 rounded-lg bg-brand px-3 text-xs font-semibold text-white transition hover:bg-indigo-700"
+                  title="New Workflow"
+                  type="button"
+                  onClick={onCreate}
+                >
+                  <Plus size={15} />
+                  New Workflow
+                </button>
+                <button
+                  className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-xs font-medium text-ink transition hover:bg-slate-100 dark:hover:bg-zinc-800"
+                  title="Every workflow's runs, newest first"
+                  type="button"
+                  onClick={() => openWorkflowRuns()}
+                >
+                  <History aria-hidden="true" size={14} />
+                  All workflow runs
+                </button>
+              </div>
             }
             workflowsContent={workflowGroups.length ? (
           workflowGroups.map(({ id, name, items, root }) => {
@@ -6024,7 +6257,10 @@ export function GlobalToolbar({
               </button>
             ) : null}
             <button className={`${buttonClass} shrink-0`} disabled={Boolean(updateState?.checking || updateState?.downloading || updateState?.verifying)} title={updateState?.error ? `Update check failed: ${updateState.error}` : "Check for updates"} aria-label="Check for updates" type="button" onClick={onCheckForUpdates}>
-              <RefreshCw size={16} className={updateState?.checking ? "animate-spin" : ""} />
+              <span className="relative">
+                <RefreshCw size={16} className={updateState?.checking ? "animate-spin" : ""} />
+                {updateState?.error && !updateState?.checking ? <span aria-hidden="true" className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-amber-500" /> : null}
+              </span>
             </button>
           </div>
         ) : null}
@@ -8023,14 +8259,23 @@ export function ChatPane({
     await removeThread(threadId);
   }
 
+  // Deletes the thread and its conversation archive copy, unlike Delete, which keeps it.
+  async function deleteThreadPermanently(threadId) {
+    const thread = threads.find(item => item.id === threadId) || loadChatThread(threadId);
+    if (!window.confirm(permanentDeleteMessage(thread?.title))) return;
+    await removeThread(threadId, { purge: true });
+  }
+
   // Thread state is read through updaters so several deletions can run in sequence.
-  async function removeThread(threadId) {
+  async function removeThread(threadId, { purge = false } = {}) {
     deletedChatThreadIdsRef.current.add(threadId);
     await stopAssistant(threadId);
-    const archived = await archiveThreadFromStorage(threadId, () => repository.all(threadId), true);
+    const archived = purge ? await purgeThreadFromArchive(threadId) : await archiveThreadFromStorage(threadId, () => repository.all(threadId), true);
     if (!archived) {
       deletedChatThreadIdsRef.current.delete(threadId);
-      setChatStateByThread((current) => ({ ...current, [threadId]: { sending: false, error: "The archive could not be saved. Reconnect the archive folder, or stop archiving in Settings > Memory before deleting this thread." } }));
+      setChatStateByThread((current) => ({ ...current, [threadId]: { sending: false, error: purge
+        ? "The archive copy could not be removed, so the thread was kept. Reconnect the archive folder and try Delete permanently again."
+        : "The archive could not be saved. Reconnect the archive folder, or stop archiving in Settings > Memory before deleting this thread." } }));
       return false;
     }
     try { await repository.remove(threadId); } catch (error) {
@@ -8276,6 +8521,7 @@ export function ChatPane({
                 onPin={pinThread}
                 onRename={setRenamingThread}
                 onDelete={deleteThread}
+                onDeletePermanently={memorySettings?.archiveFolder ? deleteThreadPermanently : undefined}
                 onThreadsAction={applyThreadsAction}
                 onClearArchive={clearArchivedThreads}
                 archiveRetention={archiveRetention}
@@ -8323,6 +8569,7 @@ export function ChatPane({
                 onPin={pinThread}
                 onRename={setRenamingThread}
                 onDelete={deleteThread}
+                onDeletePermanently={memorySettings?.archiveFolder ? deleteThreadPermanently : undefined}
                 onThreadsAction={applyThreadsAction}
                 onClearArchive={clearArchivedThreads}
                 archiveRetention={archiveRetention}
@@ -9330,9 +9577,22 @@ function archiveThreadFromStorage(threadId, messages, deleted = false) {
   }, { deleted });
 }
 
-async function deletePhoneThread(id) {
+// Delete permanently removes the archive copy: snapshot, journal and the attachments
+// only this thread used. It goes through the same per-thread queue as saves.
+function purgeThreadFromArchive(threadId) {
+  const bridge = window.goferDesktop?.rem;
+  if (!bridge?.archive) return Promise.resolve(true);
+  if (!bridge.purge) return Promise.resolve(false);
+  return scheduleConversationArchive(threadId, () => bridge.purge([threadId]), { deleted: true });
+}
+
+export function permanentDeleteMessage(title) {
+  return `Delete "${title || "Untitled"}" permanently? This removes the thread from Rem and its conversation archive snapshot, journal and the attachments no other thread uses. ${ARCHIVE_GIT_LIMIT} This cannot be undone.`;
+}
+
+async function deletePhoneThread(id, { purge = false } = {}) {
   const repository = conversationRepository();
-  if (!await archiveThreadFromStorage(id, () => repository.all(id), true)) {
+  if (!await (purge ? purgeThreadFromArchive(id) : archiveThreadFromStorage(id, () => repository.all(id), true))) {
     throw new Error("Phone deletion is waiting for the desktop archive. Reconnect its folder or stop archiving in Settings > Memory.");
   }
   const response = await fetch(apiUrl(`/chat/threads/${encodeURIComponent(id)}`), { method: "DELETE" });
@@ -9577,11 +9837,37 @@ export function CreateWorkflowDialog({
   const [importFile, setImportFile] = useState(null);
   const [importError, setImportError] = useState("");
   const [dragActive, setDragActive] = useState(false);
+  const [starters, setStarters] = useState([]);
+  const [startersError, setStartersError] = useState("");
+  const [starterId, setStarterId] = useState("");
   const importInputRef = useRef(null);
+  const starter = starters.find((item) => item.id === starterId) ?? null;
+
+  useEffect(() => {
+    if (!open) return undefined;
+    let cancelled = false;
+    setStartersError("");
+    fetch(apiUrl("/rattish/starters"))
+      .then(async (response) => {
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || `Starter list returned ${response.status}`);
+        if (!cancelled) setStarters(Array.isArray(payload.starters) ? payload.starters : []);
+      })
+      .catch((loadError) => {
+        if (!cancelled) {
+          setStarters([]);
+          setStartersError(loadError instanceof Error ? loadError.message : "Couldn't load the starters.");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   useEffect(() => {
     if (open) {
       setName("");
+      setStarterId("");
       setMode("create");
       setProjectRoot(defaultProjectRoot);
       setProjectError("");
@@ -9612,6 +9898,7 @@ export function CreateWorkflowDialog({
     onCreate(name, {
       projectRoot: selectedProject,
       projectGrantId: window.goferDesktop?.workspace?.pathGrantForApi?.(selectedProject) ?? "",
+      ...(starter ? { starter: starter.id } : {}),
     });
   }
 
@@ -9662,7 +9949,7 @@ export function CreateWorkflowDialog({
         <div className="flex items-center justify-between border-b border-line px-5 py-4">
           <div>
             <h2 className="text-base font-semibold">New workflow</h2>
-            <p className="text-xs text-muted">Create one from scratch or import a bundle</p>
+            <p className="text-xs text-muted">Start blank or from a starter, or import a bundle</p>
           </div>
           <button
             className="grid h-8 w-8 place-items-center rounded-lg text-muted transition hover:bg-slate-100 hover:text-ink"
@@ -9708,17 +9995,51 @@ export function CreateWorkflowDialog({
             </button>
           </div>
           {mode === "create" ? (
-            <label className="block">
-              <span className="text-xs font-medium text-muted">Name</span>
-              <input
-                autoFocus
-                className="mt-1 h-10 w-full rounded-lg border border-line px-3 text-sm outline-none transition focus:border-indigo-500"
-                disabled={saving}
-                placeholder="Daily Analysis"
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-              />
-            </label>
+            <>
+              <label className="block">
+                <span className="text-xs font-medium text-muted">Start from</span>
+                <select
+                  aria-describedby="workflow-starter-hint"
+                  className="mt-1 h-10 w-full rounded-lg border border-line bg-white px-3 text-sm outline-none transition focus:border-indigo-500"
+                  disabled={saving}
+                  value={starterId}
+                  onChange={(event) => setStarterId(event.target.value)}
+                >
+                  <option value="">Blank workflow</option>
+                  {starters.map((item) => (
+                    <option key={item.id} value={item.id}>{item.name}</option>
+                  ))}
+                </select>
+                <span className="mt-1 block text-xs text-muted" id="workflow-starter-hint">
+                  {startersError
+                    ? `Starters aren't available: ${startersError}`
+                    : starter
+                      ? `${starter.summary}${starter.hasTests ? " Comes with a test set." : ""}`
+                      : "An empty workflow. Or pick a starter with inputs, a test set and a guide."}
+                </span>
+                {starter?.docsUrl ? (
+                  <a
+                    className="mt-1 inline-block text-xs font-medium text-indigo-700 underline-offset-2 hover:underline"
+                    href={starter.docsUrl}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    Read the {starter.name} guide
+                  </a>
+                ) : null}
+              </label>
+              <label className="block">
+                <span className="text-xs font-medium text-muted">Name</span>
+                <input
+                  autoFocus
+                  className="mt-1 h-10 w-full rounded-lg border border-line px-3 text-sm outline-none transition focus:border-indigo-500"
+                  disabled={saving}
+                  placeholder={starter ? starter.name : "Daily Analysis"}
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                />
+              </label>
+            </>
           ) : (
             <div>
               <span className="text-xs font-medium text-muted">Workflow bundle</span>
@@ -9835,7 +10156,7 @@ export function CreateWorkflowDialog({
           </button>
           <button
             className="inline-flex h-9 items-center gap-2 rounded-lg bg-brand px-3 text-sm font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
-            disabled={saving || !projectRoot.trim() || (mode === "create" ? !name.trim() : !importFile)}
+            disabled={saving || !projectRoot.trim() || (mode === "create" ? !name.trim() && !starter : !importFile)}
             type="submit"
           >
             {saving ? (

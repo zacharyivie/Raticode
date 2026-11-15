@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Code2, Copy, Loader2, MoreVertical, PencilLine, Play, Square, Trash2 } from "lucide-react";
 import { formatRunAge } from "../lib/workflowRuns.js";
+import { workflowFolderLabel } from "../lib/workflowFolder.js";
 
 const WORKFLOW_MENU_SIZE = { width: 200, height: 214 };
 
@@ -54,6 +55,7 @@ export default function WorkflowListItem({
   const [draftName, setDraftName] = useState(workflow.name);
   const subtitle = workflowListSubtitle(listStatus);
   const invalid = listStatus.key === "invalid";
+  const folder = workflowFolderLabel(workflow);
 
   useEffect(() => {
     if (!menu) return undefined;
@@ -201,6 +203,15 @@ export default function WorkflowListItem({
           </div>
           <WorkflowStatusPill listStatus={listStatus} />
         </div>
+        {folder ? (
+          <p
+            className="mt-0.5 truncate font-mono text-[10px] leading-4 text-muted"
+            data-workflow-folder=""
+            title={workflow.sourcePath || folder}
+          >
+            {folder}
+          </p>
+        ) : null}
         {subtitle ? (
           <p
             className={`mt-0.5 truncate text-[10px] leading-4 ${invalid ? "text-red-700 dark:text-red-300" : "text-muted"}`}

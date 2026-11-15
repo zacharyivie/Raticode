@@ -1,0 +1,95 @@
+{
+ "limits": {
+  "max_threads_max": 16,
+  "max_threads_min": 1,
+  "rate_limit_percent_max": 100,
+  "token_limit_max": 1000000000000
+ },
+ "report": {
+  "duplicates_merged": [],
+  "notes": [
+   {
+    "at": "2026-11-13T17:16:05.274245+00:00",
+    "text": "You turned on auto-approval: new ideas from self-work research go to Backlog approved until self-work ends. Ideas already waiting still need your approval."
+   },
+   {
+    "at": "2026-11-13T17:16:05.281361+00:00",
+    "text": "Started after 15 quiet minutes: 0 to-dos, 0 backlog jobs, 2 research runs."
+   },
+   {
+    "at": "2026-11-13T17:16:05.511049+00:00",
+    "text": "I finished \u201cResearch reliability problems in project\u201d but couldn't read its proposals."
+   }
+  ],
+  "since": "2026-11-13T17:16:05.274245+00:00",
+  "summary": "Auto-approved 1 ticket, researched 1 project.",
+  "tickets_added": [
+   {
+    "at": "2026-11-13T17:16:05.528630+00:00",
+    "auto_approved": true,
+    "organization_id": "",
+    "organization_name": "",
+    "proposed": false,
+    "scope": "rem",
+    "ticket_id": "ae24b9e0-c052-46c9-ac93-ba3005ff578d",
+    "title": "Voice shortcuts"
+   }
+  ],
+  "unseen": true,
+  "updated_at": "2026-11-13T17:16:05.528659+00:00",
+  "work_done": [
+   {
+    "at": "2026-11-13T17:16:05.528659+00:00",
+    "state": "researched",
+    "summary": "Added 1 ticket, 1 approved by self-work.",
+    "thread_id": "09a053be-173a-4c3d-bc3b-f01dc4ef91ee",
+    "ticket_id": "",
+    "title": "Research new features for project"
+   }
+  ]
+ },
+ "schedule": {
+  "active": null,
+  "last_period": null,
+  "timezone": "America/New_York",
+  "upcoming": []
+ },
+ "settings": {
+  "auto_approve_proposals": true,
+  "auto_pull_backlog": false,
+  "daily_token_limit": 0,
+  "enabled": true,
+  "idle_minutes": 15,
+  "max_threads": 2,
+  "rate_limit_percent": 0,
+  "revision": 1,
+  "saved_enabled": true,
+  "session_token_limit": 0
+ },
+ "state": {
+  "active_threads": 1,
+  "activity": [
+   {
+    "kind": "research",
+    "paused": "",
+    "project": "project",
+    "thread_id": "b8c1ebfc-ea77-4df2-a288-03a86d541f4d",
+    "title": "Research speed and upkeep in project"
+   }
+  ],
+  "assigned_projects": 1,
+  "auto_approved_session": 1,
+  "board_enabled": true,
+  "detail": "1 thread working.",
+  "last_prompt_at": "",
+  "limit_reason": "",
+  "mode": "working",
+  "outside_projects": 0,
+  "paused_for_you": 0,
+  "paused_threads": 0,
+  "proposals_waiting": 0,
+  "starts_at": "",
+  "thread_limit": 2,
+  "todo_remaining": 0
+ }
+}

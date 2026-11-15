@@ -9,7 +9,7 @@ export const docsSidebar: DefaultTheme.SidebarItem[] = [
   },
   {
     text: 'The studio', collapsed: false,
-    items: [page('Projects & workspaces', 'studio/projects'), page('Code & graph editors', 'studio/editors'), page('Source control', 'studio/source-control'), page('Terminal', 'studio/terminal'), page('Browser', 'studio/browser'), page('Runs & approvals', 'studio/runs'), page('Import & export', 'studio/sharing')],
+    items: [page('Projects & workspaces', 'studio/projects'), page('Code & graph editors', 'studio/editors'), page('Source control', 'studio/source-control'), page('Worktree setup', 'studio/worktree-setup'), page('Terminal', 'studio/terminal'), page('Browser', 'studio/browser'), page('Runs & approvals', 'studio/runs'), page('Import & export', 'studio/sharing')],
   },
   {
     text: 'Working with Rem', collapsed: false,
@@ -17,7 +17,11 @@ export const docsSidebar: DefaultTheme.SidebarItem[] = [
   },
   {
     text: 'Building workflows', collapsed: false,
-    items: [page('Rattish language', 'workflows/rattish'), page('Routes, branches & joins', 'workflows/routes'), page('Inputs, outputs & bindings', 'workflows/inputs'), page('Loops & fan-out', 'workflows/loops'), page('Validation & preflight', 'workflows/validation'), page('Triggers', 'workflows/triggers'), page('Schedules', 'workflows/schedules'), page('File watchers', 'workflows/watchers'), page('Runner queue', 'workflows/runner-queue')],
+    items: [page('Rattish language', 'workflows/rattish'), page('Routes, branches & joins', 'workflows/routes'), page('Inputs, outputs & bindings', 'workflows/inputs'), page('Loops & fan-out', 'workflows/loops'), page('Validation & preflight', 'workflows/validation'), page('Test sets', 'workflows/tests'), page('Jev classifier', 'workflows/jev'), page('Triggers', 'workflows/triggers'), page('Schedules', 'workflows/schedules'), page('File watchers', 'workflows/watchers'), page('Runner queue', 'workflows/runner-queue')],
+  },
+  {
+    text: 'Starter workflows', collapsed: true,
+    items: [page('Overview', 'starters/'), page('Summarize new files', 'starters/summarize-new-files'), page('Daily report', 'starters/daily-report'), page('Webhook approval', 'starters/webhook-approval'), page('Test and fix', 'starters/test-and-fix'), page('Notify on condition', 'starters/notify-on-condition'), page('Jev demo', 'starters/jev-demo')],
   },
   {
     text: 'Node reference', collapsed: true,
@@ -26,6 +30,7 @@ export const docsSidebar: DefaultTheme.SidebarItem[] = [
       ['Agents', ['agent', 'common-llm-task']],
       ['Files & resources', ['read-file', 'write-file', 'copy-file', 'move-file', 'delete-file', 'file', 'folder', 'open-resource', 'prompt-file']],
       ['Control & interaction', ['loop', 'break', 'workflow', 'approval-gate', 'notification', 'rem-prompt', 'rem-task', 'http-request']],
+      ['Classification', ['jev']],
       ['Local retrieval', ['local-vectorize', 'local-search']],
     ].map(([text, names]) => ({ text: text as string, collapsed: true, items: (names as string[]).map(name => page(name, `nodes/${name}`)) }))],
   },

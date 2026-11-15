@@ -32,6 +32,15 @@ from tests.conftest import FakeSubscription
 
 runner = CliRunner()
 
+
+def _unfolded(output: str) -> str:
+    """Join the lines Rich folds at the console width, so long temporary paths still match.
+
+    Parallel pytest workers add a ``popen-gwN`` folder to every temporary path.
+    """
+    return "".join(output.splitlines())
+
+
 _SIMPLE_TOML = """
 [workflow]
 id = "simple"
@@ -2048,7 +2057,7 @@ def test_workflow_plan_prints_fan_out_samples(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     assert "samples=" in result.output
-    assert "alpha.txt" in result.output
+    assert "alpha.txt" in _unfolded(result.output)
 
 
 def test_workflow_plan_prints_partial_fan_out_counts_as_lower_bounds(
@@ -2139,7 +2148,7 @@ working_dir = "work"
 
     assert result.exit_code == 0, result.output
     assert "Working dir" in result.output
-    assert str(workdir) in result.output
+    assert str(workdir) in _unfolded(result.output)
 
 
 def test_workflow_plan_prints_preview_metadata(tmp_path: Path) -> None:

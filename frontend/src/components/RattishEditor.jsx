@@ -2,6 +2,7 @@ import { installRemActions } from "../lib/editorRem.js";
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { AlertTriangle, Check, FileCode2, Loader2, RefreshCw, Save } from "lucide-react";
 import { apiUrl } from "../lib/api.js";
+import { workflowFolderPath } from "../lib/workflowFolder.js";
 import { diagnosticToMarker, diagnosticsToMarkers } from "../lib/rattishRanges.js";
 
 const ANALYSIS_DELAY_MS = 300;
@@ -376,8 +377,10 @@ const RattishEditor = forwardRef(function RattishEditor({
       <div className="flex h-7 shrink-0 items-center gap-1 border-b border-line bg-white px-3 text-[11px] text-muted">
         <span className="truncate">{workflow.projectName || workflow.projectRoot}</span>
         <span aria-hidden="true">/</span>
-        <span className="truncate">.raticode/{workflow.id}</span>
-        <span aria-hidden="true">/</span>
+        {workflowFolderPath(workflow) ? <>
+          <span className="truncate">{workflowFolderPath(workflow)}</span>
+          <span aria-hidden="true">/</span>
+        </> : null}
         <strong className="font-semibold text-ink">workflow.rattish</strong>
       </div></> : null}
       <div className="relative min-h-0 flex-1">

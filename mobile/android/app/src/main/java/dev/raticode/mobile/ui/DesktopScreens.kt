@@ -567,7 +567,9 @@ internal fun ColumnScope.LegacyOrganizationView(client: LiveClient, id: String) 
     Box(Modifier.weight(1f)) {
         DesktopGate(client, key, "Loading this organization…") {
             if (org != null) {
-                val needsYou = { t: OrganizationTask -> t.needsApproval || t.needsReview || t.attention || t.status == "blocked" }
+                // The desktop's attention flag leaves out blocked work that waits by itself or for Rem's look in Auto mode;
+                // older desktops flag every blocked ticket.
+                val needsYou = { t: OrganizationTask -> t.needsApproval || t.needsReview || t.attention }
                 val shown = org.tasks.filter { t -> when (filter) {
                     "attention" -> needsYou(t)
                     "open" -> t.status !in setOf("done", "cancelled")

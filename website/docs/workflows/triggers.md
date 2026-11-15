@@ -43,6 +43,7 @@ Raticode refuses a trigger the workflow couldn't run, for example when a require
 - The expression has five fields: minute, hour, day of month, month, weekday.
 - Weekdays follow crontab, so `0` and `7` are both Sunday.
 - Set a day of the month or a weekday, not both.
+- A schedule no date can match, such as `0 9 31 2 *` (February 31), is refused.
 - The schedule follows the time zone you choose, including daylight saving changes.
 
 ### File changes
@@ -66,6 +67,8 @@ Bind events with the `trigger.events` reference. A `loop` with a `trigger-events
 
 The loop also provides `index` and `event_json`, plus `file_content` when the loop sets `include-content`.
 
+Each run saves its trigger events in its run folder, readable only by your user account (from 0.5.5). That lets you [resume a triggered run or run it again](../studio/runs.md#resume-and-run-again) with the same changed files or webhook body, on the computer, on the phone or with `Raticode rattish runs rerun RUN_ID`. The saved events are deleted with the run.
+
 ### Webhooks
 
 A webhook trigger gets a URL on `127.0.0.1` and a token. Raticode shows the token once and stores only its hash. If you lose it, replace it with **New token** or `rotate-token`.
@@ -77,6 +80,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -d '{"ref":"main"}' http://127.0.
 - The call returns `202` with `started`, `queued` or `skipped`.
 - Requests from a web page are refused.
 - A `loop` with a `trigger-events` source receives the JSON body as `payload`. Treat it as untrusted input.
+- The body must be strict JSON in UTF-8, or empty (the payload is then `null`). A body the run record couldn't store gets `400` with the reason and starts nothing: `NaN` or `Infinity`, whole numbers beyond 9,007,199,254,740,991 (send those as strings), text with a lone surrogate escape, or nesting thousands of levels deep.
 - On a computer with other user accounts, keep the token off the command line, where other accounts can read it. `curl -H @header-file` reads the header from a private file.
 - The listener opens only while an enabled webhook trigger exists. If port 8767 is taken, the Triggers section says so, and `Raticode rattish triggers webhook-port PORT` changes it.
 
@@ -87,7 +91,7 @@ Each trigger has an overlap policy, set in the Triggers section or with `--overl
 | Policy | CLI value | What happens |
 | --- | --- | --- |
 | Skip this run | `skip` | The start is dropped and recorded as skipped. This is the default. |
-| Run once after it finishes | `queue` | One run waits. Later starts fold into it. |
+| Run once after it finishes | `queue` | One run waits. Later starts fold into it: a file trigger's waiting run gets every file that changed while it waited (up to 256), and a webhook's gets the latest call's body. |
 | Run at the same time | `parallel` | Another run starts, up to 16 triggered runs at once. |
 
 ## Missed and failed runs
@@ -96,7 +100,37 @@ The Triggers section and `Raticode rattish triggers history` list every occurren
 
 - **Cron.** A scheduled time more than a minute old when the scheduler reaches it counts as missed, whether the computer was asleep or nothing was running. By default Raticode only records it. Choose **Show as missed and run once** (`--missed run_once`) to also run once to catch up.
 - **File and webhook.** These can't be replayed. When the scheduler comes back after more than two minutes away, they record a missed entry with the length of the gap.
-- **Interrupted runs.** A queued run that never started and a run cut off by a crash are recorded too.
+- **Paused.** Times that fall while [all triggers are paused](#pause-all-triggers) are recorded as skipped, not missed, and never caught up.
+- **Interrupted runs.** A queued run that never started and a run cut off by a crash are recorded too. A run whose process ended without saving its result, for example when the computer restarted, shows as disconnected rather than still running, so it doesn't make `skip` or `queue` triggers wait. On Linux and Windows this holds even when another program has since been given the old process ID. On macOS Raticode checks the process ID alone, so in the rare case another program has taken it, the run keeps showing as running until you stop it or that program ends.
+
+## Pause all triggers
+
+::: info New in 0.5.5
+Pausing every trigger at once, on the computer, in the CLI and on the phone (Raticode Mobile 0.35.0), is new in Raticode 0.5.5.
+:::
+
+One switch pauses every trigger on this computer, for example before travel or while you change several workflows. Turn on **Pause all triggers** at the top of the [Workflow runs](../studio/runs.md#pause-all-triggers) view, or run:
+
+```bash
+Raticode rattish triggers pause --all
+Raticode rattish triggers resume --all
+```
+
+The paired phone has the same switch under **More › Workflows**; see [Workflows on the phone](../mobile/workspace.md#triggers).
+
+- Pausing doesn't change any trigger's own on/off setting. Resuming brings back exactly the triggers that were on, and the ones that were off stay off. You can still turn single triggers on or off while paused; they take effect when you resume.
+- While paused, nothing starts on its own. Cron times are recorded as **skipped** and are never caught up, even with **Show as missed and run once**. File changes aren't watched. Webhook calls get `409` and are recorded as skipped. A queued run that was waiting is dropped and recorded as skipped.
+- The pause is saved, so it holds across restarts and for the background scheduler. A cron time that fell inside a pause still counts as skipped if nothing was running at the time.
+- The Triggers section of each workflow shows **All triggers are paused**, and `Raticode rattish triggers list` and `status` say so too.
+- Without `--all`, `pause` and `resume` change nothing and point to `disable ID` and `enable ID` for a single trigger.
+
+## Stop a triggered run
+
+Stop a triggered run the same way as any other (from 0.5.5): **Stop** in the app's Runs, **Stop** on the phone, or `Raticode rattish stop WORKFLOW --run RUN_ID`. This works whichever process started the run, including the background scheduler from `rattish triggers start` or **Start at login**, on Linux, macOS and Windows.
+
+- The request goes to the process running the workflow, which ends it within about a second as **Stopped**, the same as a run stopped in the app. A node in the middle of a call is cancelled, so its work may be partly done.
+- Until then, Runs shows **Stop requested**, and so does the phone.
+- `rattish stop` works with no backend running. Without `--run` it stops every run of that workflow on this computer.
 
 ## Start at login
 
@@ -108,9 +142,8 @@ The **Start at login** switch, or `Raticode rattish triggers login on`, adds a p
 | macOS | `~/Library/LaunchAgents/com.raticode.triggers.*.plist` |
 | Windows | A script in your Startup folder |
 
-- The entry keeps the `PATH` of the process that switched it on, so providers are found at login. Other environment variables aren't copied, so a workflow that needs an API key from your shell profile should read it another way.
+- The entry keeps the `PATH` of the process that switched it on, so providers are found at login. Other environment variables aren't copied, so an API key exported in your shell profile isn't there. Save it as a [workflow secret](./inputs.md#secrets) instead (from 0.5.5): `secret["NAME"]` reads the system keychain, which most desktops unlock when you log in. If the keychain is still locked when a trigger fires, preflight stops that run and says so.
 - Only one process runs a data directory's triggers at a time. If you open the desktop app while the background scheduler holds them, the app waits on standby and takes over if the scheduler exits.
-- The app's Stop button can't reach a run the background scheduler started.
 
 ## Commands
 
@@ -119,6 +152,7 @@ The **Start at login** switch, or `Raticode rattish triggers login on`, adds a p
 | `Raticode rattish triggers list [PATH]` | Show triggers, next runs, and scheduler state |
 | `Raticode rattish triggers update ID ...` | Change a trigger |
 | `Raticode rattish triggers enable ID` / `disable ID` | Turn a trigger on or off |
+| `Raticode rattish triggers pause --all` / `resume --all` | Pause or resume every trigger, keeping each one's own setting |
 | `Raticode rattish triggers remove ID` | Delete a trigger and its history |
 | `Raticode rattish triggers rotate-token ID` | Replace a webhook token |
 | `Raticode rattish triggers history [ID]` | Show recent runs |

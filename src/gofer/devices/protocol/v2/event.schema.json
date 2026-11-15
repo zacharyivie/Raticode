@@ -2369,6 +2369,7 @@
                   "archive",
                   "restore",
                   "delete",
+                  "delete_permanently",
                   "read",
                   "unread"
                 ]
@@ -2662,7 +2663,8 @@
                   "source_control.read",
                   "usage.overview",
                   "workflows.list",
-                  "workflows.read"
+                  "workflows.read",
+                  "workflows.runs"
                 ]
               },
               "params": {
@@ -2683,7 +2685,58 @@
             "type": "string",
             "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
           }
-        }
+        },
+        "allOf": [
+          {
+            "$comment": "rem.notices names the alert switches that are on in include, and the desktop's opaque position in mark. workflow is the notices notification nodes with channel: phone stored for the phone; phones send it only to desktops whose overview has rem_notices_workflow. The answer (fixture desktop.result.rem-notices-workflow) gives each workflow notice workflow_id, workflow_name, run_id and more_from_run, which is N on a run's one 'And N more from this run' notice past the desktop's per-run cap; a read with include also returns dropped, the workflow messages removed from the desktop's store before this phone read them.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "rem.notices"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "include": {
+                          "type": "array",
+                          "items": {
+                            "enum": [
+                              "needs_you",
+                              "finished",
+                              "proposals",
+                              "workflow"
+                            ]
+                          },
+                          "minItems": 1,
+                          "maxItems": 4,
+                          "uniqueItems": true
+                        },
+                        "mark": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
       }
     },
     {
@@ -2738,9 +2791,12 @@
                   "selfwork.settings",
                   "settings.update",
                   "swarms.start",
+                  "workflows.rerun",
                   "workflows.resume",
                   "workflows.run",
-                  "workflows.stop"
+                  "workflows.stop",
+                  "workflows.trigger",
+                  "workflows.triggers.pause"
                 ]
               },
               "params": {
@@ -2761,7 +2817,193 @@
             "type": "string",
             "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
           }
-        }
+        },
+        "allOf": [
+          {
+            "$comment": "workflows.run names the workflow, the saved revision the phone was shown, and typed run inputs from the phone's Run form. The desktop checks the inputs against the workflow's input schema.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "workflows.run"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "workflow_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "expected_revision": {
+                          "type": "string",
+                          "maxLength": 200
+                        },
+                        "inputs": {
+                          "type": "object",
+                          "maxProperties": 64
+                        }
+                      },
+                      "required": [
+                        "workflow_id"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "workflows.rerun runs a workflow again with one run's inputs and trigger events as the desktop saved them. The phone names the run and sends no values.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "workflows.rerun"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "workflow_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "run_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        }
+                      },
+                      "required": [
+                        "workflow_id",
+                        "run_id"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "workflows.trigger turns one of a workflow's triggers on or off. Turning one on starts unattended work, so the phone asks first and sends confirmed; the desktop refuses it without.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "workflows.trigger"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "workflow_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "trigger_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64
+                        },
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "confirmed": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "workflow_id",
+                        "trigger_id",
+                        "enabled"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$comment": "workflows.triggers.pause pauses or resumes every trigger on the desktop at once. Each trigger keeps its own on/off setting. Resuming starts unattended work again, so it carries confirmed.",
+            "if": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "op": {
+                      "const": "workflows.triggers.pause"
+                    }
+                  },
+                  "required": [
+                    "op"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "properties": {
+                    "params": {
+                      "type": "object",
+                      "properties": {
+                        "paused": {
+                          "type": "boolean"
+                        },
+                        "confirmed": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "paused"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
       }
     },
     {
@@ -2792,14 +3034,14 @@
                   "kanban.timeline",
                   "media.image",
                   "media.preview",
-                  "organizations.control",
-                  "organizations.backlog_pull",
-                  "organizations.requests",
                   "organizations.auto_mode",
+                  "organizations.backlog_pull",
+                  "organizations.control",
                   "organizations.knowledge",
                   "organizations.list",
                   "organizations.note",
                   "organizations.read",
+                  "organizations.requests",
                   "organizations.schedule",
                   "organizations.task",
                   "organizations.worker",
@@ -2846,9 +3088,13 @@
                   "usage.overview",
                   "workflows.list",
                   "workflows.read",
+                  "workflows.rerun",
                   "workflows.resume",
                   "workflows.run",
-                  "workflows.stop"
+                  "workflows.runs",
+                  "workflows.stop",
+                  "workflows.trigger",
+                  "workflows.triggers.pause"
                 ]
               },
               "ok": {

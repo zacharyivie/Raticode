@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
-import { EMPTY_FILTERS, describeQuery, matchesFilters, parseDateBound, parseQuery, queryText, searchLibrary, webSourceUrl, wordDiff } from "./secondBrain.js";
+import { EMPTY_FILTERS, describeQuery, matchesFilters, parseDateBound, parseQuery, queryText, searchLibrary, webSourceUrl, wordDiff, demoteReplaced, newerReports, checkByDue, HEALTH_KINDS, deadLinkSummary, linkReason } from "./secondBrain.js";
 import * as store from "./secondBrainStore.js";
 
 const doc = (fields) => ({ id: fields.id, brainId: "b", title: "Untitled", path: `${fields.id}.md`, folder: "", type: "note", tags: [], origin: "authored", extraction: "ready", reading: { read: true }, dates: { added: "2026-01-01", modified: "2026-01-01", published: "" }, blocks: [], concepts: [], ...fields });
@@ -160,4 +160,34 @@ test("a note's Source link only ever points at a web address", () => {
   for (const value of ["javascript:alert(1)", " JavaScript:alert(1)", "data:text/html,<b>x</b>", "file:///etc/passwd", "", null, "not a url"]) {
     assert.equal(webSourceUrl(value), "", String(value));
   }
+});
+
+test("replaced reports rank after current ones and name the chain of newer reports", () => {
+  const block = text => [{ id: "b1", heading: "", text }];
+  const doc = (id, extra = {}) => ({ id, brainId: "b", title: id, path: `${id}.html`, type: "html", tags: [], extraction: "ready", dates: { modified: "2026-11-01" }, blocks: block("rollout plan evidence rollout plan"), ...extra });
+  const documents = [doc("draft", { replacedBy: { docId: "final" } }), doc("final", { replacedBy: { docId: "final2" } }), doc("final2", { blocks: block("rollout plan") })];
+  const { results } = searchLibrary(documents, { text: "rollout" });
+  assert.deepEqual(results.map(result => result.doc.id), ["final2", "draft", "final"]);
+  assert.deepEqual(demoteReplaced([{ doc: documents[0] }, { doc: documents[2] }]).map(result => result.doc.id), ["final2", "draft"]);
+  assert.deepEqual(newerReports(documents[0], documents).map(item => item.id), ["final", "final2"]);
+});
+
+test("check-by dates are due on the day and never for replaced reports", () => {
+  const today = new Date(2026, 10, 13);
+  assert.equal(checkByDue({ checkBy: "2026-11-13" }, today), true);
+  assert.equal(checkByDue({ checkBy: "2026-11-14" }, today), false);
+  assert.equal(checkByDue({ checkBy: "2026-11-01", replacedBy: { docId: "x" } }, today), false);
+  assert.equal(checkByDue({}, today), false);
+});
+
+test("dead links are grouped by why they are dead, in a fixed order", () => {
+  assert.deepEqual(HEALTH_KINDS[0], ["link", "Dead links"]);
+  const issues = [
+    { kind: "link", reason: "temporary" }, { kind: "link", reason: "absolute" }, { kind: "link" },
+    { kind: "link", reason: "temporary" }, { kind: "metadata" }, { kind: "link", reason: "outside" },
+  ];
+  assert.deepEqual(deadLinkSummary(issues).map(item => [item.id, item.count]), [["absolute", 1], ["missing", 1], ["temporary", 2], ["outside", 1]]);
+  assert.equal(linkReason({ kind: "link" })[0], "missing");
+  assert.equal(linkReason({ kind: "link", reason: "unknown" })[0], "missing");
+  assert.equal(linkReason({ kind: "link", reason: "absolute" })[1], "Absolute path inside the brain");
 });

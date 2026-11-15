@@ -17,9 +17,11 @@ def test_distribution_packages_rattish_assistant_resources() -> None:
     included = project["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
 
     assert included["rattish/spec"] == "gofer/rattish/assets/docs"
+    assert included["rattish/starters"] == "gofer/rattish/assets/starters"
     assert included["skills/raticode-workflow-builder"] == "gofer/rattish/assets/assistant-skill"
     frozen_build = (repository / "raticode.spec").read_text(encoding="utf-8")
     assert '("rattish/spec", "gofer/rattish/assets/docs")' in frozen_build
+    assert '("rattish/starters", "gofer/rattish/assets/starters")' in frozen_build
     assert (
         '("skills/raticode-workflow-builder", "gofer/rattish/assets/assistant-skill")'
         in frozen_build
@@ -38,6 +40,7 @@ def test_rattish_docs_reports_installed_authoring_resources() -> None:
     assert Path(payload["nodeContractsGuide"]).is_file()
     assert (Path(payload["contractsRoot"]) / "agent.json").is_file()
     assert (Path(payload["schemasRoot"]) / "ir.schema.json").is_file()
+    assert Path(payload["testSetSchema"]).is_file()
 
 
 def _read_file_source(name: str = "CLI slice") -> str:
@@ -84,7 +87,7 @@ def test_rattish_check_compiles_to_internal_cache_and_reuses_valid_artifact(
     assert len(artifacts) == 1
     cached = json.loads(artifacts[0].read_text(encoding="utf-8"))
     assert cached["source_path"] == str(source)
-    assert cached["ir"]["compiler"]["version"] == "0.2.1"
+    assert cached["ir"]["compiler"]["version"] == "0.2.2"
     assert cached["ir"]["workflow"]["name"] == "CLI slice"
 
 

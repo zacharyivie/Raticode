@@ -3,6 +3,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { ArrowLeft, ChevronRight, Crown, History, MessagesSquare, MoreHorizontal, Pause, Play, Plus, Send, Settings2, Square, Trash2, X } from "lucide-react";
 import { ProviderModelEffortFields, useProviderCapabilities } from "./ProviderModelEffortFields.jsx";
 import RemResources, { DEFAULT_REM_RESOURCES, remResourceError } from "./RemResources.jsx";
+import { WorktreeSetupNotice } from "./WorktreeSetup.jsx";
 import { startPolling } from "../lib/refresh.js";
 import { swarmOverview, milestoneProgress, objectiveProgressChange, newSwarmAgent, positiveDraft, swarmRequest, RUN_LIMIT_DEFAULTS, FULL_ACCESS_MODES, fullAccessAgents, runStateLabel, agentUsage, parseChecks, formatChecks, formatMinutes } from "../lib/swarms.js";
 
@@ -182,6 +183,7 @@ export function SwarmExecution({ run, agents, readOnly, busy, onAction }) {
         {workspace.branch ? <p className="break-all">Review branch: <code>{workspace.branch}</code> <CopyButton text={workspace.branch} /></p> : null}
         {workspace.integration ? <p role="status">Combined checks: {workspace.integration.passed ? "Passed" : "Incomplete"}{workspace.integration.error ? ` · ${workspace.integration.error}` : ""}</p> : null}
         {workspace.excludedFiles?.length ? <p className="text-muted">Left out of the starting snapshot because they look like secrets: {workspace.excludedFiles.join(", ")}</p> : null}
+        {workspace.setup ? <WorktreeSetupNotice setup={workspace.setup} /> : null}
       </div>)}
       {run.integration ? <p role="status">Combined checks: {run.integration.passed ? "Passed" : "Incomplete"}{run.integration.error ? ` · ${run.integration.error}` : ""}</p> : null}
       {run.cleanup?.archives?.length ? <details><summary className="cursor-pointer">Archived unfinished work ({run.cleanup.archives.length})</summary><ul className="mt-2 space-y-1">{run.cleanup.archives.map(path => <li key={path} className="break-all"><code>{path}</code></li>)}</ul></details> : null}
@@ -192,6 +194,8 @@ export function SwarmExecution({ run, agents, readOnly, busy, onAction }) {
         <p className="font-medium">{titles.get(attempt.milestoneId) || (attempt.milestoneId ? `Milestone ${attempt.milestoneId}` : "Board conversation")} · {agents.find(agent => agent.id === attempt.ownerId)?.name || attempt.ownerId} · {attempt.state}{attempt.repairCount ? ` · repair ${attempt.repairCount}` : ""}</p>
         <p className="break-all text-muted">Attempt {attempt.id}{attempt.sessionId ? ` · Session ${attempt.sessionId}` : ""}</p>
         {attempt.workspace?.path ? <p className="break-all text-muted">{attempt.workspace.path}{attempt.workspace.branch ? ` · ${attempt.workspace.branch}` : ""}</p> : null}
+        {typeof attempt.workspace?.setup === "object" ? <WorktreeSetupNotice setup={attempt.workspace.setup} /> : null}
+        {attempt.integration?.setup ? <WorktreeSetupNotice setup={attempt.integration.setup} /> : null}
         {attempt.result ? <p>Verification: {attempt.result.passed ? "Passed" : "Failed"}{attempt.result.error ? ` · ${attempt.result.error}` : ""}</p> : null}
         {attempt.result?.artifacts?.map(artifact => <p key={artifact.path} className="break-all text-muted">Artifact: {artifact.path} · SHA-256 {artifact.sha256}</p>)}
         {[...(attempt.result?.checks || []), ...(attempt.integration?.checks || [])].map(check => <p key={check.logPath} className="break-all text-muted">Exit {check.exitCode}: {check.command.join(" ")} · Log: {check.logPath}</p>)}

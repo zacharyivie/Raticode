@@ -19,8 +19,8 @@ class OrganizationModelTest {
     private val plan = org.plan!!
 
     private fun task(id: String, status: String, epic: String = "", assignee: String = "", running: Boolean = false, approval: Boolean = false,
-                     blockReason: String = "", review: Boolean = status == "in_review") =
-        OrganizationTask(id, id, "", status, "medium", "", 3, running, approval, review, false, blockReason, "", "", emptyList(),
+                     blockReason: String = "", review: Boolean = status == "in_review", attention: Boolean = false) =
+        OrganizationTask(id, id, "", status, "medium", "", 3, running, approval, review, attention, blockReason, "", "", emptyList(),
             TicketExtras("ORG-$id", assignee, epic, "app", "", approval, emptyList(), emptyList(), "", emptyMap(), emptyList(), ""))
 
     @Test fun readsEverySectionFromTheDesktop() {
@@ -143,10 +143,13 @@ class OrganizationModelTest {
     }
 
     @Test fun needsYouListsReviewsBeforeFlags() {
-        val busy = org.copy(tasks = listOf(task("f", "blocked", blockReason = "Stuck"), task("r", "in_review"), task("ok", "todo")))
+        val busy = org.copy(tasks = listOf(task("f", "blocked", blockReason = "Stuck", attention = true), task("r", "in_review"), task("ok", "todo"),
+            // Waits for its next automatic try (or for Rem's look in Auto mode): the desktop doesn't flag it.
+            task("w", "blocked", blockReason = "Waiting to try again after a temporary provider problem")))
         val needs = OrganizationModel.needsYou(busy, plan)
         assertTrue(needs[0] is OrganizationModel.NeedsYou.Review)
         assertTrue(needs[1] is OrganizationModel.NeedsYou.Flag)
+        assertEquals("f", (needs[1] as OrganizationModel.NeedsYou.Flag).task.id)
         assertEquals(2, needs.size)
         assertEquals("1 failed, 2 without verified evidence", OrganizationModel.reviewCaution(task("c", "in_review").let {
             it.copy(extras = it.extras!!.copy(evidence = mapOf("ok" to 1, "bad" to 1, "none" to 2))) }))
@@ -198,5 +201,40 @@ class OrganizationModelTest {
         assertEquals("Rem", OrganizationModel.actorName("Rem (self-work)", org))
         assertEquals("Lead", OrganizationModel.actorName("employee:lead", org))
         assertEquals("gone", OrganizationModel.actorName("employee:gone", org))
+    }
+    @Test fun theListSaysWhichOrganizationsNeedYouAndWhy() {
+        val json = JSONObject().put("organizations", JSONArray()
+            .put(JSONObject().put("organization_id", "a").put("name", "A").put("state", "paused").put("needs_you", 3)
+                .put("pause_reason", "Monthly run limit reached").put("archived", false))
+            .put(JSONObject().put("organization_id", "b").put("name", "B").put("state", "paused")))
+        @Suppress("UNCHECKED_CAST") val list = DesktopViews.parse("organizations.list", json) as List<OrganizationSummary>
+        assertEquals(3, list[0].needsYou); assertEquals("Monthly run limit reached", list[0].pauseReason); assertFalse(list[0].archived)
+        // An older desktop sends none of these.
+        assertEquals(0, list[1].needsYou); assertEquals("", list[1].pauseReason)
+    }
+
+    @Test fun aNewOrganizationShowsItsFirstStepsUntilItHasRun() {
+        val empty = Organization("n", "New", "", "paused", emptyList(), emptyList(), emptyList(), plan)
+        val steps = OrganizationModel.setupSteps(empty, plan.copy(usage = OrgUsage(0, 0)))
+        assertEquals(listOf("worker", "folder", "ticket", "start"), steps.map { it.id })
+        assertTrue(steps.none { it.done })
+        assertTrue(steps[0].desktopOnly && steps[1].desktopOnly && !steps[2].desktopOnly)
+        assertEquals(listOf("There are no workers yet.", "It owns no project folder.", "There are no open tickets."), OrganizationModel.startGaps(empty))
+        val held = empty.copy(employees = listOf(OrganizationEmployee("w", "W", "", "codex", "", paused = true)), projects = listOf("App"),
+            tasks = listOf(task("1", "todo")))
+        assertEquals("Release a worker's hold", OrganizationModel.setupSteps(held, plan.copy(usage = OrgUsage(0, 0)))[0].label)
+        assertEquals(listOf("Every worker is held."), OrganizationModel.startGaps(held))
+        val ran = held.copy(state = "running", employees = listOf(OrganizationEmployee("w", "W", "", "codex", "", paused = false)))
+        assertTrue(OrganizationModel.setupSteps(ran, plan).isEmpty())
+        assertTrue(OrganizationModel.startGaps(ran).isEmpty())
+    }
+
+    @Test
+    fun staleTextSaysWhyThePageIsOld() {
+        assertEquals(null, OrganizationModel.staleText(connected = true, loaded = true, error = null))
+        assertEquals(null, OrganizationModel.staleText(connected = false, loaded = false, error = "x"))
+        assertTrue(OrganizationModel.staleText(connected = false, loaded = true, error = null)!!.startsWith("Offline."))
+        assertEquals("Couldn't refresh: The desktop is busy. This is the last update from your computer.",
+            OrganizationModel.staleText(connected = true, loaded = true, error = "The desktop is busy."))
     }
 }

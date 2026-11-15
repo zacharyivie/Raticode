@@ -1,5 +1,5 @@
 import { memo, useDeferredValue, useEffect, useId, useMemo, useRef, useState } from "react";
-import { Search, X, ListFilter, RotateCcw, ChevronUp, ChevronDown } from "lucide-react";
+import { Search, X, ListFilter, RotateCcw, ChevronUp, ChevronDown, MessageSquarePlus, Trash2 } from "lucide-react";
 import { languageForPath } from "../lib/editorLanguage.js";
 import { filterCommitFiles, indexCommitMatches, searchCommitFiles } from "../lib/commitDiff.js";
 
@@ -7,13 +7,57 @@ const STATUS_LABELS = { A: "Added", D: "Deleted", M: "Modified", R: "Renamed", C
 const DEFAULT_EDITOR_SETTINGS = {};
 const EMPTY_FILES = [];
 const EMPTY_MATCHES = [];
+const EMPTY_COMMENTS = [];
+const SIDE_LABELS = { modified: "After", original: "Before" };
 
-const CommitFileDiff = memo(function CommitFileDiff({ file, theme, editorSettings, query, matches, registry }) {
+// One line comment being written: the line stays a string while it's edited.
+function CommentDraft({ file, draft, setDraft, onComment }) {
+  const lineId = useId();
+  const line = Number.parseInt(draft.line, 10);
+  const valid = Number.isInteger(line) && line > 0 && draft.body.trim();
+  const save = event => {
+    event.preventDefault();
+    if (!valid) return;
+    onComment({ path: file.path, side: draft.side, line, body: draft.body.trim() });
+    setDraft(null);
+  };
+  return <form className="commit-diff-comment-form" onSubmit={save} aria-label={`Comment on ${file.path}`}>
+    <div className="commit-diff-comment-where">
+      <label htmlFor={lineId}>Line</label>
+      <input id={lineId} aria-label="Line number" inputMode="numeric" value={draft.line} onChange={event => setDraft({ ...draft, line: event.target.value })} />
+      <label className="commit-diff-sr" htmlFor={`${lineId}-side`}>Side</label>
+      <select id={`${lineId}-side`} value={draft.side} onChange={event => setDraft({ ...draft, side: event.target.value })}>
+        <option value="modified">After the change</option>
+        {file.status !== "A" ? <option value="original">Before the change</option> : null}
+      </select>
+    </div>
+    <label className="commit-diff-sr" htmlFor={`${lineId}-body`}>Comment</label>
+    <textarea id={`${lineId}-body`} aria-label="Comment text" autoFocus rows={2} maxLength={4000} placeholder="What should the worker change here?" value={draft.body}
+      onChange={event => setDraft({ ...draft, body: event.target.value })}
+      onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); setDraft(null); } if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) save(event); }} />
+    <div className="commit-diff-comment-actions">
+      <button type="button" className="is-primary" disabled={!valid} onClick={save}>Add comment</button>
+      <button type="button" onClick={() => setDraft(null)}>Cancel</button>
+    </div>
+  </form>;
+}
+
+const CommitFileDiff = memo(function CommitFileDiff({ file, theme, editorSettings, query, matches, registry, comments = EMPTY_COMMENTS, onComment, onRemoveComment }) {
+  const [draft, setDraft] = useState(null);
+  const commentingRef = useRef(null);
+  commentingRef.current = onComment ? setDraft : null;
+  const markRef = useRef(null);
   const articleRef = useRef(null);
   const containerRef = useRef(null);
   const searchRef = useRef(null);
   const queryRef = useRef({ query, matches });
   const [error, setError] = useState("");
+
+  const commentsRef = useRef(comments);
+  useEffect(() => {
+    commentsRef.current = comments;
+    markRef.current?.(comments);
+  }, [comments]);
 
   useEffect(() => {
     queryRef.current = { query, matches };
@@ -133,6 +177,19 @@ const CommitFileDiff = memo(function CommitFileDiff({ file, theme, editorSetting
           resize();
         };
         searchRef.current(queryRef.current.query, queryRef.current.matches);
+        // Clicking a line number starts a comment on that line, on that side.
+        const gutter = new Set([monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS, monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN, monaco.editor.MouseTargetType.GUTTER_LINE_DECORATIONS]);
+        sides.forEach((side, index) => listeners.push(side.onMouseDown(event => {
+          const lineNumber = event.target.position?.lineNumber;
+          if (!commentingRef.current || !gutter.has(event.target.type) || !lineNumber) return;
+          commentingRef.current({ side: index === 0 ? "original" : "modified", line: String(lineNumber), body: "" });
+        })));
+        const marks = sides.map(side => side.createDecorationsCollection());
+        markRef.current = list => sides.forEach((side, index) => marks[index].set(list.filter(item => item.side === (index === 0 ? "original" : "modified")).map(item => ({
+          range: new monaco.Range(item.line, 1, item.line, 1),
+          options: { isWholeLine: true, className: "commit-diff-commented-line", linesDecorationsClassName: "commit-diff-commented-gutter" },
+        }))));
+        markRef.current(commentsRef.current);
         resize();
       } catch (cause) {
         if (!cancelled) setError(cause.message || "Unable to display this file diff.");
@@ -151,6 +208,7 @@ const CommitFileDiff = memo(function CommitFileDiff({ file, theme, editorSetting
       entries.delete(file);
       activeDecoration?.clear();
       searchRef.current = null;
+      markRef.current = null;
       observer?.disconnect();
       cancelAnimationFrame(frame);
       listeners.forEach(listener => listener.dispose());
@@ -175,7 +233,17 @@ const CommitFileDiff = memo(function CommitFileDiff({ file, theme, editorSetting
       <h3 className="min-w-0 flex-1 break-all font-mono font-semibold text-ink">{highlightedTitle}{title.slice(titleCursor)}</h3>
       <span className="text-muted">{STATUS_LABELS[file.status] || file.status}{file.submodule ? " · Submodule" : ""}</span>
       {file.oldMode !== file.newMode && file.status !== "A" && file.status !== "D" ? <span className="text-muted">Mode {file.oldMode} → {file.newMode}</span> : null}
+      {file.uncommitted ? <span className="text-muted">Not committed yet</span> : null}
+      {onComment && !file.binary ? <button type="button" className="commit-diff-comment-open" aria-label={`Comment on a line of ${file.path}`} title="Comment on a line (or click a line number)" onClick={() => setDraft(current => current || { side: "modified", line: "", body: "" })}><MessageSquarePlus size={13} aria-hidden="true" />Comment</button> : null}
     </header>
+    {comments.length || draft ? <div className="commit-diff-comments">
+      {comments.length ? <ul aria-label={`Comments on ${file.path}`}>{comments.map(item => <li key={item.key}>
+        <span className="commit-diff-comment-line">{SIDE_LABELS[item.side]} line {item.line}</span>
+        <p>{item.body}</p>
+        {onRemoveComment ? <button type="button" aria-label={`Remove comment on line ${item.line}`} title="Remove comment" onClick={() => onRemoveComment(item.key)}><Trash2 size={12} aria-hidden="true" /></button> : null}
+      </li>)}</ul> : null}
+      {draft ? <CommentDraft file={file} draft={draft} setDraft={setDraft} onComment={onComment} /> : null}
+    </div> : null}
     {file.binary ? <p className="px-4 py-5 text-xs text-muted">Binary file. Text comparison is unavailable.</p> : <>
       <div className="grid grid-cols-2 border-b border-line text-xs text-muted">
         <span className="border-r border-line px-4 py-1">Before{file.status === "A" ? " · File did not exist" : ""}</span>
@@ -188,8 +256,9 @@ const CommitFileDiff = memo(function CommitFileDiff({ file, theme, editorSetting
 });
 
 // Typing in the toolbar must not reconcile every loaded Monaco comparison.
-const CommitFileList = memo(function CommitFileList({ files, theme, editorSettings, query, matchIndex, registry }) {
-  return files.map(file => <CommitFileDiff key={file.path} file={file} theme={theme} editorSettings={editorSettings} query={query} matches={matchIndex.get(file) || EMPTY_MATCHES} registry={registry} />);
+const CommitFileList = memo(function CommitFileList({ files, theme, editorSettings, query, matchIndex, registry, commentsByPath, onComment, onRemoveComment }) {
+  return files.map(file => <CommitFileDiff key={file.path} file={file} theme={theme} editorSettings={editorSettings} query={query} matches={matchIndex.get(file) || EMPTY_MATCHES} registry={registry}
+    comments={commentsByPath?.get(file.path) || EMPTY_COMMENTS} onComment={onComment} onRemoveComment={onRemoveComment} />);
 });
 
 // The outer scrollbar represents the whole commit, including unloaded editors.
@@ -228,7 +297,9 @@ function MatchOverview({ matches, activeMatch, registry, scrollRef, contentRef }
   return <div className="commit-diff-overview" aria-hidden="true">{markers.map(marker => <i key={marker.y} className={marker.active ? "is-current" : ""} style={{ top: marker.y }} />)}</div>;
 }
 
-export default function CommitDiff({ projectRoot, hash, theme, editorSettings = DEFAULT_EDITOR_SETTINGS }) {
+// A commit from Source Control, or a ticket's patch given as ``payload`` (the same file
+// list). With ``onComment``, line numbers and each file's Comment button add line comments.
+export default function CommitDiff({ projectRoot, hash = "", theme, editorSettings = DEFAULT_EDITOR_SETTINGS, payload = null, heading = "", subheading = "", label = "", comments = EMPTY_COMMENTS, onComment = null, onRemoveComment = null }) {
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const [revision, setRevision] = useState(0);
@@ -245,6 +316,11 @@ export default function CommitDiff({ projectRoot, hash, theme, editorSettings = 
   const [selection, setSelection] = useState(null);
   const [navigation, setNavigation] = useState(null);
   const files = result?.files || EMPTY_FILES;
+  const commentsByPath = useMemo(() => {
+    const grouped = new Map();
+    for (const item of comments) grouped.set(item.path, [...(grouped.get(item.path) || []), item]);
+    return grouped;
+  }, [comments]);
   // File contents are immutable for this commit. Reuse search results when only
   // path patterns change, instead of lowercasing and scanning both revisions again.
   const searchedFiles = useMemo(() => searchCommitFiles(files, deferredQuery), [files, deferredQuery]);
@@ -298,8 +374,9 @@ export default function CommitDiff({ projectRoot, hash, theme, editorSettings = 
 
   useEffect(() => {
     let cancelled = false;
-    setResult(null);
+    setResult(payload);
     setError("");
+    if (payload) return undefined;
     async function load() {
       try {
         const payload = await window.goferDesktop?.workspace?.gitRepoAction?.(projectRoot, "commit-diff", { hash });
@@ -311,15 +388,18 @@ export default function CommitDiff({ projectRoot, hash, theme, editorSettings = 
     }
     void load();
     return () => { cancelled = true; };
-  }, [projectRoot, hash, revision]);
+  }, [projectRoot, hash, revision, payload]);
 
-  return <section aria-label={`Commit diff ${hash.slice(0, 8)}`} className="commit-diff flex min-h-0 min-w-0 flex-1 flex-col">
+  return <section aria-label={label || `Commit diff ${hash.slice(0, 8)}`} className="commit-diff flex min-h-0 min-w-0 flex-1 flex-col">
     <header className="commit-diff-header shrink-0 border-b border-line text-xs">
-      <div className="space-y-1 px-4 pb-3 pt-3">
+      {payload ? (heading || subheading ? <div className="space-y-1 px-4 pb-3 pt-3">
+        {heading ? <h2 className="break-words font-semibold text-ink">{heading}</h2> : null}
+        {subheading ? <p className="break-all text-muted">{subheading}</p> : null}
+      </div> : null) : <div className="space-y-1 px-4 pb-3 pt-3">
       <h2 className="break-words font-semibold text-ink">{result?.subject || `Commit ${hash.slice(0, 8)}`}</h2>
       <p className="break-all text-muted">{projectRoot}</p>
       <p className="text-muted">{result ? `${result.parentHash ? `${result.parentHash.slice(0, 8)} → ${hash.slice(0, 8)} · First parent` : `Empty tree → ${hash.slice(0, 8)} · Initial commit`} · Read only` : hash.slice(0, 8)}</p>
-      </div>
+      </div>}
       <div className="commit-diff-tools" role="search" aria-label="Search commit diff">
         <div className="commit-diff-search">
           <Search size={15} aria-hidden="true" className="shrink-0 text-muted" />
@@ -350,12 +430,12 @@ export default function CommitDiff({ projectRoot, hash, theme, editorSettings = 
     </header>
     {error ? <div role="alert" className="p-4 text-xs text-red-700 dark:text-red-300"><p className="whitespace-pre-wrap">{error}</p><button type="button" className="mt-3 rounded border border-line px-3 py-1 text-ink" onClick={() => setRevision(value => value + 1)}>Retry commit diff</button></div>
       : !result ? <p role="status" className="p-4 text-xs text-muted">Loading commit diff…</p>
-      : !result.files?.length ? <p className="p-4 text-xs text-muted">No changes in this commit.</p>
+      : !result.files?.length ? <p className="p-4 text-xs text-muted">{payload ? "No changes on this branch." : "No changes in this commit."}</p>
       : <div className="relative flex min-h-0 flex-1">
       <div ref={scrollRef} aria-label="Changed files" aria-busy={pendingFilters || query !== deferredQuery} tabIndex={0} className="commit-diff-scroll min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
         <div ref={contentRef}>
         {!visibleFiles.length ? <div className="commit-diff-empty"><Search size={22} aria-hidden="true" className="text-muted" /><h3>No files match</h3><p>Try different search text or adjust the file patterns.</p><button type="button" onClick={resetFilters}>Clear search and filters</button></div> : null}
-        <CommitFileList files={visibleFiles} theme={theme} editorSettings={editorSettings} query={deferredQuery} matchIndex={matchIndex} registry={registry} />
+        <CommitFileList files={visibleFiles} theme={theme} editorSettings={editorSettings} query={deferredQuery} matchIndex={matchIndex} registry={registry} commentsByPath={onComment ? commentsByPath : null} onComment={onComment} onRemoveComment={onRemoveComment} />
         </div>
       </div>
       <MatchOverview matches={matches} activeMatch={activeMatch} registry={registry} scrollRef={scrollRef} contentRef={contentRef} />

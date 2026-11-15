@@ -84,3 +84,5 @@ Open an issue on [GitHub](https://github.com/zacharyivie/Raticode/issues) with:
 - diagnostics from **Settings > Developer**, and a minimal failing Rattish file if you have one
 
 Remove keys, tokens, private attachments and personal paths first. Keep your working state as it is; don't delete databases to make an error go away.
+
+For help that doesn't belong in a public issue, email [support@raticode.dev](mailto:support@raticode.dev).

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Building2, Clock, Folder, Network, Pause, Play, Search, Settings, SquareKanban, Users, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Building2, Clock, Folder, Network, Pause, Play, RefreshCw, Search, Settings, SquareKanban, Users, X } from "lucide-react";
 import { KINDS, buildModel, hoursStatus, initialsOf, moveRule, needsYou, reviewCaution, searchEntities } from "../lib/organizationModel.js";
 import { organizationRequest } from "../lib/organizations.js";
+import { ORGANIZATION_BOARD_FILTERS, liveOrganizationFilters, organizationBoard, useBoardFilters } from "../lib/boardFilters.js";
 import { startPolling } from "../lib/refresh.js";
 import OrganizationWorkspace, { StartSheet } from "./OrganizationWorkspace.jsx";
 import OrganizationDetail from "./OrganizationSheet.jsx";
@@ -11,8 +12,8 @@ import "./OrganizationHome.css";
 import { AutoBadge } from "./OrganizationAutoMode.jsx";
 
 const TABS = [["org", "Organization", Building2], ["projects", "Projects", Folder], ["issues", "Issues", SquareKanban], ["workers", "Workers", Users], ["knowledge", "Knowledge", Network]];
-const POLL_ERROR = "Couldn't refresh: ";
-const BOARD = { board: "tickets", group: false, fProject: "all", fWorker: "all", fEpic: "all", mine: false };
+const clock = at => new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+const BOARD = ORGANIZATION_BOARD_FILTERS;
 const KNOWLEDGE = () => ({ view: "graph", project: "all", kinds: new Set(Object.keys(KINDS)), suggested: true, tickets: false, query: "" });
 
 function Palette({ model, onPick, onClose }) {
@@ -37,6 +38,30 @@ function Palette({ model, onPick, onClose }) {
   </div>;
 }
 
+// The first read: a quiet outline of the page while it loads, or a way out when it can't.
+function FirstLoad({ failure, onRetry, onClose }) {
+  if (failure) return <section className="oh" aria-label="Organization">
+    <div className="oh-main"><div className="oh-view"><div className="oh-panel oh-blank oh-fail" role="alert">
+      <AlertTriangle size={26} aria-hidden="true" />
+      <h2>Couldn&apos;t open this organization</h2>
+      <p>{failure}</p>
+      <p className="oh-muted">Raticode keeps trying every few seconds.</p>
+      <div className="oh-row"><button className="oh-btn primary" type="button" onClick={onRetry}><RefreshCw size={14} />Try again</button><button className="oh-btn" type="button" onClick={onClose}><ArrowLeft size={14} />Back to organizations</button></div>
+    </div></div></div>
+  </section>;
+  return <section className="oh" aria-label="Organization" aria-busy="true">
+    <div className="oh-main">
+      <header className="oh-top"><span className="oh-skel" style={{ width: 30, height: 30 }} /><span className="oh-skel" style={{ width: 180, height: 16 }} /><span className="grow" /><span className="oh-skel" style={{ width: 72, height: 30 }} /></header>
+      <div className="oh-tabs oh-skel-tabs" aria-hidden="true">{TABS.map(([id]) => <span key={id} className="oh-skel" style={{ width: 92, height: 14 }} />)}</div>
+      <div className="oh-view">
+        <p className="oh-sr" role="status">Loading organization…</p>
+        <div className="oh-panel oh-skel-panel" aria-hidden="true"><span className="oh-skel" style={{ width: "55%", height: 22 }} /><span className="oh-skel" style={{ width: "35%", height: 14 }} /></div>
+        <div className="oh-grid-2" aria-hidden="true"><div className="oh-panel oh-skel-panel tall"><span className="oh-skel" style={{ width: "40%", height: 14 }} /><span className="oh-skel" /><span className="oh-skel" /></div><div className="oh-panel oh-skel-panel tall"><span className="oh-skel" style={{ width: "40%", height: 14 }} /><span className="oh-skel" /><span className="oh-skel" /><span className="oh-skel" /></div></div>
+      </div>
+    </div>
+  </section>;
+}
+
 export default function OrganizationHome(props) {
   const { organizationId, onClose } = props;
   const [mode, setMode] = useState("home");
@@ -46,10 +71,13 @@ export default function OrganizationHome(props) {
   return <Home {...props} openSettings={() => setMode("settings")} />;
 }
 
-function Home({ organizationId, onClose, openSettings }) {
+function Home({ organizationId, onClose, openSettings, defaults = {} }) {
   const [organization, setOrganization] = useState(null);
   const [events, setEvents] = useState([]);
   const [error, setError] = useState("");
+  // A failed background read. The page keeps what it last loaded and says how old it is.
+  const [stale, setStale] = useState(null);
+  const [loadedAt, setLoadedAt] = useState(0);
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState("org");
   const [projectId, setProjectId] = useState(null);
@@ -57,12 +85,14 @@ function Home({ organizationId, onClose, openSettings }) {
   const [palette, setPalette] = useState(false);
   const [toasts, setToasts] = useState([]);
   const [starting, setStarting] = useState(false);
-  const [filters, setFilters] = useState(BOARD);
   const [kb, setKb] = useState(KNOWLEDGE);
   const [kbFocus, setKbFocus] = useState(null);
   const version = useRef("");
   const view = useRef(null);
   const model = useMemo(() => buildModel(organization), [organization]);
+  // This organization's board filters, kept on this computer across visits and restarts.
+  const liveFilters = useCallback(value => organization ? liveOrganizationFilters(value, model) : value, [organization, model]);
+  const [filters, setFilters] = useBoardFilters(organizationBoard(organizationId), BOARD, liveFilters);
 
   const toast = useCallback((text, action) => {
     const id = Math.random().toString(36).slice(2);
@@ -72,6 +102,7 @@ function Home({ organizationId, onClose, openSettings }) {
 
   const refresh = useCallback(async (force = false) => {
     const data = await organizationRequest("", "read", organizationId, force ? {} : { sinceVersion: version.current });
+    setStale(null); setLoadedAt(Date.now());
     if (!data.notModified) {
       version.current = data.version;
       setOrganization(data);
@@ -80,10 +111,10 @@ function Home({ organizationId, onClose, openSettings }) {
   }, [organizationId]);
 
   useEffect(() => {
-    version.current = ""; setOrganization(null); setTrail([]);
+    version.current = ""; setOrganization(null); setTrail([]); setStale(null);
     let cancelled = false;
     const stop = startPolling(async () => {
-      try { if (!cancelled) { await refresh(); setError(current => (current.startsWith(POLL_ERROR) ? "" : current)); } } catch (failure) { if (!cancelled) setError(`${POLL_ERROR}${failure.message}`); }
+      try { if (!cancelled) await refresh(); } catch (failure) { if (!cancelled) setStale(failure.message || String(failure)); }
     }, { interval: 3000, immediate: true });
     return () => { cancelled = true; stop(); };
   }, [refresh]);
@@ -116,7 +147,7 @@ function Home({ organizationId, onClose, openSettings }) {
     if (options.project) setProjectId(options.project);
     if (options.mine) setFilters({ ...BOARD, mine: true });
     view.current?.scrollTo(0, 0);
-  }, []);
+  }, [setFilters]);
 
   useEffect(() => {
     const onKey = event => {
@@ -133,8 +164,21 @@ function Home({ organizationId, onClose, openSettings }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [palette, trail.length]);
 
+  // Arrow keys, Home and End move between the five sections, as in any tab strip.
+  const onTabKey = event => {
+    const index = TABS.findIndex(([id]) => id === tab);
+    const next = { ArrowRight: index + 1, ArrowLeft: index - 1, Home: 0, End: TABS.length - 1 }[event.key];
+    if (next == null) return;
+    event.preventDefault();
+    const id = TABS[(next + TABS.length) % TABS.length][0];
+    go(id);
+    setTimeout(() => document.getElementById(`oh-tab-${id}`)?.focus(), 0);
+  };
+
   const ctx = {
-    model, busy, organizationId, onAct: act,
+    model, busy, organizationId, onAct: act, defaults,
+    // After a change made outside an organization action, such as landing from the patch.
+    refresh: () => { void refresh(true).catch(() => {}); window.dispatchEvent(new CustomEvent("gofer:organizations-changed")); },
     onOpen: ref => open(ref),
     close: () => setTrail([]),
     replace: ref => setTrail(current => [...current.slice(0, -1), ref]),
@@ -179,7 +223,8 @@ function Home({ organizationId, onClose, openSettings }) {
     return Boolean(result?.id);
   }
 
-  if (!organization) return <section className="oh"><div className="oh-main"><p className="oh-loading" role="status">{error || "Loading organization…"}</p></div></section>;
+  const retry = () => { void refresh(true).catch(failure => setStale(failure.message || String(failure))); };
+  if (!organization) return <FirstLoad failure={stale} onRetry={retry} onClose={onClose} />;
   const { config, runtime } = organization;
   const running = runtime.state === "running";
   const archived = runtime.archived === true;
@@ -197,7 +242,7 @@ function Home({ organizationId, onClose, openSettings }) {
         <span className="oh-mark" aria-hidden="true">{initialsOf(config.name)}</span>
         <h1>{config.name}</h1>
         <AutoBadge organization={organization} />
-        <span className={`oh-pill st-${archived ? "paused" : running ? "running" : "paused"}`}><i className="oh-dot" />{archived ? "Archived" : running ? "Running" : "Paused"}</span>
+        <span className={`oh-pill oh-state st-${archived ? "archived" : running ? "running" : "paused"}`}><i className="oh-dot" aria-hidden="true" />{archived ? "Archived" : running ? "Running" : "Paused"}</span>
         {hours && !archived && <button className={`oh-pill oh-hours-pill ${hours.open ? "open" : "closed"}`} type="button" title="Working hours. Click to change them." onClick={() => open("new:hours", true)}><Clock size={13} />{hours.text}</button>}
         {focusBlock && !archived && <button className="oh-pill oh-block-pill" type="button" title={`${focusBlock.label}: ${focusBlock.focus || "the current schedule block"}. Click to change the schedule.`} onClick={() => open("new:schedule", true)}>{focusBlock.label}</button>}
         <span className="grow" />
@@ -207,13 +252,14 @@ function Home({ organizationId, onClose, openSettings }) {
           : <button className="oh-btn primary" type="button" disabled={busy || starting} onClick={() => setStarting(true)}><Play size={14} />Start</button>)}
         <button className="oh-btn ghost icon" type="button" aria-label="Settings, history and operations" title="Settings, history and operations" onClick={openSettings}><Settings size={16} /></button>
       </header>
-      <nav className="oh-tabs" role="tablist" aria-label="Organization sections">{TABS.map(([id, label, Icon]) => <button key={id} role="tab" type="button" aria-selected={tab === id} onClick={() => go(id)}><Icon size={15} />{label}{counts[id] ? <span className="oh-count" title={`${counts[id]} need you`}>{counts[id]}</span> : null}</button>)}</nav>
-      <section className={`oh-view ${!detail && ["issues", "workers"].includes(tab) ? "fill" : ""}`} ref={view} tabIndex={-1}>
-        {error && <div className="oh-banner bad" role="alert"><span>{error}</span><button className="oh-icon-btn" type="button" aria-label="Dismiss error" onClick={() => setError("")}><X size={13} /></button></div>}
+      <nav className="oh-tabs" role="tablist" aria-label="Organization sections" onKeyDown={onTabKey}>{TABS.map(([id, label, Icon]) => <button key={id} id={`oh-tab-${id}`} role="tab" type="button" aria-selected={tab === id} aria-controls="oh-panel" tabIndex={tab === id ? 0 : -1} title={label} onClick={() => go(id)}><Icon size={15} aria-hidden="true" /><span className="lbl">{label}</span>{counts[id] ? <span className="oh-count" title={`${counts[id]} need you`}>{counts[id]}<span className="oh-sr"> need you</span></span> : null}</button>)}</nav>
+      <section id="oh-panel" role="tabpanel" aria-labelledby={`oh-tab-${tab}`} className={`oh-view ${!detail && ["issues", "workers"].includes(tab) ? "fill" : ""}`} ref={view} tabIndex={-1}>
+        {stale && <div className="oh-banner stale" role="status"><AlertTriangle size={14} aria-hidden="true" /><span><b>Couldn&apos;t refresh.</b> {loadedAt ? `This is how things looked at ${clock(loadedAt)}. ` : ""}Raticode keeps trying. <small>{stale}</small></span><button className="oh-btn small" type="button" onClick={retry}><RefreshCw size={13} />Try again</button></div>}
+        {error && <div className="oh-banner bad" role="alert"><AlertTriangle size={14} aria-hidden="true" /><span>{error}</span><button className="oh-icon-btn" type="button" aria-label="Dismiss error" onClick={() => setError("")}><X size={13} /></button></div>}
         {!running && runtime.pauseReason && !archived && runtime.pauseReason !== "Paused by you" && <div className="oh-banner" role="status"><Pause size={14} /><span>{runtime.pauseReason}</span></div>}
         {starting && <div className="oh-start"><StartSheet organization={organization} busy={busy} onCancel={() => setStarting(false)} onStart={async () => { if (await act("control", { state: "running" }, "Started. Workers pick up To do tickets.")) setStarting(false); }} /></div>}
         {detail ? <OrganizationDetail model={model} trail={trail} setTrail={setTrail} ctx={ctx} listLabel={tabLabel} /> : <>
-          {tab === "org" && <OverviewView model={model} events={events} busy={busy} onOpen={ctx.onOpen} onAct={act} go={go} />}
+          {tab === "org" && <OverviewView model={model} events={events} busy={busy} onOpen={ref => open(ref, true)} onAct={act} go={go} onStart={() => { setStarting(true); view.current?.scrollTo(0, 0); }} />}
           {tab === "projects" && <ProjectsView model={model} projectId={projectId} onProject={setProjectId} onOpen={ctx.onOpen} onBoard={ctx.board} onAct={act} busy={busy} />}
           {tab === "issues" && <IssuesView model={model} filters={filters} setFilters={setFilters} busy={busy} onOpen={ref => open(ref, true)} onMove={move} onQuickAdd={quickAdd} />}
           {tab === "workers" && <WorkersView model={model} onOpen={ref => open(ref, true)} />}

@@ -190,7 +190,7 @@ def test_check_catches_stale_and_unsafe_packages(tmp_path: Path) -> None:
     cli = folder / "raticode-cli-bin" / "PKGBUILD"
     text = cli.read_text(encoding="utf8")
     text = text.replace(
-        "# Maintainer: Zack Ivie <publisheddoonk at gmail dot com>",
+        "# Maintainer: Zack Ivie <support at raticode dot dev>",
         "# Maintainer: Raticode <x@raticode.local>",
     )
     text = text.replace(

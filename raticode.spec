@@ -34,6 +34,7 @@ datas += [
     ("rattish/providers", "gofer/rattish/assets/providers"),
     ("rattish/schemas", "gofer/rattish/assets/schemas"),
     ("rattish/spec", "gofer/rattish/assets/docs"),
+    ("rattish/starters", "gofer/rattish/assets/starters"),
     ("skills/raticode-workflow-builder", "gofer/rattish/assets/assistant-skill"),
 ]
 

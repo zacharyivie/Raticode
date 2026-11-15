@@ -91,6 +91,7 @@ if __name__ == "__main__":
                     "root": str(brain),
                     "largeRoot": str(large_brain),
                     "export": str(root / "export.zip"),
+                    "backups": str(root / "backups"),
                     "import": str(root / "imported"),
                 }
             ),

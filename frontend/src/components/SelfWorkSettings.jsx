@@ -1,6 +1,7 @@
+import { useEffect, useRef, useState } from "react";
 import { formatWhen } from "../lib/remHome.js";
 import { openRemThread } from "../lib/remHomeStore.js";
-import { activityLine, autoPullHint, boardOn, cancelSelfWorkWindow, cappedThreads, modeLabel, remProjectChoices, saveParticipant, saveSelfWork, savedSwitchNote, selfWorkLine, selfWorkWindows, useKanban, windowDetail, withProject } from "../lib/remKanban.js";
+import { activityLine, autoApproveHint, autoApproveWarning, autoPullHint, boardOn, cancelSelfWorkWindow, cappedThreads, hasAutoApprove, modeLabel, remProjectChoices, saveParticipant, saveSelfWork, savedSwitchNote, selfWorkLimitsLine, selfWorkLine, selfWorkWindows, useKanban, windowDetail, withProject } from "../lib/remKanban.js";
 import { NumberControl, SwitchControl } from "./SettingControls.jsx";
 import SelfWorkReport from "./SelfWorkReport.jsx";
 import "./Kanban.css";
@@ -54,6 +55,8 @@ export default function SelfWorkSettings() {
       </div>
       <SwitchControl label="Pull backlog tickets" checked={settings.auto_pull_backlog} disabled={!tickets} onChange={value => save({ auto_pull_backlog: value })} />
     </div>
+    {hasAutoApprove(view) ? <AutoApprove view={view} disabled={!tickets} save={save} /> : null}
+    {"session_token_limit" in settings ? <SelfWorkLimits settings={settings} limits={limits} reason={state.limit_reason} save={save} /> : null}
     {rem ? <fieldset className="space-y-1" data-testid="self-work-projects">
       <legend className="text-xs font-medium text-ink">Rem&rsquo;s projects</legend>
       <p className="text-[11px] text-muted">Rem works on its own only in these. Work you ask for isn&rsquo;t limited.</p>
@@ -71,6 +74,34 @@ export default function SelfWorkSettings() {
     {tickets && state.proposals_waiting ? <p className="text-[11px] text-muted">{state.proposals_waiting} {state.proposals_waiting === 1 ? "idea waits" : "ideas wait"} for your approval on the board.</p> : null}
     <div className="text-xs"><SelfWorkReport report={view.report} title="Latest report" limit={12} /></div>
   </section>;
+}
+
+// Approve its own backlog tickets: off by default and only ever turned on here, by the user,
+// after reading what it allows. Turning it off needs no confirmation.
+function AutoApprove({ view, disabled, save }) {
+  const on = view.settings.auto_approve_proposals;
+  const [asking, setAsking] = useState(false);
+  const confirm = useRef(null);
+  useEffect(() => { if (asking) confirm.current?.focus(); }, [asking]);
+  useEffect(() => { if (on) setAsking(false); }, [on]);
+  return <div className="space-y-2" data-testid="self-work-auto-approve">
+    <div className="flex items-start gap-3">
+      <div className="min-w-0 flex-1">
+        <p className="text-xs font-medium text-ink">Approve its own backlog tickets</p>
+        <p className="text-[11px] text-muted" data-testid="self-work-auto-approve-hint">{autoApproveHint(view)}</p>
+      </div>
+      <SwitchControl label="Approve its own backlog tickets" checked={on || asking} disabled={disabled}
+        onChange={value => { if (value) setAsking(true); else if (asking) setAsking(false); else save({ auto_approve_proposals: false }); }} />
+    </div>
+    {asking ? <div role="group" aria-label="Confirm auto-approval" className="space-y-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-[11px] text-ink" data-testid="self-work-auto-approve-confirm">
+      <p className="font-medium">Let Rem approve tickets it proposes?</p>
+      <ul className="list-disc space-y-1 pl-4">{autoApproveWarning(view).map(line => <li key={line}>{line}</li>)}</ul>
+      <div className="flex gap-2">
+        <button ref={confirm} type="button" className="h-7 rounded-md border border-brand bg-brand px-2 text-[11px] font-semibold text-white outline-none transition hover:opacity-90 focus-visible:ring-2 focus-visible:ring-brand/40" onClick={() => { setAsking(false); save({ auto_approve_proposals: true, confirm_auto_approve: true }); }}>Turn on</button>
+        <button type="button" className="h-7 rounded-md border border-line bg-white px-2 text-[11px] font-semibold text-ink outline-none transition hover:bg-slate-50 focus-visible:ring-2 focus-visible:ring-brand/40" onClick={() => setAsking(false)}>Keep asking me</button>
+      </div>
+    </div> : null}
+  </div>;
 }
 
 // Timed self-work: the window running now and the ones coming up, each with a button that
@@ -96,4 +127,26 @@ function SelfWorkWindows({ windows, onCancel }) {
       <p className="text-[11px] text-muted">{last.summary}</p>
     </div> : null}
   </div>;
+}
+
+// Limits on what self-work spends: tokens per session and per day, and how full a provider's
+// rate-limit window may be. Past one, Rem starts nothing new; work already running finishes.
+function SelfWorkLimits({ settings, limits, reason, save }) {
+  const tokenMax = limits.token_limit_max || 1e12;
+  const row = (key, label, hint, max, suffix) => <div className="flex items-start gap-3" key={key}>
+    <div className="min-w-0 flex-1">
+      <p className="text-xs font-medium text-ink">{label}</p>
+      <p className="text-[11px] text-muted">{hint}</p>
+    </div>
+    <div className="w-28 shrink-0"><NumberControl value={settings[key]} min={0} max={max} suffix={suffix} onCommit={value => { const next = Math.round(value); if (next !== settings[key]) save({ [key]: next }); }} /></div>
+  </div>;
+  return <fieldset className="space-y-2" data-testid="self-work-limits">
+    <legend className="text-xs font-medium text-ink">Limits</legend>
+    <p className="text-[11px] text-muted" data-testid="self-work-limits-line">{selfWorkLimitsLine(settings)}</p>
+    {reason ? <p role="status" className="text-[11px] text-amber-700" data-testid="self-work-limit-reason">{reason}</p> : null}
+    {row("session_token_limit", "Tokens per session", "From when self-work starts until you\u2019re back. 0 means no limit.", tokenMax, "")}
+    {row("daily_token_limit", "Tokens per day", "Self-work's tokens since midnight on this computer. 0 means no limit.", tokenMax, "")}
+    {row("rate_limit_percent", "Rate limit use", "Stops when a stored rate-limit window of Rem\u2019s task provider is this full. 0 means no limit.", limits.rate_limit_percent_max || 100, "%")}
+    <p className="text-[11px] text-muted">Token limits count what providers report. Calls a provider doesn&rsquo;t report don&rsquo;t count toward them.</p>
+  </fieldset>;
 }

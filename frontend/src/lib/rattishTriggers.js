@@ -57,7 +57,10 @@ export function triggerPolicyText(trigger) {
   return parts.join(" · ");
 }
 
+export const PAUSED_TEXT = "All triggers are paused. Nothing fires until you resume them in Workflow runs.";
+
 export function schedulerSummary(scheduler) {
+  if (scheduler?.paused) return { running: Boolean(scheduler.running), paused: true, text: PAUSED_TEXT };
   if (!scheduler?.running) {
     return { running: false, text: "Not running. Nothing will fire until Raticode or its scheduler starts." };
   }
@@ -168,4 +171,19 @@ export const triggersApi = {
   rotateToken: (triggerId) => post(`/${encodeURIComponent(triggerId)}/rotate-token`),
   setStartAtLogin: (enabled) => post("/login", { enabled }),
   previewCron: (expression, timezone) => post("/preview", { expression, timezone }),
+  // Every trigger on this computer at once. Each keeps its own on/off setting.
+  pauseState: () => send("/pause"),
+  setPaused: (paused) => post("/pause", { paused }),
 };
+
+// The Pause all triggers switch's line under its label.
+export function pauseSummary(state) {
+  if (!state) return "";
+  const { triggers = 0, enabled = 0 } = state;
+  if (state.pause?.paused) {
+    const since = formatWhen(state.pause.pausedAt);
+    return `Paused${since ? ` since ${since}` : ""}. Cron times are skipped, not caught up. Resuming turns back on the ${enabled} of ${triggers} that were on.`;
+  }
+  if (!triggers) return "No triggers yet.";
+  return `${enabled} of ${triggers} trigger${triggers === 1 ? "" : "s"} on.`;
+}

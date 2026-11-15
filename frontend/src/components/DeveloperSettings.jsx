@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import AppLogViewer from "./AppLogViewer.jsx";
 import ReportThemeSettings from "./ReportThemeSettings.jsx";
+import { ARCHIVE_GIT_LIMIT, ARCHIVE_PURGE_OPTIONS } from "../lib/threadActivity.js";
 
 export default function DeveloperSettings() {
   const [info, setInfo] = useState(null);
@@ -41,6 +42,10 @@ export function RemMemorySettings({ value, onChange, providerState, audioInputDe
     } catch (cause) { setError(cause.message); }
     finally { setBusy(false); }
   }
+  async function choosePurge(next) {
+    if (next !== "never" && !window.confirm(`Purge archive copies of threads deleted more than ${next} days ago? Their snapshots, journals and unshared attachments are removed from the archive folder now and from then on. ${ARCHIVE_GIT_LIMIT}`)) return;
+    await commit("archivePurgeDays", next);
+  }
   async function choose(key) {
     setError("");
     try {
@@ -50,10 +55,16 @@ export function RemMemorySettings({ value, onChange, providerState, audioInputDe
   }
   const buttonClass = "rounded border border-line px-2 py-1 text-xs hover:bg-slate-50 focus-visible:outline disabled:opacity-40";
   return <div className="space-y-4 py-3">
-    <div><h3 className="text-xs font-semibold">Conversation archive</h3><p className="mt-1 text-[11px] text-muted">Archive existing and future conversations, messages, tool activity, and attachments. Files remain available after a thread is deleted in Rem.</p>
+    <div><h3 className="text-xs font-semibold">Conversation archive</h3><p className="mt-1 text-[11px] text-muted">Archive existing and future conversations, messages, tool activity, and attachments. Files remain available after a thread is deleted in Rem, unless you choose Delete permanently or turn on purging below.</p>
       <p className="my-2 break-all text-xs text-muted">{value.archiveFolder || "Not configured"}</p>
       <button type="button" className={buttonClass} disabled={!bridge || busy} onClick={() => void choose("archiveFolder")}>Choose archive folder</button>
       {value.archiveFolder ? <button type="button" className={`${buttonClass} ml-2`} disabled={busy} onClick={() => void commit("archiveFolder", "")}>Stop archiving</button> : null}
+      <label className="mt-3 block text-xs font-semibold" htmlFor="rem-archive-purge">Purge archive copies</label>
+      <p id="rem-archive-purge-help" className="mt-1 text-[11px] text-muted">Remove the snapshot, journal and unshared attachments of a deleted thread from the archive this long after it was deleted. Never keeps everything. {ARCHIVE_GIT_LIMIT}</p>
+      <select id="rem-archive-purge" aria-describedby="rem-archive-purge-help" className="mt-2 rounded border border-line bg-white px-2 py-1 text-xs disabled:opacity-40"
+        value={value.archivePurgeDays || "never"} disabled={!bridge || busy || !value.archiveFolder} onChange={(event) => void choosePurge(event.target.value)}>
+        {ARCHIVE_PURGE_OPTIONS.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+      </select>
     </div>
     <div className="border-t border-line pt-3"><h3 className="text-xs font-semibold">Second Brain</h3><p className="mt-1 text-[11px] text-muted">Give Rem tools to search your knowledge, read notes, and save reports in this folder. The tools work independently of shell access.</p>
       <p className="my-2 break-all text-xs text-muted">{value.secondBrainRoot || "Choose a knowledge folder"}</p>

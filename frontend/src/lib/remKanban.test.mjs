@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { activityLine, assignmentLine, autoPullHint, avatarColor, boardOn, cappedThreads, canDropOn, checksLine, columnTickets, entryHeadline, entryTone, filterTickets, initials, modeLabel, ownerFilters, participantOf, remProjectChoices, savedSwitchNote, scopeNote, selfWorkLine, selfWorkWindows, visibleEntries, windowDetail, withProject } from "./remKanban.js";
+import { autoApproveHint, autoApproveWarning, hasAutoApprove } from "./remKanban.js";
+import { activityLine, assignmentLine, formatTokens, selfWorkLimitsLine, usageSentence, usageShort, autoPullHint, avatarColor, boardOn, cappedThreads, canDropOn, checksLine, columnTickets, entryHeadline, entryTone, filterTickets, initials, modeLabel, ownerFilters, participantOf, remProjectChoices, savedSwitchNote, scopeNote, selfWorkLine, selfWorkWindows, visibleEntries, windowDetail, withProject } from "./remKanban.js";
 
 const ticket = (fields = {}) => ({ ticket_id: "t", key: "REM-1", title: "Export", scope: "rem", organization_id: "", status: "todo", priority: "medium", proposed: false, running: false, created_at: "2026-11-01", ...fields });
 
@@ -197,4 +198,78 @@ test("timed self-work windows show only when the desktop sends a schedule", () =
   assert.equal(savedSwitchNote(view), "On for this window; goes back to off after it.");
   assert.equal(savedSwitchNote({ ...view, schedule: { ...view.schedule, active: { ...active, after_end: "on" } } }), "On for this window; stays on after it.");
   assert.equal(savedSwitchNote({ ...view, settings: { ...settings, saved_enabled: true } }), "");
+});
+
+test("ticket usage says unknown when a provider didn't report it", () => {
+  assert.equal(usageShort(undefined), "");
+  assert.equal(usageShort({ calls: 0, total_tokens: null }), "");
+  assert.equal(usageShort({ calls: 3, reported_calls: 3, unknown_calls: 0, total_tokens: 12_400 }), "12.4k tokens");
+  assert.equal(usageShort({ calls: 3, reported_calls: 2, unknown_calls: 1, total_tokens: 950 }), "950 tokens + 1 unknown");
+  assert.equal(usageShort({ calls: 2, unknown_calls: 2, total_tokens: null }), "Tokens unknown");
+  assert.equal(usageSentence({ calls: 0 }), "No model calls yet.");
+  assert.equal(usageSentence({ calls: 1, unknown_calls: 1, total_tokens: null }), "Unknown: the provider didn't report usage for its 1 model call.");
+  assert.equal(usageSentence({ calls: 2, reported_calls: 2, total_tokens: 1500 }), "1,500 tokens over 2 model calls.");
+  assert.match(usageSentence({ calls: 3, reported_calls: 2, unknown_calls: 1, total_tokens: 1500 }), /1 of them was not fully reported/);
+  assert.equal(formatTokens(3_200_000), "3.2M");
+  assert.equal(formatTokens(2_000), "2k");
+});
+
+test("self-work limits read as one line", () => {
+  assert.match(selfWorkLimitsLine({ session_token_limit: 0, daily_token_limit: 0, rate_limit_percent: 0 }), /^No limits/);
+  assert.equal(
+    selfWorkLimitsLine({ session_token_limit: 500_000, daily_token_limit: 2_000_000, rate_limit_percent: 80 }),
+    "Stops starting new work past 500k tokens a session or 2M tokens a day or at 80% of a rate limit. Running work finishes normally.",
+  );
+  assert.equal(selfWorkLimitsLine({ rate_limit_percent: 90 }), "Stops starting new work at 90% of a rate limit. Running work finishes normally.");
+});
+
+test("auto-approval explains what it does and is hidden from older desktops", () => {
+  assert.equal(hasAutoApprove({ settings: { enabled: true } }), false);
+  assert.equal(hasAutoApprove({ settings: { auto_approve_proposals: false } }), true);
+  assert.match(autoApproveHint({ state: { board_enabled: false }, settings: { auto_approve_proposals: true } }), /^Needs the Kanban board/);
+  assert.match(autoApproveHint({ state: {}, settings: { auto_approve_proposals: false } }), /wait in Backlog for your approval/);
+  const on = { state: { auto_approved_session: 13 }, limits: {}, settings: { auto_approve_proposals: true, auto_pull_backlog: false } };
+  assert.match(autoApproveHint(on), /until self-work ends \(13 this session\)\. They wait in Backlog until you move them/);
+  assert.match(autoApproveHint({ ...on, settings: { ...on.settings, auto_pull_backlog: true } }), /Rem ranks them and works on the best ones/);
+  const warning = autoApproveWarning(on).join(" ");
+  assert.match(warning, /for as long as self-work runs, without you reading them first/);
+  // No per-session cap is promised anywhere.
+  assert.doesNotMatch([autoApproveHint(on), warning].join(" "), /up to \d+|a session,|limit/);
+  assert.match(warning, /Backlog pulling is off/);
+  assert.match(warning, /Ideas already waiting for you stay yours to decide/);
+});
+
+test("a card says what its ticket still waits for", async () => {
+  const { waitsLine } = await import("./remKanban.js");
+  const waits = [
+    { ticket_id: "a", key: "REM-1", title: "Polling triggers", status: "todo" },
+    { ticket_id: "b", key: "REM-2", title: "Webhooks", status: "done" },
+    { ticket_id: "c", key: "REM-3", title: "Editor", status: "cancelled" },
+  ];
+  assert.equal(waitsLine(ticket({ waits_for: waits })), "Waits for: Polling triggers and 1 more");
+  assert.equal(waitsLine(ticket({ waits_for: waits.slice(0, 2) })), "Waits for: Polling triggers");
+  assert.equal(waitsLine(ticket({ waits_for: [waits[1]] })), "");
+  assert.equal(waitsLine(ticket()), "");
+});
+
+test("a ticket waits only for tickets with the same owner, each once", async () => {
+  const { waitChoices, waitsChange, canEditWaits } = await import("./remKanban.js");
+  const me = ticket({ ticket_id: "me", key: "REM-1", waits_for: [{ ticket_id: "listed" }], revision: 4 });
+  const board = { tickets: [
+    me,
+    ticket({ ticket_id: "listed", key: "REM-2" }),
+    ticket({ ticket_id: "ten", key: "REM-10" }),
+    ticket({ ticket_id: "three", key: "REM-3", status: "done" }),
+    ticket({ ticket_id: "gone", key: "REM-4", status: "cancelled" }),
+    ticket({ ticket_id: "org", key: "ENG-1", scope: "organization", organization_id: "eng" }),
+  ] };
+  assert.deepEqual(waitChoices(board, me).map(t => t.ticket_id), ["three", "ten"]);
+  const orgTicket = ticket({ ticket_id: "o2", key: "ENG-2", scope: "organization", organization_id: "eng" });
+  assert.deepEqual(waitChoices({ tickets: [...board.tickets, orgTicket] }, orgTicket).map(t => t.ticket_id), ["org"]);
+  assert.deepEqual(waitsChange(me, ["ten"]), { action: "edit", ticket_id: "me", scope: "rem", organization_id: undefined, expected_revision: 4, waits_for: ["ten"] });
+  assert.equal(canEditWaits(me), true);
+  assert.equal(canEditWaits(ticket({ running: true })), true);
+  assert.equal(canEditWaits(ticket({ scope: "organization", running: true })), false);
+  assert.equal(canEditWaits(ticket({ status: "done" })), false);
+  assert.equal(canEditWaits(ticket({ proposed: true, status: "backlog" })), false);
 });

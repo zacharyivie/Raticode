@@ -11,7 +11,11 @@ import anyio
 
 from gofer.core.agent import AgentResult
 from gofer.core.http import HttpClient, HttpRequest, HttpResponse, UrllibHttpClient
-from gofer.core.provider_profiles import ResolvedProviderSettings
+from gofer.core.provider_profiles import (
+    ResolvedProviderSettings,
+    is_loopback_base_url,
+    local_server_host,
+)
 from gofer.subscriptions.base import Subscription
 from gofer.subscriptions.usage import api_quota_windows, normalize_usage, track_invocation
 
@@ -54,11 +58,16 @@ class DirectApiSubscription(Subscription):
             raise ValueError(
                 "Direct API subscriptions do not support tools, MCP servers, or extra paths"
             )
-        api_key = env.get("GOFER_DIRECT_API_KEY")
-        if not api_key:
+        api_key = env.get("GOFER_DIRECT_API_KEY") or ""
+        # A local model server on this computer is the one direct API with no key.
+        keyless = provider_settings.local and is_loopback_base_url(provider_settings.api_base_url)
+        if not api_key and not keyless:
             raise ValueError(
                 f"Direct API provider '{self.subscription_name}' is missing an API key"
             )
+        # What the user pays for a call to their own server: a known nothing, so
+        # max-cost-usd keeps working. Tokens come from the response when it has them.
+        local_cost: dict[str, object] = {"cost_usd": 0.0} if provider_settings.local else {}
 
         start = time.monotonic()
         quota_metadata: dict[str, object] = {}
@@ -78,6 +87,7 @@ class DirectApiSubscription(Subscription):
                 raise DirectProviderError(_normalized_error(response.status, payload))
             message, metadata = self._parse_success(payload, provider_settings)
             metadata.update(quota_metadata)
+            metadata.update(local_cost)
             metadata.setdefault("provider", self.subscription_name)
             metadata.setdefault("profile", provider_settings.profile_name)
             metadata.setdefault("model", provider_settings.model or self.default_model)
@@ -107,10 +117,16 @@ class DirectApiSubscription(Subscription):
                 provider=self.subscription_name,
                 profile=provider_settings.profile_name,
                 model=provider_settings.model or self.default_model,
-                usage_metadata=quota_metadata,
+                usage_metadata={**quota_metadata, **local_cost},
             )
         except Exception as exc:  # noqa: BLE001
             message = f"Provider service is temporarily unavailable: {exc}"
+            if provider_settings.local:
+                message = (
+                    f"The local model server at {provider_settings.api_base_url} didn't "
+                    f"answer: {exc}. Start the server, or check the address in the "
+                    f"'{provider_settings.profile_name}' profile."
+                )
             return AgentResult(
                 agent_id="",
                 success=False,
@@ -122,7 +138,7 @@ class DirectApiSubscription(Subscription):
                 provider=self.subscription_name,
                 profile=provider_settings.profile_name,
                 model=provider_settings.model or self.default_model,
-                usage_metadata=quota_metadata,
+                usage_metadata={**quota_metadata, **local_cost},
             )
 
     async def _send(
@@ -201,7 +217,10 @@ class OpenAiApiSubscription(DirectApiSubscription):
         timeout: float | None,
     ) -> HttpRequest:
         base_url = (settings.api_base_url or "https://api.openai.com/v1").rstrip("/")
-        api_mode = str(settings.provider_options.get("api") or "responses")
+        # Local model servers speak chat completions; few implement the Responses API.
+        api_mode = (
+            "chat" if settings.local else str(settings.provider_options.get("api") or "responses")
+        )
         path = "/chat/completions" if api_mode == "chat" else "/responses"
         body: dict[str, Any]
         if api_mode == "chat":
@@ -212,7 +231,9 @@ class OpenAiApiSubscription(DirectApiSubscription):
         else:
             body = {"model": settings.model or self.default_model, "input": prompt}
         body.update(_safe_provider_options(settings.provider_options))
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         if settings.organization:
             headers["OpenAI-Organization"] = settings.organization
         return HttpRequest(
@@ -220,7 +241,9 @@ class OpenAiApiSubscription(DirectApiSubscription):
             url=f"{base_url}{path}",
             headers=headers,
             body=json.dumps(body).encode("utf-8"),
-            timeout_seconds=timeout or 120.0,
+            # A local model on a CPU can take minutes to load and answer.
+            timeout_seconds=timeout or (600.0 if settings.local else 120.0),
+            network_allowlist=local_server_allowlist(settings),
         )
 
     def _parse_success(
@@ -279,6 +302,18 @@ class AnthropicApiSubscription(DirectApiSubscription):
         metadata = normalize_usage(self.subscription_name, usage)
         metadata["model"] = str(payload.get("model") or settings.model or self.default_model)
         return message, metadata
+
+
+def local_server_allowlist(settings: ResolvedProviderSettings) -> list[str]:
+    """Let a local model server profile reach its own host, and nothing else.
+
+    The network policy blocks loopback and private addresses by default. Saving a local
+    model server profile is the user's consent to reach the host it names.
+    """
+    if not settings.local:
+        return []
+    host = local_server_host(settings.api_base_url)
+    return [host] if host else []
 
 
 def _json_body(body: bytes) -> dict[str, Any]:

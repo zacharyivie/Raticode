@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { workflowsToScan } from "./useWorkflowRunRegistry.js";
+import { listedRattishWorkflows, workflowsToScan } from "./useWorkflowRunRegistry.js";
 
 const workflows = ["idle", "active", "lost", "queued", "changed", "fresh"].map(id => ({ id }));
 const latest = new Map([["idle", "a"], ["active", "b"], ["lost", "c"], ["queued", "d"], ["changed", "e2"], ["fresh", "f"]]);
@@ -33,4 +33,23 @@ test("without a workflow list, only active and queued work is read", () => {
     previousLatest,
   });
   assert.deepEqual(scanned.map(w => w.id), ["active"]);
+});
+
+test("run monitoring ignores listed entries that aren't Rattish workflows", () => {
+  const payload = {
+    authoringLanguage: "rattish",
+    workflows: [
+      { id: "pyproject", sourceFormat: "toml", invalid: true },
+      { id: "nightly", sourceFormat: "rattish" },
+      { id: "untyped" },
+    ],
+  };
+  assert.deepEqual(listedRattishWorkflows(payload).map(w => w.id), ["nightly"]);
+});
+
+test("a payload from a backend that doesn't author Rattish keeps every workflow", () => {
+  const workflows = [{ id: "legacy", sourceFormat: "toml" }, { id: "nightly", sourceFormat: "rattish" }];
+  assert.deepEqual(listedRattishWorkflows({ workflows }).map(w => w.id), ["legacy", "nightly"]);
+  assert.deepEqual(listedRattishWorkflows({}), []);
+  assert.deepEqual(listedRattishWorkflows(undefined), []);
 });

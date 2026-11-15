@@ -200,6 +200,8 @@ def test_cron_runs_in_the_chosen_time_zone_across_daylight_saving() -> None:
         ("0 0 13 * 5", "UTC", "not both"),
         ("0 0 * * 9", "UTC", "Weekday"),
         ("0 0 * * 5-1", "UTC", "backwards"),
+        ("0 9 31 2 *", "UTC", "never runs"),
+        ("0 9 30 2 *", "UTC", "never runs"),
     ],
 )
 def test_bad_schedules_are_refused_with_a_reason(
@@ -430,6 +432,47 @@ def test_file_changes_wait_for_quiet_then_start_one_run(
     ]
 
 
+def test_a_queued_file_run_sees_every_file_changed_while_it_waited(
+    data_dir: Path, source: Path, tmp_path: Path
+) -> None:
+    watched = tmp_path / "watched"
+    watched.mkdir()
+    runs = FakeRuns(hold=True)
+    engine, _, clock = _engine(data_dir, runs=runs)
+    record, _ = engine.store.create(
+        kind="file",
+        source_path=source,
+        config={"path": str(watched), "debounceSeconds": 1},
+        overlap="queue",
+        now=START,
+    )
+    engine.become_owner()
+    engine.note_file_change(record.id, "created", watched / "first.txt")
+    clock.advance(2)
+    engine.tick()
+    _wait_for(lambda: len(runs.started) == 1)
+
+    # Two batches arrive while that run is going; both fold into one queued run.
+    engine.note_file_change(record.id, "created", watched / "a.txt")
+    engine.note_file_change(record.id, "created", watched / "c.txt")
+    clock.advance(2)
+    engine.tick()
+    engine.note_file_change(record.id, "created", watched / "b.txt")
+    engine.note_file_change(record.id, "modified", watched / "a.txt")
+    clock.advance(2)
+    engine.tick()
+    assert _statuses(engine.store, record.id) == ["queued", "running"]
+
+    runs.release.set()
+    _wait_for(lambda: runs.finished == 1 and not engine._active)
+    clock.advance(1)
+    engine.tick()
+    _settled(engine, runs, 2)
+
+    queued = {item["name"]: item["kind"] for item in runs.started[1].events}
+    assert queued == {"a.txt": "modified", "b.txt": "created", "c.txt": "created"}
+
+
 def test_constant_changes_still_start_a_run_eventually(
     data_dir: Path, source: Path, tmp_path: Path
 ) -> None:
@@ -582,6 +625,60 @@ def test_webhook_requires_its_token(webhook: tuple[TriggerEngine, FakeRuns, str,
     _wait_for(lambda: len(runs.started) == 1)
     assert runs.started[0].events[0]["payload"] == {"ref": "main"}
     assert engine.store.events()[0].run_id == payload["runId"]
+
+
+@pytest.mark.parametrize(
+    ("body", "fragment"),
+    [
+        (b"[" * 100_000 + b"]" * 100_000, "nested too deeply"),
+        (b'{"x": NaN}', "NaN isn't a JSON number"),
+        (b'{"x": -Infinity}', "-Infinity isn't a JSON number"),
+        (b'{"x": 1e999}', "too large"),
+        (b'{"x": 123456789012345678901234567890}', "Send numbers beyond"),
+        (b'{"x": "\\ud800"}', "valid Unicode"),
+        (b'{"x": "\xe9"}', "must be JSON in UTF-8"),
+        (b'{"x": ' + b"9" * 5000 + b"}", "number too large to store"),
+    ],
+    ids=[
+        "deep",
+        "nan",
+        "infinity",
+        "overflow",
+        "big-integer",
+        "lone-surrogate",
+        "latin-1",
+        "huge-integer",
+    ],
+)
+def test_webhook_bodies_a_run_record_cannot_hold_are_refused_with_a_reason(
+    webhook: tuple[TriggerEngine, FakeRuns, str, str], body: bytes, fragment: str
+) -> None:
+    engine, runs, url, token = webhook
+
+    status, payload = _post(url, body=body, headers={"Authorization": f"Bearer {token}"})
+
+    assert status == 400
+    assert fragment in payload["error"]
+    assert runs.started == []
+    assert engine.store.events() == []
+
+
+def test_webhook_accepts_any_strict_json_value_or_no_body(
+    webhook: tuple[TriggerEngine, FakeRuns, str, str],
+) -> None:
+    engine, runs, url, token = webhook
+    bearer = {"Authorization": f"Bearer {token}"}
+    # The default overlap rule skips a call that arrives while the last run is still
+    # finishing, which on a busy machine made this test drop runs. Let them run side by side.
+    engine.store.update(url.rsplit("/", 1)[1], overlap="parallel")
+
+    for body in (b"", b"  ", b'"text"', b"[1, 2.5, null]", b'{"big": 9007199254740991}'):
+        status, payload = _post(url, body=body, headers=bearer)
+        assert (status, payload["status"]) == (202, "started")
+    _wait_for(lambda: len(runs.started) == 5)
+    assert sorted(
+        (json.dumps(run.events[0]["payload"]) for run in runs.started), key=str
+    ) == sorted(["null", "null", '"text"', "[1, 2.5, null]", '{"big": 9007199254740991}'])
 
 
 def test_rotating_a_webhook_token_retires_the_old_one(
@@ -929,3 +1026,182 @@ def test_cli_history_shows_problems(data_dir: Path, source: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "failed" in result.output
     assert "Node hello exited with 1." in result.output
+
+
+# --- Pausing every trigger at once -------------------------------------------------
+
+
+def test_pausing_keeps_each_triggers_own_setting_and_resuming_restores_it(
+    data_dir: Path, source: Path
+) -> None:
+    store = TriggerStore(data_dir)
+    on = _cron(store, source)
+    off = _cron(store, source, enabled=False)
+    revision = store.revision()
+
+    paused = store.set_paused(True, now=START)
+    assert paused.paused is True
+    assert paused.since == START.isoformat()
+    assert store.revision() > revision
+    assert {item.id: item.enabled for item in store.list_triggers()} == {on: True, off: False}
+    # Pausing twice keeps the first start.
+    assert store.set_paused(True, now=START + timedelta(hours=1)).since == START.isoformat()
+
+    store.update(off, label="Still editable while paused")
+    resumed = store.set_paused(False, now=START + timedelta(hours=2))
+    assert resumed.paused is False
+    assert resumed.windows == ((START.isoformat(), (START + timedelta(hours=2)).isoformat()),)
+    assert {item.id: item.enabled for item in store.list_triggers()} == {on: True, off: False}
+    assert store.set_paused(False) == resumed  # Resuming again changes nothing.
+    assert scheduler_status(store)["paused"] is False
+
+
+def test_cron_times_while_paused_are_skipped_and_never_caught_up(
+    data_dir: Path, source: Path
+) -> None:
+    engine, runs, clock = _engine(data_dir)
+    trigger_id = _cron(engine.store, source, missed="run_once")
+    engine.become_owner()
+    engine.tick()
+
+    engine.store.set_paused(True, now=clock())
+    status = scheduler_status(engine.store, now=clock())
+    assert status["paused"] is True
+    assert status["pausedAt"] == clock().isoformat()
+    for _ in range(3):
+        clock.advance(60)
+        engine.tick()
+    assert runs.started == []
+    skipped = engine.store.events(trigger_id=trigger_id)
+    assert [item.status for item in skipped] == ["skipped", "skipped", "skipped"]
+    assert all("paused" in item.message for item in skipped)
+
+    engine.store.set_paused(False, now=clock())
+    engine.tick()
+    assert runs.started == []  # Nothing to catch up, even with run_once.
+
+    clock.advance(60)
+    engine.tick()
+    _settled(engine, runs, 1)
+    assert len(runs.started) == 1
+    assert _statuses(engine.store, trigger_id)[0] == "passed"
+    assert engine.store.get(trigger_id).enabled is True
+
+
+def test_a_pause_while_nothing_ran_still_counts_as_skipped_not_missed(
+    data_dir: Path, source: Path
+) -> None:
+    first, _, clock = _engine(data_dir)
+    trigger_id = _cron(first.store, source, missed="run_once", config=_EVERY_SEVEN_MINUTES)
+    first.become_owner()
+    first.tick()
+    first._heartbeat(clock())
+    first.store.set_paused(True, now=clock())
+
+    # Nothing runs for an hour; the pause ends half way through.
+    first.store.set_paused(False, now=clock() + timedelta(minutes=30))
+    clock.advance(3600 + 240)
+    restarted, runs, _ = _engine(data_dir, clock=clock)
+    restarted.become_owner()
+    restarted.tick()
+    _settled(restarted, runs, 1)
+
+    events = {item.status: item for item in restarted.store.events(trigger_id=trigger_id)}
+    assert events["skipped"].count == 4  # 12:07, 12:14, 12:21, 12:28
+    assert "paused" in events["skipped"].message
+    assert events["missed"].count == 5  # 12:35 to 13:03
+    assert len(runs.started) == 1  # run_once catches up a missed run, never a skipped one.
+
+
+def test_paused_triggers_drop_file_changes_and_queued_runs(
+    data_dir: Path, source: Path, tmp_path: Path
+) -> None:
+    watched = tmp_path / "watched"
+    watched.mkdir()
+    runs = FakeRuns(hold=True)
+    engine, _, clock = _engine(data_dir, runs=runs)
+    record, _ = engine.store.create(
+        kind="file", source_path=source, config={"path": str(watched)}, now=clock()
+    )
+    cron_id = _cron(engine.store, source, overlap="queue")
+    engine.become_owner()
+    clock.advance(31)
+    engine.tick()
+    _wait_for(lambda: len(runs.started) == 1)
+    clock.advance(60)
+    engine.tick()
+    assert _statuses(engine.store, cron_id) == ["queued", "running"]
+    engine.note_file_change(record.id, "modified", watched / "a.txt")
+
+    engine.store.set_paused(True, now=clock())
+    clock.advance(1)
+    engine.tick()
+    assert _statuses(engine.store, cron_id)[0] == "skipped"
+    assert engine._changes == {}
+    engine.note_file_change(record.id, "modified", watched / "b.txt")
+    assert engine._changes == {}
+
+    runs.release.set()
+    _wait_for(lambda: runs.finished == 1 and not engine._active)
+    clock.advance(10)
+    engine.tick()
+    assert len(runs.started) == 1
+    assert engine.store.get(record.id).enabled is True
+
+
+def test_a_paused_webhook_refuses_calls_and_records_them_as_skipped(
+    webhook: tuple[TriggerEngine, FakeRuns, str, str],
+) -> None:
+    engine, runs, url, token = webhook
+    engine.store.set_paused(True)
+    status, payload = _post(url, headers={"Authorization": f"Bearer {token}"})
+    assert status == 409
+    assert payload["status"] == "skipped"
+    assert "paused" in payload["error"]
+    assert runs.started == []
+    assert engine.store.events()[0].status == "skipped"
+
+    engine.store.set_paused(False)
+    assert _post(url, headers={"Authorization": f"Bearer {token}"})[0] == 202
+
+
+def test_cli_pauses_and_resumes_all_triggers(data_dir: Path, source: Path) -> None:
+    base = ("--data-dir", str(data_dir))
+    store = TriggerStore(data_dir)
+    _cron(store, source)
+    off = _cron(store, source, enabled=False)
+
+    refused = runner.invoke(app, ["rattish", "triggers", "pause", *base])
+    assert refused.exit_code == 2
+    assert "--all" in refused.output
+    assert store.pause_state().paused is False
+
+    paused = _json_cli("pause", "--all", *base)
+    assert paused["pause"]["paused"] is True
+    assert paused["changed"] is True
+    assert (paused["triggers"], paused["enabled"]) == (2, 1)
+    assert _json_cli("pause", "--all", *base)["changed"] is False
+    assert _json_cli("status", *base)["scheduler"]["paused"] is True
+
+    listed = runner.invoke(app, ["rattish", "triggers", "list", *base])
+    assert "All triggers are paused" in listed.output
+
+    resumed = runner.invoke(app, ["rattish", "triggers", "resume", "--all", *base])
+    assert resumed.exit_code == 0, resumed.output
+    assert "1 of 2 triggers on" in resumed.output
+    assert store.pause_state().paused is False
+    assert store.get(off).enabled is False
+
+
+def test_trigger_pause_api(data_dir: Path, source: Path) -> None:
+    from gofer.ui.rattish_triggers import set_trigger_pause_payload, trigger_pause_payload
+
+    _cron(TriggerStore(data_dir), source)
+    assert trigger_pause_payload(data_dir)["pause"] == {"paused": False, "pausedAt": None}
+    paused = set_trigger_pause_payload(data_dir, {"paused": True})
+    assert paused["pause"]["paused"] is True
+    assert paused["scheduler"]["paused"] is True
+    assert (paused["triggers"], paused["enabled"]) == (1, 1)
+    with pytest.raises(TriggerError, match="true or false"):
+        set_trigger_pause_payload(data_dir, {"paused": "yes"})
+    assert set_trigger_pause_payload(data_dir, {"paused": False})["pause"]["paused"] is False

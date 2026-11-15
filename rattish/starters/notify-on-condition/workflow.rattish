@@ -1,0 +1,69 @@
+rattish: 1
+
+# Starter: run a check and send a notification only when its output matches.
+# Guide: https://raticode.dev/docs/starters/notify-on-condition
+workflow:
+  name: Notify on condition
+  interface-version: 1
+  inputs:
+    check-command:
+      schema: {"description": "Shell command that checks something and prints what it found. It runs in the project folder.", "minLength": 1, "type": "string"}
+      default: df -P . | awk 'NR == 2 { gsub("%", "", $5); print ($5 >= 90 ? "ALERT: disk is " $5 "% full" : "ok: disk is " $5 "% full") }'
+    alert-pattern:
+      schema: {"description": "Regular expression. A notification goes out when the check's output matches it.", "minLength": 1, "type": "string"}
+      default: ALERT
+    title:
+      schema: {"description": "Notification title.", "minLength": 1, "type": "string"}
+      default: Raticode check needs attention
+    channel:
+      schema: {"description": "desktop shows a notification on this computer. webhook posts {\"text\": ...} to the URL saved as the ALERT_WEBHOOK_URL secret, which suits Slack and Teams incoming webhooks.", "enum": ["desktop", "webhook"], "type": "string"}
+      default: desktop
+
+node check:
+  type: bash-command
+  command: |
+    output=$(bash -c "$CHECK_COMMAND" 2>&1)
+    code=$?
+    printf '%s\n' "$output" | tail -c 4000
+    if [ "$code" -ne 0 ]; then
+      echo "The check command exited with code $code."
+    fi
+  with:
+    check-command: input.check-command
+  to:
+    - notify-desktop when node.check.output.stdout matches input.alert-pattern and input.channel == "desktop"
+    - post-webhook when node.check.output.stdout matches input.alert-pattern and input.channel == "webhook"
+    - all-clear otherwise
+
+node notify-desktop:
+  type: notification
+  channel: desktop
+  urgency: critical
+  with:
+    title: input.title
+    body: node.check.output.stdout
+  needs: check
+  finish: pass
+
+node post-webhook:
+  type: http-request
+  method: POST
+  json: {"text": "{{title}}\n{{found}}"}
+  expected-statuses: [200, 201, 202, 204]
+  with:
+    # Desktop alerts don't need this secret, so it may be missing.
+    url:
+      from: secret["ALERT_WEBHOOK_URL"]
+      default: ""
+    title: input.title
+    found: node.check.output.stdout
+  needs: check
+  finish: pass
+
+node all-clear:
+  type: bash-command
+  command: echo "No alert. The output didn't match $ALERT_PATTERN."
+  with:
+    alert-pattern: input.alert-pattern
+  needs: check
+  finish: pass

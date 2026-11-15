@@ -360,3 +360,58 @@ def start_background_refresh(data_dir: Path | None = None) -> Callable[[], None]
                 del _background[key]
 
     return stopper
+
+
+def window_used_percent(window: dict[str, Any]) -> float | None:
+    """How full one stored rate-limit window is, 0 to 100, or None when it can't be told."""
+    if window.get("unlimited") is True:
+        return None
+    if window.get("status") == "rejected":
+        return 100.0
+
+    def number(key: str) -> float | None:
+        value = window.get(key)
+        if isinstance(value, int | float) and not isinstance(value, bool) and value >= 0:
+            return float(value)
+        return None
+
+    used, limit, remaining = number("used"), number("limit"), number("remaining_percent")
+    if window.get("unit") == "percent" and used is not None:
+        return min(100.0, used)
+    if remaining is not None:
+        return max(0.0, 100.0 - min(100.0, remaining))
+    if used is not None and limit:
+        return min(100.0, 100.0 * used / limit)
+    return None
+
+
+def stored_windows(provider: str, data_dir: Path | None = None) -> list[dict[str, Any]]:
+    """The provider's rate-limit windows Raticode last stored, with how full each is.
+
+    Reads only what is saved: the last polled reading and the windows recent turns reported.
+    A window whose reset time has passed is left out. Each item has ``label`` and ``percent``.
+    """
+    windows: list[dict[str, Any]] = []
+    with usage_db(data_dir) as db:
+        snapshot = db.execute("SELECT payload FROM usage_snapshots WHERE id=?", (provider,))
+        row = snapshot.fetchone()
+        if row is not None:
+            windows.extend(json.loads(row["payload"]).get("windows") or [])
+        for limit in db.execute(
+            "SELECT windows FROM usage_rate_limits WHERE provider=? AND profile=''", (provider,)
+        ):
+            windows.extend(json.loads(limit["windows"]))
+    found: dict[str, dict[str, Any]] = {}
+    for window in windows:
+        if not isinstance(window, dict):
+            continue
+        if window.get("resets_at") and _age(window.get("resets_at")) >= 0:
+            continue
+        percent = window_used_percent(window)
+        if percent is None:
+            continue
+        label = str(window.get("label") or window.get("id") or "limit")
+        key = str(window.get("id") or label)
+        if key not in found or percent > found[key]["percent"]:
+            found[key] = {"id": key, "label": label, "percent": percent}
+    return sorted(found.values(), key=lambda w: -w["percent"])

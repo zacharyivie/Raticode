@@ -15,6 +15,15 @@ export const FULL_SCAN_MS = 30_000;
 
 const latestRunOf = workflow => JSON.stringify(workflow.latestRun ?? null);
 
+// The workflows Studio and run monitoring use from a /workflows payload. When the
+// backend authors Rattish, anything else it lists (old TOML files, or a project file
+// such as pyproject.toml it mistook for one) is not a workflow to show or poll.
+export function listedRattishWorkflows(payload) {
+  const workflows = payload?.workflows ?? [];
+  if (payload?.authoringLanguage !== "rattish") return workflows;
+  return workflows.filter(workflow => workflow.sourceFormat === "rattish");
+}
+
 // Which workflows a poll reads: all of them on a full scan; otherwise ones with
 // an active or lost run, ones with a queued run, and ones whose latest run in the
 // workflow list changed since the last poll (including workflows new to it).
@@ -59,14 +68,15 @@ export function useWorkflowRunRegistry(workflows) {
       const failures = [];
       const known = new Map(knownRef.current.filter(workflow => workflow.sourceFormat !== "project").map(workflow => [workflow.id, workflow]));
       const [discovered, queue] = await Promise.allSettled([read("/workflows"), read("/queue")]);
+      const discoveredWorkflows = discovered.status === "fulfilled" ? listedRattishWorkflows(discovered.value) : [];
       if (discovered.status === "fulfilled") {
-        for (const workflow of discovered.value.workflows || []) known.set(workflow.id, { ...known.get(workflow.id), ...workflow });
+        for (const workflow of discoveredWorkflows) known.set(workflow.id, { ...known.get(workflow.id), ...workflow });
       } else failures.push(discovered.reason.message);
       for (const run of recordsRef.current) {
         if (!known.has(run.workflowId)) known.set(run.workflowId, { id: run.workflowId, name: run.workflowName, projectRoot: run.projectPath, sourcePath: run.sourcePath });
       }
       const latest = discovered.status === "fulfilled"
-        ? new Map((discovered.value.workflows || []).map(workflow => [workflow.id, latestRunOf(workflow)]))
+        ? new Map(discoveredWorkflows.map(workflow => [workflow.id, latestRunOf(workflow)]))
         : null;
       const startedAt = Date.now();
       const full = !latest || startedAt - lastFullScan.current >= FULL_SCAN_MS;

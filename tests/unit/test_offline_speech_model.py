@@ -344,8 +344,14 @@ def test_a_failed_download_shows_its_reason_until_it_is_tried_again(
 
     monkeypatch.setattr(chat_media, "urlopen", lambda request, **kw: FakeResponse(small_model))
     chat_media.start_offline_model_download(data_dir=tmp_path)
-    wait_for(lambda: chat_media.offline_model_status(data_dir=tmp_path)["installed"])
-    assert "download" not in chat_media.offline_model_status(data_dir=tmp_path)
+    # The model folder appears just before the job clears its "installing" state, so
+    # wait for both rather than racing the background thread on a busy machine.
+    wait_for(
+        lambda: (
+            (status := chat_media.offline_model_status(data_dir=tmp_path))["installed"]
+            and "download" not in status
+        )
+    )
 
 
 def test_dictation_never_downloads_the_model_itself(monkeypatch, tmp_path, small_model) -> None:

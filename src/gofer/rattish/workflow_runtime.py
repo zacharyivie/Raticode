@@ -7,7 +7,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -15,8 +15,17 @@ from typing import Any, Literal
 import anyio
 
 from gofer.core.approvals import NotificationAdapter
+from gofer.core.usage_context import observe_usage
 from gofer.rattish.ir_validation import validate_ir_invariants
+from gofer.rattish.provider_fallback import (
+    choice_summary,
+    fallback_reason,
+    provider_choices,
+    switch_message,
+)
 from gofer.rattish.provider_runtime import default_provider_subscriptions
+from gofer.rattish.result_cache import ResultCache
+from gofer.rattish.run_usage import RunUsageMeter
 from gofer.rattish.runtime import (
     _MISSING,
     DEFAULT_NODE_HANDLERS,
@@ -48,6 +57,8 @@ class NodeRunRecord:
     result: NodeExecutionResult
     # The run this result was copied from when a resumed run reused it.
     reused_from: str | None = None
+    # Tokens and cost of the provider calls this activation made, when it made any.
+    usage: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,8 +119,11 @@ class _WorkflowScheduler:
         on_node_event: NodeEventCallback | None,
         replay: Sequence[Mapping[str, Any]] = (),
         replay_source: str | None = None,
+        usage: RunUsageMeter | None = None,
+        result_cache: ResultCache | None = None,
     ) -> None:
         self.ir = ir
+        self.result_cache = result_cache
         self.nodes = {node["id"]: node for node in ir["nodes"]}
         self.workflow_inputs = workflow_inputs
         self.trigger_events = trigger_events
@@ -122,6 +136,7 @@ class _WorkflowScheduler:
         self.agent_run_memory: dict[str, list[dict[str, str]]] = {}
         self.lineage_id = "root"
         self.run_id = uuid.uuid4().hex
+        self._usage = usage
         self.latest_outputs: dict[str, Any] = {}
         self.latest_statuses: dict[str, str] = {}
         self.latest_errors: dict[str, dict[str, Any]] = {}
@@ -163,7 +178,25 @@ class _WorkflowScheduler:
         self.reused = 0
         self.reusable = sum(1 for prior in replay if prior["outcome"] in _REUSABLE)
 
+    @property
+    def usage(self) -> RunUsageMeter:
+        if self._usage is None:
+            self._usage = RunUsageMeter.for_ir(self.ir, self.run_id)
+        return self._usage
+
+    def _check_usage_limit(self) -> None:
+        """End the run with a budget error once a usage limit is crossed.
+
+        It replaces a node's own failure, since crossing the limit is why the run ends.
+        """
+        reached = self.usage.limit_reached()
+        if reached is not None:
+            self.error = RuntimeErrorInfo(
+                "budget", reached["code"], reached["message"], reached["details"]
+            )
+
     async def run(self) -> WorkflowExecutionResult:
+        self.usage  # noqa: B018 - created before any node runs, inside the caller's context
         completion_capacity = sum(
             node["execution"]["max_concurrency"] for node in self.nodes.values()
         )
@@ -195,6 +228,7 @@ class _WorkflowScheduler:
                         break
                 completion = await receive.receive()
                 self._process_completion(completion)
+                self._check_usage_limit()
                 if self.error is not None:
                     task_group.cancel_scope.cancel()
                     break
@@ -316,6 +350,9 @@ class _WorkflowScheduler:
             )
             if error
             else None,
+            provider=prior.get("provider"),
+            fallbacks=tuple(prior.get("fallbacks") or ()),
+            cached_at=prior.get("cached_at"),
         )
         self.reused += 1
         self._process_completion(
@@ -377,6 +414,7 @@ class _WorkflowScheduler:
                     finished_at,
                     round((time.monotonic() - started_clock) * 1000),
                     result,
+                    usage=self.usage.activation_usage(node_id, run_number),
                 ),
             )
         )
@@ -390,40 +428,143 @@ class _WorkflowScheduler:
         node_statuses: Mapping[str, str],
         node_errors: Mapping[str, Mapping[str, Any]],
     ) -> NodeExecutionResult:
+        """Run a node's attempts, moving down its fallback providers when it has any.
+
+        Each provider gets the node's full retry-count. The next fallback entry is used
+        only when the current one's last attempt failed with a provider availability
+        error and the run's usage limits still allow more calls.
+        """
+        choices = provider_choices(node)
+        if len(choices) < 2:
+            result, _ = await self._run_retries(
+                node, activation, run_number, node_outputs, node_statuses, node_errors, None, 0
+            )
+            return replace(result, provider=choice_summary(choices[0])) if choices else result
+        fallbacks: list[dict[str, Any]] = []
+        attempts_made = 0
+        index = 0
+        while True:
+            choice = choices[index]
+            result, used = await self._run_retries(
+                node,
+                activation,
+                run_number,
+                node_outputs,
+                node_statuses,
+                node_errors,
+                choice if index else None,
+                attempts_made,
+            )
+            attempts_made += used
+            reason = fallback_reason(result.error) if result.outcome != "success" else None
+            if reason is None or index + 1 == len(choices) or self.usage.stop_requested():
+                return replace(result, provider=choice_summary(choice), fallbacks=tuple(fallbacks))
+            index += 1
+            switch = {
+                "from": choice_summary(choice),
+                "to": choice_summary(choices[index]),
+                "reason": reason,
+                "message": result.error.message if result.error is not None else "",
+            }
+            fallbacks.append(switch)
+            self._emit_node_event(
+                "node_fell_back",
+                node["id"],
+                activation,
+                run_number,
+                attempt=attempts_made,
+                message=switch_message(switch),
+                provider=switch["to"],
+                from_provider=switch["from"],
+                fallback_reason=reason,
+            )
+
+    async def _run_retries(
+        self,
+        node: Mapping[str, Any],
+        activation: _Activation,
+        run_number: int,
+        node_outputs: Mapping[str, Any],
+        node_statuses: Mapping[str, str],
+        node_errors: Mapping[str, Mapping[str, Any]],
+        provider_choice: Mapping[str, Any] | None,
+        attempts_before: int,
+    ) -> tuple[NodeExecutionResult, int]:
+        """Run one provider's attempts: the first try plus the node's retry-count.
+
+        Returns the last result and how many attempts ran.
+        """
+        started: dict[str, Any] = (
+            {"provider": choice_summary(provider_choice)} if provider_choice is not None else {}
+        )
         for attempt in range(node["execution"]["retry_count"] + 1):
             self._emit_node_event(
-                "node_started", node["id"], activation, run_number, attempt=attempt + 1
-            )
-            result = await execute_node(
-                self.ir,
+                "node_started",
                 node["id"],
-                workflow_inputs=self.workflow_inputs,
-                trigger_events=self.trigger_events,
-                node_outputs=node_outputs,
-                node_statuses=node_statuses,
-                node_errors=node_errors,
-                handlers=self.handlers,
-                trash_root=self.trash_root,
-                subscriptions=self.subscriptions,
-                data_dir=self.data_dir,
-                agent_run_memory=self.agent_run_memory,
-                notification_adapter=self.notification_adapter,
-                run_id=self.run_id,
+                activation,
+                run_number,
+                attempt=attempts_before + attempt + 1,
+                **started,
             )
+            with observe_usage(self.usage.observer(node["id"], run_number)):
+                result = await self._execute_node(
+                    node, node_outputs, node_statuses, node_errors, provider_choice
+                )
+            if result.cached_at is not None:
+                # No provider call was made: the activation records 0 tokens and $0.
+                self.usage.add_cached(node["id"], run_number)
             if result.outcome == "success" or attempt == node["execution"]["retry_count"]:
-                return result
+                return result, attempt + 1
+            details = result.error.details if result.error is not None else {}
+            # A handler marks errors another attempt can't fix, such as a rejected key.
+            if details.get("retryable") is False:
+                return result, attempt + 1
+            # Another attempt would make more calls after a usage limit was crossed.
+            if self.usage.stop_requested():
+                return result, attempt + 1
             self._emit_node_event(
                 "node_retried",
                 node["id"],
                 activation,
                 run_number,
-                attempt=attempt + 1,
+                attempt=attempts_before + attempt + 1,
                 message=result.error.message if result.error else "Node failed; retrying.",
             )
             delay_ms = node["execution"]["retry_delay_ms"]
+            # A rate limit names how long to wait; waiting less would only fail again.
+            retry_after_ms = details.get("retry_after_ms")
+            if isinstance(retry_after_ms, int) and retry_after_ms > delay_ms:
+                delay_ms = retry_after_ms
             if delay_ms:
                 await anyio.sleep(delay_ms / 1000)
         raise AssertionError("An activation must execute at least one attempt.")
+
+    async def _execute_node(
+        self,
+        node: Mapping[str, Any],
+        node_outputs: Mapping[str, Any],
+        node_statuses: Mapping[str, str],
+        node_errors: Mapping[str, Mapping[str, Any]],
+        provider_choice: Mapping[str, Any] | None = None,
+    ) -> NodeExecutionResult:
+        return await execute_node(
+            self.ir,
+            node["id"],
+            workflow_inputs=self.workflow_inputs,
+            trigger_events=self.trigger_events,
+            node_outputs=node_outputs,
+            node_statuses=node_statuses,
+            node_errors=node_errors,
+            handlers=self.handlers,
+            trash_root=self.trash_root,
+            subscriptions=self.subscriptions,
+            data_dir=self.data_dir,
+            agent_run_memory=self.agent_run_memory,
+            notification_adapter=self.notification_adapter,
+            run_id=self.run_id,
+            provider_choice=provider_choice,
+            result_cache=self.result_cache,
+        )
 
     def _emit_node_event(
         self,
@@ -469,6 +610,7 @@ class _WorkflowScheduler:
             outcome=result.outcome,
             message=result.error.message if result.error else "",
             **({"reused": True} if record.reused_from else {}),
+            **({"cached": True} if result.cached_at is not None else {}),
         )
         if result.outcome == "success":
             self.latest_outputs[node_id] = result.output
@@ -828,11 +970,16 @@ async def execute_workflow(
     on_node_event: NodeEventCallback | None = None,
     replay: Sequence[Mapping[str, Any]] = (),
     replay_source: str | None = None,
+    usage_meter: RunUsageMeter | None = None,
+    result_cache: ResultCache | None = None,
 ) -> WorkflowExecutionResult:
     """Execute one validated Rattish IR workflow using routed activation semantics.
 
     ``replay`` holds an earlier run's saved node records, in their saved order,
-    for a resumed run; ``replay_source`` is that run's ID.
+    for a resumed run; ``replay_source`` is that run's ID. ``usage_meter`` counts the
+    run's provider calls and enforces its usage limits; one is made from the IR when
+    it is omitted. ``result_cache`` lets nodes with ``cache: DURATION`` reuse saved
+    answers; without it (as in test sets) every node runs.
     """
     _require_validated_ir(ir)
     validate_ir_invariants(ir)
@@ -862,6 +1009,8 @@ async def execute_workflow(
         on_node_event,
         replay,
         replay_source,
+        usage_meter,
+        result_cache,
     )
     if run_id is not None:
         scheduler.run_id = run_id

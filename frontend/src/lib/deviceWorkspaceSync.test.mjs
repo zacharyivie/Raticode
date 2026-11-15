@@ -155,6 +155,35 @@ test("renderer only acknowledges phone deletion after local archive and deletion
   } finally { stop?.(); globalThis.window = previousWindow; globalThis.fetch = previousFetch; }
 });
 
+test("Delete permanently on the phone asks the desktop to purge the archive copy; plain delete does not", async () => {
+  const { startDeviceWorkspaceSync } = await import("./deviceWorkspaceSync.js");
+  const previousWindow = globalThis.window, previousFetch = globalThis.fetch;
+  const repository = { all: async () => [], save: async () => {} };
+  try {
+    for (const purge of [true, false]) {
+      const meta = { id: `phone-${purge}`, title: "Shared", provider: "codex", model: "a", projectRoot: "/project" };
+      const data = new Map([["gofer-flow-chat-threads", JSON.stringify([{ id: meta.id }])], [`gofer-flow-chat-thread-meta:${meta.id}`, JSON.stringify(meta)]]);
+      const storage = { getItem: key => data.get(key) ?? null, setItem: (key, value) => data.set(key, value) };
+      const host = new EventTarget();
+      Object.assign(host, { localStorage: storage, goferDesktop: { workspace: { pathGrantForApi: () => "grant" } } });
+      globalThis.window = host;
+      globalThis.fetch = async (_url, options = {}) => {
+        if (!options.body) return { ok: true, json: async () => ({ workspace_peers: ["paired"] }) };
+        const body = JSON.parse(options.body);
+        return { ok: true, json: async () => body.action === "workspace_poll" ? { threads: [{ thread_id: "wire", revision: 2, metadata: meta, messages: [], delete_requested: true, ...(purge ? { purge_requested: true } : {}) }] } : {} };
+      };
+      const calls = [];
+      const deleted = new Promise(resolve => host.addEventListener("gofer:device-thread-deleted", resolve, { once: true }));
+      const stop = startDeviceWorkspaceSync({ storage, repository, interval: 60000, deleteThread: async (id, options) => {
+        calls.push([id, options]); data.delete(`gofer-flow-chat-thread-meta:${id}`); data.set("gofer-flow-chat-threads", "[]");
+      } });
+      await deleted;
+      stop();
+      assert.deepEqual(calls, [[meta.id, { purge }]]);
+    }
+  } finally { globalThis.window = previousWindow; globalThis.fetch = previousFetch; }
+});
+
 test("phone sync bumps only new user messages and completion, not thoughts or replay", async () => {
   const { startDeviceWorkspaceSync } = await import("./deviceWorkspaceSync.js");
   const previousWindow = globalThis.window, previousFetch = globalThis.fetch;

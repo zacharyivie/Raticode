@@ -20,6 +20,7 @@ from typing import Any
 
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS, ResourceLimits
 from gofer.rattish.workspaces import (
+    DEFAULT_RATICODE_IGNORE,
     SAFE_FILE_MODE_MASK,
     WORKFLOW_ENTRYPOINT,
     WORKFLOW_IGNORE,
@@ -229,9 +230,27 @@ def _portable_workspace_files(workflow: RegisteredWorkflow) -> list[tuple[Path, 
         if not ignore_path.exists():
             ignore_path = workflow.workflow_root / ignore_name
     patterns = _read_ignore_patterns(ignore_path)
+    nested: set[Path] = set()
+    if not workflow.managed:
+        # A workflow found elsewhere in a project shares its folder with project files.
+        if workflow.workflow_root.resolve() == workflow.project_root.resolve():
+            raise RattishBundleError(
+                "Move this workflow into its own folder first: it sits at the top of its "
+                "project, so the bundle would carry the whole project."
+            )
+        if not ignore_path.is_file():
+            patterns = _parse_ignore_patterns(DEFAULT_RATICODE_IGNORE.splitlines())
+        # Folders below it that hold their own workflow are separate workflows.
+        nested = {
+            entry.parent
+            for entry in workflow.workflow_root.rglob(WORKFLOW_ENTRYPOINT)
+            if entry.parent != workflow.workflow_root
+        }
     files: list[tuple[Path, str]] = []
     for path in sorted(workflow.workflow_root.rglob("*")):
         relative = path.relative_to(workflow.workflow_root).as_posix()
+        if nested and any(path == folder or folder in path.parents for folder in nested):
+            continue
         if relative in LEGACY_WORKFLOW_IGNORES and relative != ignore_path.name:
             continue
         if _is_ignored(relative, path.is_dir(), patterns):
@@ -255,6 +274,10 @@ def _read_ignore_patterns(path: Path) -> tuple[tuple[str, bool], ...]:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError) as exc:
         raise RattishBundleError(f"Could not read {path}: {exc}") from exc
+    return _parse_ignore_patterns(lines)
+
+
+def _parse_ignore_patterns(lines: Iterable[str]) -> tuple[tuple[str, bool], ...]:
     patterns: list[tuple[str, bool]] = []
     for raw in lines:
         line = raw.rstrip()

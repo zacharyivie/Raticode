@@ -1,6 +1,6 @@
 # Raticode
 
-**Website: [raticode.dev](https://raticode.dev/)** · [Download](https://raticode.dev/#download) · [Docs](https://raticode.dev/docs/) · [Releases](https://github.com/zacharyivie/Raticode/releases)
+**Website: [raticode.dev](https://raticode.dev/)** · [Download](https://raticode.dev/#download) · [Docs](https://raticode.dev/docs/) · [Releases](https://github.com/zacharyivie/Raticode/releases) · Support: [support@raticode.dev](mailto:support@raticode.dev)
 
 Raticode is a desktop studio and Python CLI for building and running AI coding workflows. Workflows use the Rattish language in `workflow.rattish` and connect shell commands, scripts, HTTP requests, and coding agents through explicit routes, joins, branches, and cycles.
 
@@ -988,13 +988,15 @@ Run checks after code changes:
 ```bash
 ruff check src tests --fix
 mypy src tests
-python -m pytest
+python -m pytest -n 8 --dist worksteal   # or plain `python -m pytest` for one process
 cd frontend && npm test && npm run check:build
 ```
 
 Frontend checks are split by runtime:
 
-- `npm test` runs the fast Node-based React/helper tests.
+- `npm test` runs the Node-based React/helper tests in one process, with the
+  slow real-browser and git test files in their own processes beside it.
+  `npm run test:serial` runs them all in one process.
 - `npm run check:build` verifies the production Vite bundle.
 - `npm run test:browser` builds the Vite app, serves the built files with
   mocked API responses, and drives the workflow studio in Electron/Chromium.

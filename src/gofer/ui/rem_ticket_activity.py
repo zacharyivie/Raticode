@@ -282,7 +282,7 @@ def block_reason(run: dict[str, Any] | None, at: datetime | None = None) -> tupl
             return (
                 "Paused for your work",
                 "Paused so your own work could run first. Rem resumes it in the same thread "
-                "once your work is done and you've been away 15 minutes.",
+                "as soon as a thread is free again.",
                 "",
             )
         return (
@@ -541,11 +541,13 @@ def organization_transition(
     }
 
 
-# An organization ticket blocked with one of these waits for the company to run again or for
-# its working hours; Raticode puts it back in To do by itself then.
+# An organization ticket blocked with one of these waits for the company to run again, for
+# its working hours, or for its next automatic try after a temporary provider problem;
+# Raticode puts it back in To do by itself then (organization_recovery.waiting_ready).
 PAUSED_REASON = "Waiting for the organization to start again"
 HOURS_REASON = "Waiting for working hours"
-WAITING_REASONS = frozenset({PAUSED_REASON, HOURS_REASON})
+RETRY_REASON = "Waiting to try again after a temporary provider problem"
+WAITING_REASONS = frozenset({PAUSED_REASON, HOURS_REASON, RETRY_REASON})
 
 
 def _latest_review(task: dict[str, Any]) -> str:

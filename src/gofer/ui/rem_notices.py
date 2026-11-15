@@ -2,14 +2,18 @@
 
 The phone reads the same alerts through ``rem.notices``, filtered to the requests it
 sent. Every request made through the desktop API is the user's own, so this read keeps
-the task updates that need the user or finished, plus self-work and organization alerts.
+the task updates that need the user or finished, plus self-work, organization and
+workflow alerts. Workflow alerts are the notices notification nodes with
+``channel: phone`` left in the computer's alert store (``gofer.core.phone_alerts``).
 """
 
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
 
+from gofer.core.phone_alerts import PhoneAlertStore
 from gofer.devices.desktop_control import (
     REM_NOTICE_FILTERS,
     _notice_when,
@@ -17,8 +21,10 @@ from gofer.devices.desktop_control import (
     _task_reason,
 )
 
-# Message position, self-work report position, then organization event position or "-".
-_CURSOR = re.compile(r"c1\.([0-9]{1,16})\.([0-9]{1,16})\.([0-9]{1,16}|-)")
+# Message position, self-work report position, organization event position or "-", then
+# the workflow alert position. A cursor from before workflow alerts has no last part; the
+# workflow position then starts from now.
+_CURSOR = re.compile(r"c1\.([0-9]{1,16})\.([0-9]{1,16})\.([0-9]{1,16}|-)(?:\.([0-9]{1,16}))?")
 NOTICES = 200
 MESSAGE_PAGE = 300
 
@@ -79,7 +85,7 @@ def parse_include(value: str) -> list[str]:
         REM_NOTICE_FILTERS
     )
     if any(item not in REM_NOTICE_FILTERS for item in include) or len(set(include)) != len(include):
-        raise ValueError("Choose alerts from needs_you, finished and proposals")
+        raise ValueError("Choose alerts from needs_you, finished, proposals and workflow")
     return include
 
 
@@ -96,13 +102,20 @@ def read_notices(rem: Any, organizations: Any, cursor: str, include: list[str]) 
         after: int | None = int(match[1])
         report: int | None = int(match[2])
         organization: int | None = None if match[3] == "-" else int(match[3])
+        workflow: int | None = None if match[4] is None else int(match[4])
     else:
-        after = report = organization = None
+        after = report = organization = workflow = None
     stored = rem.store.messages_after(after or 0, 0 if after is None else 300)
     latest = int(stored["latest"])
     reports = rem.self_work.alerts_after(report)
     manager = organizations if organizations is not None and organizations.enabled else None
     orgs = manager.alerts_after(organization) if manager is not None else None
+    data_dir = getattr(rem, "data_dir", None)
+    workflows: dict[str, Any] = (
+        PhoneAlertStore(Path(data_dir)).after(workflow)
+        if data_dir
+        else {"last": 0, "more": False, "dropped": 0, "alerts": []}
+    )
     found: list[dict[str, Any]] = []
     last = latest if after is None or after > latest else int(stored["last"])
     if after is not None and after <= latest:
@@ -128,15 +141,20 @@ def read_notices(rem: Any, organizations: Any, cursor: str, include: list[str]) 
                     "thread_id": str(work.get("thread_id") or ""),
                 }
             )
-    alerts = [*reports["alerts"], *(orgs["alerts"] if orgs else [])]
+    alerts = [*reports["alerts"], *(orgs["alerts"] if orgs else []), *workflows["alerts"]]
     found.extend(_source_notice(a) for a in alerts if a["reason"] in include)
     found.sort(key=_notice_when)
     org_last = "-" if orgs is None else str(orgs["last"])
     return {
-        "cursor": f"c1.{last}.{reports['last']}.{org_last}",
+        "cursor": f"c1.{last}.{reports['last']}.{org_last}.{workflows['last']}",
         "include": include,
         "notices": found[-NOTICES:],
         "skipped": max(0, len(found) - NOTICES),
+        # Workflow notices removed from the computer's store before this read reached them.
+        "dropped": workflows.get("dropped", 0) if "workflow" in include else 0,
         # More is stored after this cursor; read again at once.
-        "more": last < latest or reports["more"] or bool(orgs and orgs["more"]),
+        "more": last < latest
+        or reports["more"]
+        or bool(orgs and orgs["more"])
+        or workflows["more"],
     }

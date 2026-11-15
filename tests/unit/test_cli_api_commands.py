@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import threading
+import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
@@ -203,8 +204,17 @@ def test_workflow_list_show_run_wait_runs_logs_and_events(backend) -> None:
     run_id = run_result["id"]
     runs = ok("rattish", "runs", workflow_id)
     assert [r["id"] for r in runs["runs"]] == [run_id]
+    assert runs["runs"][0]["usage"]["calls"] == 0
     log = ok("rattish", "logs", workflow_id, run_id)
     assert log["runId"] == run_id and log["status"] == "success"
+    assert log["usage"]["summary"] == "No model calls"
+    assert log["usage"]["limits"] == {"maxTokens": None, "maxCostUsd": None}
+    _, runs_text, _ = run("rattish", "runs", workflow_id, "--output", "text", json_output=False)
+    assert "TOKENS" in runs_text and "EST. COST" in runs_text
+    _, log_text, _ = run(
+        "rattish", "logs", workflow_id, run_id, "--output", "text", json_output=False
+    )
+    assert log_text.startswith("Usage: No model calls")
     assert ok("rattish", "logs", workflow_id)["runId"] == run_id
     events = ok("rattish", "events", workflow_id, run_id)
     assert any(e["type"] == "node_completed" for e in events["runEvents"])
@@ -241,6 +251,64 @@ def test_run_waiting_on_an_approval_exits_7_until_approved(backend) -> None:
     finished = ok("rattish", "wait", workflow_id, run_id, "--timeout", "60", "--interval", "0.2")
     assert finished["status"] == "success"
     assert ok("rattish", "approvals", workflow_id, "--pending")["approvals"] == []
+
+
+def test_runs_all_lists_every_workflow_with_how_each_run_started(backend, monkeypatch) -> None:
+    nightly = backend.workflow(ECHO)
+    other = backend.workflow(ECHO.replace("Nightly", "Weekly"), "Weekly")
+    manual = ok("rattish", "start", nightly, "--wait", "--timeout", "60")["id"]
+    # Rem's sessions can't start backend runs; they run a workflow in their own process.
+    from gofer.rattish.workspaces import find_registered_workflow
+
+    source = find_registered_workflow(other, registry_dir=backend.data).entrypoint
+    monkeypatch.setenv("RATICODE_AGENT_SESSION", "1")
+    result = CliRunner().invoke(
+        app, ["rattish", "run", str(source), "--data-dir", str(backend.data), "--format", "json"]
+    )
+    monkeypatch.delenv("RATICODE_AGENT_SESSION")
+    assert result.exit_code == 0, result.output
+    by_rem = json.loads(result.stdout)["run"]["run_id"]
+
+    listed = ok("rattish", "runs", "--all", "--since", "1h")
+    assert [(r["id"], r["workflowName"], r["startedBy"]) for r in listed["runs"]] == [
+        (by_rem, "Weekly", "rem"),
+        (manual, "Nightly", "manual"),
+    ]
+    assert listed["totals"]["summary"] == "2 workflow runs: 2 passed"
+    assert {w["id"] for w in listed["workflows"]} == {nightly, other}
+    only = ok("rattish", "runs", "--all", "--workflow", other, "--status", "success")
+    assert [r["id"] for r in only["runs"]] == [by_rem]
+    assert ok("rattish", "runs", "--all", "--status", "error")["runs"] == []
+
+    code, text, stderr = run("rattish", "runs", "--all", "--output", "text", json_output=False)
+    assert code == 0 and not stderr
+    header, *_ = text.splitlines()
+    assert header.split() == [
+        "STARTED",
+        "WORKFLOW",
+        "HOW",
+        "STATUS",
+        "DURATION",
+        "TOKENS",
+        "EST.",
+        "COST",
+        "RUN",
+    ]
+    assert "Weekly" in text and " Rem " in text
+    assert text.splitlines()[-1] == "2 workflow runs: 2 passed"
+
+    # The run list behind the app's view says the same, and bad filters are refused.
+    request = urllib.request.Request(
+        backend.url + "/api/rattish/runs?since=yesterday",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    with pytest.raises(urllib.error.HTTPError) as refused:
+        urllib.request.urlopen(request, timeout=10)
+    assert refused.value.code == 400
+    assert run("rattish", "runs")[0] == 2
+    assert run("rattish", "runs", nightly, "--all")[0] == 2
+    assert run("rattish", "runs", nightly, "--since", "1h")[0] == 2
+    assert run("rattish", "runs", "--all", "--since", "soon")[0] != 0
 
 
 def test_unknown_workflow_and_bad_input_exit_codes(backend) -> None:

@@ -27,6 +27,8 @@
     "name": "Build",
     "interface_version": null,
     "max_runs": 50,
+    "max_tokens": null,
+    "max_cost_usd": null,
     "timeout_ms": 7200000,
     "inputs": [],
     "outputs": []

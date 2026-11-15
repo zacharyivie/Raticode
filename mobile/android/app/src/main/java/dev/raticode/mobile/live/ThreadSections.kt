@@ -99,8 +99,17 @@ data class ThreadAction(val action: String, val label: String, val danger: Boole
  * section header selects every thread in that section.
  */
 object ThreadSelection {
-    /** thread.manage actions; `read` and `unread` need a desktop whose overview reports `thread_read`. */
-    val MANAGE_ACTIONS = setOf("pin", "unpin", "archive", "restore", "delete", "read", "unread")
+    /**
+     * thread.manage actions; `read` and `unread` need a desktop whose overview reports `thread_read`,
+     * and `delete_permanently` one that reports `thread_purge`.
+     */
+    val MANAGE_ACTIONS = setOf("pin", "unpin", "archive", "restore", "delete", "delete_permanently", "read", "unread")
+
+    /** Same wording as the desktop's Delete permanently confirmation. */
+    fun permanentDeleteMessage(title: String): String =
+        "Delete \"${title.ifBlank { "Untitled" }}\" permanently? This removes the thread from desktop, this phone and the desktop's " +
+            "conversation archive: its snapshot, journal and the attachments no other thread uses. It can't remove copies " +
+            "already in Git commits or other backups. This cannot be undone."
 
     fun toggle(selected: Set<String>, id: String): Set<String> = if (id in selected) selected - id else selected + id
 

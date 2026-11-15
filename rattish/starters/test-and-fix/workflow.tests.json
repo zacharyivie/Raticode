@@ -1,0 +1,29 @@
+{
+  "testSetVersion": 1,
+  "cases": [
+    {
+      "id": "already-passing",
+      "name": "Stops at once when the tests pass",
+      "inputs": {"test-command": "echo 'all 12 tests passed'"},
+      "checks": [
+        {"type": "text", "label": "Reports passing tests", "target": "nodes.done.stdout", "contains": "The tests pass."},
+        {"type": "json", "label": "Calls no model", "target": "nodes.fix", "exists": false}
+      ]
+    },
+    {
+      "id": "fixes-a-typo",
+      "name": "Fixes a failing script and tests again",
+      "inputs": {
+        "prepare-command": "rm -rf .raticode/test-and-fix/logs/test-scratch && mkdir -p .raticode/test-and-fix/logs/test-scratch && cp -R .raticode/test-and-fix/fixtures/greeting .raticode/test-and-fix/logs/test-scratch/",
+        "test-command": "sh .raticode/test-and-fix/logs/test-scratch/greeting/test-greet.sh",
+        "instructions": "Only edit .raticode/test-and-fix/logs/test-scratch/greeting/greet.sh. Don't change test-greet.sh or any other file."
+      },
+      "checks": [
+        {"type": "text", "label": "The tests pass in the end", "target": "nodes.run-tests.stdout", "contains": "::tests:: passed"},
+        {"type": "command", "label": "greet.sh is fixed", "command": "sh .raticode/test-and-fix/logs/test-scratch/greeting/greet.sh Ada | grep -qx 'Hello, Ada!'"},
+        {"type": "command", "label": "The test file is unchanged", "command": "cmp -s .raticode/test-and-fix/fixtures/greeting/test-greet.sh .raticode/test-and-fix/logs/test-scratch/greeting/test-greet.sh"},
+        {"type": "judge", "label": "Explains the fix", "target": "nodes.fix", "criteria": "Says it corrected the misspelled greeting (Helo to Hello) in greet.sh."}
+      ]
+    }
+  ]
+}

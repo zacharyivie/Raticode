@@ -1,4 +1,4 @@
-// The media bar through a real tab: a <webview> with Raticode's own preload,
+// The media bar through a real tab: a Raticode (chromium) view with Raticode's own preload,
 // the real browser sessions and bridge, and the real bar component drawn with
 // the studio's styles. Small enough to need no app build: esbuild and Tailwind
 // compile only the bar. Runs on a hidden display; the page plays silence.
@@ -10,7 +10,7 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
-const { BrowserWindow, Menu, app, clipboard, dialog, ipcMain, nativeImage, session, shell, webContents } = require("electron");
+const { BrowserWindow, Menu, WebContentsView, app, clipboard, dialog, ipcMain, nativeImage, session, shell, webContents } = require("electron");
 const { createBrowserSessions } = require("../browser-sessions.cjs");
 const { createBrowserStore } = require("../browser-store.cjs");
 
@@ -89,13 +89,13 @@ async function run() {
     <script>
       window.openTab = async (url) => {
         const state = await window.goferBrowser.create({ url, clientId: "tab" });
-        const element = document.createElement("webview");
-        element.setAttribute("partition", state.partition);
-        element.setAttribute("preload", window.goferBrowser.preloadPath);
-        element.setAttribute("src", state.src);
+        // The page is a view the main process made; this slot says where it shows.
+        const element = document.createElement("div");
         element.style.cssText = "position:absolute;inset:0";
-        element.addEventListener("dom-ready", () => void window.goferBrowser.adopt(state.id, element.getWebContentsId(), "tab"), { once: true });
         document.getElementById("view").append(element);
+        await window.goferBrowser.adopt(state.id, -1, "tab");
+        window.showTab = (shown) => { const box = element.getBoundingClientRect(); return window.goferBrowser.place(state.id, { x: box.left, y: box.top, width: box.width, height: box.height, visible: shown }); };
+        await window.showTab(true);
         window.tab = { id: state.id, element };
         return state.id;
       };
@@ -110,6 +110,7 @@ async function run() {
   let window = null;
   const browsers = createBrowserSessions({
     app, Menu, clipboard, dialog, shell, session, webContents, nativeImage,
+    WebContentsView, preloadPath: path.join(__dirname, "..", "browser-preload.cjs"),
     getMainWindow: () => window,
     resolvePath: (target) => target,
     store: createBrowserStore(path.join(profile, "browser")),
@@ -129,7 +130,6 @@ async function run() {
       contextIsolation: true,
       preload: path.join(__dirname, "..", "preload.cjs"),
       sandbox: true,
-      webviewTag: true,
       additionalArguments: [`--gofer-browser-preload=${pathToFileURL(preload)}`],
     },
   });
@@ -140,7 +140,8 @@ async function run() {
   const disabledControls = () => page(`[${["Previous", "Pause", "Next"].map((label) => `${button(label)}?.disabled`).join(",")}]`);
   const barText = () => page(`${bar}?.textContent || ""`);
   const hasBar = () => page(`Boolean(${bar})`);
-  const guest = () => webContents.getAllWebContents().find((item) => item.getType() === "webview" && !item.isDestroyed());
+  // The tab's page is a view the main process made.
+  const guest = () => webContents.getAllWebContents().find((item) => item.getType() === "window" && item !== window.webContents && !item.isDestroyed());
   const play = () => guest().executeJavaScript("document.querySelector('audio').play().then(() => true)", true);
   const inGuest = (code) => guest().executeJavaScript(code);
   async function click(label) {
@@ -187,7 +188,7 @@ async function run() {
   }
 
   // Controls work with real clicks while the tab is hidden, as in another area.
-  await page("window.tab.element.style.display = 'none'");
+  await page("window.showTab(false).then(() => true)");
   await click("Next");
   await waitFor(async () => (await inGuest("document.title")) === "next:1", "Next did not reach the page");
   await waitFor(async () => /Song 1/.test(await barText()), "the bar did not follow the new track");
@@ -204,7 +205,7 @@ async function run() {
   await click("Play");
   await waitFor(async () => !(await inGuest("document.querySelector('audio').paused")), "Play did not resume");
   await waitFor(() => page(`Boolean(${button("Pause")})`), "the toggle did not change back");
-  await page("window.tab.element.style.display = ''");
+  await page("window.showTab(true).then(() => true)");
 
   // A same-page address change keeps playing and keeps the bar.
   await inGuest("history.pushState({}, '', '/player?v=2'); true");

@@ -46,6 +46,12 @@ jobs:
       - name: Test Python
         run: uv run --locked pytest
 
+      # Each starter workflow is copied with `rattish create --from`, checked with
+      # `rattish check`, and its test set run with a stand-in model. The log lists
+      # every starter and test case.
+      - name: Check starter workflows and their test sets
+        run: uv run --locked pytest tests/integration/test_starter_workflows.py -v -s -p no:cacheprovider
+
       - name: Audit all locked Python platform dependencies
         run: uv run --locked python scripts/audit-dependencies.py
 

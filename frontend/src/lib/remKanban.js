@@ -107,6 +107,49 @@ export function activityLine(item) {
   return item.paused ? `${line} · ${pausedLabel(item.paused)}` : line;
 }
 
+// A token count as people say it: 950, 12.4k, 3.2M.
+export function formatTokens(count) {
+  if (count >= 1e6) return `${Number((count / 1e6).toFixed(1))}M`;
+  if (count >= 1e3) return `${Number((count / 1e3).toFixed(1))}k`;
+  return String(count);
+}
+
+// A ticket's model use in a few words for its card, or "" before any call. A provider that
+// doesn't report its usage makes that call unknown, so a total is never shown as complete
+// when it isn't. Older desktops send no usage.
+export function usageShort(usage) {
+  if (!usage?.calls) return "";
+  const unknown = (usage.unknown_calls || 0) + (usage.partial_calls || 0);
+  if (usage.total_tokens == null) return "Tokens unknown";
+  return `${formatTokens(usage.total_tokens)} tokens${unknown ? ` + ${unknown} unknown` : ""}`;
+}
+
+// The same in a sentence, for the ticket's sheet.
+export function usageSentence(usage) {
+  if (!usage) return "";
+  const calls = usage.calls || 0;
+  if (!calls) return "No model calls yet.";
+  const plural = n => `${n} model ${n === 1 ? "call" : "calls"}`;
+  const unknown = (usage.unknown_calls || 0) + (usage.partial_calls || 0);
+  if (usage.total_tokens == null) return `Unknown: the provider didn't report usage for ${calls === 1 ? "its" : "any of its"} ${plural(calls)}.`;
+  const total = `${usage.total_tokens.toLocaleString("en-US")} tokens over ${plural(calls)}`;
+  if (!unknown) return `${total}.`;
+  return `${total}. ${unknown === calls ? "All" : unknown} of them ${unknown === 1 ? "was" : "were"} not fully reported, so the real total is higher.`;
+}
+
+// Self-work's limits in one line for Settings, such as "Stops new work past 500k tokens a
+// session or at 80% of a rate limit." Older desktops send no limits.
+export function selfWorkLimitsLine(settings) {
+  if (!settings) return "";
+  const parts = [];
+  if (settings.session_token_limit) parts.push(`${formatTokens(settings.session_token_limit)} tokens a session`);
+  if (settings.daily_token_limit) parts.push(`${formatTokens(settings.daily_token_limit)} tokens a day`);
+  const tokens = parts.length ? `past ${parts.join(" or ")}` : "";
+  const rate = settings.rate_limit_percent ? `at ${settings.rate_limit_percent}% of a rate limit` : "";
+  if (!tokens && !rate) return "No limits: self-work starts new work whenever threads are free.";
+  return `Stops starting new work ${[tokens, rate].filter(Boolean).join(" or ")}. Running work finishes normally.`;
+}
+
 // A paused ticket or self-work item: paused by you, or making way for your own work.
 export const pausedLabel = by => by === "priority" ? "Paused for your work" : "Paused";
 
@@ -161,6 +204,29 @@ export function autoPullHint(view) {
   return view?.settings?.auto_pull_backlog
     ? "After its to-dos, Rem takes the highest-impact backlog tickets and leaves out any that no longer make sense. Spare threads research new ideas for your approval."
     : "After its to-dos, Rem leaves the backlog alone and researches new ideas for your approval.";
+}
+
+// Whether this desktop lets self-work approve its own tickets. Older backends don't send it.
+export const hasAutoApprove = view => typeof view?.settings?.auto_approve_proposals === "boolean";
+
+// What the auto-approval setting does now, in one sentence under its switch.
+export function autoApproveHint(view) {
+  if (!boardOn(view)) return "Needs the Kanban board. With the board off, Rem makes no tickets.";
+  if (!view?.settings?.auto_approve_proposals) return "Off: ideas from Rem's research wait in Backlog for your approval.";
+  const used = view?.state?.auto_approved_session || 0;
+  const pulls = view.settings.auto_pull_backlog ? "Rem ranks them and works on the best ones." : "They wait in Backlog until you move them, or turn on backlog pulling.";
+  return `On: new ideas go to Backlog approved, marked "Auto-approved", until self-work ends (${used} this session). ${pulls}`;
+}
+
+// What turning auto-approval on allows, shown before the user confirms it.
+export function autoApproveWarning(view) {
+  return [
+    "While you're away, tickets Rem's research proposes go to Backlog already approved, for as long as self-work runs, without you reading them first.",
+    view?.settings?.auto_pull_backlog
+      ? "Backlog pulling is on, so Rem will also work on them, inside its projects and limits."
+      : "Backlog pulling is off, so they wait in Backlog until you move them or turn pulling on.",
+    "Ideas already waiting for you stay yours to decide. Rem still can't mark its own tickets Done, and you can edit or cancel any ticket it approved.",
+  ];
 }
 
 // The projects Rem can be given for self-work, with the ones it has ticked. A project Rem
@@ -232,6 +298,13 @@ export const sendTicket = change => post("/ticket", "POST", { request_id: reques
 // One ticket's timeline: its status changes and comments, oldest first.
 export const readTimeline = ticket => post("/timeline", "POST", ticketAddress(ticket));
 export const sendComment = (ticket, body) => sendTicket({ ...ticketAddress(ticket), action: "comment", body });
+// A ticket's full patch, where it lands and whether it merges cleanly.
+export const readPatch = (ticket, branch) => post("/patch", "POST", { ...ticketAddress(ticket), ...(branch ? { branch } : {}) });
+// The user's Accept: lands the reviewed branch in its base. The response's result says
+// whether it landed or which files conflict.
+export const landTicket = (ticket, patch, note = "") => sendTicket({ ...ticketAddress(ticket), action: "land", expected_revision: ticket.revision, patch_revision: patch.revision, branch: patch.branch, ...(note.trim() ? { note: note.trim() } : {}) });
+// Line comments, a note, or a rebase request go back to the ticket's worker.
+export const requestChanges = (ticket, change) => sendTicket({ ...ticketAddress(ticket), action: "request_changes", expected_revision: ticket.revision, ...change });
 const ticketAddress = ticket => ({ ticket_id: ticket.ticket_id, scope: ticket.scope, organization_id: ticket.organization_id || undefined });
 
 export const STATUS_LABELS = Object.freeze(Object.fromEntries([...COLUMNS, ["cancelled", "Cancelled"]]));
@@ -297,3 +370,36 @@ export function useKanban(active = true, interval = 4000) {
   }, [apply]);
   return { board: data?.board || null, selfWork: data?.self_work || null, error, setError, refresh, run };
 }
+
+// Tickets that wait for other tickets. The backend keeps the list, refuses loops and decides
+// when a ticket is ready; this only words it and builds the change.
+const OPEN = ["backlog", "todo", "in_progress", "in_review", "blocked"];
+
+// The card's line: what the ticket still waits for, or nothing once all of it is Done.
+export function waitsLine(ticket) {
+  const left = (ticket?.waits_for || []).filter(item => item.status !== "done");
+  if (!left.length) return "";
+  const first = left[0].title || left[0].key;
+  return `Waits for: ${first}${left.length > 1 ? ` and ${left.length - 1} more` : ""}`;
+}
+
+// Whether the user can change what this ticket waits for from its sheet.
+export function canEditWaits(ticket) {
+  if (!ticket || ticket.proposed || !OPEN.includes(ticket.status)) return false;
+  // An organization changes a ticket's plan only while it isn't running.
+  return ticket.scope === "rem" || (!ticket.running && !ticket.paused);
+}
+
+// Tickets this one could wait for: open or done ones with the same owner, not itself and
+// not already listed. Rem's wait for Rem's; an organization's for its own.
+export function waitChoices(board, ticket) {
+  const listed = new Set((ticket?.waits_for || []).map(item => item.ticket_id));
+  return (board?.tickets || [])
+    .filter(other => other.ticket_id !== ticket.ticket_id && !listed.has(other.ticket_id)
+      && other.scope === ticket.scope && (other.organization_id || "") === (ticket.organization_id || "")
+      && other.status !== "cancelled" && other.key)
+    .sort((a, b) => Number(a.key.split("-").at(-1)) - Number(b.key.split("-").at(-1)));
+}
+
+// The edit that replaces what a ticket waits for.
+export const waitsChange = (ticket, ids) => ({ action: "edit", ticket_id: ticket.ticket_id, scope: ticket.scope, organization_id: ticket.organization_id || undefined, expected_revision: ticket.revision, waits_for: ids });

@@ -29,6 +29,7 @@ from gofer.core.provider_capabilities import (
 )
 from gofer.core.provider_profiles import ResolvedProviderSettings, validate_provider_settings
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS
+from gofer.core.usage_context import LiveCall
 from gofer.subscriptions.base import Subscription
 from gofer.subscriptions.tool_trace import normalize_tool_trace
 from gofer.subscriptions.usage import normalize_usage, track_invocation
@@ -701,7 +702,9 @@ async def stream_cli(
     timeout: float | None = None,
     max_output_bytes: int | None = DEFAULT_RESOURCE_LIMITS.max_subprocess_output_bytes,
     stdin: bytes | None = None,
+    on_usage: Callable[[dict[str, Any]], object] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
+    """Run one CLI turn. ``on_usage`` receives the turn's usage so far whenever it grows."""
     # Trust only the selected working directory for this invocation.
     # Tool permissions remain controlled by cli_invocation.
     if provider == "copilot":
@@ -727,7 +730,10 @@ async def stream_cli(
                 if event["stream"] == "stderr":
                     stderr += event["text"] or ""
                 else:
+                    reported = dict(output.usage)
                     output.feed(event["text"] or "")
+                    if on_usage is not None and output.usage and output.usage != reported:
+                        on_usage(dict(output.usage))
                     if output.session_id:
                         yield {"type": "session", "sessionId": output.session_id}
                     for trace_event in output.drain_events():
@@ -853,6 +859,11 @@ class CliSubscription(Subscription):
         }
         if self.provider == "cursor":
             await check_cursor_plugins(command[0], cancel_event)
+        # Inside a workflow run, usage the CLI reports mid-turn (OpenCode's steps,
+        # Copilot's usage events) counts toward the run's limits and can stop the turn.
+        live = LiveCall(
+            self.provider, provider_settings.model if provider_settings else None, cancel_event
+        )
         with cli_invocation(
             self.provider,
             command,
@@ -868,9 +879,10 @@ class CliSubscription(Subscription):
                 cwd=working_dir,
                 env=child_env,
                 timeout=timeout,
-                cancel_event=cancel_event,
+                cancel_event=live.cancel_event,
                 max_output_bytes=max_output_bytes,
                 stdin=stdin,
+                on_usage=live.report if live.observer is not None else None,
             ):
                 if event["type"] == "thought":
                     thoughts.append(event["text"])
@@ -879,9 +891,11 @@ class CliSubscription(Subscription):
                 else:
                     final = event
         text = (final.get("message") or {}).get("body") or final.get("error") or ""
+        if live.stopped:
+            text = live.stop_message()
         return AgentResult(
             agent_id="",
-            success=not final.get("error"),
+            success=not final.get("error") and not live.stopped,
             output=text,
             message=text,
             exit_code=final["exitCode"],

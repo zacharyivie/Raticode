@@ -30,8 +30,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
-from urllib.parse import parse_qs, urlparse
+from typing import Any, Literal
+from urllib.parse import parse_qs, unquote, urlparse
 
 from gofer.core.command_slots import start_leftover_reclaimer
 from gofer.core.provider_auth import ProviderAuthSessions
@@ -51,6 +51,7 @@ from gofer.core.provider_preferences import (
 )
 from gofer.core.resources import ResourceLimits, bundle_resource_limits_from_env
 from gofer.core.scheduler import WorkflowScheduler
+from gofer.core.secrets_folder import CREDENTIALS_DIRECTORY_ENV
 from gofer.core.usage import summarize_node_outputs
 from gofer.core.usage_credentials import (
     UsageCredentialError,
@@ -61,12 +62,19 @@ from gofer.core.usage_service import refresh_usage, start_background_refresh, us
 from gofer.core.watcher import WorkflowWatcher
 from gofer.core.workflow import AgenticWorkflow
 from gofer.rattish.editor import RattishEditorError, RattishRevisionConflict
+from gofer.rattish.test_sets import WorkflowTestError
 from gofer.rattish.trigger_login import LoginEntryError
 from gofer.rattish.trigger_service import TriggerEngine
 from gofer.rattish.triggers import TriggerError, TriggerNotFound
 from gofer.rattish.workspaces import list_registered_workflows
 from gofer.ui import headless as headless_support
-from gofer.ui import rattish_triggers, system_speech
+from gofer.ui import (
+    rattish_cache,
+    rattish_secrets,
+    rattish_triggers,
+    system_speech,
+    worktree_setup,
+)
 from gofer.ui.api import (
     DiscoveryCancelled,
     ProviderProfileError,
@@ -84,7 +92,9 @@ from gofer.ui.api import (
     analyze_rattish_document_payload,
     apply_workflow_validation_fix_payload,
     cancel_queued_run_payload,
+    check_provider_profile_payload,
     create_registered_workflow_payload,
+    create_workflow_from_starter_payload,
     create_workflow_payload,
     decide_workflow_approval_payload,
     delete_provider_profile_payload,
@@ -121,6 +131,7 @@ from gofer.ui.api import (
     runner_queue_payload,
     save_rattish_document_payload,
     save_rattish_metadata_payload,
+    starter_workflows_payload,
     stop_rattish_runs_for_shutdown,
     stop_workflow_run_payload,
     trigger_workflow_payload,
@@ -181,6 +192,14 @@ from gofer.ui.rem_home import RemHome
 from gofer.ui.rem_home_models import RemConflict
 from gofer.ui.rem_kanban import KanbanRefused, message_ticket_keys, task_ticket_keys
 from gofer.ui.swarms import SwarmManager
+from gofer.ui.workflow_tests import (
+    save_workflow_tests_payload,
+    start_workflow_tests_payload,
+    stop_all_workflow_tests,
+    stop_workflow_tests_payload,
+    workflow_test_result_payload,
+    workflow_tests_payload,
+)
 from gofer.utils.logging import configure_backend_logging, get_logger, reset_backend_logging
 from gofer.utils.paths import get_data_dir, restrict_to_owner
 from gofer.utils.process import seal_credential_env
@@ -197,6 +216,8 @@ CORS_PREFLIGHT_MAX_AGE_SECONDS = 600
 UI_JSON_MAX_DEPTH = 64
 UI_JOB_DEADLINE_SECONDS = 24 * 60 * 60
 COMMIT_MESSAGE_MAX_BODY_BYTES = 2 * 1024 * 1024
+# A Rem message may carry one screenshot of up to 5 MB, sent as base64.
+REM_MESSAGE_MAX_BODY_BYTES = 8 * 1024 * 1024
 DEFAULT_DEV_FRONTEND_ORIGINS = {"http://127.0.0.1:5173", "http://localhost:5173"}
 
 # Readable reasons for device refusals the desktop window acts on.
@@ -292,6 +313,20 @@ def _optional_body_str(body: dict[str, Any], name: str) -> str | None:
     if not isinstance(value, str):
         raise ValueError(f"{name} must be a string")
     return value
+
+
+def _api_started_by(body: dict[str, Any]) -> Literal["manual", "rem"]:
+    """How an API caller says it started a run: ``rem`` from Rem's sessions, else manual.
+
+    The phone and triggers start runs inside the backend and say so there; an API
+    caller can't claim to be either.
+    """
+    value = body.get("startedBy")
+    if value is None or value == "manual":
+        return "manual"
+    if value == "rem":
+        return "rem"
+    raise WorkflowRunError("startedBy must be manual or rem")
 
 
 def _finite_json_number(value: str) -> float:
@@ -436,10 +471,16 @@ class GoferUiServer(ThreadingHTTPServer):
         """Run a Rem task with the fleet status tools desktop threads have.
 
         Sending work to another desktop would delegate the task again, so Rem
-        tasks only read fleet status, like a read-only desktop thread.
+        tasks only read fleet status, like a read-only desktop thread. Self-work
+        runs with nobody watching get neither fleet nor Organizations tools.
         """
         from gofer.ui.device_tools import stream_with_fleet_tools
 
+        if (options.get("workflow") or {}).get("remUnattended") is True:
+            async with aclosing(stream_workflow_chat(**options)) as stream:
+                async for event in stream:
+                    yield event
+            return
         async with aclosing(
             stream_with_fleet_tools(
                 self._device_chat_source, self.devices, read_only_override=True, **options
@@ -767,8 +808,9 @@ class GoferUiServer(ThreadingHTTPServer):
         if brain.get("enabled") and brain.get("root"):
             from gofer.ui.second_brain import SecondBrain
 
-            history = self.rem_home.store.conversation()["messages"]
-            query = next((m["body"] for m in reversed(history) if m["role"] == "user"), "")
+            # The user's newest message only; the rest of the chat isn't read.
+            latest = self.rem_home.store.tail(1, roles=("user",))
+            query = str(latest[0].get("body") or "") if latest else ""
             references: list[tuple[str, str]] = []
             if brain.get("brainIds"):
                 hits = self.second_brains.search(
@@ -950,7 +992,11 @@ class GoferUiServer(ThreadingHTTPServer):
 
     def _run_continuous_workflow_once(self, workflow_id: str) -> None:
         try:
-            asyncio.run(run_workflow_payload(workflow_id, self.data_dir, dry_run=False))
+            asyncio.run(
+                run_workflow_payload(
+                    workflow_id, self.data_dir, dry_run=False, started_by="trigger"
+                )
+            )
             if _continuous_failures.pop(workflow_id, None) is not None:
                 log.info("Continuous workflow '%s' is running again", workflow_id)
         except Exception as exc:  # noqa: BLE001
@@ -1118,6 +1164,39 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             ):
                 self._dispatch_rattish_triggers(method, parsed.path, parse_qs(parsed.query))
                 return
+            if method != "OPTIONS" and (
+                parsed.path == "/api/rattish/secrets"
+                or parsed.path.startswith("/api/rattish/secrets/")
+            ):
+                self._dispatch_rattish_secrets(method, parsed.path, parse_qs(parsed.query))
+                return
+            if method == "GET" and parsed.path == "/api/rattish/cache":
+                self._dispatch_rattish_cache(method, parse_qs(parsed.query))
+                return
+            if method == "DELETE" and parsed.path == "/api/rattish/cache":
+                self._dispatch_rattish_cache(method, parse_qs(parsed.query))
+                return
+            if method == "GET" and parsed.path == "/api/rattish/runs":
+                self._send_all_workflow_runs(parse_qs(parsed.query))
+                return
+            if (
+                method == "POST"
+                and parsed.path.startswith("/api/rattish/runs/")
+                and parsed.path.endswith("/rerun")
+            ):
+                self._rerun_rattish_run(parsed)
+                return
+            if method == "GET" and parsed.path == "/api/rattish/starters":
+                try:
+                    self._send_json(starter_workflows_payload())
+                except WorkflowCreateError as exc:
+                    self._send_json({"error": str(exc)}, status=500)
+                return
+            if parsed.path == "/api/worktree-setup" or parsed.path.startswith(
+                "/api/worktree-setup/"
+            ):
+                self._dispatch_worktree_setup(method, parsed.path, parse_qs(parsed.query))
+                return
             getattr(self, f"_dispatch_{method}")()
         except (OrganizationConflict, RemConflict) as exc:
             self._send_json({"error": str(exc)}, status=409)
@@ -1171,6 +1250,8 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             if method == "GET" and parts == ["conversation"]:
                 # A restarted backend has no desktop context until the renderer
                 # sends it again; queued tasks wait for it.
+                # The newest CHAT_WINDOW messages and how many are earlier, so a poll costs
+                # the same however long the chat is. The version covers only this window.
                 snapshot = service.store.conversation()
                 # Full file paths in Rem's text become links in the desktop chat.
                 snapshot["messages"] = with_file_mentions(snapshot["messages"])
@@ -1190,6 +1271,29 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                     result["opened_projects"] = [
                         {"root": p["root"], "name": p["name"]} for p in opened
                     ]
+            elif method == "GET" and parts == ["history"]:
+                # Earlier chat messages, a page before message `before`, as the phone's
+                # rem.history reads them. `through` reaches back to a search result.
+                query = parse_qs(parsed.query)
+                before = query.get("before", [""])[0]
+                through = query.get("through", [""])[0]
+                if not before or len(before) > 128 or len(through) > 128:
+                    raise ValueError("Choose where the earlier messages end")
+                limit = query.get("limit", [""])[0]
+                if limit and not limit.isdigit():
+                    raise ValueError("Invalid page size")
+                try:
+                    page = service.store.page(
+                        before, through=through or None, limit=int(limit or 40)
+                    )
+                except KeyError:
+                    self._send_json(
+                        {"error": "That part of Rem's chat is no longer stored."}, status=404
+                    )
+                    return
+                page["messages"] = with_file_mentions(page["messages"])
+                page["tickets"] = service.kanban.resolve(message_ticket_keys(page["messages"]))
+                result = page
             elif method == "GET" and parts == ["tasks"]:
                 tasks = service.store.tasks(summary=True)
                 result = rem_poll_result(
@@ -1275,7 +1379,9 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 warnings = self._prune_rem_context(body)
                 result = {**service.configure(body), "warnings": warnings}
             elif method == "POST" and parts == ["messages"]:
-                result = service.submit_message(self._read_json())
+                # Room for one screenshot (Show Rem your screen), at most 5 MB as base64.
+                # Agent tokens never get here: agent_request_refusal refuses this route.
+                result = service.submit_message(self._read_json(limit=REM_MESSAGE_MAX_BODY_BYTES))
             elif method == "POST" and parts == ["reset"]:
                 result = service.clear_history(self._read_json())
             elif (
@@ -1346,10 +1452,17 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         if method == "POST" and parts == ["timeline"]:
             # One ticket's comments and status history; a read, sent with its address.
             return service.kanban.timeline(self._read_json())
+        if method == "POST" and parts == ["patch"]:
+            # A ticket's full patch, where it lands and whether it merges; a read.
+            return service.kanban.patch(self._read_json())
+        outcome = None
         if method == "POST" and parts == ["ticket"]:
             body = self._read_json()
             request_id = str(body.get("request_id") or uuid.uuid4())
-            service.kanban.act("rem" if self._agent_token_name else "user", body, request_id)
+            result = service.kanban.act(
+                "rem" if self._agent_token_name else "user", body, request_id
+            )
+            outcome = result if body.get("action") == "land" else None
         elif method == "POST" and parts == ["participant"]:
             service.kanban.set_participant_projects("user", self._read_json())
         elif method == "PUT" and parts == ["settings"]:
@@ -1361,7 +1474,9 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             service.self_work.change_window(self._read_json())
         else:
             raise KeyError(method)
-        return {"board": service.kanban.board(), "self_work": service.self_work.view()}
+        board = {"board": service.kanban.board(), "self_work": service.self_work.view()}
+        # Accept says whether the branch landed or which files conflict.
+        return {**board, "result": outcome} if outcome is not None else board
 
     def _dispatch_rem_resources_request(self, method: str) -> None:
         """Read or edit the Raticode-wide skill and MCP server library."""
@@ -1425,6 +1540,13 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             )
             return
         params = body.get("params", {})
+        if method == "GET":
+            # The renderer's poll sends the revision it has and gets {unchanged, revision}
+            # while it is current; recheck=1 runs Library health's file checks again now.
+            params = {
+                "revision": _optional_query(query, "revision") or "",
+                "recheck": _optional_query(query, "recheck") == "1",
+            }
         if not isinstance(params, dict):
             raise ValueError("Expected Second Brain parameters")
         grants = body.get("workspaceGrants", {})
@@ -1435,6 +1557,12 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             paths.append((str(params.get("root", "")), not params.get("create", False)))
         if action == "update_brain" and params.get("patch", {}).get("root"):
             paths.append((params["patch"]["root"], True))
+        if action == "update_brain" and isinstance(params.get("patch", {}).get("backup"), dict):
+            # Scheduled backups write here later without asking, so the folder needs the
+            # user's approval when it is chosen.
+            folder = params["patch"]["backup"].get("folder")
+            if folder:
+                paths.append((str(folder), False))
         if action == "import_preview":
             paths.append((str(params.get("path", "")), True))
         if action == "task":
@@ -1471,6 +1599,132 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"result": result})
 
+    def _dispatch_worktree_setup(self, method: str, path: str, query: dict[str, list[str]]) -> None:
+        """A project's worktree setup and the user's approval of it.
+
+        Approving lets the setup run commands in every new worktree, so agent tokens can
+        read it but never approve it (``agent_request_refusal``).
+        """
+        base = self._request_data_dir(query)
+        action = path.removeprefix("/api/worktree-setup").strip("/")
+        if method == "GET" and not action:
+            project = _optional_query(query, "project")
+            if project is None:
+                raise ValueError("project is required")
+            self._send_json(worktree_setup.status(base, project))
+        elif method == "GET" and action == "pending":
+            self._send_json({"pending": worktree_setup.Approvals(base).pending()})
+        elif method == "POST" and action == "approve":
+            body = self._read_json(limit=8192)
+            self._send_json(
+                worktree_setup.approve(
+                    base, str(body.get("project") or ""), str(body.get("sha256") or "")
+                )
+            )
+        elif method == "POST" and action == "revoke":
+            body = self._read_json(limit=8192)
+            self._send_json(worktree_setup.revoke(base, str(body.get("project") or "")))
+        else:
+            self._send_json({"error": "Unknown worktree setup request"}, status=404)
+
+    def _send_all_workflow_runs(self, query: dict[str, list[str]]) -> None:
+        from gofer.ui.workflow_runs import WorkflowRunsError, all_workflow_runs_payload
+
+        try:
+            payload = all_workflow_runs_payload(
+                self._request_data_dir(query),
+                status=_optional_query(query, "status"),
+                workflow_ids=[item for item in query.get("workflow", []) if item],
+                since=_optional_query(query, "since"),
+                until=_optional_query(query, "until"),
+                started_by=_optional_query(query, "startedBy"),
+                limit=_optional_int_query(query, "limit"),
+                offset=_int_query(query, "offset", 0),
+            )
+        except (WorkflowRunsError, ValueError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        self._send_json(payload)
+
+    def _rerun_rattish_run(self, parsed: Any) -> None:
+        """Run a workflow again with one run's saved inputs and trigger events.
+
+        The body may name ``workflowId`` (otherwise the run ID finds it), give
+        ``inputs`` for the password inputs the run didn't save, and ask for
+        ``background``.
+        """
+        from gofer.ui.api import rerun_workflow_payload
+
+        run_id = unquote(parsed.path.removeprefix("/api/rattish/runs/").removesuffix("/rerun"))
+        query = parse_qs(parsed.query)
+        try:
+            body = self._read_json()
+            if not isinstance(body, dict):
+                raise WorkflowRunError("The request body must be a JSON object")
+            inputs = body.get("inputs")
+            if inputs is not None and not isinstance(inputs, dict):
+                raise WorkflowRunError("inputs must be an object of input names to values")
+            workflow_id = body.get("workflowId")
+            if workflow_id is not None and not isinstance(workflow_id, str):
+                raise WorkflowRunError("workflowId must be a string")
+            payload = self._run_async(
+                rerun_workflow_payload(
+                    run_id,
+                    self._request_data_dir(query),
+                    workflow_id=workflow_id or None,
+                    inputs=inputs,
+                    background=body.get("background") is True,
+                    started_by=_api_started_by(body),
+                )
+            )
+        except (WorkflowRunError, json.JSONDecodeError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        self._send_json({"run": payload})
+
+    def _dispatch_rattish_secrets(
+        self, method: str, path: str, query: dict[str, list[str]]
+    ) -> None:
+        """Workflow secrets. No response or error ever contains a saved value."""
+        from gofer.rattish.workflow_secrets import WorkflowSecretError
+
+        base = self._request_data_dir(query)
+        action = unquote(path.removeprefix("/api/rattish/secrets").strip("/"))
+        workflow_id = _optional_query(query, "workflowId")
+        try:
+            if method == "GET" and not action:
+                self._send_json(rattish_secrets.secrets_payload(base, workflow_id))
+            elif method == "POST" and not action:
+                body = self._read_json(limit=rattish_secrets.MAX_BODY_BYTES)
+                self._send_json(rattish_secrets.save_secret_payload(base, body, workflow_id))
+            elif method == "DELETE" and action and "/" not in action:
+                self._send_json(rattish_secrets.remove_secret_payload(base, action, workflow_id))
+            else:
+                self._send_json({"error": "Method not allowed"}, status=405)
+        except WorkflowSecretError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+        except (ValueError, json.JSONDecodeError):
+            # The body may hold the value, so the parser's message is never echoed.
+            self._send_json({"error": "Send a secret name and value as JSON."}, status=400)
+
+    def _dispatch_rattish_cache(self, method: str, query: dict[str, list[str]]) -> None:
+        """A workflow's result cache: GET shows its size, DELETE clears it."""
+        base = self._request_data_dir(query)
+        workflow_id = _optional_query(query, "workflowId")
+        try:
+            if method == "GET":
+                self._send_json(rattish_cache.cache_payload(base, workflow_id))
+            elif method == "DELETE":
+                self._send_json(rattish_cache.clear_cache_payload(base, workflow_id))
+            else:
+                self._send_json({"error": "Method not allowed"}, status=405)
+        except rattish_cache.ResultCacheRequestError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+        except OSError as exc:
+            self._send_json(
+                {"error": f"Could not read or clear the result cache: {exc}"}, status=500
+            )
+
     def _dispatch_rattish_triggers(
         self, method: str, path: str, query: dict[str, list[str]]
     ) -> None:
@@ -1485,6 +1739,10 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     rattish_triggers.create_trigger_payload(base, self._read_json()), status=201
                 )
+            elif method == "GET" and action == "pause":
+                self._send_json(rattish_triggers.trigger_pause_payload(base))
+            elif method == "POST" and action == "pause":
+                self._send_json(rattish_triggers.set_trigger_pause_payload(base, self._read_json()))
             elif method == "POST" and action == "preview":
                 self._send_json(rattish_triggers.preview_trigger_payload(self._read_json()))
             elif method == "POST" and action == "login":
@@ -1551,6 +1809,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             "knowledge_search",
             "knowledge_read",
             "ticket_changes",
+            "ticket_patch",
             "repository",
         } | READ_OPERATIONS
         if method == "GET" and action not in read_actions:
@@ -1603,6 +1862,21 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             for path in paths:
                 if path in previous:
                     continue
+                if self._agent_token_name and _is_path_inside(
+                    _canonical_path_for_containment(Path(path)),
+                    _canonical_path_for_containment(self._default_data_dir()),
+                ):
+                    # Folders in Raticode's own data need no grant from the desktop, which
+                    # is for the owner's session; an agent token never hands them out.
+                    self._send_json(
+                        {
+                            "error": "Agent tokens can't give an organization folders inside "
+                            "Raticode's data folder",
+                            "code": "agent_token_forbidden",
+                        },
+                        status=403,
+                    )
+                    return
                 try:
                     resolved = self._assert_bundle_path_allowed(
                         Path(path),
@@ -1881,6 +2155,31 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             self._send_json(payload)
             return
 
+        if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/tests"):
+            workflow_id = parsed.path.removeprefix("/api/workflows/").removesuffix("/tests")
+            query = parse_qs(parsed.query)
+            try:
+                payload = workflow_tests_payload(workflow_id, self._request_data_dir(query))
+            except WorkflowTestError as exc:
+                self._send_json({"error": str(exc)}, status=404)
+                return
+            self._send_json(payload)
+            return
+
+        if parsed.path.startswith("/api/workflows/") and "/tests/results/" in parsed.path:
+            remainder = parsed.path.removeprefix("/api/workflows/")
+            workflow_id, result_id = remainder.split("/tests/results/", 1)
+            query = parse_qs(parsed.query)
+            try:
+                payload = workflow_test_result_payload(
+                    workflow_id, self._request_data_dir(query), result_id
+                )
+            except WorkflowTestError as exc:
+                self._send_json({"error": str(exc)}, status=404)
+                return
+            self._send_json(payload)
+            return
+
         if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/document"):
             workflow_id = parsed.path.removeprefix("/api/workflows/").removesuffix("/document")
             query = parse_qs(parsed.query)
@@ -2000,6 +2299,12 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(provider_capability_service().snapshot_payload())
             else:
                 self._send_json(provider_capabilities_payload(refresh=refresh))
+            return
+
+        if parsed.path == "/api/classifiers/jev":
+            from gofer.classifiers.jev_settings import jev_status
+
+            self._send_json(jev_status(self._request_data_dir(parse_qs(parsed.query))))
             return
 
         if parsed.path == "/api/usage/credentials":
@@ -2214,6 +2519,15 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
 
     def _dispatch_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/classifiers/jev/key":
+            self._jev_post(parsed, "key")
+            return
+        if parsed.path == "/api/classifiers/jev/settings":
+            self._jev_post(parsed, "settings")
+            return
+        if parsed.path == "/api/classifiers/jev/check":
+            self._jev_post(parsed, "check")
+            return
         if parsed.path == "/api/usage/credentials":
             query = parse_qs(parsed.query)
             try:
@@ -2467,6 +2781,50 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                     settings=body,
                 )
             except (WorkflowLogError, json.JSONDecodeError, ValueError) as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            self._send_json(payload)
+            return
+
+        if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/tests"):
+            workflow_id = parsed.path.removeprefix("/api/workflows/").removesuffix("/tests")
+            query = parse_qs(parsed.query)
+            try:
+                payload = save_workflow_tests_payload(
+                    workflow_id, self._request_data_dir(query), self._read_json()
+                )
+            except (WorkflowTestError, json.JSONDecodeError) as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            self._send_json(payload)
+            return
+
+        if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/tests/run"):
+            workflow_id = parsed.path.removeprefix("/api/workflows/").removesuffix("/tests/run")
+            query = parse_qs(parsed.query)
+            try:
+                payload = start_workflow_tests_payload(
+                    workflow_id, self._request_data_dir(query), self._read_json()
+                )
+            except (WorkflowTestError, json.JSONDecodeError) as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            self._send_json(payload, status=202)
+            return
+
+        if (
+            parsed.path.startswith("/api/workflows/")
+            and "/tests/results/" in parsed.path
+            and parsed.path.endswith("/stop")
+        ):
+            remainder = parsed.path.removeprefix("/api/workflows/").removesuffix("/stop")
+            workflow_id, result_id = remainder.split("/tests/results/", 1)
+            query = parse_qs(parsed.query)
+            try:
+                payload = stop_workflow_tests_payload(
+                    workflow_id, self._request_data_dir(query), result_id
+                )
+            except WorkflowTestError as exc:
                 self._send_json({"error": str(exc)}, status=400)
                 return
             self._send_json(payload)
@@ -2773,11 +3131,19 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                         )
                     except WorkflowBundleError as exc:
                         raise WorkflowCreateError(str(exc)) from exc
-                    workflow = create_registered_workflow_payload(
-                        str(body.get("name", "")),
-                        project_root,
-                        registry_dir=self._request_data_dir(query),
-                    )
+                    if body.get("starter"):
+                        workflow = create_workflow_from_starter_payload(
+                            str(body.get("starter")),
+                            str(body.get("name", "")),
+                            project_root,
+                            registry_dir=self._request_data_dir(query),
+                        )
+                    else:
+                        workflow = create_registered_workflow_payload(
+                            str(body.get("name", "")),
+                            project_root,
+                            registry_dir=self._request_data_dir(query),
+                        )
             except WorkflowAlreadyExistsError as exc:
                 self._send_json({"error": str(exc)}, status=409)
                 return
@@ -3144,6 +3510,24 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             self._send_json(payload)
             return
 
+        if parsed.path.startswith("/api/provider/profiles/") and parsed.path.endswith("/check"):
+            query = parse_qs(parsed.query)
+            profile_name = parsed.path.removeprefix("/api/provider/profiles/").removesuffix(
+                "/check"
+            )
+            try:
+                body = self._read_json(limit=16 * 1024)
+                payload = check_provider_profile_payload(
+                    profile_name,
+                    body.get("model") if isinstance(body, dict) else None,
+                    self._request_data_dir(query),
+                )
+            except (ProviderProfileError, json.JSONDecodeError) as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            self._send_json(payload)
+            return
+
         if parsed.path == "/api/provider/profiles":
             query = parse_qs(parsed.query)
             try:
@@ -3170,6 +3554,9 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 trigger_context = body.get("triggerContext")
                 if trigger_context is not None and not isinstance(trigger_context, dict):
                     raise WorkflowRunError("triggerContext must be an object")
+                resume_inputs = body.get("inputs")
+                if resume_inputs is not None and not isinstance(resume_inputs, dict):
+                    raise WorkflowRunError("inputs must be an object of input names to values")
                 payload = self._run_async(
                     resume_workflow_payload(
                         workflow_id,
@@ -3181,6 +3568,8 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                         force=bool(body.get("force", False)),
                         trigger_context=trigger_context,
                         background=body.get("background") is True,
+                        started_by=_api_started_by(body),
+                        inputs=resume_inputs,
                     )
                 )
             except (WorkflowRunError, json.JSONDecodeError) as exc:
@@ -3424,6 +3813,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                     if not isinstance(body["expectedRevision"], str):
                         raise WorkflowRunError("expectedRevision must be a string")
                     run_options["expected_revision"] = body["expectedRevision"]
+                run_options["started_by"] = _api_started_by(body)
                 trigger_context = body.get("triggerContext")
                 if trigger_context is not None and not isinstance(trigger_context, dict):
                     raise WorkflowRunError("triggerContext must be an object")
@@ -3604,6 +3994,15 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             self._send_json(payload)
             return
 
+        if parsed.path == "/api/classifiers/jev/key":
+            from gofer.classifiers.jev_settings import JevSettingsError, remove_jev_key
+
+            try:
+                self._send_json(remove_jev_key(self._request_data_dir(parse_qs(parsed.query))))
+            except JevSettingsError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            return
+
         if parsed.path.startswith("/api/provider/profiles/"):
             profile_name = parsed.path.removeprefix("/api/provider/profiles/")
             query = parse_qs(parsed.query)
@@ -3674,6 +4073,34 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         server = self.server
         if isinstance(server, GoferUiServer):
             server.ensure_continuous_runs()
+
+    def _jev_post(self, parsed: Any, action: str) -> None:
+        """Jev key, switch and key check. Responses and errors never contain the key."""
+        from gofer.classifiers.jev_settings import (
+            JevSettingsError,
+            check_jev_key,
+            save_jev_key,
+            save_jev_settings,
+        )
+
+        data_dir = self._request_data_dir(parse_qs(parsed.query))
+        try:
+            body = self._read_json(limit=16 * 1024)
+            if not isinstance(body, dict):
+                raise JevSettingsError("Expected Jev settings.")
+            if action == "key":
+                payload = save_jev_key(body.get("key"), data_dir)
+            elif action == "settings":
+                payload = save_jev_settings(body, data_dir)
+            else:
+                payload = self._run_async(check_jev_key(data_dir))
+        except JevSettingsError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        except (ValueError, json.JSONDecodeError):
+            self._send_json({"error": "Invalid Jev settings."}, status=400)
+            return
+        self._send_json(payload)
 
     def _run_async(self, operation: Coroutine[Any, Any, Any]) -> Any:
         async def bounded() -> Any:
@@ -4559,50 +4986,66 @@ def serve(
     headless: bool = False,
     token_file: Path | None = None,
     rem_settings: Path | None = None,
+    secrets_dir: Path | None = None,
 ) -> None:
     configure_backend_logging()
-    log.info(
-        "Starting Raticode backend (Python %s, %s %s)",
-        sys.version.split()[0],
-        sys.platform,
-        os.uname().machine if hasattr(os, "uname") else "",
-    )
-    session: HeadlessSession | None = None
-    if headless:
-        session = HeadlessSession.prepare(host, data_dir or get_data_dir(), token_file)
-    elif not headless_support.is_loopback_host(host):
-        # A developer option (browser development); the API then answers other computers.
-        log.warning(
-            "Listening on %s, which other computers can reach. Raticode's API holds your "
-            "workflows, folder grants and Rem; use 127.0.0.1 unless you need this.",
-            host,
+    # Undo the logging setup if startup fails, such as on a bad secrets folder, so a
+    # handler isn't left writing to a stream the caller closes.
+    try:
+        log.info(
+            "Starting Raticode backend (Python %s, %s %s)",
+            sys.version.split()[0],
+            sys.platform,
+            os.uname().machine if hasattr(os, "uname") else "",
         )
-        print(
-            f"Warning: Raticode is listening on {host}, which other computers can reach. "
-            "Use --host 127.0.0.1 unless you need this.",
-            file=sys.stderr,
+        session: HeadlessSession | None = None
+        if headless:
+            # Check the secrets folder first, so a bad one stops startup before any file is written.
+            folder = headless_support.prepare_secrets_dir(secrets_dir)
+        # The folder is resolved; nothing spawned from here on may be pointed at it. The
+        # desktop's backend reads no secrets folder, but a variable it inherited goes too.
+        seal_credential_env((CREDENTIALS_DIRECTORY_ENV,))
+        if headless:
+            session = HeadlessSession.prepare(host, data_dir or get_data_dir(), token_file)
+            session.secrets_dir = folder
+        elif not headless_support.is_loopback_host(host):
+            # A developer option (browser development); the API then answers other computers.
+            log.warning(
+                "Listening on %s, which other computers can reach. Raticode's API holds your "
+                "workflows, folder grants and Rem; use 127.0.0.1 unless you need this.",
+                host,
+            )
+            print(
+                f"Warning: Raticode is listening on {host}, which other computers can reach. "
+                "Use --host 127.0.0.1 unless you need this.",
+                file=sys.stderr,
+            )
+        server = create_server(
+            host=host,
+            port=port,
+            data_dir=data_dir,
+            api_token=session.token if session else None,
         )
-    server = create_server(
-        host=host,
-        port=port,
-        data_dir=data_dir,
-        api_token=session.token if session else None,
-    )
-    # The server has read its tokens; nothing spawned from here on may inherit them.
-    seal_credential_env()
-    if session is not None:
-        session.attach(server, rem_settings)
-    server.scheduler.start(paused=True)
-    server.sync_schedules()
-    server.scheduler.resume()
-    server.watcher.start()
-    server.start_continuous_monitor()
-    triggers = TriggerEngine(server.data_dir, owner="app", runner=run_triggered_rattish)
-    triggers.start()
-    stop_usage_refresh = start_background_refresh(server.data_dir)
-    stop_reclaimer = start_leftover_reclaimer()
-    _install_shutdown_handlers(server)
-    print(f"GOFER_UI_READY {json.dumps(ready_payload(server), sort_keys=True)}", flush=True)
+        # The server has read its tokens; nothing spawned from here on may inherit them.
+        seal_credential_env()
+        if session is not None:
+            session.attach(server, rem_settings)
+            for warning, line in headless_support.secret_feature_log_lines():
+                (log.warning if warning else log.info)("%s", line)
+        server.scheduler.start(paused=True)
+        server.sync_schedules()
+        server.scheduler.resume()
+        server.watcher.start()
+        server.start_continuous_monitor()
+        triggers = TriggerEngine(server.data_dir, owner="app", runner=run_triggered_rattish)
+        triggers.start()
+        stop_usage_refresh = start_background_refresh(server.data_dir)
+        stop_reclaimer = start_leftover_reclaimer()
+        _install_shutdown_handlers(server)
+        print(f"GOFER_UI_READY {json.dumps(ready_payload(server), sort_keys=True)}", flush=True)
+    except BaseException:
+        reset_backend_logging()
+        raise
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -4610,11 +5053,15 @@ def serve(
     finally:
         if session is not None:
             session.close()
+            from gofer.core.secrets_folder import configure_secrets_dir
+
+            configure_secrets_dir(None)
         stop_reclaimer()
         stop_usage_refresh()
         server.stop_continuous_monitor()
         triggers.stop()
         stop_rattish_runs_for_shutdown(server.data_dir)
+        stop_all_workflow_tests()
         server.watcher.shutdown(wait=False)
         server.scheduler.shutdown(wait=False)
         server.server_close()
@@ -4631,6 +5078,7 @@ class HeadlessSession:
         self.token = token
         self.written_token = written_token
         self.endpoint_text = ""
+        self.secrets_dir: Path | None = None
 
     @classmethod
     def prepare(cls, host: str, data_dir: Path, token_file: Path | None) -> HeadlessSession:
@@ -4667,7 +5115,11 @@ class HeadlessSession:
             )
         host, port = server.server_address[:2]
         endpoint = headless_support.publish_endpoint(
-            self.data_dir, host=str(host), port=int(port), token_file=self.written_token
+            self.data_dir,
+            host=str(host),
+            port=int(port),
+            token_file=self.written_token,
+            secrets_dir=self.secrets_dir,
         )
         self.endpoint_text = endpoint.read_text(encoding="utf-8")
 

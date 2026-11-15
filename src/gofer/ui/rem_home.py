@@ -38,12 +38,14 @@ from gofer.core.command_slots import (
 )
 from gofer.rattish.workspaces import WORKFLOW_METADATA
 from gofer.subscriptions.tool_trace import normalize_tool_trace, successful_receipt
+from gofer.ui import rem_db_backups, worktree_setup
 from gofer.ui import rem_home_memory as memory_book
 from gofer.ui import rem_home_sleep as sleeping
 from gofer.ui import rem_task_after as after_tasks
 from gofer.ui.chat import CHAT_CHANGE_IGNORED_DIRECTORIES
 from gofer.ui.chat_jobs import ChatJobs
 from gofer.ui.chat_steering import ChatSteering, ChatSteeringConflict
+from gofer.ui.claude_sandbox import sandbox_instructions
 from gofer.ui.organization_auto import approve_on_instruction, waits_on_rem
 from gofer.ui.rem_home_artifacts import artifact_tools, validate_artifacts
 from gofer.ui.rem_home_landing import (
@@ -51,6 +53,7 @@ from gofer.ui.rem_home_landing import (
     landing_feedback,
     landing_opted_out,
     unlanded_branches,
+    written_branches,
 )
 from gofer.ui.rem_home_models import (
     ACTIVE,
@@ -106,6 +109,8 @@ from gofer.ui.rem_projects import (
     prepare_project,
 )
 from gofer.ui.rem_screen import (
+    DESKTOP_SCREEN_GONE,
+    DESKTOP_SCREEN_RULES,
     MAX_WAITING,
     SCREEN_GONE,
     SCREEN_HELD,
@@ -113,6 +118,7 @@ from gofer.ui.rem_screen import (
     SCREEN_WITHHELD,
     acts,
     clean_screen,
+    clean_screen_image,
     screen_withheld,
 )
 from gofer.ui.rem_self_work import UNATTENDED, SelfWork, self_started
@@ -283,9 +289,14 @@ KANBAN_RULES = (
     "board.organizations, the organizations and workers you can assign to. A ticket is work "
     "for later, a task is work now: when the user asks you to add, assign, change or move a "
     "ticket, return tickets entries instead of a task. Create with {action:create,title,"
-    "description,priority?,status:backlog|todo,type?,project_dir?,done_when?}, and for an "
-    "organization add scope:organization,organization_id and optional assignee_id (a worker's "
-    "ID). Leave those out to assign yourself. Change one with {action:edit|move|assign,"
+    "description,priority?,status:backlog|todo,type?,project_dir?,done_when?,waits_for?}, and "
+    "for an organization add scope:organization,organization_id and optional assignee_id (a "
+    "worker's ID). Leave those out to assign yourself. waits_for lists the keys of tickets on "
+    "the same board (your REM tickets for yours, that organization's for its own) that must be "
+    "Done first; self-work skips the ticket until then. Set it when the user names an order, "
+    "or when you propose work that plainly needs another ticket finished first; edit with "
+    "the full new list, or [] to clear it. The board refuses loops. Change one with "
+    "{action:edit|move|assign,"
     "ticket_id,scope,organization_id?,expected_revision,...} using its exact ID and revision "
     "from board; move takes column:backlog|todo|in_progress|cancelled; to hand your ticket to "
     "an organization use assign with to_organization_id. Only change tickets when the user asks "
@@ -334,8 +345,9 @@ SELF_WORK_RULES = (
     "restore (default), or on/off only when the user says what should happen after; "
     "wait_for_idle:true only when they say to wait until they're away. When a time is unclear "
     "(which day, AM or PM) ask instead of guessing. Only the on/off switch and windows change: "
-    "never change its thread limit, backlog pulling or projects, and tell the user those are in "
-    "Settings > Rem. Raticode applies it and adds the actual result to your reply, so don't say "
+    "never change its thread limit, backlog pulling, auto-approval of its own tickets or "
+    "projects, and tell the user those are in Settings > Rem. Raticode applies it and adds "
+    "the actual result to your reply, so don't say "
     "yourself that it is now on or off or when it ends. Leave self_work null otherwise. Pausing "
     "one task is a control, not self_work. A task that should start when self-work's window "
     "ends uses the task's after_self_work, not self_work."
@@ -512,6 +524,8 @@ class Superseded(InterruptedError):
 
 
 VERIFY_READ_CHUNK_BYTES = 64 * 1024
+# The newest chat messages Rem's reply sees as history; recall reaches further back.
+REPLY_HISTORY = 60
 # A turn stops when it shows no provider activity for the idle window, or when
 # it reaches the absolute limit even while active. A test or build that is
 # running or waiting for a command slot counts as activity.
@@ -1217,12 +1231,15 @@ def subject_hash(root: Path, *, ignored_paths: set[Path] | None = None) -> str:
     Memory use stays bounded by the chunk size. Dependencies are excluded; links
     are recorded without following them outside the project. Large files retain
     content checks, including changes that preserve size and modification time.
+    A file or folder another process deletes during the scan counts as absent, so
+    a test run's temporary files can't block a review; the hash still changes.
     """
     digest = hashlib.sha256()
     ignored = {p.absolute() for p in (ignored_paths or set())}
 
     def scan_error(error: OSError) -> None:
-        raise error
+        if not isinstance(error, FileNotFoundError):
+            raise error
 
     def skipped(directory: str, name: str) -> bool:
         if name in CHAT_CHANGE_IGNORED_DIRECTORIES:
@@ -1249,7 +1266,10 @@ def subject_hash(root: Path, *, ignored_paths: set[Path] | None = None) -> str:
             path = Path(directory) / name
             if path.absolute() in ignored:
                 continue
-            info = path.lstat()
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                continue
             digest.update(
                 encode(
                     [
@@ -1259,19 +1279,23 @@ def subject_hash(root: Path, *, ignored_paths: set[Path] | None = None) -> str:
                     ]
                 ).encode()
             )
-            if stat.S_ISLNK(info.st_mode):
-                digest.update(encode(os.readlink(path)).encode())
-            elif stat.S_ISREG(info.st_mode) and info.st_size:
-                # Bound each allocation and stop at the captured size if another
-                # process keeps appending. Its changed metadata invalidates review.
-                remaining = info.st_size
-                with path.open("rb") as handle:
-                    while remaining:
-                        chunk = handle.read(min(VERIFY_READ_CHUNK_BYTES, remaining))
-                        if not chunk:
-                            break
-                        digest.update(chunk)
-                        remaining -= len(chunk)
+            try:
+                if stat.S_ISLNK(info.st_mode):
+                    digest.update(encode(os.readlink(path)).encode())
+                elif stat.S_ISREG(info.st_mode) and info.st_size:
+                    # Bound each allocation and stop at the captured size if another
+                    # process keeps appending. Its changed metadata invalidates review.
+                    remaining = info.st_size
+                    with path.open("rb") as handle:
+                        while remaining:
+                            chunk = handle.read(min(VERIFY_READ_CHUNK_BYTES, remaining))
+                            if not chunk:
+                                break
+                            digest.update(chunk)
+                            remaining -= len(chunk)
+            except FileNotFoundError:
+                # Deleted after lstat; mark it so the hash differs from a full read.
+                digest.update(b"\0vanished")
     return digest.hexdigest()
 
 
@@ -1301,7 +1325,17 @@ class RemHome:
         # The paired-phone guard (devices.phone_guard.PhoneLocks), set while phones can
         # use Rem. Told when Rem holds back files a phone asked for, so it can lock it.
         self.phone_guard: Any = None
-        self.store = RemHomeStore(data_dir)
+        # A damaged database is moved aside and its newest verified copy restored, so
+        # a bad file can't stop the backend (and with it workflows, the studio and phones).
+        self.store = rem_db_backups.open_store(data_dir)
+        try:
+            rem_db_backups.post_notices(data_dir, self.store)
+        except (OSError, sqlite3.Error) as exc:
+            log.warning("Couldn't post Rem's database restore notice: %s", exc)
+        # Verified copies of the store, at startup and daily, while this backend owns Rem.
+        self.db_snapshots = rem_db_backups.Snapshots(
+            data_dir, on_damage=self._database_damaged, enabled=start
+        )
         self.source, self.jobs, self.steering, self.authorize = source, jobs, steering, authorize
         # Only the chat reply being written on this thread streams its text.
         self._drafting = threading.local()
@@ -1325,6 +1359,10 @@ class RemHome:
             resume=lambda run_id, actor: self.resume_run(
                 run_id, {"request_id": f"ticket-resume-{run_id}-{uuid4().hex}"}, by=actor
             ),
+            # The user's request for changes from a ticket's patch, in the same thread.
+            follow_up=lambda thread_id, body, request_id: self.instruct(
+                thread_id, {"request_id": request_id, "body": body}
+            ),
         )
         self.next_self_work = 0.0
         self.self_work_failure = RepeatingFailure(log, "Rem self-work")
@@ -1340,6 +1378,9 @@ class RemHome:
         self.conversation_cancel = threading.Event()
         # Phone screen text waiting for its reply, by request ID. Memory only, used once.
         self.screens: dict[str, dict[str, str]] = {}
+        # Desktop screenshots waiting for their reply, by request ID: (name, image).
+        # Memory only, used once, never written to the store or logged.
+        self.screen_images: dict[str, tuple[str, ChatImage]] = {}
         self.owned = False
         self.has_context = False
         # Why queued work waits before the first context arrives. A headless backend
@@ -1356,6 +1397,19 @@ class RemHome:
         if start:
             self.monitor.start()
 
+    def _database_damaged(self, error: str) -> None:
+        """Tell the user in Rem's chat that the live database failed its check."""
+        try:
+            with self.store.connect() as db:
+                self.store.message(
+                    db,
+                    rem_db_backups.damage_text(self.data_dir),
+                    identity=f"rem-db-damage-{uuid4().hex}",
+                    database_restore={"reason": "suspect", "error": error},
+                )
+        except sqlite3.Error as exc:
+            log.warning("Couldn't post the database damage notice: %s", exc)
+
     def _monitor(self) -> None:
         # The loop ticks four times a second; a lasting failure is logged once.
         failure = RepeatingFailure(log, "Rem home reconciliation")
@@ -1365,6 +1419,9 @@ class RemHome:
                 failure.succeeded()
             except Exception as exc:
                 failure.failed(exc)
+                if rem_db_backups.is_damage(exc):
+                    # Checks the whole file in the background, at most hourly.
+                    self.db_snapshots.suspect(str(exc))
             self.stop.wait(0.25)
 
     def _lease(self) -> bool:
@@ -1500,6 +1557,7 @@ class RemHome:
             if self.owned:
                 self._stand_by()
             return
+        self.db_snapshots.tick()
         with self.lock:
             if self.resetting:
                 return
@@ -1880,19 +1938,35 @@ class RemHome:
         """Queue a user message. ``source`` marks a paired phone's request, never set by the API.
 
         A phone request may carry ``screen`` text for its reply only; it is kept in memory and the
-        stored message records just the app's name.
+        stored message records just the app's name. A desktop request may carry ``screen_image``,
+        a screenshot the user took for this message (Show Rem your screen), kept the same way: in
+        memory for this reply, with only its name (``screen_capture``) stored.
 
         ``refers_to`` is the ID of an earlier chat message this one replies to. Only the ID is
         stored; readers get a preview of the message, or learn that it is no longer there.
         """
-        if set(payload) - {"request_id", "body", "attachments", "screen", "refers_to"}:
+        if set(payload) - {
+            "request_id",
+            "body",
+            "attachments",
+            "screen",
+            "screen_image",
+            "refers_to",
+        }:
             raise ValueError("Unknown message fields")
         if "screen" in payload and source != "phone":
             raise ValueError("Only a paired phone can share its screen")
+        if "screen_image" in payload and source is not None:
+            raise ValueError("Only the desktop app can show Rem a screenshot")
         screen = clean_screen(payload["screen"]) if "screen" in payload else None
+        shot = clean_screen_image(payload["screen_image"]) if "screen_image" in payload else None
         text = payload.get("body", "")
         attachments = message_attachments(payload.get("attachments"), self.data_dir)
-        if not isinstance(text, str) or not (text.strip() or attachments) or len(text) > 100000:
+        if (
+            not isinstance(text, str)
+            or not (text.strip() or attachments or shot)
+            or len(text) > 100000
+        ):
             raise ValueError("Write a message of at most 100,000 characters")
         refers_to = payload.get("refers_to")
         if refers_to is not None and (
@@ -1910,6 +1984,7 @@ class RemHome:
             **({"attachments": attachments} if attachments else {}),
             **({"source": source} if source else {}),
             **({"screen_app": screen["app"]} if screen else {}),
+            **({"screen_capture": shot[0]} if shot else {}),
             **({"refers_to": refers_to} if refers_to else {}),
         }
 
@@ -1917,22 +1992,30 @@ class RemHome:
             self.self_work.note_prompt(db)
             return queue_user_message(self.store, db, entry, self.owner)
 
-        # The screen text is left out of the command record, which is stored.
-        stored = {k: v for k, v in payload.items() if k != "screen"}
+        # The screen text and screenshot are left out of the command record, which is stored.
+        stored = {k: v for k, v in payload.items() if k not in {"screen", "screen_image"}}
         if screen:
             stored["screen_app"] = screen["app"]
-        if not screen:
+        if shot:
+            stored["screen_capture"] = shot[0]
+        if not screen and not shot:
             return self.store.command("message", stored, operation)
         # Ready before the message is queued, so the reply that picks it up finds it.
         with self.lock:
-            self.screens[payload["request_id"]] = screen
-            while len(self.screens) > MAX_WAITING:
-                self.screens.pop(next(iter(self.screens)))
+            if screen:
+                self.screens[payload["request_id"]] = screen
+                while len(self.screens) > MAX_WAITING:
+                    self.screens.pop(next(iter(self.screens)))
+            if shot:
+                self.screen_images[payload["request_id"]] = shot
+                while len(self.screen_images) > MAX_WAITING:
+                    self.screen_images.pop(next(iter(self.screen_images)))
         try:
             return self.store.command("message", stored, operation)
         except Exception:
             with self.lock:
                 self.screens.pop(payload["request_id"], None)
+                self.screen_images.pop(payload["request_id"], None)
             raise
 
     def _promote_waiting(self) -> None:
@@ -1989,7 +2072,9 @@ class RemHome:
         return self.store.mutate_task(identity, payload, action, context=context, db=db)
 
     def _reply(self) -> None:
-        snapshot = self.store.conversation()
+        # Only the end of the chat: the model sees the last REPLY_HISTORY messages, and
+        # the request it answers is looked up by ID, so a long chat costs a reply nothing.
+        snapshot = self.store.conversation(REPLY_HISTORY + 10)
         pending = snapshot["conversation"].get("pending")
         if not pending or pending == snapshot["conversation"].get("processed") or self.resetting:
             return
@@ -2008,9 +2093,7 @@ class RemHome:
             projects = [
                 {"root": p["root"], "name": p.get("name")} for p in config.get("projects", [])
             ]
-            incoming: dict[str, Any] = next(
-                (m for m in snapshot["messages"] if m["id"] == pending), {}
-            )
+            incoming: dict[str, Any] = self.store.find_message(str(pending)) or {}
             query = incoming.get("body", "")
             current_request: dict[str, Any] = {"id": pending, "body": query}
             if incoming.get("attachments"):
@@ -2052,6 +2135,29 @@ class RemHome:
                 screened = True
             elif incoming.get("screen_app"):
                 current_request["screen_unavailable"] = True
+            # A desktop screenshot is shown to the model for this reply only, then forgotten.
+            with self.lock:
+                shot = self.screen_images.pop(pending, None)
+            # The attached images alone, for a decision that mustn't see the screenshot.
+            plain_images = tuple(getattr(self._drafting, "images", ()) or ())
+            refusal = chat_image_refusal(str(chat_config(config).get("provider") or "codex"))
+            if shot and not from_phone and refusal:
+                # The model can't see it; the reply says why instead of guessing.
+                current_request["desktop_screen"] = {
+                    "name": shot[0],
+                    "image": "not shown",
+                    "not_shown_because": refusal,
+                }
+            elif shot and not from_phone:
+                self._drafting.images = (*plain_images, shot[1])
+                current_request["desktop_screen"] = {
+                    "name": shot[0],
+                    "image": "shown",
+                    "image_number": len(self._drafting.images),
+                }
+                screened = True
+            elif incoming.get("screen_capture"):
+                current_request["desktop_screen_unavailable"] = True
             recall_reader = RemRecall(self.store, config)
             # A reply carries the message it answers, however far back it is, and the
             # first read ranks that message's task thread among the linked ones.
@@ -2094,6 +2200,8 @@ class RemHome:
                     + (" " + PHONE_ACTIONS if from_phone else "")
                     + (" " + SCREEN_RULES if "screen" in request else "")
                     + (" " + SCREEN_GONE if "screen_unavailable" in request else "")
+                    + (" " + DESKTOP_SCREEN_RULES if "desktop_screen" in request else "")
+                    + (" " + DESKTOP_SCREEN_GONE if "desktop_screen_unavailable" in request else "")
                     + (" " + SCREEN_WITHHELD if "screen_withheld" in request else "")
                     + (" " + REPLYING_RULES if "replying_to" in request else "")
                     + (
@@ -2255,7 +2363,8 @@ class RemHome:
                         {
                             "current_request": request,
                             "history": bounded_messages(
-                                [excerpt(m, query) for m in snapshot["messages"][-60:]], 60000
+                                [excerpt(m, query) for m in snapshot["messages"][-REPLY_HISTORY:]],
+                                60000,
                             ),
                             "recalled_context": recalled,
                             "projects": projects,
@@ -2421,11 +2530,17 @@ class RemHome:
                 decided = prompt
                 return decision
 
-            if "screen" in current_request:
+            seen = (current_request.get("desktop_screen") or {}).get("image") == "shown"
+            if "screen" in current_request or seen:
                 withheld = screen_withheld(current_request)
+
+                def without_screen() -> Decision:
+                    # The screenshot goes too: only the user's words and files remain.
+                    self._drafting.images = plain_images
+                    return decide(build(withheld))
+
                 decision = self._screen_safe(
-                    decide(build(current_request), seen_screen=True),
-                    lambda: decide(build(withheld)),
+                    decide(build(current_request), seen_screen=True), without_screen
                 )
             else:
                 decision = decide(build(current_request))
@@ -2484,14 +2599,8 @@ class RemHome:
                 # A reply to a task's message continues that task, not the newest one.
                 replied = ((replying_to or {}).get("work") or {}).get("task_id")
                 task = known.get(replied) if replied else None
-                task = task or next(
-                    (
-                        known[m["work"]["task_id"]]
-                        for m in reversed(snapshot["messages"])
-                        if m.get("work", {}).get("task_id") in known
-                    ),
-                    None,
-                )
+                if task is None and (latest := self.store.latest_card_task(set(known))):
+                    task = known[latest]
                 # A task on hold has no run yet: "retry" means the task it waits for.
                 held = (task or {}).get("dependency") or {}
                 if task and held.get("state") == "held" and not task.get("last_run"):
@@ -3051,7 +3160,19 @@ class RemHome:
             if epoch is not None and (run["epoch"] != epoch or run["state"] == "cancelling"):
                 return False
             if released:
-                run.update(worktree=None, worktree_note=note or None)
+                kept = run.get("worktree") or {}
+                run.update(
+                    worktree=None,
+                    worktree_note=note or None,
+                    # The branch stays for review: the ticket's patch and Accept read it.
+                    released_worktree={
+                        key: kept[key]
+                        for key in ("branch", "base", "repository", "base_branch")
+                        if key in kept
+                    }
+                    if note
+                    else None,
+                )
                 summary = f"{summary.rstrip()}\n\n{note}" if note else summary
             if state in {"blocked", "cancelled"}:
                 run["blocked_phase"] = run["state"]
@@ -3382,12 +3503,25 @@ class RemHome:
             worktree = self.store.get(db, "runs", identity).get("worktree")
         if worktree:
             try:
-                ensure_worktree(worktree)
+                created = ensure_worktree(worktree)
             except WorktreeError as exc:
                 log.warning("Rem could not create a worktree for %s: %s", identity, exc)
                 # Fall back to waiting for the project checkout.
                 self._update(identity, worktree=None, worktree_failed=True)
                 return
+            if created:
+                with self.store.read() as db:
+                    source = self.store.get(db, "runs", identity)["recipe"]["project_dir"]
+                setup = worktree_setup.prepare_quietly(
+                    self.data_dir,
+                    source=source,
+                    worktree=worktree["root"],
+                    surface="rem",
+                    cancel=cancel,
+                    log=log.warning,
+                )
+                if setup is not None:
+                    self._update(identity, worktree_setup=setup)
         with self.store.read() as db:
             started = self.store.get(db, "runs", identity)
         if "branch_tips" not in started and self._lands_on_dev(started):
@@ -4101,7 +4235,8 @@ class RemHome:
             return []
         found: list[dict[str, Any]] = []
         try:
-            organizations = manager.store.list_organizations()
+            # Shared decoded copies, read again only for organizations that changed.
+            organizations = manager.store.snapshots()
         except Exception:
             log.exception("Couldn't list organization requests for Rem's chat")
             return []
@@ -4557,6 +4692,12 @@ class RemHome:
                 if t.get("category") == "shell" and t.get("input")
             ]
             known = list(run.get("landing_branches") or [])
+            # Every branch this run wrote to, landed or not, so its ticket can show the patch.
+            written = written_branches(
+                run["recipe"]["project_dir"], run["branch_tips"], commands, known
+            )
+            if written and written != run.get("work_branches"):
+                self._update(run["id"], work_branches=written)
             unlanded = unlanded_branches(
                 run["recipe"]["project_dir"], run["branch_tips"], commands, known
             )
@@ -4809,6 +4950,16 @@ class RemHome:
                 "finished changes to this branch. Install or link dependencies here if checks "
                 "need them. Rem removes the worktree afterwards and keeps the branch."
             )
+            setup = run.get("worktree_setup")
+            if setup and setup.get("status") != "passed":
+                instructions += (
+                    f"\n{setup.get('summary')} Prepare what your checks need yourself, and "
+                    "don't change the project's setup file to get around the approval."
+                )
+            elif setup:
+                instructions += (
+                    f"\nThe project's worktree setup already ran here: {setup['summary']}"
+                )
         skill = (
             worktree_skill(config.get("resources") or {})
             if recipe.get("project_dir") and not readonly and not run.get("worktree")
@@ -4853,6 +5004,9 @@ class RemHome:
                 "browser": False,
                 "mcpServers": [],
             }
+        # Self-work and reviews run with nobody watching. Codex already runs them
+        # in its own sandbox; Claude Code's shell gets operating-system limits.
+        sandboxed = provider == "claude_code" and (unattended or role == "verify")
         workflow = {
             "projectRoot": str(root),
             "projectName": Path(recipe.get("project_dir") or root).name,
@@ -4862,9 +5016,14 @@ class RemHome:
             "remManagedTask": {
                 "readOnly": readonly,
                 "networkAccess": not readonly and bool(resources.get("web")),
+                # The usage ledger records each model call against this run.
+                "runId": run["id"],
+                **({"claudeSandbox": True} if sandboxed else {}),
             },
             "remReportTheme": config.get("report_theme") or {"format": "html"},
             **({"remBlockGitPush": True} if unattended else {}),
+            # Fleet and Organizations tools reach other computers and companies.
+            **({"remUnattended": True} if unattended else {}),
         }
         if config.get("browser_target"):
             # The browser the user chose for threads in Settings > Browser.
@@ -4890,6 +5049,15 @@ class RemHome:
                 f"\nYour shell starts in a private scratch folder, {scratch}. Temp files and "
                 f"tool caches go there. The project at {root} is read-only to you; change into "
                 "it to inspect files and run checks."
+            )
+        elif sandboxed:
+            # Claude Code's own temp files, and a read-only turn's test caches,
+            # go to a private folder that is removed when the turn ends.
+            # Named by run and role, not turn, so a resumed session's
+            # instructions stay the same from turn to turn.
+            scratch = self.data_dir / "rem-work" / "turn-scratch" / f"{run['id']}-{role}"
+            instructions += sandbox_instructions(
+                read_only=readonly, scratch=scratch if readonly else None
             )
         # Rem acts for the user, so Claude Code runs without prompts. Plan mode
         # would also block the granted report tool; read-only turns lose the
@@ -5553,6 +5721,8 @@ class RemHome:
                 with sqlite3.connect(self.store.path) as db:
                     db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                     db.execute("VACUUM")
+                # Backup copies would bring the cleared history back on a restore.
+                rem_db_backups.replace_after_clear(self.data_dir)
                 self.workers.clear()
                 self.conversation_worker = None
                 self.conversation_cancel = threading.Event()

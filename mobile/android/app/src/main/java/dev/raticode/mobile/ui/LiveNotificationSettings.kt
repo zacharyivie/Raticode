@@ -99,7 +99,7 @@ fun TaskProgressSettings(backgroundOn: Boolean) {
  * this phone didn't start.
  */
 @Composable
-fun RemNotificationSettings(supported: Boolean?, desktopControl: Boolean, filterSupported: Boolean?) {
+fun RemNotificationSettings(supported: Boolean?, desktopControl: Boolean, filterSupported: Boolean?, workflowSupported: Boolean? = null) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var enabled by remember { mutableStateOf(RemNotifications.enabled(context)) }
@@ -149,14 +149,17 @@ fun RemNotificationSettings(supported: Boolean?, desktopControl: Boolean, filter
                 showText = !showText
                 RemNotifications.setShowText(context, showText)
             }) { Text(if (showText) "Hide Rem's words in alerts" else "Show Rem's words in alerts") }
-            RemAlertChoices(filterSupported)
+            RemAlertChoices(filterSupported, workflowSupported)
         }
     }
 }
 
-/** The alerts beyond this phone's own requests, and quiet hours. Saved on the phone; the desktop decides what counts under each. */
+/**
+ * The alerts beyond this phone's own requests, and quiet hours. Saved on the phone; the desktop decides what counts under each.
+ * [workflowSupported] is null until the desktop says whether it sends workflow messages.
+ */
 @Composable
-private fun RemAlertChoices(filterSupported: Boolean?) {
+private fun RemAlertChoices(filterSupported: Boolean?, workflowSupported: Boolean?) {
     val context = LocalContext.current
     var include by remember { mutableStateOf(RemNotifications.include(context).toSet()) }
     var quiet by remember { mutableStateOf(RemNotifications.quietHours(context)) }
@@ -182,6 +185,10 @@ private fun RemAlertChoices(filterSupported: Boolean?) {
             RemAlertRules.FINISHED in include, "remAlertFinished") { filter(RemAlertRules.FINISHED, it) }
         AlertSwitch("Proposals are waiting", "One alert for each self-work round that leaves proposals for you.",
             RemAlertRules.PROPOSALS in include, "remAlertProposals") { filter(RemAlertRules.PROPOSALS, it) }
+        AlertSwitch("Workflow messages", "What a workflow sends to your phone with a notification step. Tap one to open its run.",
+            RemAlertRules.WORKFLOW in include, "remAlertWorkflow") { filter(RemAlertRules.WORKFLOW, it) }
+        if (filterSupported != false && workflowSupported == false && RemAlertRules.WORKFLOW in include)
+            Text("Update Raticode on your computer to get workflow messages.", style = MaterialTheme.typography.bodySmall)
         Text("Your desktop decides what counts as each of these.", style = MaterialTheme.typography.bodySmall)
         AlertSwitch("Quiet hours", "Alerts still arrive during these hours, without sound or a pop-up.", quiet.on, "remQuietHours") { save(quiet.copy(on = it)) }
         if (quiet.on) {

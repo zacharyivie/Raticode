@@ -1,0 +1,23 @@
+/* A ticket's patch and the decision on it, inside the Kanban and Organizations sheets. */
+.tpr { display: grid; gap: 8px; min-width: 0; }
+.tpr-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; font-size: 12.5px; }
+.tpr-branch { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow-wrap: anywhere; }
+.tpr-size { color: var(--muted); }
+.tpr-state { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 600; }
+.tpr-state.ok, .tpr-state.done { background: var(--done-soft); color: var(--done); }
+.tpr-state.bad { background: var(--blocked-soft); color: var(--blocked); }
+.tpr-state.warn { background: var(--review-soft); color: var(--review); }
+.tpr-muted { margin: 0; color: var(--muted); font-size: 12px; }
+.tpr-toggle { justify-self: start; }
+/* The diff keeps its own scroll, so the sheet's decision stays reachable below it. */
+.tpr-diff { display: flex; height: min(68vh, 900px); min-height: 280px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); container-type: inline-size; }
+.tpr-decide { display: grid; gap: 8px; }
+.tpr-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.tpr-conflict { display: grid; gap: 6px; padding: 10px 12px; border-radius: 8px; background: var(--blocked-soft); color: var(--ink); font-size: 12.5px; }
+.tpr-conflict p { margin: 0; }
+.tpr-conflict ul { margin: 0; padding-left: 18px; color: var(--blocked); }
+.tpr-conflict .oh-btn { justify-self: start; }
+.tpr-outcome { margin: 0; padding: 6px 10px; border-radius: 8px; background: var(--done-soft); color: var(--done); font-size: 12.5px; font-weight: 550; }
+.tpr-error { margin: 0; color: var(--blocked); font-size: 12.5px; }
+/* Reviewing widens the Kanban sheet so both sides of the diff are readable. */
+.kb-sheet.is-reviewing { width: min(1180px, 100%); }

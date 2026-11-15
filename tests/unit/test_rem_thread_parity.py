@@ -256,3 +256,36 @@ def test_rem_task_source_adds_read_only_fleet_status():
     assert "fleet_status" in tools
     # Sending work to another desktop would delegate the task again.
     assert "fleet_send" not in tools
+
+
+def test_unattended_rem_tasks_get_no_fleet_or_organizations_tools(monkeypatch):
+    import gofer.ui.server as server_module
+    from gofer.ui.server import GoferUiServer
+
+    seen: list[dict[str, Any]] = []
+
+    async def chat_source(**kwargs: Any):
+        seen.append(kwargs)
+        yield {"type": "final", "message": {"body": "ok"}}
+
+    async def device_source(**kwargs: Any):
+        raise AssertionError("self-work must not reach the fleet or Organizations path")
+        yield {}
+
+    monkeypatch.setattr(server_module, "stream_workflow_chat", chat_source)
+    server = SimpleNamespace(devices=SimpleNamespace(action=lambda body: {}))
+    server._device_chat_source = device_source
+
+    async def run() -> list[dict[str, Any]]:
+        return [
+            event
+            async for event in GoferUiServer._rem_task_source(
+                server,  # type: ignore[arg-type]
+                permission_mode="dontAsk",
+                workflow={"remUnattended": True, "remResources": {"mcpServers": []}},
+            )
+        ]
+
+    assert asyncio.run(run())[-1]["type"] == "final"
+    assert seen[0]["workflow"]["remResources"]["mcpServers"] == []
+    assert "trusted_organization_url" not in seen[0]

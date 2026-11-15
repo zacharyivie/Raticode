@@ -6,6 +6,9 @@ import shutil
 import smtplib
 import ssl
 import sys
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
@@ -16,8 +19,14 @@ import anyio
 
 from gofer.core.http import HttpClient, HttpRequest, UrllibHttpClient
 from gofer.core.operations import HttpRetryPolicy
+from gofer.utils.atomic_output import atomic_binary_output
 from gofer.utils.paths import get_data_dir
 from gofer.utils.process import run_subprocess
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 ApprovalDecisionValue = Literal["approved", "rejected", "timeout"]
 
@@ -198,12 +207,12 @@ class ApprovalStore:
 
     def create_or_update(self, request: ApprovalRequest) -> Path:
         path = self.request_path(request.workflow_id, request.run_id, request.node_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        existing = self.get(request.workflow_id, request.run_id, request.node_id)
-        if existing is not None and existing.decision is not None:
-            request.decision = existing.decision
-            request.status = "decided"
-        path.write_text(json.dumps(request.to_dict(), indent=2), encoding="utf-8")
+        with _request_lock(path):
+            existing = _read_request(path)
+            if existing is not None and existing.decision is not None:
+                request.decision = existing.decision
+                request.status = "decided"
+            _write_request(path, request)
         return path
 
     def get(
@@ -212,17 +221,8 @@ class ApprovalStore:
         run_id: str,
         node_id: str,
     ) -> ApprovalRequest | None:
-        path = self.request_path(workflow_id, run_id, node_id)
-        if not path.exists():
-            return None
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-        if not isinstance(data, dict):
-            return None
-        request = ApprovalRequest.from_dict(data)
-        return self._expire_if_needed(request)
+        request = _read_request(self.request_path(workflow_id, run_id, node_id))
+        return self._expire_if_needed(request) if request is not None else None
 
     def decide(
         self,
@@ -234,49 +234,66 @@ class ApprovalStore:
         decided_by: str = "cli",
         notes: str = "",
     ) -> ApprovalRequest:
-        request = self.get(workflow_id, run_id, node_id)
-        if request is None:
+        path = self.request_path(workflow_id, run_id, node_id)
+        if not path.exists():
             raise ValueError("Pending approval not found")
-        if request.decision is not None:
-            raise ValueError(f"Approval already decided as {request.decision.decision}")
-        if request.status == "cancelled":
-            raise ValueError(
-                "Approval was cancelled"
-                + (f": {request.cancelled_reason}" if request.cancelled_reason else ".")
+        # Held across the read and the write, so a waiting run that rewrites this
+        # file at the same moment can't put back the undecided copy it read.
+        with _request_lock(path):
+            request = self.get(workflow_id, run_id, node_id)
+            if request is None:
+                raise ValueError("Pending approval not found")
+            if request.decision is not None:
+                raise ValueError(f"Approval already decided as {request.decision.decision}")
+            if request.status == "cancelled":
+                raise ValueError(
+                    "Approval was cancelled"
+                    + (f": {request.cancelled_reason}" if request.cancelled_reason else ".")
+                )
+            if request.approvers and decided_by != "gofer" and decided_by not in request.approvers:
+                allowed = ", ".join(request.approvers)
+                raise ValueError(
+                    f"Approver {decided_by!r} is not allowed; expected one of: {allowed}"
+                )
+            request.status = "decided"
+            request.decision = ApprovalDecision(
+                decision=decision,
+                decided_by=decided_by,
+                notes=notes,
             )
-        if request.approvers and decided_by != "gofer" and decided_by not in request.approvers:
-            allowed = ", ".join(request.approvers)
-            raise ValueError(f"Approver {decided_by!r} is not allowed; expected one of: {allowed}")
-        request.status = "decided"
-        request.decision = ApprovalDecision(
-            decision=decision,
-            decided_by=decided_by,
-            notes=notes,
-        )
-        self.create_or_update(request)
+            self.create_or_update(request)
         return request
 
     def cancel(self, workflow_id: str, run_id: str, node_id: str, reason: str) -> bool:
         """Close an undecided request so it can no longer be decided or time out."""
-        request = self.get(workflow_id, run_id, node_id)
-        if request is None or request.status != "pending":
+        path = self.request_path(workflow_id, run_id, node_id)
+        if not path.exists():
             return False
-        request.status = "cancelled"
-        request.cancelled_reason = reason
-        self.create_or_update(request)
+        with _request_lock(path):
+            request = self.get(workflow_id, run_id, node_id)
+            if request is None or request.status != "pending":
+                return False
+            request.status = "cancelled"
+            request.cancelled_reason = reason
+            self.create_or_update(request)
         return True
 
     def cancel_pending_for_run(self, workflow_id: str, run_id: str, reason: str) -> int:
         """Close every undecided request that belongs to one finished run."""
-        for request in self.list_requests(workflow_id):
-            if (
-                request.run_id == run_id
-                and request.status == "cancelled"
-                and request.cancelled_reason == APPROVAL_GATE_STOPPED_REASON
-            ):
-                # The gate stopped because its run ended, so record why the run ended.
-                request.cancelled_reason = reason
-                self.create_or_update(request)
+        for listed in self.list_requests(workflow_id):
+            if listed.run_id != run_id or listed.status != "cancelled":
+                continue
+            path = self.request_path(listed.workflow_id, listed.run_id, listed.node_id)
+            with _request_lock(path):
+                request = _read_request(path)
+                if (
+                    request is not None
+                    and request.status == "cancelled"
+                    and request.cancelled_reason == APPROVAL_GATE_STOPPED_REASON
+                ):
+                    # The gate stopped because its run ended, so record why the run ended.
+                    request.cancelled_reason = reason
+                    _write_request(path, request)
         return sum(
             self.cancel(request.workflow_id, request.run_id, request.node_id, reason)
             for request in self.list_pending(workflow_id)
@@ -284,31 +301,43 @@ class ApprovalStore:
         )
 
     def mark_waiting(self, workflow_id: str, run_id: str, node_id: str) -> None:
-        request = self.get(workflow_id, run_id, node_id)
-        if request is None:
+        path = self.request_path(workflow_id, run_id, node_id)
+        if not path.exists():
             return
-        request.waiter_seen_at = _now()
-        request.waiter_pid = os.getpid()
-        self.create_or_update(request)
+        with _request_lock(path):
+            request = self.get(workflow_id, run_id, node_id)
+            if request is None:
+                return
+            request.waiter_seen_at = _now()
+            request.waiter_pid = os.getpid()
+            self.create_or_update(request)
 
     def claim_resume(self, workflow_id: str, run_id: str, node_id: str) -> ApprovalRequest | None:
-        request = self.get(workflow_id, run_id, node_id)
-        if request is None or request.decision is None:
+        path = self.request_path(workflow_id, run_id, node_id)
+        if not path.exists():
             return None
-        if request.resume_claimed_at and _pid_is_live(request.resume_claimed_by_pid):
-            return None
-        request.resume_claimed_at = _now()
-        request.resume_claimed_by_pid = os.getpid()
-        self.create_or_update(request)
+        with _request_lock(path):
+            request = self.get(workflow_id, run_id, node_id)
+            if request is None or request.decision is None:
+                return None
+            if request.resume_claimed_at and _pid_is_live(request.resume_claimed_by_pid):
+                return None
+            request.resume_claimed_at = _now()
+            request.resume_claimed_by_pid = os.getpid()
+            self.create_or_update(request)
         return request
 
     def release_resume(self, workflow_id: str, run_id: str, node_id: str) -> None:
-        request = self.get(workflow_id, run_id, node_id)
-        if request is None:
+        path = self.request_path(workflow_id, run_id, node_id)
+        if not path.exists():
             return
-        request.resume_claimed_at = None
-        request.resume_claimed_by_pid = None
-        self.create_or_update(request)
+        with _request_lock(path):
+            request = self.get(workflow_id, run_id, node_id)
+            if request is None:
+                return
+            request.resume_claimed_at = None
+            request.resume_claimed_by_pid = None
+            self.create_or_update(request)
 
     def list_pending(self, workflow_id: str | None = None) -> list[ApprovalRequest]:
         return [
@@ -326,43 +355,96 @@ class ApprovalStore:
             for path in sorted(request_root.glob("*/*.json")):
                 if path.name.endswith(".checkpoint.json"):
                     continue
-                try:
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    continue
-                if not isinstance(data, dict):
-                    continue
-                request = self._expire_if_needed(ApprovalRequest.from_dict(data))
-                requests.append(request)
+                request = _read_request(path)
+                if request is not None:
+                    requests.append(self._expire_if_needed(request))
         return requests
 
     def _expire_if_needed(self, request: ApprovalRequest) -> ApprovalRequest:
-        if (
-            request.decision is not None
-            or request.status == "cancelled"
-            or request.timeout_seconds is None
-        ):
+        if not _has_timed_out(request):
             return request
-        try:
-            requested_at = datetime.fromisoformat(request.requested_at)
-        except ValueError:
-            return request
-        now = datetime.now(requested_at.tzinfo or UTC)
-        if now < requested_at + timedelta(seconds=request.timeout_seconds):
-            return request
-        decision: ApprovalDecisionValue = (
-            "timeout" if request.timeout_decision == "timeout" else "rejected"
-        )
-        request.status = "decided"
-        request.decision = ApprovalDecision(
-            decision=decision,
-            decided_by="gofer",
-            notes=f"Timed out after {request.timeout_seconds} seconds",
-        )
         path = self.request_path(request.workflow_id, request.run_id, request.node_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(request.to_dict(), indent=2), encoding="utf-8")
-        return request
+        with _request_lock(path):
+            # Someone may have decided or cancelled it since it was read.
+            current = _read_request(path) or request
+            if not _has_timed_out(current):
+                return current
+            decision: ApprovalDecisionValue = (
+                "timeout" if current.timeout_decision == "timeout" else "rejected"
+            )
+            current.status = "decided"
+            current.decision = ApprovalDecision(
+                decision=decision,
+                decided_by="gofer",
+                notes=f"Timed out after {current.timeout_seconds} seconds",
+            )
+            _write_request(path, current)
+        return current
+
+
+def _has_timed_out(request: ApprovalRequest) -> bool:
+    if (
+        request.decision is not None
+        or request.status == "cancelled"
+        or request.timeout_seconds is None
+    ):
+        return False
+    try:
+        requested_at = datetime.fromisoformat(request.requested_at)
+    except ValueError:
+        return False
+    now = datetime.now(requested_at.tzinfo or UTC)
+    return now >= requested_at + timedelta(seconds=request.timeout_seconds)
+
+
+def _read_request(path: Path) -> ApprovalRequest | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return ApprovalRequest.from_dict(data) if isinstance(data, dict) else None
+
+
+def _write_request(path: Path, request: ApprovalRequest) -> None:
+    # Replaced in one step, so a reader never sees a half-written request.
+    with atomic_binary_output(path) as output:
+        output.write(json.dumps(request.to_dict(), indent=2).encode("utf-8"))
+
+
+_held_request_locks = threading.local()
+
+
+@contextmanager
+def _request_lock(path: Path) -> Iterator[None]:
+    """Hold one request against every thread and process while it is read and rewritten.
+
+    The run that waits on a gate rewrites its file several times a second, while the
+    app, the CLI or a phone decides it. Without this, either side can write back an
+    older copy over the other's change. Nested use in one thread is allowed.
+    """
+    held: set[str] = getattr(_held_request_locks, "paths", None) or set()
+    _held_request_locks.paths = held
+    key = str(path)
+    if key in held:
+        yield
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path.with_name(f"{path.name}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if sys.platform == "win32":
+            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        held.add(key)
+        try:
+            yield
+        finally:
+            held.discard(key)
+            if sys.platform == "win32":
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+    finally:
+        os.close(descriptor)
 
 
 def _pid_is_live(pid: int | None) -> bool:

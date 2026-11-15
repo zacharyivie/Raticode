@@ -22,6 +22,7 @@ from gofer.ui.organization_store import (
     Task,
     now,
     project_identity,
+    self_work_roots,
     ticket_prefix,
 )
 from gofer.utils.atomic_output import open_binary_input
@@ -233,6 +234,18 @@ def dependency_reason(org: dict[str, Any], task: dict[str, Any]) -> str:
     return "Waiting for " + ", ".join(key(d) for d in waiting)
 
 
+def blocked_needs_user(org: dict[str, Any], task: dict[str, Any]) -> bool:
+    """Whether a blocked ticket waits on the user.
+
+    Not when it waits by itself (other tickets, a Start, working hours, its next automatic
+    try), nor while Rem still has to look at it in Auto mode.
+    """
+    from gofer.ui.organization_auto import rem_will_reopen
+    from gofer.ui.organization_store import SELF_CLEARING
+
+    return task.get("blockReason") not in SELF_CLEARING and not rem_will_reopen(org, task)
+
+
 def task_reason(org: dict[str, Any], task: dict[str, Any], at: datetime | None = None) -> str:
     at = at or datetime.now(UTC)
     config, runtime = org["config"], org["runtime"]
@@ -378,7 +391,11 @@ def diagnostics(org: dict[str, Any]) -> dict[str, Any]:
     heartbeats = {
         e["id"]: {
             "intervalSeconds": e["heartbeatSeconds"],
-            "nextAt": runtime.get("heartbeats", {}).get(e["id"]),
+            # A worker without projects never checks in, so it has no next check-in.
+            "nextAt": runtime.get("heartbeats", {}).get(e["id"])
+            if self_work_roots(org, e["id"])
+            else None,
+            "unassigned": not self_work_roots(org, e["id"]),
             "failures": runtime.get("heartbeatFailures", {}).get(e["id"], 0),
             "stalled": runtime.get("heartbeatStalls", {}).get(e["id"]),
         }
@@ -417,7 +434,8 @@ def diagnostics(org: dict[str, Any]) -> dict[str, Any]:
         "attention": [
             t["id"]
             for t in tasks
-            if t["status"] in {"blocked", "in_review"}
+            if t["status"] == "in_review"
+            or (t["status"] == "blocked" and blocked_needs_user(org, t))
             or (
                 t["status"] not in {"done", "cancelled"}
                 and t["approvalRequired"]
@@ -1074,7 +1092,15 @@ def resolve_secrets(
     org: dict[str, Any], employee: dict[str, Any], resources: dict[str, Any], store: Any = None
 ) -> list[str]:
     """Resolve only explicitly granted references in MCP environment values."""
+    from gofer.core.secrets_folder import keychain_then_folder, org_secret_file
     from gofer.devices.storage import OSSecretStore
+
+    def keychain(account: str) -> str | None:
+        nonlocal store
+        if store is None:
+            store = OSSecretStore(service="Raticode organization secrets")
+        value: str | None = store.get(account)
+        return value
 
     resolved = []
     for server in resources.get("mcpServers", []):
@@ -1087,9 +1113,9 @@ def resolve_secrets(
                 raise ValueError(
                     "MCP secret reference is missing, revoked or outside employee grants"
                 )
-            if store is None:
-                store = OSSecretStore(service="Raticode organization secrets")
-            secret = store.get(record["account"])
+            account = record["account"]
+            # A headless backend without a keychain reads its secrets folder instead.
+            secret = keychain_then_folder(lambda: keychain(account), org_secret_file(account))
             if not secret:
                 raise ValueError("Referenced secret is unavailable in the protected store")
             server["env"][key] = secret

@@ -33,6 +33,8 @@ async function main() {
     if (!response.ok) throw new Error(payload.error);
     return payload.result;
   };
+  // Lets the test make the backend slow or unreachable for the page's loading and error states.
+  const fault = { fail: false, delay: 0 };
   await app.whenReady();
   const { createServer } = await import("vite");
   vite = await createServer({ root: path.join(root, "frontend"), cacheDir: testViteCacheDir("organization-home"), server: { host: "127.0.0.1", port: 0 }, plugins: [{
@@ -46,9 +48,14 @@ async function main() {
     configureServer(server) { server.middlewares.use(async (request, response, next) => {
       if (request.url === "/organization-home-test") { response.setHeader("Content-Type", "text/html"); return response.end(await server.transformIndexHtml("/organization-home-test", '<html><body><div id="root"></div><script type="module" src="/organization-home-entry.jsx"></script></body></html>')); }
       if (request.url.startsWith("/api/provider/capabilities")) { response.setHeader("Content-Type", "application/json"); return response.end('{"providers":[{"id":"codex","name":"Codex","enabled":true,"models":[]},{"id":"claude_code","name":"Claude Code","enabled":true,"models":[]}]}'); }
-      if (!request.url.startsWith("/api/organizations")) return next();
+      // Organization calls, and the ticket patch review a ticket's Did section reads.
+      if (!request.url.startsWith("/api/organizations") && !request.url.startsWith("/api/rem/kanban/")) return next();
+      if (fault.delay) await sleep(fault.delay);
+      if (fault.fail) { response.statusCode = 503; response.setHeader("Content-Type", "application/json"); return response.end('{"error":"The backend is not responding"}'); }
       let body = ""; for await (const chunk of request) body += chunk;
-      const upstream = await fetch(`http://127.0.0.1:${ready.port}${request.url}`, { method: request.method, headers: { Authorization: "Bearer organization-browser-test", "Content-Type": "application/json" }, ...(body ? { body } : {}) });
+      // A poll still in flight when the test stops the backend gets a 502, not an unhandled rejection.
+      let upstream;
+      try { upstream = await fetch(`http://127.0.0.1:${ready.port}${request.url}`, { method: request.method, headers: { Authorization: "Bearer organization-browser-test", "Content-Type": "application/json" }, ...(body ? { body } : {}) }); } catch { response.statusCode = 502; return response.end('{"error":"The test backend stopped"}'); }
       response.statusCode = upstream.status; response.setHeader("Content-Type", "application/json"); response.end(await upstream.text());
     }); },
   }] });
@@ -71,6 +78,7 @@ async function main() {
 
   // Organization: mission, milestones, what needs the user, and recent activity.
   await wait("document.querySelector('.oh-mission')");
+  assert.ok((await evaluate("document.querySelector('[role=tab][aria-selected=true]').textContent")).includes("need you"), "the tab count says what it counts");
   const overview = await evaluate("document.querySelector('.oh-view').innerText");
   for (const text of ["Make agent work something you can trust at a glance.", "Every agent claim has evidence", "Organizations 2.0", "STU-2", "Drag cards between columns", "Raticode Desktop", "Docs site"]) assert.ok(overview.includes(text), text);
   await click("Edit");
@@ -83,9 +91,13 @@ async function main() {
   // Review: the ticket's claims show Raticode's own checks, and a weak claim asks for care.
   await click("Review");
   await wait("document.querySelector('.oh-detail h2')?.textContent === 'Drag cards between columns'");
+  // The heading takes focus for screen readers without drawing a control's focus ring.
+  await wait("document.activeElement === document.querySelector('.oh-detail h2')", "heading focused");
+  assert.equal(await evaluate("getComputedStyle(document.querySelector('.oh-detail h2')).outlineStyle"), "none");
+  // The patch review under Did loads separately; read the sheet once it has arrived.
+  await wait("document.querySelector('.oh-detail').innerText.includes('1 file') && document.querySelector('.oh-detail').innerText.includes('1 without verified evidence')", "changed files and the review caution");
   let text = await sheet();
   for (const expected of ["Board tests pass", "Verified: check", "Verified: quote", "Verified: commit", "No evidence", "1 without verified evidence", "Read in a run", "The board has five fixed columns", "org/drag-cards-between-columns"]) assert.ok(text.includes(expected), expected);
-  await wait("document.querySelector('.oh-detail').innerText.includes('1 file')", "changed files");
   await evaluate("document.querySelector('.oh-evbtn.ok').click()");
   await wait("document.querySelector('.oh-detail').innerText.includes('Raticode reran it')");
   text = await sheet();
@@ -109,6 +121,17 @@ async function main() {
 
   // Details fill the main area under the tabs; Escape returns to the list it came from.
   assert.equal(await evaluate("document.querySelectorAll('[role=tab]').length"), 5);
+  // The section tabs work from the keyboard: one tab stop, arrows, Home and End, and a labelled panel.
+  const selectedTab = "document.querySelector('[role=tab][aria-selected=true]')";
+  assert.equal(await evaluate("document.querySelectorAll('[role=tab][tabindex=\"0\"]').length"), 1);
+  assert.equal(await evaluate("document.querySelector('[role=tabpanel]').getAttribute('aria-labelledby')"), await evaluate(`${selectedTab}.id`));
+  await key(selectedTab, "ArrowRight");
+  await wait(`${selectedTab}?.textContent.startsWith('Projects') && document.activeElement === ${selectedTab}`, "arrow to Projects");
+  await key(selectedTab, "End");
+  await wait(`${selectedTab}?.textContent.startsWith('Knowledge')`, "End to Knowledge");
+  await key(selectedTab, "ArrowRight");
+  await wait(`${selectedTab}?.textContent.startsWith('Organization')`, "arrow wraps to Organization");
+  await wait("document.querySelector('.oh-mission')");
   assert.ok(await evaluate("Boolean(document.querySelector('.oh-mission'))"));
   await click("Milestone");
   await wait("document.querySelector('.oh-detail h2')?.textContent === 'New organization milestone'");
@@ -338,10 +361,36 @@ async function main() {
   await wait("document.querySelector('.oh-mission')");
   assert.equal((await api("audit_verify")).ok, true);
 
+  // A failed refresh keeps the page, says how old it is and offers Try again.
+  fault.fail = true;
+  await wait("document.querySelector('.oh-banner.stale')?.innerText.includes(\"Couldn't refresh.\")", "stale banner");
+  assert.ok(await evaluate("Boolean(document.querySelector('.oh-mission'))"), "the last view stays");
+  fault.fail = false;
+  await click("Try again", "document.querySelector('.oh-banner.stale')");
+  await wait("!document.querySelector('.oh-banner.stale')", "stale banner clears");
+
+  // A small window keeps the header on one line and names only the open section.
+  win.setSize(420, 820); await sleep(300);
+  const narrow = await evaluate(`(() => { const top = document.querySelector('.oh-top'); const tabs = [...document.querySelectorAll('[role=tab]')]; return { fits: top.scrollWidth <= top.clientWidth + 1, title: document.querySelector('.oh-top h1').getBoundingClientRect().width, hidden: tabs.filter(t => t.getAttribute('aria-selected') === 'false').every(t => t.querySelector('.lbl').getBoundingClientRect().width <= 1 && t.title), shown: ${selectedTab}.querySelector('.lbl').getBoundingClientRect().width > 20 }; })()`);
+  assert.deepEqual({ ...narrow, title: narrow.title > 80 }, { fits: true, title: true, hidden: true, shown: true });
+  win.setSize(1440, 900); await sleep(200);
+
+  // Opening: an outline while the first read is on its way, and a way back when it fails.
+  fault.delay = 1500;
+  await win.webContents.reload();
+  await wait("document.querySelector('.oh[aria-busy=true] .oh-skel') && document.querySelector('[role=status]')?.textContent.includes('Loading organization')", "loading outline");
+  fault.delay = 0; fault.fail = true;
+  await win.webContents.reload();
+  await wait("document.querySelector('.oh-fail')?.innerText.includes(\"Couldn't open this organization\")", "first-load error");
+  assert.ok(await evaluate(`Boolean(${button("Back to organizations")})`));
+  fault.fail = false;
+  await click("Try again");
+  await wait("document.querySelector('.oh-mission')", "recovered after Try again");
+
   const screenshot = await win.webContents.capturePage();
   fs.writeFileSync(path.join(os.tmpdir(), "organizations-home.png"), screenshot.toPNG());
   assert.deepEqual(errors.filter(message => !message.includes("Download the React DevTools")), []);
-  console.log("Organizations home browser: overview, full-page details with Back and Escape, review with checked claims, board rules with In progress meaning next, projects, folders, worker permissions and check-ins, working hours, chart zoom, knowledge, search and the shared repository work against a real backend.");
+  console.log("Organizations home browser: overview, full-page details with Back and Escape, review with checked claims, board rules with In progress meaning next, projects, folders, worker permissions and check-ins, working hours, chart zoom, knowledge, search, the shared repository, keyboard tabs, the small-window header and the loading, stale and error states work against a real backend.");
 }
 
 main().then(() => { clearTimeout(timeout); win?.destroy(); vite?.close(); backend?.stdin.end(); backend?.kill(); app.exit(0); }, error => { console.error(error); clearTimeout(timeout); backend?.kill(); app.exit(1); });

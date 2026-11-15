@@ -1,0 +1,82 @@
+rattish: 1
+
+# Starter: run the tests, let an agent fix failures, and test again.
+# Guide: https://raticode.dev/docs/starters/test-and-fix
+workflow:
+  name: Test and fix
+  interface-version: 1
+  # Ends the run if its model calls' estimated cost passes this. Raise it or set none.
+  max-cost-usd: 2.00
+  inputs:
+    test-command:
+      schema: {"description": "Command that runs the tests and exits 0 when they pass. It runs in the project folder.", "minLength": 1, "type": "string"}
+      default: npm test
+    prepare-command:
+      schema: {"description": "Optional command to run once before the first test run, such as installing dependencies.", "type": "string"}
+      default: ""
+    instructions:
+      schema: {"description": "What the agent may change while fixing.", "minLength": 1, "type": "string"}
+      default: Fix the code so the tests pass. Don't change or delete the tests, and keep each change as small as possible.
+
+node prepare:
+  type: bash-command
+  command: |
+    if [ -n "$PREPARE_COMMAND" ]; then
+      bash -c "$PREPARE_COMMAND"
+    fi
+  with:
+    prepare-command: input.prepare-command
+  to: run-tests
+
+node run-tests:
+  type: bash-command
+  max-runs: 4
+  command: |
+    output=$(bash -c "$TEST_COMMAND" 2>&1)
+    code=$?
+    printf '%s\n' "$output" | tail -c 20000
+    if [ "$code" -eq 0 ]; then
+      echo "::tests:: passed"
+    else
+      echo "::tests:: failed with exit code $code"
+    fi
+  with:
+    test-command: input.test-command
+  needs: prepare
+  to:
+    - done when node.run-tests.output.stdout contains "::tests:: passed"
+    - fix otherwise
+
+node fix:
+  type: agent
+  provider: claude-code
+  max-runs: 3
+  tools:
+    - Read
+    - Edit
+    - Write
+    - Glob
+    - Grep
+  prompt: |
+    The project's tests fail. Find the cause and fix it.
+
+    {{instructions}}
+
+    The test command was: {{test-command}}
+
+    Its output:
+    {{test-output}}
+
+    When you are done, reply with one short paragraph saying what you changed.
+  with:
+    instructions: input.instructions
+    test-command: input.test-command
+    test-output: node.run-tests.output.stdout
+  needs: run-tests
+  to: run-tests
+
+node done:
+  type: bash-command
+  command: echo "The tests pass."
+  needs: run-tests
+  finish: pass

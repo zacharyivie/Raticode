@@ -14,16 +14,16 @@ Open Settings from **Help > Settings**, the gear (**Open settings**) in the tool
 
 | Category | What's there |
 | --- | --- |
-| General | Data directory, initial sidebar, file autosave, default run target (local or runner queue), **Check for updates at startup**, and **Delete archived threads** after 7, 30 or 90 days |
-| Devices | Microphone and level, **Dictation** (press or hold), **Send after dictation**, **Speech recognition**, and paired phones and computers once pairing is on. See [dictation](../rem/attachments.md#dictate-a-message) and [pairing](../mobile/pairing.md). |
+| General | Data directory, initial sidebar, file autosave, default run target (local or runner queue), **Check for updates** (on startup and, from 0.5.5, every 10 minutes, with a once-a-day reminder when you're behind), and **Delete archived threads** after 7, 30 or 90 days |
+| Devices | Microphone and level, **Dictation** (press or hold), **Send after dictation**, **Dictate to Rem from any app** (off by default), **Show Rem your screen** (off by default), **Speech recognition**, and paired phones and computers once pairing is on. See [dictation](../rem/attachments.md#dictate-a-message), [dictating from any app](../rem/attachments.md#dictate-from-any-app), [showing Rem your screen](../rem/attachments.md#show-rem-your-screen) and [pairing](../mobile/pairing.md). |
 | Appearance | **Color theme** and **Reduced motion**. Report styling is under Memory. |
 | Editor | Font size, line height, tab size, word wrap, minimap, autosave delay, and whether Markdown and HTML open in preview or edit mode. See [editors](../studio/editors.md). |
 | Browser | **Default browser for new tabs**, home page, search URL, downloads, and what Rem may do in the browser. See [Browser](../studio/browser.md). |
 | Terminal | Shell, font, cursor and scrollback. See [terminal](../studio/terminal.md). |
-| Providers | Enabled providers, executable overrides, allowed and denied models, defaults, and **Refresh providers**. See [provider setup](../setup.md). |
+| Providers | Enabled providers, executable overrides, allowed and denied models, defaults, and **Refresh providers**. See [provider setup](../setup.md). From 0.5.5, **Classification models** holds the [Jev](../workflows/jev.md) key, its on/off switch and **Check key**. **Local model servers** adds, checks and removes [local model server](../setup.md#local-model-servers) profiles for workflow agent nodes (from 0.5.5). |
 | Usage | Remaining allowances and usage measured in Raticode. See [usage](../rem/usage.md). |
 | Rem | **Self-work** (on or off, max threads, backlog pulling, Rem's projects and the latest report), commit messages, **Tidy voice messages**, default scope, avatar and thoughts, **Swarm access**, **Rem task workers**, **Queue tests and builds**, default resources, and the provider, model and effort for new threads and for Rem's chat. See [Rem's home](../rem/home.md). |
-| Memory | Second Brain, conversation archive, report output and report themes |
+| Memory | Second Brain, conversation archive, **Purge archive copies** (Never by default, or 7, 30 or 90 days after deletion), report output and report themes |
 | Developer | The application log, diagnostics, and **Feature Preview** switches for experimental features (phone and desktop pairing, Organizations, Swarms, Second Brain) |
 | Layout | Arrangement, which side the project and Rem panes sit on, what the Rem pane shows (threads or Rem's home), terminal location, startup panes, pane sizes and **Reset layout** |
 | Plugins | Which plugins show in the plugin rail, their order, and **Lock plugin order**. Hiding **Browser** removes its icon; links, Rem's tabs and `Ctrl+J` still open it. |
@@ -43,6 +43,8 @@ Some settings depend on your platform, Feature Preview switches and installed pr
 
 - Turn on Second Brain only after choosing a knowledge folder.
 - Set an archive folder separately if you want portable copies of conversations.
+- **Purge archive copies** removes the archive copies of deleted threads 7, 30 or 90 days after deletion. **Never (keep everything)** is the default. A purge only changes the archive folder: it can't remove copies already in Git commits or other backups. See [Purge archive copies after a while](../knowledge/archive.md#purge-archive-copies-after-a-while).
+- **Delete archived threads** under General removes threads from Rem but keeps their archive copies.
 - Report format and theme apply to future reports. They don't turn on archiving or change existing files.
 
 See [Second Brain](../knowledge/second-brain.md), [Conversation archive](../knowledge/archive.md) and [Report themes](../knowledge/themes.md).

@@ -79,11 +79,20 @@ class RemStore:
         assert key in {"config", "conversation"}
         return self.config if key == "config" else self.conversation_setting
 
-    def conversation(self) -> dict[str, Any]:
+    def conversation(self, limit: int = 200) -> dict[str, Any]:
+        shown = self.messages[-limit:] if limit > 0 else []
         return {
             "conversation": {"turn_state": "idle", "provider": "codex"},
-            "messages": self.messages,
+            "messages": shown,
+            "earlier": len(self.messages) - len(shown),
         }
+
+    def find_message(self, identity: str, *, waiting: bool = False) -> dict[str, Any] | None:
+        return next((m for m in self.messages if m.get("id") == identity), None)
+
+    def tail(self, limit: int, *, roles: tuple[str, ...] = ()) -> list[dict[str, Any]]:
+        kept = [m for m in self.messages if not roles or m.get("role") in roles]
+        return kept[-limit:] if limit > 0 else []
 
     def tasks(self, *, summary: bool = False) -> list[dict[str, Any]]:
         # The phone never needs run traces or worker config.
@@ -280,6 +289,19 @@ def test_large_results_are_split_into_bounded_parts(phone):
     assert rows.fetchone()[0] > 3
 
 
+def test_the_phone_counts_messages_the_desktop_didnt_read_as_earlier(phone):
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    app.desktop.rem.store.messages = [
+        {"id": f"m{i}", "role": "user", "body": "Hi", "created_at": "t"} for i in range(1000)
+    ]
+    result = send("desktop.read", "rem.home")["value"]
+    # The desktop reads its newest window; the phone shows the newest 80 of it, and the
+    # count of earlier messages it can page back through still covers the whole chat.
+    assert [m["id"] for m in result["messages"]][-1] == "m999" and len(result["messages"]) == 80
+    assert result["earlier"] == 920
+
+
 def test_work_threads_reach_the_phone_with_thoughts_grouped_like_the_desktop(phone):
     app, peer, _, send = phone
     app.desktop.enable(peer, True)
@@ -414,6 +436,7 @@ def test_organizations_use_the_desktop_manager(phone, tmp_path):
         )
         listed = send("desktop.read", "organizations.list")["value"]["organizations"]
         assert listed[0]["projects"] == ["Notes"] and root not in json.dumps(listed)
+        assert (listed[0]["needs_you"], listed[0]["archived"]) == (0, False)
         oid = org["id"]
         created = send(
             "desktop.action",
@@ -1366,6 +1389,7 @@ def test_phone_retries_a_review_and_reads_the_reply_as_it_grows(phone):
     overview = send("desktop.read", "overview")["value"]
     assert overview["review_retry"] is True and overview["draft_deltas"] is True
     assert overview["thread_read"] is True
+    assert overview["thread_purge"] is True
     rem.store.task.update(
         active_run=None,
         last_run={"id": "run1", "state": "blocked", "review_retryable": True, "thread_id": "t"},
@@ -1597,7 +1621,7 @@ def test_phone_alerts_cover_only_its_own_requests_and_their_tasks(phone, home):
     assert send("desktop.read", "rem.notices", {"after": 2})["value"]["notices"] == []
 
 
-ALL_ALERTS = ["needs_you", "finished", "proposals"]
+ALL_ALERTS = ["needs_you", "finished", "proposals", "workflow"]
 
 
 def alerting_phone(phone: Any, home: Any) -> Any:
@@ -1625,14 +1649,38 @@ def check_phone_can_read(answer: dict[str, Any]) -> None:
     """What the phone's parser relies on, and only ever keeps."""
     assert 0 < len(answer["mark"]) <= 256
     for notice in answer["notices"]:
-        assert notice["kind"] in {"reply", "task_update", "proposals", "organization"}
+        assert notice["kind"] in {"reply", "task_update", "proposals", "organization", "workflow"}
         assert notice.get("reason", "needs_you") in ALL_ALERTS
         assert 0 < len(notice["id"]) <= 128 and len(notice["body"]) <= 1500
 
 
+# Sequences for refused_alert_read, clear of the ones the phone fixture's send uses.
+_REFUSED_SEQUENCE = iter(range(5000, 6000))
+
+
+def refused_alert_read(app: Any, peer: str, params: dict[str, Any]) -> bool:
+    """Whether the protocol schema or the desktop refuses this ``rem.notices`` read."""
+    replies = app.handle(
+        peer,
+        event(
+            "desktop.read",
+            next(_REFUSED_SEQUENCE),
+            thread_id=None,
+            payload={"op": "rem.notices", "params": params},
+        ),
+    )
+    results = [r["payload"] for r in replies if r["type"] == "desktop.result"]
+    if results:
+        return results[0]["ok"] is False and results[0]["code"] == "invalid"
+    errors = [r["payload"] for r in replies if r["type"] == "error"]
+    return len(errors) == 1 and errors[0]["retryable"] is False
+
+
 def test_alert_filter_is_advertised_and_checked(phone, home):
     app, peer, _, send = alerting_phone(phone, home)
-    assert send("desktop.read", "overview")["value"]["rem_notices_filter"] is True
+    overview = send("desktop.read", "overview")["value"]
+    assert overview["rem_notices_filter"] is True
+    assert overview["rem_notices_workflow"] is True
     bad_lists: list[Any] = [
         [],
         None,
@@ -1643,10 +1691,14 @@ def test_alert_filter_is_advertised_and_checked(phone, home):
         ["needs_you", "needs_you"],
     ]
     for bad in bad_lists:
-        assert send("desktop.read", "rem.notices", {"include": bad})["code"] == "invalid"
-    for bad in (5, None, "", "abc", "n1.1", "n1.1.2.3", "n1.a.2", "n2.1.2", "x" * 257):
-        read = send("desktop.read", "rem.notices", {"include": ["finished"], "mark": bad})
-        assert read["code"] == "invalid"
+        assert refused_alert_read(app, peer, {"include": bad}), bad
+    bad_marks: list[Any] = [5, None, "", "abc", "n1.1", "n1.1.2.3.4", "n1.a.2", "n2.1.2"]
+    for bad in [*bad_marks, "n1.1.2.x", "x" * 257]:
+        assert refused_alert_read(app, peer, {"include": ["finished"], "mark": bad}), bad
+    # Marks from before workflow alerts, and ones that carry the workflow position.
+    for good in ("n1.1.2", "n1.1.-", "n1.1.2.3", "n1.1.-.0"):
+        read = send("desktop.read", "rem.notices", {"include": ["workflow"], "mark": good})
+        assert read["ok"] is True, good
     filtered = {"include": ["finished"], "after": 0, "extra": True}
     assert send("desktop.read", "rem.notices", filtered)["code"] == "invalid"
     assert send("desktop.read", "rem.notices", {"include": ["finished"], "after": "1"})["code"] == (
@@ -1673,6 +1725,7 @@ def test_alert_filter_is_advertised_and_checked(phone, home):
     assert not [r for r in replies if r["type"] == "desktop.result"]
     app.desktop.rem = None
     assert send("desktop.read", "overview")["value"]["rem_notices_filter"] is False
+    assert send("desktop.read", "overview")["value"]["rem_notices_workflow"] is False
 
 
 def test_alert_filter_covers_tasks_from_any_source(phone, home):
@@ -1996,7 +2049,8 @@ def test_alert_filter_reports_organization_tasks(phone, home, tmp_path):
 def test_alert_filter_without_organizations_keeps_the_mark_readable(phone, home):
     _, _, _, send = alerting_phone(phone, home)
     first = send("desktop.read", "rem.notices", {"include": ["finished"]})["value"]
-    assert first["mark"].endswith(".-")
+    # No organizations here: "-", then the workflow alert position.
+    assert re.fullmatch(r"n1\.\d+\.-\.\d+", first["mark"])
     read = send(
         "desktop.read",
         "rem.notices",
@@ -2614,3 +2668,105 @@ def test_a_queued_request_names_what_it_waited_for_on_the_phone(phone):
     )
     assert shown["queued_after"] == ["CLI audit"]
     assert "/x" not in json.dumps(shown)
+
+
+def test_workflow_notices_reach_the_phone_under_their_own_switch(phone, home):
+    from gofer.core.phone_alerts import PhoneAlertStore
+
+    app, peer, _, send = alerting_phone(phone, home)
+    alerts = PhoneAlertStore(Path(home.data_dir))
+    alerts.add(title="Before", body="From before the switch", workflow_id="wf", run_id="r0")
+    first = send("desktop.read", "rem.notices", {"include": ["workflow"]})["value"]
+    # The first read only sets the position: notices from before never alert.
+    assert first["notices"] == [] and first["mark"].endswith(".1")
+
+    alerts.add(
+        title="Nightly report",
+        body="Ready: see /home/me/reports/out.md",
+        workflow_id="wf-nightly",
+        workflow_name="Nightly",
+        run_id="run-7",
+    )
+    params = {"after": first["cursor"], "include": ["workflow"], "mark": first["mark"]}
+    read = send("desktop.read", "rem.notices", params)["value"]
+    check_phone_can_read(read)
+    assert [
+        (n["kind"], n["reason"], n["title"], n["workflow_id"], n["run_id"], n["needs_user"])
+        for n in read["notices"]
+    ] == [("workflow", "workflow", "Nightly report", "wf-nightly", "run-7", False)]
+    # Local paths stay on the computer, as in every alert about work the phone didn't ask for.
+    assert read["notices"][0]["body"] == "Ready: see out.md"
+    assert read["notices"][0]["workflow_name"] == "Nightly"
+    assert read["mark"].endswith(".2")
+
+    # Without the switch, the position still moves and the notice stays on the computer.
+    alerts.add(title="Quiet", body="", workflow_id="wf", run_id="r2")
+    other = send(
+        "desktop.read",
+        "rem.notices",
+        {"after": first["cursor"], "include": ["finished"], "mark": read["mark"]},
+    )["value"]
+    assert other["notices"] == [] and other["mark"].endswith(".3")
+
+    # A mark from before workflow alerts reads from now instead of sending history.
+    legacy = send(
+        "desktop.read",
+        "rem.notices",
+        {"after": first["cursor"], "include": ["workflow"], "mark": "n1.0.-"},
+    )["value"]
+    assert legacy["notices"] == [] and legacy["mark"].endswith(".3")
+
+
+def test_workflow_notices_fold_per_run_and_report_what_was_dropped(phone, home, monkeypatch):
+    from gofer.core import phone_alerts
+
+    monkeypatch.setattr(phone_alerts, "RUN_CAP", 2)
+    monkeypatch.setattr(phone_alerts, "KEEP", 4)
+    app, peer, _, send = alerting_phone(phone, home)
+    alerts = phone_alerts.PhoneAlertStore(Path(home.data_dir))
+    alerts.add(title="Before", body="", workflow_id="wf", run_id="r0")
+    first = send("desktop.read", "rem.notices", {"include": ["workflow"]})["value"]
+    assert first["dropped"] == 0
+
+    # Six notices from one run: two kept, the rest folded into one moving notice.
+    for index in range(6):
+        alerts.add(
+            title=f"Step {index}",
+            body="",
+            workflow_id="wf-nightly",
+            workflow_name="Nightly backup",
+            run_id="run-9",
+        )
+    params = {"after": first["cursor"], "include": ["workflow"], "mark": first["mark"]}
+    read = send("desktop.read", "rem.notices", params)["value"]
+    check_phone_can_read(read)
+    assert [(n["title"], n["more_from_run"]) for n in read["notices"]] == [
+        ("Step 0", 0),
+        ("Step 1", 0),
+        ("Nightly backup", 4),
+    ]
+    assert read["notices"][-1]["body"] == "And 4 more from this run."
+    assert read["dropped"] == 0
+
+    # The phone is away while more notices than the store keeps arrive.
+    for index in range(6):
+        alerts.add(title=f"Other {index}", body="", workflow_id="wf-other", run_id=f"o{index}")
+    away = {"after": read["cursor"], "include": ["workflow"], "mark": read["mark"]}
+    late = send("desktop.read", "rem.notices", away)["value"]
+    assert [n["title"] for n in late["notices"]] == ["Other 2", "Other 3", "Other 4", "Other 5"]
+    assert late["dropped"] == 2
+    # Without the workflow switch the position moves but no gap is reported.
+    other = send("desktop.read", "rem.notices", {**away, "include": ["finished"]})["value"]
+    assert other["dropped"] == 0
+
+    # The answer has the fields the protocol fixture shows, which the phone's parser reads.
+    fixture = json.loads(
+        (
+            Path(module.__file__).parent
+            / "protocol/v2/fixtures/desktop.result.rem-notices-workflow.json"
+        ).read_text()
+    )
+    shown = json.loads(fixture["payload"]["body"])
+    # digest is on every read answer, added by the desktop for change checks.
+    assert set(shown) == set(late) - {"digest"}
+    assert {key for n in shown["notices"] for key in n} == set(late["notices"][0])

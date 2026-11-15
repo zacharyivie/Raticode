@@ -8,25 +8,19 @@ import threading
 import time
 from pathlib import Path
 from types import FrameType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import typer
 
-from gofer.rattish.trigger_login import LoginEntryError, login_status, set_login_enabled
-from gofer.rattish.trigger_service import TriggerEngine, scheduler_status
-from gofer.rattish.triggers import (
+from gofer.rattish.trigger_defaults import (
     DEFAULT_DEBOUNCE_SECONDS,
     DEFAULT_MISSED,
     DEFAULT_OVERLAP,
-    RUNS_ONLY_WHILE_RUNNING_NOTICE,
-    TriggerError,
-    TriggerRecord,
-    TriggerStore,
-    describe_trigger,
-    next_run_at,
-    webhook_url,
 )
 from gofer.utils.paths import get_data_dir
+
+if TYPE_CHECKING:
+    from gofer.rattish.triggers import TriggerRecord, TriggerStore
 
 app = typer.Typer(
     help="Start Rattish workflows on a schedule, a file change or a local webhook.",
@@ -50,6 +44,8 @@ _DISABLED_OPTION = typer.Option(False, "--disabled", help="Save the trigger turn
 
 
 def _store(data_dir: Path | None) -> TriggerStore:
+    from gofer.rattish.triggers import TriggerStore
+
     return TriggerStore(data_dir or get_data_dir())
 
 
@@ -68,6 +64,8 @@ def _fail(error: Exception, output_format: str) -> typer.Exit:
 
 
 def _parse_inputs(values: list[str] | None) -> dict[str, Any]:
+    from gofer.rattish.triggers import TriggerError
+
     inputs: dict[str, Any] = {}
     for item in values or []:
         name, separator, raw = item.partition("=")
@@ -81,6 +79,8 @@ def _parse_inputs(values: list[str] | None) -> dict[str, Any]:
 
 
 def _trigger_payload(store: TriggerStore, record: TriggerRecord) -> dict[str, Any]:
+    from gofer.rattish.triggers import describe_trigger, next_run_at, webhook_url
+
     latest = store.latest_event(record.id)
     return {
         **record.to_payload(),
@@ -114,9 +114,18 @@ def _trigger_line(payload: dict[str, Any]) -> str:
 
 def _status_sentence(status: dict[str, Any]) -> str:
     if not status["running"]:
-        return "Scheduler: not running. Nothing will fire until Raticode or its scheduler starts."
-    owner = "the Raticode app" if status["owner"] == "app" else "the background scheduler"
-    return f"Scheduler: running in {owner} (process {status['pid']})."
+        sentence = (
+            "Scheduler: not running. Nothing will fire until Raticode or its scheduler starts."
+        )
+    else:
+        owner = "the Raticode app" if status["owner"] == "app" else "the background scheduler"
+        sentence = f"Scheduler: running in {owner} (process {status['pid']})."
+    if status.get("paused"):
+        sentence += f"\n{_PAUSED_SENTENCE} (since {status.get('pausedAt')})"
+    return sentence
+
+
+_PAUSED_SENTENCE = "All triggers are paused. Nothing fires until you resume them."
 
 
 def _add(
@@ -132,6 +141,9 @@ def _add(
     output_format: str,
     data_dir: Path | None,
 ) -> None:
+    from gofer.rattish.trigger_service import scheduler_status
+    from gofer.rattish.triggers import RUNS_ONLY_WHILE_RUNNING_NOTICE, TriggerError
+
     _require_format(output_format)
     store = _store(data_dir)
     try:
@@ -272,6 +284,9 @@ def list_triggers(
     data_dir: Path | None = _DATA_DIR_OPTION,
 ) -> None:
     """List triggers and whether anything is running them."""
+    from gofer.rattish.trigger_service import scheduler_status
+    from gofer.rattish.triggers import RUNS_ONLY_WHILE_RUNNING_NOTICE
+
     _require_format(output_format)
     store = _store(data_dir)
     triggers = [_trigger_payload(store, item) for item in store.list_triggers(source)]
@@ -307,6 +322,8 @@ def update(
     data_dir: Path | None = _DATA_DIR_OPTION,
 ) -> None:
     """Change a trigger. Options you leave out stay the same."""
+    from gofer.rattish.triggers import TriggerError
+
     _require_format(output_format)
     changes: dict[str, Any] = {
         key: value
@@ -344,6 +361,8 @@ def _emit_one(store: TriggerStore, record: TriggerRecord, output_format: str) ->
 
 
 def _set_enabled(trigger_id: str, enabled: bool, output_format: str, data_dir: Path | None) -> None:
+    from gofer.rattish.triggers import TriggerError
+
     _require_format(output_format)
     store = _store(data_dir)
     try:
@@ -373,6 +392,76 @@ def disable(
     _set_enabled(trigger_id, False, output_format, data_dir)
 
 
+def _set_paused(paused: bool, every: bool, output_format: str, data_dir: Path | None) -> None:
+    from gofer.rattish.trigger_service import scheduler_status
+
+    _require_format(output_format)
+    verb = "pause" if paused else "resume"
+    if not every:
+        typer.echo(
+            f"Add --all to {verb} every trigger on this computer. To turn one trigger "
+            f"{'off' if paused else 'on'}, use Raticode rattish triggers "
+            f"{'disable' if paused else 'enable'} TRIGGER_ID.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    store = _store(data_dir)
+    before = store.pause_state()
+    state = store.set_paused(paused)
+    triggers = store.list_triggers()
+    enabled = sum(1 for item in triggers if item.enabled)
+    if output_format == "json":
+        typer.echo(
+            json.dumps(
+                {
+                    "ok": True,
+                    "pause": state.to_payload(),
+                    "changed": before.paused != state.paused,
+                    "triggers": len(triggers),
+                    "enabled": enabled,
+                    "scheduler": scheduler_status(store),
+                },
+                sort_keys=True,
+            )
+        )
+        return
+    if paused:
+        already = "already " if before.paused else ""
+        typer.echo(
+            f"All triggers are {already}paused. Cron times until you resume are recorded "
+            "as skipped and won't be caught up."
+        )
+    else:
+        already = "" if before.paused else "Triggers weren't paused. "
+        typer.echo(
+            f"{already}Triggers resumed: {enabled} of {len(triggers)} "
+            f"trigger{'' if len(triggers) == 1 else 's'} on, as each was set."
+        )
+
+
+_ALL_OPTION = typer.Option(False, "--all", help="Every trigger on this computer.")
+
+
+@app.command("pause")
+def pause(
+    every: bool = _ALL_OPTION,
+    output_format: str = _FORMAT_OPTION,
+    data_dir: Path | None = _DATA_DIR_OPTION,
+) -> None:
+    """Pause every trigger at once. Each trigger keeps its own on/off setting."""
+    _set_paused(True, every, output_format, data_dir)
+
+
+@app.command("resume")
+def resume(
+    every: bool = _ALL_OPTION,
+    output_format: str = _FORMAT_OPTION,
+    data_dir: Path | None = _DATA_DIR_OPTION,
+) -> None:
+    """Resume triggers after pause --all, exactly as each one was set."""
+    _set_paused(False, every, output_format, data_dir)
+
+
 @app.command("remove")
 def remove(
     trigger_id: str = typer.Argument(..., help="Trigger ID."),
@@ -380,6 +469,8 @@ def remove(
     data_dir: Path | None = _DATA_DIR_OPTION,
 ) -> None:
     """Delete a trigger and its history."""
+    from gofer.rattish.triggers import TriggerError
+
     _require_format(output_format)
     try:
         _store(data_dir).delete(trigger_id)
@@ -398,6 +489,8 @@ def rotate_token(
     data_dir: Path | None = _DATA_DIR_OPTION,
 ) -> None:
     """Replace a webhook's token. The old token stops working at once."""
+    from gofer.rattish.triggers import TriggerError
+
     _require_format(output_format)
     try:
         token = _store(data_dir).rotate_token(trigger_id)
@@ -417,6 +510,8 @@ def webhook_port(
     data_dir: Path | None = _DATA_DIR_OPTION,
 ) -> None:
     """Show or change the local port webhooks listen on."""
+    from gofer.rattish.triggers import TriggerError
+
     _require_format(output_format)
     store = _store(data_dir)
     try:
@@ -466,6 +561,10 @@ def status(
     data_dir: Path | None = _DATA_DIR_OPTION,
 ) -> None:
     """Show whether anything is running triggers on this computer."""
+    from gofer.rattish.trigger_login import login_status
+    from gofer.rattish.trigger_service import scheduler_status
+    from gofer.rattish.triggers import RUNS_ONLY_WHILE_RUNNING_NOTICE, TriggerStore
+
     _require_format(output_format)
     base = data_dir or get_data_dir()
     store = TriggerStore(base)
@@ -490,6 +589,8 @@ def login(
     data_dir: Path | None = _DATA_DIR_OPTION,
 ) -> None:
     """Start the scheduler at login, so triggers still fire after a reboot."""
+    from gofer.rattish.trigger_login import LoginEntryError, login_status, set_login_enabled
+
     _require_format(output_format)
     if state not in {"on", "off", "status"}:
         typer.echo("Choose on, off, or status.", err=True)
@@ -511,6 +612,8 @@ def login(
 @app.command("start")
 def start(data_dir: Path | None = _DATA_DIR_OPTION) -> None:
     """Run triggers in this process until it's stopped."""
+    from gofer.rattish.trigger_service import TriggerEngine
+
     base = data_dir or get_data_dir()
     engine = TriggerEngine(base, owner="background")
     stop = threading.Event()

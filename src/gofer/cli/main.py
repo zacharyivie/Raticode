@@ -10,6 +10,15 @@ if sys.argv[1:2] == ["slot"]:
 
     raise SystemExit(_slot_main(sys.argv[2:]))
 
+if sys.argv[1:3] == ["ui", "second-brain"]:
+    # Rem starts this MCP server for every provider turn. Serve it without building
+    # the full command tree; help and unusual arguments fall through to Typer below.
+    from gofer.cli.commands.second_brain import fast_main as _second_brain_main
+
+    _second_brain_exit = _second_brain_main(sys.argv[3:])
+    if _second_brain_exit is not None:
+        raise SystemExit(_second_brain_exit)
+
 from pathlib import Path
 
 import typer
@@ -19,6 +28,7 @@ from gofer.cli.commands import (
     api,
     brain,
     doctor,
+    jev,
     org,
     provider,
     rattish,
@@ -72,6 +82,7 @@ app.add_typer(system.projects_app, name="projects")
 app.add_typer(system.devices_app, name="devices")
 app.add_typer(system.threads_app, name="threads")
 system.register_provider_commands(provider.app)
+provider.app.add_typer(jev.app, name="jev")
 app.command("doctor")(doctor.doctor)
 app.command("schema")(schema.schema_command)
 app.command("api")(api.api_command)
@@ -126,24 +137,21 @@ def second_brain(
     model: str = typer.Option("", "--model"),
 ) -> None:
     """Serve the native Rem knowledge tools over MCP stdio."""
-    from gofer.ui.second_brain import serve_registered_brains, serve_second_brain
+    from gofer.cli.commands.second_brain import run_second_brain
 
-    if library_data_dir is not None and brain_id:
-        serve_registered_brains(
-            library_data_dir,
-            brain_id,
-            report_format,
-            report_theme,
-            {
-                "threadId": thread_id,
-                "projectRoot": project_root,
-                "provider": provider,
-                "model": model,
-            },
-        )
-        return
-
-    serve_second_brain(root, report_format, report_theme)
+    run_second_brain(
+        root,
+        report_format,
+        report_theme,
+        library_data_dir,
+        brain_id,
+        {
+            "threadId": thread_id,
+            "projectRoot": project_root,
+            "provider": provider,
+            "model": model,
+        },
+    )
 
 
 _HOST_OPTION = typer.Option(
@@ -173,6 +181,16 @@ _TOKEN_FILE_OPTION = typer.Option(
     "--token-file",
     help="Headless: read the owner token from this owner-only file (mode 600) instead.",
 )
+_SECRETS_DIR_OPTION = typer.Option(
+    None,
+    "--secrets-dir",
+    help=(
+        "Headless: read keychain secrets (Jev key, Organizations and webhook secrets, usage "
+        "reporting credentials, workflow secrets) from owner-only files (mode 600) in this "
+        "folder when there is no system keychain. Defaults to $CREDENTIALS_DIRECTORY from "
+        "systemd. Read-only."
+    ),
+)
 _REM_SETTINGS_OPTION = typer.Option(
     None,
     "--rem-settings",
@@ -187,12 +205,15 @@ def _serve(
     headless: bool,
     token_file: Path | None,
     rem_settings: Path | None,
+    secrets_dir: Path | None = None,
 ) -> None:
     from gofer.ui.headless import HeadlessError
     from gofer.ui.server import serve
 
-    if not headless and (token_file is not None or rem_settings is not None):
-        typer.echo("--token-file and --rem-settings need --headless.", err=True)
+    if not headless and (
+        token_file is not None or rem_settings is not None or secrets_dir is not None
+    ):
+        typer.echo("--token-file, --rem-settings and --secrets-dir need --headless.", err=True)
         raise typer.Exit(2)
     try:
         serve(
@@ -202,6 +223,7 @@ def _serve(
             headless=headless,
             token_file=token_file,
             rem_settings=rem_settings,
+            secrets_dir=secrets_dir,
         )
     except HeadlessError as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -216,9 +238,10 @@ def serve_command(
     headless: bool = _HEADLESS_OPTION,
     token_file: Path | None = _TOKEN_FILE_OPTION,
     rem_settings: Path | None = _REM_SETTINGS_OPTION,
+    secrets_dir: Path | None = _SECRETS_DIR_OPTION,
 ) -> None:
     """Run the Raticode backend API. Add --headless for servers and containers."""
-    _serve(host, port, data_dir, headless, token_file, rem_settings)
+    _serve(host, port, data_dir, headless, token_file, rem_settings, secrets_dir)
 
 
 @ui_app.command("serve")
@@ -229,9 +252,10 @@ def serve_ui(
     headless: bool = _HEADLESS_OPTION,
     token_file: Path | None = _TOKEN_FILE_OPTION,
     rem_settings: Path | None = _REM_SETTINGS_OPTION,
+    secrets_dir: Path | None = _SECRETS_DIR_OPTION,
 ) -> None:
     """Serve JSON endpoints used by the React workflow studio (same as Raticode serve)."""
-    _serve(host, port, data_dir, headless, token_file, rem_settings)
+    _serve(host, port, data_dir, headless, token_file, rem_settings, secrets_dir)
 
 
 @ui_app.command("browser", hidden=True)

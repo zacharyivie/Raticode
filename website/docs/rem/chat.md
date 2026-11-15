@@ -28,7 +28,8 @@ The list groups threads as **Pinned**, **Unread**, **Read** (your seven most rec
 
 - Name a thread for its task, pin ongoing work and archive finished work.
 - Archiving marks a thread read; new activity brings it back.
-- **Settings > General > Delete archived threads** removes archived threads after 7, 30 or 90 days.
+- **Settings > General > Delete archived threads** removes archived threads after 7, 30 or 90 days. A [conversation archive](../knowledge/archive.md) keeps their copies.
+- With an archive folder set, **Thread options > Delete permanently** also removes the thread's archive copy. See [Delete permanently](../knowledge/archive.md#delete-permanently).
 - **Mark as read** on an unread row, or **Mark all read** on the Unread header, clears the blue dot.
 - **Search threads** finds a title or text anywhere in saved history, including older messages not loaded yet.
 
@@ -40,6 +41,10 @@ The list groups threads as **Pinned**, **Unread**, **Read** (your seven most rec
 - Esc clears the selection.
 
 The phone app offers the same actions with a long press.
+
+## Rem's long conversation
+
+Rem's own conversation, on its home, opens with its newest 200 messages (from 0.5.5); **Show earlier messages** at the top, or scrolling up to it, loads 40 more at a time. Search there still jumps to any message, back to the first. See [Earlier messages](./home.md#earlier-messages).
 
 ## Switch models when sending
 

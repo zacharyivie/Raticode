@@ -131,9 +131,14 @@ test("a sign-in in the Firefox window carries over to Raticode's Firefox tabs", 
     // The user closes the window. Closing it from the desktop lets Firefox
     // finish saving; the test ends it with a signal, so it first waits for
     // Firefox's batched write of the cookie to reach the profile.
-    const journal = path.join(engine.profileDir(), "cookies.sqlite-wal");
+    // The log can exist before the cookie is in it, so wait for the cookie's own bytes:
+    // on a busy machine the old size check let the test end Firefox before the write.
+    const cookieFiles = ["cookies.sqlite-wal", "cookies.sqlite"].map((name) => path.join(engine.profileDir(), name));
+    const cookieSaved = () => cookieFiles.some((file) => {
+      try { return fs.readFileSync(file).includes("signed-in"); } catch { return false; }
+    });
     const saved = Date.now() + 15000;
-    while (Date.now() < saved && !(fs.existsSync(journal) && fs.statSync(journal).size > 0)) await new Promise((resolve) => setTimeout(resolve, 200));
+    while (Date.now() < saved && !cookieSaved()) await new Promise((resolve) => setTimeout(resolve, 200));
     const closed = new Promise((resolve) => engine.events.once("sign-in-window-closed", resolve));
     windows[0].child.kill("SIGTERM");
     await closed;

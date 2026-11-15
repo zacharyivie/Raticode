@@ -1,0 +1,101 @@
+rattish: 1
+
+# Starter: ask Jev a yes/no question and a multiple-choice question, then branch on the answers.
+# Guide: https://raticode.dev/docs/starters/jev-demo
+# Needs a Jev key in Settings > Providers. A run makes at most two Jev calls and nothing else
+# leaves the computer: the other steps only print what Jev answered.
+workflow:
+  name: Jev demo
+  interface-version: 1
+  inputs:
+    message:
+      schema: {"description": "The text Jev reads, such as a customer message.", "maxLength": 4000, "minLength": 1, "type": "string"}
+      default: My order arrived with a cracked screen. I'd like my money back, please.
+    sure-score:
+      schema: {"description": "Answers scoring at least this are acted on. Lower scores go to a person.", "maximum": 1, "minimum": 0, "type": "number"}
+      default: 0.8
+
+# Yes/no question. label is "yes" when score >= threshold; routes also compare the score.
+# Every route whose condition holds fires, so the conditions don't overlap.
+node wants-refund:
+  type: jev
+  question: Does the writer ask for their money back?
+  criteria:
+    yes: The writer asks for a refund, a chargeback, a reversed payment or their money back.
+    no: Complaints, questions, thanks or praise that don't ask for money back.
+  threshold: 0.5
+  request-timeout: 15s
+  with:
+    state: input.message
+  to:
+    - refund when node.wants-refund.output.label == "yes" and node.wants-refund.output.score >= input.sure-score
+    - check-refund-by-hand when node.wants-refund.output.label == "yes" and node.wants-refund.output.score < input.sure-score
+    - pick-team otherwise
+
+# Multiple-choice question. label is the option Jev picked and score is its confidence.
+node pick-team:
+  type: jev
+  question-type: choice
+  question: Which team should answer this message?
+  options:
+    billing: Payments, invoices, receipts, prices and refunds.
+    shipping: Deliveries, tracking, lost or late parcels and returns.
+    bugs: Something in the product or the app is broken or shows an error.
+    other: Anything else, such as praise, sales questions or account changes.
+  request-timeout: 15s
+  with:
+    state: input.message
+  needs: wants-refund
+  to:
+    - bug-report when node.pick-team.output.label == "bugs" and node.pick-team.output.score >= input.sure-score
+    - send-to-team when node.pick-team.output.label != "bugs" and node.pick-team.output.score >= input.sure-score
+    - pick-team-by-hand otherwise
+
+node refund:
+  type: bash-command
+  command: echo "Refund request (label $LABEL, score $SCORE). A real workflow would start the refund steps here."
+  with:
+    label: node.wants-refund.output.label
+    score: node.wants-refund.output.score
+  needs: wants-refund
+  finish: pass
+
+node check-refund-by-hand:
+  type: bash-command
+  command: echo "Maybe a refund request (label $LABEL, score $SCORE is below $SURE_SCORE). A person should check it."
+  with:
+    label: node.wants-refund.output.label
+    score: node.wants-refund.output.score
+    sure-score: input.sure-score
+  needs: wants-refund
+  finish: pass
+
+node bug-report:
+  type: bash-command
+  command: echo "Not a refund (score $REFUND_SCORE). Bug report for the bugs team (confidence $SCORE)."
+  with:
+    refund-score: node.wants-refund.output.score
+    score: node.pick-team.output.score
+  needs: pick-team
+  finish: pass
+
+node send-to-team:
+  type: bash-command
+  command: echo "Not a refund (score $REFUND_SCORE). Send to the $TEAM team (confidence $SCORE)."
+  with:
+    refund-score: node.wants-refund.output.score
+    team: node.pick-team.output.label
+    score: node.pick-team.output.score
+  needs: pick-team
+  finish: pass
+
+node pick-team-by-hand:
+  type: bash-command
+  command: echo "Not a refund (score $REFUND_SCORE). Jev leaned to $TEAM but only at $SCORE, so a person should pick the team. Every option - $CHOICES"
+  with:
+    refund-score: node.wants-refund.output.score
+    team: node.pick-team.output.label
+    score: node.pick-team.output.score
+    choices: node.pick-team.output.probabilities
+  needs: pick-team
+  finish: pass

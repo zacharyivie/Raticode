@@ -136,6 +136,8 @@ export function resolvePluginActivity(pluginSettings, activity, fallback = FALLB
 // workspace. A workspace whose plugin is turned off falls back to the editor.
 export const EDITOR_CONTENT = "editor";
 export const BROWSER_CONTENT = "browser";
+// Every workflow's runs in one list. It belongs to no plugin, so it is always available.
+export const WORKFLOW_RUNS_CONTENT = "workflow-runs";
 const WORKSPACE_PLUGIN_IDS = ["rem", "second-brain", "swarms", "organizations", "kanban", BROWSER_CONTENT];
 // Plugins whose home fills the main area. Clicking one in the activity rail
 // opens it, and clicking File explorer shows the editor's tabs; every other
@@ -146,6 +148,7 @@ export function resolveMainContent(pluginSettings, content) {
   // Hiding Browser from the rail keeps web tabs reachable: links, Rem's tabs
   // and the open-browser shortcut still show them.
   if (content === BROWSER_CONTENT) return BROWSER_CONTENT;
+  if (content === WORKFLOW_RUNS_CONTENT) return WORKFLOW_RUNS_CONTENT;
   return WORKSPACE_PLUGIN_IDS.includes(content) && pluginEnabled(pluginSettings, content) ? content : EDITOR_CONTENT;
 }
 
