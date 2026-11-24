@@ -12,6 +12,8 @@ agent correction loops do not need to distinguish omission from emptiness.
 
 Errors prevent IR publication. Warnings permit IR publication. Deployment-preflight
 errors do not invalidate compiled IR, but they prevent a run in that environment.
+An `info` diagnostic only reports something, such as a preflight check that was skipped,
+and never blocks publication or a run.
 
 ## Lexer and parser codes
 
@@ -96,6 +98,7 @@ point into a `.rattish` file.
 | `RATTISH_CONTRADICTORY_ROUTE` | error | An unconditional and `otherwise` route contradict each other. |
 | `RATTISH_UNREACHABLE_FAILURE_ROUTE` | error | `when failed` appears on a node that cannot tolerate failure. |
 | `RATTISH_PREDICATE_TYPE_MISMATCH` | error | Predicate operands do not support the selected operator. |
+| `RATTISH_APPROVAL_CHOICE_UNKNOWN` | error | A route compares an approval gate's `output.choice` with a String that isn't one of the gate's `options`, or the gate has no options. |
 | `RATTISH_INVALID_REGEX` | error | The right side of `matches` is not a valid regular expression. |
 | `RATTISH_INVALID_START_ASSERTION` | error | `start: true` appears with `needs`. |
 | `RATTISH_ROUTE_TARGET_AUTO_STARTS` | warning | A route target without `needs` or `start: true` also runs at workflow start. Routes that loop back to the node do not trigger it. |
@@ -127,14 +130,27 @@ point into a `.rattish` file.
 | `RATTISH_PREFLIGHT_RESOURCE_MISSING` | error | A required prompt, script, executable, directory, or plugin handler is missing. |
 | `RATTISH_PREFLIGHT_PROVIDER_UNAVAILABLE` | error | The configured provider or model cannot run in this environment. For a step with a `fallback` list, none of its providers is installed. At run time the same code marks a provider that is not installed; the step skips its retries and moves to its next fallback entry. |
 | `RATTISH_PREFLIGHT_FALLBACK_PROVIDER_UNAVAILABLE` | warning | A step with a `fallback` list has a provider, primary or fallback, that is not installed. The step still runs and skips that provider. |
+| `RATTISH_PREFLIGHT_FALLBACK_SAME_PROVIDER_ACCOUNT` | warning | A `fallback` entry is another subscription account, or the default sign-in, of a provider an earlier entry already uses. The runtime never moves a step to it after a usage limit, so it is used only for sign-in or outage errors. An API-key profile doesn't warn. |
 | `RATTISH_PREFLIGHT_PROFILE_UNAVAILABLE` | error | The selected deployment profile is missing or incompatible. |
+| `RATTISH_PREFLIGHT_MODEL_RETIRED` | error | An `anthropic-api` or `openai-api` step or fallback entry names a model the provider has retired. The message gives the retirement date and the replacement. |
+| `RATTISH_PREFLIGHT_MODEL_UNAVAILABLE` | error | The provider's model list for the profile's API key doesn't include the model. The message names a replacement. Skipped when the list can't be fetched. |
+| `RATTISH_PREFLIGHT_MODEL_DEPRECATED` | warning | An `anthropic-api` or `openai-api` model is deprecated. The message gives its retirement date and the replacement. |
+| `RATTISH_PREFLIGHT_FILE_INPUT_UNFILLED` | error | A triggered run's workflow has a required file input, which a trigger can't fill. |
 | `RATTISH_PREFLIGHT_SECRET_UNAVAILABLE` | error | A referenced secret is neither saved in the host's secret store nor set in the environment, or its store cannot be read. The message names the secret and how to add it. |
 | `RATTISH_PREFLIGHT_PROMPT_TEMPLATE_INVALID` | error | A prompt file contains malformed or unbound placeholders. |
 | `RATTISH_PREFLIGHT_CHILD_WORKFLOW_UNAVAILABLE` | error | A compiled child dependency can no longer be loaded. |
 | `RATTISH_PREFLIGHT_CHILD_WORKFLOW_NOT_READY` | error | A referenced workflow tree failed deployment preflight. |
+| `RATTISH_PREFLIGHT_WORKTREE_UNAVAILABLE` | error | A `workspace: worktree` workflow's project isn't in a git repository with a commit, so a run can't get a worktree. |
+| `RATTISH_PREFLIGHT_WORKTREE_SETUP_MISSING` | warning | A `workspace: worktree` workflow's project has no `.raticode/worktree-setup.json`, so each run's worktree has only the files git tracks. |
+| `RATTISH_PREFLIGHT_MCP_CACHE_UNREADABLE` | info | An `mcp-tool` step's tool calls on this computer get an empty package cache (bubblewrap has no overlays and the cache is over the 500 MB a call copies), and the step's `network` doesn't list the package host, so a call can't download the package. |
+| `RATTISH_PREFLIGHT_MCP_ENV_MISSING` | warning | An `mcp-tool` step's server names an environment variable that isn't set where Raticode runs. The server starts without it. |
+| `RATTISH_PREFLIGHT_MCP_TOOL_CHECK_SKIPPED` | info | An `mcp-tool` step's local server would run unsandboxed (`sandbox: off`, or native Windows), so preflight didn't start it to check the tool and arguments. The run still checks them. |
+| `RATTISH_WORKTREE_LIMIT` | error | The workflow already has the most run worktrees waiting to be landed or discarded (10), so the run didn't start. A trigger skips the start instead. |
+| `RATTISH_WORKTREE_UNAVAILABLE` | error | The run's worktree couldn't be created. |
+| `RATTISH_WORKTREE_SETUP_FAILED` | error | The project's approved worktree setup failed in the run's worktree, before any node ran. |
 | `RATTISH_WORKFLOW_EMPTY` | error | A compiled workflow has no executable nodes. Preflight and runtime reject the run, but the editor may display the workflow. |
 | `RATTISH_CLI_INPUT_INVALID` | error | A `Raticode rattish run --input` argument is not a unique `NAME=JSON` assignment. |
-| `RATTISH_WORKFLOW_INPUT_INVALID` | error | Supplied workflow inputs are missing, unknown, or fail their declared schemas. |
+| `RATTISH_WORKFLOW_INPUT_INVALID` | error | Supplied workflow inputs are missing, unknown, or fail their declared schemas, or a file input's file is missing, too large, of a kind it doesn't accept, or can't be copied into the run folder. |
 | `RATTISH_RUNTIME_COMMAND_FAILED` | error | A command node completed with a nonzero exit status. |
 | `RATTISH_RUNTIME_CONFIGURATION_ERROR` | error | A runtime handler rejected node configuration that could not be checked statically. |
 | `RATTISH_RUNTIME_FILESYSTEM_ERROR` | error | A runtime handler could not complete a filesystem operation. |

@@ -98,6 +98,9 @@ async function main() {
   await evaluate("__sb.navigate('inbox');__sb.openDialog('capture',{mode:'excerpt'})");
   await field("Title ", "Desktop capture"); await field("Excerpt", "A captured source from the desktop test."); await click("Save to Inbox");
   await wait("__sb.getState().documents.some(doc=>doc.title==='Desktop capture'&&doc.inbox)");
+  // The Library list says when a document's text came from outside.
+  await evaluate("__sb.navigate('search');__sb.updateSearch({text:'captured source'})");
+  await wait("document.querySelector('.sb-result-meta [data-origin=imported]')?.textContent==='Imported'");
   // Backups: a folder outside the brain, the schedule switch, then Back up now and its verified result.
   await evaluate("__sb.navigate('settings')");
   await wait("document.querySelector('.sb-backup-status')?.textContent.includes('Last verified backup: none yet')");
@@ -333,7 +336,49 @@ async function main() {
   await click("Mark checked"); await evaluate("__sb.flushLibraryWrites()");
   await wait(`!__sb.getState().documents.find(d=>d.id===${JSON.stringify(finalId)}).checkBy&&!__sb.getState().health.some(i=>i.kind==='review')`);
   assert.deepEqual([fs.readFileSync(draftFile), fs.readFileSync(finalFile)], reportBytes);
+  // Summaries: Details says when there is none, Edit metadata sets one (stored in library
+  // metadata, the file is unchanged), and the Reports list shows a report file's summary.
+  await evaluate(`__sb.openDocument(${JSON.stringify(finalId)},{preview:false})`);
+  await click("Details");
+  await wait("document.querySelector('.sb-doc-summary')?.textContent.includes('No summary')");
+  await click("Edit metadata");
+  const summary = "The final plan keeps every finding from the draft and adds a second final finding.";
+  await field("Summary (optional)", summary); await click("Save"); await evaluate("__sb.flushLibraryWrites()");
+  await wait(`document.querySelector('.sb-doc-summary')?.textContent.includes(${JSON.stringify(summary)})&&document.querySelector('.sb-doc-summary').textContent.includes('Set in Edit metadata')`);
+  await evaluate("__sb.refreshLibrary?.()");
+  await wait(`__sb.getState().documents.find(d=>d.id===${JSON.stringify(finalId)}).summarySource==='metadata'`);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(ready.root, ".raticode", "brain.json"), "utf8")).library.documents.find(d => d.id === finalId).summary, summary);
+  assert.deepEqual([fs.readFileSync(draftFile), fs.readFileSync(finalFile)], reportBytes);
+  if (process.env.GOFER_TEST_SUMMARY_SCREENSHOT) fs.writeFileSync(process.env.GOFER_TEST_SUMMARY_SCREENSHOT, (await win.webContents.capturePage()).toPNG());
+  const reported = await evaluate("(()=>{const s=__sb.getState();const r=s.reports.find(r=>r.brainId===s.activeBrainId&&s.documents.some(d=>d.brainId===r.brainId&&d.path===r.artifactPath));return r&&{id:r.id,doc:s.documents.find(d=>d.brainId===r.brainId&&d.path===r.artifactPath).id};})()");
+  assert.ok(reported, "a report with an indexed artifact");
+  await evaluate(`__sb.updateDocument(${JSON.stringify(reported.doc)},{summary:'Report summary shown in the list.',summarySource:'metadata'});__sb.navigate('reports',{reportId:''})`);
+  await wait("[...document.querySelectorAll('.sb-report-summary')].some(e=>e.textContent==='Report summary shown in the list.')");
+  if (process.env.GOFER_TEST_REPORTS_SUMMARY_SCREENSHOT) fs.writeFileSync(process.env.GOFER_TEST_REPORTS_SUMMARY_SCREENSHOT, (await win.webContents.capturePage()).toPNG());
+  // Folder rules: Brain settings › Folders leaves Reports out of search, the Library lists its
+  // files only under Left out and names the rule, and a result's Folder menu lists it after
+  // other results instead. The rule is saved in brain.json; the files are never touched.
+  await evaluate("__sb.navigate('settings')");
+  await wait("document.querySelector('select[aria-label=\"Search rule for Reports\"]')!==null");
+  await evaluate("(()=>{const s=document.querySelector('select[aria-label=\"Search rule for Reports\"]');s.value='leave-out';s.dispatchEvent(new Event('change',{bubbles:true}));})()");
+  await evaluate("__sb.flushLibraryWrites()");
+  await wait(`__sb.getState().documents.find(d=>d.id===${JSON.stringify(finalId)}).excludedBy==='Reports'`);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(ready.root, ".raticode", "brain.json"), "utf8")).brain.settings.folderRules.Reports, "leave-out");
+  await evaluate("__sb.navigate('search');__sb.resetSearch();__sb.updateSearch({text:'final0w3'})");
+  await wait("document.querySelector('.sb-results-head strong')?.textContent==='0 documents'&&document.querySelector('.sb-results').textContent.includes('left out of search here')");
+  await click("Show them");
+  await wait("document.querySelector('.sb-result-meta')?.textContent.includes('Left out by the Reports folder rule')");
+  if (process.env.GOFER_TEST_FOLDER_RULES_SCREENSHOT) fs.writeFileSync(process.env.GOFER_TEST_FOLDER_RULES_SCREENSHOT, (await win.webContents.capturePage()).toPNG());
+  await click("Search rule for Reports");
+  await click("List after other results");
+  await evaluate("__sb.flushLibraryWrites()");
+  await wait(`!__sb.getState().documents.find(d=>d.id===${JSON.stringify(finalId)}).excluded`);
+  await evaluate("__sb.resetSearch();__sb.updateSearch({text:'final0w3'})");
+  await wait("document.querySelector('.sb-results-head strong')?.textContent==='1 document'&&document.querySelector('.sb-result-meta').textContent.includes('Listed after other results · Reports')");
+  await evaluate("__sb.setFolderRule(__sb.getState().activeBrainId,'Reports','normal')"); await evaluate("__sb.flushLibraryWrites()");
+  await wait("!__sb.getState().brains.find(b=>b.id===__sb.getState().activeBrainId).settings.folderRules");
+  assert.deepEqual([fs.readFileSync(draftFile), fs.readFileSync(finalFile)], reportBytes);
   assert.deepEqual(errors,[]);
-  console.log("Second Brain desktop API test passed, including automatic report sources, job source rules, health batches of 15 with scrolling, filters, selection, final batches and manual fallback, report families with a confirmed replaced-by mark, and check-by reminders.");
+  console.log("Second Brain desktop API test passed, including automatic report sources, job source rules, health batches of 15 with scrolling, filters, selection, final batches and manual fallback, report families with a confirmed replaced-by mark, check-by reminders, document summaries and folder rules.");
 }
 main().then(async()=>{clearTimeout(timeout);await vite?.close();win?.destroy();backend?.kill();app.exit(0);}).catch(async error=>{console.error(error);clearTimeout(timeout);await vite?.close();backend?.kill();app.exit(1);});

@@ -36,6 +36,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.raticode.mobile.live.LiveClient
+import dev.raticode.mobile.live.ThreadAccounts
 import dev.raticode.mobile.live.ThreadActivity
 import dev.raticode.mobile.live.ThreadEntry
 import dev.raticode.mobile.live.ThreadSelection
@@ -75,6 +76,54 @@ internal fun ChoiceMenu(label: String, description: String, choices: List<Pair<S
     }
 }
 
+/**
+ * The thread's account of [menu]'s provider: Rem's setting, the default sign-in or one account. Accounts that need sign-in
+ * are listed but can't be picked. Their Sign in item starts the sign-in from this phone when the desktop can do that for
+ * the account (Codex, Grok, [signIns]); otherwise it says where to sign in on the computer (Claude Code).
+ */
+@Composable
+internal fun AccountMenu(menu: ThreadAccounts.Menu, choice: String, enabled: Boolean = true, warning: String? = null,
+                         signIns: PhoneSignIn? = null, onChoose: (String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    var signIn by remember(menu.provider) { mutableStateOf<String?>(null) }
+    Column {
+        Box {
+            TextButton(onClick = { expanded = true }, enabled = enabled, contentPadding = PaddingValues(horizontal = 8.dp),
+                modifier = Modifier.fillMaxWidth().testTag("threadAccountMenu").semantics { contentDescription = "${menu.label} account: ${ThreadAccounts.label(menu, choice)}" }) {
+                Text("Account", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.width(8.dp))
+                Text(ThreadAccounts.label(menu, choice), Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.labelMedium)
+                Icon(ThreadIcons.ExpandMore, null, Modifier.size(16.dp))
+            }
+            DropdownMenu(expanded, { expanded = false }) {
+                ThreadAccounts.options(menu, choice).forEach { option ->
+                    DropdownMenuItem(enabled = option.enabled, modifier = Modifier.testTag("threadAccount:${option.id}"),
+                        text = { Column {
+                            Text(option.label)
+                            Text(option.meta, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } },
+                        onClick = { expanded = false; signIn = null; onChoose(option.id) },
+                        trailingIcon = { if (option.id == choice) Icon(Icons.Default.Check, "Selected") })
+                    if (option.needsSignIn) DropdownMenuItem(modifier = Modifier.testTag("threadAccountSignIn"),
+                        text = { Text("Sign in to ${option.label}", color = MaterialTheme.colorScheme.primary) },
+                        onClick = {
+                            expanded = false
+                            val fromPhone = signIns?.available == true && menu.accounts.any { it.name == option.id && it.phoneSignIn }
+                            if (fromPhone) { signIn = null; signIns!!.start(menu.provider, option.id) } else signIn = option.label
+                        })
+                }
+            }
+        }
+        signIn?.let { Text("${it}: ${ThreadAccounts.SIGN_IN_HELP}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("threadAccountSignInHelp")) }
+        signIns?.let { actions -> menu.accounts.forEach { account ->
+            actions.states[account.name]?.let { AccountSignInPanel(menu.provider, account.name, it, actions) }
+        } }
+        warning?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary,
+            modifier = Modifier.testTag("threadAccountWarning").semantics { liveRegion = LiveRegionMode.Polite }) }
+    }
+}
+
 @RequiresApi(29)
 @Composable
 internal fun ModelControls(client: LiveClient, provider: String, model: String, effort: String,
@@ -105,6 +154,8 @@ internal fun ThreadHome(client: LiveClient, onOpen: (String, String?) -> Unit, o
     var model by rememberSaveable { mutableStateOf("") }
     var effort by rememberSaveable { mutableStateOf("") }
     var permission by rememberSaveable { mutableStateOf("") }
+    // The new thread's Account menu choice per provider; blank follows Rem's setting.
+    var accountChoices by remember { mutableStateOf(mapOf<String, String>()) }
     var runningOpen by rememberSaveable { mutableStateOf(false) }
     var archiveOpen by rememberSaveable { mutableStateOf(false) }
     var archiveCount by rememberSaveable { mutableIntStateOf(10) }
@@ -157,13 +208,15 @@ internal fun ThreadHome(client: LiveClient, onOpen: (String, String?) -> Unit, o
             ?.takeIf { it in client.permissionModes[provider].orEmpty() } ?: client.defaultPermissions[provider].orEmpty()
     }
     LaunchedEffect(query, client.connected) { kotlinx.coroutines.delay(250); client.searchThreads(query) }
+    LaunchedEffect(client.threadAccountsSync, client.connected) { if (client.threadAccountsSync) client.readThreadAccounts(null) }
     LaunchedEffect(client.requestError) { if (client.requestError != null) { edited = false } }
     val canCreate = template != null && provider.isNotBlank() && model.isNotBlank() && !creating
     fun create(send: Boolean, attach: Boolean = false) {
         if (!canCreate) return
         if (attach) onAttachAfterCreation()
         client.createThread(template.first, project = project.takeIf(String::isNotBlank), provider = provider,
-            model = model, effort = effort, permission = permission, firstMessage = if (send) draft else "", draftText = if (attach) draft else "") {
+            model = model, effort = effort, permission = permission, firstMessage = if (send) draft else "", draftText = if (attach) draft else "",
+            account = accountChoices[provider]) {
             if (send || attach) { draft = ""; edited = false }
             // Creation remains disabled until its authenticated response navigates to chat.
         }
@@ -297,6 +350,10 @@ internal fun ThreadHome(client: LiveClient, onOpen: (String, String?) -> Unit, o
             if (!compactTyping) ModelControls(client, provider, model, effort, !creating) { p, m, e ->
                 if (p != provider) permission = client.defaultPermissions[p].orEmpty()
                 provider = p; model = m; effort = e
+            }
+            val accountMenu = client.threadAccounts?.takeIf { it.thread == null }?.menus?.get(provider)
+            if (!compactTyping && accountMenu != null) AccountMenu(accountMenu, accountChoices[provider].orEmpty(), !creating, signIns = phoneSignIn(client)) { choice ->
+                accountChoices = if (choice.isBlank()) accountChoices - provider else accountChoices + (provider to choice)
             }
             if (speechError != null) Text(speechError!!, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             if (listening) Text("Listening on this phone…", style = MaterialTheme.typography.bodySmall)

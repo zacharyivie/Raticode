@@ -32,6 +32,21 @@ def target_for(org: dict[str, Any], task: dict[str, Any]) -> dict[str, Any]:
     return dict(target)
 
 
+def runs_on_fleet(org: dict[str, Any], task: dict[str, Any]) -> bool:
+    """Whether a ticket's run only sends its work to a paired desktop and polls it.
+
+    That desktop runs the worker and counts it under its own worker limit, so the run
+    takes no worker on this computer: the same turn counts once, where it runs.
+    """
+    spec = task.get("execution") or {}
+    if spec.get("kind") == "workflow" or not spec.get("targetId"):
+        return False
+    try:
+        return bool(target_for(org, task)["kind"] == "fleet")
+    except ValueError:
+        return False
+
+
 def reservation(org: dict[str, Any], task: dict[str, Any]) -> int:
     spec = task.get("execution")
     if not spec:
@@ -245,6 +260,12 @@ class OrganizationExecution:
             )["run"]
             handle["runId"] = run["id"]
             self.handle(chosen, handle)
+            # From here this thread only polls the swarm, which takes a worker for each of
+            # its turns. Holding the ticket's worker too would count it twice, and at a
+            # worker limit of 1 the swarm's first turn would wait for it forever.
+            worker = chosen.pop("worker", None)
+            if worker is not None:
+                worker.release()
             while True:
                 current = self.swarms.get(root, sid, include_history=False)["run"]
                 if current["id"] != run["id"]:

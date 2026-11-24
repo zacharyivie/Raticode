@@ -19,6 +19,7 @@ ANGLES = (
     "Research new features for project",
     "Research reliability problems in project",
     "Research speed and upkeep in project",
+    "Research design and module depth in project",
 )
 
 
@@ -59,21 +60,21 @@ def test_a_long_window_researches_again_after_an_hour_instead_of_running_dry(boa
     clock.to(minutes=1)
     tick(home)
     wait_for(lambda: quiet(home), 8)
-    assert len(research_runs(fake)) == 3
+    assert len(research_runs(fake)) == 4
     assert detail(home).startswith("Out of work for now")
     # The user is around and chatting: in a window that doesn't end the session.
     reply_to(home, "chat", "How's it going?")
     clock.to(minutes=31)
     for _ in range(5):
         tick(home)
-    assert len(research_runs(fake)) == 3, "a new round waits an hour after the last began"
+    assert len(research_runs(fake)) == 4, "a new round waits an hour after the last began"
     # An hour after the first round began, a new round fills the threads again.
     for number, title in enumerate(ANGLES):
         fake.answers[title] = ideas(f"Idea {number} b")
     clock.to(minutes=62)
     tick(home)
     wait_for(lambda: quiet(home), 8)
-    assert len(research_runs(fake)) == 6
+    assert len(research_runs(fake)) == 8
     assert any(n.startswith("Started research round 2") for n in notes(home))
     # Each round is its own run, never the earlier round's run again.
     with home.store.read() as db:
@@ -81,7 +82,7 @@ def test_a_long_window_researches_again_after_an_hour_instead_of_running_dry(boa
             row[0]
             for row in db.execute("SELECT occurrence FROM runs WHERE occurrence LIKE 'research:%'")
         ]
-    assert len(occurrences) == len(set(occurrences)) == 6
+    assert len(occurrences) == len(set(occurrences)) == 8
 
 
 def test_a_round_that_finds_nothing_new_ends_research_for_the_session(board):
@@ -97,21 +98,21 @@ def test_a_round_that_finds_nothing_new_ends_research_for_the_session(board):
     clock.to(minutes=62)
     tick(home)
     wait_for(lambda: quiet(home), 8)
-    assert len(research_runs(fake)) == 6
+    assert len(research_runs(fake)) == 8
     clock.to(hours=3)
     for _ in range(5):
         tick(home)
     # No third round: research would only repeat itself.
-    assert len(research_runs(fake)) == 6
+    assert len(research_runs(fake)) == 8
     assert "found nothing new" in detail(home)
     # The note says how many ideas wait for the user, since only they can unlock that work.
-    assert "3 ideas wait for your approval" in detail(home)
+    assert "4 ideas wait for your approval" in detail(home)
 
 
 def test_waiting_proposals_still_stop_new_rounds_while_auto_approval_is_off(board):
     home, fake, _ = board
     clock = Clock(home)
-    # Five ideas from each angle: 15 waiting, past the 12 that stop research.
+    # Five ideas from each angle: 20 waiting, past the 12 that stop research.
     for number, title in enumerate(ANGLES):
         fake.answers[title] = ideas(*(f"Idea {number}-{i}" for i in range(5)))
     window(home, clock)
@@ -121,5 +122,5 @@ def test_waiting_proposals_still_stop_new_rounds_while_auto_approval_is_off(boar
     clock.to(hours=2)
     for _ in range(5):
         tick(home)
-    assert len(research_runs(fake)) == 3
+    assert len(research_runs(fake)) == 4
     assert detail(home).startswith("Stopped researching")

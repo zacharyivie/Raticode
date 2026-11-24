@@ -216,6 +216,39 @@ def test_concurrency_diagnostic_matches_what_can_run(tmp_path: Path) -> None:
     manager.close()
 
 
+def numbered_workers(count: int) -> list[dict[str, str]]:
+    return [{"id": f"worker{n}", "name": f"Worker {n}"} for n in range(count)]
+
+
+def test_concurrency_diagnostic_has_no_fixed_cap_of_eight(tmp_path: Path) -> None:
+    manager = start_manager(tmp_path)
+    repo = repository(tmp_path / "repo")
+    org = company(manager, repo, maxConcurrency=12, employees=numbered_workers(12))
+    diagnostics = act(manager, org, "diagnostics")
+    assert diagnostics["effectiveConcurrency"] == 12
+    assert "serviceConcurrency" not in diagnostics
+    note = diagnostics["concurrencyNote"]
+    assert note.startswith("Up to 12 at once: each worker runs one task at a time")
+    assert "Worker limit" in note and "Settings › Computers" in note
+    assert "employee" not in note.lower()
+    manager.close()
+
+
+def test_rehearsal_starts_every_ready_worker_up_to_the_cap(tmp_path: Path) -> None:
+    manager = start_manager(tmp_path)
+    repo = repository(tmp_path / "repo")
+    workers = numbered_workers(10)
+    org = company(manager, repo, maxConcurrency=10, employees=workers)
+    for worker in workers:
+        act(manager, org, "task_create", title=f"Work for {worker['id']}", assignee=worker["id"])
+    result = act(manager, org, "rehearse", assumedDurationSeconds=60)
+    starts = [row.get("startSeconds") for row in result["tasks"]]
+    assert len(starts) == 10
+    assert starts == [0.0] * 10
+    assert not manager._active
+    manager.close()
+
+
 def test_employees_work_in_their_own_worktree_and_branch(tmp_path: Path) -> None:
     repo = repository(tmp_path / "repo")
     gate = Gate()

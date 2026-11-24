@@ -7,9 +7,12 @@ workflow:
   interface-version: 1
   # Ends the run if its model calls' estimated cost passes this. Raise it or set none.
   max-cost-usd: 2.00
+  # Each run works in its own git worktree. Review its changes in the run's Changes
+  # tab, then land or discard them. Set workspace: project to edit the project folder.
+  workspace: worktree
   inputs:
     test-command:
-      schema: {"description": "Command that runs the tests and exits 0 when they pass. It runs in the project folder.", "minLength": 1, "type": "string"}
+      schema: {"description": "Command that runs the tests and exits 0 when they pass. It runs in the run's worktree of the project.", "minLength": 1, "type": "string"}
       default: npm test
     prepare-command:
       schema: {"description": "Optional command to run once before the first test run, such as installing dependencies.", "type": "string"}
@@ -20,6 +23,7 @@ workflow:
 
 node prepare:
   type: bash-command
+  shell: bash
   command: |
     if [ -n "$PREPARE_COMMAND" ]; then
       bash -c "$PREPARE_COMMAND"
@@ -30,6 +34,7 @@ node prepare:
 
 node run-tests:
   type: bash-command
+  shell: bash
   max-runs: 4
   command: |
     output=$(bash -c "$TEST_COMMAND" 2>&1)
@@ -77,6 +82,7 @@ node fix:
 
 node done:
   type: bash-command
+  shell: bash
   command: echo "The tests pass."
   needs: run-tests
   finish: pass

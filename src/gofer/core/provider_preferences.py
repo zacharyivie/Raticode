@@ -69,21 +69,36 @@ def save_provider_preference(provider: str, changes: dict[str, Any]) -> None:
 
 
 def commit_message_preference() -> dict[str, Any]:
+    # stripCoAuthors is off until the user checks Settings > Rem > Remove
+    # Co-authored-by lines; see gofer.core.commit_attribution.
     return {
         "autoCommit": False,
+        "stripCoAuthors": False,
         "template": DEFAULT_COMMIT_MESSAGE_TEMPLATE,
         **provider_preference("commitMessage"),
     }
 
 
+def strip_co_authors_enabled() -> bool:
+    return commit_message_preference().get("stripCoAuthors") is True
+
+
 def save_commit_message_preference(changes: dict[str, Any]) -> None:
     from gofer.core.provider_capabilities import PROVIDER_BINARIES, model_is_blocked
 
-    if not changes or set(changes) - {"provider", "model", "template", "autoCommit"}:
+    if not changes or set(changes) - {
+        "provider",
+        "model",
+        "template",
+        "autoCommit",
+        "stripCoAuthors",
+    }:
         raise ValueError("Unknown commit message setting")
     changes = dict(changes)
     if "autoCommit" in changes and not isinstance(changes["autoCommit"], bool):
         raise ValueError("Auto commit must be a boolean")
+    if "stripCoAuthors" in changes and not isinstance(changes["stripCoAuthors"], bool):
+        raise ValueError("Remove Co-authored-by lines must be a boolean")
     if "template" in changes:
         template = changes["template"]
         if not isinstance(template, str) or len(template) > MAX_COMMIT_TEMPLATE_LENGTH:
@@ -159,7 +174,10 @@ def save_voice_tidy_preference(changes: dict[str, Any]) -> None:
 def speech_preference() -> dict[str, Any]:
     """Which speech-to-text dictation uses: the OS's own recognizer, or Raticode's offline model."""
     engine = provider_preference("speech").get("engine")
-    return {"engine": engine if engine in {"system", "offline"} else "system"}
+    chosen = engine in {"system", "offline"}
+    # "chosen" is False until the user picks one; Windows then prefers a downloaded
+    # offline model over its own recognizer (chat_media.prefers_offline_model).
+    return {"engine": engine if chosen else "system", "chosen": chosen}
 
 
 def save_speech_preference(changes: dict[str, Any]) -> None:

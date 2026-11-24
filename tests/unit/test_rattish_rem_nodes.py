@@ -41,10 +41,8 @@ class FakeRem:
     """A Rem whose chat model and workers are scripted; nothing reaches a provider."""
 
     def __init__(self, data: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        import gofer.ui.rem_home as rem_home_module
-
-        monkeypatch.setattr(rem_home_module, "memory_available_bytes", lambda: 8 * 1024**3)
-        monkeypatch.setattr(rem_home_module, "swap_blocked", lambda: None)
+        # New workers wait while this computer is short of memory; keep tests host-independent.
+        monkeypatch.setattr("gofer.core.command_slots.memory_hold", lambda: None)
         monkeypatch.setattr(rem_workflow, "POLL_SECONDS", 0.02)
         self.worker_prompts: list[str] = []
         self.chat_prompts: list[str] = []
@@ -108,7 +106,9 @@ class FakeRem:
                 },
             }
             return
-        text = json.dumps(kwargs.get("messages") or [])
+        # The task's prompt reaches the worker in its instructions, under Private
+        # task requirements; its messages only point there.
+        text = json.dumps([kwargs.get("agent_instructions"), kwargs.get("messages") or []])
         self.worker_prompts.append(text)
         while not self.hold.is_set():
             if kwargs["cancel_event"].is_set():

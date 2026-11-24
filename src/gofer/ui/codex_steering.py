@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+from gofer.core import codex_sandbox, credential_mask
 from gofer.core.command_slots import scoped_command
 from gofer.subscriptions.codex import codex_exec_input
 from gofer.subscriptions.usage import normalize_usage
@@ -180,8 +181,13 @@ async def stream_codex_turn(
     env: dict[str, str] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     child_env = build_subprocess_env(env_with_executable_on_path(command[0], env))
+    # Without Raticode's permission profile (full access), the app-server starts inside
+    # credential_mask, keeping only its own account folder.
+    app_server = credential_mask.mask_unsandboxed(
+        "codex", _app_server_command(command), env=env, check=command
+    )
     process = await asyncio.create_subprocess_exec(
-        *scoped_command(_app_server_command(command), child_env),
+        *scoped_command(app_server, child_env),
         cwd=cwd,
         env=child_env,
         stdin=asyncio.subprocess.PIPE,
@@ -236,18 +242,26 @@ async def stream_codex_turn(
             {"clientInfo": {"name": "raticode", "title": "Raticode swarms", "version": "1.0.0"}},
         )
         await transport.send({"method": "initialized", "params": {}})
-        sandbox = command[command.index("--sandbox") + 1]
-        params: dict[str, Any] = {"cwd": str(cwd), "approvalPolicy": "never", "sandbox": sandbox}
+        params: dict[str, Any] = {"cwd": str(cwd), "approvalPolicy": "never"}
         if "--model" in command:
             params["model"] = command[command.index("--model") + 1]
-        # Same additional writable directories as the ordinary Rem transport.
-        roots = [command[i + 1] for i, flag in enumerate(command[:-1]) if flag == "--add-dir"]
-        params["config"] = {"sandbox_workspace_write.writable_roots": roots}
-        if (
-            "sandbox_workspace_write.network_access=true" in command
-            and sandbox == "workspace-write"
-        ):
-            params["config"]["sandbox_workspace_write.network_access"] = True
+        profile = codex_sandbox.app_server_config(command)
+        if profile is not None:
+            # The same permission profile as the exec command: its writable folders,
+            # network setting and denied credential folders. A sandbox mode here would
+            # make Codex ignore the profile.
+            params["config"] = profile
+        else:
+            sandbox = command[command.index("--sandbox") + 1]
+            params["sandbox"] = sandbox
+            # Same additional writable directories as the ordinary Rem transport.
+            roots = [command[i + 1] for i, flag in enumerate(command[:-1]) if flag == "--add-dir"]
+            params["config"] = {"sandbox_workspace_write.writable_roots": roots}
+            if (
+                "sandbox_workspace_write.network_access=true" in command
+                and sandbox == "workspace-write"
+            ):
+                params["config"]["sandbox_workspace_write.network_access"] = True
         result = await transport.request("thread/start", params)
         control.thread_id = result["thread"]["id"]
         inputs = [{"type": "text", "text": command[-1]}]
@@ -321,7 +335,8 @@ async def stream_codex_turn(
             command,
             stdin=stdin,
             cwd=cwd,
-            env=env_with_executable_on_path(command[0]),
+            # The turn's environment, including the tool tokens Codex reads from it.
+            env=env_with_executable_on_path(command[0], env),
             cancel_event=cancel_event,
             timeout=None,
             max_output_bytes=max_output_bytes,

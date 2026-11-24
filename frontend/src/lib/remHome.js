@@ -127,6 +127,16 @@ export function groupTasks(tasks = [], now = new Date()) {
     return { ...group, label: group.id === "attention" && items.every(item => item.task.last_run?.needs_user === false) ? "Updates" : group.label, items };
   }).filter(group => group.items.length);
 }
+// What Dismiss all clears: tasks whose last run stopped, failed or ended unclear and
+// wasn't dismissed. A run still waiting for the user's answer and a task on hold stay,
+// as the backend's rem_home_store.attention decides.
+export function dismissibleUpdates(tasks = [], now = new Date()) {
+  return tasks.filter(task => {
+    if (task.deleted_at) return false;
+    const activity = taskActivity(task, now);
+    return activity.kind === "attention" && !activity.held && task.last_run?.needs_user !== true;
+  });
+}
 function sortKey({ task }, group) {
   if (group === "scheduled") return task.next_occurrence_at || "9999";
   if (group === "done") return invertIso(task.last_run?.finished_at);
@@ -448,6 +458,20 @@ export function checkGroups(criteria) {
   return { ...groups, reviewed: items.length > groups.unchecked.length };
 }
 
+// The review's notes on a run: findings that didn't send the work back (notes, and
+// should-fix findings after their one return). Each reads "Note · standards · file".
+const NOTE_SEVERITY = { note: "Note", should_fix: "Should fix", blocker: "Blocker" };
+const NOTE_AXIS = { spec: "task", standards: "standards" };
+export function reviewNotes(notes) {
+  return (Array.isArray(notes) ? notes : [])
+    .filter(item => item && typeof item === "object" && typeof item.explanation === "string" && item.explanation.trim())
+    .map((item, index) => ({
+      key: `note-${index}`,
+      title: plainMarkdown(item.explanation).trim(),
+      reason: [NOTE_SEVERITY[item.severity] || "Note", NOTE_AXIS[item.axis], typeof item.file === "string" ? item.file.trim() : ""].filter(Boolean).join(" · "),
+    }));
+}
+
 // Desktop notifications for runs that finished since the previous poll. Only a
 // run seen active before can notify, so the first load and old results stay quiet.
 export function finishedRunNotifications(previous, tasks) {
@@ -562,4 +586,41 @@ export function localTimezone() {
 export function projectLabel(path) {
   if (!path) return "";
   return String(path).replace(/[/\\]+$/, "").split(/[/\\]/).at(-1) || path;
+}
+
+// Make it a workflow: what the drafting task's finished card says. Costs are dollars the
+// providers reported; a cost nobody reported reads as unknown, never as $0.
+export function usdText(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "";
+  return value > 0 && value < 0.01 ? `$${value.toFixed(3)}` : `$${value.toFixed(2)}`;
+}
+
+export function workflowDraftSummary(result) {
+  if (!result || result.status === "drafting") return null;
+  const source = result.source_title ? `“${result.source_title}”` : "The task";
+  if (result.status === "unfinished") return { tone: "attention", title: "The workflow draft didn't finish", lines: [`${source} keeps running as a Rem task. Open the thread to see why, or run the draft again.`] };
+  if (result.status === "not_worth_it") return { tone: "neutral", title: "Switching won't save much", lines: [result.reason, `${source} needs judgment every run, so it keeps running as a Rem task.`].filter(Boolean) };
+  if (result.status === "missing") return { tone: "attention", title: "No workflow to switch to", lines: [result.reason].filter(Boolean) };
+  const task = result.task_cost || {};
+  const test = result.test_cost;
+  const taskCost = typeof task.average_usd === "number" ? task.average_usd : null;
+  const testCost = typeof test?.cost_usd === "number" ? test.cost_usd : null;
+  const calls = test?.model_calls ?? 0;
+  const costs = {
+    task: taskCost !== null
+      ? `${usdText(taskCost)} a run on average (${task.runs_with_cost} of its last ${task.runs} runs)`
+      : "Unknown: its provider didn't report what its runs cost",
+    workflow: !test ? "Not tested yet"
+      : testCost !== null ? `${usdText(testCost)} for its test run${calls === 0 ? ", with no model calls" : ""}`
+        : `Unknown: ${calls} model call${calls === 1 ? "" : "s"} didn't report a cost`,
+  };
+  let saving = "";
+  if (taskCost !== null && testCost !== null) {
+    const difference = taskCost - testCost;
+    saving = Math.abs(difference) < 0.005 ? "About the same per run."
+      : difference > 0 ? `About ${usdText(difference)} less per run with the workflow.`
+        : `The workflow costs about ${usdText(-difference)} more per run.`;
+  }
+  const lines = result.source_deleted ? [`${source} was deleted, so there's no schedule to switch.`] : [];
+  return { tone: "success", title: "Workflow draft ready", lines, costs, saving, path: result.workflow_path, switched: Boolean(result.switch?.active), canSwitch: !result.source_deleted };
 }

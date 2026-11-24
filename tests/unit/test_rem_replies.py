@@ -30,8 +30,8 @@ def _record(**reply: Any):
 
 def _request(prompt: str) -> dict[str, Any]:
     """The current_request object Rem was given."""
-    start = prompt.index('{"at"')
-    context = json.loads(prompt[start:].split("\nAdditional recalled context:")[0])
+    # The records object; the turn's own rules and any later rounds follow it.
+    context, _ = json.JSONDecoder().raw_decode(prompt, prompt.index('{"projects"'))
     return cast(dict[str, Any], context["current_request"])
 
 

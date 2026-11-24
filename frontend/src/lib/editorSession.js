@@ -23,11 +23,15 @@ export function loadEditorSession(storage = globalThis.window?.localStorage) {
       : browserPaths.includes(value.activePath) ? value.activePath : browserPaths.at(-1) || '';
     // Before the Browser plugin, a selected web tab meant the browser was in front.
     const legacyBrowserInFront = !savedBrowserPaths && browserPaths.includes(value.activePath) && (value.mainContent === 'editor' || !value.mainContent);
+    // Web-page files another app opened stay offline documents (scripts off,
+    // never online) after a restart, so only open file tabs are kept.
+    const externalPaths = cleanPaths(value.externalPaths).filter(path => filePaths.includes(path));
     return {
       pinnedRun: typeof value.pinnedRun?.workflowId === "string" && typeof value.pinnedRun?.runId === "string" ? value.pinnedRun : null,
       paths: filePaths,
       activePath: filePaths.includes(value.activePath) ? value.activePath : filePaths[0] || '',
       workflowTabs,
+      externalPaths,
       browserTabs,
       browserPaths,
       browserActivePath,
@@ -41,8 +45,10 @@ export function loadEditorSession(storage = globalThis.window?.localStorage) {
 // version from before the Browser plugin still restores them.
 export function saveEditorSession(session, storage = globalThis.window?.localStorage) {
   const browserPaths = Array.isArray(session?.browserPaths) ? session.browserPaths : [];
-  const paths = [...new Set([...(Array.isArray(session?.paths) ? session.paths : []), ...browserPaths])];
-  try { storage?.setItem(EDITOR_SESSION_KEY, JSON.stringify({ ...session, paths, browserPaths, version: 2 })); } catch { /* Editing remains available when local storage is full. */ }
+  const filePaths = Array.isArray(session?.paths) ? session.paths : [];
+  const paths = [...new Set([...filePaths, ...browserPaths])];
+  const externalPaths = [...new Set(session?.externalPaths || [])].filter(path => filePaths.includes(path));
+  try { storage?.setItem(EDITOR_SESSION_KEY, JSON.stringify({ ...session, paths, browserPaths, externalPaths, version: 2 })); } catch { /* Editing remains available when local storage is full. */ }
 }
 export function loadWorkflowDraft(path, storage = globalThis.window?.localStorage) {
   try {

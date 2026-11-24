@@ -14,18 +14,18 @@ contracts freeze.
 
 ## Built-in type names
 
-Rattish 1 currently names these 25 built-in node types:
+Rattish 1 currently names these 26 built-in node types:
 
 ```text
 agent                 approval-gate         bash-command
 break                 common-llm-task       copy-file
 delete-file           file                  folder
 http-request          jev                   local-search
-local-vectorize       loop                  move-file
-notification          open-resource         prompt-file
-python-script         read-file             rem-prompt
-rem-task              shell-script          workflow
-write-file
+local-vectorize       loop                  mcp-tool
+move-file             notification          open-resource
+prompt-file           python-script         read-file
+read-web-page         rem-prompt            rem-task
+shell-script          workflow              write-file
 ```
 
 All type names compare case-insensitively and lower to the spelling shown above.
@@ -76,9 +76,25 @@ The old common fields map as follows:
 
 | Type | Required fields | Optional fields and defaults |
 |---|---|---|
-| `bash-command` | `command: String` | `working-dir: Path = none`, `env: StringMap = {}` |
+| `bash-command` | `command: String` | `working-dir: Path = none`, `env: StringMap = {}`, `shell: auto, bash, or powershell = auto` |
 | `python-script` | `script-path: Path` | `args: StringList = []`, `env: StringMap = {}` |
-| `shell-script` | `script-path: Path` | `args: StringList = []`, `env: StringMap = {}` |
+| `shell-script` | `script-path: Path` | `args: StringList = []`, `env: StringMap = {}`, `shell: auto, bash, or powershell = auto` |
+
+`shell` picks the program that runs a `bash-command` command or a `shell-script` file:
+
+| `shell` | `bash-command` | `shell-script` |
+|---|---|---|
+| `auto` | `powershell.exe -Command` on Windows, `bash -c` elsewhere | `bash` from `PATH` |
+| `bash` | bash; on Windows, Git for Windows' `bin\bash.exe` | the same bash |
+| `powershell` | `powershell.exe -Command` on Windows, `pwsh -Command` elsewhere | `-File` with the same program |
+
+On Windows, `shell: bash` finds Git for Windows next to `git.exe` on `PATH`, in the folder
+Git for Windows records in the registry, or in its default install folders, then accepts
+another `bash.exe` on `PATH`. It never runs a `bash.exe` inside the Windows folder or
+`WindowsApps`: those are the WSL launcher. When no bash is found, preflight fails with
+`RATTISH_PREFLIGHT_RESOURCE_MISSING`, whose details carry `install_url`, the Git for Windows
+download page. A run that skips preflight fails the node with the configuration error
+`RATTISH_RUNTIME_SHELL_UNAVAILABLE`.
 
 For all three command and script types, `with.stdin` supplies standard input. Every other
 `with` name becomes an environment variable by replacing hyphens with underscores and
@@ -179,6 +195,8 @@ no separate agent declaration and no `agent-id` field.
 | `output-schema-path` | Path or `none` | `none` |
 | `repair-attempts` | integer from 0 through 3 | `0` |
 | `fallback` | list of at most 4 maps of `provider`, `profile`, `model`, `effort` | `[]` |
+| `sandbox` | `on` or `off` | `on` |
+| `network` | `any`, `none`, or list of host names (`*.` prefix allowed) | `[]` |
 
 `prompt` and `prompt-path` are mutually exclusive. Supplying both is a compile error.
 Supplying neither lowers to `prompt: ""` and produces a warning only.
@@ -187,6 +205,42 @@ Supplying neither lowers to `prompt: ""` and produces a warning only.
 The compiler resolves omitted `model` and `effort` values from the selected provider's
 versioned contract and writes the resolved values into IR. Provider installation and
 credentials remain deployment-preflight concerns.
+
+### Sandbox and network
+
+With `sandbox: on`, the runtime starts `claude-code` with Claude Code's sandbox settings
+(the settings Rem uses for unattended turns): shell writes are limited to `working-dir`,
+`extra-paths`, a per-run scratch folder under the data folder (removed when the run ends)
+and, for a git worktree, part of the repository's shared `.git` folder; credential paths are
+hidden from the shell and denied to the Read and Edit tools; Bash is not approved
+automatically; and the shell's network allowlist is `network`. In a `workspace: worktree`
+run, a step whose `working-dir` is in the run's worktree may write only `objects/`, the
+run's own `worktrees/<name>/` folder, `refs/heads/raticode/run/` and
+`logs/refs/heads/raticode/run/`, and its environment adds `gc.auto=0` and
+`maintenance.auto=false` through `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`
+after any entries already there. `git add` and `git commit` on the run's branch work; every
+other branch, tag and the repository's config stay read-only. Any other git worktree used as
+a step's `working-dir` gets the whole shared `.git` folder. `network: any` adds the permission rule
+`WebFetch(domain:*)`, which allows every host. `codex` keeps the reach of `workspace-write`
+through a Codex permission profile that also denies the home credential paths and Raticode's
+credential folders; `network: any` turns on its workspace network, and a list of hosts is a
+preflight error (`RATTISH_PREFLIGHT_NETWORK_UNSUPPORTED`). A run started by a trigger refuses a Codex
+profile with full access (`RATTISH_PREFLIGHT_SANDBOX_REQUIRED`). The sandbox applies only to
+the built-in Claude Code and Codex adapters.
+
+Providers without a sandbox, every provider on native Windows, and `sandbox: off` run
+unsandboxed: preflight check `runs-unsandboxed` warns with `RATTISH_PREFLIGHT_RUNS_UNSANDBOXED`
+for each provider in the chain. On a sandboxed step, `sandbox-widened` warns with
+`RATTISH_PREFLIGHT_SANDBOX_WIDENED` for each `extra-paths` entry outside the project root and
+for `network: any`. `extra-paths-allowed` fails with `RATTISH_PREFLIGHT_CREDENTIAL_PATH` when an
+entry is, holds or sits in a credential folder (Raticode's account, device, browser-grant or
+secrets folders, or a home path such as `~/.ssh`), for every provider and sandbox setting; the
+runtime refuses the step again with `RATTISH_SANDBOX_CREDENTIAL_PATH`. `sandbox: off` also warns at compile time with
+`RATTISH_AGENT_SANDBOX_OFF`. `sandbox-available` fails when Claude Code's sandbox can't
+start or a profile passes its own `--settings`. `network-declared` fails with
+`RATTISH_PREFLIGHT_NETWORK_UNDECLARED` when a sandboxed step's tool rules allow a network
+command while `network` lists no hosts, or its static prompt names a web address that
+`network` doesn't cover and its tools don't include WebFetch.
 
 ### Fallback providers
 
@@ -210,13 +264,35 @@ the step, and no switch happens once the run's usage limits request a stop. The 
 from the step's prompt: it doesn't resume the failed session, whose side effects remain,
 exactly as with a `retry-count` attempt.
 
+A step never moves to another account of a provider at a usage limit. Each entry's sign-in
+is the profile's `account_id`, the provider's default sign-in (no profile, or a profile
+with no sign-in of its own), or the profile's own token or config folder; a profile whose
+environment or secret references set an API key (such as `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY` or `XAI_API_KEY`), and every `anthropic-api` and `openai-api` entry, pays
+with an API key instead. Once an entry fails with `rate_limit`, the runtime passes over
+every later entry of that provider whose sign-in is a different subscription sign-in than
+the ones that hit the limit, whatever error ends the entries in between. Each one passed
+over is appended to `fallbacks` with `skipped: true`, `reason: rate_limit`, `from` the
+entry that failed last, and a `message` such as `skipped work-account: Raticode doesn't
+move work to another account of the same provider at a usage limit`; no `node_fell_back`
+event is emitted for it. Another provider, an API-key profile and the same sign-in with
+another model are still used, and `signed_out`, `overloaded` and `not_installed` still
+switch accounts. If every remaining entry is skipped, the step ends with the failure of
+the last entry that ran.
+
 Each node run record carries `provider` (the provider, profile, model and effort of its
-last attempt) and, after a switch, `fallbacks` with `from`, `to`, `reason` and the
-error `message`.
+last attempt) and, after a switch or a skip, `fallbacks` with `from`, `to`, `reason`, the
+error `message` and, for a skipped entry, `skipped: true`.
 
 Preflight check `provider-available` fails only when no provider in the chain is
 installed. `fallback-provider-available` warns about each missing one, and
-`profile-compatible` checks every entry's profile and credentials.
+`profile-compatible` checks every entry's profile and credentials, and warns with
+`RATTISH_PREFLIGHT_FALLBACK_SAME_PROVIDER_ACCOUNT` when an entry is another subscription
+account, or the default sign-in, of an earlier entry's provider: it will only be used for
+sign-in or outage errors. For `anthropic-api` and `openai-api` it also checks each entry's
+model: a retired model, or one missing from the
+provider's model list, is an error, and a deprecated model is a warning with its retirement
+date. An error in any entry is reported ahead of a warning.
 
 `profile` selects deployment-only environment and secret configuration. It does not
 select or override `provider`, `model`, or `effort`. A profile need not exist on the
@@ -343,6 +419,129 @@ execution. A bound `json` value suppresses authored `body`, and a bound `body` s
 authored `json`. Binding both is a runtime configuration error. `json` and `body` are also
 mutually exclusive when both are authored.
 
+`read-web-page` has these operation fields:
+
+| Field | Type | Default |
+|---|---|---:|
+| `url` | String | required |
+| `max-chars` | Integer 1..1000000 | `20000` |
+| `format` | `markdown` or `text` | `markdown` |
+| `request-timeout` | duration (`ms`, `s` or `m`) | `30s` |
+| `render` | `never`, `auto` or `always` | `never` |
+| `network-allowlist` | StringList | `[]` |
+
+`with.url` replaces the authored `url` for one execution. The runtime sends one GET with no
+cookies or credentials, follows at most 5 redirects, and applies `request-timeout` to the
+whole fetch. Before each connection it resolves the host and refuses the hop unless every
+address is public or `network-allowlist` names the host, a `*.domain` pattern, the address
+or a network containing it; the connection is pinned to the checked address. It reads at
+most 5 MiB and accepts `text/html`, `application/xhtml+xml` and `text/plain` (an untyped
+body is sniffed); any other type fails with `RATTISH_WEB_PAGE_UNSUPPORTED_TYPE` naming it.
+No JavaScript runs unless `render` asks for it.
+
+`render: never` only fetches. `render: always` renders every HTML page, and `render: auto`
+renders an HTML page only when the fetched page's `likely_needs_javascript` is true. Plain
+text is never rendered. Rendering runs after the plain fetch, on its final address, with an
+installed Chrome, Chromium or Edge started with `--headless=new --dump-dom --timeout` and a
+new, empty profile in the run's scratch folder that is deleted when the render ends. It
+gets its own `request-timeout`; the browser's `--timeout` stops loading a little earlier
+(up to 5 seconds) so the loaded page is still printed. Every browser request, loopback
+included, goes through a local proxy that lives only for that render and applies the same
+address check and `network-allowlist` to each host, connecting to the checked address.
+Refused requests get HTTP 403 inside the page. The rendered HTML, at most 5 MiB, goes
+through the same text extraction. With no browser installed, `always` fails with
+`RATTISH_WEB_PAGE_NO_BROWSER` (`configuration`) and `auto` keeps the fetched page; preflight
+reports the missing browser as an error for `always` and a warning for `auto`. A browser
+that fails or runs out of time fails `always` with `RATTISH_WEB_PAGE_BROWSER_FAILED`
+(`network`) or `RATTISH_WEB_PAGE_TIMEOUT`, and `auto` keeps the fetched page.
+
+The output is a closed object with `title`, `description`, `text`, `links`, `final_url`,
+`truncated`, `likely_needs_javascript` and `rendered`, which is true when the fields come
+from the rendered page. `text` is taken from `<article>` elements when
+present, else `<main>`, else the body, leaving out `nav`, `aside`, `footer`, the page
+`header` (an article's own header stays), buttons, frames, scripts and hidden elements.
+`format: markdown` keeps headings, lists, links, emphasis, code, quotes and tables as
+Markdown; `text` drops the marks. `text` is cut to `max-chars` at a nearby space or line
+break. `links` holds up to 200 unique absolute `http` and `https` links from the whole page
+without fragments. `truncated` is true when the body (or the rendered HTML) passed 5 MiB or
+`text` passed `max-chars`. `likely_needs_javascript` is true when the readable text is under 200
+characters and the page has an app root element or a noscript JavaScript notice, or under
+50 characters and any script; after a render it describes the rendered page. Every output field is untrusted page content. Failures use
+`RATTISH_WEB_PAGE_*` codes with kind `network`, except `RATTISH_WEB_PAGE_INVALID_URL`
+(`configuration`) and `RATTISH_WEB_PAGE_TIMEOUT` (`timeout`).
+
+`mcp-tool` has these operation fields:
+
+| Field | Type | Default |
+|---|---|---:|
+| `server` | String, a name in Rem's MCP server list | required |
+| `tool` | String | required |
+| `arguments` | JSON object, or a String that renders to one | `{}` |
+| `output-schema` | Object or `none` | `none` |
+| `output-schema-path` | Path or `none` | `none` |
+| `working-dir` | Path | `.` |
+| `call-timeout` | duration (`ms`, `s`, `m` or `h`) | `60s` |
+| `sandbox` | `on` or `off` | `on` |
+| `network` | host list, `any` or `none` | `[]` |
+
+The runtime resolves `server` in Rem's MCP server list (`rem-resources.json` in the data folder)
+when the node starts, opens a fresh session (a `stdio` server is started for the call and stopped
+after it; an `http` server gets one Streamable HTTP session), sends `initialize`, lists the tools,
+checks the rendered arguments against the tool's `inputSchema` and sends `tools/call`. `with.arguments`
+replaces the authored value; a String value must render to JSON text holding an object. Unquoted
+block-map keys lower-case like every Rattish map key, so the compiler warns with
+`RATTISH_MCP_ARGUMENT_KEY_CHANGED` when one changes spelling.
+
+The output is the result's `structuredContent` when present, else its `text` content items joined
+with line breaks. With an output schema whose `type` isn't `string`, text is parsed as JSON. A result
+with `isError: true` fails with `RATTISH_MCP_TOOL_ERROR` (kind `command`).
+
+A `stdio` server runs in an operating-system sandbox unless `sandbox: off` or the host is native
+Windows: writes are limited to `working-dir`, the run's scratch folder and the server's package
+cache, the same credential folders as agent steps and the rest of the data folder are hidden, and
+the network is limited to `network` through a host-filtering proxy (bubblewrap with a private
+network namespace on Linux, `sandbox-exec` on macOS). `call-timeout` covers the start, the listing
+and the call.
+
+The package cache is `mcp-cache/<definition digest>/` in the data folder, one per server
+definition, shared by preflight, the tool listing and runs. `npm_config_cache` is its `npm` folder,
+`XDG_CACHE_HOME` its `xdg` folder and `UV_CACHE_DIR` `xdg/uv`; `TMPDIR`, `TMP` and `TEMP` stay in
+the run's scratch folder. Changing or removing the server's library entry deletes its cache, and a
+cache unused for 30 days is pruned. Only list-only starts (preflight, the tool listing) write it.
+A tool call reads it through a throwaway layer: a bubblewrap overlay (0.11 or later) on Linux, an
+APFS clone on macOS, or, on Linux without overlays, a copy (`cp -a --reflink=auto`) in the run's
+scratch folder of a cache a list-only start has filled and that holds at most 500 MB, with the
+lasting folder shown read-only. When none of these works, the call gets an empty cache.
+
+A `stdio` server's environment is not the host process's. It holds a base set (`HOME`, `LOGNAME`,
+`PATH`, `SHELL`, `TERM`, `USER`, `LANG`, `LANGUAGE`, `LC_*`, `TMPDIR`, `TMP`, `TEMP`, and on
+native Windows the system variables such as `SYSTEMROOT`, `USERPROFILE` and `PATHEXT`, matched
+without case), then the variables the server's library entry names in `env` (names only), then
+the sandbox's own temporary, cache and proxy variables, which win. `GOFER_*` variables are never
+passed. A named variable that isn't set is left out.
+
+Preflight checks `server-registered`, `sandbox-available`, `tool-arguments-valid` (lists the tools,
+checks the tool name and the literal arguments; values with templates are checked at run time) and
+warns with `runs-unsandboxed`, `package-pinned`, `env-set` and `cache-readable`. `package-pinned` reports
+`RATTISH_PREFLIGHT_MCP_PACKAGE_UNPINNED` when the server's command starts a package runner (`npx`,
+`bunx`, `pnpm dlx`, `uvx`, `pipx run` and their aliases) whose package has no exact version
+(`pkg@1.2.3`, `pkg==1.2.3`); pinning covers the top-level package only. `env-set` reports
+`RATTISH_PREFLIGHT_MCP_ENV_MISSING` when a variable the server names isn't set. `cache-readable`
+reports `RATTISH_PREFLIGHT_MCP_CACHE_UNREADABLE` with severity `info` when the server starts a
+package runner, the step's `network` doesn't list its registry host (`registry.npmjs.org`, or
+`pypi.org` and `files.pythonhosted.org`), and this computer's tool calls would get an empty cache. `tool-arguments-valid` never starts a `stdio` server that would run
+unsandboxed: it reports `RATTISH_PREFLIGHT_MCP_TOOL_CHECK_SKIPPED` with severity `info` instead,
+and the run checks the tool and arguments. A trigger approval covers each server's definition,
+including its variable names but never their values, under the key
+`mcp-server:NAME`, and a triggered run checks it again before it starts or connects to the server.
+Each regular file inside the project that a `stdio` server's command or arguments name, a relative
+value resolved from `working-dir`, is covered too, with role `script` under its absolute path. A
+triggered run checks each one right before the server starts and fails the step with
+`RATTISH_APPROVED_FILE_CHANGED` when it differs or wasn't there at approval.
+When an unpinned server's definition is new or changed, Review changes marks the entry with
+`unpinned` and `warning`, and it is listed in `unseen` with reason `unpinned`, so approving it needs
+`accept_unseen`.
+
 `approval-gate` has these operation fields:
 
 | Field | Type | Default |
@@ -354,6 +553,19 @@ mutually exclusive when both are authored.
 | `notify` | Boolean | `false` |
 | `notification-title` | String | `"Raticode approval needed"` |
 | `subject` | String or `none` | `none` |
+| `options` | StringList of 2 to 8 labels, or `none` | `none` |
+| `reject-options` | StringList | `[]` |
+| `reply` | `none`, `optional`, or `required` | `none` |
+
+With `options`, the person answers with one of the labels instead of Approve or Reject.
+Labels are 1 to 60 characters with no leading or trailing space and must differ by more than
+capital letters. The output's `choice` holds the label picked, and `decision` is `rejected`
+when that label is in `reject-options` and `approved` otherwise, so `approved` keeps working
+in routes. `reject-options` must name listed options. `reply` asks for typed text, returned
+as the output's `reply`. A timeout picks no option: `choice` is null and `reply` is empty.
+The compiler narrows `choice` to the listed options plus null, and a route that compares
+`node.<id>.output.choice` with `==` or `!=` against a String that isn't a listed option is
+rejected with `RATTISH_APPROVAL_CHOICE_UNKNOWN`.
 
 `notification` supports the channels `desktop`, `phone`, `slack`, `teams`, `webhook`, and
 `email`:

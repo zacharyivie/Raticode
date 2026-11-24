@@ -27,11 +27,11 @@ def native_cli(monkeypatch, tmp_path):
 
     async def subprocess(command, **kwargs):
         provider = command[0]
-        prompt = command[command.index("-p") + 1] if provider == "copilot" else command[-1]
+        prompt = command[-1]
         if provider == "codex":
             assert command[-1] == "-"
             prompt = kwargs["stdin"].decode("utf-8")
-        if provider in {"claude_code", "cursor", "opencode"}:
+        if provider in {"claude_code", "cursor", "opencode", "copilot"}:
             assert "-p" not in command
             prompt = kwargs["stdin"].decode("utf-8")
         if provider == "antigravity":

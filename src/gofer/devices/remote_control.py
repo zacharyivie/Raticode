@@ -61,6 +61,10 @@ class RemoteControl:
         self.swarms: Any = None
         self.data_dir: Path | None = None
         self.decide_workflow: Callable[..., Any] | None = None
+        # Phones that said, on their last approvals request, that they show option
+        # buttons. Older phones reject unknown fields, so they never see options and
+        # aren't sent gates they can't answer.
+        self._choice_peers: set[str] = set()
 
     # Local authenticated settings API only.
     def enable(self, peer: str, enabled: bool) -> None:
@@ -140,10 +144,21 @@ class RemoteControl:
     ) -> dict[str, Any]:
         allowed = self.allowed(peer)
         if kind == "approval.request":
+            if event["type"] == "approval.request":
+                if event["payload"].get("include_choices") is True:
+                    self._choice_peers.add(peer)
+                else:
+                    self._choice_peers.discard(peer)
+            choices = peer in self._choice_peers
             approvals = [
                 {k: v for k, v in item.items() if not k.startswith("_")}
                 for item in (self.approvals(peer) if allowed else [])
+                if choices or not item["_needs_choices"]
             ]
+            if not choices:
+                for item in approvals:
+                    item.pop("options", None)
+                    item.pop("reply", None)
             payload = {"remote_allowed": allowed, "approvals": approvals}
             result: dict[str, Any] = self.app._emit(peer, event, "approval.snapshot", payload)
             return result
@@ -173,7 +188,7 @@ class RemoteControl:
             for request in ApprovalStore(self.data_dir).list_pending()[:50]:
                 if request.decision is not None:
                     continue
-                identity = {
+                identity: dict[str, Any] = {
                     "source": "workflow",
                     "workflow": request.workflow_id,
                     "run": request.run_id,
@@ -181,6 +196,13 @@ class RemoteControl:
                     "message": request.message,
                     "requested_at": request.requested_at,
                 }
+                # Only set on gates that use them, so plain gates keep their digests.
+                answer: dict[str, Any] = {}
+                if request.options:
+                    answer["options"] = [option[:60] for option in request.options[:8]]
+                if request.reply_mode != "none":
+                    answer["reply"] = request.reply_mode
+                identity.update(answer)
                 result.append(
                     {
                         "approval_id": str(
@@ -196,7 +218,9 @@ class RemoteControl:
                         "summary": (request.message or "Approval requested")[:1000],
                         "requested_at": str(request.requested_at)[:80],
                         "instruction_required": False,
+                        **answer,
                         "_target": identity,
+                        "_needs_choices": bool(request.options) or request.reply_mode == "required",
                     }
                 )
         names, _ = self.projects(peer)
@@ -236,6 +260,7 @@ class RemoteControl:
                                 "requested_at": str(item.get("createdAt", ""))[:80],
                                 "instruction_required": True,
                                 "_target": identity,
+                                "_needs_choices": False,
                             }
                         )
         return result[:50]
@@ -253,6 +278,14 @@ class RemoteControl:
         instruction = str(payload.get("instruction", "")).strip()
         if target["source"] == "workflow":
             assert self.decide_workflow is not None
+            choice = payload.get("choice")
+            if target.get("options") and choice is None:
+                raise ValueError(
+                    "This approval has options. Update Raticode Mobile to answer it, or "
+                    "answer it on your computer."
+                )
+            # A gate that asks for a reply takes the typed text as its reply.
+            replied = "reply" in target
             self.decide_workflow(
                 target["workflow"],
                 target["run"],
@@ -260,7 +293,9 @@ class RemoteControl:
                 "approved" if approve else "rejected",
                 self.data_dir,
                 decided_by="phone",
-                notes=instruction,
+                notes="" if replied else instruction,
+                choice=choice,
+                reply=instruction if replied else "",
             )
             return
         if not approve and not instruction:

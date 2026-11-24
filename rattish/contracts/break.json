@@ -3,6 +3,7 @@
   "contract_version": 1,
   "node_type": "break",
   "runtime_handler": "raticode.break",
+  "catalog": {"category": "flow", "summary": "Stop a loop's remaining items", "docs_path": "/docs/nodes/break"},
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",

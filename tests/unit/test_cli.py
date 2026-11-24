@@ -106,6 +106,37 @@ def test_workflow_create(tmp_path: Path) -> None:
     assert len(created) == 1
 
 
+def test_workflow_create_keeps_the_name_a_string_and_never_overwrites(tmp_path: Path) -> None:
+    import tomllib
+
+    hostile = 'x"\n[[nodes]]\nid = "pwn"\ntype = "bash_command"\ncommand = "echo injected'
+    result = runner.invoke(
+        app, ["workflow", "create", "--name", hostile, "--output", str(tmp_path)]
+    )
+    assert result.exit_code == 0, result.output
+    (created,) = tmp_path.glob("*.toml")
+    parsed = tomllib.loads(created.read_text(encoding="utf-8"))
+    assert parsed["workflow"]["name"] == hostile
+    assert "nodes" not in parsed
+
+    created.write_text(created.read_text(encoding="utf-8") + "# my edits\n", encoding="utf-8")
+    again = runner.invoke(app, ["workflow", "create", "--name", hostile, "--output", str(tmp_path)])
+    assert again.exit_code == 1
+    # Rich folds the long path at 80 columns; join the lines first.
+    assert "already exists" in " ".join(again.output.split())
+    assert created.read_text(encoding="utf-8").endswith("# my edits\n")
+
+
+def test_workflow_rm_names_the_log_folders_beside_a_file_it_deletes(tmp_path: Path) -> None:
+    runner.invoke(app, ["workflow", "create", "--name", "Build", "--output", str(tmp_path)])
+    logs = tmp_path / "logs" / "build"
+    logs.mkdir(parents=True)
+    result = runner.invoke(app, ["workflow", "rm", str(tmp_path / "build.toml")], input="n\n")
+    assert result.exit_code != 0
+    assert f"This also deletes {logs}." in result.output.replace("\n", "")
+    assert logs.is_dir() and (tmp_path / "build.toml").is_file()
+
+
 def test_provider_profile_cli_create_list_and_remove(tmp_path: Path) -> None:
     create_result = runner.invoke(
         app,

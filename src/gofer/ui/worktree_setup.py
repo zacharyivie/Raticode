@@ -567,12 +567,18 @@ def prepare(
     worktree: Path | str,
     surface: str,
     cancel: threading.Event | None = None,
+    commands: bool = True,
 ) -> dict[str, Any] | None:
     """Run a project's approved setup in a worktree it just got.
 
     ``source`` is the project folder the worktree was made from (where ignored files such
     as installed packages live) and ``worktree`` the matching folder in the new checkout.
     Returns None when the project has no setup file, otherwise a result for the run.
+
+    ``commands=False`` is for a checkout of work nobody has reviewed yet (Raticode's own
+    project check and proving test): setup commands run outside any sandbox and can run
+    files the worker committed (``./setup.sh``, package scripts), so a setup that has
+    commands isn't applied at all and the result's status is ``commands_not_run``.
     """
     source, worktree = Path(source), Path(worktree)
     # The committed file the new checkout got, not uncommitted edits in the project folder.
@@ -618,6 +624,13 @@ def prepare(
         result["approvedSha256"] = approved.get("sha256")
         result["approvedAt"] = approved.get("approvedAt")
     settings = effective_config(config)
+    if not commands and settings["setup"]:
+        result.update(
+            status="commands_not_run",
+            summary="Project setup didn't run: it runs commands, and Raticode never runs "
+            "them outside the sandbox on work nobody has reviewed yet.",
+        )
+        return result
     try:
         result["steps"] = apply(settings, source, worktree, cancel)
     except Exception as exc:  # setup must never take down the run that asked for it
@@ -653,10 +666,18 @@ def prepare_quietly(
     surface: str,
     cancel: threading.Event | None = None,
     log: Callable[[str], None] | None = None,
+    commands: bool = True,
 ) -> dict[str, Any] | None:
     """``prepare`` that reports its own crash as a failed result instead of raising."""
     try:
-        return prepare(data_dir, source=source, worktree=worktree, surface=surface, cancel=cancel)
+        return prepare(
+            data_dir,
+            source=source,
+            worktree=worktree,
+            surface=surface,
+            cancel=cancel,
+            commands=commands,
+        )
     except Exception as exc:
         if log:
             log(f"Worktree setup crashed: {exc}")

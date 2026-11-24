@@ -1,19 +1,26 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { Check, ChevronDown, Copy, ExternalLink, LogIn, RefreshCw } from "lucide-react";
+import { ChevronDown, ExternalLink, RefreshCw } from "lucide-react";
 import { apiUrl } from "../lib/api.js";
 import {
   allowanceLabel, formatUsageAmount, formatUsageNumber, formatUsageTime,
   remainingPercent, usageDashboardUrl, usageProviderName, usageSignIn, usageStatus,
 } from "../lib/usage.js";
-import { useProviderSignIn } from "./ProviderModelEffortFields.jsx";
+import { customRangeError, loadUsageRange, localDateString, saveUsageRange, USAGE_RANGES, usageRangeLabel, usageRangeQuery } from "../lib/usageHistory.js";
 import "./UsageDashboard.css";
+import TokenUsageChart from "./TokenUsageChart.jsx";
 import UsageCredentials from "./UsageCredentials.jsx";
+import UsageApiCost from "./UsageApiCost.jsx";
+import UsageVerifiedWork from "./UsageVerifiedWork.jsx";
+import UsageAlerts from "./UsageAlerts.jsx";
+import UsageAccountCards from "./UsageAccountCards.jsx";
+import { StandingParts } from "./ContextSent.jsx";
 
 const USAGE_POLL_MS = 60_000;
 
 export default function UsageDashboard() {
   const [overview, setOverview] = useState(null);
-  const [days, setDays] = useState(30);
+  const [range, setRange] = useState(() => loadUsageRange());
+  const rangeQuery = usageRangeQuery(range);
   const [view, setView] = useState("allowance");
   const [group, setGroup] = useState("all");
   const [loading, setLoading] = useState(true);
@@ -31,7 +38,7 @@ export default function UsageDashboard() {
     }
     try {
       const read = async force => {
-        const response = await fetch(apiUrl(`/usage/${force ? "refresh" : "overview"}?days=${days}`), {
+        const response = await fetch(apiUrl(`/usage/${force ? "refresh" : "overview"}?${rangeQuery}`), {
           signal: controller.signal,
           ...(force ? { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" } : {}),
         });
@@ -56,7 +63,7 @@ export default function UsageDashboard() {
     } finally {
       if (!controller.signal.aborted && !quiet) setLoading(false);
     }
-  }, [days]);
+  }, [rangeQuery]);
   useEffect(() => {
     void load(false, true);
     const refresh = () => { void load(false, true); };
@@ -75,6 +82,13 @@ export default function UsageDashboard() {
 
   const accounts = (overview?.accounts || []).filter(account => group === "all" || (group === "api") === account.provider?.endsWith("_api"));
   const signedOut = accounts.filter(account => usageSignIn(account)).length;
+  const checkAgain = useCallback(() => { void load(true); }, [load]);
+  function chooseRange(next) {
+    saveUsageRange(next);
+    if (usageRangeQuery(next) === rangeQuery) return;
+    setOverview(null);
+    setRange(next);
+  }
   function tabKey(event, index) {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
@@ -99,33 +113,36 @@ export default function UsageDashboard() {
     {error ? <p role="alert" className="usage-error">{error}{overview ? " Showing the last loaded results." : ""}</p> : null}
     {loading ? <p role="status" className="usage-note">{overview ? "Updating usage…" : "Loading provider usage…"}</p> : null}
     <div role="tabpanel" id={`${id}-allowance-panel`} aria-labelledby={`${id}-allowance-tab`} hidden={view !== "allowance"}>
+      {/* The account cards and their weekly pace charts belong to this view only. */}
+      {overview ? <UsageAccountCards accounts={overview.accounts || []} remAccount={overview.rem_claude_account || null} checking={loading} onCheck={checkAgain} /> : null}
       <div className="usage-filters">
         <span>Provider account allowances</span>
         <label>Show <select value={group} onChange={event => setGroup(event.target.value)} aria-label="Usage account type">
           <option value="all">All accounts</option><option value="cli">Coding apps</option><option value="api">API profiles</option>
         </select></label>
       </div>
-      {signedOut ? <p className="usage-attention">{signedOut === 1 ? "1 account needs" : `${signedOut} accounts need`} you to sign in before Raticode can read its allowance. Use the sign-in option below.</p> : null}
+      {signedOut ? <p className="usage-attention">{signedOut === 1 ? "1 account needs" : `${signedOut} accounts need`} you to sign in before Raticode can read its allowance. Use Sign in on its card above.</p> : null}
       <div className="usage-row-head" aria-hidden="true"><span>Provider / account</span><span>Remaining allowance</span></div>
-      {accounts.map(account => <AccountRow key={account.id} account={account} checking={loading} onCredentialsSaved={() => load(true)} />)}
+      {accounts.map(account => <AccountRow key={account.id} account={account} onCredentialsSaved={checkAgain} />)}
       {!loading && overview && !accounts.length ? <p className="usage-empty">No {group === "api" ? "API profiles" : "accounts"} to show. Add a provider in Settings → Providers.</p> : null}
       <p className="usage-note">Allowances keep each provider&apos;s own units and reset windows. A plan percentage does not tell you how many tokens remain.</p>
+      <UsageAlerts />
     </div>
     <div role="tabpanel" id={`${id}-tokens-panel`} aria-labelledby={`${id}-tokens-tab`} hidden={view !== "tokens"}>
-      <div className="usage-filters"><span>All projects on this device</span><label>Period <select value={days} onChange={event => { setOverview(null); setDays(Number(event.target.value)); }} aria-label="Usage period">
-        <option value={1}>Last 24 hours</option><option value={7}>Last 7 days</option><option value={30}>Last 30 days</option><option value={90}>Last 90 days</option>
-      </select></label></div>
-      {overview ? <TokenActivity activity={overview.activity || {}} trackingStartedAt={overview.tracking_started_at} /> : null}
+      <div className="usage-filters"><span>All projects on this device · {usageRangeLabel(range)}</span></div>
+      <UsageRangePicker range={range} onChange={chooseRange} />
+      {overview ? <TokenActivity activity={overview.activity || {}} series={overview.series} trackingStartedAt={overview.tracking_started_at} cost={overview.api_cost} /> : null}
+      {overview ? <UsageVerifiedWork numbers={overview.verified_work} /> : null}
+      {overview ? <StandingParts standing={overview.standing_parts} /> : null}
     </div>
   </div>;
 }
 
-function AccountRow({ account, checking, onCredentialsSaved }) {
+function AccountRow({ account, onCredentialsSaved }) {
   const windows = account.windows || [];
   const primary = windows[0];
   const url = usageDashboardUrl(account.dashboard_url);
   const name = usageProviderName(account.provider);
-  const signIn = usageSignIn(account);
   return <div className="usage-account-row"><details className="usage-account" data-status={account.status}>
     <summary>
       <span className="usage-identity"><strong>{name}</strong><span>{account.profile || account.label || "Provider account"}</span></span>
@@ -151,41 +168,7 @@ function AccountRow({ account, checking, onCredentialsSaved }) {
         key={`${account.provider}:${account.profile || ""}`} provider={account.provider} profile={account.profile || null} onSaved={onCredentialsSaved}
       /> : null}
     </div>
-  </details>
-  {/* Outside the disclosure so a signed-out account shows its way forward without expanding. */}
-  {signIn ? <UsageSignIn provider={account.provider} name={name} help={signIn} checking={checking} onCheck={onCredentialsSaved} /> : null}
-  </div>;
-}
-
-function UsageSignIn({ provider, name, help, checking, onCheck }) {
-  const { pending, starting, error, authenticate } = useProviderSignIn(provider);
-  const [copied, setCopied] = useState(false);
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(help.command);
-      setCopied(true);
-    } catch { setCopied(false); }
-  }
-  const message = pending ? `Finish signing in to ${name} in your browser. Usage updates when you are done.`
-    : help.browser ? `Sign in to ${name} so Raticode can read your remaining allowance.`
-      : help.command ? <>Open a terminal and run <code>{help.command}</code> to sign in to {name}, then check again.</>
-        : `Sign in to ${name} using this profile's own settings, then check again.`;
-  return <div className="usage-sign-in">
-    <p role={pending ? "status" : undefined}>{message}</p>
-    <div className="usage-sign-in-actions">
-      {help.browser ? <button type="button" className="usage-sign-in-primary" disabled={starting} onClick={() => authenticate(pending ? "cancel" : "start")}>
-        {pending ? null : <LogIn size={13} aria-hidden="true" />}{starting ? "Opening sign-in…" : pending ? "Cancel sign-in" : `Sign in to ${name}`}
-      </button> : null}
-      {!help.browser && help.command ? <button type="button" className="usage-refresh" onClick={copy}>
-        {copied ? <Check size={13} aria-hidden="true" /> : <Copy size={13} aria-hidden="true" />}{copied ? "Copied" : "Copy command"}
-      </button> : null}
-      <button type="button" className="usage-refresh" disabled={checking} onClick={onCheck}>
-        <RefreshCw size={13} aria-hidden="true" />{checking ? "Checking…" : "Check again"}
-      </button>
-    </div>
-    {help.browser && help.command && !pending ? <p className="usage-sign-in-alt">If no browser opens, run <code>{help.command}</code> in a terminal.</p> : null}
-    {error ? <p role="alert" className="usage-error">{error}</p> : null}
-  </div>;
+  </details></div>;
 }
 
 function AllowanceBar({ window }) {
@@ -194,11 +177,63 @@ function AllowanceBar({ window }) {
   return <span className={`usage-meter${percent <= 10 ? " usage-meter-low" : ""}`} role="meter" aria-label={`${window.label} remaining`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} aria-valuetext={`${formatUsageNumber(percent)}% remaining`}><span style={{ width: `${percent}%` }} /></span>;
 }
 
-function TokenActivity({ activity, trackingStartedAt }) {
+function UsageRangePicker({ range, onChange }) {
+  const [custom, setCustom] = useState(range.key === "custom");
+  const today = localDateString();
+  const [start, setStart] = useState(range.start || "");
+  const [end, setEnd] = useState(range.end || today);
+  const [error, setError] = useState("");
+  const id = useId();
+  const selected = custom ? "custom" : range.key;
+  function pick(key) {
+    if (key === "custom") {
+      setCustom(true);
+      setError("");
+      return;
+    }
+    setCustom(false);
+    onChange({ key, start: "", end: "" });
+  }
+  function apply(event) {
+    event.preventDefault();
+    const problem = customRangeError(start, end, today);
+    setError(problem);
+    if (!problem) onChange({ key: "custom", start, end });
+  }
+  return <div className="usage-range">
+    <div className="usage-range-options" role="radiogroup" aria-label="Usage period">
+      {USAGE_RANGES.map(option => <button
+        key={option.key} type="button" role="radio" aria-checked={selected === option.key}
+        aria-label={option.label} title={option.label} onClick={() => pick(option.key)}
+        tabIndex={selected === option.key ? 0 : -1}
+        onKeyDown={event => {
+          const index = USAGE_RANGES.findIndex(item => item.key === option.key);
+          const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+          if (!step) return;
+          event.preventDefault();
+          const next = USAGE_RANGES[(index + step + USAGE_RANGES.length) % USAGE_RANGES.length];
+          pick(next.key);
+          event.currentTarget.parentElement.querySelectorAll("[role=radio]")[USAGE_RANGES.indexOf(next)]?.focus();
+        }}
+      >{option.short}</button>)}
+    </div>
+    {custom ? <form className="usage-range-custom" onSubmit={apply} noValidate aria-label="Custom range">
+      <label htmlFor={`${id}-start`}>From</label>
+      <input id={`${id}-start`} type="date" value={start} min="2000-01-01" max={end || today} onChange={event => setStart(event.target.value)} aria-invalid={Boolean(error) || undefined} aria-describedby={error ? `${id}-error` : undefined} />
+      <label htmlFor={`${id}-end`}>To</label>
+      <input id={`${id}-end`} type="date" value={end} min={start || "2000-01-01"} onChange={event => setEnd(event.target.value)} aria-invalid={Boolean(error) || undefined} aria-describedby={error ? `${id}-error` : undefined} />
+      <button type="submit" className="usage-refresh">Show range</button>
+      {error ? <p id={`${id}-error`} role="alert" className="usage-range-error">{error}</p> : null}
+    </form> : null}
+  </div>;
+}
+
+function TokenActivity({ activity, series, trackingStartedAt, cost }) {
   const providers = activity.providers || [];
   return <>
     {!activity.calls ? <div className="usage-empty"><h3>No usage recorded in this period</h3><p>Usage appears here as you work with Rem, workflows, and swarms on this device.</p></div> : <>
       <div className="usage-total"><span>Reported tokens</span><strong>{formatUsageNumber(activity.total_tokens)}</strong><p>{formatUsageNumber(activity.reported_calls)} of {formatUsageNumber(activity.calls)} calls reported tokens. {formatUsageNumber(activity.unknown_calls)} without token data.</p></div>
+      {series ? <TokenUsageChart series={series} /> : null}
       {activity.partial_calls > 0 ? <p className="usage-note">{formatUsageNumber(activity.partial_calls)} {activity.partial_calls === 1 ? "call reported only part of its" : "calls reported only part of their"} token usage.</p> : null}
       {activity.estimated_calls > 0 ? <p className="usage-note">{formatUsageNumber(activity.estimated_calls)} {activity.estimated_calls === 1 ? "call has" : "calls have"} estimated usage, {formatUsageNumber(activity.estimated_total_tokens)} estimated tokens. Estimates are excluded from reported totals.</p> : null}
       <div className="usage-table-scroll"><table className="usage-token-table"><caption>Provider token usage</caption><thead><tr><th scope="col">Provider</th><th scope="col">Input</th><th scope="col">Output</th><th scope="col">Total</th></tr></thead><tbody>
@@ -207,6 +242,7 @@ function TokenActivity({ activity, trackingStartedAt }) {
           <td>{formatUsageNumber(provider.input_tokens)}</td><td>{formatUsageNumber(provider.output_tokens)}</td><td>{formatUsageNumber(provider.total_tokens)}</td>
         </tr>)}
       </tbody><tfoot><tr><th scope="row">Reported total</th><td>{formatUsageNumber(activity.input_tokens)}</td><td>{formatUsageNumber(activity.output_tokens)}</td><td>{formatUsageNumber(activity.total_tokens)}</td></tr></tfoot></table></div>
+      <UsageApiCost cost={cost} />
     </>}
     <p className="usage-note">Only provider-reported tokens are counted. Missing usage stays unknown. Account-wide usage in other apps is outside this history.</p>
     {trackingStartedAt ? <p className="usage-note">Tracking on this device since {formatUsageTime(trackingStartedAt)}.</p> : null}

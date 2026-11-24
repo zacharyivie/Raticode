@@ -24,61 +24,29 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-# Credential stores a shell started by an unattended agent has no reason to
-# read. Paths that don't exist on this computer are simply skipped by the
-# sandbox, so one list serves Linux and macOS.
-SECRET_PATHS = (
-    "~/.ssh",
-    "~/.gnupg",
-    "~/.claude",
-    "~/.claude.json",
-    "~/.codex/auth.json",
-    "~/.aws",
-    "~/.azure",
-    "~/.config/gcloud",
-    "~/.kube",
-    "~/.docker/config.json",
-    "~/.netrc",
-    "~/.git-credentials",
-    "~/.config/git/credentials",
-    "~/.config/gh",
-    "~/.local/share/keyrings",
-    "~/.password-store",
-    "~/.npmrc",
-    "~/.pypirc",
-    "~/Library/Keychains",
+from gofer.core.agent_credentials import (
+    DATA_CREDENTIAL_FOLDERS,
+    HOME_SECRET_PATHS,
+    data_credential_names,
 )
-# Raticode's own data folder holds paired-device keys and site grants. The shell
-# can't see the folder at all; the Read tool is kept from these parts of it.
-DATA_SECRETS = ("devices", "browser-grants")
+from gofer.core.agent_credentials import secrets_folders as _secrets_folders
+
+# Credential stores a shell started by an unattended agent has no reason to read.
+SECRET_PATHS = HOME_SECRET_PATHS
+# Raticode's own data folder holds paired-device keys, site grants and every
+# provider's account folders (gofer.core.agent_credentials). The shell can't see the
+# folder at all; the Read tool is kept from these parts of it.
+DATA_SECRETS = (*DATA_CREDENTIAL_FOLDERS, "claude-accounts")
+
+
+def data_secrets(data_dir: Path) -> list[str]:
+    """Every credential folder in the data folder, as names (see agent_credentials)."""
+    return data_credential_names(data_dir)
 
 
 def secrets_folders() -> list[str]:
-    """A headless backend's read-only secrets folder and systemd's credentials folder.
-
-    The configured folder (``--secrets-dir``, or ``$CREDENTIALS_DIRECTORY`` by default)
-    holds the Jev key and other keychain secrets, such as Organizations and workflow
-    secrets. systemd's folder is listed too in case it differs, from the sealed copy once
-    startup moved it out of the environment. Each folder is listed as given and as
-    resolved, so a symlinked path can't be read under its other name.
-    """
-    from gofer.core.secrets_folder import CREDENTIALS_DIRECTORY_ENV, configured_secrets_dir
-    from gofer.utils.process import credential_env
-
-    candidates: list[Path] = []
-    configured = configured_secrets_dir()
-    if configured is not None:
-        candidates.append(configured)
-    systemd = credential_env(CREDENTIALS_DIRECTORY_ENV).strip()
-    if systemd:
-        candidates.append(Path(systemd))
-    folders: list[str] = []
-    for folder in candidates:
-        folder = Path(os.path.abspath(folder.expanduser()))
-        for path in (folder, folder.resolve()):
-            if str(path) not in folders:
-                folders.append(str(path))
-    return folders
+    """A headless backend's secrets folder and systemd's credentials folder, as paths."""
+    return [str(folder) for folder in _secrets_folders()]
 
 
 def unavailable_reason(
@@ -110,6 +78,14 @@ def unavailable_reason(
 
 def git_common_dir(root: Path) -> Path | None:
     """The shared ``.git`` folder of a worktree, when it lives outside ``root``."""
+    common = repository_git_dir(root)
+    if common is None:
+        return None
+    return None if common.is_relative_to(root.resolve()) else common
+
+
+def repository_git_dir(root: Path) -> Path | None:
+    """The shared ``.git`` folder of the repository ``root`` is in, or None outside one."""
     try:
         completed = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -122,8 +98,7 @@ def git_common_dir(root: Path) -> Path | None:
         return None
     if completed.returncode != 0 or not completed.stdout.strip():
         return None
-    common = Path(completed.stdout.strip()).resolve()
-    return None if common.is_relative_to(root.resolve()) else common
+    return Path(completed.stdout.strip()).resolve()
 
 
 def _rule_paths(path: str) -> list[str]:
@@ -135,11 +110,47 @@ def _rule_paths(path: str) -> list[str]:
 
 
 def permission_deny_rules(data_dir: Path, secret_folders: Iterable[str] = ()) -> list[str]:
-    paths = [*SECRET_PATHS, *secret_folders, *(str(data_dir / name) for name in DATA_SECRETS)]
+    paths = [
+        *SECRET_PATHS,
+        *secret_folders,
+        *(str(data_dir / name) for name in data_secrets(data_dir)),
+    ]
     return [
         f"{tool}({spec})"
         for path in paths
         for spec in _rule_paths(path)
+        for tool in ("Read", "Edit")
+    ]
+
+
+def hidden_deny_rules(folders: Iterable[str]) -> list[str]:
+    """Read, Edit, Grep and Glob deny rules for folders a turn must not see at all.
+
+    Claude Code 2.1.319 matches Grep and Glob against Read rules; the rules under their
+    own names are kept for any version that matches those tools by name.
+    """
+    return [
+        f"{tool}({spec})"
+        for path in folders
+        for spec in _rule_paths(path)
+        for tool in ("Read", "Edit", "Grep", "Glob")
+    ]
+
+
+def credential_deny_rules(data_dir: Path) -> list[str]:
+    """Read and Edit deny rules for every Raticode credential folder, for any Claude turn.
+
+    Account folders, paired-device keys, site grants and a headless secrets folder
+    (``gofer.core.agent_credentials``), including folders not made yet. Edit rules also
+    cover the Write tool. Turns the user watches keep their home folder's own
+    credentials; unattended turns hide those too (``permission_deny_rules``).
+    """
+    from gofer.core.agent_credentials import credential_folders
+
+    return [
+        f"{tool}({spec})"
+        for folder in credential_folders(data_dir)
+        for spec in _rule_paths(str(folder))
         for tool in ("Read", "Edit")
     ]
 
@@ -163,6 +174,7 @@ def sandbox_settings(
     writable: Iterable[Path | None] = (),
     visible: Iterable[Path | None] = (),
     protected: Iterable[Path | None] = (),
+    hidden: Iterable[Path] = (),
 ) -> dict[str, Any]:
     """Claude Code settings that sandbox the shell and deny secrets to every tool.
 
@@ -171,18 +183,23 @@ def sandbox_settings(
     paths inside Raticode's data folder the shell still needs to read, such as
     the command-slot wrappers. ``protected`` are
     extra folders the turn may read but not change (Claude Code makes every
-    ``--add-dir`` writable to the shell otherwise).
+    ``--add-dir`` writable to the shell otherwise). ``hidden`` are folders inside
+    the turn's projects that neither the shell nor any file tool may read or change,
+    such as a Second Brain that keeps cloud processing off.
     """
     root = root.resolve()
     data_dir = data_dir.resolve()
-    hidden = secrets_folders()
+    private = [str(Path(path).resolve()) for path in hidden]
+    secret_folders = secrets_folders()
     writes = [Path(path).resolve() for path in writable if path is not None]
     # A denied folder also denies every folder inside it, so an extra folder
     # that holds one the turn must write, like its scratch folder, stays open.
     # A read-only project is denied regardless.
     kept = [Path(path).resolve() for path in protected if path is not None]
-    deny_write = [*([root] if read_only else [])] + [
-        path for path in kept if not any(w.is_relative_to(path) for w in writes)
+    deny_write = [
+        *([root] if read_only else []),
+        *(path for path in kept if not any(w.is_relative_to(path) for w in writes)),
+        *(Path(path) for path in private),
     ]
     # Writable folders must be readable too. A folder re-opened for reading is
     # mounted read-only over everything inside it, so a parent of a writable
@@ -193,6 +210,10 @@ def sandbox_settings(
         *writes,
         *([root] if root.is_relative_to(data_dir) else []),
     ]
+    for folder in map(Path, private):
+        # A folder re-opened for reading would show what is inside it again.
+        if any(folder.is_relative_to(path) or path.is_relative_to(folder) for path in allow_read):
+            raise ValueError(f"The sandbox can't hide {folder}: the turn must read or write in it")
     return {
         "sandbox": {
             "enabled": True,
@@ -202,7 +223,7 @@ def sandbox_settings(
             "allowUnsandboxedCommands": False,
             "autoAllowBashIfSandboxed": True,
             "filesystem": {
-                "denyRead": [*SECRET_PATHS, *hidden, str(data_dir)],
+                "denyRead": [*SECRET_PATHS, *secret_folders, str(data_dir), *private],
                 "allowRead": _unique(allow_read),
                 "allowWrite": _unique(writes),
                 "denyWrite": _unique(deny_write),
@@ -212,7 +233,9 @@ def sandbox_settings(
             "network": {"allowedDomains": [], "strictAllowlist": True},
         },
         # The sandbox doesn't cover the Read and Edit tools.
-        "permissions": {"deny": permission_deny_rules(data_dir, hidden)},
+        "permissions": {
+            "deny": [*permission_deny_rules(data_dir, secret_folders), *hidden_deny_rules(private)]
+        },
     }
 
 
@@ -260,6 +283,129 @@ def sandbox_instructions(*, read_only: bool, scratch: Path | None) -> str:
         + "If a command fails only because of the sandbox, say so in your result instead of "
         "working around it."
     )
+
+
+# Claude Code reads a project's own .claude/settings.json and settings.local.json
+# unless told otherwise, and the hooks they name run outside the sandbox, so a
+# cloned repository could run anything as the user. Unattended turns load only the
+# user's settings and Raticode's own --settings (whose hook queues tests). That also
+# drops the project's CLAUDE.md files, which project_instruction_args passes back as
+# plain text. Measured with Claude Code 2.1.319: project hooks don't run, Raticode's do.
+PROJECT_SETTING_SOURCES = ("--setting-sources", "user")
+INSTRUCTION_FILES = ("CLAUDE.md", ".claude/CLAUDE.md")
+# All instruction files together; anything past this is cut with a note.
+MAX_INSTRUCTION_BYTES = 64 * 1024
+# Nested CLAUDE.md files listed by path, and how much of the tree is searched for them.
+MAX_NESTED_INSTRUCTIONS = 40
+MAX_NESTED_DEPTH = 6
+MAX_NESTED_FOLDERS = 5000
+_SKIPPED_FOLDERS = frozenset(
+    {"node_modules", "build", "dist", "out", "target", "venv", "__pycache__", "vendor"}
+)
+
+
+def _read_instruction_file(path: Path, limit: int) -> str | None:
+    """The file's text, or None if it's missing, a link or not a regular file."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            data = handle.read(max(limit, 0) + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    text = data[:limit].decode("utf-8", errors="replace")
+    return (
+        text + "\n[Cut here: Raticode passes at most 64 KB of instructions.]"
+        if len(data) > limit
+        else text
+    )
+
+
+def _instruction_files_above(root: Path) -> list[Path]:
+    """CLAUDE.md files in ``root`` and the folders above it, outermost first, below home.
+
+    The walk stops before the home folder. ``--setting-sources user`` already loads
+    ``~/.claude/CLAUDE.md``, so passing home's files as well would send them twice.
+    """
+    home = Path.home().resolve()
+    folders: list[Path] = []
+    for folder in (root, *root.parents):
+        if folder == folder.parent or folder == home:
+            break
+        folders.append(folder)
+    return [
+        folder / name
+        for folder in reversed(folders)
+        for name in INSTRUCTION_FILES
+        if (folder / name).is_file()
+    ]
+
+
+def _nested_instruction_files(root: Path) -> list[Path]:
+    """CLAUDE.md files in folders below ``root``, skipping hidden and dependency folders."""
+    found: list[Path] = []
+    visited = 0
+    for current, folders, files in os.walk(root):
+        visited += 1
+        depth = len(Path(current).relative_to(root).parts)
+        folders[:] = sorted(
+            name
+            for name in folders
+            if not name.startswith(".")
+            and name not in _SKIPPED_FOLDERS
+            and depth < MAX_NESTED_DEPTH
+        )
+        if depth and "CLAUDE.md" in files:
+            found.append(Path(current) / "CLAUDE.md")
+        if len(found) >= MAX_NESTED_INSTRUCTIONS or visited >= MAX_NESTED_FOLDERS:
+            break
+    return found
+
+
+def project_instruction_args(root: Path) -> list[str]:
+    """Claude Code arguments for an unattended turn: no project settings, its CLAUDE.md as text.
+
+    ``--setting-sources user`` keeps a project's hooks, permissions and MCP servers out
+    of the turn. The CLAUDE.md files Claude Code would have read in ``root`` and the
+    folders above it, short of home, come back through ``--append-system-prompt``; links aren't
+    followed, so a CLAUDE.md that points at a key file adds nothing. Nested CLAUDE.md
+    files are listed so the agent reads the one for a folder it works in.
+    """
+    root = root.resolve()
+    args = list(PROJECT_SETTING_SOURCES)
+    blocks: list[str] = []
+    remaining = MAX_INSTRUCTION_BYTES
+    for path in _instruction_files_above(root):
+        text = _read_instruction_file(path, remaining)
+        if text is None or not text.strip():
+            continue
+        remaining -= len(text.encode("utf-8"))
+        blocks.append(
+            f"Contents of {path} (project instructions, checked into the codebase):\n\n{text}"
+        )
+        if remaining <= 0:
+            break
+    nested = _nested_instruction_files(root)
+    if nested:
+        listing = "\n".join(f"- {path.relative_to(root)}" for path in nested)
+        blocks.append(
+            "These folders have their own CLAUDE.md. Before working in one of them, read "
+            f"its CLAUDE.md and follow it:\n{listing}"
+        )
+    if blocks:
+        header = (
+            "Raticode doesn't load this project's Claude Code settings in unattended turns, "
+            "so the project's instruction files are given here instead."
+        )
+        args += ["--append-system-prompt", "\n\n".join([header, *blocks])]
+    return args
 
 
 # While a sandboxed command runs, Claude Code write-protects shell and tool

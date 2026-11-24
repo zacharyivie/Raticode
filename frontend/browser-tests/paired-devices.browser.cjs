@@ -164,6 +164,17 @@ async function main() {
   await screenshot("desktop-invite-light");
   await click("Cancel invitation");
   await wait("!document.querySelector('textarea[aria-label=\"Desktop invitation link\"]')");
+  // The computer joins another network: the open invitation names the old address, so
+  // it goes away, and a notice gives the new address until dismissed.
+  await click("Create invitation link");
+  await wait("Boolean(document.querySelector('textarea[aria-label=\"Desktop invitation link\"]'))");
+  assert.equal(await evaluate("Boolean(document.querySelector('[aria-label=\"Network change\"]'))"), false);
+  Object.assign(state, { lan_host: "10.0.0.7", lan_moved: { from: "192.168.1.203", to: "10.0.0.7", at: Date.now() / 1000 + 1 } });
+  await wait("document.querySelector('[aria-label=\"Network change\"]')?.textContent.includes('10.0.0.7:44233')");
+  await wait("!document.querySelector('textarea[aria-label=\"Desktop invitation link\"]')");
+  await screenshot("network-change-light");
+  await click("Dismiss");
+  await wait("!document.querySelector('[aria-label=\"Network change\"]')");
   const paste = value => evaluate(`(() => { const input = Array.from(document.querySelectorAll('label')).find(l => l.textContent.startsWith('Invitation link')).querySelector('textarea'); input.focus(); Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set.call(input, ${JSON.stringify(value)}); input.dispatchEvent(new Event('input', {bubbles:true})); input.blur(); })()`);
   await paste("test invitation");
   await wait("document.body.textContent.includes(\"This isn't an invitation link\")");
@@ -315,7 +326,9 @@ async function main() {
   await evaluate("document.documentElement.classList.add('dark')");
   await screenshot("phone-dark");
   await expand("Connection and troubleshooting");
-  assert.equal(await evaluate("document.body.textContent.includes('192.168.1.203:44233')"), true);
+  // The listener moved to 10.0.0.7 above; troubleshooting shows the address it has now.
+  assert.equal(await evaluate(`document.body.textContent.includes('${state.lan_host}:44233')`), true);
+  assert.equal(state.lan_host, "10.0.0.7");
   // Tailscale is optional and off until chosen; setup only explains the user's own steps.
   assert.equal(await evaluate("Boolean(document.querySelector('[aria-label=\\'Tailscale access rule\\']'))"), false);
   await click("Set up");

@@ -20,7 +20,7 @@ Jev is a classification provider, not a coding provider. It doesn't write text o
 
 You need a TypeSafe API key. TypeSafe's [API reference](https://docs.typesafe.ai/api) explains how keys work.
 
-1. Open **Settings > Providers** and scroll to **Classification models**.
+1. Open **Settings > Providers** and scroll to **Classification models**. From 0.6.0 it's under **For workflows only**; choose it to open the form.
 2. Paste the key into **API key** under **Jev (TypeSafe)** and choose **Save**. The field empties again: Raticode never shows the key after saving it.
 3. Choose **Check key**. Raticode makes one call to Jev's model list. **Jev accepted the key** means it works, and the card lists the models Jev names, such as `jev-latest`.
 

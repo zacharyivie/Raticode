@@ -4,13 +4,16 @@ import org.json.JSONObject
 
 /**
  * One thing for this phone's alerts. [kind] is `reply` or `task_update` for Rem's chat messages, `proposals` for one self-work
- * round's batch, `organization` for an organization's task and `workflow` for a message a workflow sent to the phone. [reason] is
- * the alert switch it counts under, empty when it counts because this phone asked for the work. A workflow message names its
- * [workflowId] and [runId], which a tap opens. [moreFromRun] is set on a run's one "And N more from this run" notice: N, the
- * messages past the desktop's per-run cap that it stands for.
+ * round's batch, `organization` for an organization's task, `workflow` for a message a workflow sent to the phone and `decision`
+ * for a question of Rem's that waits for the user while no task stops for it (auto mode). [reason] is the alert switch it counts
+ * under, empty when it counts because this phone asked for the work. A workflow message names its [workflowId] and [runId], which a
+ * tap opens. [moreFromRun] is set on a run's one "And N more from this run" notice: N, the messages past the desktop's per-run cap
+ * that it stands for. A question names its [decisionId], which a tap opens on the Decisions screen, its [question], its
+ * [projectName] (empty for one about the user) and Rem's [recommended] answer.
  */
 data class RemNotice(val id: String, val kind: String, val body: String, val createdAt: String, val title: String, val needsUser: Boolean, val reason: String = "",
-                     val workflowId: String = "", val runId: String = "", val workflowName: String = "", val moreFromRun: Int = 0)
+                     val workflowId: String = "", val runId: String = "", val workflowName: String = "", val moreFromRun: Int = 0,
+                     val decisionId: String = "", val question: String = "", val projectName: String = "", val recommended: String = "")
 
 /**
  * The desktop's `rem.notices` answer. [cursor] is the last message position it read; [more] means read again at once.
@@ -30,7 +33,9 @@ object RemNoticeText {
     const val HISTORY = 12
     private const val MARK_MAX = 256
     private const val COUNT_MAX = 1_000_000
-    private val KINDS = setOf("task_update", "proposals", "organization", RemAlertRules.WORKFLOW)
+    private val KINDS = setOf("task_update", "proposals", "organization", RemAlertRules.WORKFLOW, RemAlertRules.DECISION)
+    /** A decision ID as the desktop writes it, such as `D-12`. */
+    private val DECISION_ID = Regex("D-[0-9]{1,9}")
 
     /**
      * The `rem.notices` request. Only a desktop whose overview advertises the filter gets [include] or [mark], and only while
@@ -52,17 +57,26 @@ object RemNoticeText {
         val list = json.optJSONArray("notices")
         val notices = (0 until minOf(list?.length() ?: 0, MAX)).map { list!!.getJSONObject(it) }.map {
             val kind = it.optString("kind").takeIf { name -> name in KINDS } ?: "reply"
-            val reason = when (kind) {
+            // A question without a decision ID it could open is shown as an ordinary Needs you line.
+            val decision = it.optJSONObject("decision")?.takeIf { kind == RemAlertRules.DECISION }
+            val decisionId = decision?.optString("id")?.takeIf { id -> DECISION_ID.matches(id) }.orEmpty()
+            val kept = if (kind == RemAlertRules.DECISION && decisionId.isEmpty()) "task_update" else kind
+            val reason = when (kept) {
                 "proposals" -> RemAlertRules.PROPOSALS
                 RemAlertRules.WORKFLOW -> RemAlertRules.WORKFLOW
+                // Questions count under Needs you, whatever else the answer says.
+                RemAlertRules.DECISION -> RemAlertRules.NEEDS_YOU
                 else -> it.optString("reason").takeIf { name -> name in RemAlertRules.FILTERS }.orEmpty()
             }
-            val workflow = kind == RemAlertRules.WORKFLOW
-            RemNotice(it.getString("id").take(128), kind, it.optString("body").take(1500), it.optString("created_at").take(80),
-                it.optString("title").take(160), it.optBoolean("needs_user") && !workflow, reason,
+            val workflow = kept == RemAlertRules.WORKFLOW
+            val asks = kept == RemAlertRules.DECISION
+            RemNotice(it.getString("id").take(128), kept, it.optString("body").take(1500), it.optString("created_at").take(80),
+                it.optString("title").take(160), (it.optBoolean("needs_user") && !workflow) || asks, reason,
                 if (workflow) it.optString("workflow_id").take(200) else "", if (workflow) it.optString("run_id").take(128) else "",
                 if (workflow) it.optString("workflow_name").take(160) else "",
-                if (workflow) it.optInt("more_from_run").coerceIn(0, COUNT_MAX) else 0)
+                if (workflow) it.optInt("more_from_run").coerceIn(0, COUNT_MAX) else 0,
+                decisionId, if (asks) decision!!.optString("question").take(500) else "",
+                if (asks) it.optString("project_name").take(160) else "", if (asks) decision!!.optString("recommended").take(300) else "")
         }
         // An opaque position can't be shortened, so one that is too long counts as none.
         val mark = (json.opt("mark") as? String)?.takeIf { it.length <= MARK_MAX }.orEmpty()
@@ -72,6 +86,7 @@ object RemNoticeText {
 
     /** The alert line for one message. */
     fun line(notice: RemNotice, showText: Boolean): String {
+        if (notice.kind == RemAlertRules.DECISION) return RemAlertRules.decisionText(notice, showText)
         val generic = when {
             notice.kind == "proposals" -> "Proposals are waiting"
             notice.kind == RemAlertRules.WORKFLOW -> RemAlertRules.WORKFLOW_GENERIC

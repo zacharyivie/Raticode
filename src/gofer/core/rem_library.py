@@ -7,14 +7,16 @@ start of every turn so edits reach every provider without stale copies.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import tempfile
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from gofer.core.prompt_envelope import McpReference
 
@@ -24,6 +26,8 @@ MAX_LIBRARY_BYTES = 2 * 1024 * 1024
 MAX_SKILLS_PER_ROOT = 200
 MAX_SKILL_HEADER_BYTES = 16 * 1024
 MAX_DESCRIPTION_CHARS = 400
+MAX_ENV_NAMES = 50
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 # Raticode supplies these connections itself; a library entry must not shadow them.
 RESERVED_MCP_NAMES = frozenset(
     {
@@ -34,6 +38,7 @@ RESERVED_MCP_NAMES = frozenset(
         "rem_wait",
         "reports",
         "second_brain",
+        "social",
         "swarm",
     }
 )
@@ -51,8 +56,39 @@ class LibrarySkill(BaseModel):
 
 class LibraryMcpServer(McpReference):
     description: str = Field(default="", max_length=MAX_DESCRIPTION_CHARS)
+    # Names of environment variables an mcp-tool step passes to this local server, on
+    # top of a small base set. Only names are stored; values come from Raticode's
+    # environment when the server starts. Rem threads don't use this list.
+    env: list[str] = Field(default_factory=list)
     addedBy: Source = "app"
     addedAt: str = ""
+
+    @field_validator("env")
+    @classmethod
+    def valid_env_names(cls, names: list[str]) -> list[str]:
+        kept: list[str] = []
+        for raw in names:
+            name = str(raw).strip()
+            if not name:
+                continue
+            if not _ENV_NAME.fullmatch(name):
+                raise ValueError(
+                    f"{name!r} isn't an environment variable name: use letters, digits and "
+                    "underscores, not starting with a digit"
+                )
+            if name.upper().startswith("GOFER_"):
+                raise ValueError(f"{name} is Raticode's own variable and is never passed on")
+            if name not in kept:
+                kept.append(name)
+        if len(kept) > MAX_ENV_NAMES:
+            raise ValueError(f"Name at most {MAX_ENV_NAMES} environment variables")
+        return kept
+
+    @model_validator(mode="after")
+    def env_needs_a_local_program(self) -> LibraryMcpServer:
+        if self.env and self.type != "stdio":
+            raise ValueError("Only a local program server takes environment variables")
+        return self
 
 
 class RemLibrary(BaseModel):
@@ -97,7 +133,13 @@ def _save_library(data_dir: Path, library: RemLibrary) -> None:
             mode="w", encoding="utf-8", dir=destination.parent, delete=False
         ) as output:
             temporary = output.name
-            output.write(library.model_dump_json(indent=2))
+            data = library.model_dump(mode="json")
+            # An empty env list stays out of the file, so a Raticode version without
+            # the field can still read the library.
+            for server in data["mcpServers"]:
+                if not server.get("env"):
+                    server.pop("env", None)
+            output.write(json.dumps(data, indent=2))
             output.write("\n")
         os.replace(temporary, destination)
     finally:
@@ -142,10 +184,20 @@ def skill_header(folder: Path) -> dict[str, str]:
     }
 
 
-def discovery_roots(data_dir: Path) -> list[tuple[str, Path]]:
-    """Folders whose immediate children are skill folders, in display order."""
+def discovery_roots(data_dir: Path, codex_home: Path | None = None) -> list[tuple[str, Path]]:
+    """Folders whose immediate children are skill folders, in display order.
+
+    Codex's skills come from ``codex_home``, else the folder of the Codex account
+    Settings > Rem names (its own CODEX_HOME, codex_accounts.py), else Raticode's own
+    CODEX_HOME.
+    """
     home = Path.home()
-    codex_home = Path(os.environ.get("CODEX_HOME", str(home / ".codex")))
+    if codex_home is None:
+        from gofer.core.codex_accounts import rem_codex_home
+
+        codex_home = rem_codex_home(data_dir)
+    if codex_home is None:
+        codex_home = Path(os.environ.get("CODEX_HOME", str(home / ".codex")))
     return [
         ("raticode", skills_dir(data_dir)),
         ("agents", home / ".agents" / "skills"),
@@ -166,11 +218,11 @@ def _skill_entry(folder: Path, origin: str, **extra: Any) -> dict[str, Any]:
     }
 
 
-def discover_skills(data_dir: Path) -> list[dict[str, Any]]:
+def discover_skills(data_dir: Path, codex_home: Path | None = None) -> list[dict[str, Any]]:
     """List registered skills plus skill folders found in well-known locations."""
     library = load_library(data_dir)
     entries: dict[str, dict[str, Any]] = {}
-    for origin, root in discovery_roots(data_dir):
+    for origin, root in discovery_roots(data_dir, codex_home):
         try:
             children = sorted(root.iterdir())
         except OSError:
@@ -270,13 +322,17 @@ def save_mcp_server(
             raise ValueError(f"No MCP server named {replace}")
         if any(item.name == entry.name for i, item in enumerate(servers) if i != index):
             raise ValueError(f"An MCP server named {entry.name} already exists")
+        previous = None
         if index is None:
             servers.append(entry)
         else:
+            previous = servers[index]
             entry.addedBy = servers[index].addedBy
             entry.addedAt = servers[index].addedAt
             servers[index] = entry
         _save_library(data_dir, library)
+    if previous is not None:
+        _drop_changed_cache(data_dir, previous, entry)
     return entry.model_dump()
 
 
@@ -286,9 +342,42 @@ def remove_mcp_server(data_dir: Path, name: str) -> bool:
         kept = [server for server in library.mcpServers if server.name != name]
         if len(kept) == len(library.mcpServers):
             return False
+        removed = [server for server in library.mcpServers if server.name == name]
         library.mcpServers = kept
         _save_library(data_dir, library)
+    for server in removed:
+        _drop_changed_cache(data_dir, server, None)
     return True
+
+
+def _definition(server: LibraryMcpServer) -> dict[str, Any]:
+    return server.model_dump(include={"name", "type", "url", "command", "args", "env"})
+
+
+def _drop_changed_cache(
+    data_dir: Path, old: LibraryMcpServer, new: LibraryMcpServer | None
+) -> None:
+    """Delete ``old``'s package cache unless ``new`` keeps the same definition."""
+    from gofer.rattish import mcp_cache
+
+    old_digest = mcp_cache.server_digest(_definition(old))
+    new_digest = mcp_cache.server_digest(_definition(new)) if new is not None else None
+    if old_digest and old_digest != new_digest:
+        mcp_cache.remove(data_dir, old_digest)
+
+
+def clear_mcp_cache(data_dir: Path, name: str | None = None) -> int:
+    """Delete the package cache of server ``name``, or of every server; the bytes freed."""
+    from gofer.rattish import mcp_cache
+
+    if name is None:
+        return mcp_cache.clear_all(data_dir)
+    server = next((item for item in load_library(data_dir).mcpServers if item.name == name), None)
+    if server is None:
+        raise ValueError(f"No MCP server named {name}")
+    if server.type != "stdio":
+        raise ValueError(f"MCP server {name} is an HTTP server, which has no package cache")
+    return mcp_cache.remove_for_server(data_dir, _definition(server))
 
 
 def with_library_resources(

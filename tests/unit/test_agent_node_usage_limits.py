@@ -26,6 +26,7 @@ from gofer.rattish.run_usage import (
 from gofer.subscriptions import claude_code
 from gofer.subscriptions.claude_code import ClaudeCodeSubscription, claude_budget_cap
 from gofer.subscriptions.cli_providers import stream_cli
+from gofer.ui import claude_sandbox
 
 
 def _call(
@@ -210,6 +211,8 @@ def fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     script.write_text(_FAKE_CLAUDE.format(python=sys.executable, root=str(root)))
     script.chmod(0o755)
     monkeypatch.setattr(claude_code, "resolve_provider_executable", lambda _id: str(script))
+    # Agent steps run sandboxed; these tests don't need bubblewrap installed.
+    monkeypatch.setattr(claude_sandbox, "unavailable_reason", lambda platform=None: None)
     return root
 
 

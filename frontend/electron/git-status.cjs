@@ -118,11 +118,13 @@ function readPorcelain(projectRoot, runner, includeBranch = false) {
 
 // A folder's own .git/config can name commands that reads run: `git status` and
 // `git diff` run a clean filter or process filter on any file whose timestamps changed,
-// and diff drivers can name textconv or external commands. An unpacked archive or
-// synced folder can carry such a config, so automatic reads blank every command a
-// repository-scoped setting names (CWE-78). Filters from the user's global or system
+// and diff drivers can name textconv or external commands. Git 2.54 and later also run
+// hooks named in config (`hook.<name>.command`), which `core.hooksPath` doesn't stop. An
+// unpacked archive or synced folder can carry such a config, so automatic reads blank
+// every command a repository-scoped setting names (CWE-78). An empty hook command makes
+// git fail, so hooks become `true` instead. Filters from the user's global or system
 // config, and git-lfs set up with `git lfs install --local`, still run.
-const REPOSITORY_COMMAND_KEYS = "^(filter\\..+\\.(clean|smudge|process)|diff\\..+\\.(textconv|command))$";
+const REPOSITORY_COMMAND_KEYS = "^(filter\\..+\\.(clean|smudge|process)|diff\\..+\\.(textconv|command)|hook\\..+\\.command)$";
 const TRUSTED_FILTER_COMMAND = /^git-lfs (?:filter-process|clean -- %f|smudge -- %f)$/;
 const REPOSITORY_SCOPES = new Set(["local", "worktree"]);
 const commandOverrideReads = new Map();
@@ -142,7 +144,12 @@ function parseRepositoryCommandConfig(output) {
     // A required filter with no command fails the read; mark it optional instead.
     if (key.startsWith("filter.")) overrides.add(`${key.slice(0, key.lastIndexOf("."))}.required`);
   }
-  return [...overrides].flatMap(key => ["-c", key.endsWith(".required") ? `${key}=false` : `${key}=`]);
+  return [...overrides].flatMap(key => ["-c", `${key}=${harmlessCommand(key)}`]);
+}
+
+function harmlessCommand(key) {
+  if (key.endsWith(".required")) return "false";
+  return key.startsWith("hook.") ? "true" : "";
 }
 
 function repositoryCommandOverrides(args, options, execFileImpl) {
@@ -384,7 +391,7 @@ async function gitRepositoryAction(projectRoot, action, value = "", options = {}
       }
       return { hash, parentHash, subject, files };
     } catch (error) {
-      if (error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") throw new Error("This commit diff is too large to display in the editor.");
+      if (error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") throw new Error("This commit diff is too large to display in the editor.", { cause: error });
       throw error;
     }
   }

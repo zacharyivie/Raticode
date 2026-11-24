@@ -35,8 +35,17 @@ SELF_WORK_SETTINGS = (
     "session_token_limit",
     "daily_token_limit",
     "rate_limit_percent",
+    "daily_allowance_percent",
+    "allowance_mode",
+    "pace_aim_percent",
+    "pace_lead_hours",
     "auto_approve_proposals",
+    "provider_accounts",
 )
+# Settings the status line shows as key=value; accounts get a line of their own.
+_SHOWN_SETTINGS = tuple(key for key in SELF_WORK_SETTINGS[3:] if key != "provider_accounts")
+# Off, Daily cap or Pace to reset (rem_self_work_pace.MODES, kept here so the CLI starts fast).
+ALLOWANCE_MODES = ("off", "daily", "pace")
 AUTO_APPROVE_WARNING = (
     "With auto-approval on, ideas Rem's self-work research finds go to Backlog already "
     "approved, for as long as self-work runs, without you reading them first; with backlog "
@@ -94,6 +103,9 @@ def _line(ticket: dict[str, Any]) -> str:
     waits = [w for w in ticket.get("waits_for") or [] if w.get("status") != "done"]
     if waits:
         flags += " (waits for " + ", ".join(w.get("key") or w["title"] for w in waits) + ")"
+    if ticket.get("violates_decisions"):
+        flags += " (violates " + ", ".join(ticket["violates_decisions"]) + ")"
+    flags += "".join(f" [{tag}]" for tag in ticket.get("tags") or [])
     return (
         f"{ticket.get('key') or ticket['ticket_id']:<10} {ticket['status']:<11} "
         f"r{ticket['revision']:<3} {where}: {ticket['title']}{flags}"
@@ -179,6 +191,11 @@ def show(
             _line(timeline["ticket"]),
             f"Usage: {usage_label(timeline['ticket'].get('usage'))}",
             *_waits_lines(timeline["ticket"]),
+            *(
+                [timeline["ticket"]["violation_reason"]]
+                if timeline["ticket"].get("violation_reason")
+                else []
+            ),
             "",
             timeline["ticket"].get("description") or "",
         ]
@@ -493,8 +510,11 @@ def _status(view: dict[str, Any]) -> CommandResult:
         f"{state['todo_remaining']} to do, {state['proposals_waiting']} proposals waiting. "
         f"Settings r{settings['revision']}: enabled={settings['enabled']}, "
         f"max_threads={settings['max_threads']}, auto_pull_backlog={settings['auto_pull_backlog']}"
-        + "".join(f", {key}={settings[key]}" for key in SELF_WORK_SETTINGS[3:] if key in settings)
+        + "".join(f", {key}={settings[key]}" for key in _SHOWN_SETTINGS if key in settings)
     )
+    accounts = _accounts_line(view)
+    if accounts:
+        text += f"\n{accounts}"
     schedule = view.get("schedule") or {}
     if "saved_enabled" in settings and settings["saved_enabled"] != settings["enabled"]:
         text += f" (switch saved as {'on' if settings['saved_enabled'] else 'off'})"
@@ -503,6 +523,12 @@ def _status(view: dict[str, Any]) -> CommandResult:
             f"\nAuto-approval is on: {state.get('auto_approved_session', 0)} "
             "tickets approved by self-work this session."
         )
+    today = state.get("daily_allowance") or {}
+    if today.get("message"):
+        text += f"\n{today['message']}"
+    paced = state.get("allowance_pace") or {}
+    if paced.get("message"):
+        text += f"\n{paced['message']}"
     if schedule.get("active"):
         window = schedule["active"]
         text += f"\nWindow {window['id']}: {window['label']}, {window['after_label']}."
@@ -511,7 +537,69 @@ def _status(view: dict[str, Any]) -> CommandResult:
     if schedule.get("last_period"):
         last = schedule["last_period"]
         text += f"\nLast period {last['started_at']} to {last['ended_at']}: {last['summary']}"
+    stop_text = _stop_text(view.get("stop") or {})
+    if stop_text:
+        text += f"\n{stop_text}"
     return CommandResult(data=view, text=text)
+
+
+def _stop_text(stop: dict[str, Any]) -> str:
+    """When self-work stops and the last check, or the last stop after a period ended."""
+    if stop.get("active"):
+        text = f"{stop.get('label')} (stop r{stop.get('revision', 0)})."
+        judgment = stop.get("judgment")
+        if stop.get("judging"):
+            text += " Checking the condition now."
+        elif judgment:
+            verdict = "met" if judgment.get("met") else "not met"
+            text += f" Last check {judgment.get('at_label')}: {verdict}. {judgment.get('evidence')}"
+        elif stop.get("condition"):
+            text += " Not checked yet."
+        if stop.get("judge_failed"):
+            text += " The last check failed; it's tried again in 10 minutes."
+        return text.strip()
+    last = stop.get("last") or {}
+    if last.get("condition"):
+        judgment = last.get("judgment") or {}
+        verdict = "met" if judgment.get("met") else "not met" if judgment else "never checked"
+        return f"Last stop condition “{last['condition']}”: {verdict}."
+    return ""
+
+
+def _choice_label(choice: str, rem_setting: str) -> str:
+    if choice == "@default":
+        return "default sign-in"
+    if choice == "auto":
+        return "choose by usage"
+    if choice:
+        return choice
+    rem = "choose by usage" if rem_setting == "auto" else rem_setting or "default sign-in"
+    return f"Rem's setting ({rem})"
+
+
+def _accounts_line(view: dict[str, Any]) -> str:
+    """ "Self-work accounts: Claude Code: work; Codex: Rem's setting (default sign-in)"."""
+    rows = view.get("accounts") or []
+    if not rows:
+        return ""
+    parts = [
+        f"{row['label']}: {_choice_label(row.get('choice') or '', row.get('rem_setting') or '')}"
+        for row in rows
+    ]
+    return "Self-work accounts: " + "; ".join(parts)
+
+
+def _account_choices(values: list[str]) -> dict[str, str]:
+    """PROVIDER=ACCOUNT pairs from --account; an empty ACCOUNT means Rem's setting."""
+    choices: dict[str, str] = {}
+    for value in values:
+        provider, sep, choice = value.partition("=")
+        if not sep or not provider.strip():
+            raise backend.invalid(
+                f"--account takes PROVIDER=ACCOUNT, such as claude_code=work, not {value!r}."
+            )
+        choices[provider.strip()] = choice.strip()
+    return choices
 
 
 @selfwork_app.command("status")
@@ -582,8 +670,39 @@ def selfwork_set(
         "--rate-limit-percent",
         min=0,
         max=100,
-        help="Start no new work while a stored rate-limit window of Rem's provider is at "
-        "or above this percent; 0 is no limit",
+        help="Start no new work while a stored rate-limit window of the account self-work "
+        "would run on is at or above this percent; 0 is no limit",
+    ),
+    daily_allowance: int | None = typer.Option(
+        None,
+        "--daily-allowance-percent",
+        min=0,
+        max=100,
+        help="Start no new work once self-work used this percent of the weekly allowance of "
+        "the account it runs on today (resets at local midnight); 0 is no cap. A percent "
+        "above 0 chooses Daily cap",
+    ),
+    allowance_mode: str | None = typer.Option(
+        None,
+        "--allowance-mode",
+        help="How self-work uses a weekly allowance: off, daily (Daily cap, with "
+        "--daily-allowance-percent) or pace (Pace to reset: start new work only while the "
+        "account is under a line that reaches the aim shortly before its reset)",
+    ),
+    pace_aim: int | None = typer.Option(
+        None,
+        "--pace-aim",
+        min=1,
+        max=100,
+        help="Pace to reset: the percent of the allowance to reach by the reset, from 1 to 100 "
+        "(default 97)",
+    ),
+    pace_lead: int | None = typer.Option(
+        None,
+        "--pace-lead",
+        min=0,
+        max=24,
+        help="Pace to reset: reach the aim this many hours before the reset (default 3)",
     ),
     auto_approve: bool | None = typer.Option(
         None,
@@ -595,6 +714,13 @@ def selfwork_set(
         False,
         "--confirm-auto-approve",
         help="Confirm you want self-work to approve its own tickets without asking you",
+    ),
+    account: list[str] | None = typer.Option(
+        None,
+        "--account",
+        help="PROVIDER=ACCOUNT: the account runs self-work starts use with that provider. "
+        "ACCOUNT is an account name, auto (choose by usage), @default (the default sign-in) "
+        "or empty for Rem's setting (Settings > Rem > Accounts); repeat for several providers",
     ),
     output: opts.Output = opts.OutputFormat.json,
     endpoint: opts.EndpointUrl = None,
@@ -622,9 +748,18 @@ def selfwork_set(
             ("session_token_limit", session_tokens),
             ("daily_token_limit", daily_tokens),
             ("rate_limit_percent", rate_percent),
+            ("daily_allowance_percent", daily_allowance),
+            ("pace_aim_percent", pace_aim),
+            ("pace_lead_hours", pace_lead),
         ):
             if value is not None:
                 wanted[key] = value
+        if allowance_mode is not None:
+            if allowance_mode not in ALLOWANCE_MODES:
+                raise backend.invalid("--allowance-mode takes off, daily or pace.")
+            wanted["allowance_mode"] = allowance_mode
+        if account:
+            wanted["provider_accounts"] = _account_choices(account)
         if not wanted:
             raise backend.invalid("Change at least one setting.")
         return _put_settings(client, wanted, expected_revision)
@@ -741,6 +876,126 @@ def selfwork_window(
     backend.run("selfwork window", output, (endpoint, token_file, data_dir), body)
 
 
+@selfwork_app.command("stop-when")
+def selfwork_stop_when(
+    condition: str | None = typer.Argument(
+        None, help="Stop when this is true, in your words, e.g. 'REM-205 to REM-212 are done'"
+    ),
+    no_later_than: str | None = typer.Option(
+        None, "--no-later-than", help="Stop by this time whatever the condition says, HH:MM"
+    ),
+    day: str | None = typer.Option(
+        None, "--day", help="today, tonight, tomorrow or YYYY-MM-DD for --no-later-than"
+    ),
+    timezone: str | None = typer.Option(
+        None, "--timezone", help="IANA time zone, such as Asia/Irkutsk; this computer's if left out"
+    ),
+    clear: str | None = typer.Option(
+        None, "--clear", help="Clear condition, no-later-than or both"
+    ),
+    revision: int | None = typer.Option(
+        None, "--revision", help="Refuse if the stop changed since this revision"
+    ),
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Stop the self-work running now when a condition is met, or by a time at the latest."""
+
+    def body(client: ApiClient, out: Output) -> CommandResult:
+        backend.require_user("change when Rem's self-work stops")
+        payload: dict[str, Any] = {}
+        if clear is not None:
+            names = {"condition": "condition", "no-later-than": "no_later_than", "both": "both"}
+            if clear not in names:
+                raise backend.invalid("--clear is condition, no-later-than or both.")
+            payload["clear"] = names[clear]
+        if condition is not None:
+            payload["condition"] = condition
+        if no_later_than:
+            payload["no_later_than"] = _clock(no_later_than, day, timezone)
+        elif day or timezone:
+            raise backend.invalid("--day and --timezone go with --no-later-than.")
+        if not payload:
+            raise backend.invalid("Give a condition, --no-later-than, or --clear.")
+        if revision is not None:
+            payload["expected_revision"] = revision
+        view = client.post("/rem/kanban/stop", payload)["self_work"]
+        return _status(view)
+
+    backend.run("selfwork stop-when", output, (endpoint, token_file, data_dir), body)
+
+
+OBJECTIVE_ACTIONS = ("list", "add", "edit", "remove", "move", "check", "uncheck")
+
+
+def _objectives_text(view: dict[str, Any]) -> str:
+    items = view.get("items") or []
+    if not items:
+        return "No self-work objectives. Rem writes its own when self-work starts with none."
+    lines = [f"Objectives (revision {view.get('revision', 0)}):"]
+    for item in items:
+        mark = "x" if item.get("done") else " "
+        line = f"[{mark}] {item['text']}  ({item['id']})"
+        if item.get("done_when"):
+            line += f"\n      done when: {item['done_when']}"
+        if item.get("done") and item.get("done_evidence"):
+            line += f"\n      met: {item['done_evidence']}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+@selfwork_app.command("objectives")
+def selfwork_objectives(
+    action: str = typer.Argument("list", help="list, add, edit, remove, move, check or uncheck"),
+    text: str | None = typer.Option(None, "--text", help="The objective, for add or edit"),
+    done_when: str | None = typer.Option(
+        None, "--done-when", help="Its doneness criteria; leave out for an open-ended one"
+    ),
+    identity: str | None = typer.Option(None, "--id", help="The objective's ID from `list`"),
+    index: int | None = typer.Option(None, "--index", help="New position for move, from 0"),
+    evidence: str | None = typer.Option(None, "--evidence", help="How it was met, for check"),
+    revision: int | None = typer.Option(
+        None, "--expected-revision", help="The list's revision from `list`"
+    ),
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Show or change the self-work objectives: the goals that guide a whole session."""
+
+    def body(client: ApiClient, out: Output) -> CommandResult:
+        if action not in OBJECTIVE_ACTIONS:
+            raise backend.invalid(f"Choose one of: {', '.join(OBJECTIVE_ACTIONS)}.")
+        if action == "list":
+            view = client.get("/rem/objectives")
+            return CommandResult(data=view, text=_objectives_text(view))
+        backend.require_user("change Rem's self-work objectives")
+        if action == "add" and not text:
+            raise backend.invalid("add needs --text.")
+        if action != "add" and not identity:
+            raise backend.invalid(f"{action} needs --id.")
+        if action == "move" and index is None:
+            raise backend.invalid("move needs --index.")
+        payload: dict[str, Any] = {"action": action}
+        for key, value in (
+            ("text", text),
+            ("done_when", done_when),
+            ("id", identity),
+            ("index", index),
+            ("evidence", evidence),
+            ("expected_revision", revision),
+        ):
+            if value is not None:
+                payload[key] = value
+        view = client.post("/rem/objectives", payload)
+        return CommandResult(data=view, text=_objectives_text(view))
+
+    backend.run("selfwork objectives", output, (endpoint, token_file, data_dir), body)
+
+
 @selfwork_app.command("export")
 def selfwork_export(
     endpoint: opts.EndpointUrl = None,
@@ -794,6 +1049,11 @@ def selfwork_apply(
             if not confirm_auto_approve:
                 raise backend.invalid(AUTO_APPROVE_WARNING)
             wanted["confirm_auto_approve"] = True
+        accounts = wanted.get("provider_accounts")
+        if isinstance(accounts, dict):
+            # The file replaces every choice: a provider it leaves out follows Rem's setting.
+            saved = current.get("provider_accounts") or {}
+            wanted["provider_accounts"] = {**{p: "" for p in saved}, **accounts}
         revision = expected_revision
         if revision is None:
             revision = int(current["revision"])

@@ -8,10 +8,12 @@ test("each kind of content gets its own profile", () => {
     user: "persist:raticode-browser",
     rem: "persist:raticode-rem",
     preview: "raticode-preview",
+    previewOnline: "raticode-preview-online",
     private: "raticode-private",
   });
   // Previews never persist cookies or storage.
   assert.equal(policy.PARTITIONS.preview.startsWith("persist:"), false);
+  assert.equal(policy.PARTITIONS.previewOnline.startsWith("persist:"), false);
   assert.equal(policy.PARTITIONS.private.startsWith("persist:"), false);
 });
 

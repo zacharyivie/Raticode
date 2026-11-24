@@ -51,7 +51,9 @@ app.whenReady().then(async () => {
   protocol.handle("raticode-media", request => { requests.push(request.headers.get("range")); return previews.handle(request); });
   const frontend = path.resolve(__dirname, "..");
   const { createServer } = await import("vite");
-  server = await createServer({ cacheDir: testViteCacheDir(), root: frontend, configFile: false, server: { host: "127.0.0.1", port: 0 }, plugins: [(await import("@vitejs/plugin-react")).default(), {
+  // Same Monaco bundling fixes as vite.config.js (DOMPurify, language workers).
+  const { monacoPatches } = await import("../dev/monaco-patches.js");
+  server = await createServer({ cacheDir: testViteCacheDir(), root: frontend, configFile: false, optimizeDeps: { rolldownOptions: { plugins: [monacoPatches()] } }, server: { host: "127.0.0.1", port: 0 }, plugins: [monacoPatches(), (await import("@vitejs/plugin-react")).default(), {
     name: "file-media-fixture", configureServer(dev) { dev.middlewares.use(async (req, res, next) => {
       if (!req.url.startsWith("/?")) return next();
       res.setHeader("Content-Type", "text/html");

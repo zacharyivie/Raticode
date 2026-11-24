@@ -1,0 +1,68 @@
+{
+  "strategies": [
+    "overflow",
+    "balanced",
+    "manual"
+  ],
+  "default_strategy": "overflow",
+  "consumers": [
+    {
+      "consumer": "rem",
+      "kind": "rem",
+      "name": "Rem",
+      "strategy": "balanced",
+      "saved": true,
+      "computers": [],
+      "shared": [],
+      "missing_computers": [],
+      "notice": ""
+    },
+    {
+      "consumer": "org:00000000-0000-4000-8000-0000000000a1",
+      "kind": "organization",
+      "name": "Acme",
+      "strategy": "manual",
+      "saved": true,
+      "computers": [
+        "00000000-0000-4000-8000-000000000005",
+        "00000000-0000-4000-8000-000000000006"
+      ],
+      "shared": [
+        "00000000-0000-4000-8000-000000000005"
+      ],
+      "missing_computers": [
+        "00000000-0000-4000-8000-000000000006"
+      ],
+      "notice": "Organization workers start only on this computer for now, so with only Laptop picked, its tickets wait unless they run through a fleet execution target there."
+    },
+    {
+      "consumer": "org:00000000-0000-4000-8000-0000000000a2",
+      "kind": "organization",
+      "name": "Beta",
+      "strategy": "overflow",
+      "saved": false,
+      "computers": [],
+      "shared": [],
+      "missing_computers": [],
+      "notice": ""
+    }
+  ],
+  "order": [
+    "00000000-0000-4000-8000-000000000005",
+    "00000000-0000-4000-8000-000000000004"
+  ],
+  "computers": [
+    {
+      "id": "00000000-0000-4000-8000-000000000005",
+      "name": "Laptop",
+      "state": "offline",
+      "this_computer": false
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000004",
+      "name": "Studio desktop",
+      "state": "online",
+      "this_computer": true
+    }
+  ]
+}

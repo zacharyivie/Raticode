@@ -5,6 +5,7 @@ import { dismissGenerationJob, latestGenerationJob, jobIsRunning } from "../lib/
 import { pathKey as normalizeWorkspacePath, samePath, pathWithin, displayPath } from "../lib/workspacePaths.js";
 import { startPolling, shareInFlight } from "../lib/refresh.js";
 import { commitDiffPath } from "../lib/commitDiff.js";
+import { cleanCommitMessage } from "../lib/commitMessage.js";
 import RemActionIcon from "./RemActionIcon.jsx";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { askRemAboutFiles, copyFilesForPaste } from "../lib/fileAttachments.js";
@@ -22,6 +23,7 @@ import {
   FileJson2,
   FilePlus2,
   FileText,
+  FlaskConical,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -32,6 +34,7 @@ import {
   Lock,
   LockOpen,
   PencilLine,
+  Play,
   Plus,
   Minus,
   MoreHorizontal,
@@ -56,6 +59,8 @@ import { formatKeybinding, DEFAULT_APP_SETTINGS, matchesCommand } from "../lib/s
 
 export default function CodeFileExplorer({
   activeFilePath = "",
+  fileWorkflows = [],
+  onRunWorkflowWithFile,
   sidebarView: controlledSidebarView,
   onSidebarViewChange,
   workflowsContent,
@@ -74,6 +79,7 @@ export default function CodeFileExplorer({
   selectedOrganizationId,
   onOpenSecondBrain,
   onOpenKanban,
+  onOpenPosts,
   kanbanOpen,
   secondBrainOpen = false,
   onOpenRemHome,
@@ -124,6 +130,8 @@ export default function CodeFileExplorer({
   }, [rootPath]);
   useEffect(() => { setDuplicateRequest(null); }, [rootPath]);
   const [contextMenu, setContextMenu] = useState(null);
+  // "Run workflow with this file": the file waiting for a workflow to be chosen.
+  const [fileRunRequest, setFileRunRequest] = useState(null);
   const clipboardEntry = useSyncExternalStore(subscribeFileClipboard, getFileClipboard, getFileClipboard);
   const [dropDirectory, setDropDirectory] = useState("");
   const [transferBusy, setTransferBusy] = useState(false);
@@ -450,6 +458,10 @@ export default function CodeFileExplorer({
     setGitNotice("");
     try {
       if (pendingStagingRef.current && !await pendingStagingRef.current) return;
+      if (action === "commit") {
+        value = await cleanCommitMessage(value);
+        if (!value.trim()) throw new Error("The message had only Co-authored-by lines. Write a message before committing.");
+      }
       const bridge = window.goferDesktop?.workspace;
       let result;
       if (bulk) {
@@ -864,7 +876,7 @@ export default function CodeFileExplorer({
           // Vite can update this dialog while Electron still has the old handler
           // or preload that drops the replacement flag.
           if (action === "replace" && /destination already exists/i.test(cause.message || "")) {
-            throw new Error("Restart Raticode to load file replacement support, then try again.");
+            throw new Error("Restart Raticode to load file replacement support, then try again.", { cause });
           }
           throw cause;
         }
@@ -1265,7 +1277,7 @@ export default function CodeFileExplorer({
     >
       <div className={`flex w-10 shrink-0 flex-col border-line ${railOnRight ? "border-l" : "border-r"}`}>
         <div ref={railRef} role="tablist" aria-label="Project sidebar views" aria-orientation="vertical" className="flex flex-col">
-          {railPlugins.map(({ id, label }) => {
+          {railPlugins.map(({ id, label, badge }) => {
             const Icon = PLUGIN_ICONS[id];
             const dropTarget = pluginDrag && pluginDrag.id !== id && pluginDrag.targetId === id ? pluginDrag.placement : "";
             return (
@@ -1275,13 +1287,14 @@ export default function CodeFileExplorer({
                 role="tab"
                 type="button"
                 aria-label={label}
-                title={pluginsLocked ? label : `${label} · Drag to reorder`}
+                aria-description={badge || undefined}
+                title={`${label}${badge ? ` (${badge})` : ""}${pluginsLocked ? "" : " · Drag to reorder"}`}
                 aria-selected={sidebarView === id}
                 aria-controls={pluginHasPane(id) ? `sidebar-panel-${id}` : `main-panel-${id}`}
                 tabIndex={sidebarView === id ? 0 : -1}
                 draggable={!pluginsLocked}
                 className={`relative grid h-10 w-full shrink-0 place-items-center ${railOnRight ? "border-r-2" : "border-l-2"} focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-brand ${sidebarView === id ? "border-brand text-ink" : "border-transparent text-muted hover:bg-slate-100 hover:text-ink"} ${pluginDrag?.id === id ? "opacity-40" : ""}`}
-                onClick={() => { setSidebarView(id); if (id === "search") setSearchFocusRequest((value) => value + 1); if (id === "rem") onOpenRemHome?.(); if (id === "second-brain") onOpenSecondBrain?.(); if (id === "kanban") onOpenKanban?.(); if (id === "files") onShowEditor?.(); if (id === "browser") onOpenBrowser?.(); setContextMenu(null); setRecentMenuOpen(false); }}
+                onClick={() => { setSidebarView(id); if (id === "search") setSearchFocusRequest((value) => value + 1); if (id === "rem") onOpenRemHome?.(); if (id === "second-brain") onOpenSecondBrain?.(); if (id === "kanban") onOpenKanban?.(); if (id === "posts") onOpenPosts?.(); if (id === "files") onShowEditor?.(); if (id === "browser") onOpenBrowser?.(); setContextMenu(null); setRecentMenuOpen(false); }}
                 onDragStart={(event) => {
                   if (pluginsLocked) { event.preventDefault(); return; }
                   event.dataTransfer?.setData(PLUGIN_DRAG_TYPE, id);
@@ -1321,6 +1334,7 @@ export default function CodeFileExplorer({
               >
                 {dropTarget ? <span aria-hidden="true" className={`pointer-events-none absolute inset-x-1.5 h-0.5 rounded-full bg-brand ${dropTarget === "after" ? "bottom-0" : "top-0"}`} /> : null}
                 <Icon aria-hidden="true" size={19} strokeWidth={1.5} />
+                {badge ? <FlaskConical aria-hidden="true" data-plugin-badge={badge} size={10} strokeWidth={2} className="pointer-events-none absolute bottom-1.5 right-1.5 text-amber-600 dark:text-amber-400" /> : null}
               </button>
             );
           })}
@@ -1348,7 +1362,7 @@ export default function CodeFileExplorer({
           <div className="min-h-0 flex-1 overflow-y-auto px-2">{workflowsContent}</div>
         </div>
       ) : null}
-      {remPanelMounted && railIds.includes("rem") ? <Suspense fallback={sidebarView === "rem" ? <section id="sidebar-panel-rem" role="tabpanel" aria-labelledby="sidebar-tab-rem" className="flex-1 p-3 text-xs text-muted">Loading Rem…</section> : null}><RemHomeSidebar active={sidebarView === "rem"} open={remHomeOpen} onOpen={() => onOpenRemHome?.()} projectOptions={remProjectOptions} /></Suspense> : null}
+      {remPanelMounted && railIds.includes("rem") ? <Suspense fallback={sidebarView === "rem" ? <section id="sidebar-panel-rem" role="tabpanel" aria-labelledby="sidebar-tab-rem" className="flex-1 p-3 text-xs text-muted">Loading Rem…</section> : null}><RemHomeSidebar active={sidebarView === "rem"} open={remHomeOpen} onOpen={() => onOpenRemHome?.()} projectOptions={remProjectOptions} projectRoot={rootPath} /></Suspense> : null}
       {railIds.includes("kanban") ? <KanbanSidebar active={sidebarView === "kanban"} open={kanbanOpen} onOpen={onOpenKanban} /> : null}
       {railIds.includes("organizations") ? <OrganizationSidebar active={sidebarView === "organizations"} selectedId={selectedOrganizationId} onSelect={onOpenOrganization} /> : null}
       {sidebarView === "second-brain" ? <Suspense fallback={<section id="sidebar-panel-second-brain" role="tabpanel" aria-labelledby="sidebar-tab-second-brain" className="flex-1 p-3 text-xs text-muted">Loading Second Brain…</section>}><SecondBrainSidebar active open={secondBrainOpen} onOpen={() => onOpenSecondBrain?.()} /></Suspense> : null}
@@ -1871,6 +1885,12 @@ export default function CodeFileExplorer({
           x={contextMenu.x}
           y={contextMenu.y}
           onAskRem={() => askRemAboutEntry(contextMenu.entry)}
+          canRunWithFile={Boolean(onRunWorkflowWithFile) && fileWorkflows.length > 0}
+          onRunWithFile={() => {
+            const entry = contextMenu.entry;
+            setContextMenu(null);
+            if (entry && !entry.isDirectory) setFileRunRequest({ path: entry.path, name: entry.name });
+          }}
           onCopy={() => copyEntry(contextMenu.entry)}
           onCut={() => copyEntry(contextMenu.entry, "move")}
           onCopyPath={() => copyPath(contextMenu.entry)}
@@ -1950,6 +1970,47 @@ export default function CodeFileExplorer({
           <div className="mt-5 flex justify-end gap-2">
             <button type="button" className="rounded border border-line px-3 py-2 text-xs" disabled={gitOperationBusy} onClick={() => setBranchCleanup(null)}>{branchCleanup.plan?.remove.length ? "Cancel" : "Close"}</button>
             {branchCleanup.plan?.remove.length ? <button type="button" className="rounded bg-red-600 px-3 py-2 text-xs text-white disabled:opacity-50" disabled={gitBusy || branchCleanup.saving} onClick={() => void runBranchCleanup()}>{gitOperationBusy ? "Deleting…" : `Delete ${branchCleanup.plan.remove.length} branch${branchCleanup.plan.remove.length === 1 ? "" : "es"}`}</button> : null}
+          </div>
+        </Dialog>
+      ) : null}
+
+      {fileRunRequest ? (
+        <Dialog
+          title="Run workflow with this file"
+          description={`Choose a workflow to run with ${fileRunRequest.name}.`}
+          onClose={() => setFileRunRequest(null)}
+          panelClassName="w-full max-w-md rounded-xl border border-line bg-white p-5 text-ink shadow-panel"
+        >
+          <h2 className="text-sm font-semibold">Run workflow with this file</h2>
+          <p className="mt-1 break-all text-xs text-muted">{fileRunRequest.name}</p>
+          {fileWorkflows.length ? (
+            <ul aria-label="Workflows with a file input" className="mt-3 max-h-72 space-y-1 overflow-y-auto">
+              {fileWorkflows.map(({ workflow: target, input }) => {
+                const several = fileWorkflows.filter(item => item.workflow.id === target.id).length > 1;
+                return (
+                  <li key={`${target.id}:${input}`}>
+                    <button
+                      className="flex w-full flex-col rounded-md border border-line px-3 py-2 text-left text-xs hover:bg-slate-50 dark:hover:bg-zinc-800"
+                      type="button"
+                      onClick={() => {
+                        const request = fileRunRequest;
+                        setFileRunRequest(null);
+                        onRunWorkflowWithFile?.(target, input, request.path);
+                      }}
+                    >
+                      <span className="font-medium">{target.name || target.id}</span>
+                      {several ? <span className="text-[11px] text-muted">as {target.inputs?.[input]?.label || input}</span> : null}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="mt-3 text-xs text-muted">No workflow in this project has a file input.</p>
+          )}
+          <p className="mt-3 text-[11px] text-muted">The Run dialog opens with the file filled in, so you can check the other inputs first.</p>
+          <div className="mt-4 flex justify-end">
+            <button type="button" className="rounded border border-line px-3 py-2 text-xs" onClick={() => setFileRunRequest(null)}>Cancel</button>
           </div>
         </Dialog>
       ) : null}
@@ -2043,8 +2104,10 @@ function SourceControlDecoration({ directory = false, path, projectRoot, statuse
 
 function ExplorerContextMenu({
   canPaste,
+  canRunWithFile = false,
   entry,
   onAskRem,
+  onRunWithFile,
   onCopy,
   onCut,
   onCopyPath,
@@ -2073,6 +2136,7 @@ function ExplorerContextMenu({
       {entry ? (
         <>
           {!entry.isDirectory ? <MenuButton icon={RemActionIcon} label="Ask Rem about this" onClick={onAskRem} /> : null}
+          {!entry.isDirectory && canRunWithFile ? <MenuButton icon={Play} label="Run workflow with this file" onClick={onRunWithFile} /> : null}
           <div className="my-1 border-t border-line" />
           <MenuButton icon={PencilLine} label="Rename" shortcut="F2" onClick={onRename} />
           <MenuButton icon={Copy} label="Copy" shortcut={formatKeybinding("Mod+KeyC")} onClick={onCopy} />

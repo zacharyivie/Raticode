@@ -130,4 +130,24 @@ class RemTaskStatusTest {
         assertEquals(dev.raticode.mobile.live.RunPause.Control.None,
             dev.raticode.mobile.live.RunPause.control(task("c", active = run("executing")), supported = false))
     }
+
+    @Test fun dismissAllClearsUpdatesAndKeepsQuestionsAndHolds() {
+        val tasks = listOf(
+            task("failed", last = run("failed", needsUser = false)),
+            task("blocked", last = run("blocked", needsUser = false)),
+            task("unclear", last = run("outcome_unknown", needsUser = false)),
+            task("question", last = run("blocked", needsUser = true)),
+            task("seen", last = run("failed", needsUser = false, acknowledged = true)),
+            task("done", last = run("succeeded", needsUser = false)),
+            task("running", active = run("executing"), last = run("failed", needsUser = false)),
+            task("held").copy(dependency = dev.raticode.mobile.live.RemDependency("held", "Audit failed", emptyList())),
+        )
+        assertEquals(listOf("failed", "blocked", "unclear"), RemTaskStatus.dismissible(tasks).map { it.id })
+        // What it leaves under Needs you still needs the user, so the heading goes back to Needs you.
+        val left = tasks.map { t -> if (t in RemTaskStatus.dismissible(tasks)) t.copy(lastRun = t.lastRun!!.copy(acknowledged = true)) else t }
+        val attention = RemTaskStatus.groups(left, stamp).single { it.id == "attention" }
+        assertEquals(listOf("question", "held"), attention.tasks.map { it.first.id })
+        assertEquals("Needs you", attention.label)
+        assertTrue(RemTaskStatus.dismissible(emptyList()).isEmpty())
+    }
 }

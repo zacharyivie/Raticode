@@ -8,8 +8,9 @@ const path = require("node:path");
 const test = require("node:test");
 const { EVENT } = require("../x11-client.cjs");
 const { readAuthority, parseDisplay } = require("../x11-client.cjs");
-const { NEW_TAB_PAGE, PROFILE_PREFS, WINDOW_CLASS, createGeckoWindow, pageAddress, supportProblem } = require("../gecko-window.cjs");
+const { NEW_TAB_PAGE, PROFILE_PREFS, REM_CONTROL_PREFS, WINDOW_CLASS, createGeckoWindow, pageAddress, supportProblem } = require("../gecko-window.cjs");
 const { X11_SWITCH, relaunchNeeded, setWantsX11, wantsX11 } = require("../gecko-display.cjs");
+const { CLOSED_FOR_SAFETY, createGeckoControl } = require("../gecko-control.cjs");
 
 const ROOT = 1;
 const HOST = 500;
@@ -50,7 +51,7 @@ class FakeClient extends EventEmitter {
 }
 
 class FakeProcess extends EventEmitter {
-  constructor() { super(); this.pid = 4242; this.signals = []; }
+  constructor() { super(); this.pid = 4242; this.signals = []; this.stderr = new EventEmitter(); }
   kill(signal) { this.signals.push(signal); if (signal === "SIGTERM" && this.diesOnTerm !== false) setImmediate(() => this.emit("exit", 0)); }
   unref() {}
 }
@@ -79,8 +80,10 @@ function setup(options = {}) {
     ...LINUX_X11,
     windowTimeoutMs: options.windowTimeoutMs || 2000,
     stopTimeoutMs: 50,
+    dropGraceMs: options.dropGraceMs ?? 30,
     ask: options.ask,
     relaunch: options.relaunch,
+    control: options.control,
   });
   return { client, dataDir, gecko, processes, spawned, states, window, done: () => { fs.rmSync(dataDir, { recursive: true, force: true }); } };
 }
@@ -442,4 +445,142 @@ test("the display's cookie is read for the right display", () => {
   assert.equal(readAuthority("0", { env: { XAUTHORITY: "/x" }, hostname: "myhost", read }).data.toString(), "right");
   assert.equal(readAuthority("9", { env: { XAUTHORITY: "/x" }, hostname: "myhost", read }), null);
   assert.equal(readAuthority("0", { env: { XAUTHORITY: "/x" }, hostname: "h", read: () => { throw new Error("missing"); } }), null);
+});
+
+test("Rem's control port opens only after the user lets Rem use Gecko, and its address goes to Rem's connection", async (t) => {
+  const attached = [];
+  let host = null;
+  const control = {
+    setHost: (next) => { host = next; },
+    attach: async (url, { kill }) => { attached.push(url); assert.equal(typeof kill, "function"); },
+    detach: () => attached.push("detached"),
+  };
+  const context = setup({ control });
+  t.after(context.done);
+  assert.equal(host.enabled(), false);
+  await started(context);
+  assert.ok(!context.spawned[0].args.includes("--remote-debugging-port"));
+  assert.equal(context.spawned[0].options.stdio, "ignore");
+  assert.equal(context.gecko.status().remControl, false);
+
+  // Turning it on restarts the running Gecko with the port; its tabs come back through Firefox's session restore.
+  const turningOn = context.gecko.handle("rem-control", { enabled: true });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const launch = context.spawned.filter((item) => item.command === "/usr/bin/firefox").at(-1);
+  assert.notEqual(launch, context.spawned[0]);
+  assert.deepEqual(launch.args.slice(launch.args.indexOf("--remote-debugging-port"), launch.args.indexOf("--remote-debugging-port") + 2), ["--remote-debugging-port", "0"]);
+  assert.deepEqual(launch.options.stdio, ["ignore", "ignore", "pipe"]);
+  const child = context.processes.at(-1);
+  child.stderr.emit("data", Buffer.from("WebDriver BiDi listening on ws://127.0.0.1:45678\n"));
+  browserWindow(context.client, 78);
+  context.client.emit("event", created(78));
+  const state = await turningOn;
+  assert.deepEqual(attached.filter((item) => item !== "detached"), ["ws://127.0.0.1:45678"]);
+  assert.equal(state.remControl, true);
+  assert.equal(state.remControlActive, true);
+  assert.equal(host.enabled(), true);
+  const profile = launch.args[launch.args.indexOf("--profile") + 1];
+  const prefs = fs.readFileSync(path.join(profile, "user.js"), "utf8");
+  for (const name of Object.keys(REM_CONTROL_PREFS)) assert.match(prefs, new RegExp(name.replaceAll(".", "\\.")));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(context.dataDir, "gecko", "settings.json"), "utf8")).remControl, true);
+  context.gecko.close();
+});
+
+// Gecko started with "Let Rem use Raticode (gecko)" already on: Firefox prints
+// its control address, then its window appears.
+async function startedWithControl(context) {
+  fs.mkdirSync(path.join(context.dataDir, "gecko"), { recursive: true });
+  fs.writeFileSync(path.join(context.dataDir, "gecko", "settings.json"), JSON.stringify({ remControl: true }));
+  const opening = context.gecko.handle("open", {});
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  const child = context.processes.at(-1);
+  child.stderr.emit("data", Buffer.from("WebDriver BiDi listening on ws://127.0.0.1:45678\n"));
+  browserWindow(context.client);
+  context.client.emit("event", created(77));
+  await opening;
+  return child;
+}
+
+const killSignals = (child) => child.signals.filter((signal) => signal === "SIGKILL");
+
+test("Rem's connection failing closes Gecko and says it was closed for safety", async (t) => {
+  for (const killsFirst of [false, true]) {
+    const control = {
+      setHost() {},
+      // gecko-control.cjs calls kill itself before it rejects; either way Firefox is closed once.
+      attach: async (url, { kill }) => { if (killsFirst) kill(); throw new Error("session.subscribe failed"); },
+      detach() {},
+    };
+    const context = setup({ control });
+    t.after(context.done);
+    const child = await startedWithControl(context);
+    assert.deepEqual(killSignals(child), ["SIGKILL"], "a Firefox with its control port open and no Raticode session is closed");
+    const { error } = context.gecko.status();
+    assert.ok(error.startsWith("Rem can't use Raticode (gecko): session.subscribe failed"), error);
+    assert.ok(error.endsWith(CLOSED_FOR_SAFETY), error);
+    context.gecko.close();
+  }
+});
+
+// A stand-in for Firefox's WebDriver BiDi that answers every request.
+function droppableBidi() {
+  let onClose = () => {};
+  const connection = {
+    opened: Promise.resolve(),
+    closed: false,
+    async send(method) { return method === "browser.createUserContext" ? { userContext: "rem-container" } : {}; },
+    close() { connection.closed = true; },
+    drop() { connection.closed = true; onClose(); },
+  };
+  return { connection, connect: (url, options) => { onClose = options.onClose; return connection; } };
+}
+
+test("a control connection that drops closes the controlled Gecko unless Firefox exits by itself", async (t) => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-gecko-drop-"));
+  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+
+  // Still running after the grace period: closed, and the reason is shown.
+  const bidi = droppableBidi();
+  const control = createGeckoControl({ stagingDir: path.join(dataDir, "staging"), connectBidi: bidi.connect });
+  const context = setup({ control });
+  t.after(context.done);
+  const child = await startedWithControl(context);
+  assert.equal(control.status().running, true);
+  bidi.connection.drop();
+  assert.deepEqual(killSignals(child), [], "Firefox gets a moment to finish quitting on its own");
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.deepEqual(killSignals(child), ["SIGKILL"], "a dropped connection closes the controlled Firefox");
+  assert.match(context.gecko.status().error, /Rem's connection to Raticode \(gecko\) closed unexpectedly/);
+  assert.ok(context.gecko.status().error.endsWith(CLOSED_FOR_SAFETY));
+  context.gecko.close();
+
+  // The user quit Firefox: its connection closes first, then it exits.
+  const quitting = droppableBidi();
+  const quitControl = createGeckoControl({ stagingDir: path.join(dataDir, "staging"), connectBidi: quitting.connect });
+  const quit = setup({ control: quitControl });
+  t.after(quit.done);
+  const quitChild = await startedWithControl(quit);
+  quitting.connection.drop();
+  quitChild.emit("exit", 0);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.deepEqual(killSignals(quitChild), [], "a Firefox that exits by itself isn't killed");
+  assert.equal(quit.gecko.status().error, "");
+});
+
+test("Raticode stopping a controlled Gecko ends Rem's connection first, so it never counts as a drop", async (t) => {
+  const bidi = droppableBidi();
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-gecko-stop-"));
+  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+  const control = createGeckoControl({ stagingDir: path.join(dataDir, "staging"), connectBidi: bidi.connect });
+  const context = setup({ control });
+  t.after(context.done);
+  const child = await startedWithControl(context);
+  assert.equal(control.status().running, true);
+  await context.gecko.handle("stop");
+  assert.equal(bidi.connection.closed, true, "Raticode closes Rem's connection itself");
+  assert.equal(control.status().running, false);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.deepEqual(child.signals, ["SIGTERM"], "Firefox is asked to close, not killed");
+  assert.equal(context.gecko.status().error, "");
 });

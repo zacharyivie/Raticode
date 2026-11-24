@@ -21,6 +21,7 @@ workflow:
 
 node check:
   type: bash-command
+  shell: bash
   command: |
     output=$(bash -c "$CHECK_COMMAND" 2>&1)
     code=$?
@@ -62,6 +63,7 @@ node post-webhook:
 
 node all-clear:
   type: bash-command
+  shell: bash
   command: echo "No alert. The output didn't match $ALERT_PATTERN."
   with:
     alert-pattern: input.alert-pattern

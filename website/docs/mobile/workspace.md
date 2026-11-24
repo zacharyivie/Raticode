@@ -27,6 +27,30 @@ Files is read-only.
 - Other files over 10 MB can't come to the phone.
 - Files that look like secrets, such as `.env`, show a lock and never leave the computer.
 
+### Open files from other apps
+
+*New in Raticode Mobile 0.36.0.* Raticode can also open files that are already on the phone, from Files, Downloads, a chat app or anything else that opens files. **More › Open with Raticode** lists what it can open:
+
+| Kind | Types |
+| --- | --- |
+| Web pages | HTML and XHTML |
+| PDF documents | PDF |
+| Pictures | PNG, JPEG, GIF, WebP, BMP, HEIC, AVIF and icons |
+| SVG drawings | SVG |
+| Videos | MP4, WebM, 3GP, MOV, MKV and Ogg video |
+| Sound | MP3, M4A, AAC, WAV, Ogg, Opus, FLAC and AIFF |
+| Markdown | Markdown |
+| Text and code | Plain text, CSV, CSS, XML, JSON, JavaScript, Python, Java, Kotlin, C, shell scripts, YAML and TOML |
+
+The first time you open one of these, Android asks which app to use. Choose Raticode, then **Always**, to make Raticode the default viewer for that kind of file. **Android default apps settings** and **Raticode's Open by default settings** on the same page take you to Android's settings; clear Raticode's defaults there to stop.
+
+What you open this way is treated as untrusted:
+
+- The file opens in a viewer of its own, read only, up to 50 MB. Text shows its first 2 MB.
+- Web pages and SVG drawings show without running their scripts, loading anything from the internet or reading other files, like HTML previews in **Files**.
+- The viewer has no **Ask Rem**. Nothing you open this way goes to Rem, a thread or your computer.
+- Raticode reads only the file the other app gave it, with Android's one-time permission for that file. It asks for no storage permission, so apps that hand over a plain file path instead of sharing the file can't open it in Raticode.
+
 ## Source control
 
 **Source control** lists your open projects with their branch, commits to push or pull, changed files and any merge or rebase in progress. Each project has the desktop's three views:
@@ -57,6 +81,8 @@ The **Orgs** tab shows each [organization](../advanced/organizations.md) with it
 - Nothing is saved until you tap **Save**, and the computer checks the schedule again before saving.
 - Offline, you see the schedule you last loaded and can't edit it. An older computer asks you to update it.
 
+A worker's page shows its model, account, access, check-in interval and manager as tiles, and below them which tickets it may change in each project. When the worker's provider has accounts, tap the **Account** tile to pick another one or the default sign-in. See [worker accounts](../advanced/organizations.md#worker-accounts). An older computer doesn't show the choice.
+
 **Needs you** on the same page shows Rem's requests with **Approve** and **Decline**. Approve asks you to confirm first. With two or more waiting, **Approve all** lists exactly what it will approve and approves only those, in the [same safe order as the computer](../advanced/organizations.md#approve-several-requests-at-once); a request that arrives after the list opens keeps waiting. A card then shows each request as **Approved**, **Failed** or **Left waiting**. The phone approves exactly what you could approve at the computer, including requests that let workers run without a sandbox or add secrets. An older computer that can't take decisions from the phone asks you to update it, and an older computer may leave unsandboxed requests waiting for you there.
 
 The **Auto mode** card turns [Auto mode](../advanced/organizations.md#auto-mode) on or off. Turning it on asks you to confirm what it allows. With it on, the organization shows **Auto**; requests Rem is deciding say **Rem is reviewing** and aren't in Approve all; the card lists Rem's recent decisions with their reasons; and if Auto mode stopped the organization, a card says why and what to do. An older computer shows an update note instead of the switch. You can also [tell Rem to approve](../advanced/organizations.md#tell-rem-to-approve) in its chat on the phone.
@@ -70,10 +96,27 @@ The **Auto mode** card turns [Auto mode](../advanced/organizations.md#auto-mode)
 - Add a ticket for Rem or an organization, assign it, or hand one of Rem's tickets to an organization.
 - Long-press a ticket to move it.
 - The filters, the column you were on and the open section (**Board**, **Proposed**, **People** or **Self-work**) stay after you leave the board or close the app. A filter that's on is highlighted, and **Clear filters** turns them off. If a saved organization, person or project is gone, that filter shows everything again and the others stay. The phone keeps its own filters, separate from your computer's.
-- Open a ticket for **History and comments**: each status change with its reason, oldest first, and comments from you, Rem and workers. Long results stay folded until you tap **Show the full text**. Add a comment at the bottom.
+- Open a ticket to see it at a glance (see [A ticket's page](#a-ticket-s-page)).
+- **History and comments** on a ticket's page lists each status change with its reason, oldest first, and comments from you, Rem and workers. Long results stay folded until you tap **Show the full text**. Add a comment at the bottom.
 - Offline, a ticket shows the history you last loaded. An older computer asks you to update it instead.
 - Tapping a ticket pill in Rem's chat opens that ticket here. A ticket no longer on the board says so.
+- A ticket that contradicts one of the project's decisions shows a red **Violates D-4** badge on its card, and its page shows a **Violates decisions** chip with the reason in the box at the top. Self-work won't start it until you change the ticket or the decision; see [Self-work keeps to decisions](../rem/board.md#self-work-keeps-to-decisions). An older computer sends no marker, so nothing shows. *New in Raticode 0.6.0 and Raticode Mobile 0.36.0.*
 - A ticket that [waits for other tickets](../rem/board.md#tickets-that-wait-for-other-tickets) shows **Waits for:** on its card. Its page lists them in **Waits for**, where you add one with **Wait for a ticket…** or remove one with its **×**. If one was cancelled, the card and page show a notice instead. An older computer sends no list, so nothing shows.
+
+### A ticket's page
+
+A ticket's page is laid out to be read in a few seconds. Nothing from the earlier layout was removed; long text is folded. *New in Raticode Mobile 0.36.0.*
+
+- **At the top:** the key, who owns the ticket, a large title, and colored chips for its column, **Running**, **Paused** and **High** or **Critical** priority.
+- **Column strip:** a strip of dots shows where the ticket is between **Backlog** and **Done**. A blocked or paused ticket shows the reason in a tinted box.
+- **Auto-approved:** this is a chip. Tap it to read why self-work approved the ticket.
+- **Assigned to:** shows the assignee with their avatar. **Change** picks someone else, and **Their projects** opens their page. When a Rem ticket can't be handed to an organization right now, **Why can't I change this?** explains.
+- **Facts:** **Column**, **Priority**, **Project**, **Kind**, **Waits for** and **Added** show as tiles. Tap **Column** to move the ticket.
+- **Folded text:** **Why Rem suggests it** and **Last result** show their first sentence, with **Show more** for the rest. **Details** folds when it's long.
+- **Waits for** and **Waited on by:** each lists tickets with a status dot. Tap one to open it. **Waited on by** shows which tickets are waiting for this one.
+- **Pinned actions:** **Move** stays pinned at the bottom of the screen, with **Open** *organization* on an organization's ticket. A proposal pins **Approve** and **Decline** instead.
+
+An organization's ticket in **Orgs › Issues** uses the same layout. Its first two actions are pinned at the bottom, such as **Accept** and **Request changes** for work to review, or **Approve plan**. The others, and **Cancel ticket**, are under **⋯**. Assignee, priority, due date, project, milestone and epic show as tiles, and tapping one opens its page.
 
 The board also has:
 
@@ -89,8 +132,11 @@ The board also has:
 
 - Turn self-work on or off, set the maximum threads, and choose whether Rem pulls from Backlog when To do is empty. Telling Rem "turn on self-work" or "stop self-work" changes the same switch.
 - **Approve its own backlog tickets** lets self-work's new ideas go to Backlog already approved until self-work ends, instead of waiting for you. Turning it on shows what it allows and asks you to confirm; turning it off doesn't. Those tickets carry an **Auto-approved** badge on the board and on their page, and the report says how many it approved. A computer without this setting shows no switch. See [Let Rem approve its own tickets](../rem/board.md#let-rem-approve-its-own-tickets).
+- **Allowance use** chooses **Off**, **Daily cap** or **[Pace to reset](../rem/board.md#pace-to-reset)**. With Pace to reset, **Aim by reset** (any percent from 1 to 100) and **Finish before reset** step with − and +, and the computer's pace line shows under them, in amber while self-work holds new work, with a warning when **Rate limit use** is below the aim. A computer without the choice shows only the daily cap. *New in Raticode 0.6.0 and Raticode Mobile 0.36.0.*
+- **Weekly allowance per day** (with Daily cap chosen) sets the [daily cap on the weekly allowance](../rem/board.md#daily-cap-on-the-weekly-allowance) with − and +; the change is saved when you stop tapping. Under it is today's use in the computer's words, naming the [account](../rem/providers.md#self-work-on-accounts) self-work runs on when it uses one, in amber when the computer has no current usage reading and self-work starts nothing new. A computer without the cap shows no row. *New in Raticode 0.6.0 and Raticode Mobile 0.36.0.*
+- **Accounts** appears when a provider on the computer has at least one account added. Tap a provider to choose which account self-work's runs use: Rem's setting, the default sign-in, choose by usage or one account. Chat, threads and tasks you create keep using Rem's setting. A computer without this setting shows no group. See [Which account self-work uses](../rem/board.md#which-account-self-work-uses). *New in Raticode 0.6.0 and Raticode Mobile 0.36.0.*
 - The status line says how many self-work tasks are paused to make room for your work.
-- See the report. **Where Rem can work** opens the board's **People**.
+- See the report. Its counts (tickets added, work done, duplicates merged, notes) show as tiles, and its summary is folded to the first sentence, with **Show more**. **Where Rem can work** opens the board's **People**.
 - Rem's chat shows what happened while you were away, with a task card for each job.
 
 With the board off on the computer:
@@ -107,8 +153,9 @@ An older computer without the board shows an update note instead. See [Global bo
 
 - **Run**, **Stop**, **Resume** and **Run again with the same inputs** ask first, then run on the computer with its usual checks.
 - **Stop** reaches a run however it started, including one the computer's background trigger scheduler started. The run shows **Stop requested** until it ends.
-- You can't edit workflows from the phone.
+- You can't edit workflows from the phone, except **Use this model** after [Try another model](#try-another-model).
 - When a workflow is missing a [secret](../workflows/inputs.md#secrets), the reason under **Run** names it and says where to add it on the computer. Secret values never travel to the phone, and the phone can't save them.
+- When a workflow has an error or fails [preflight](../workflows/validation.md#preflight-diagnostics), the reason under **Run** names the first problem, such as `Line 5: No node contract is available for 'write-fil'. Did you mean 'write-file'?` or a missing Jev key. Fix it on the computer. The computer writes this reason, so it's new in Raticode 0.6.0; Raticode 0.5.5 only says to open the workflow on the computer.
 
 ### All runs
 
@@ -116,7 +163,7 @@ An older computer without the board shows an update note instead. See [Global bo
 The **All runs** list needs Raticode Mobile 0.35.0 and Raticode 0.5.5. With an older computer, the tab doesn't appear.
 :::
 
-**All runs** at the top of **More › Workflows** lists the runs of every workflow in your open projects, newest first, like the computer's [Workflow runs](../studio/runs.md#every-workflow-s-runs) view. Each run shows its workflow, status, when it started, how long it took, whether it was started by hand, a trigger, the phone or Rem, and its tokens and estimated cost. Chips filter by time (24 hours, 7 days, 30 days or all time), status and workflow, and the line above the list totals what matches. Tap a run to open it in its workflow. The phone shows the newest 60 runs; older ones are on the computer. A run whose model step moved to a [fallback provider](../nodes/agent.md#fallback-providers) reads **switched provider**, and in the run's steps that step says which provider it left, why, and which one answered. That needs Raticode 0.5.5 on the computer; the phone app needs no update.
+**All runs** at the top of **More › Workflows** lists the runs of every workflow in your open projects, newest first, like the computer's [Workflow runs](../studio/runs.md#every-workflow-s-runs) view. Each run shows its workflow, status, when it started, how long it took, whether it was started by hand, a trigger, the phone or Rem, and its tokens and estimated cost. Chips filter by time (24 hours, 7 days, 30 days or all time), status and workflow, and the line above the list totals what matches. Tap a run to open it in its workflow. The phone shows the newest 60 runs; older ones are on the computer. A run whose model step moved to a [fallback provider](../nodes/agent.md#fallback-providers) reads **switched provider**, and in the run's steps that step says which provider it left, why, and which one answered. That needs Raticode 0.5.5 on the computer; the phone app needs no update. A model step also names the provider app version it started, such as *Provider: Claude Code 2.3.1*; that needs a computer with Raticode 0.6.0 or later, and the phone app needs no update.
 
 ### Run with inputs
 
@@ -135,6 +182,39 @@ Fields start at the workflow's defaults. Leave an optional field blank to use it
 
 **Run** marks any field that needs fixing, such as a missing required value, a number out of range or JSON that doesn't parse, and sends nothing until they're fixed. The computer then checks the values against the schema again before anything starts. They also go through the same [suspicious-request check](pairing.md#suspicious-requests-lock-the-phone) as everything else the phone sends.
 
+### Share to a workflow
+
+::: info New in 0.36.0
+Share to a workflow is new in Raticode Mobile 0.36.0 and Raticode 0.6.0. It needs both: a computer older than 0.6.0 doesn't say which inputs take text, so the phone asks you to update it.
+:::
+
+Pick **Run a workflow** in any app's share sheet to send a link, text or one file into one of your workflows. Several files at once are left out; share them to [Rem](rem.md#share-to-rem) instead, or one at a time.
+
+1. Raticode opens **Run a workflow** with what you shared at the top. It lists the workflows in your open projects that have a text input: a plain text [input](../workflows/inputs.md), not a choice, a number or a password.
+2. Tap a workflow. If it has more than one text input, choose the one that gets the shared text. The phone remembers that choice for the workflow and uses it next time; **Change input** picks another.
+3. The workflow's [Run sheet](#run-with-inputs) opens with the shared text in that input and the other fields at their defaults. Edit anything, then tap **Run**.
+
+Nothing reaches the computer until you tap **Run**. The run goes through the same run request, schema check and [suspicious-request check](pairing.md#suspicious-requests-lock-the-phone) as a run you fill in by hand. **Cancel** or Back on the list, or **Discard** on the workflow, drops the shared text. The phone keeps it in memory only, so it's also gone if Android closes Raticode.
+
+The three workflows you most recently ran from a share appear as direct-share shortcuts at the top of Android's share sheet. Picking one opens that workflow's Run sheet with the remembered input filled in. Unpairing the phone forgets the remembered inputs and removes the shortcuts.
+
+Shared text can contain instructions you didn't write, such as a web page telling an AI step to do something else. Read it in the Run sheet before you run: the workflow treats it as your input.
+
+For a workflow that's ready for shared links, create the [Summarize a link](../starters/summarize-a-link.md) starter on the computer. It reads the page and sends a short summary back to the phone as a workflow message.
+
+#### Share a file
+
+*New in Raticode Mobile 0.36.0 and Raticode 0.6.0. A computer older than 0.6.0 doesn't list file inputs, so the phone asks you to update it.*
+
+Share one file, such as a PDF, a photo or a spreadsheet, to **Run a workflow**:
+
+1. The list shows the workflows with a [file input](../workflows/inputs.md#file-inputs) the file fits: one that accepts its kind, with a size limit it's under. Text the other app shared along with the file is left out.
+2. Tap a workflow. If more than one of its file inputs fits, choose one; the phone remembers it, as it does for text.
+3. The Run sheet shows the file's name in that input. A file input can only be filled from a share, so a workflow that needs a file says so when you open its Run sheet any other way.
+4. Tap **Run**. Only then does the phone read the file and upload it to your computer, over the same encrypted connection and in the same way as [Share to Rem](rem.md#share-to-rem). The run request then goes through the usual schema check and [suspicious-request check](pairing.md#suspicious-requests-lock-the-phone).
+
+The computer checks the file against the input again, copies it into the run's folder, readable only by your account, and deletes the upload. If the upload doesn't finish, the workflow's card says why and you can tap **Run** again. A file can be at most the size the phone can send, 10 MB with an older computer, as for Rem.
+
 ### Resume and run again
 
 When a run failed, **Resume from failed step** starts a new run on the computer. It reuses the steps that finished and runs the failed step again, then the steps after it. A stopped or interrupted run shows **Resume** and continues from where it stopped. The confirmation lists the steps that run again.
@@ -147,6 +227,35 @@ When a run failed, **Resume from failed step** starts a new run on the computer.
 
 The computer decides whether a run can be resumed or run again. When it can't, the reason shows under the buttons. The computer doesn't save password inputs (`"format": "password"`), and the phone can't fill them in when it resumes or runs again, so for such a run the reason names those inputs: use **Resume** or **Run again** on the computer, where the app asks for them.
 
+### Try another model
+
+::: info New in 0.36.0
+Try another model on the phone is new in Raticode Mobile 0.36.0 and needs Raticode 0.6.0 or later on the computer; with an older computer the button doesn't appear.
+:::
+
+**Tests · Try another model** on a workflow's page opens its [test set](../workflows/tests.md#try-another-model), the same action as the computer's **Tests** panel:
+
+- Pick a step that calls a model, a provider, and a model. The computer's providers and their models appear as chips, and you can type any model name.
+- **Check cost** shows the expected cost for the current model and the candidate first. **Run both** stays off until it has.
+- Each case runs on the computer with the current model, then the candidate. If a finished result of the same version and test set already covers the cases, the current model's side reuses it and costs nothing. The workflow, its triggers and their approvals don't change, and judge checks keep their own model.
+- A table then shows each case side by side: pass or fail, cost and time for the current model against the candidate, marked **Fixed**, **Broke** or **Changed** where they differ, with totals. The page refreshes while the try runs.
+- **Use this model** asks first, then writes the step's `provider:` and `model:` through the computer's editor, like a graph edit. Every trigger on the workflow then asks for approval again. It's off while the try runs and once the workflow changed since it.
+
+Adding or editing test cases stays on the computer.
+
+### Ask Rem about a failed run
+
+*New in Raticode Mobile 0.36.0; needs Raticode 0.6.0 or later on the computer.*
+
+A failed or interrupted run shows **Ask Rem about this failure** on its card. The phone asks the computer for a short summary of the run, the same one the desktop attaches, and puts it in Rem's message box as a file. Nothing is sent: write your question and send it.
+
+- The summary names the workflow file, the run, the node that ended it and its type, the provider app version a model step started (and whether it changed since the last passing run), the error, the end of that node's output (up to 200 lines, cut to 8 KB), preflight problems and the run's inputs. Password inputs show as a mask.
+- Folder paths read as the project's name and "Raticode data", as elsewhere on the phone.
+- Everything from the run is marked as untrusted, so Rem treats it as data, not instructions.
+- With an older computer the button doesn't appear. If the computer can't read the run, the reason shows under the buttons.
+
+See [Ask Rem about a failure](../studio/runs.md#ask-rem-about-a-failure).
+
 ### Triggers
 
 ::: info New in 0.35.0
@@ -158,6 +267,22 @@ A workflow's **Triggers** tab lists its [triggers](../workflows/triggers.md): ea
 - Each trigger has its own switch. Turning one off happens at once.
 - Turning one on asks first, because it then starts the workflow on your computer without asking each time it fires. Like everything the phone sends, it goes through the [suspicious-request check](pairing.md#suspicious-requests-lock-the-phone), so a locked phone can't turn triggers back on. The computer refuses an unconfirmed request.
 - Adding, changing and deleting triggers stays on the computer.
+- A trigger with a [daily limit](../workflows/triggers.md#daily-limit) shows how much of it today has used, and once it is used up, that its starts are skipped until midnight. The **Pause all triggers** card shows the computer-wide limit the same way. When a limit is reached, the phone gets one Workflow message that day. Limits are set on the computer. This is new in Raticode 0.6.0 and Raticode Mobile 0.36.0.
+- Each trigger shows its [Time limit](../workflows/triggers.md#time-limit), such as **Time limit: 6 h** or **No time limit**. It is set on the computer. This is new in Raticode 0.6.0 and Raticode Mobile 0.36.0; with an older computer the line doesn't appear.
+- A triggered run that hit a provider's [usage limit](../workflows/triggers.md#usage-limits) shows as **Waiting for usage limit**, as the trigger's last result and in the workflow's runs, until the computer resumes it after the reset. Whether a trigger waits is set on the computer. This is new in Raticode 0.6.0 and Raticode Mobile 0.36.0.
+
+#### Approve a changed workflow
+
+*New in Raticode Mobile 0.36.0; needs Raticode 0.6.0 or later on the computer.*
+
+A trigger runs only the workflow version you [approved](../workflows/triggers.md#approved-versions). When the workflow, or a prompt file, script or child workflow it runs, changed since then, the trigger's card says **Workflow changed since you approved it** and its starts are skipped. The phone also gets one Workflow message about it; tapping it opens the workflow.
+
+- **Review changes** lists the changed files. Tap one to see its diff, in the same view as Source control.
+- **Approve this version** approves exactly what the list showed. If the workflow changed again since, the computer refuses it and the trigger keeps waiting; open **Review changes** again.
+- The phone shows up to 60,000 characters of diff. When a file's diff was cut, or the file is binary or too large to show, **Approve this version** asks a second time and names those files. **Open** shows the whole file in the file viewer, when [Files](#files) is available on the phone. **Approve without seeing all** approves anyway.
+- Like everything the phone sends, approving goes through the [suspicious-request check](pairing.md#suspicious-requests-lock-the-phone) first, so a locked phone can't approve.
+- Turning on a trigger whose workflow changed approves nothing. The phone says so before you confirm, then opens **Review changes**.
+- Both apps need the update. With an older computer, triggers show no approval state, and an older phone can't show **Review changes**: approve on the computer or with `Raticode rattish triggers approve`.
 
 **Pause all triggers** at the top of **More › Workflows** pauses every trigger on the computer, the same switch as in its Workflow runs view. Pausing happens at once; resuming asks first and says how many triggers come back on. Each trigger keeps its own switch, so resuming restores exactly the ones that were on. While paused, the computer records scheduled times as skipped and doesn't catch them up. See [Pause all triggers](../workflows/triggers.md#pause-all-triggers).
 
@@ -165,16 +290,34 @@ A workflow's **Triggers** tab lists its [triggers](../workflows/triggers.md): ea
 
 With **Allow approvals and swarm controls** on:
 
-- **Approvals** answers workflow and swarm approvals.
+- **Approvals** answers workflow and swarm approvals. A workflow approval with [options](../nodes/approval-gate.md#choices-and-typed-replies) shows one button per option instead of Approve and Reject, and asks for a reply when the workflow wants one. *New in Raticode Mobile 0.36.0, with Raticode 0.6.0 on the computer.* Older app versions don't list approvals with options or a required reply; answer those on the computer.
 - **Swarms** shows each [swarm's](../advanced/swarms.md) status as a colored dot with its progress, each agent's state and the board, with pause, resume, stop and messages.
 - Long board posts and approval summaries show a few lines until you tap **Show more**.
 
 With **Use Raticode from this phone** you can also start swarms, including ones whose agents have full access, and start organizations or release a held worker that runs without a sandbox. Starting there counts as your confirmation, as it does at the computer.
 
+## Social posts
+
+*New in Raticode Mobile 0.36.0; needs Raticode 0.6.0 or later on the computer. [Posts](../advanced/posts.md) is experimental and untested, and may change: a Feature Preview on the computer, and marked **Experimental** in More and at the top of the phone's Posts page.*
+
+**More › Posts** shows the computer's [Posts](../advanced/posts.md) queue, grouped like its lanes: **Needs your review**, **Due now**, **Needs attention**, **Scheduled** and **Done**. With an older computer the page asks you to update it.
+
+Each post shows who proposed it, when it goes out and to which accounts, its warnings, and notes such as another post going to the same account an hour earlier. Each account's text appears as it will be posted, with a marker where LinkedIn, Facebook or YouTube cut it with **see more**, the character count against the platform's limit, and X's cost. **Why Rem proposed this** shows the reason and the pages it drew on.
+
+- **Approve**, **Post now**, **Ask for changes**, **Decline** and **Cancel post** each ask once more and say what they do. Asking for changes needs a note, which the proposer reads when it revises the post.
+- An approval covers the exact version the phone showed. If the post changed on the computer in the meantime, the computer refuses the approval and the list refreshes, so you see the new version first.
+- The phone shows the first 4,000 characters of each text and can't show images, videos or a post's options, such as a video title or a LinkedIn link preview title. When a post has more than the phone shows, approving says so and asks you to check it on the computer first.
+- **Publish now** sends a due or stuck account's post, such as a [LinkedIn tap to publish](../advanced/posts.md#linkedin-tap-to-publish). For Patreon, Buy Me a Coffee and TikTok, **Open** goes to the site's post page and **Mark posted** takes the link to the post you made.
+- **Publishing** at the top pauses or resumes all publishing, like **Pause all publishing** on the computer. Resuming asks first.
+
+The phone has your trust here, as at the computer, so a tap is your approval. Rem, tasks and workflows still can't approve: they reach Posts only through their propose-only tools. Like everything the phone sends, decisions go through the [suspicious-request check](pairing.md#suspicious-requests-lock-the-phone), and the post's activity log records them as yours, from the phone. The phone can't write or edit posts, connect accounts or change Posts settings; account logins never travel to it.
+
 ## Desktop settings, Usage and the Developer log
 
-- **Desktop settings** changes the computer's appearance, Rem defaults, editor, terminal and web browser settings.
-- **Usage** shows provider usage, as in [Usage and allowances](../rem/usage.md).
+- **Desktop settings** changes the computer's appearance, Rem defaults, editor, terminal and web browser settings. **Rem › Remove Co-authored-by lines from commits** saves on the computer straight away, even when the Raticode window is closed. See [Remove Co-authored-by lines](../studio/source-control.md#remove-co-authored-by-lines).
+- **Usage** shows provider usage, as in [Usage and allowances](../rem/usage.md). At the top, one card per provider account shows its windows with a reset countdown, its sign-in state (for the default Claude Code sign-in and each Claude Code, Codex or Grok account), when it was last checked and, when Rem chooses Claude Code, Codex or Grok accounts by usage, which one Rem uses next; see [Accounts at a glance](../rem/usage.md#accounts-at-a-glance). A Codex or Grok account that needs sign-in has **Sign in** on its card, which [signs it in from the phone](../rem/providers.md#sign-an-account-in-from-the-phone). *New in Raticode 0.6.0 and Raticode Mobile 0.36.0.* A card with a weekly window also charts this week's readings against an even pace and says whether the account lasts until the reset; see [Weekly pace](../rem/usage.md#weekly-pace). Under **Tokens in Raticode**, pick 24h, 7d, 30d, 3mo, 6mo, 1Y, 5Y, All or Custom; Custom opens a date range picker. The phone remembers the choice. The stacked chart shows each provider's tokens per bucket, in the same [provider colors](../rem/usage.md#provider-colors) as the desktop; tap a bar, or use **Earlier** and **Later**, to read its tokens and each provider's share. The **By provider** and **By account** chips above the chart split it [by account](../rem/usage.md#by-provider-or-by-account) instead, each account in a shade of its provider's color with its own pattern and named like **Claude Code · work**. The phone remembers this choice too; a computer without the account split keeps the chart by provider. A computer still on 0.5.5 shows its last 30 days only and says so. Below the chart, **Cost at API prices** shows the period's [estimated cost at API list prices](../rem/usage.md#cost-at-api-prices) and each provider's share. It appears only when the computer's Raticode has the estimate. Under it, **Verified work** shows the same numbers as the desktop's [Verified work](../rem/usage.md#verified-work) for the chosen period: how many accepted tickets passed review first time, repairs per ticket, blocked tickets and why, project check failures on the first try, flaky check runs, tokens per accepted ticket and how often you stepped in. A self-work report in Rem's chat shows its one line, such as **3 of 4 tickets passed review first time.** Both appear only when the computer's Raticode has them. *New in Raticode 0.6.0 and Raticode Mobile 0.36.0.*
+- **Usage › See computers** lists each computer Raticode can run work on: the computer you're connected to and each desktop paired with it. Each one shows its state, running workers with what kinds they are (such as *4: 2 organization workers, 1 Rem task, 1 swarm turn*; a computer on an older Raticode shows only the number), worker limit, room for new workers, and CPU and memory pressure; [Computers and their load](../rem/home.md#computers-and-their-load) explains the numbers. Use − and + to change the connected computer's **Worker limit**, where Auto picks a number from its cores and memory; the change is saved when you stop tapping. A computer on an older Raticode says to update it instead. *New in Raticode 0.6.0 and Raticode Mobile 0.36.0.*
+- **Usage › See computers › Where work runs** shows the strategy and the computers it runs on for Rem and each organization, and lets you change the strategy: **Fill one computer, then the next**, **Spread evenly** or **Only computers I pick**. With **Only computers I pick**, tick the computers and mark any that another placement may also use as **Shared**; nothing is sent until at least one computer is ticked. If the computer refuses a change, the reason shows under that row. A placement whose work can't start anywhere, such as one with only paired desktops picked, shows the computer's warning under it. The order of computers is set on the computer, in **Settings › Computers**. The tab shows only when the connected computer's Raticode has it. [Where work runs](../rem/home.md#where-work-runs) explains the rules. *New in Raticode 0.6.0 and Raticode Mobile 0.36.0.*
 - **Developer log** follows the computer's application log. Long-press an entry to copy it or **Ask Rem** about it.
 
 ## Browser
@@ -193,6 +336,16 @@ With **Use Raticode from this phone** you can also start swarms, including ones 
 - The **Tabs** button lists the tabs of both built-in browsers together, each marked **chromium** or **gecko**. Tap any tab to switch. The other browser's tabs stay open, and music in one keeps playing while you use the other.
 - **New tabs open in**, at the top of the list, picks the browser for a new tab, a private tab, a reopened tab or one of your computer's tabs. It starts at your default.
 - **Browser settings and privacy › Default browser** sets the default. Raticode (gecko)'s settings have the same choice. A choice saved by an earlier version carries over: **Raticode's browser** is now **Raticode (chromium)** and **Gecko** is now **Raticode (gecko)**.
+
+### Make Raticode the phone's default browser
+
+*New in Raticode Mobile 0.36.0.* Raticode can be the browser Android uses for links you tap in other apps. Open **More › Open with Raticode** and choose **Make Raticode the default browser**. Android asks you to confirm in its own dialog, or opens its default-apps settings where you pick Raticode. Raticode never changes the default by itself, and you can switch back in Android's settings.
+
+**Links from other apps open in**, on the same page, picks **Raticode (chromium)**, the default, or **Raticode (gecko)**. Each link opens in a new tab and the Browser page comes to the front. It works before the phone is paired with a computer too. As in Raticode (chromium), `http` links are opened as `https`.
+
+- While the [child lock](locks.md) is on, a link doesn't open; Raticode says so.
+- With app lock on, the link opens after you unlock Raticode.
+- A link's tab is like one you opened yourself. Rem sees its page only when you send it with **Ask Rem**.
 
 **Firefox**, **Chrome** or **Edge** as the default open pages in their own apps, with their own sign-ins and data, which Raticode never sees. Android doesn't let one app draw inside another, so Raticode can't list or switch their tabs. **Open this page in**, in the tab list, sends the current page to one of them. **Use Raticode (chromium) instead** and **Use Raticode (gecko), with Firefox extensions** switch back.
 

@@ -55,10 +55,10 @@ The test set sits beside the workflow, named after it. For a registered workflow
 | --- | --- | --- |
 | `text` | The value, as text, matches | One of `equals`, `contains`, `notContains`, `matches` (a regular expression), plus optional `ignoreCase` |
 | `json` | The field has the expected JSON value | One of `equals`, `notEquals`, `oneOf` (a list), or `exists: true/false` |
-| `command` | A command exits with the expected code | `command`, `exitCode` (default 0), `timeoutSeconds` (default 60) |
+| `command` | A command exits with the expected code | `command`, `exitCode` (default 0), `timeoutSeconds` (default 60), `shell` (default `auto`) |
 | `judge` | A model says the value meets the criteria | `criteria`, optional `provider`, `model`, `profile`, `effort` |
 
-A **command** check runs in the project folder with the target value on standard input. It also gets `RATICODE_TEST_CASE`, `RATICODE_TEST_RUN_ID` and `RATICODE_TEST_RUN_FILE`, the path of the full run record, if your script needs more than one value.
+A **command** check runs in the project folder with the target value on standard input. `shell` works like the [bash-command field](../nodes/bash-command.md#which-shell-runs-the-command): `auto` uses PowerShell on Windows and bash elsewhere, and `bash` uses Git for Windows' bash on Windows. Set `"shell": "bash"` when the check is a bash command and the test set should pass on Windows. The editor's **Shell** menu sets it; `shell` is new in Raticode 0.6.0. It also gets `RATICODE_TEST_CASE`, `RATICODE_TEST_RUN_ID` and `RATICODE_TEST_RUN_FILE`, the path of the full run record, if your script needs more than one value.
 
 A **judge** check is optional and costs one model call per case. It uses the check's `provider`, then the test set's `judge.provider`, then the workflow's first agent provider, then Claude Code. The model answers pass or fail with a one-line reason, and the panel shows that reason.
 
@@ -106,6 +106,35 @@ Every result records the workflow revision it tested: a fingerprint of the sourc
 - **Show source change** shows the diff between the two revisions, so you can see which prompt edit caused it.
 
 Results from an older revision stay visible until you run the tests again, with a note that they don't match the current source.
+
+## Try another model
+
+::: info New in 0.6.0
+Try another model is new in Raticode 0.6.0, and on the phone in Raticode Mobile 0.36.0.
+:::
+
+To see whether a cheaper or newer model does the job, try it on the test set before you change the workflow. In the **Tests** panel choose **Try another model**, pick the step, the provider and the model, then **Check cost**.
+
+- The panel shows the expected cost for both models first: the current model and the candidate. **Run both** stays off until it has.
+- Each case runs with the current model, then with the candidate. If a finished result of the same revision and test set already covers the cases, the current model's side reuses it and costs nothing.
+- The override applies only to that test run. The workflow file, its triggers and their approvals don't change. Each case's run record lists the tried model under `model_overrides`.
+- Judge checks keep their own model on both sides, so the grading doesn't change with the candidate.
+- A table then shows each case side by side: pass or fail, cost and time for the current model against the candidate, marked **Fixed**, **Broke** or **Changed** where they differ, with totals. Cost here is the workflow's own model calls; judge checks are left out because they are the same on both sides.
+- **Use this model** writes `provider:` and `model:` into the step through the editor, like a graph edit: a change that would stop the workflow compiling isn't saved, and every trigger on the workflow asks for approval again before it runs the new version. The button is off when the workflow changed since the try or has unsaved edits.
+
+The same action is on the phone, under **Tests · Try another model** on a workflow's page; see [Raticode Mobile](../mobile/workspace.md#try-another-model).
+
+The candidate's result is saved with the models it tried. **Compare with the last revision** and the expected cost only use results with the same models, so a tried model never counts as the workflow's own. The candidate's expected cost is unknown until a try of that model has measured it.
+
+From the command line, `--model NODE=PROVIDER:MODEL` does the same, and you can repeat it for several steps. The model may contain colons, as in `opencode:llama3:8b`:
+
+```bash
+Raticode rattish test WORKFLOW_PATH --model write=claude-code:claude-sonnet-5-5 --estimate
+Raticode rattish test WORKFLOW_PATH --model write=claude-code:claude-sonnet-5-5
+Raticode rattish test WORKFLOW_PATH --use-model write=claude-code:claude-sonnet-5-5
+```
+
+The run prints both expected costs, then one row per case with the current model's and the candidate's result, cost and time. The exit code follows the candidate. `--history` marks each tried result with `[tried NODE: PROVIDER MODEL]`. `--use-model` writes the model into the step and runs nothing. `--max-cost` counts both models.
 
 ## From the command line
 

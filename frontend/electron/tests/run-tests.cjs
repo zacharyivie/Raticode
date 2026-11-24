@@ -20,14 +20,17 @@ const FRONTEND = path.join(__dirname, "..", "..");
 
 // Slowest first, so the longest file starts at once and the short ones fill the gaps.
 // Times are from the 13 November 2026 nightly run, when all of these ran in one process.
+// The agent guards took 84 s then, about 60 s of it a Firefox tab waiting for a frame that
+// never loaded; since 16 November its Firefox part takes about 20 s.
 const SEPARATE = [
-  "electron/tests/stream-agent-guards.test.cjs", // Firefox, Chrome and Edge tabs: 84 s
-  "electron/tests/stream-tab-sound.test.cjs", // media bar sound, three engines: 26 s
-  "electron/tests/stream-tab-media.test.cjs", // media bar controls, three engines: 28 s
   "electron/tests/chrome-signin.test.cjs", // 36 s
   "electron/git-efficiency.test.cjs", // git integration: 35 s
+  "electron/tests/stream-tab-media.test.cjs", // media bar controls, three engines: 28 s
+  "electron/tests/stream-agent-guards.test.cjs", // Firefox, Chrome and Edge tabs: about 26 s
+  "electron/tests/stream-tab-sound.test.cjs", // media bar sound, three engines: 26 s
   "electron/tests/stream-agent-actions.test.cjs", // 17 s
   "electron/tests/firefox-browser.test.cjs", // 15 s
+  "electron/tests/gecko-rem-control.test.cjs", // real windowed Firefox on its own Xvfb: 8 s
   "electron/tests/firefox-settings.test.cjs", // 14 s
   "electron/tests/branch-targets.test.cjs", // git: 9 s
   "electron/tests/firefox-signin.test.cjs", // 7 s

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self'">
+<title>Run a workflow – Raticode</title>
+<style>
+  :root { color-scheme: light dark; --bg: #ffffff; --ink: #18181b; --muted: #52525b; --line: #d4d4d8; --field: #fafafa;
+    --warn-bg: #fffbeb; --warn-line: #fcd34d; --warn-ink: #78350f; --brand: #4f46e5; --brand-ink: #ffffff; --error: #b91c1c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #18181b; --ink: #f4f4f5; --muted: #a1a1aa; --line: #3f3f46; --field: #27272a;
+      --warn-bg: #2a2110; --warn-line: #a16207; --warn-ink: #fde68a; --brand: #818cf8; --brand-ink: #111827; --error: #fca5a5; }
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 13px/1.45 system-ui, "Segoe UI", Roboto, sans-serif; }
+  form { box-sizing: border-box; display: flex; flex-direction: column; gap: 10px; height: 100%; padding: 16px 18px 14px; }
+  .kicker { margin: 0; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  h1 { margin: 0; font-size: 16px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  label { font-size: 12px; font-weight: 600; }
+  textarea { flex: 1; min-height: 120px; resize: none; box-sizing: border-box; width: 100%; padding: 8px 10px; border: 1px solid var(--line);
+    border-radius: 8px; background: var(--field); color: var(--ink); font: 12px/1.5 ui-monospace, "JetBrains Mono", Consolas, monospace; }
+  textarea:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+  .caution { margin: 0; padding: 7px 10px; border: 1px solid var(--warn-line); border-radius: 8px; background: var(--warn-bg); color: var(--warn-ink); font-size: 12px; }
+  .note { margin: 0; font-size: 11px; color: var(--muted); }
+  .error { margin: 0; font-size: 12px; color: var(--error); }
+  .note[hidden], .error[hidden] { display: none; }
+  .actions { display: flex; align-items: center; gap: 8px; }
+  .hint { flex: 1; font-size: 11px; color: var(--muted); }
+  button { font: inherit; font-size: 12px; border-radius: 7px; padding: 6px 14px; cursor: pointer; border: 1px solid var(--line); background: transparent; color: var(--ink); }
+  button[type="submit"] { background: var(--brand); border-color: var(--brand); color: var(--brand-ink); font-weight: 600; }
+  button:disabled { opacity: .6; cursor: default; }
+  button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+</style>
+</head>
+<body>
+  <form id="sheet" aria-labelledby="title">
+    <div>
+      <p class="kicker">Run a workflow</p>
+      <h1 id="title">Workflow</h1>
+    </div>
+    <label for="text" id="label">Text</label>
+    <textarea id="text" spellcheck="true" aria-describedby="caution cut error"></textarea>
+    <p class="caution" id="caution" role="note"></p>
+    <p class="note" id="cut" hidden></p>
+    <p class="error" id="error" role="alert" hidden></p>
+    <div class="actions">
+      <span class="hint">Enter runs it · Shift+Enter adds a line · Esc closes</span>
+      <button type="button" id="cancel">Cancel</button>
+      <button type="submit" id="run">Run</button>
+    </div>
+  </form>
+  <script src="workflow-run-sheet.js"></script>
+</body>
+</html>

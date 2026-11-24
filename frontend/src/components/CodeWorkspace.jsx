@@ -66,7 +66,7 @@ import IntegratedBrowser, { HtmlModeToggle } from "./IntegratedBrowser.jsx";
 import GeckoBrowser from "./GeckoBrowser.jsx";
 import { BrowserEngineBadge, BrowserFamilyChooser, BrowserGroupNewTab, BrowserTabNotice, BrowserWindowToggle, useBrowserEngineStatus } from "./BrowserTabControls.jsx";
 import { useBrowserHost } from "../lib/browserHost.js";
-import { browserFamilyChoices, geckoTabPath, groupBrowserTabPaths, groupedBrowserPaths } from "../lib/browserTabs.js";
+import { browserFamilyChoices, geckoTabPath, groupBrowserTabPaths, groupedBrowserPaths, isGeckoWindowTab } from "../lib/browserTabs.js";
 import { pendingRemApprovals } from "../lib/browserUi.js";
 import { WEB_BROWSER_OPTIONS, webBrowserEngine } from "../lib/browserEngines.js";
 
@@ -74,6 +74,7 @@ import { textEditorSessions, discardedSessionPaths, codeCloseProtection } from "
 export { FILE_AUTOSAVE_DELAY_MS, codeCloseProtection, hasUnsavedCodeChanges, applyCodeFilesystemChange } from "../lib/codeEditorSessions.js";
 
 const TerminalWorkspace = lazy(() => import("./TerminalWorkspace.jsx"));
+const EMPTY_PATH_SET = new Set();
 
 // Browser, workflow graph, commit and terminal tabs have no file behind them.
 function isVirtualTab(path, browserTabs, workflowTabs) {
@@ -81,6 +82,8 @@ function isVirtualTab(path, browserTabs, workflowTabs) {
 }
 
 const CodeWorkspace = forwardRef(function CodeWorkspace({
+  // Files another app opened with Raticode: their HTML previews run no scripts.
+  externalPaths = EMPTY_PATH_SET,
   active,
   emptyContent,
   activePath,
@@ -101,6 +104,8 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   onAskRemAboutPage,
   onShareBrowserTab,
   canShareBrowserTab = false,
+  // Shares the tab in front of Raticode (gecko)'s own window with Rem.
+  onShareGeckoTab,
   onReopenClosedBrowserTab,
   onDocumentStateChange,
   onActiveDocumentStateChange,
@@ -883,6 +888,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
               focusLocationOnCreate={browserTab?.focusLocation === true}
               initialUrl={browserTab?.url || "about:blank"}
               localPath={browserTab ? "" : path}
+              external={!browserTab && externalPaths.has(path)}
               openBrowserBinding={settingBinding(settings, "browser.open")}
               searchUrl={settings.browser.searchUrl}
               diffPath={html ? path : ""}
@@ -1148,6 +1154,14 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
             disabled={workflowTabs[tabMenu.path] ? !onDuplicateWorkflowTab : openPaths.length < 2}
             onClick={() => void splitEditorTab(tabMenu.path, side)}
           >Split {side}</button>)}
+          {onShareGeckoTab && isGeckoWindowTab(browserTabs[tabMenu.path]) ? (
+            <button
+              className="flex h-7 w-full items-center rounded px-2 text-left hover:bg-slate-100"
+              role="menuitem"
+              type="button"
+              onClick={() => { setTabMenu(null); onShareGeckoTab(); }}
+            >Share the Gecko tab in front with Rem…</button>
+          ) : null}
           {browserVariant && browserHost.available ? (
             <button
               className="flex h-7 w-full items-center rounded px-2 text-left hover:bg-slate-100"
@@ -1733,6 +1747,9 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
       const initialEditorSettings = editorSettingsRef.current;
       const editorOptions = {
         automaticLayout: false,
+        // Monaco 0.57 types through Chromium's EditContext by default; keep the hidden
+        // textarea that shortcuts, context menus and text insertion expect.
+        editContext: false,
         cursorBlinking: reduceMotionRef.current ? "solid" : "smooth",
         fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
         fontSize: initialEditorSettings.fontSize,

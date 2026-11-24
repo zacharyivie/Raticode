@@ -34,6 +34,29 @@ The graph is drawn from the source; it isn't a second definition that runs. Node
 
 <AppScreenshot name="workflow-source" caption="Source on the graph's path bar opens workflow.rattish in its own editor tab." />
 
+### Add a node
+
+*New in Raticode 0.6.0. Up to 0.5.5, Add node adds a command node straight away.*
+
+Open the node picker in any of these ways:
+
+- **Add node** (the **+** button) in the graph toolbar.
+- **Add node** in the middle of an empty graph.
+- **Tab** while the graph has focus, for example after you click a node or an empty part of the graph. Shift+Tab still moves focus out of the graph.
+
+The picker groups nodes by what they do: **Run code**, **Files**, **AI**, **Web**, **Approvals and notices**, **Flow control** and **Other workflows**. Each node has a one-line description and a book icon that opens its page in the [node reference](../nodes/index.md).
+
+- Type to search names, descriptions and group names. Up and Down choose a node, Enter adds it and Escape closes the picker.
+- If a node is selected, the new node goes to its right and the selected node routes on to it: Raticode adds the new node to the selected node's `to:` list and keeps the routes that were there. With nothing selected, the new node is added without a route.
+- A node with `finish:` set, or a `break` node, can't have outgoing routes, so a node added after one isn't routed.
+- New nodes are named after their type, such as `read-file-1`. Rename one in the inspector's **ID** field.
+
+Every choice is an edit to `workflow.rattish` that Raticode checks before saving. If the workflow compiled before, an edit that would stop it compiling isn't saved, and the toolbar says why. Each node starts with fields that compile, such as an `echo` command or, for a `break` node, the loop it follows. A `workflow` node needs another workflow in the project with an interface version, and a `rem-task` node needs one of Rem's tasks.
+
+The inspector's **Type** field opens the same picker, with the node's current type marked. Choosing a different type keeps the node's ID, routes and shared settings such as `needs` and `timeout`, drops the old type's own fields and fills in starting fields for the new type.
+
+The list, groups and descriptions come from the installed Rattish node contracts, so a node type that Raticode adds appears in the picker without anything else changing.
+
 ## Understand diagnostics
 
 **Problems** lists errors and warnings with their source locations.

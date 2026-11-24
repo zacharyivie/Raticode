@@ -26,7 +26,7 @@ import time
 import uuid
 import zipfile
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from html import escape
@@ -40,13 +40,17 @@ if TYPE_CHECKING:
 
 
 from gofer.ui.brain_backups import (
+    KEPT_SMALLER,
+    backup_health,
     backup_path,
     backup_settings,
     backup_warning,
     clean_partials,
     due_key,
     format_size,
+    probe_folder,
     prune,
+    smaller_counts,
     validate_backup,
     verify_package,
 )
@@ -59,14 +63,40 @@ from gofer.ui.brain_documents import (
     MAX_TEXT,
     checked_archive,
     extract,
+    html_reader_stale,
     ocr_pdf,
     preview_html,
+    quote_selector,
     read_source,
+    reanchor,
     safe_relative,
     source_path,
     validate_portable,
     validate_settings,
 )
+from gofer.ui.brain_folders import (
+    LIST_AFTER,
+    LOWERED,
+    apply_rule,
+    checked_rules,
+    left_out_folder,
+    lowered_folder,
+)
+from gofer.ui.brain_origin import (
+    ORIGIN_AUTHORED,
+    ORIGIN_IMPORTED,
+    archive_names,
+    is_archive_attachment,
+)
+from gofer.ui.brain_pdf import PdfReaderNotStarted
+from gofer.ui.brain_summaries import (
+    apply_summary,
+    checked_summary,
+    clean_summary,
+    file_summary,
+    summary_stale,
+)
+from gofer.ui.case_twins import CaseTwinError, brain_twins, case_twins, twin_message
 from gofer.ui.report_links import (
     ABSOLUTE,
     OUTSIDE,
@@ -76,10 +106,15 @@ from gofer.ui.report_links import (
     rewrite_links,
 )
 from gofer.utils.atomic_output import atomic_binary_output, open_binary_input
+from gofer.utils.drive_format import write_error_message
 from gofer.utils.logging import RepeatingFailure
 from gofer.utils.paths import restrict_to_owner
 
 log = logging.getLogger(__name__)
+
+# A save still being written (gofer.utils.atomic_output names it ".<name>.<hex>.tmp").
+# It is renamed or removed at any moment, so packages never take it.
+ATOMIC_TEMPORARY = re.compile(r"^\..+\.[0-9a-f]{32}\.tmp$")
 
 KINDS = (
     "documents",
@@ -95,14 +130,96 @@ KINDS = (
 # Tables whose rows the library snapshot shows. A write to any of them moves the
 # library revision, so polls that already have the current one skip the snapshot.
 REVISED_TABLES = frozenset({"brains", "entities", "tasks", "preferences"})
+# Bump to scan every indexed brain once more after the origin rules change.
+ORIGIN_LABELS = 1
 _WRITE_ACTIONS = frozenset({sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE})
 # Library health's filesystem checks (link targets, folder permissions) are reused
 # for this long unless Library health opens or a scan finishes.
 HEALTH_RECHECK_SECONDS = 60.0
+# How long a library connection waits for another writer before "database is locked".
+BUSY_TIMEOUT = 30.0
+# Report records save_note couldn't store because the library was busy. The desktop's
+# background check stores them (BrainLibrary.apply_pending_reports).
+PENDING_REPORTS = "pending-reports"
+# Exact search ranks a document by the sum of its best few passage scores, with a
+# title match counting this many times a match in the passage text.
+BEST_PASSAGES = 3
+TITLE_WEIGHT = 5.0
+# Exact search lifts recent documents a little: its first RECENCY_WINDOW documents are
+# ranked again by 1/(RANK_FUSION_K + match rank) + RECENCY_WEIGHT/(RANK_FUSION_K +
+# recency rank), so match scores and dates are never compared directly. The weight was
+# tuned on 861 requests from Rem's task history (scripts/brain-search-test-set.py): 0.6 to
+# 0.7 raised top-5 and MRR for both task prompts and Rem's own searches; 1.0 and above
+# lowered task-prompt top-5.
+RECENCY_WINDOW = 30
+RECENCY_WEIGHT = 0.7
+RANK_FUSION_K = 60
 
 
 def now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def appeared_at(dates: Mapping[str, Any] | None) -> datetime | None:
+    """When a document appeared: the earlier of its added and modified dates."""
+    times = []
+    for key in ("added", "modified"):
+        value = (dates or {}).get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        times.append(parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC))
+    return min(times) if times else None
+
+
+def _shared_ranks(values: Mapping[str, Any]) -> dict[str, int]:
+    """1-based ranks, highest value first; equal values share the better rank."""
+    ordered = sorted(values.values(), reverse=True)
+    first: dict[Any, int] = {}
+    for rank, value in enumerate(ordered, start=1):
+        first.setdefault(value, rank)
+    return {key: first[value] for key, value in values.items()}
+
+
+def recency_lift(
+    doc_ids: Sequence[str],
+    match_scores: Mapping[str, float],
+    appeared: Mapping[str, datetime | None],
+    weight: float | None = None,
+) -> list[str]:
+    """Documents in match order with the first RECENCY_WINDOW ranked again for recency.
+
+    Each of those documents scores 1/(k + match rank) + weight/(k + recency rank), k = 60.
+    The recency rank orders the window by the day of ``appeared``, newest first; documents
+    from the same day share a rank, and documents with no date rank after the dated ones.
+    Equal match scores share a match rank, so of two equal matches the newer lists first.
+    Documents past the window keep their order.
+    """
+    weight = RECENCY_WEIGHT if weight is None else weight
+    window = list(dict.fromkeys(doc_ids))[:RECENCY_WINDOW]
+    if len(window) < 2 or weight <= 0:
+        return list(doc_ids)
+    match = _shared_ranks({doc_id: match_scores.get(doc_id, 0.0) for doc_id in window})
+    # Recency counts whole days (UTC), so files copied or cloned together a moment apart
+    # share a rank instead of being ordered by noise.
+    days = {}
+    for doc_id in window:
+        time_value = appeared.get(doc_id)
+        days[doc_id] = time_value.astimezone(UTC).date().toordinal() if time_value else -1
+    recency = _shared_ranks(days)
+    place = {doc_id: index for index, doc_id in enumerate(window)}
+    lifted = sorted(
+        window,
+        key=lambda doc_id: (
+            -(1 / (RANK_FUSION_K + match[doc_id]) + weight / (RANK_FUSION_K + recency[doc_id])),
+            place[doc_id],
+        ),
+    )
+    chosen = set(window)
+    return lifted + [doc_id for doc_id in doc_ids if doc_id not in chosen]
 
 
 def identifier(prefix: str) -> str:
@@ -118,6 +235,59 @@ def write_json(path: Path, value: Any) -> None:
         handle.write(encode(value).encode("utf-8"))
 
 
+def library_busy(exc: BaseException) -> bool:
+    """Whether a database error means another connection held the library too long."""
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return code & 0xFF in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+    return "locked" in str(exc) or "busy" in str(exc)
+
+
+def queue_pending_report(folder: Path, report: dict[str, Any]) -> Path:
+    """Keep a report record the library couldn't store, for its background check.
+
+    `folder` is the library's data folder (BrainLibrary.folder). The file is private
+    to this account: it holds the report's question and cited passages.
+    """
+    pending = folder / PENDING_REPORTS
+    pending.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if sys.platform != "win32":
+        pending.chmod(0o700)
+    path = pending / f"{report['id']}.json"
+    with atomic_binary_output(path, exclusive=True) as handle:
+        handle.write(encode({"version": 1, "report": report}).encode("utf-8"))
+    return path
+
+
+def pending_reports(folder: Path) -> list[tuple[Path, dict[str, Any] | None]]:
+    """Queued report records, oldest first; None for a file that can't be read."""
+    pending = folder / PENDING_REPORTS
+    try:
+        files = sorted(
+            (path for path in pending.iterdir() if path.suffix == ".json" and path.is_file()),
+            key=lambda path: (path.stat().st_mtime_ns, path.name),
+        )
+    except OSError:
+        return []
+    found: list[tuple[Path, dict[str, Any] | None]] = []
+    for path in files:
+        try:
+            with open_binary_input(path) as handle:
+                body = json.loads(handle.read(MAX_MANIFEST))
+            report = body["report"] if body.get("version") == 1 else None
+            if not isinstance(report, dict) or not all(
+                isinstance(report.get(key), str)
+                for key in ("id", "brainId", "artifactPath", "outputHash")
+            ):
+                report = None
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            report = None
+        found.append((path, report))
+    return found
+
+
 def default_settings(metadata: str = "portable") -> dict[str, Any]:
     return {
         "metadata": metadata,
@@ -128,6 +298,78 @@ def default_settings(metadata: str = "portable") -> dict[str, Any]:
         "ocrLanguage": "eng",
         "obsidian": True,
         "zotero": False,
+    }
+
+
+EVIDENCE_FIELDS = ("docId", "blockId", "version", "quote")
+# How many passage IDs an evidence error names.
+CANDIDATE_LIMIT = 8
+
+
+def locate_quote(doc: dict[str, Any], blocks: dict[str, str], quote: str) -> str:
+    """The ID of the one passage in `blocks` that contains `quote` exactly.
+
+    Zero or several matches raise an error that names the candidate passages: the
+    passages that contain the quote, or the closest ones by shared words.
+    """
+    matches = [block_id for block_id, text in blocks.items() if quote in text]
+    if len(matches) == 1:
+        return matches[0]
+    title = doc.get("title") or doc.get("path") or doc.get("id", "")
+    if matches:
+        shown = ", ".join(matches[:CANDIDATE_LIMIT])
+        extra = len(matches) - CANDIDATE_LIMIT
+        more = f" and {extra} more" if extra > 0 else ""
+        raise ValueError(
+            f"The quote appears in {len(matches)} passages of “{title}”: {shown}{more}. "
+            "Add the blockId of the passage you mean, or quote more of it."
+        )
+    words = set(re.findall(r"\w+", quote.casefold()))
+    scored = sorted(
+        (
+            (-len(words & set(re.findall(r"\w+", text.casefold()))), index, block_id)
+            for index, (block_id, text) in enumerate(blocks.items())
+        ),
+    )
+    closest = [block_id for score, _, block_id in scored[:3] if score < 0]
+    hint = f" Closest passages: {', '.join(closest)}." if closest else ""
+    raise ValueError(
+        f"No passage of “{title}” contains the quote exactly.{hint} Copy the quote from "
+        "read_note without changing it."
+    )
+
+
+def evidence_entry(reference: Any) -> dict[str, str]:
+    """An evidence entry with only the known fields, each a string; raises when malformed."""
+    if not isinstance(reference, dict):
+        raise ValueError("An evidence entry must be an object with docId and quote")
+    extra = sorted(set(reference) - set(EVIDENCE_FIELDS))
+    if extra:
+        raise ValueError(f"Unknown evidence field: {', '.join(extra)}")
+    entry = {key: reference[key] for key in EVIDENCE_FIELDS if reference.get(key) is not None}
+    if any(not isinstance(value, str) for value in entry.values()):
+        raise ValueError("Evidence fields must be text")
+    if not entry.get("docId"):
+        raise ValueError("An evidence entry needs the docId that read_note returned")
+    if not entry.get("quote"):
+        raise ValueError("An evidence entry needs the exact quote it cites")
+    return entry
+
+
+def evidence_reply(citations: list[dict[str, Any]], marks: list[dict[str, Any]]) -> dict[str, Any]:
+    """What a save tool adds to its reply: each evidence entry's mark, and a summary."""
+    if not marks:
+        return {}
+    rejected = sum(mark["status"] == "rejected" for mark in marks)
+    if not rejected:
+        return {"evidence": marks}
+    return {
+        "evidence": marks,
+        "note": (
+            f"Saved with {len(citations)} of {len(marks)} citations. {rejected} evidence "
+            f"{'entry was' if rejected == 1 else 'entries were'} left out; each one's error "
+            "says why. Fix them and save a new copy to keep every citation."
+        ),
     }
 
 
@@ -245,6 +487,150 @@ def restrict_brain(root: Path) -> list[dict[str, Any]]:
     return open_to_others(root)
 
 
+def disk_fingerprint(root: Path, relative: str) -> str | None:
+    """A brain file's scan fingerprint as it is now, or None when it isn't a plain file."""
+    try:
+        path = source_path(root, relative)
+        if path.is_symlink() or not path.is_file():
+            return None
+        info = path.stat()
+    except (OSError, ValueError):
+        return None
+    return f"{info.st_mtime_ns}:{info.st_size}"
+
+
+def merge_stored(
+    root: Path,
+    scanned: set[str],
+    touched: list[dict[str, Any]],
+    stored: list[dict[str, Any]],
+    left_out: Iterable[str] = (),
+) -> tuple[dict[str, tuple[str, bool]], set[str]]:
+    """Fold the rows another process published during a scan into the scan's documents.
+
+    ``touched`` is changed in place; ``stored`` is the brain's rows read inside the
+    publish transaction, ``scanned`` the paths this scan listed.
+
+    - A document the scan found new, at a path that now has a stored row, takes that
+      row's ID, versions and metadata, so citations and reports that name it still do.
+    - A stored row whose file changed again after the scan read it, and still matches
+      the file on disk, stays as stored: the scan's copy is older.
+    - A stored row for a file on disk that wasn't in the scan's list (saved after the
+      scan walked the folder) is kept, unless it sits in a ``left_out`` folder (another
+      brain's private folder), which the scan skips on purpose.
+
+    Returns the adopted documents (scan ID -> stored ID and whether the stored version
+    became an earlier version) and the IDs whose stored row was kept.
+    """
+    by_id = {doc["id"]: doc for doc in stored}
+    by_path = {doc["path"]: doc for doc in stored if not doc.get("missing")}
+    scan_ids = {doc["id"] for doc in touched}
+    adopted: dict[str, tuple[str, bool]] = {}
+    for doc in touched:
+        row = by_path.get(doc["path"])
+        if doc.get("missing") or doc["id"] in by_id or not row or row["id"] in scan_ids:
+            continue
+        versions = copy.deepcopy(row.get("versions", []))
+        versioned = row.get("version") != doc["version"]
+        if versioned:
+            versions.insert(
+                0,
+                {
+                    "hash": row["version"],
+                    "at": row["dates"]["modified"],
+                    "note": "Source changed",
+                    "blocks": {block["id"]: block["text"] for block in row.get("blocks", [])},
+                },
+            )
+        adopted[doc["id"]] = (row["id"], versioned)
+        doc.update(
+            id=row["id"],
+            versions=versions,
+            metadata=copy.deepcopy(row.get("metadata", {})),
+            dates={**doc["dates"], "added": row["dates"].get("added", doc["dates"]["added"])},
+        )
+        # What the other process said about the file (a report Rem saved, its notes).
+        for key in ("type", "origin", "annotations"):
+            if key in row:
+                doc[key] = row[key]
+    kept: set[str] = set()
+    for index, doc in enumerate(touched):
+        row = by_id.get(doc["id"])
+        if (
+            doc.get("missing")
+            or not row
+            or row.get("missing")
+            or row["path"] != doc["path"]
+            or not row.get("fingerprint")
+            or row["fingerprint"] == doc.get("fingerprint")
+        ):
+            continue
+        if disk_fingerprint(root, doc["path"]) == row["fingerprint"]:
+            touched[index] = copy.deepcopy(row)
+            kept.add(row["id"])
+    positions = {doc["id"]: index for index, doc in enumerate(touched)}
+    skipped = tuple(f"{folder}/" for folder in left_out)
+    for row in stored:
+        if row["path"] in scanned or row.get("missing") or row["path"].startswith(skipped):
+            continue
+        position = positions.get(row["id"])
+        if position is not None and not touched[position].get("missing"):
+            continue
+        if (
+            Path(row["path"]).suffix.lower() not in EXTENSIONS
+            or disk_fingerprint(root, row["path"]) is None
+        ):
+            continue
+        if position is None:
+            touched.append(copy.deepcopy(row))
+        else:
+            touched[position] = copy.deepcopy(row)
+        kept.add(row["id"])
+    return adopted, kept
+
+
+class DocumentHeaders(Mapping[str, dict[str, Any]]):
+    """Document headers read on first use and remembered, limited to some brains.
+
+    ``replacement_status`` follows replacedBy links through a mapping. This one reads
+    each linked document's header when the chain reaches it, instead of every document.
+    """
+
+    def __init__(
+        self,
+        library: BrainLibrary,
+        brain_ids: Sequence[str],
+        known: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
+        self._library = library
+        self._brain_ids = list(brain_ids)
+        self._cache: dict[str, dict[str, Any] | None] = dict(known or {})
+
+    def _load(self, doc_id: object) -> dict[str, Any] | None:
+        if not isinstance(doc_id, str):
+            return None
+        if doc_id not in self._cache:
+            self._cache[doc_id] = self._library.document_headers(self._brain_ids, [doc_id]).get(
+                doc_id
+            )
+        return self._cache[doc_id]
+
+    def __getitem__(self, doc_id: str) -> dict[str, Any]:
+        header = self._load(doc_id)
+        if header is None:
+            raise KeyError(doc_id)
+        return header
+
+    def __contains__(self, doc_id: object) -> bool:
+        return self._load(doc_id) is not None
+
+    def __iter__(self) -> Iterator[str]:
+        return iter([key for key, value in self._cache.items() if value is not None])
+
+    def __len__(self) -> int:
+        return sum(value is not None for value in self._cache.values())
+
+
 class BrainLibrary:
     def __init__(
         self,
@@ -295,7 +681,17 @@ class BrainLibrary:
         # True/False, or the reason a path is unsafe (source_path's ValueError).
         self._sources: dict[str, bool | str] = {}
         self._open_checks: dict[str, list[dict[str, Any]]] = {}
-        self._health_cache: tuple[Any, list[dict[str, Any]], list[dict[str, Any]]] | None = None
+        self._twin_checks: dict[str, list[tuple[str, str]]] = {}
+        self._health_cache: (
+            tuple[Any, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]] | None
+        ) = None
+        # Replaced and check-by headers per brain selection, valid for one library revision.
+        self._flagged_headers: dict[tuple[str, ...], tuple[int, dict[str, dict[str, Any]]]] = {}
+        self._unused_archive: dict[tuple[str, ...], tuple[int, frozenset[str]]] = {}
+        # Dated report series per brain selection, valid for one library revision.
+        self._series: dict[tuple[str, ...], tuple[int, dict[str, dict[str, Any]]]] = {}
+        # The connection of this thread's open read_snapshot, if any.
+        self._reader = threading.local()
         with self.connect() as db:
             db.executescript("""
                 PRAGMA journal_mode=WAL;
@@ -345,8 +741,14 @@ class BrainLibrary:
         The revision moves in the same transaction as the write, so a reader never sees
         new rows under an old revision. Every process that opens the library (the UI
         server, Rem's Second Brain tools) shares the stored revision.
+
+        Inside ``read_snapshot`` on the same thread, this is the snapshot's connection.
         """
-        db = sqlite3.connect(self.database, timeout=30)
+        shared = getattr(self._reader, "db", None)
+        if shared is not None:
+            yield shared
+            return
+        db = sqlite3.connect(self.database, timeout=BUSY_TIMEOUT)
         db.row_factory = sqlite3.Row
         wrote = False
 
@@ -364,6 +766,119 @@ class BrainLibrary:
                     db.execute("UPDATE library_revision SET value=value+1 WHERE id=1")
         finally:
             db.close()
+
+    @contextmanager
+    def write_transaction(self) -> Iterator[sqlite3.Connection]:
+        """Run this thread's library reads and writes in one BEGIN IMMEDIATE transaction.
+
+        The write lock is taken before the first read, so no other process (Rem's Second
+        Brain tools, another window) can write between what this block reads and what it
+        writes. Every ``connect`` on this thread inside the block uses the same
+        connection. Nested blocks share the outer transaction. The revision moves once,
+        at commit, when anything the snapshot shows was written.
+        """
+        shared = getattr(self._reader, "db", None)
+        if shared is not None:
+            if not getattr(self._reader, "writing", False):
+                raise RuntimeError("A library write can't start inside a read snapshot")
+            yield shared
+            return
+        db = sqlite3.connect(self.database, timeout=BUSY_TIMEOUT, isolation_level=None)
+        db.row_factory = sqlite3.Row
+        wrote = False
+
+        def watch(action: int, table: str | None, *_: str | None) -> int:
+            nonlocal wrote
+            if action in _WRITE_ACTIONS and table in REVISED_TABLES:
+                wrote = True
+            return sqlite3.SQLITE_OK
+
+        db.set_authorizer(watch)
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            self._reader.db = db
+            self._reader.writing = True
+            try:
+                yield db
+                if wrote:
+                    db.execute("UPDATE library_revision SET value=value+1 WHERE id=1")
+                db.execute("COMMIT")
+            except BaseException:
+                if db.in_transaction:
+                    db.execute("ROLLBACK")
+                raise
+        finally:
+            self._reader.db = None
+            self._reader.writing = False
+            db.close()
+
+    def edit_document(self, doc_id: str, edit: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+        """Change some fields of one stored document and leave the rest as stored.
+
+        ``edit`` changes the record read inside one immediate transaction, so a re-index
+        another process publishes meanwhile keeps its own fields (passages, versions)
+        and this edit keeps its own.
+        """
+        with self.write_transaction() as db:
+            row = db.execute(
+                "SELECT body FROM entities WHERE kind='documents' AND id=?", (doc_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("Library item is no longer available")
+            doc = dict(json.loads(row[0]))
+            edit(doc)
+            db.execute(
+                "UPDATE entities SET body=? WHERE kind='documents' AND id=?",
+                (encode(doc), doc_id),
+            )
+        return doc
+
+    def edit_fields(
+        self, doc_id: str, before: dict[str, Any], after: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Store only the top-level fields that differ between ``before`` and ``after``."""
+        changed = {key: after[key] for key in after if after[key] != before.get(key)}
+        removed = [key for key in before if key not in after]
+
+        def edit(doc: dict[str, Any]) -> None:
+            doc.update(copy.deepcopy(changed))
+            for key in removed:
+                doc.pop(key, None)
+
+        return self.edit_document(doc_id, edit)
+
+    @contextmanager
+    def read_snapshot(self) -> Iterator[None]:
+        """Run this thread's library reads on one connection in one read transaction.
+
+        Under WAL, every read inside sees the database as it was when the block began,
+        even when another process publishes a re-index meanwhile, so a search and the
+        documents it loads agree. Writes inside are refused. Nested blocks share the
+        outer snapshot.
+        """
+        if getattr(self._reader, "db", None) is not None:
+            yield
+            return
+        db = sqlite3.connect(self.database, timeout=BUSY_TIMEOUT)
+        db.row_factory = sqlite3.Row
+        self._reader.writing = False
+
+        def read_only(action: int, *_: str | None) -> int:
+            return sqlite3.SQLITE_DENY if action in _WRITE_ACTIONS else sqlite3.SQLITE_OK
+
+        try:
+            db.execute("BEGIN")
+            # A WAL read transaction takes its snapshot at the first read, not at BEGIN.
+            db.execute("SELECT value FROM library_revision WHERE id=1").fetchone()
+            db.set_authorizer(read_only)
+            self._reader.db = db
+            yield
+        finally:
+            self._reader.db = None
+            try:
+                db.rollback()
+            finally:
+                db.close()
 
     def revision(self) -> int:
         """The library revision: it goes up on every write to brains, entities, tasks
@@ -403,6 +918,7 @@ class BrainLibrary:
         self._exists.clear()
         self._sources.clear()
         self._open_checks.clear()
+        self._twin_checks.clear()
 
     def _check_link(self, link: str, root: Path, folder: Path) -> LinkCheck:
         key = (link, str(root), str(folder))
@@ -508,6 +1024,153 @@ class BrainLibrary:
         if row is None:
             raise ValueError("Library item is no longer available")
         return dict(json.loads(row[0]))
+
+    def documents(self, ids: Iterable[str], brain_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Decode only the named documents that belong to the given brains."""
+        wanted = list(dict.fromkeys(ids))
+        found: dict[str, dict[str, Any]] = {}
+        if not wanted or not brain_ids:
+            return found
+        brains = ",".join("?" for _ in brain_ids)
+        with self.connect() as db:
+            for start in range(0, len(wanted), 500):
+                chunk = wanted[start : start + 500]
+                for row in db.execute(
+                    "SELECT body FROM entities WHERE kind='documents' AND brain IN ("
+                    + brains
+                    + ") AND id IN ("
+                    + ",".join("?" for _ in chunk)
+                    + ")",
+                    (*brain_ids, *chunk),
+                ):
+                    doc = json.loads(row[0])
+                    found[doc["id"]] = doc
+        return found
+
+    def documents_at(self, path: str, brain_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """The documents stored at a brain-relative path, decoding only those rows.
+
+        ``encode`` writes the top-level path as ``"path": <json string>``, so a text
+        search skips the other rows before SQLite parses any JSON.
+        """
+        if not path or not brain_ids:
+            return {}
+        fragment = '"path": ' + json.dumps(path, ensure_ascii=False)
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT body FROM entities WHERE kind='documents' AND brain IN ("
+                + ",".join("?" for _ in brain_ids)
+                + ") AND instr(body, ?) > 0 AND json_extract(body, '$.path') = ?",
+                (*brain_ids, fragment, path),
+            ).fetchall()
+        return {doc["id"]: doc for doc in (json.loads(row[0]) for row in rows)}
+
+    def document_headers(
+        self,
+        brain_ids: Sequence[str],
+        ids: Iterable[str] | None = None,
+        *,
+        flagged: bool = False,
+    ) -> dict[str, dict[str, Any]]:
+        """Document fields that search results and status need, without block text.
+
+        Keyed by document ID in brain order, then storage order. ``ids`` limits the
+        rows; ``flagged`` keeps only documents marked replaced or given a check-by date.
+        """
+        if not brain_ids:
+            return {}
+        # Searches check every document for replaced and check-by marks. Remember the
+        # answer until anything in the library is written (any process moves the revision).
+        cache_key = tuple(brain_ids) if flagged and ids is None else None
+        revision = self.revision() if cache_key else 0
+        cached = self._flagged_headers.get(cache_key) if cache_key else None
+        if cached and cached[0] == revision:
+            return copy.deepcopy(cached[1])
+        columns = (
+            "SELECT id, brain, json_extract(body, '$.path'), json_extract(body, '$.title'),"
+            " json_extract(body, '$.version'), json_extract(body, '$.type'),"
+            " json_extract(body, '$.dates.modified'),"
+            " json_extract(body, '$.replacedBy.docId'), json_extract(body, '$.checkBy'),"
+            " json_extract(body, '$.origin'), json_extract(body, '$.missing'),"
+            " json_extract(body, '$.excluded'), json_extract(body, '$.notSeries'),"
+            " json_extract(body, '$.summary')"
+            " FROM entities WHERE kind='documents' AND brain IN ("
+            + ",".join("?" for _ in brain_ids)
+            + ")"
+        )
+        if flagged:
+            columns += " AND (instr(body, '\"replacedBy\"') > 0 OR instr(body, '\"checkBy\"') > 0)"
+        order = {brain_id: index for index, brain_id in enumerate(brain_ids)}
+        rows: list[Any] = []
+        with self.connect() as db:
+            if ids is None:
+                rows = db.execute(columns + " ORDER BY rowid", tuple(brain_ids)).fetchall()
+            else:
+                wanted = list(dict.fromkeys(ids))
+                for start in range(0, len(wanted), 500):
+                    chunk = wanted[start : start + 500]
+                    rows += db.execute(
+                        columns
+                        + " AND id IN ("
+                        + ",".join("?" for _ in chunk)
+                        + ") ORDER BY rowid",
+                        (*brain_ids, *chunk),
+                    ).fetchall()
+        rows.sort(key=lambda row: order.get(row[1], len(order)))
+        headers: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            header = {
+                "id": row[0],
+                "brainId": row[1],
+                "path": row[2] or "",
+                "title": row[3] or "",
+                "version": row[4] or "",
+                "type": row[5] or "",
+                "dates": {"modified": row[6] or ""},
+                "origin": row[9] or ORIGIN_AUTHORED,
+            }
+            if row[7]:
+                header["replacedBy"] = {"docId": row[7]}
+            if row[8]:
+                header["checkBy"] = row[8]
+            if row[13]:
+                header["summary"] = row[13]
+            for column, key in ((10, "missing"), (11, "excluded"), (12, "notSeries")):
+                if row[column]:
+                    header[key] = True
+            if not flagged or row[7] or row[8]:
+                headers[row[0]] = header
+        if cache_key:
+            self._flagged_headers[cache_key] = (revision, copy.deepcopy(headers))
+        return headers
+
+    def document_ids(self, ids: Iterable[str], brain_ids: Sequence[str]) -> set[str]:
+        """Which of these documents exist in the given brains, without decoding any."""
+        wanted = list(dict.fromkeys(ids))
+        found: set[str] = set()
+        if not wanted or not brain_ids:
+            return found
+        with self.connect() as db:
+            for start in range(0, len(wanted), 500):
+                chunk = wanted[start : start + 500]
+                found.update(
+                    row[0]
+                    for row in db.execute(
+                        "SELECT id FROM entities WHERE kind='documents' AND brain IN ("
+                        + ",".join("?" for _ in brain_ids)
+                        + ") AND id IN ("
+                        + ",".join("?" for _ in chunk)
+                        + ")",
+                        (*brain_ids, *chunk),
+                    )
+                )
+        return found
+
+    def header_lookup(
+        self, brain_ids: Sequence[str], known: dict[str, dict[str, Any]] | None = None
+    ) -> DocumentHeaders:
+        """A mapping that reads document headers one at a time, for replacedBy chains."""
+        return DocumentHeaders(self, brain_ids, known)
 
     def put(self, kind: str, item: dict[str, Any]) -> None:
         with self.connect() as db:
@@ -716,12 +1379,17 @@ class BrainLibrary:
             if self._health_cache is not None and self._health_cache[0] == key:
                 health = copy.deepcopy(self._health_cache[1])
                 payload["families"] = copy.deepcopy(self._health_cache[2])
+                payload["series"] = copy.deepcopy(self._health_cache[3])
             else:
+                from gofer.ui.brain_series import detect_series
+
                 health = self.health(payload)
+                payload["series"] = detect_series(payload["documents"])
                 self._health_cache = (
                     key,
                     copy.deepcopy(health),
                     copy.deepcopy(payload["families"]),
+                    copy.deepcopy(payload["series"]),
                 )
             capabilities = {
                 "pdf": importlib.util.find_spec("pypdf") is not None,
@@ -779,13 +1447,18 @@ class BrainLibrary:
         root = Path(brain["root"])
         if not root.is_dir():
             raise ValueError("Brain folder is unavailable")
+        private_inside = self.private_brains_inside(brain)
         with self.lock:
             previous = self.entities("documents", brain_id)
             by_path = {doc["path"]: doc for doc in previous}
             paths: list[str] = []
             for parent, dirs, files in os.walk(root, followlinks=False):
                 dirs[:] = sorted(
-                    d for d in dirs if not d.startswith(".") and not (Path(parent) / d).is_symlink()
+                    d
+                    for d in dirs
+                    if not d.startswith(".")
+                    and not (Path(parent) / d).is_symlink()
+                    and Path(parent) / d not in private_inside
                 )
                 for name in sorted(files):
                     path = Path(parent) / name
@@ -801,9 +1474,23 @@ class BrainLibrary:
             for report in self.entities("reports", brain_id)
             for path in (report["artifactPath"], report["artifactPath"] + ".html")
         }
+        # Files attached in Rem conversations are outside text, like captures. A
+        # document that already says where it came from keeps that.
+        archives = archive_names(root)
+
+        def origin_for(relative: str, previous: str | None) -> str:
+            if is_archive_attachment(relative, archives) and previous in {None, ORIGIN_AUTHORED}:
+                return ORIGIN_IMPORTED
+            return previous or ORIGIN_AUTHORED
+
         touched: list[dict[str, Any]] = []
         added: list[str] = []
         changed: list[str] = []
+        rewritten: dict[str, tuple[str, list[dict[str, Any]], list[dict[str, Any]]]] = {}
+        # Path -> the title a newer reader replaced on the same file version.
+        retitled: dict[str, str] = {}
+        # Once the PDF reader fails to start, later PDFs in this scan wait for the next one.
+        pdf_reader_down = False
         for index, relative in enumerate(paths):
             if cancel and cancel.is_set():
                 raise InterruptedError("Indexing cancelled")
@@ -821,8 +1508,10 @@ class BrainLibrary:
                 and not old.get("missing")
                 and old.get("fingerprint") == fingerprint
                 and old.get("extraction") != "pending"
+                and not html_reader_stale(old)
+                and not summary_stale(old)
             ):
-                touched.append(old)
+                touched.append({**old, "origin": origin_for(relative, old.get("origin"))})
                 continue
             digest = (old or {}).get("version") or hashlib.sha256(relative.encode()).hexdigest()
             try:
@@ -837,18 +1526,32 @@ class BrainLibrary:
                 format_key = {"note": "markdown", "html": "html", "text": "text", "pdf": "pdf"}[
                     EXTENSIONS[extension]
                 ]
+                if pdf_reader_down and extension == ".pdf":
+                    raise PdfReaderNotStarted
                 extracted = (
                     extract(
                         data,
                         extension,
                         encoding=(old or {}).get("encoding", "utf-8"),
                         obsidian=brain["settings"].get("obsidian", True),
+                        cancel=cancel,
                     )
                     if brain["settings"]["formats"].get(format_key)
                     else {"blocks": [], "extraction": "excluded"}
                 )
                 error = ""
+            except InterruptedError:
+                # Cancelled while a PDF was being read: not a failure of that file.
+                raise
+            except PdfReaderNotStarted as exc:
+                # The reader never started, so the PDF wasn't read: pending is read again
+                # on the next scan instead of being skipped until the file changes.
+                pdf_reader_down = True
+                extracted = {"blocks": [], "extraction": "pending"}
+                error = str(exc)
             except Exception as exc:
+                # A PDF that ran out of time or memory lands here too. Its fingerprint is
+                # stored below, so later scans skip it until the file changes.
                 extracted = {"blocks": [], "extraction": "failed"}
                 error = str(exc)[:1000]
             stamp = datetime.fromtimestamp(info.st_mtime, UTC).isoformat()
@@ -906,7 +1609,7 @@ class BrainLibrary:
                 "reading": (old or {}).get(
                     "reading", {"read": False, "starred": False, "reviewed": False}
                 ),
-                "origin": (old or {}).get("origin", "authored"),
+                "origin": origin_for(relative, (old or {}).get("origin")),
                 "inbox": (old or {}).get("inbox", relative.startswith("Inbox/")),
                 "excluded": (old or {}).get("wasExcluded", False)
                 if (old or {}).get("missing")
@@ -920,35 +1623,74 @@ class BrainLibrary:
                 "concepts": [],
                 "missing": False,
             }
+            if "reader" in extracted:
+                doc["reader"] = extracted["reader"]
+            else:
+                doc.pop("reader", None)
+            if "summaryReader" in extracted:
+                doc["summaryReader"] = extracted["summaryReader"]
+            else:
+                doc.pop("summaryReader", None)
+            apply_summary(
+                doc,
+                (str(extracted.get("summary") or ""), str(extracted.get("summarySource") or "")),
+            )
             # Preserve OCR against an unchanged source on subsequent scans.
             if old and old.get("ocrVersion") == digest:
                 doc.update(blocks=old["blocks"], extraction=old["extraction"], ocrVersion=digest)
+            if old and old["version"] == digest and old.get("blocks") != doc["blocks"]:
+                # Same file read differently (a newer reader): its passages got new IDs.
+                rewritten[document_id] = (digest, old.get("blocks") or [], doc["blocks"])
+            if old and old["version"] == digest and old.get("title") != doc["title"]:
+                retitled[relative] = str(old.get("title") or "")
             if relative in artifacts:
                 doc.update(type="report", origin=artifacts[relative])
             touched.append(doc)
             if progress:
                 progress(90 * (index + 1) / max(1, len(paths)))
-        references = self._referenced_documents(brain_id)
-        present_ids = {doc["id"] for doc in touched}
-        for doc in previous:
-            if doc["id"] not in present_ids and doc["id"] in references:
-                touched.append(
-                    {
-                        **doc,
-                        "missing": True,
-                        "wasExcluded": doc.get("wasExcluded", doc.get("excluded", False)),
-                        "excluded": True,
-                        "inbox": False,
-                        "extraction": "unavailable",
-                    }
-                )
-        for doc in touched:
-            doc["cites"] = list(
-                {linked_document(doc, link, touched) for link in doc.get("links", [])} - {None}
+        # Publish in one immediate transaction: no other process (Rem's Second Brain
+        # tools, another window) can write between the fresh read below and the publish.
+        with self.lock, self.write_transaction() as db:
+            brain = self.brain(brain_id)
+            if Path(brain["root"]) != root:
+                raise ValueError("Brain moved during indexing. Retrying at the new location.")
+            references = self._referenced_documents(brain_id)
+            present_ids = {doc["id"] for doc in touched}
+            for doc in previous:
+                if doc["id"] not in present_ids and doc["id"] in references:
+                    touched.append(
+                        {
+                            **doc,
+                            "missing": True,
+                            "wasExcluded": doc.get("wasExcluded", doc.get("excluded", False)),
+                            "excluded": True,
+                            "inbox": False,
+                            "extraction": "unavailable",
+                        }
+                    )
+            stored = self.entities("documents", brain_id)
+            adopted, kept_newer = merge_stored(
+                root,
+                set(paths),
+                touched,
+                stored,
+                [folder.relative_to(root).as_posix() for folder in private_inside],
             )
-        with self.lock, self.connect() as db:
+            added = [doc_id for doc_id in added if doc_id not in adopted]
+            changed += [doc_id for doc_id, versioned in adopted.values() if versioned]
+            for doc_id in kept_newer:
+                rewritten.pop(doc_id, None)
+            retitled = {
+                path: title
+                for path, title in retitled.items()
+                if not any(doc["path"] == path and doc["id"] in kept_newer for doc in touched)
+            }
+            for doc in touched:
+                doc["cites"] = list(
+                    {linked_document(doc, link, touched) for link in doc.get("links", [])} - {None}
+                )
             # Extraction can overlap UI edits. Preserve the latest mutable metadata at publication.
-            fresh = {doc["id"]: doc for doc in self.entities("documents", brain_id)}
+            fresh = {doc["id"]: doc for doc in stored}
             for doc in touched:
                 saved = fresh.get(doc["id"])
                 if saved:
@@ -960,6 +1702,7 @@ class BrainLibrary:
                         "metadata",
                         "replacedBy",
                         "checkBy",
+                        "notSeries",
                     ):
                         if key in saved and not (
                             saved.get("missing")
@@ -970,13 +1713,18 @@ class BrainLibrary:
                     for key in ("title", "author", "tags", "project"):
                         if key in saved.get("metadata", {}):
                             doc[key] = saved["metadata"][key]
-            brain = self.brain(brain_id)
-            if Path(brain["root"]) != root:
-                raise ValueError("Brain moved during indexing. Retrying at the new location.")
+                    apply_summary(doc)
+            # Folder rules as saved now: a new file in a left-out folder is never indexed.
+            rules = brain["settings"].get("folderRules")
+            for doc in touched:
+                apply_rule(doc, rules)
             # Publish one generation atomically; readers keep the preceding
             # generation during extraction.
             db.execute("DELETE FROM entities WHERE kind='documents' AND brain=?", (brain_id,))
             db.execute("DELETE FROM passages WHERE brain=?", (brain_id,))
+            for doc_id in rewritten:
+                # Stored vectors name the old passage IDs; the next embedding pass redoes them.
+                db.execute("DELETE FROM embeddings WHERE brain=? AND doc=?", (brain_id, doc_id))
             for doc in touched:
                 db.execute(
                     "INSERT INTO entities VALUES('documents',?,?,?)",
@@ -997,15 +1745,16 @@ class BrainLibrary:
                 "pending": sum(doc["extraction"] in {"pending", "ocr"} for doc in touched),
                 "failed": sum(doc["extraction"] == "failed" for doc in touched),
                 "generation": brain["index"]["generation"] + 1,
+                # Brains indexed before attachments were labelled scan once more.
+                "origins": ORIGIN_LABELS,
             }
-        with self.lock:
-            current = self.brain(brain_id)
-            if Path(current["root"]) != root:
-                raise ValueError("Brain moved during indexing. Retrying at the new location.")
-            current["index"] = brain["index"]
-            brain = current
             self.put_brain(brain)
+            for brain_with_evidence in self._reanchor_evidence(rewritten) - {brain_id}:
+                self._portable(brain_with_evidence)
             self._resolve_citations(brain_id)
+            self._retitle_reports(brain_id, retitled, touched)
+            # brain.json is written under the same write lock, so a publish from another
+            # process can't land between this generation and its portable copy.
             self._portable(brain_id)
         if brain["settings"].get("semantic"):
             self.embed(brain_id, cancel or threading.Event())
@@ -1024,6 +1773,64 @@ class BrainLibrary:
         self._event_jobs(brain_id, [item for item in added if item not in generated], changed)
         return {"documents": len(touched), "added": len(added), "changed": len(changed)}
 
+    def _retitle_reports(
+        self, brain_id: str, retitled: dict[str, str], touched: list[dict[str, Any]]
+    ) -> None:
+        """Give report records the title a newer reader found in their unchanged file.
+
+        Only a record whose title is still the one the file gave before changes: a title
+        the save call or the user chose stays.
+        """
+        if not retitled:
+            return
+        titles = {doc["path"]: doc["title"] for doc in touched if doc["path"] in retitled}
+        for report in self.entities("reports", brain_id):
+            path = str(report.get("artifactPath") or "")
+            path = path if path in titles else path + ".html"
+            if path not in titles:
+                continue
+            old = retitled[path]
+            if report.get("title") in {old, old[:300]} and titles[path]:
+                report["title"] = titles[path][:300]
+                self.put("reports", report)
+
+    def _reanchor_evidence(
+        self, rewritten: dict[str, tuple[str, list[dict[str, Any]], list[dict[str, Any]]]]
+    ) -> set[str]:
+        """Re-find evidence on documents whose current version was read again.
+
+        ``rewritten`` maps a document ID to its version, old passages and new passages.
+        Evidence pinned to an earlier version reads that version's stored passages and
+        is left alone. Returns the brains whose records changed.
+        """
+        if not rewritten:
+            return set()
+        old_text = {
+            doc_id: {block["id"]: block["text"] for block in old}
+            for doc_id, (_, old, _) in rewritten.items()
+        }
+
+        def fix(evidence: dict[str, Any]) -> bool:
+            entry = rewritten.get(str(evidence.get("docId", "")))
+            if not entry or evidence.get("version", entry[0]) != entry[0]:
+                return False
+            return reanchor(evidence, old_text[evidence["docId"]], entry[2])
+
+        brains: set[str] = set()
+        for kind in ("citations", "reports", "collections"):
+            for item in self.entities(kind):
+                if kind == "citations":
+                    evidence = [item]
+                else:
+                    evidence = evidence_references({kind: [item]})
+                # Every reference is fixed, so no short-circuit here.
+                if any([fix(reference) for reference in evidence]):
+                    self.put(kind, item)
+                    brains.add(item["brainId"])
+        for doc_id, (version, _, _) in rewritten.items():
+            self._passage_cache.pop((doc_id, version), None)
+        return brains
+
     def _resolve_citations(self, brain_id: str) -> None:
         documents = {doc["id"]: doc for doc in self.entities("documents")}
         for report in self.entities("reports"):
@@ -1036,7 +1843,11 @@ class BrainLibrary:
                         block for block in doc["blocks"] if citation["quote"] in block["text"]
                     ]
                     citation["state"] = "changed" if len(matches) == 1 else "relocate"
-                elif citation["state"] in {"unavailable", "changed", "relocate"}:
+                elif citation["state"] in {"unavailable", "changed", "relocate"} and (
+                    # Re-reading the same version can leave a quote with no passage.
+                    not citation.get("blockId")
+                    or any(block["id"] == citation["blockId"] for block in doc["blocks"])
+                ):
                     citation["state"] = "unreviewed"
             self.put("reports", report)
 
@@ -1060,6 +1871,10 @@ class BrainLibrary:
 
     def health(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         issues: list[dict[str, Any]] = self.access_health(payload["brains"])
+        for brain in payload["brains"]:
+            kept = backup_health(brain) if brain.get("state") == "available" else None
+            if kept and kept["id"] not in brain.get("ignoredIssues", []):
+                issues.append(kept)
         hashes: dict[str, str] = {}
         # A note that repeats the same dead link reports it once.
         seen: set[str] = set()
@@ -1226,7 +2041,8 @@ class BrainLibrary:
         return issues
 
     def access_health(self, brains: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Warn about brain folders, or their Git folders, other accounts can read."""
+        """Folder-level problems: brain folders, or their Git folders, other accounts can
+        read, and case-only twin files a backup can't hold."""
         issues = []
         for brain in brains:
             if brain.get("state") != "available":
@@ -1248,6 +2064,25 @@ class BrainLibrary:
                             f" (permissions {item['mode']:o})."
                         ),
                         "fix": "Make private",
+                    }
+                )
+            root = Path(brain["root"])
+            if str(root) not in self._twin_checks:
+                self._twin_checks[str(root)] = brain_twins(root)
+            for first, second in self._twin_checks[str(root)]:
+                key = f"twins:{brain['id']}:{first}:{second}"
+                issue_id = hashlib.sha256(key.encode()).hexdigest()[:24]
+                if issue_id in brain.get("ignoredIssues", []):
+                    continue
+                issues.append(
+                    {
+                        "id": issue_id,
+                        "kind": "twins",
+                        "brainId": brain["id"],
+                        "path": str((root / first).parent),
+                        "paths": [first, second],
+                        "detail": twin_message(first, second),
+                        "fix": "Open folder",
                     }
                 )
         return issues
@@ -1367,11 +2202,7 @@ class BrainLibrary:
                     self._resolve_citations(brain_id)
                 self._portable(brain_id)
                 if kind == "citations" and existing:
-                    doc = self.entity("documents", existing["docId"])
-                    doc["annotations"] = sum(
-                        c["docId"] == doc["id"] for c in self.entities("citations")
-                    )
-                    self.put("documents", doc)
+                    self._count_annotations(existing["docId"])
                     self._portable(brain_id)
                 return {"id": item_id, "deleted": True}
             if not item_id or len(item_id) > 150 or not isinstance(item, dict):
@@ -1380,6 +2211,7 @@ class BrainLibrary:
             if kind == "documents":
                 if not existing:
                     raise ValueError("Documents are created by indexing or capture")
+                original = existing
                 editable = {
                     "title",
                     "author",
@@ -1391,8 +2223,30 @@ class BrainLibrary:
                     "encoding",
                     "ignoredIssues",
                     "checkBy",
+                    "summary",
                 }
                 patch = {key: value for key, value in item.items() if key in editable}
+                # Every document edit sends the excluded flag it shows; only a change is
+                # the user's own choice, which a folder rule then no longer undoes.
+                if "excluded" in patch:
+                    patch["excluded"] = bool(patch["excluded"])
+                    if patch["excluded"] == bool(existing.get("excluded")):
+                        del patch["excluded"]
+                    else:
+                        folder = left_out_folder(
+                            existing["path"], brain["settings"].get("folderRules")
+                        )
+                        if folder and not patch["excluded"]:
+                            raise ValueError(
+                                f"This file is in {folder}, which is left out of search. "
+                                "Change that folder's rule in Brain settings › Folders."
+                            )
+                        existing = {
+                            key: value for key, value in existing.items() if key != "excludedBy"
+                        }
+                # Every document edit sends the summary it shows; only a different one
+                # sets (or, when empty, clears) the summary chosen in Edit metadata.
+                wanted = checked_summary(patch.pop("summary")) if "summary" in patch else None
                 if "checkBy" in patch:
                     from gofer.ui.brain_families import check_by
 
@@ -1405,6 +2259,12 @@ class BrainLibrary:
                         if key in patch
                     },
                 }
+                if wanted is not None and wanted != clean_summary(existing.get("summary")):
+                    # A summary the same as the file's own is no edit.
+                    if wanted and wanted != file_summary(existing)[0]:
+                        metadata["summary"] = wanted
+                    else:
+                        metadata.pop("summary", None)
                 if "dates" in item:
                     metadata["published"] = item["dates"].get("published", "")
                 if "source" in item:
@@ -1431,18 +2291,34 @@ class BrainLibrary:
                         ),
                     },
                 }
-                if "excluded" in patch or "title" in patch:
-                    with self.connect() as db:
+                apply_summary(item)
+                # Store only the fields this edit changed, in one immediate transaction:
+                # a re-index another process publishes meanwhile keeps its passages and
+                # versions. Passages are rebuilt from the record as stored.
+                with self.write_transaction() as db:
+                    stored = self.edit_fields(item_id, original, item)
+                    if "excluded" in patch or "title" in patch:
                         db.execute("DELETE FROM passages WHERE doc=?", (item_id,))
-                        if not item.get("excluded") and item["extraction"] == "ready":
-                            for block in item["blocks"]:
+                        if not stored.get("excluded") and stored["extraction"] == "ready":
+                            for block in stored["blocks"]:
                                 db.execute(
                                     "INSERT INTO passages VALUES(?,?,?,?,?)",
-                                    (brain_id, item_id, block["id"], item["title"], block["text"]),
+                                    (
+                                        brain_id,
+                                        item_id,
+                                        block["id"],
+                                        stored["title"],
+                                        block["text"],
+                                    ),
                                 )
                     if any(item.get(key) != existing.get(key) for key in ("excluded", "title")):
-                        with self.connect() as db:
-                            db.execute("DELETE FROM vectors WHERE doc=?", (item_id,))
+                        db.execute("DELETE FROM vectors WHERE doc=?", (item_id,))
+                    self._portable(brain_id)
+                if brain["settings"].get("semantic") and any(
+                    item.get(key) != existing.get(key) for key in ("excluded", "title")
+                ):
+                    self.start_task("index", {"brainId": brain_id, "force": True})
+                return stored
             elif kind == "citations":
                 self.validate_evidence(item)
             elif kind == "collections":
@@ -1473,10 +2349,8 @@ class BrainLibrary:
                         c["state"] != "found" for c in item["citations"]
                     ):
                         raise ValueError("Review all claims and citations before publishing")
-                    for doc in self.entities("documents", brain_id):
-                        if doc["path"] == existing["artifactPath"]:
-                            doc["inbox"] = False
-                            self.put("documents", doc)
+                    for doc_id in self.documents_at(existing["artifactPath"], [brain_id]):
+                        self.edit_document(doc_id, lambda doc: doc.update(inbox=False))
             elif kind == "projects":
                 name = str(item.get("name") or "").strip()
                 aliases = item.get("aliases", [])
@@ -1557,21 +2431,15 @@ class BrainLibrary:
                     raise ValueError("Choose a Rem provider before enabling this job")
             self.put(kind, item)
             if kind == "citations":
-                document_id = item["docId"]
-                doc = self.entity("documents", document_id)
-                doc["annotations"] = sum(
-                    c["docId"] == document_id for c in self.entities(kind, brain_id)
-                )
-                self.put("documents", doc)
+                self._count_annotations(item["docId"])
             self._portable(brain_id)
-            if (
-                kind == "documents"
-                and existing
-                and brain["settings"].get("semantic")
-                and any(item.get(key) != existing.get(key) for key in ("excluded", "title"))
-            ):
-                self.start_task("index", {"brainId": brain_id, "force": True})
             return item
+
+    def _count_annotations(self, doc_id: str) -> None:
+        """Store a document's citation count, writing only that field."""
+        with self.write_transaction():
+            count = sum(citation["docId"] == doc_id for citation in self.entities("citations"))
+            self.edit_document(doc_id, lambda doc: doc.update(annotations=count))
 
     def confirm_replacement(self, older_id: str, newer_id: str) -> dict[str, Any]:
         """Mark older_id as replaced by newer_id, or clear the mark when newer_id is empty.
@@ -1581,14 +2449,15 @@ class BrainLibrary:
         """
         from gofer.ui.brain_families import newest_replacement
 
-        with self.lock:
+        # One immediate transaction from the checks to brain.json, writing only the mark:
+        # a re-index another process publishes meanwhile keeps both.
+        with self.lock, self.write_transaction():
             older = self.entity("documents", older_id)
             brain = self.brain(older["brainId"])
             if not Path(brain["root"]).is_dir():
                 raise ValueError("Brain folder is unavailable")
-            if not newer_id:
-                older.pop("replacedBy", None)
-            else:
+            mark: dict[str, Any] | None = None
+            if newer_id:
                 newer = self.entity("documents", newer_id)
                 if newer["brainId"] != older["brainId"]:
                     raise ValueError("A report can only be replaced by one in the same brain")
@@ -1600,8 +2469,15 @@ class BrainLibrary:
                         "That report is already marked as replaced by this one. "
                         "Clear that mark first."
                     )
-                older["replacedBy"] = {"docId": newer_id, "at": now()}
-            self.put("documents", older)
+                mark = {"docId": newer_id, "at": now()}
+
+            def replace(doc: dict[str, Any]) -> None:
+                if mark is None:
+                    doc.pop("replacedBy", None)
+                else:
+                    doc["replacedBy"] = mark
+
+            older = self.edit_document(older_id, replace)
             self._portable(older["brainId"])
             return older
 
@@ -1619,6 +2495,14 @@ class BrainLibrary:
         if block_id and block_id not in blocks:
             raise ValueError("Evidence passage is not present in the pinned source version")
         quote = evidence.get("quote")
+        if not block_id and quote:
+            # A quote without a passage: use the one passage that contains it.
+            if not blocks and version != doc["version"]:
+                raise ValueError(
+                    "That source version is unavailable. Leave version out to use the current one."
+                )
+            block_id = locate_quote(doc, blocks, quote)
+            evidence["blockId"] = block_id
         if block_id and quote is None:
             evidence["quote"] = blocks[block_id]
             quote = evidence["quote"]
@@ -1626,21 +2510,80 @@ class BrainLibrary:
             if not quote or quote not in blocks.get(block_id, ""):
                 raise ValueError("Citation text does not match its source passage")
             text = blocks[block_id]
-            start = text.index(quote)
-            evidence.update(
-                selector={
-                    "exact": quote,
-                    "prefix": text[max(0, start - 80) : start],
-                    "suffix": text[start + len(quote) : start + len(quote) + 80],
-                    "start": start,
-                    "end": start + len(quote),
-                },
-                snapshot=text,
-            )
+            evidence.update(selector=quote_selector(text, quote), snapshot=text)
         evidence["version"] = version
         return doc
 
+    def resolve_evidence(
+        self, entries: Any, readable: Callable[[str], object]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Check the evidence a Rem task or thread gave with a saved report.
+
+        `readable(brain_id)` raises ValueError when the saver may not read that brain;
+        it runs before the passages are looked at, so an error never names passages
+        from another brain. Each entry is checked with validate_evidence, which finds
+        the passage for a quote given without blockId. A bad entry is marked and left
+        out instead of failing the save. Returns the citations to record and one mark
+        per entry, numbered as given so the report's [n] references still match.
+        """
+        if entries is None:
+            return [], []
+        if not isinstance(entries, list):
+            return [], [{"n": 0, "status": "rejected", "error": "evidence must be a list"}]
+        citations: list[dict[str, Any]] = []
+        marks: list[dict[str, Any]] = []
+        for index, reference in enumerate(entries[:500]):
+            n = index + 1
+            try:
+                entry = evidence_entry(reference)
+                given = {key for key in ("blockId", "version") if entry.get(key)}
+                try:
+                    brain_id = self.entity("documents", entry["docId"])["brainId"]
+                    readable(brain_id)
+                except ValueError:
+                    raise ValueError(
+                        f"{entry['docId']} isn't a document in the brains you can read. "
+                        "Use the documentId that search or read_note returned."
+                    ) from None
+                self.validate_evidence(entry)
+            except (ValueError, KeyError, TypeError) as exc:
+                marks.append(
+                    {
+                        "n": n,
+                        "status": "rejected",
+                        **(
+                            {"docId": reference["docId"]}
+                            if isinstance(reference, dict)
+                            and isinstance(reference.get("docId"), str)
+                            else {}
+                        ),
+                        "error": str(exc),
+                    }
+                )
+                continue
+            citations.append({**entry, "id": f"c-{n}", "n": n, "state": "unreviewed"})
+            marks.append(
+                {
+                    "n": n,
+                    "status": "cited",
+                    "docId": entry["docId"],
+                    "blockId": entry["blockId"],
+                    "version": entry["version"],
+                    **({"found": sorted({"blockId", "version"} - given)} if len(given) < 2 else {}),
+                }
+            )
+        if len(entries) > 500:
+            marks.append({"n": 501, "status": "rejected", "error": "Only 500 citations are kept"})
+        return citations, marks
+
     def update_brain(self, params: dict[str, Any]) -> dict[str, Any]:
+        backup_patch = params["patch"].get("backup")
+        if isinstance(backup_patch, dict) and backup_patch.get("folder"):
+            # Checked outside the lock: a slow or sleeping drive must not hold up the library.
+            brain = self.brain(str(params["id"]))
+            chosen = validate_backup(backup_patch, Path(brain["root"]))["folder"]
+            if chosen != backup_settings(brain)["folder"]:
+                probe_folder(Path(chosen))
         with self.lock:
             brain = self.brain(str(params["id"]))
             patch = params["patch"]
@@ -1653,9 +2596,16 @@ class BrainLibrary:
                 brain["root"] = str(root)
                 reindex = True
             brain["name"] = str(patch.get("name", brain["name"]))
+            rules_changed = False
             if "settings" in patch:
                 settings = {**brain["settings"], **patch["settings"]}
                 validate_settings(settings)
+                # Left out of brain.json until used, so older Raticode builds can still
+                # open brains that have no folder rules.
+                rules = checked_rules(settings.pop("folderRules", None))
+                if rules:
+                    settings["folderRules"] = rules
+                rules_changed = rules != (brain["settings"].get("folderRules") or {})
                 if settings.get("semantic") and importlib.util.find_spec("fastembed") is None:
                     raise ValueError(
                         "Local semantic search requires the packaged FastEmbed component"
@@ -1704,10 +2654,52 @@ class BrainLibrary:
                     brain["backupStatus"] = {**brain.get("backupStatus", {}), "enabledAt": now()}
             brain["lastOpened"] = patch.get("lastOpened", brain["lastOpened"])
             self.put_brain(brain)
+            if (
+                rules_changed
+                and self._apply_folder_rules(brain)
+                and brain["settings"].get("semantic")
+            ):
+                # Files back in search need their meaning vectors.
+                reindex = True
             self._portable(brain["id"])
         if reindex:
             self.start_task("index", {"brainId": brain["id"], "force": True})
         return brain
+
+    def _apply_folder_rules(self, brain: dict[str, Any]) -> int:
+        """Leave documents out of search, or put them back, after the folder rules changed.
+
+        Only library records and the search index change; files are never touched.
+        Returns how many documents changed.
+        """
+        rules = brain["settings"].get("folderRules")
+        changed = 0
+        with self.connect() as db:
+            for doc in self.entities("documents", brain["id"]):
+                if not apply_rule(doc, rules):
+                    continue
+                changed += 1
+                db.execute(
+                    "UPDATE entities SET body=? WHERE kind='documents' AND id=?",
+                    (encode(doc), doc["id"]),
+                )
+                db.execute("DELETE FROM passages WHERE doc=?", (doc["id"],))
+                db.execute("DELETE FROM vectors WHERE doc=?", (doc["id"],))
+                if not doc.get("excluded") and doc["extraction"] == "ready":
+                    for block in doc["blocks"]:
+                        db.execute(
+                            "INSERT INTO passages VALUES(?,?,?,?,?)",
+                            (brain["id"], doc["id"], block["id"], doc["title"], block["text"]),
+                        )
+        return changed
+
+    def folder_rules(self, brain_ids: Sequence[str]) -> dict[str, dict[str, str]]:
+        """Each brain's folder rules, for brains that have any."""
+        return {
+            brain_id: rules
+            for brain_id in brain_ids
+            if (rules := self.brain(brain_id)["settings"].get("folderRules"))
+        }
 
     def request(self, action: str, params: dict[str, Any]) -> Any:
         if action == "snapshot":
@@ -1840,10 +2832,13 @@ class BrainLibrary:
                     brain["ignoredIssues"] = list(set(brain.get("ignoredIssues", []) + [issue_id]))
                     self.put_brain(brain)
                 elif issue_id in issues:
-                    doc = self.entity("documents", issues[issue_id]["docId"])
-                    doc["ignoredIssues"] = list(set(doc.get("ignoredIssues", []) + [issue_id]))
-                    self.put("documents", doc)
-                    self._portable(doc["brainId"])
+
+                    def ignore(doc: dict[str, Any], issue: str = issue_id) -> None:
+                        doc["ignoredIssues"] = list(set(doc.get("ignoredIssues", []) + [issue]))
+
+                    with self.lock, self.write_transaction():
+                        doc = self.edit_document(issues[issue_id]["docId"], ignore)
+                        self._portable(doc["brainId"])
             return {}
         if action == "backup_estimate":
             return self.backup_estimate(str(params["brainId"]))
@@ -1866,6 +2861,10 @@ class BrainLibrary:
             )
         if action == "clear_replacement":
             return self.confirm_replacement(str(params.get("docId", "")), "")
+        if action == "mark_series":
+            return self.mark_series(
+                str(params.get("seriesId", "")), params.get("notSeries", True) is not False
+            )
         if action == "related":
             doc = self.entity("documents", str(params["id"]))
             return [item["docId"] for item in self._similar(doc) if not item["revision"]][:5]
@@ -2159,8 +3158,41 @@ class BrainLibrary:
             "provenance": provenance,
         }
 
-    def record_artifact(self, path: Path, provenance: dict[str, Any]) -> dict[str, Any] | None:
-        """Register a report a Rem task saved into a registered brain, with how it was made."""
+    @staticmethod
+    def _describe_artifact(
+        record: dict[str, Any],
+        title: str,
+        question: str,
+        citations: list[dict[str, Any]] | None,
+    ) -> None:
+        """Put the title, question and checked citations a save call gave on its record."""
+        if title:
+            record["title"] = title[:300]
+        if question:
+            record["question"] = question[:2000]
+        if citations:
+            record["citations"] = citations
+            record["sourceVersions"] = list(
+                {
+                    (c["docId"], c["version"]): {"docId": c["docId"], "version": c["version"]}
+                    for c in citations
+                }.values()
+            )
+
+    def record_artifact(
+        self,
+        path: Path,
+        provenance: dict[str, Any],
+        *,
+        title: str = "",
+        question: str = "",
+        citations: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        """Register a report a Rem task saved into a registered brain, with how it was made.
+
+        `citations` come from resolve_evidence, already checked against the brains the
+        task may read. `title` and `question` replace the ones Raticode would guess.
+        """
         try:
             resolved = path.resolve(strict=True)
         except OSError:
@@ -2180,22 +3212,109 @@ class BrainLibrary:
                     None,
                 )
                 if existing is not None:
+                    # A Library refresh can register the task's receipt first. Give that
+                    # record what the save call said, once.
+                    backfilled = (existing.get("provenance") or {}).get("source") == "receipt"
+                    described = citations or title or question
+                    if backfilled and described and not existing["citations"]:
+                        self._describe_artifact(existing, title, question, citations)
+                        self.put("reports", existing)
+                        self._portable(brain["id"])
                     return existing
-                try:
-                    data = read_source(Path(brain["root"]), relative)
-                    title = str(extract(data, resolved.suffix.lower()).get("title") or "")
-                except (OSError, ValueError):
-                    title = ""
+                if not title:
+                    try:
+                        data = read_source(Path(brain["root"]), relative)
+                        title = str(extract(data, resolved.suffix.lower()).get("title") or "")
+                    except (OSError, ValueError):
+                        title = ""
                 record = self._artifact_record(
                     brain,
                     relative,
                     title,
                     {"basis": "observed", "hashMatches": True, "at": now(), **provenance},
                 )
+                self._describe_artifact(record, title, question, citations)
                 self.put("reports", record)
                 self._portable(brain["id"])
             return record
         return None
+
+    def apply_pending_reports(self) -> int:
+        """Store the report records save_note queued while the library was busy.
+
+        A record is stored when the file at its artifactPath still has its output hash,
+        and its document (once indexed) is labelled as a Rem report. A record whose
+        brain or file is gone, or whose file changed since, is dropped. Returns how
+        many were stored. A busy database leaves the rest queued for the next check.
+        """
+        stored = 0
+        for path, report in pending_reports(self.folder):
+            if self.stop.is_set():
+                break
+            if report is None:
+                log.warning("Dropped an unreadable queued Second Brain report: %s", path.name)
+                path.unlink(missing_ok=True)
+                continue
+            # A database error (busy again) propagates: this and later records stay queued.
+            try:
+                kept = self._apply_pending_report(report)
+            except (OSError, ValueError) as exc:
+                log.debug("Kept queued report %s (%s)", report["id"], type(exc).__name__)
+                continue
+            if kept is not None:
+                stored += kept
+                path.unlink(missing_ok=True)
+        return stored
+
+    def _apply_pending_report(self, report: dict[str, Any]) -> int | None:
+        """1 when stored, 0 when dropped, None to try again later."""
+        try:
+            brain = self.brain(report["brainId"])
+        except ValueError:
+            return 0
+        root = Path(brain["root"])
+        if not root.is_dir():
+            return None
+        try:
+            data = read_source(root, report["artifactPath"])
+        except (FileNotFoundError, ValueError):
+            # Deleted, or no longer a plain file inside the brain.
+            return 0
+        if "sha256:" + hashlib.sha256(data).hexdigest() != report["outputHash"]:
+            log.info("Dropped queued report %s: its file changed since it was saved", report["id"])
+            return 0
+        with self.lock:
+            existing = next(
+                (
+                    item
+                    for item in self.entities("reports", brain["id"])
+                    if item["artifactPath"] == report["artifactPath"]
+                ),
+                None,
+            )
+            if existing is None:
+                self.put("reports", report)
+            elif existing.get("outputHash") == report["outputHash"] or existing["citations"]:
+                return 0
+            else:
+                # A refresh registered the file first. Give that record what save_note said.
+                self._describe_artifact(
+                    existing, report["title"], report["question"], report["citations"]
+                )
+                existing["provenance"] = {
+                    **(existing.get("provenance") or {}),
+                    **report["provenance"],
+                }
+                existing["outputHash"] = report["outputHash"]
+                self.put("reports", existing)
+            version = report["outputHash"].removeprefix("sha256:")
+            for doc in self.documents_at(report["artifactPath"], [brain["id"]]).values():
+                if doc["version"] == version and doc.get("origin") != "agent":
+                    self.edit_document(
+                        doc["id"], lambda doc: doc.update(type="report", origin="agent")
+                    )
+            self._portable(brain["id"])
+        return 1
 
     def observe(self, doc: dict[str, Any], kind: str, actor: dict[str, Any]) -> None:
         """Remember that a Rem thread read a document (one row per thread and document)."""
@@ -2291,8 +3410,7 @@ class BrainLibrary:
                     self.put("reports", report)
                     updated += 1
             for doc in touched_docs:
-                doc.update(type="report", origin="agent")
-                self.put("documents", doc)
+                self.edit_document(doc["id"], lambda doc: doc.update(type="report", origin="agent"))
             if created or updated:
                 self._portable(brain_id)
         return {"created": created, "updated": updated, "skipped": skipped}
@@ -2393,6 +3511,7 @@ class BrainLibrary:
                 "verify",
                 "conversations",
                 "scheduled",
+                "acceptSmaller",
                 "collectionId",
                 "provider",
                 "question",
@@ -2581,6 +3700,7 @@ class BrainLibrary:
                         raise ValueError(
                             "Source changed. Refresh the library before extracting it."
                         )
+                    old_blocks = doc.get("blocks") or []
                     if kind == "ocr":
                         blocks = ocr_pdf(source_data, str(params.get("language", "eng")), cancel)
                         doc.update(
@@ -2589,7 +3709,10 @@ class BrainLibrary:
                     else:
                         encoding = str(params.get("encoding", "utf-8"))
                         extracted = extract(
-                            source_data, Path(doc["path"]).suffix.lower(), encoding=encoding
+                            source_data,
+                            Path(doc["path"]).suffix.lower(),
+                            encoding=encoding,
+                            cancel=cancel,
                         )
                         doc.update(
                             blocks=extracted["blocks"],
@@ -2597,8 +3720,23 @@ class BrainLibrary:
                             encoding=encoding,
                             error="",
                         )
+                        if "reader" in extracted:
+                            doc["reader"] = extracted["reader"]
+                        apply_summary(
+                            doc,
+                            (extracted.get("summary", ""), extracted.get("summarySource", "")),
+                        )
                     with self.lock:
                         self.put("documents", doc)
+                        if old_blocks != doc["blocks"]:
+                            rewritten = {doc_id: (doc["version"], old_blocks, doc["blocks"])}
+                            with self.connect() as db:
+                                db.execute(
+                                    "DELETE FROM embeddings WHERE brain=? AND doc=?",
+                                    (doc["brainId"], doc_id),
+                                )
+                            for brain_id in self._reanchor_evidence(rewritten) - {doc["brainId"]}:
+                                self._portable(brain_id)
                     progress(90 * (index + 1) / len(docs))
                 result = self.scan(task["brainId"], cancel, progress)
             self._task_update(
@@ -2850,24 +3988,46 @@ class BrainLibrary:
     def search(self, params: dict[str, Any]) -> dict[str, Any]:
         import numpy as np
 
+        from gofer.ui.brain_queries import checked_query, semantic_text
+
         brains = params.get("brainIds") or [params["brainId"]]
         for brain_id in brains:
             self.brain(brain_id)
         query = str(params.get("query", ""))[:2000]
-        words = re.findall(r"\w+", query, re.UNICODE)[:32]
+        # The app's query syntax: plain words rank by BM25 as before, quoted phrases go
+        # in as FTS5 phrases, and field clauses, phrases and -exclusions are checked
+        # against each hit's document below.
+        parsed = checked_query(query)
+        filtered = bool(parsed["clauses"] or parsed["phrases"] or parsed["exclude"])
+        if parsed["filters"].get("brains"):
+            wanted = set(parsed["filters"]["brains"])
+            brains = [
+                brain_id
+                for brain_id in brains
+                if brain_id.casefold() in wanted
+                or self.brain(brain_id)["name"].casefold() in wanted
+            ]
+        words = [word for term in parsed["terms"] for word in re.findall(r"\w+", term)][:32]
+        phrases = [phrase for phrase in parsed["phrases"] if re.search(r"\w", phrase)][:8]
+        plain = not (parsed["clauses"] or parsed["exclude"] or parsed["any"])
+        meaning = query if plain else semantic_text(query)
         hits: dict[tuple[str, str], dict[str, Any]] = {}
+        document_scores: dict[str, float] = {}
         mode = params.get("mode", "exact")
-        if words and mode != "semantic":
-            clause = " OR ".join('"' + word.replace('"', '""') + '"' for word in words)
+        if brains and not words and not phrases and filtered:
+            return self._filter_listing(parsed, brains)
+        if brains and (words or phrases) and mode != "semantic":
+            clause = " OR ".join('"' + text.replace('"', '""') + '"' for text in words + phrases)
+            in_brains = ",".join("?" for _ in brains)
             with self.connect() as db:
+                # A passage is a hit only when its own text matches. Every row repeats its
+                # document's title, so the title gets a weight of 0 here and is matched
+                # once per document below instead.
                 for row in db.execute(
-                    (
-                        "SELECT doc,block,bm25(passages) AS score FROM passages WHERE"
-                        " passages MATCH ? AND brain IN ("
-                    )
-                    + ",".join("?" for _ in brains)
-                    + ") ORDER BY score LIMIT 2000",
-                    (clause, *brains),
+                    "SELECT doc,block,bm25(passages,0,0,0,0,1) AS score FROM passages"
+                    f" WHERE passages MATCH ? AND brain IN ({in_brains})"
+                    " ORDER BY score LIMIT 2000",
+                    (f"content : ({clause})", *brains),
                 ):
                     hits[(row[0], row[1])] = {
                         "docId": row[0],
@@ -2875,12 +4035,57 @@ class BrainLibrary:
                         "score": -row[2],
                         "matchKind": "content",
                     }
+                # A title match raises its document once. A document found only by its
+                # title is listed once, at its first passage (rows keep passage order).
+                # bm25 can't run inside an aggregate, so a materialized step scores the rows.
+                titles = {
+                    row[0]: (row[1], -row[3])
+                    for row in db.execute(
+                        "WITH matched AS MATERIALIZED (SELECT doc,block,rowid AS at,"
+                        "bm25(passages,0,0,0,1,0) AS score FROM passages"
+                        f" WHERE passages MATCH ? AND brain IN ({in_brains}))"
+                        " SELECT doc,block,MIN(at),score FROM matched GROUP BY doc"
+                        " ORDER BY score LIMIT 2000",
+                        (f"title : ({clause})", *brains),
+                    )
+                }
+                # Documents rank by the sum of their best passages, each scored on its
+                # title and text together with the title weighted 5 to 1. A document
+                # with several strong passages beats one with a single lucky passage.
+                # On 91 requests from Rem's own task history this lifted top-1 from
+                # 0.154 to 0.242 and top-5 from 0.484 to 0.549 (scripts/brain-search-
+                # test-set.py). Which passages are listed still follows the rules above.
+                document_scores = {
+                    row[0]: -row[1]
+                    for row in db.execute(
+                        "WITH matched AS MATERIALIZED (SELECT doc,"
+                        f"bm25(passages,0,0,0,{TITLE_WEIGHT},1.0) AS score FROM passages"
+                        f" WHERE passages MATCH ? AND brain IN ({in_brains})),"
+                        " ranked AS (SELECT doc,score,ROW_NUMBER() OVER"
+                        " (PARTITION BY doc ORDER BY score) AS place FROM matched)"
+                        " SELECT doc,SUM(score) AS total FROM ranked WHERE place <= ?"
+                        " GROUP BY doc ORDER BY total LIMIT 2000",
+                        (f"{{title content}} : ({clause})", *brains, BEST_PASSAGES),
+                    )
+                }
+            for item in hits.values():
+                item["score"] += titles.get(item["docId"], ("", 0.0))[1]
+            matched = {item["docId"] for item in hits.values()}
+            for doc_id, (block_id, score) in titles.items():
+                if doc_id not in matched:
+                    hits[(doc_id, block_id)] = {
+                        "docId": doc_id,
+                        "blockId": block_id,
+                        "score": score,
+                        "matchKind": "title",
+                    }
         meaning_order: list[str] = []
-        if words and mode != "exact":
+        meaning_words = re.findall(r"\w+", meaning)
+        if meaning_words and mode != "exact":
             enabled = [
                 brain_id for brain_id in brains if self.brain(brain_id)["settings"].get("semantic")
             ]
-            lowered = {word.casefold() for word in words}
+            lowered = {word.casefold() for word in meaning_words}
             for brain_id in enabled:
                 brain = self.brain(brain_id)
                 vectors = self._vectors(brain_id)
@@ -2888,7 +4093,7 @@ class BrainLibrary:
                     continue
                 with self.model_lock:
                     query_vector = np.asarray(
-                        self._embedding(query, brain, threading.Event(), query=True),
+                        self._embedding(meaning, brain, threading.Event(), query=True),
                         dtype=np.float32,
                     )
                 matrix = vectors["matrix"]
@@ -2896,8 +4101,17 @@ class BrainLibrary:
                     continue
                 norm = float(np.linalg.norm(query_vector)) or 1.0
                 scores = matrix @ (query_vector / norm)
-                documents = {doc["id"]: doc for doc in self.entities("documents", brain_id)}
-                for row in np.argsort(-scores)[:200]:
+                top = np.argsort(-scores)[:200]
+                # Decode only the documents behind the windows that can match.
+                documents = self.documents(
+                    (
+                        vectors["rowDocs"][int(row)]
+                        for row in top
+                        if float(scores[int(row)]) >= 0.45
+                    ),
+                    [brain_id],
+                )
+                for row in top:
                     score = float(scores[int(row)])
                     if score < 0.45:
                         break
@@ -2926,10 +4140,29 @@ class BrainLibrary:
                             "score": score,
                             "matchKind": "meaning",
                         }
+        if filtered and hits:
+            allowed = self._query_matches(parsed, {item["docId"] for item in hits.values()}, brains)
+            hits = {key: item for key, item in hits.items() if item["docId"] in allowed}
+            meaning_order = [doc_id for doc_id in meaning_order if doc_id in allowed]
+        # Each document's passages stay together, best first, at its document's place.
+        # The document ID breaks ties, so two documents with equal scores (duplicate
+        # files, say) never interleave their passages.
         exact = sorted(
-            (item for item in hits.values() if item["matchKind"] == "content"),
-            key=lambda item: -item["score"],
+            (item for item in hits.values() if item["matchKind"] in {"content", "title"}),
+            key=lambda item: (
+                -document_scores.get(item["docId"], 0.0),
+                item["docId"],
+                -item["score"],
+            ),
         )
+        from gofer.ui.brain_series import names_date
+
+        # A query about a date (a date in the words, or a date clause such as modified:)
+        # keeps the plain score order: no recency lift, and no grouping of dated report
+        # series.
+        dated = bool(params.get("dated") or parsed["date"] or names_date(query))
+        if exact and not dated:
+            exact = self._lift_recent(exact, document_scores, brains)
         related = sorted(
             (item for item in hits.values() if item["matchKind"] == "meaning"),
             key=lambda item: -item["score"],
@@ -2937,45 +4170,258 @@ class BrainLibrary:
         ordered = exact + related
         if mode == "hybrid":
             # Reciprocal rank fusion of documents (k = 60), so BM25 and cosine scales are
-            # never compared directly. A document's passages stay together in rank order.
+            # never compared directly. The word ranking is the document order above, and a
+            # document's passages stay together in rank order.
             fused: dict[str, float] = {}
             sources: dict[str, set[str]] = {}
             # A passage found both ways is listed once, but its document counts in both
             # rankings, so meaning order comes from every semantic match.
+            # The word ranking names how each document matched: by its passages
+            # ("content"), or only by its title ("title").
             rankings = (
-                ("content", [item["docId"] for item in exact]),
-                ("meaning", meaning_order),
+                [(item["docId"], item["matchKind"]) for item in exact],
+                [(doc_id, "meaning") for doc_id in meaning_order],
             )
-            for kind, ranking in rankings:
-                for rank, doc_id in enumerate(dict.fromkeys(ranking), start=1):
+            for ranking in rankings:
+                kinds = dict(ranking)
+                for rank, doc_id in enumerate(kinds, start=1):
                     fused[doc_id] = fused.get(doc_id, 0.0) + 1 / (60 + rank)
-                    sources.setdefault(doc_id, set()).add(kind)
+                    sources.setdefault(doc_id, set()).add(kinds[doc_id])
             position = {id(item): index for index, item in enumerate(ordered)}
             ordered.sort(key=lambda item: (-fused[item["docId"]], position[id(item)]))
             for item in ordered:
                 item["score"] = fused[item["docId"]]
                 item["fusedFrom"] = sorted(sources[item["docId"]])
-        from gofer.ui.brain_families import demote_replaced, replacement_status
+        return self._search_reply(ordered, brains, group=not dated)
 
-        documents_by_id = {
-            doc["id"]: doc for brain_id in brains for doc in self.entities("documents", brain_id)
+    def _lift_recent(
+        self, exact: list[dict[str, Any]], scores: Mapping[str, float], brains: Sequence[str]
+    ) -> list[dict[str, Any]]:
+        """Exact hits with their first documents ranked again for recency (recency_lift).
+
+        Each document's passages stay together in their order.
+        """
+        doc_ids = list(dict.fromkeys(item["docId"] for item in exact))
+        window = doc_ids[:RECENCY_WINDOW]
+        if len(window) < 2:
+            return exact
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id, json_extract(body, '$.dates.added'),"
+                " json_extract(body, '$.dates.modified') FROM entities"
+                " WHERE kind='documents' AND brain IN ("
+                + ",".join("?" for _ in brains)
+                + ") AND id IN ("
+                + ",".join("?" for _ in window)
+                + ")",
+                (*brains, *window),
+            ).fetchall()
+        appeared = {row[0]: appeared_at({"added": row[1], "modified": row[2]}) for row in rows}
+        place = {
+            doc_id: index for index, doc_id in enumerate(recency_lift(doc_ids, scores, appeared))
         }
-        replaced = {
+        position = {id(item): index for index, item in enumerate(exact)}
+        return sorted(exact, key=lambda item: (place[item["docId"]], position[id(item)]))
+
+    def _query_library(self, parsed: dict[str, Any]) -> dict[str, Any]:
+        """The collections, citations, reports and brains a parsed query's clauses read."""
+        from gofer.ui.brain_queries import needs_library
+
+        library: dict[str, Any] = {kind: self.entities(kind) for kind in needs_library(parsed)}
+        if parsed["filters"].get("brains"):
+            library["brains"] = self.brains()
+        return library
+
+    def _query_matches(
+        self, parsed: dict[str, Any], doc_ids: Iterable[str], brains: Sequence[str]
+    ) -> set[str]:
+        """Which of these documents pass the query's fields, phrases and exclusions."""
+        from gofer.ui.brain_queries import query_matches
+
+        library = self._query_library(parsed)
+        return {
             doc_id
-            for doc_id, doc in documents_by_id.items()
-            if (doc.get("replacedBy") or {}).get("docId")
+            for doc_id, doc in self.documents(doc_ids, brains).items()
+            if query_matches(doc, parsed, {}, library, words=False)
         }
-        ordered = demote_replaced(ordered, replaced)
+
+    def _filter_listing(self, parsed: dict[str, Any], brains: list[str]) -> dict[str, Any]:
+        """A query with only fields and exclusions lists matching documents, newest first."""
+        from gofer.ui.brain_queries import query_matches
+
+        library = self._query_library(parsed)
+        documents = [
+            doc
+            for brain_id in brains
+            for doc in self.entities("documents", brain_id)
+            if query_matches(doc, parsed, {}, library, words=False)
+        ]
+        documents.sort(key=lambda doc: (doc.get("dates") or {}).get("modified") or "", reverse=True)
+        ordered = [
+            {
+                "docId": doc["id"],
+                "blockId": doc["blocks"][0]["id"] if doc.get("blocks") else "",
+                "score": 0.0,
+                "matchKind": "filter",
+            }
+            for doc in documents
+        ][:2000]
+        return self._search_reply(ordered, brains)
+
+    def _search_reply(
+        self, ordered: list[dict[str, Any]], brains: list[str], *, group: bool = False
+    ) -> dict[str, Any]:
+        """Ranked hits with replaced reports and unused archive files moved after the rest.
+
+        With ``group``, matching editions of a dated report series list together, newest
+        first, at the best edition's place. Every hit in a series carries ``series``.
+        """
+        from gofer.ui.brain_families import ARCHIVE_SOURCE, demote_replaced, replacement_status
+        from gofer.ui.brain_series import group_series, series_field
+
+        series = self.series_index(brains)
+        if group:
+            ordered = group_series(ordered, series)
+        # Only documents marked replaced or with a check-by date change the order or
+        # carry status here, so read just their headers instead of every document.
+        flagged = self.document_headers(brains, flagged=True)
+        replaced = {
+            doc_id for doc_id, doc in flagged.items() if (doc.get("replacedBy") or {}).get("docId")
+        }
+        # Unused conversation archive files rank last; headers are enough to find them.
+        archived = self.unused_archive(brains)
+        lowered = self.lowered_documents(brains, (item["docId"] for item in ordered))
+        ordered = demote_replaced(ordered, replaced, archived, lowered)
+        lookup = DocumentHeaders(self, brains, flagged)
         for item in ordered:
-            doc = documents_by_id.get(item["docId"])
-            if doc and (item["docId"] in replaced or doc.get("checkBy")):
-                item.update(replacement_status(doc, documents_by_id))
+            doc = flagged.get(item["docId"])
+            if doc:
+                item.update(replacement_status(doc, lookup))
+            if item["docId"] in lowered and item.get("status", "current") == "current":
+                item.update(status=LOWERED, folder=lowered[item["docId"]])
+            if item["docId"] in archived:
+                item["source"] = ARCHIVE_SOURCE
+            if item["docId"] in series:
+                item["series"] = series_field(series[item["docId"]])
         return {
             "hits": ordered,
             "generation": {
                 brain_id: self.brain(brain_id)["index"]["generation"] for brain_id in brains
             },
         }
+
+    def lowered_documents(self, brain_ids: Sequence[str], ids: Iterable[str]) -> dict[str, str]:
+        """Which of these documents a folder rule lists after other results, by folder."""
+        rules = self.folder_rules(brain_ids)
+        if not any(rule == LIST_AFTER for each in rules.values() for rule in each.values()):
+            return {}
+        found: dict[str, str] = {}
+        for doc_id, header in self.document_headers(list(rules), ids).items():
+            folder = lowered_folder(header["path"], rules.get(header["brainId"]))
+            if folder:
+                found[doc_id] = folder
+        return found
+
+    def series_index(self, brain_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Each document's place in a dated report series, remembered for one revision.
+
+        Series come from file names and modified dates in the document headers, and the
+        user's "Not a series" marks, which are all written through the library.
+        """
+        from gofer.ui.brain_series import detect_series, series_index
+
+        key = tuple(brain_ids)
+        revision = self.revision()
+        cached = self._series.get(key)
+        if cached and cached[0] == revision:
+            return cached[1]
+        index = series_index(detect_series(self.document_headers(brain_ids).values()))
+        self._series[key] = (revision, index)
+        return index
+
+    def mark_series(self, series_id: str, not_series: bool) -> dict[str, Any]:
+        """Mark a detected series "Not a series", or undo that mark.
+
+        The mark is stored on every member's document record and written to the brain's
+        portable metadata. Files are not changed.
+        """
+        from gofer.ui.brain_series import detect_series
+
+        def mark(doc: dict[str, Any]) -> None:
+            if not_series:
+                doc["notSeries"] = True
+            else:
+                doc.pop("notSeries", None)
+
+        with self.lock, self.write_transaction():
+            found = detect_series(self.entities("documents"))
+            group = next((item for item in found if item["id"] == series_id), None)
+            if group is None:
+                raise ValueError("That report series is no longer in the library")
+            brain = self.brain(group["brainId"])
+            if not Path(brain["root"]).is_dir():
+                raise ValueError("Brain folder is unavailable")
+            members = self.document_ids(
+                (edition["docId"] for edition in group["editions"]), [group["brainId"]]
+            )
+            for doc_id in members:
+                self.edit_document(doc_id, mark)
+            self._portable(group["brainId"])
+            return {**group, "notSeries": not_series}
+
+    def unused_archive(self, brain_ids: Sequence[str]) -> set[str]:
+        """``unused_archive_documents`` for every document, remembered for one revision.
+
+        Document headers are read only when a selected brain has a conversation archive.
+        Archive files reach the index only through a scan, which moves the revision.
+        """
+        key = tuple(brain_ids)
+        revision = self.revision()
+        cached = self._unused_archive.get(key)
+        if cached and cached[0] == revision:
+            return set(cached[1])
+
+        def headers() -> Iterator[dict[str, Any]]:
+            yield from self.document_headers(brain_ids).values()
+
+        archived = self.unused_archive_documents(list(brain_ids), headers())
+        self._unused_archive[key] = (revision, frozenset(archived))
+        return archived
+
+    def unused_archive_documents(
+        self, brain_ids: list[str], documents: Iterable[dict[str, Any]]
+    ) -> set[str]:
+        """Files in Rem's conversation archive that no report, citation or collection uses.
+
+        Search ranks these after every other hit. Nothing leaves the index, so a reference
+        this check misses only moves a cited file down; it never hides or breaks it.
+        """
+        from gofer.ui.brain_graph import conversation_archives
+
+        folders: dict[str, set[str]] = {}
+        for brain_id in brain_ids:
+            found = {
+                path.name for path in conversation_archives(Path(self.brain(brain_id)["root"]))
+            }
+            if found:
+                folders[brain_id] = found
+        if not folders:
+            return set()
+        archived = {
+            doc["id"]
+            for doc in documents
+            if doc["path"].split("/", 1)[0] in folders.get(doc["brainId"], ())
+        }
+        if not archived:
+            return set()
+        evidence = {kind: self.entities(kind) for kind in ("citations", "reports", "collections")}
+        used = {ref["docId"] for ref in evidence_references(evidence)}
+        used |= {
+            item["docId"]
+            for report in evidence["reports"]
+            for item in report.get("sourceVersions", [])
+        }
+        return archived - used
 
     def _needs_embedding(self, brain: dict[str, Any]) -> bool:
         """Once per run: a brain with related meaning on but no stored vectors re-embeds.
@@ -2991,20 +4437,49 @@ class BrainLibrary:
             ).fetchone()
         return stored is None and brain["index"].get("documents", 0) > 0
 
+    def private_brains_inside(self, brain: dict[str, Any]) -> set[Path]:
+        """Folders of other brains inside [brain] that keep Allow cloud processing off.
+
+        Their files belong to that private brain, so the outer brain's index leaves them
+        out: a cloud-allowed brain around a private one would otherwise index and serve
+        the private brain's notes as its own.
+        """
+        from gofer.ui.brain_privacy import brain_is_private
+
+        root = Path(brain["root"])
+        inside: set[Path] = set()
+        for other in self.brains():
+            if other["id"] == brain["id"] or not brain_is_private(other):
+                continue
+            folder = Path(os.path.realpath(other["root"]))
+            if folder != root and folder.is_relative_to(root):
+                inside.add(folder)
+        return inside
+
     def needs_scan(self, brain_id: str) -> bool:
         brain = self.brain(brain_id)
+        private_inside = self.private_brains_inside(brain)
+        if brain["index"].get("state") == "ready" and brain["index"].get("origins") != (
+            ORIGIN_LABELS
+        ):
+            # Relabels conversation attachments indexed before they were imported.
+            return True
         root = Path(brain["root"])
+        documents = self.entities("documents", brain_id)
+        if any(html_reader_stale(doc) for doc in documents):
+            # HTML read by an older reader: one re-extraction after the upgrade.
+            return True
         previous = {
-            doc["path"]: doc.get("fingerprint")
-            for doc in self.entities("documents", brain_id)
-            if not doc.get("missing")
+            doc["path"]: doc.get("fingerprint") for doc in documents if not doc.get("missing")
         }
         seen = set()
         for parent, dirs, files in os.walk(root, followlinks=False):
             dirs[:] = [
                 name
                 for name in dirs
-                if not name.startswith(".") and not (Path(parent) / name).is_symlink()
+                if not name.startswith(".")
+                and not (Path(parent) / name).is_symlink()
+                and Path(parent) / name not in private_inside
             ]
             for name in files:
                 target = Path(parent) / name
@@ -3029,6 +4504,11 @@ class BrainLibrary:
                 failure.failed(exc)
 
     def _monitor_pass(self) -> None:
+        # Before the refresh checks, so the scan below labels the saved file a report.
+        try:
+            self.apply_pending_reports()
+        except sqlite3.Error as exc:
+            log.debug("Kept queued Second Brain reports (%s)", type(exc).__name__)
         for brain in self.brains():
             if self.stop.is_set():
                 return
@@ -3171,14 +4651,22 @@ class BrainLibrary:
     def backup(
         self, params: dict[str, Any], cancel: threading.Event, progress: Callable[[float], None]
     ) -> dict[str, Any]:
-        """Write a complete package to the backup folder, verify the saved copy, then prune."""
+        """Write a complete package to the backup folder, verify the saved copy, then prune.
+
+        A copy with less than half the files, documents or bytes of the last verified one
+        is kept and nothing is pruned. ``acceptSmaller`` makes the new copy the one later
+        backups compare with.
+        """
         brain = self.brain(params["brainId"])
         # Re-check: the brain may have moved since the folder was chosen.
         settings = validate_backup(backup_settings(brain), Path(brain["root"]))
         if not settings["folder"]:
             raise ValueError("Choose a backup folder in Brain settings first")
         folder = Path(settings["folder"])
-        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ValueError(write_error_message(exc, folder)) from exc
         clean_partials(folder)
         moment = datetime.now(UTC)
         destination = backup_path(folder, brain, moment)
@@ -3205,7 +4693,6 @@ class BrainLibrary:
             destination.unlink(missing_ok=True)
             raise
         progress(95)
-        removed = prune(folder, brain, settings["keep"], destination)
         verified = {
             "at": now(),
             "path": str(destination),
@@ -3214,6 +4701,26 @@ class BrainLibrary:
             "documents": checked["documents"],
             "conversations": exported["conversations"],
         }
+        last = (self.brain(brain["id"]).get("backupStatus") or {}).get("lastVerified")
+        smaller = [] if params.get("acceptSmaller") else smaller_counts(verified, last)
+        if smaller:
+            # An emptied, half-synced or unmounted brain folder: keep this copy and every
+            # older one, and keep comparing with the last full copy until the user
+            # accepts the smaller size.
+            self._backup_status(
+                brain["id"],
+                lastAttempt={
+                    "at": verified["at"],
+                    "state": "kept",
+                    "error": "",
+                    "detail": KEPT_SMALLER,
+                    "smaller": smaller,
+                    **{key: verified[key] for key in ("path", "size", "files", "documents")},
+                    "conversations": verified["conversations"],
+                },
+            )
+            return {**verified, "removed": [], "verified": True, "kept": True, "smaller": smaller}
+        removed = prune(folder, brain, settings["keep"], destination)
         self._backup_status(
             brain["id"],
             lastVerified=verified,
@@ -3326,6 +4833,9 @@ class BrainLibrary:
             for doc in library["documents"]
             if not doc.get("missing")
         }
+        # Files the folder walk found that no library document names. Another program
+        # (Rem saving a note, a sync tool) may remove one before it is read.
+        walked: set[str] = set()
         if purpose in {"complete", "documents"}:
             # Preserve vault configuration and attachments, without exporting
             # Raticode caches/secrets.
@@ -3340,10 +4850,22 @@ class BrainLibrary:
                 ]
                 for name in names:
                     path = Path(parent) / name
-                    if path.is_symlink() or name in {".env", ".env.local", "credentials.json"}:
+                    if (
+                        path.is_symlink()
+                        or name in {".env", ".env.local", "credentials.json"}
+                        or ATOMIC_TEMPORARY.match(name)
+                    ):
                         continue
                     relative = path.relative_to(root).as_posix()
-                    sources.setdefault(f"files/{relative}", (root, relative))
+                    if f"files/{relative}" not in sources:
+                        walked.add(f"files/{relative}")
+                        sources[f"files/{relative}"] = (root, relative)
+        # Before any file is read: a package can't hold names that differ only by
+        # case, and the archive check would refuse them only after reading everything.
+        twins = case_twins(sources)
+        if twins:
+            first, second = (name.removeprefix("files/") for name in twins[0])
+            raise CaseTwinError(twin_message(first, second))
         if purpose != "documents":
             # Refuse before reading a gigabyte into memory: the verifier would reject it.
             total, largest = 0, ("", 0)
@@ -3373,7 +4895,13 @@ class BrainLibrary:
         for name, (base, relative) in sources.items():
             if cancel.is_set():
                 raise InterruptedError("Export cancelled")
-            files[name] = read_source(base, relative)
+            try:
+                files[name] = read_source(base, relative)
+            except FileNotFoundError:
+                # A library document that is gone still fails the package; a stray
+                # file removed since the walk simply isn't in it.
+                if name not in walked:
+                    raise
         if purpose == "documents":
             files = {name.removeprefix("files/"): content for name, content in files.items()}
         manifest: dict[str, Any] = {
@@ -3384,12 +4912,18 @@ class BrainLibrary:
             "library": library if purpose != "documents" else {"documents": library["documents"]},
             "files": {name: hashlib.sha256(data).hexdigest() for name, data in files.items()},
         }
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        # A recognizable name, so a backup can remove one left by a killed process.
-        with tempfile.NamedTemporaryFile(
-            dir=destination.parent, prefix=".raticode-export-", suffix=".zip.partial", delete=False
-        ) as handle:
-            temporary = Path(handle.name)
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            # A recognizable name, so a backup can remove one left by a killed process.
+            with tempfile.NamedTemporaryFile(
+                dir=destination.parent,
+                prefix=".raticode-export-",
+                suffix=".zip.partial",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+        except OSError as exc:
+            raise ValueError(write_error_message(exc, destination.parent)) from exc
         try:
             with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 if purpose != "documents":
@@ -3421,6 +4955,12 @@ class BrainLibrary:
                 "size": destination.stat().st_size,
                 "conversations": not archives,
             }
+        except InterruptedError:
+            raise
+        except OSError as exc:
+            # The drive's own words, such as "[Errno 27] File too large", say nothing
+            # about FAT32's 4 GB limit or a read-only mount.
+            raise ValueError(write_error_message(exc, destination.parent)) from exc
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -3549,11 +5089,18 @@ class BrainLibrary:
         doc = next(
             doc for doc in self.entities("documents", brain["id"]) if doc["path"] == relative
         )
-        doc.update(
-            type="capture", origin="imported", inbox=True, dates={**doc["dates"], "captured": now()}
-        )
-        self.put("documents", doc)
-        self._portable(brain["id"])
+        captured = now()
+        with self.lock, self.write_transaction():
+            self.edit_document(
+                doc["id"],
+                lambda doc: doc.update(
+                    type="capture",
+                    origin="imported",
+                    inbox=True,
+                    dates={**doc["dates"], "captured": captured},
+                ),
+            )
+            self._portable(brain["id"])
         return {"docId": doc["id"], "path": relative}
 
     def _provider_generate(
@@ -3586,7 +5133,13 @@ class BrainLibrary:
 
             extra_args: list[str] = []
             if name == "codex":
-                extra_args = resource_cli_args(name, AgentResources.none(), Path(name_))
+                account_home = settings.env.get("CODEX_HOME")
+                extra_args = resource_cli_args(
+                    name,
+                    AgentResources.none(),
+                    Path(name_),
+                    codex_home=Path(account_home) if account_home else None,
+                )
             elif name == "claude_code":
                 extra_args = [
                     "--tools",
@@ -3596,8 +5149,15 @@ class BrainLibrary:
                     '{"mcpServers":{}}',
                 ]
             settings = settings.model_copy(update={"extra_args": extra_args})
+            from gofer.ui.rem_home_provider import one_shot_env
+
+            # A report is written in one call whose prompt is never sent again.
             config = AgentConfig(
-                agent_id="Rem", subscription=name, working_dir=Path(name_), model=settings.model
+                agent_id="Rem",
+                subscription=name,
+                working_dir=Path(name_),
+                model=settings.model,
+                env=one_shot_env(name),
             )
             subscription = _SUBSCRIPTIONS[name]
             if name in {"codex", "claude_code"}:
@@ -4020,11 +5580,15 @@ class BrainLibrary:
             self.put("reports", report)
             self._portable(brain["id"])
         self.scan(brain["id"], cancel)
-        for doc in self.entities("documents", brain["id"]):
-            if doc["path"] == report["artifactPath"]:
-                doc.update(type="report", origin="generated", inbox=report["draft"])
-                self.put("documents", doc)
-        self._portable(brain["id"])
+        with self.lock, self.write_transaction():
+            for doc_id in self.documents_at(report["artifactPath"], [brain["id"]]):
+                self.edit_document(
+                    doc_id,
+                    lambda doc: doc.update(
+                        type="report", origin="generated", inbox=report["draft"]
+                    ),
+                )
+            self._portable(brain["id"])
         return {
             "reportId": report["id"],
             "path": str(artifact),

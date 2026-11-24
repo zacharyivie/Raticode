@@ -251,7 +251,7 @@ private fun FolderRows(folder: ExplorerFolder, query: String, onOpen: (ExplorerE
  */
 @RequiresApi(29)
 @Composable
-private fun FileViewerPage(client: LiveClient, projectId: String, projectName: String, path: String, listedSize: Long?, listedModified: String,
+internal fun FileViewerPage(client: LiveClient, projectId: String, projectName: String, path: String, listedSize: Long?, listedModified: String,
                            type: String, locked: Boolean, onAskRem: ((String) -> Unit)?, onClose: () -> Unit) {
     val name = FileExplorer.name(path)
     val viewer = FileExplorer.viewer(name)

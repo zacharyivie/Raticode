@@ -33,11 +33,15 @@ MANAGED_DATA_FOLDERS = frozenset(
         "organization-skills",
         "organization-worktrees",
         "radish",
+        # Report theme settings handed to report and Second Brain tool servers, by content.
+        "report-themes",
         # Saved answers of nodes with cache: DURATION, one folder per workflow.
         "rattish-cache",
         "rattish-triggers",
         "rem-work",
         "rem-worktrees",
+        # Temp files and caches of sandboxed workflow agent steps, one folder per run.
+        "run-scratch",
         "run-state",
         "second-brains",
         # Run retention settings (retention.json).
@@ -54,6 +58,9 @@ MANAGED_DATA_FOLDERS = frozenset(
 )
 # Every chat-* folder belongs to Rem's chats, including ones added later.
 MANAGED_DATA_FOLDER_PREFIXES = ("chat-",)
+# Every <provider>-accounts folder holds one provider's account sign-ins
+# (provider_accounts.py), including providers added later.
+MANAGED_DATA_FOLDER_SUFFIXES = ("-accounts",)
 
 
 def is_managed_data_folder(name: str) -> bool:
@@ -62,4 +69,8 @@ def is_managed_data_folder(name: str) -> bool:
     Case is ignored, as on the case-insensitive file systems of macOS and Windows.
     """
     folded = name.lower()
-    return folded in MANAGED_DATA_FOLDERS or folded.startswith(MANAGED_DATA_FOLDER_PREFIXES)
+    return (
+        folded in MANAGED_DATA_FOLDERS
+        or folded.startswith(MANAGED_DATA_FOLDER_PREFIXES)
+        or folded.endswith(MANAGED_DATA_FOLDER_SUFFIXES)
+    )

@@ -13,7 +13,9 @@ from typing import Any, cast
 
 import pytest
 
+from gofer.core.command_slots import memory_hold as real_memory_hold
 from gofer.core.provider_capabilities import CLI_PROVIDERS
+from gofer.ui.chat import INCOMPLETE_JSON_RECORD
 from gofer.ui.chat_jobs import ChatJobs
 from gofer.ui.chat_steering import ChatSteering
 from gofer.ui.rem_home import RemHome, Superseded, subject_hash
@@ -26,7 +28,7 @@ from gofer.ui.rem_home_models import (
     worker_config,
 )
 from gofer.ui.rem_home_provider import MalformedDecision
-from gofer.ui.rem_home_store import RemHomeStore
+from gofer.ui.rem_home_store import RemHomeStore, encode
 
 # Task card fields the conversation fills in from the run as it is now.
 LIVE_CARD = {"state", "needs_user", "step"}
@@ -57,13 +59,10 @@ def recipe(project: Path | None = None, **patch: Any) -> dict[str, Any]:
 
 @pytest.fixture
 def home(tmp_path: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
-    import gofer.ui.rem_home as rem_home_module
-
     # The automatic worker limit follows this computer's cores and memory (2 on a
     # 4-core CI runner), and new workers wait when memory runs low. Pin both so
     # tests behave the same on every host; admission tests set their own values.
-    monkeypatch.setattr(rem_home_module, "memory_available_bytes", lambda: 8 * 1024**3)
-    monkeypatch.setattr(rem_home_module, "swap_blocked", lambda: None)
+    monkeypatch.setattr("gofer.core.command_slots.memory_hold", lambda: None)
 
     async def source(**kwargs: Any):
         instructions = kwargs["agent_instructions"]
@@ -568,10 +567,49 @@ def test_large_project_can_complete_review_but_reviewer_edits_still_block(
 
     home.source = mutating_reviewer
     task = home.create_task({"request_id": "changed-project", **recipe(project)})["task"]
-    run = wait_run(home, task["id"], {"succeeded", "blocked"}, timeout=15)
+    # Files that keep changing (another task landing on the same checkout) wait and are
+    # checked again later instead of blocking the run.
+    run = wait_run(home, task["id"], {"succeeded", "blocked", "queued"}, timeout=15)
+    deadline = time.monotonic() + 10
+    while len(changes) < 3 and time.monotonic() < deadline:
+        run = wait_run(home, task["id"], {"succeeded", "blocked", "queued"}, timeout=15)
+        time.sleep(0.01)
+    run = wait_run(home, task["id"], {"succeeded", "blocked", "queued"}, timeout=15)
+    assert run["state"] == "queued" and len(changes) == 3
+    with home.store.read() as db:
+        stored = home.store.get(db, "runs", run["id"])
+    assert stored["review_change_retries"] == 1 and stored["resume_review"]
+    assert stored["not_before"] > datetime.now(UTC).isoformat()
+    assert "files to settle" in stored["phase_label"]
+
+
+def test_review_files_changing_blocks_only_after_its_waits(
+    home: RemHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import gofer.ui.rem_home as rem_home_module
+
+    monkeypatch.setattr(rem_home_module, "REVIEW_CHANGE_RETRY_SECONDS", (0,))
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "source.py"
+    source.write_text("value = 1\n")
+    original = home.source
+    changes = []
+
+    async def mutating_reviewer(**kwargs):
+        if "independent read-only reviewer" in kwargs["agent_instructions"]:
+            changes.append(kwargs)
+            source.write_text(f"value = {len(changes) + 1}\n")
+        async for event in original(**kwargs):
+            yield event
+
+    home.source = mutating_reviewer
+    task = home.create_task({"request_id": "always-changing", **recipe(project)})["task"]
+    run = wait_run(home, task["id"], {"succeeded", "blocked"}, timeout=20)
     assert run["state"] == "blocked"
     assert "source files kept changing" in run["summary_short"].lower()
-    assert len(changes) == 3
+    # Three reviews, one wait, then three more reviews.
+    assert len(changes) == 6
 
 
 @pytest.mark.parametrize("problem", [False, True])
@@ -893,7 +931,13 @@ def test_rem_requests_attention_only_with_a_specific_consequential_question(home
     )["task"]
     run = wait_run(home, task["id"], {"succeeded", "blocked"})
     assert run["state"] == "blocked"
-    assert run["summary_short"] == "Do you authorize paying $20 for this service?"
+    # A question with no recommended answer never reaches the user bare: Raticode builds
+    # the card itself (rem_decisions).
+    assert run["summary_short"] == (
+        "Rem couldn't settle this. Here is what it found. "
+        "Do you authorize paying $20 for this service?"
+    )
+    assert run["decision_request"]["fallback"] is True
     assert not home.store.thread(run["thread_id"])["metadata"].get("archived")
     assert not run["phase_label"]
 
@@ -957,7 +1001,11 @@ def test_rem_answers_work_clarifications_before_independent_review(
     assert run["state"] == ("blocked" if needs_user else "succeeded"), run
     if needs_user:
         assert len(workers) == len(reviews) == 1
-        assert run["summary_short"] == "Do you authorize paying $20 for testing?"
+        assert run["summary_short"] == (
+            "Rem couldn't settle this. Here is what it found. "
+            "Do you authorize paying $20 for testing?"
+        )
+        assert run["decision_request"]["question"] == "Do you authorize paying $20 for testing?"
         assert not home.store.thread(run["thread_id"])["metadata"].get("archived")
     else:
         assert len(workers) == len(reviews) == 2
@@ -1174,6 +1222,49 @@ def test_optimistic_review_without_command_receipts_is_blocked(home: RemHome, tm
     assert run["repair_count"] == 1
     assert "command receipts" in run["summary_short"]
     assert all(c["result"] == "unknown" for c in run["criteria"])
+
+
+def test_reviewer_sees_each_tool_call_once_and_the_gate_keeps_full_traces(
+    home: RemHome, tmp_path: Path
+):
+    original = home.source
+    reviews: list[str] = []
+    command = "pytest tests/test_feature.py -k one-entry-per-call"
+
+    async def source(**kwargs):
+        if "independent read-only reviewer" in kwargs["agent_instructions"]:
+            reviews.append(kwargs["agent_instructions"])
+            async for event in original(**kwargs):
+                yield event
+            return
+        call = {"id": "call-1", "kind": "tool", "title": "Bash", "category": "shell"}
+        yield {"type": "thought", "trace": {**call, "input": "{}", "phase": "start"}}
+        yield {"type": "thought", "trace": {**call, "input": command, "phase": "update"}}
+        yield {
+            "type": "thought",
+            "trace": {
+                "id": "call-1",
+                "kind": "tool",
+                "title": "Tool result",
+                "phase": "result",
+                "status": "completed",
+                "exitCode": 0,
+                "output": "1 passed",
+            },
+        }
+        yield {"type": "final", "message": {"body": "Implemented and tested."}}
+
+    home.source = source
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    run = wait_run(home, task["id"], {"blocked", "succeeded"})
+    assert run["state"] == "succeeded", run
+    assert len(reviews) == 1
+    assert reviews[0].count(command) == 1
+    assert reviews[0].count("1 passed") == 1
+    assert "Tool result" not in reviews[0]
+    with home.store.read() as db:
+        stored = home.store.get(db, "runs", run["id"])
+    assert [t["phase"] for t in stored["worker_traces"]] == ["start", "update", "result"]
 
 
 def test_missing_worker_check_receipts_get_a_repair_turn(home: RemHome, tmp_path: Path):
@@ -1649,15 +1740,19 @@ def test_all_providers_execute_and_verify_using_selected_model(
     run_ref = {"runId": run["id"]}
     assert observed[0]["workflow"]["remManagedTask"] == {
         "readOnly": False,
+        "unattended": False,
         "networkAccess": False,
         **run_ref,
     }
     assert observed[1]["workflow"]["remManagedTask"] == {
         "readOnly": True,
+        "unattended": False,
         "networkAccess": False,
         **run_ref,
         # Nobody watches a review, so Claude Code's shell runs in its OS sandbox.
         **({"claudeSandbox": True} if provider == "claude_code" else {}),
+        # And Codex writes the data folder only where that sandbox could.
+        "limitDataFolder": True,
     }
     assert observed[1]["workflow"]["remResources"]["web"] is False
     if provider in {"grok", "antigravity"}:
@@ -1677,7 +1772,8 @@ def test_reviewers_get_a_private_scratch_folder(home: RemHome, tmp_path: Path, p
         observed.append(kwargs)
         scratch = kwargs.get("trusted_scratch_dir")
         if scratch:
-            Path(scratch).mkdir(parents=True)
+            # Chat creates it with exist_ok: the review's report rules file is already there.
+            Path(scratch).mkdir(parents=True, exist_ok=True)
             (Path(scratch) / "cache").write_text("x")
         async for event in original(**kwargs):
             yield event
@@ -1699,12 +1795,65 @@ def test_reviewers_get_a_private_scratch_folder(home: RemHome, tmp_path: Path, p
         assert review["permission_mode"] == "dontAsk"
         assert str(scratch) in review["agent_instructions"]
         assert "read-only to the shell" in review["agent_instructions"]
+        assert Path(review["workflow"]["remReportRulesFile"]).parent == scratch
         assert not scratch.exists()
         return
     scratch = Path(review["trusted_scratch_dir"])
     assert scratch.is_relative_to(home.data_dir / "rem-work" / "review-scratch")
     assert review["permission_mode"] == "read-only"
     assert str(scratch) in review["agent_instructions"]
+    assert Path(review["workflow"]["remReportRulesFile"]).parent == scratch
+    assert not scratch.exists()
+
+
+def test_a_review_that_ends_after_rem_gave_up_still_removes_its_scratch(
+    home: RemHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    original = home.source
+    release = threading.Event()
+    gave_up = threading.Event()
+    seen: list[Path] = []
+
+    async def source(**kwargs):
+        scratch = kwargs.get("trusted_scratch_dir")
+        if scratch:
+            # Chat creates it with exist_ok: the review's report rules file is already there.
+            Path(scratch).mkdir(parents=True, exist_ok=True)
+            (Path(scratch) / "cache").write_text("x")
+            seen.append(Path(scratch))
+            # The provider keeps going after Rem stopped waiting for it.
+            await asyncio.to_thread(release.wait, 10)
+        async for event in original(**kwargs):
+            yield event
+
+    waiting = home._await_turn
+
+    def give_up(identity, turn_id, role, finished, *rest):
+        if role == "verify":
+            deadline = time.monotonic() + 5
+            while not seen and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert not finished.is_set()
+            gave_up.set()
+            raise TimeoutError("Worker stop could not be confirmed. Inspect the thread.")
+        return waiting(identity, turn_id, role, finished, *rest)
+
+    monkeypatch.setattr(home, "_await_turn", give_up)
+    home.source = source
+    home.configure({"provider": "claude_code"})
+    home.create_task({"request_id": "create", **recipe(tmp_path)})
+    deadline = time.monotonic() + 10
+    while not gave_up.is_set() and time.monotonic() < deadline:
+        home.tick()
+        time.sleep(0.01)
+    assert gave_up.is_set(), home.store.tasks()
+    (scratch,) = seen
+    assert scratch.parent == home.data_dir / "rem-work" / "turn-scratch"
+    assert scratch.is_dir()
+    release.set()
+    deadline = time.monotonic() + 10
+    while scratch.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
     assert not scratch.exists()
 
 
@@ -1791,9 +1940,22 @@ def test_all_providers_research_save_and_review(home: RemHome, tmp_path: Path, p
     for options in observed:
         assert options["workflow"]["remReportTheme"] == {"format": "html", "theme": "blueprint"}
         prompt = build_chat_prompt(provider, "cli-default", [], options["workflow"])
-        assert "Default report output: standalone HTML" in prompt
-        assert "Blueprint:" in prompt
-        assert "every informational file" in prompt
+        if options is observed[0]:
+            # The worker reads the format and design rules from rem_artifacts' rules tool.
+            assert "call `rules` on rem_artifacts" in prompt
+            assert "Blueprint:" not in prompt
+        elif provider == "antigravity":
+            # Antigravity can only open the project, so its reviewer carries the rules.
+            assert "remReportRulesFile" not in options["workflow"]
+            assert prompt.count("Blueprint:") == 1
+        else:
+            # The read-only reviewer has no rules tool and never saves a report, so its
+            # prompt names the file that holds the rules instead of carrying them.
+            rules_file = options["workflow"]["remReportRulesFile"]
+            assert prompt.count(rules_file) == 1
+            assert "Default report output:" not in prompt and "Blueprint:" not in prompt
+            if Path(rules_file).exists():  # A scratch folder goes with its turn.
+                assert "Blueprint:" in Path(rules_file).read_text(encoding="utf-8")
         assert with_report_outputs(options["workflow"], None, tmp_path) is options["workflow"]
 
     assert observed[0]["workflow"]["remResources"]["web"] is True
@@ -1849,33 +2011,109 @@ def test_reviewer_placeholder_criterion_does_not_discard_the_review():
     assert "Root cause unconfirmed" in RemHome._review_summary(json.dumps(verdict), item)
 
 
-@pytest.mark.parametrize("readable_retry", [True, False])
-def test_unreadable_review_is_retried_once_in_a_fresh_session(
-    home: RemHome, tmp_path: Path, readable_retry: bool
-):
+RESTATE_TEXT = "Raticode couldn't read your verdict"
+
+
+def _restate_reviewer(home: RemHome, answers: list[str]):
+    """A reviewer that answers each review call with the next of ``answers``.
+
+    ``valid`` is the fixture's readable verdict, ``prose`` an answer with no verdict,
+    ``empty`` a verdict with no criteria and ``valid_new_session`` a readable verdict
+    from a session the provider says it couldn't resume.
+    """
     original = home.source
     reviews: list[dict[str, Any]] = []
 
     async def source(**kwargs):
         if "independent read-only reviewer" in kwargs["agent_instructions"]:
             reviews.append(kwargs)
-            if len(reviews) == 1 or not readable_retry:
+            answer = answers[len(reviews) - 1]
+            if answer == "prose":
+                yield {
+                    "type": "final",
+                    "message": {"body": "I ran the tests and the feature works as asked."},
+                }
+                return
+            if answer == "empty":
                 yield {"type": "final", "message": {"body": json.dumps({"criteria": []})}}
                 return
+            async for event in original(**kwargs):
+                if answer == "valid_new_session" and event["type"] == "final":
+                    event = {**event, "sessionResumed": False}
+                yield event
+            return
         async for event in original(**kwargs):
             yield event
 
     home.source = source
+    return reviews
+
+
+def _restates(reviews: list[dict[str, Any]]) -> list[bool]:
+    return [RESTATE_TEXT in str(r["messages"][-1]["body"]) for r in reviews]
+
+
+def test_unreadable_review_is_restated_in_the_same_session(home: RemHome, tmp_path: Path):
+    reviews = _restate_reviewer(home, ["prose", "valid"])
     task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
     run = wait_run(home, task["id"], {"blocked", "succeeded"})
-    assert len(reviews) == 2
+    assert run["state"] == "succeeded", run
+    # One review session: the restate resumed the session that gave the prose answer.
+    assert _restates(reviews) == [False, True]
+    assert reviews[0]["reset_session"] is True
+    assert reviews[1]["reset_session"] is False
+    assert reviews[1]["conversation_id"] == reviews[0]["conversation_id"]
+    assert run["review_format_retry"] is False
+    sent = [
+        m
+        for m in home.store.thread(run["verification_thread_id"])["messages"]
+        if m.get("sender") == "rem" and RESTATE_TEXT in m["body"]
+    ]
+    assert len(sent) == 1
+    # _verdict's own error, the verdict's shape and the criterion IDs.
+    assert "Reviewer did not return criterion evidence" in sent[0]["body"]
+    assert "{criteria:[{id,result:pass|fail|unknown" in sent[0]["body"]
+    assert "exactly once: check." in sent[0]["body"]
+    assert [(r["error"], r["outcome"]) for r in run["review_restates"]] == [
+        ("Reviewer did not return criterion evidence", "readable")
+    ]
+    assert run["criteria"][0]["result"] == "pass"
+
+
+@pytest.mark.parametrize(
+    ("answers", "outcome"),
+    [
+        (["prose", "empty", "valid"], "unreadable"),
+        (["prose", "valid_new_session", "valid"], "not_resumed"),
+    ],
+)
+def test_unreadable_restate_falls_back_to_a_fresh_session_recheck(
+    home: RemHome, tmp_path: Path, answers: list[str], outcome: str
+):
+    reviews = _restate_reviewer(home, answers)
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    run = wait_run(home, task["id"], {"blocked", "succeeded"})
+    assert run["state"] == "succeeded", run
+    assert _restates(reviews) == [False, True, False]
+    assert reviews[2]["reset_session"] is True
     assert run["review_format_retry"] is True
-    if readable_retry:
-        assert run["state"] == "succeeded", run
-    else:
-        assert run["state"] == "blocked"
-        assert "The work is saved" in run["summary_short"]
-        assert "exactly once" in run["error_detail"]
+    assert [r["outcome"] for r in run["review_restates"]] == [outcome]
+
+
+def test_review_unreadable_after_restate_and_recheck_blocks(home: RemHome, tmp_path: Path):
+    reviews = _restate_reviewer(home, ["empty", "prose", "empty"])
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    run = wait_run(home, task["id"], {"blocked", "succeeded"})
+    assert run["state"] == "blocked"
+    # One restate, then today's fresh-session recheck, then the run fails.
+    assert _restates(reviews) == [False, True, False]
+    assert reviews[2]["reset_session"] is True
+    assert run["review_format_retry"] is True
+    assert "The work is saved" in run["summary_short"]
+    assert "exactly once" in run["error_detail"]
+    assert [(r["error"], r["outcome"]) for r in run["review_restates"]] == [
+        ("Reviewer did not check every current criterion exactly once", "unreadable")
+    ]
 
 
 def test_thread_followup_invalidates_evidence_and_is_idempotent(home: RemHome, tmp_path: Path):
@@ -2242,9 +2480,22 @@ def test_research_output_service_proves_destination_and_hash(home: RemHome, tmp_
         tools = request(config["url"], {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})[1][
             "result"
         ]["tools"]
-        assert "Blueprint:" in tools[0]["description"]
-        assert "every informational file" in tools[0]["description"]
-        assert "Default report output: standalone HTML" in tools[0]["description"]
+        # save_report names its arguments and the format; rules returns the full theme.
+        assert "Blueprint:" not in tools[0]["description"]
+        assert "Default format: standalone HTML" in tools[0]["description"]
+        assert tools[1]["name"] == "rules"
+        rules = request(
+            config["url"],
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "rules", "arguments": {}},
+            },
+        )[1]["result"]["content"][0]["text"]
+        assert "Blueprint:" in rules
+        assert "every informational file" in rules
+        assert "Default report output: standalone HTML" in rules
 
         def save(path: str) -> dict[str, Any]:
             return cast(
@@ -2280,6 +2531,73 @@ def test_research_output_service_proves_destination_and_hash(home: RemHome, tmp_
         Path(saved["artifacts"][0]["path"]).write_text(document + "tampered")
         with pytest.raises(ValueError, match="changed"):
             validate_artifacts(saved)
+
+
+def test_research_report_in_a_project_folder_ignores_evidence_and_says_so(
+    home: RemHome, tmp_path: Path
+):
+    from gofer.ui.rem_home_artifacts import artifact_tools
+    from gofer.ui.report_outputs import CITATION_RULES
+    from tests.unit.test_swarm_tools import request
+
+    task = home.create_task({"request_id": "create", **recipe(tmp_path, type="research")})["task"]
+    run = task["active_run"]
+    with artifact_tools(home, run, "execute") as config:
+        assert config is not None
+        tool = request(config["url"], {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})[1][
+            "result"
+        ]["tools"][0]
+        # The same citation instruction as second_brain.save_note, from the rules tool.
+        rules = request(
+            config["url"],
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "rules", "arguments": {}},
+            },
+        )[1]["result"]["content"][0]["text"]
+        assert CITATION_RULES in rules
+        assert CITATION_RULES not in tool["description"]
+        assert "evidence, title and question" in tool["description"]
+        schema = tool["inputSchema"]["properties"]
+        assert {"evidence", "title", "question"} <= set(schema)
+        assert schema["evidence"]["items"]["required"] == ["docId", "quote"]
+
+        def save(arguments: dict[str, Any]) -> dict[str, Any]:
+            return cast(
+                dict[str, Any],
+                request(
+                    config["url"],
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {"name": "save_report", "arguments": arguments},
+                    },
+                )[1]["result"],
+            )
+
+        content = "<!doctype html><html><body>Findings [1]</body></html>"
+        response = save(
+            {
+                "path": "cited.html",
+                "content": content,
+                "title": "Cited",
+                "evidence": [{"docId": "doc-1", "quote": "Findings"}],
+            }
+        )
+        assert not response.get("isError"), response
+        reply = json.loads(response["content"][0]["text"])
+        assert "project folder" in reply["note"]
+        assert "evidence and title were ignored" in reply["note"]
+        assert "evidence" not in reply
+        # Without the fields there is nothing to explain.
+        plain = json.loads(save({"path": "plain.html", "content": content})["content"][0]["text"])
+        assert "note" not in plain
+    with home.store.connect() as db:
+        saved = home.store.get(db, "runs", run["id"])
+    assert len(saved["artifacts"]) == 2
 
 
 def test_research_without_saved_artifact_cannot_be_accepted(home: RemHome, tmp_path: Path):
@@ -2804,6 +3122,83 @@ def test_worker_background_stays_fixed_for_a_run_attempt(home: RemHome, monkeypa
     assert home._worker_background({**run, "epoch": 2}, {}) == {"recalled_context": [1]}
 
 
+def test_reply_prompt_sends_each_recalled_message_once_but_keeps_every_id_for_workers(
+    home: RemHome,
+):
+    # Recall always rereads the newest messages, which the history part already holds.
+    with home.store.connect() as db:
+        for i in range(69):
+            body = f"The parser drops comments, note {i}" if i < 5 else f"Unrelated chat {i}"
+            home.store.message(db, body, role="user" if i % 2 else "rem", identity=f"chat-{i}")
+    prompts = []
+
+    def generate(prompt, config, cancel):
+        prompts.append(prompt)
+        return {"reply": "I'll fix it.", "tasks": [recipe(title="Parser fix")]}
+
+    home.generate = generate
+    home.submit_message({"request_id": "chat-69", "body": "Fix the parser we talked about"})
+    home._reply()
+    records, _ = json.JSONDecoder().raw_decode(prompts[0][prompts[0].index('{"projects": ') :])
+    history = [m["id"] for m in records["history"]]
+    recalled = [m["id"] for m in records["recalled_context"]["history"]]
+    assert len(history) == 60 and history[-1] == "chat-69"
+    assert "chat-0" in recalled
+    assert not set(history) & set(recalled)
+    task = next(t for t in home.store.tasks() if t["title"] == "Parser fix")
+    replayed = task["delegation_context"]["recall_requests"][0]["message_ids"]
+    assert {f"chat-{i}" for i in range(64, 70)} <= set(replayed)
+    assert "chat-0" in replayed
+
+
+def test_worker_background_lists_each_replayed_message_and_thread_once(home: RemHome):
+    from tests.unit.test_rem_home_recall import linked_run
+
+    first, second = linked_run(home.store), linked_run(home.store)
+    for run in (first, second):
+        for i in range(3):
+            home.store.append_thread(
+                run["thread_id"],
+                {"id": f"{run['id']}-{i}", "role": "assistant", "body": f"Thread note {i}"},
+            )
+    with home.store.connect() as db:
+        for i in range(20):
+            home.store.message(db, f"Earlier chat {i}", identity=f"chat-{i}")
+        home.store.message(db, "Build the importer", role="user", identity="source")
+    requests = [
+        {
+            "message_ids": ["chat-1", "chat-2", "source"],
+            "threads": [{"thread_id": first["thread_id"]}],
+        },
+        {
+            "message_ids": ["chat-2", "chat-3"],
+            "threads": [{"thread_id": first["thread_id"]}, {"thread_id": second["thread_id"]}],
+        },
+        {"queries": ["Earlier chat"], "threads": [{"thread_id": second["thread_id"]}]},
+    ]
+    run = {
+        "id": "run-merge",
+        "epoch": 1,
+        "recipe": {
+            "prompt": "Build the importer",
+            "project_dir": None,
+            "delegation_context": {"source_message_id": "source", "recall_requests": requests},
+        },
+    }
+    context = home._worker_background(run, {})
+    text = encode(context)
+    message_ids = ["source", *(f"chat-{i}" for i in range(20))]
+    message_ids += [f"{r['id']}-{i}" for r in (first, second) for i in range(3)]
+    for identity in message_ids:
+        assert text.count(f'"id": "{identity}"') <= 1, identity
+    for identity in (first["thread_id"], second["thread_id"]):
+        assert text.count(f'"thread_id": "{identity}"') == 1, identity
+    # Every read rereads the newest messages; each still reaches the worker, once.
+    assert text.count('"id": "chat-19"') == 1 and text.count('"id": "chat-1"') == 1
+    assert context["original_request"]["id"] == "source"
+    assert all(m["id"] != "source" for e in context["recalled_context"] for m in e["history"])
+
+
 @pytest.mark.parametrize("mode", ["mixed", "exhausted", "cancelled"])
 def test_recall_cannot_execute_actions_or_run_without_a_final_decision(home: RemHome, mode: str):
     calls = []
@@ -2822,8 +3217,11 @@ def test_recall_cannot_execute_actions_or_run_without_a_final_decision(home: Rem
     home._reply()
     assert not home.store.tasks()
     assert home.store.conversation()["conversation"]["turn_state"] == "idle"
-    # A mixed reply is treated as the read it asked for, so it uses the reads left.
-    assert len(calls) == (1 if mode == "cancelled" else 3)
+    # A mixed reply is treated as the read it asked for, so it uses the reads left, then
+    # gets one last request for a final answer before the turn gives up.
+    assert len(calls) == (1 if mode == "cancelled" else 4)
+    if mode != "cancelled":
+        assert "You have used every read" in calls[-1]
 
 
 def test_rem_repairs_invalid_internal_task_fields_without_reasking_user(home: RemHome):
@@ -3522,6 +3920,28 @@ def test_human_question_is_answered_from_memories_before_interrupting_user(
     assert len(attempts) == 2
 
 
+def test_clarification_searches_notes_with_the_workers_question(home: RemHome, tmp_path: Path):
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    asked: list[str] = []
+
+    def context(query: str) -> dict[str, Any]:
+        asked.append(query)
+        return {"knowledge": [{"path": "/brain/schedule.md", "content": "Runs at 6AM"}]}
+
+    prompts: list[str] = []
+
+    def generate(prompt, config, cancel):
+        prompts.append(prompt)
+        return {"needs_user": False, "next_message": "Run it at 6AM."}
+
+    home.context, home.generate = context, generate
+    home._answer_worker(
+        task["active_run"], "What time should this run?", "Waiting", threading.Event()
+    )
+    assert asked == ["What time should this run?"]
+    assert "Runs at 6AM" in prompts[0]
+
+
 def test_restart_checks_uncertain_progress_read_only_before_repeating_actions(
     home: RemHome, tmp_path: Path
 ):
@@ -3696,7 +4116,7 @@ def test_workflow_follow_up_upgrades_research_scope_and_reuses_task_thread(
     assert run["thread_id"] == first["thread_id"]
     assert run["recipe"]["type"] == home.store.tasks()[0]["type"] == "errand"
     assert turns[0]["permission_mode"] == "workspace-write"
-    assert "Run the registered workflow once" in turns[0]["messages"][-1]["body"]
+    assert "Run the registered workflow once" in turns[0]["agent_instructions"]
     assert turns[0]["conversation_id"] != turns[1]["conversation_id"]
     assert all(m.get("worker_role") == "verify" for m in turns[1]["messages"])
     with home.store.connect() as db:
@@ -4043,6 +4463,9 @@ def test_transient_classification_covers_dropped_connections_and_missing_answers
     assert transient(ValueError("TypeError: fetch failed"))
     assert transient(ValueError(NO_FINAL_ANSWER))
     assert transient(ValueError("Worker ended without a result"))
+    # A stream that dropped partway through a record; a complete bad line is not retried.
+    assert transient(ValueError(INCOMPLETE_JSON_RECORD))
+    assert not transient(ValueError("Provider emitted malformed JSON output"))
     assert not transient(ValueError("Connection settings are invalid"))
     assert not transient(ValueError("Not logged in. Run codex login."))
 
@@ -4052,6 +4475,8 @@ def test_transient_classification_covers_dropped_connections_and_missing_answers
     [
         {"type": "error", "error": "API Error: Connection error."},
         {"type": "error", "error": "The provider ended its turn without a final answer."},
+        # Output that ended partway through a JSON record (chat.INCOMPLETE_JSON_RECORD).
+        {"type": "error", "error": INCOMPLETE_JSON_RECORD},
         # A turn that finished but whose final reply came back empty.
         {"type": "final", "message": {"body": ""}},
     ],
@@ -4271,7 +4696,12 @@ def test_a_retried_reply_is_logged_as_routine_and_never_quoted(home: RemHome, ca
     caplog.set_level(logging.DEBUG, logger="gofer")
     home.submit_message({"request_id": "fix", "body": secret_words})
     home._reply()
-    records = [r for r in caplog.records if r.name == "gofer.ui.rem_home"]
+    # This reply's lines only: a Rem home another test left running logs from its own thread.
+    records = [
+        r
+        for r in caplog.records
+        if r.name == "gofer.ui.rem_home" and r.thread == threading.get_ident()
+    ]
     assert [(r.levelno, r.getMessage()) for r in records] == [
         (
             logging.INFO,
@@ -4674,6 +5104,136 @@ def test_proof_wait_requires_a_bounded_future_event(patch: dict[str, Any]):
     assert RemHome._proof_wait({}, valid) == (soon + timedelta(minutes=30), "the next run")
 
 
+def test_rem_starts_are_placed_counting_organization_workers(home: RemHome, tmp_path: Path):
+    """Every Rem start asks the placement engine; workers of other consumers count."""
+    from tests.unit.test_rem_placement import FakeComputers
+
+    home.configure(
+        {"provider": "codex", "model": "cli-default", "command_slots": {"maxWorkers": 2}}
+    )
+    # One organization worker already runs here, so Rem has room for one more.
+    FakeComputers(organizations=1, limit=2).attach(home.placement)
+    entered = threading.Event()
+    release = threading.Event()
+    original = home.source
+
+    async def source(**kwargs):
+        if "independent read-only reviewer" not in kwargs["agent_instructions"]:
+            entered.set()
+            while not release.is_set() and not kwargs["cancel_event"].is_set():
+                await asyncio.sleep(0.01)
+        async for event in original(**kwargs):
+            yield event
+
+    home.source = source
+    first = home.create_task({"request_id": "first", **recipe(tmp_path / "a")})["task"]
+    second = home.create_task({"request_id": "second", **recipe(tmp_path / "b")})["task"]
+    try:
+        home.tick()  # asks for the computers' reading
+        assert not home.workers
+        home.tick()
+        assert entered.wait(2)
+        home.tick()
+        assert len(home.workers) == 1
+        tasks = {t["id"]: t["active_run"] for t in home.store.tasks()}
+        placement = tasks[first["id"]]["placement"]
+        assert placement["computer_id"] == "pc-1"
+        assert placement["computer_name"] == "Workstation"
+        assert placement["strategy"] == "overflow"
+        assert placement["consumer"] == "rem"
+        assert tasks[second["id"]]["waiting_reason"] == (
+            "Waiting for a free worker: Workstation is full "
+            "(2 of 2 running: 1 Rem task, 1 organization worker); "
+            "Waiting for Desktop B to share its projects"
+        )
+    finally:
+        release.set()
+    done = wait_run(home, first["id"], {"succeeded", "blocked"})
+    assert done["state"] == "succeeded"
+    # Kept for the whole run, for review.
+    assert done["placement"]["computer_id"] == "pc-1"
+    assert wait_run(home, second["id"], {"succeeded", "blocked"})["state"] == "succeeded"
+
+
+def test_placement_reads_computers_only_for_queued_runs_and_shows_a_failed_read(
+    home: RemHome, tmp_path: Path
+):
+    from tests.unit.test_rem_placement import BrokenComputers
+
+    broken = BrokenComputers()
+    home.placement.computers = broken
+    for _ in range(3):
+        home.tick()
+        time.sleep(0.4)
+    # Nothing is queued, so the registry is never read.
+    assert broken.reads == 0
+    task = home.create_task({"request_id": "blocked", **recipe(tmp_path / "a")})["task"]
+    home.tick()  # asks for a reading; the first pass waits silently
+    home.tick()  # the read fails
+    home.tick()
+    run = next(t for t in home.store.tasks() if t["id"] == task["id"])["active_run"]
+    assert broken.reads >= 1
+    assert not home.workers
+    assert run["state"] == "queued"
+    assert run["waiting_reason"] == (
+        "Waiting for the computers' reading: computers.json is unreadable"
+    )
+
+
+def test_a_run_placed_on_a_desktop_without_its_project_waits_and_runs_nowhere(
+    home: RemHome, tmp_path: Path
+):
+    """A placed start never falls back to another project on the paired desktop."""
+    from gofer.core import placement_settings, repository_fingerprint
+    from tests.unit.test_rem_placement import FakeComputers, git_repository, shared
+
+    project = git_repository(tmp_path / "Raticode")
+    here = repository_fingerprint.fingerprint(project)
+    # Desktop B has a project called Raticode open, but it is another repository.
+    other = {"id": "p-1", "name": "Raticode", "fingerprint": "b" * 64}
+    fake = FakeComputers(organizations=0, catalog=shared(other))
+    placement_settings.save(
+        home.data_dir,
+        "rem",
+        "manual",
+        ["desk-b"],
+        known_computers=fake.read()["computers"],
+        organizations=[],
+    )
+    home.placement.computers = fake
+    started: list[Any] = []
+    original = home.source
+
+    async def source(**kwargs):
+        started.append(kwargs)
+        async for event in original(**kwargs):
+            yield event
+
+    home.source = source
+    task = home.create_task({"request_id": "placed", **recipe(project)})["task"]
+    for _ in range(3):
+        home.tick()
+        time.sleep(0.05)
+    run = next(t for t in home.store.tasks() if t["id"] == task["id"])["active_run"]
+    assert run["state"] == "queued" and not home.workers and started == []
+    assert run["waiting_reason"] == (
+        "Waiting for a free worker: Desktop B has no open project matching Raticode"
+    )
+    assert "placement" not in run or not run["placement"]
+    # The same repository open there passes every check, and still nothing starts there.
+    fake.catalog = shared({**other, "fingerprint": here})
+    time.sleep(1.1)
+    for _ in range(2):
+        home.tick()
+        time.sleep(0.05)
+    run = next(t for t in home.store.tasks() if t["id"] == task["id"])["active_run"]
+    assert run["state"] == "queued" and started == []
+    assert run["waiting_reason"] == (
+        "Waiting for a free worker: Desktop B could run this work in its Raticode project, "
+        "but work doesn't start on other computers yet"
+    )
+
+
 def test_settings_limit_workers_and_reach_every_thread(home: RemHome, tmp_path: Path):
     from gofer.core.command_slots import read_settings, slots_root
 
@@ -4714,7 +5274,14 @@ def test_settings_limit_workers_and_reach_every_thread(home: RemHome, tmp_path: 
         home.tick()
         assert len(home.workers) == 1
         waiting = next(t for t in home.store.tasks() if t["id"] == second["id"])["active_run"]
-        assert waiting["waiting_reason"] == "Waiting for a free worker (1 task is running)"
+        assert waiting["waiting_reason"] == (
+            "Waiting for a free worker: This computer is full (1 of 1 running)"
+        )
+        running = next(t for t in home.store.tasks() if t["id"] == first["id"])["active_run"]
+        # The start was placed by the engine and the run keeps where and how, for review.
+        assert running["placement"]["computer_id"] == "this"
+        assert running["placement"]["strategy"] == "overflow"
+        assert "placement" not in waiting
     finally:
         release.set()
     assert wait_run(home, first["id"], {"succeeded", "blocked"})["state"] == "succeeded"
@@ -4724,10 +5291,12 @@ def test_settings_limit_workers_and_reach_every_thread(home: RemHome, tmp_path: 
 def test_new_workers_wait_for_free_memory(
     home: RemHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    import gofer.ui.rem_home as rem_home_module
+    import gofer.core.command_slots as command_slots
 
     available = [8 * 1024**3]
-    monkeypatch.setattr(rem_home_module, "memory_available_bytes", lambda: available[0])
+    monkeypatch.setattr(command_slots, "memory_hold", real_memory_hold)
+    monkeypatch.setattr(command_slots, "swap_blocked", lambda: None)
+    monkeypatch.setattr(command_slots, "memory_available_bytes", lambda: available[0])
     entered = threading.Event()
     release = threading.Event()
     original = home.source
@@ -4762,17 +5331,19 @@ def test_rem_tests_admit_the_same_workers_on_a_small_computer(
     home: RemHome, monkeypatch: pytest.MonkeyPatch
 ):
     import gofer.core.command_slots as command_slots
-    import gofer.ui.rem_home as rem_home_module
 
     # A one-core, 2 GB computer would allow one worker automatically.
     monkeypatch.setattr(command_slots, "cpu_count", lambda: 1)
     monkeypatch.setattr(command_slots, "memory_total_bytes", lambda: 2 * 1024**3)
     assert command_slots.default_limits()["maxWorkers"] == 1
 
-    # The fixture's saved limit and free memory keep concurrency tests host-independent.
-    assert home._admission() == (8, None)
-    available = rem_home_module.memory_available_bytes()
-    assert available is not None and available >= command_slots.WORKER_MEMORY_FLOOR
+    # The fixture's saved limit and memory hold keep concurrency tests host-independent.
+    assert home._admission() == 8
+    held = home.placement.claims.record("this", "rem")
+    try:
+        assert home.placement.claims.held_back("this") is None
+    finally:
+        held.release()
 
 
 def test_waiting_or_running_tests_keep_a_quiet_turn_alive(
@@ -5292,20 +5863,22 @@ def test_new_workers_wait_while_swap_is_nearly_full(
     home: RemHome, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import gofer.core.command_slots as command_slots
-    import gofer.ui.rem_home as rem_home_module
 
-    monkeypatch.setattr(rem_home_module, "swap_blocked", command_slots.swap_blocked)
+    claims = home.placement.claims
+    monkeypatch.setattr(command_slots, "memory_hold", real_memory_hold)
+    monkeypatch.setattr(command_slots, "memory_available_bytes", lambda: 8 * 1024**3)
     monkeypatch.setattr(command_slots, "swap_used_share", lambda: 0.9)
-    limit, reason = home._admission()
     # One worker can always start, whatever the swap.
-    assert reason is None
-    finished = threading.Thread(target=lambda: None)
-    finished.start()
-    finished.join()
-    monkeypatch.setattr(home, "workers", {"busy": (finished, threading.Event())})
-    assert home._admission() == (limit, "Waiting for free memory (swap is 90% full)")
-    monkeypatch.setattr(command_slots, "swap_used_share", lambda: 0.4)
-    assert home._admission() == (limit, None)
+    assert claims.held_back("this") is None
+    busy = claims.claim("this", "rem", 8)
+    assert busy is not None
+    try:
+        assert claims.held_back("this") == "Waiting for free memory (swap is 90% full)"
+        assert claims.claim("this", "rem", 8, first=True) is None
+        monkeypatch.setattr(command_slots, "swap_used_share", lambda: 0.4)
+        assert claims.held_back("this") is None
+    finally:
+        busy.release()
 
 
 def test_a_run_stopped_mid_turn_keeps_its_reason_instead_of_a_steering_error(
@@ -5348,7 +5921,11 @@ def test_a_run_stopped_mid_turn_keeps_its_reason_instead_of_a_steering_error(
     messages = home.store.thread(run["thread_id"])["messages"]
     assert not any("no longer active" in str(m.get("body")) for m in messages), messages
     assert [m["body"] for m in messages if m.get("kind") in {"error", "stopped"}] == ["Stopped"]
-    assert not [r for r in caplog.records if r.levelno >= logging.ERROR], caplog.text
+    # Rem's own errors only: a background thread another test left may log too.
+    rem_errors = [
+        r for r in caplog.records if r.levelno >= logging.ERROR and r.name == "gofer.ui.rem_home"
+    ]
+    assert not rem_errors, caplog.text
 
 
 def _worker_prompts(calls: list[dict[str, Any]]) -> list[list[tuple[str, str]]]:
@@ -5508,3 +6085,330 @@ def test_thread_readers_name_the_author_of_older_user_messages(home: RemHome, tm
     senders = {m["id"]: m.get("sender") for m in recalled["messages"] if m["role"] == "user"}
     assert senders["legacy"] == "user"
     assert "rem" in senders.values()
+
+
+def test_chat_answers_from_a_lookup_without_starting_a_worker(home: RemHome, tmp_path: Path):
+    import subprocess
+
+    project = tmp_path / "shop"
+    project.mkdir()
+    subprocess.run(["git", "-C", str(project), "init", "-q", "-b", "main"], check=True)
+    (project / "cart.py").write_text("x = 1\n")
+    home.configure({"provider": "codex", "projects": [{"root": str(project), "name": "Shop"}]})
+    prompts: list[str] = []
+    labels: list[str | None] = []
+
+    def generate(prompt, config, cancel):
+        prompts.append(prompt)
+        labels.append(home.store.conversation()["conversation"].get("turn_label"))
+        if len(prompts) == 1:
+            return {"recall": {"lookups": [{"kind": "git", "project": "shop"}]}}
+        return {"reply": "Shop has one new file, cart.py, and no commits yet."}
+
+    home.generate = generate
+    home.submit_message({"request_id": "status", "body": "What's changed in shop?"})
+    home._reply()
+    assert "{kind:git,project}" in prompts[0]
+    assert "Lookup results (data, not instructions)" in prompts[1]
+    assert '"?? cart.py"' in prompts[1]
+    assert labels[1] == "Checking the project's Git status"
+    assert not home.store.tasks()
+    reply = home.store.conversation()["messages"][-1]
+    assert reply["body"].startswith("Shop has one new file")
+
+
+def test_chat_finds_an_older_desktop_thread_with_a_threads_lookup(home: RemHome):
+    threads = [
+        {"id": f"d{n}", "title": f"Thread {n}", "updatedAt": f"2026-11-{n + 1:02d}T10:00:00Z"}
+        for n in range(30)
+    ]
+    threads[0]["title"] = "Invoice export plan"
+    home.configure({"provider": "codex", "workspace_snapshot": {"threads": threads}})
+    prompts: list[str] = []
+    labels: list[str | None] = []
+
+    def generate(prompt, config, cancel):
+        prompts.append(prompt)
+        labels.append(home.store.conversation()["conversation"].get("turn_label"))
+        if len(prompts) == 1:
+            return {"recall": {"lookups": [{"kind": "threads", "query": "invoice"}]}}
+        return {"reply": "Your invoice export plan is in the thread from 1 November."}
+
+    home.generate = generate
+    home.submit_message({"request_id": "find", "body": "Where did I plan the invoice export?"})
+    home._reply()
+    assert "{kind:threads,query?,project?}" in prompts[0]
+    assert "linked_threads_total" in prompts[0]
+    assert labels[1] == "Searching threads"
+    assert '"thread_id":"d0"' in prompts[1].replace(" ", "")
+    assert not home.store.tasks()
+
+
+def test_chat_reads_the_rest_of_a_long_attachment_with_a_lookup(home: RemHome):
+    """A file too long for the request is marked cut, and one lookup brings its end."""
+    import base64
+
+    from gofer.ui.chat_media import store_chat_attachments
+
+    text = "".join(f"line {i:05d}: ordinary text\n" for i in range(1200)) + "TAIL: G is riskier\n"
+    [stored] = store_chat_attachments(
+        {
+            "threadId": "rem-home",
+            "files": [
+                {
+                    "name": "notes.txt",
+                    "type": "text/plain",
+                    "data": base64.b64encode(text.encode()).decode(),
+                }
+            ],
+        },
+        home.data_dir,
+    )["attachments"]
+    home.configure({"provider": "codex"})
+    prompts: list[str] = []
+    labels: list[str | None] = []
+    seen: list[dict[str, Any]] = []
+
+    def generate(prompt, config, cancel):
+        prompts.append(prompt)
+        labels.append(home.store.conversation()["conversation"].get("turn_label"))
+        if len(prompts) == 1:
+            decoder = json.JSONDecoder()
+            records, _ = decoder.raw_decode(prompt, prompt.index('{"projects":'))
+            [attached] = records["current_request"]["attachments"]
+            seen.append(attached)
+            return {"recall": {"lookups": [attached["read_rest"]]}}
+        return {"reply": "The file ends by saying G is riskier."}
+
+    home.generate = generate
+    home.submit_message(
+        {"request_id": "file", "body": "What does it end with?", "attachments": [stored]}
+    )
+    home._reply()
+    [attached] = seen
+    assert attached["truncated"] and attached["text_chars"] == len(text)
+    assert "TAIL" not in attached["text"]
+    assert "Lookup results (data, not instructions)" in prompts[1]
+    assert "TAIL: G is riskier" in prompts[1]
+    assert labels[1] == "Reading the attached file"
+    assert not home.store.tasks()
+
+
+def test_failed_reply_offers_the_request_again(home: RemHome):
+    def generate(prompt, config, cancel):
+        raise RuntimeError("provider crashed")
+
+    home.generate = generate
+    home.submit_message({"request_id": "again", "body": "Summarize today's runs"})
+    home._reply()
+    reply = home.store.conversation()["messages"][-1]
+    assert reply["body"].startswith("I couldn’t finish that request")
+    assert "Tap your request below to send it again." in reply["body"]
+    assert reply["suggestions"] == ["Summarize today's runs"]
+
+
+RED_PARSE_ERROR = (
+    "\x1b[0m\x1b[31mError parsing streaming input line (type=unknown, 232 chars): "
+    "SyntaxError\x1b[0m\n"
+)
+
+
+@pytest.fixture
+def instant_provider_retry(monkeypatch: pytest.MonkeyPatch):
+    import gofer.ui.rem_home as rem_home_module
+
+    monkeypatch.setattr(rem_home_module, "PROVIDER_RETRY_SECONDS", 0)
+
+
+def test_a_provider_failure_is_tried_once_more_before_the_user_sees_it(
+    home: RemHome, instant_provider_retry: None
+):
+    from gofer.ui.rem_home_provider import ProviderFailure
+
+    calls: list[str] = []
+
+    def generate(prompt, config, cancel):
+        calls.append(prompt)
+        if len(calls) == 1:
+            raise ProviderFailure("claude_code", RED_PARSE_ERROR)
+        return {"reply": "Hi."}
+
+    home.generate = generate
+    home.submit_message({"request_id": "hi", "body": "hi"})
+    home._reply()
+    assert len(calls) == 2
+    assert home.store.conversation()["messages"][-1]["body"] == "Hi."
+
+
+def test_a_provider_error_shown_in_chat_is_plain_words_with_the_reason(
+    home: RemHome, instant_provider_retry: None
+):
+    from gofer.ui.rem_home_provider import ProviderFailure
+
+    calls: list[str] = []
+
+    def generate(prompt, config, cancel):
+        calls.append(prompt)
+        raise ProviderFailure("claude_code", RED_PARSE_ERROR)
+
+    home.generate = generate
+    home.submit_message({"request_id": "hi", "body": "hi"})
+    home._reply()
+    # Tried twice, never more.
+    assert len(calls) == 2
+    reply = home.store.conversation()["messages"][-1]
+    assert "\x1b" not in reply["body"] and "[0m" not in reply["body"]
+    assert reply["body"] == (
+        "I couldn’t finish that request, so I didn’t change anything. Claude Code stopped "
+        "with this error: Error parsing streaming input line (type=unknown, 232 chars): "
+        "SyntaxError. Trying again once didn’t help. Tap your request below to send it again."
+    )
+    with home.store.read() as db:
+        row = db.execute("SELECT body FROM messages WHERE id='reply-hi'").fetchone()
+    assert "\x1b" not in json.loads(row[0])["diagnostic"]["error"]
+
+
+def test_a_sign_in_failure_is_shown_without_trying_again(
+    home: RemHome, instant_provider_retry: None
+):
+    from gofer.ui.rem_home_provider import ProviderFailure
+
+    calls: list[str] = []
+
+    def generate(prompt, config, cancel):
+        calls.append(prompt)
+        raise ProviderFailure(
+            "claude_code",
+            "Failed to authenticate: OAuth session expired and could not be refreshed",
+        )
+
+    home.generate = generate
+    home.submit_message({"request_id": "hi", "body": "hi"})
+    home._reply()
+    assert len(calls) == 1
+    body = home.store.conversation()["messages"][-1]["body"]
+    assert "OAuth session expired" in body and "Trying again" not in body
+
+
+def test_usage_limit_waits_for_the_reset_then_continues(
+    home: RemHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from gofer.core import usage_limits as rem_usage_limit
+
+    monkeypatch.setattr(rem_usage_limit, "UNKNOWN_RESET_WAIT", timedelta(0))
+    original = home.source
+    workers: list[dict[str, Any]] = []
+
+    async def source(**kwargs):
+        if "independent read-only reviewer" not in kwargs["agent_instructions"]:
+            workers.append(kwargs)
+            if len(workers) == 1:
+                yield {"type": "error", "error": "You've hit your usage limit."}
+                return
+        async for event in original(**kwargs):
+            yield event
+
+    home.source = source
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    run = wait_run(home, task["id"], {"blocked", "succeeded"})
+    assert run["state"] == "succeeded", run
+    assert run["usage_limit_waits"] == 1
+    assert run.get("transient_retries", 0) == 0
+    assert len(workers) == 2
+    assert workers[1]["reset_session"] is True
+
+
+def test_usage_limit_blocks_after_its_waits_run_out(
+    home: RemHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from gofer.core import usage_limits as rem_usage_limit
+
+    monkeypatch.setattr(rem_usage_limit, "UNKNOWN_RESET_WAIT", timedelta(0))
+    monkeypatch.setattr(rem_usage_limit, "MAX_WAITS", 2)
+
+    async def source(**kwargs):
+        yield {"type": "error", "error": "Weekly limit reached"}
+
+    home.source = source
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    run = wait_run(home, task["id"], {"blocked", "succeeded"})
+    assert run["state"] == "blocked"
+    assert run["usage_limit_waits"] == 2
+    assert run["summary_short"].startswith(
+        "The provider's usage limit was still reached after 2 waits"
+    )
+
+
+def listed_tasks(prompt: str) -> dict[str, Any]:
+    """The tasks section of a chat decision prompt: listed IDs and the unlisted count."""
+    records, _ = json.JSONDecoder().raw_decode(prompt[prompt.index('{"projects": ') :])
+    return {
+        "ids": [t["id"] for t in records["tasks"]],
+        "finished_not_shown": records["finished_not_shown"],
+    }
+
+
+def finished_long_ago(home: RemHome, run: dict[str, Any], **patch: Any) -> None:
+    """Test setup: the run finished ten days ago, so the chat no longer lists its task."""
+    force_run(
+        home, run["id"], finished_at=(datetime.now(UTC) - timedelta(days=10)).isoformat(), **patch
+    )
+
+
+def test_follow_up_reaches_a_finished_task_the_chat_no_longer_lists(home: RemHome, tmp_path: Path):
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    done = wait_run(home, task["id"], {"succeeded"})
+    finished_long_ago(home, done)
+    prompts: list[str] = []
+
+    def generate(prompt: str, config: Any, cancel: Any) -> dict[str, Any]:
+        prompts.append(prompt)
+        return {
+            "reply": "I’ll follow up.",
+            "controls": [{"task_id": task["id"], "action": "follow_up", "message": "Add a case"}],
+        }
+
+    home.generate = generate
+    home.submit_message({"request_id": "follow", "body": "Add a case to the old task."})
+    home._reply()
+    assert listed_tasks(prompts[0]) == {"ids": [], "finished_not_shown": 1}
+    followed = wait_run(home, task["id"], {"succeeded"})
+    assert followed["id"] != done["id"] and followed["thread_id"] == done["thread_id"]
+    assert cards(home, followed["id"])[0]["body"] == "I’ll follow up."
+
+
+def test_retry_review_reaches_a_dismissed_failure_the_chat_no_longer_lists(
+    home: RemHome, tmp_path: Path
+):
+    original = home.source
+    reviews: list[dict[str, Any]] = []
+
+    async def source(**kwargs: Any):
+        if "independent read-only reviewer" in kwargs["agent_instructions"]:
+            reviews.append(kwargs)
+            if len(reviews) == 1:
+                raise OSError(7, "Argument list too long", "/fake/codex")
+        async for event in original(**kwargs):
+            yield event
+
+    home.source = source
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    blocked = wait_run(home, task["id"], {"blocked"})
+    # The user dismissed the failure long ago: the chat lists nothing of it.
+    finished_long_ago(home, blocked, acknowledged=True)
+    prompts: list[str] = []
+
+    def generate(prompt: str, config: Any, cancel: Any) -> dict[str, Any]:
+        prompts.append(prompt)
+        return {
+            "reply": "I'll retry its review.",
+            "controls": [{"task_id": task["id"], "action": "retry_review"}],
+        }
+
+    home.generate = generate
+    home.submit_message({"request_id": "retry-review", "body": "Retry that old review"})
+    home._reply()
+    assert listed_tasks(prompts[0]) == {"ids": [], "finished_not_shown": 1}
+    finished = wait_run(home, task["id"], {"succeeded", "blocked"})
+    assert finished["state"] == "succeeded", finished
+    assert finished["id"] == blocked["id"] and len(reviews) == 2

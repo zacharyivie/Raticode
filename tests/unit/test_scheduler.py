@@ -116,9 +116,13 @@ def test_transient_operations_cleanup_sqlite_resources(tmp_path: Path) -> None:
 def test_explicit_start_resume_shutdown_cleanup(tmp_path: Path) -> None:
     db_path = tmp_path / "jobs.db"
     scheduler = WorkflowScheduler(db_path=db_path)
+    # Other tests in this process may still have scheduler threads; watch only this one's.
+    earlier = {thread for thread in threading.enumerate() if thread.name == "APScheduler"}
 
     scheduler.start(paused=True)
     assert scheduler.is_running()
+    ours = {t for t in threading.enumerate() if t.name == "APScheduler"} - earlier
+    assert ours
     scheduler.resume()
     scheduler.shutdown(wait=False)
     assert not scheduler.is_running()
@@ -126,7 +130,10 @@ def test_explicit_start_resume_shutdown_cleanup(tmp_path: Path) -> None:
     del scheduler
     _assert_no_unclosed_database_warnings()
     _assert_db_reopenable_and_replaceable(db_path)
-    assert not any(thread.name == "APScheduler" for thread in threading.enumerate())
+    # shutdown(wait=False) only wakes the scheduler's thread; give it a moment to exit.
+    for thread in ours:
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "the APScheduler thread kept running"
 
 
 def test_invalid_cron_timezone_and_missing_path_fail_clearly(tmp_path: Path) -> None:

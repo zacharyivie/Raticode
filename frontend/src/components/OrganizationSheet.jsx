@@ -11,6 +11,9 @@ import { CADENCES, DAY_NAMES, LONG_DAYS, ORDINALS, blockId, blockProblem, cleanB
 import { usageSentence } from "../lib/remKanban.js";
 import { statusLine, visibleComments } from "../lib/ticketConversation.js";
 import { ProviderModelEffortFields, useProviderCapabilities } from "./ProviderModelEffortFields.jsx";
+import WorkerAccountField from "./WorkerAccountField.jsx";
+import { accountAfterProviderChange } from "../lib/workerAccounts.js";
+import { useProviderAccountList } from "../lib/useProviderAccountList.js";
 import TicketPatchReview from "./TicketPatchReview.jsx";
 import { Avatar, Bar, Chip, Pill } from "./OrganizationViews.jsx";
 import { WorktreeSetupNotice } from "./WorktreeSetup.jsx";
@@ -139,6 +142,10 @@ function TicketSheet({ model, ticket, ctx }) {
   const linkable = Object.values(model.knowledge).filter(entry => !ticket.used.includes(entry.id));
   return <>
     {(hint => hint && <Rec label="Next"><p className={`oh-next-hint ${hint.tone}`}>{hint.text}</p></Rec>)(startHint(model, ticket))}
+    {/* A paired desktop with room while this ticket waits; nothing goes there until it's picked. */}
+    {(offer => offer && <Rec label="Room"><p className="oh-run-there" data-testid="org-run-there">{offer.pick
+      ? <><span>{offer.computer_name} has room:</span> <button className="oh-link" type="button" disabled={ctx.busy} onClick={() => ctx.onAct("run_there", { taskId: ticket.id, computerId: offer.computer_id }, `${ticket.key} runs on ${offer.computer_name}`)}>Run there</button></>
+      : <span>{offer.text}</span>}</p></Rec>)(ticket.status === "todo" && !ticket.claim ? model.runtime?.placementSuggestions?.[ticket.id] : null)}
     <Rec label="Why">{ticket.doneWhen ? <><p>{ticket.doneWhen}</p><small className="oh-faint">Done when, in your words</small></> : <Muted>No done-when yet. <button className="oh-link" type="button" onClick={startEdit}>Add one</button></Muted>}
       {ticket.description && <details className="oh-fold"><summary>Details</summary><p className="oh-prose">{ticket.description}</p></details>}</Rec>
     <Rec label="Part of"><div className="oh-chips">{ticket.project && <Chip model={model} refId={`project:${ticket.project}`} onOpen={ctx.onOpen} />}{milestone && <Chip model={model} refId={`ms:${milestone.id}`} onOpen={ctx.onOpen} />}{epic ? <Chip model={model} refId={`epic:${epic.id}`} onOpen={ctx.onOpen} /> : <Muted>No epic</Muted>}</div></Rec>
@@ -609,6 +616,7 @@ function ScheduleEditor({ model, ctx, suggested }) {
 
 function WorkerEditor({ model, worker, ctx, isNew }) {
   const { capabilities, loading, refresh } = useProviderCapabilities();
+  const { accounts } = useProviderAccountList();
   // A new worker starts on the provider and model you chose for Rem in Settings.
   const provider = ctx.defaults?.provider || "codex";
   const base = worker || { id: crypto.randomUUID(), name: "", title: "", role: "", reportsTo: null, provider, model: ctx.defaults?.model || "cli-default", effort: ctx.defaults?.effort || null, permissionMode: providerPermissionDefault(provider), paused: true, persona: "", responsibilities: [], instructions: "", resources: { shell: true, web: false, skills: [], mcpServers: [] }, skills: [], memory: "", metadata: {}, heartbeatSeconds: 0 };
@@ -618,7 +626,7 @@ function WorkerEditor({ model, worker, ctx, isNew }) {
   const [opened, setOpened] = useState(() => structuredClone(base));
   const [responsibility, setResponsibility] = useState("");
   const set = values => setDraft(current => ({ ...current, ...values }));
-  const fields = ["name", "title", "persona", "reportsTo", "provider", "model", "effort", "permissionMode", "paused", "responsibilities", "instructions", "ticketAccess", "heartbeatSeconds"];
+  const fields = ["name", "title", "persona", "reportsTo", "provider", "account", "model", "effort", "permissionMode", "paused", "responsibilities", "instructions", "ticketAccess", "heartbeatSeconds"];
   const changed = fields.filter(key => JSON.stringify(opened[key] ?? null) !== JSON.stringify(draft[key] ?? null));
   const dirty = isNew || changed.length > 0;
   // Without unsaved edits, the form follows the saved worker as it changes.
@@ -655,7 +663,8 @@ function WorkerEditor({ model, worker, ctx, isNew }) {
         <input aria-label="Add a responsibility" placeholder="Add one, then Enter" maxLength={200} value={responsibility} onChange={e => setResponsibility(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); if (responsibility.trim() && draft.responsibilities.length < 20) { set({ responsibilities: [...draft.responsibilities, responsibility.trim()] }); setResponsibility(""); } } }} /></div></div>
       <label>Reports to<select value={draft.reportsTo || ""} onChange={e => set({ reportsTo: e.target.value || null })}><option value="">You</option>{managers.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
       <ProviderModelEffortFields className="oh-provider-fields" capabilities={capabilities} loading={loading} provider={draft.provider} model={draft.model} effort={draft.effort} onRefresh={refresh}
-        onChange={values => set({ ...values, ...(values.provider && values.provider !== draft.provider ? { permissionMode: providerPermissionDefault(values.provider, capabilities.find(item => item.id === values.provider)) } : {}) })} />
+        onChange={values => set({ ...values, ...(values.provider && values.provider !== draft.provider ? { permissionMode: providerPermissionDefault(values.provider, capabilities.find(item => item.id === values.provider)), account: accountAfterProviderChange(accounts, values.provider, draft.account) } : {}) })} />
+      <WorkerAccountField accounts={accounts} provider={draft.provider} value={draft.account} onChange={account => set({ account })} />
       <label>Permissions<select value={draft.permissionMode} onChange={e => set({ permissionMode: e.target.value })}>{providerPermissionOptions(draft.provider, capability).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select></label>
       {danger && <p className="oh-warn-line"><AlertTriangle size={14} />This skips the provider&apos;s sandbox or approvals. Saving asks you to confirm.</p>}
       <details className="oh-fold"><summary>Detailed instructions</summary><textarea rows={6} maxLength={100000} value={draft.instructions} onChange={e => set({ instructions: e.target.value })} aria-label="Detailed instructions" /></details>

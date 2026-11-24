@@ -11,6 +11,8 @@ import "../src/styles/index.css";
 Object.defineProperty(navigator, "platform", { configurable: true, value: "MacIntel" });
 Object.defineProperty(navigator, "userAgent", { configurable: true, value: navigator.userAgent.replace(/X11; Linux x86_64/, "Macintosh; Intel Mac OS X 10_15_7") });
 window.monacoFixture = (await import("../src/lib/monaco.js")).loadRattishMonaco();
+// Monaco 0.56+ no longer puts the TypeScript features on monaco.languages.
+window.typeScriptWorkerFixture = (await import("monaco-editor/languages/features/typescript/register")).getTypeScriptWorker;
 window.flushDrafts = flushCodeDrafts;
 window.fixtureReady = false;
 function Fixture() {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { workflowFolderLabel, workflowFolderPath } from "./workflowFolder.js";
+import { pendingRunWorktreeCount, runWorktreeDeleteNote, workflowFolderLabel, workflowFolderPath } from "./workflowFolder.js";
 
 test("workflows outside .raticode are labelled with their project folder", () => {
   assert.equal(workflowFolderLabel({ managed: false, relativeFolder: "rattish/starters/jev-demo" }), "rattish/starters/jev-demo");
@@ -15,4 +15,25 @@ test("the editor breadcrumb uses the real folder and falls back to .raticode", (
   assert.equal(workflowFolderPath({ id: "review", relativeFolder: ".raticode/review" }), ".raticode/review");
   assert.equal(workflowFolderPath({ id: "top", relativeFolder: "." }), "");
   assert.equal(workflowFolderPath({ id: "review" }), ".raticode/review");
+});
+
+test("the delete confirmation names waiting run worktrees", async () => {
+  const asked = [];
+  const fetchImpl = async (address) => {
+    asked.push(address);
+    return { ok: true, json: async () => ({ pending: 2 }) };
+  };
+  const count = await pendingRunWorktreeCount("nightly review", { fetchImpl, url: (path) => `/api${path}` });
+  assert.equal(count, 2);
+  assert.deepEqual(asked, ["/api/workflows/nightly%20review/run-worktrees"]);
+  assert.match(runWorktreeDeleteNote(2), /2 run worktrees still wait .* removes them and their branches/);
+  assert.match(runWorktreeDeleteNote(1), /1 run worktree still waits .* removes it and its branch/);
+  assert.equal(runWorktreeDeleteNote(0), "");
+});
+
+test("a failed run worktree lookup doesn't block the delete", async () => {
+  const url = (path) => path;
+  assert.equal(await pendingRunWorktreeCount("x", { url, fetchImpl: async () => ({ ok: false }) }), 0);
+  assert.equal(await pendingRunWorktreeCount("x", { url, fetchImpl: async () => { throw new Error("offline"); } }), 0);
+  assert.equal(await pendingRunWorktreeCount("x", { url, fetchImpl: async () => ({ ok: true, json: async () => ({}) }) }), 0);
 });

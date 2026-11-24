@@ -1,0 +1,39 @@
+{
+  "testSetVersion": 1,
+  "cases": [
+    {
+      "id": "shared-text",
+      "name": "Finds the link in shared text, reads the page and tells the phone",
+      "inputs": {"link": "Worth a look: https://example.com/ (sent from my phone)"},
+      "checks": [
+        {"type": "text", "label": "Takes the link out of the shared text", "target": "nodes.find-link.stdout", "equals": "https://example.com/"},
+        {"type": "json", "label": "Reads the page title", "target": "nodes.read.title", "equals": "Example Domain"},
+        {"type": "text", "label": "Reads the page text", "target": "nodes.read.text", "contains": "illustrative examples"},
+        {"type": "json", "label": "Sends the summary to the phone", "target": "nodes.tell-phone.channel", "equals": "phone"},
+        {"type": "text", "label": "Names the page in the notice", "target": "nodes.tell-phone.title", "equals": "Summary: Example Domain"},
+        {"type": "text", "label": "Links the page in the notice", "target": "nodes.tell-phone.body", "contains": "https://example.com/"},
+        {"type": "judge", "label": "The summary is short and about the page", "target": "nodes.summarize", "criteria": "A few short bullets that describe a placeholder domain reserved for examples in documents. No more than about 600 characters."}
+      ]
+    },
+    {
+      "id": "no-link",
+      "name": "Stops when the shared text has no link",
+      "inputs": {"link": "Remember to buy milk"},
+      "expectStatus": "failed",
+      "checks": [
+        {"type": "json", "label": "Reads nothing", "target": "nodes.read", "exists": false},
+        {"type": "json", "label": "Sends nothing", "target": "nodes.tell-phone", "exists": false}
+      ]
+    },
+    {
+      "id": "private-address",
+      "name": "Refuses a link to this computer and says why on the phone",
+      "inputs": {"link": "http://127.0.0.1:9/admin"},
+      "expectStatus": "failed",
+      "checks": [
+        {"type": "json", "label": "Doesn't summarize", "target": "nodes.summarize", "exists": false},
+        {"type": "text", "label": "Tells the phone why", "target": "nodes.could-not-read.body", "contains": "private or loopback address 127.0.0.1"}
+      ]
+    }
+  ]
+}

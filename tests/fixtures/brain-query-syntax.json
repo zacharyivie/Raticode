@@ -1,0 +1,772 @@
+{
+  "comment": "Second Brain query syntax. frontend/src/lib/secondBrain.test.mjs runs these through parseQuery and tests/unit/test_brain_queries.py through parse_query; both must give exactly this.",
+  "cases": [
+    {
+      "name": "words, a phrase, an exclusion and fields",
+      "query": "event \"append only\" -draft tag:Architecture type:note published:2025..2026-06",
+      "expected": {
+        "terms": [
+          "event"
+        ],
+        "phrases": [
+          "append only"
+        ],
+        "exclude": [
+          "draft"
+        ],
+        "any": false,
+        "filters": {
+          "tags": [
+            "architecture"
+          ],
+          "types": [
+            "note"
+          ]
+        },
+        "date": {
+          "field": "published",
+          "from": "2025-01-01",
+          "to": "2026-06-30"
+        },
+        "clauses": [
+          {
+            "start": 27,
+            "end": 43,
+            "field": "tags",
+            "value": "Architecture",
+            "negated": false
+          },
+          {
+            "start": 44,
+            "end": 53,
+            "field": "types",
+            "value": "note",
+            "negated": false
+          },
+          {
+            "start": 54,
+            "end": 77,
+            "field": "date",
+            "value": "2025..2026-06",
+            "negated": false
+          }
+        ],
+        "errors": []
+      }
+    },
+    {
+      "name": "unknown field, bad date and an unclosed quote",
+      "query": "colour:red published:soon \"open phrase tag:ok",
+      "expected": {
+        "terms": [],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {},
+        "date": null,
+        "clauses": [],
+        "errors": [
+          {
+            "start": 0,
+            "end": 10,
+            "text": "colour:red",
+            "message": "“colour:” is not a search field. Use one of type:, tag:, author:, domain:, project:, folder:, in:, state:, origin:, brain:, modified:, added:, published:, captured:, generated:"
+          },
+          {
+            "start": 11,
+            "end": 25,
+            "text": "published:soon",
+            "message": "“soon” is not a date range. Use 2026, 2026-03 or 2025..2026-06."
+          },
+          {
+            "start": 26,
+            "end": 45,
+            "text": "\"open phrase tag:ok",
+            "message": "Close the quotation mark to search for this phrase."
+          }
+        ]
+      }
+    },
+    {
+      "name": "OR switches to any word",
+      "query": "journal OR snapshot",
+      "expected": {
+        "terms": [
+          "journal",
+          "snapshot"
+        ],
+        "phrases": [],
+        "exclude": [],
+        "any": true,
+        "filters": {},
+        "date": null,
+        "clauses": [],
+        "errors": []
+      }
+    },
+    {
+      "name": "only capital OR is the operator",
+      "query": "or OR",
+      "expected": {
+        "terms": [
+          "or"
+        ],
+        "phrases": [],
+        "exclude": [],
+        "any": true,
+        "filters": {},
+        "date": null,
+        "clauses": [],
+        "errors": []
+      }
+    },
+    {
+      "name": "a day range from a month to a day",
+      "query": "modified:2026-11..2026-11-14 type:report",
+      "expected": {
+        "terms": [],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {
+          "types": [
+            "report"
+          ]
+        },
+        "date": {
+          "field": "modified",
+          "from": "2026-11-01",
+          "to": "2026-11-14"
+        },
+        "clauses": [
+          {
+            "start": 0,
+            "end": 28,
+            "field": "date",
+            "value": "2026-11..2026-11-14",
+            "negated": false
+          },
+          {
+            "start": 29,
+            "end": 40,
+            "field": "types",
+            "value": "report",
+            "negated": false
+          }
+        ],
+        "errors": []
+      }
+    },
+    {
+      "name": "a month on its own covers the whole month",
+      "query": "added:2026-03",
+      "expected": {
+        "terms": [],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {},
+        "date": {
+          "field": "added",
+          "from": "2026-03-01",
+          "to": "2026-03-31"
+        },
+        "clauses": [
+          {
+            "start": 0,
+            "end": 13,
+            "field": "date",
+            "value": "2026-03",
+            "negated": false
+          }
+        ],
+        "errors": []
+      }
+    },
+    {
+      "name": "open-ended ranges",
+      "query": "published:2025.. captured:..2026",
+      "expected": {
+        "terms": [],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {},
+        "date": {
+          "field": "captured",
+          "from": "",
+          "to": "2026-12-31"
+        },
+        "clauses": [
+          {
+            "start": 0,
+            "end": 16,
+            "field": "date",
+            "value": "2025..",
+            "negated": false
+          },
+          {
+            "start": 17,
+            "end": 32,
+            "field": "date",
+            "value": "..2026",
+            "negated": false
+          }
+        ],
+        "errors": []
+      }
+    },
+    {
+      "name": "a month end in a leap year",
+      "query": "generated:2024-02",
+      "expected": {
+        "terms": [],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {},
+        "date": {
+          "field": "generated",
+          "from": "2024-02-01",
+          "to": "2024-02-29"
+        },
+        "clauses": [
+          {
+            "start": 0,
+            "end": 17,
+            "field": "date",
+            "value": "2024-02",
+            "negated": false
+          }
+        ],
+        "errors": []
+      }
+    },
+    {
+      "name": "an impossible day",
+      "query": "modified:2026-02-30",
+      "expected": {
+        "terms": [],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {},
+        "date": null,
+        "clauses": [],
+        "errors": [
+          {
+            "start": 0,
+            "end": 19,
+            "text": "modified:2026-02-30",
+            "message": "“2026-02-30” is not a date range. Use 2026, 2026-03 or 2025..2026-06."
+          }
+        ]
+      }
+    },
+    {
+      "name": "a thirteenth month",
+      "query": "modified:2026-13",
+      "expected": {
+        "terms": [],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {},
+        "date": null,
+        "clauses": [],
+        "errors": [
+          {
+            "start": 0,
+            "end": 16,
+            "text": "modified:2026-13",
+            "message": "“2026-13” is not a date range. Use 2026, 2026-03 or 2025..2026-06."
+          }
+        ]
+      }
+    },
+    {
+      "name": "a range with no dates",
+      "query": "modified:..",
+      "expected": {
+        "terms": [],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {},
+        "date": null,
+        "clauses": [],
+        "errors": [
+          {
+            "start": 0,
+            "end": 11,
+            "text": "modified:..",
+            "message": "“..” is not a date range. Use 2026, 2026-03 or 2025..2026-06."
+          }
+        ]
+      }
+    },
+    {
+      "name": "a third range part is ignored",
+      "query": "modified:2025..2026..2027",
+      "expected": {
+        "terms": [],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {},
+        "date": {
+          "field": "modified",
+          "from": "2025-01-01",
+          "to": "2026-12-31"
+        },
+        "clauses": [
+          {
+            "start": 0,
+            "end": 25,
+            "field": "date",
+            "value": "2025..2026..2027",
+            "negated": false
+          }
+        ],
+        "errors": []
+      }
+    },
+    {
+      "name": "quoted values keep their case for folder and collection",
+      "query": "tag:\"hybrid search\" author:\"Ada Lovelace\" folder:Projects/Raticode in:\"Reading list\"",
+      "expected": {
+        "terms": [],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {
+          "tags": [
+            "hybrid search"
+          ],
+          "authors": [
+            "ada lovelace"
+          ],
+          "folder": "Projects/Raticode",
+          "collection": "Reading list"
+        },
+        "date": null,
+        "clauses": [
+          {
+            "start": 0,
+            "end": 19,
+            "field": "tags",
+            "value": "hybrid search",
+            "negated": false
+          },
+          {
+            "start": 20,
+            "end": 41,
+            "field": "authors",
+            "value": "Ada Lovelace",
+            "negated": false
+          },
+          {
+            "start": 42,
+            "end": 66,
+            "field": "folder",
+            "value": "Projects/Raticode",
+            "negated": false
+          },
+          {
+            "start": 67,
+            "end": 84,
+            "field": "collection",
+            "value": "Reading list",
+            "negated": false
+          }
+        ],
+        "errors": []
+      }
+    },
+    {
+      "name": "a field can't be excluded",
+      "query": "-tag:draft notes",
+      "expected": {
+        "terms": [
+          "notes"
+        ],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {},
+        "date": null,
+        "clauses": [],
+        "errors": [
+          {
+            "start": 0,
+            "end": 10,
+            "text": "-tag:draft",
+            "message": "“-tag:” can't exclude a field. Remove the minus sign."
+          }
+        ]
+      }
+    },
+    {
+      "name": "phrase and word exclusions",
+      "query": "-\"two words\" -Draft",
+      "expected": {
+        "terms": [],
+        "phrases": [],
+        "exclude": [
+          "two words",
+          "draft"
+        ],
+        "any": false,
+        "filters": {},
+        "date": null,
+        "clauses": [],
+        "errors": []
+      }
+    },
+    {
+      "name": "a field name with no value is a plain word",
+      "query": "tag: x",
+      "expected": {
+        "terms": [
+          "tag:",
+          "x"
+        ],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {},
+        "date": null,
+        "clauses": [],
+        "errors": []
+      }
+    },
+    {
+      "name": "an empty quoted value",
+      "query": "tag:\"\"",
+      "expected": {
+        "terms": [],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {},
+        "date": null,
+        "clauses": [],
+        "errors": [
+          {
+            "start": 0,
+            "end": 6,
+            "text": "tag:\"\"",
+            "message": "Add a value after “tag:”."
+          }
+        ]
+      }
+    },
+    {
+      "name": "field names ignore case, values are lowercased",
+      "query": "TYPE:Note Brain:Research state:Starred origin:Imported project:Raticode domain:Example.org",
+      "expected": {
+        "terms": [],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {
+          "types": [
+            "note"
+          ],
+          "brains": [
+            "research"
+          ],
+          "reading": [
+            "starred"
+          ],
+          "origins": [
+            "imported"
+          ],
+          "projects": [
+            "raticode"
+          ],
+          "domains": [
+            "example.org"
+          ]
+        },
+        "date": null,
+        "clauses": [
+          {
+            "start": 0,
+            "end": 9,
+            "field": "types",
+            "value": "Note",
+            "negated": false
+          },
+          {
+            "start": 10,
+            "end": 24,
+            "field": "brains",
+            "value": "Research",
+            "negated": false
+          },
+          {
+            "start": 25,
+            "end": 38,
+            "field": "reading",
+            "value": "Starred",
+            "negated": false
+          },
+          {
+            "start": 39,
+            "end": 54,
+            "field": "origins",
+            "value": "Imported",
+            "negated": false
+          },
+          {
+            "start": 55,
+            "end": 71,
+            "field": "projects",
+            "value": "Raticode",
+            "negated": false
+          },
+          {
+            "start": 72,
+            "end": 90,
+            "field": "domains",
+            "value": "Example.org",
+            "negated": false
+          }
+        ],
+        "errors": []
+      }
+    },
+    {
+      "name": "a web address looks like a field",
+      "query": "http://example.com/x",
+      "expected": {
+        "terms": [],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {},
+        "date": null,
+        "clauses": [],
+        "errors": [
+          {
+            "start": 0,
+            "end": 20,
+            "text": "http://example.com/x",
+            "message": "“http:” is not a search field. Use one of type:, tag:, author:, domain:, project:, folder:, in:, state:, origin:, brain:, modified:, added:, published:, captured:, generated:"
+          }
+        ]
+      }
+    },
+    {
+      "name": "only letters form a field name",
+      "query": "a-b c:d1 123:abc",
+      "expected": {
+        "terms": [
+          "a-b",
+          "123:abc"
+        ],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {},
+        "date": null,
+        "clauses": [],
+        "errors": [
+          {
+            "start": 4,
+            "end": 8,
+            "text": "c:d1",
+            "message": "“c:” is not a search field. Use one of type:, tag:, author:, domain:, project:, folder:, in:, state:, origin:, brain:, modified:, added:, published:, captured:, generated:"
+          }
+        ]
+      }
+    },
+    {
+      "name": "tabs and no-break spaces separate words",
+      "query": "alpha\tbeta gamma",
+      "expected": {
+        "terms": [
+          "alpha",
+          "beta",
+          "gamma"
+        ],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {},
+        "date": null,
+        "clauses": [],
+        "errors": []
+      }
+    },
+    {
+      "name": "an empty phrase is skipped",
+      "query": "\"\"",
+      "expected": {
+        "terms": [],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {},
+        "date": null,
+        "clauses": [],
+        "errors": []
+      }
+    },
+    {
+      "name": "a lone minus is a word",
+      "query": "-",
+      "expected": {
+        "terms": [
+          "-"
+        ],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {},
+        "date": null,
+        "clauses": [],
+        "errors": []
+      }
+    },
+    {
+      "name": "the last folder wins, tags add up",
+      "query": "folder:a folder:b tag:a tag:b",
+      "expected": {
+        "terms": [],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {
+          "folder": "b",
+          "tags": [
+            "a",
+            "b"
+          ]
+        },
+        "date": null,
+        "clauses": [
+          {
+            "start": 0,
+            "end": 8,
+            "field": "folder",
+            "value": "a",
+            "negated": false
+          },
+          {
+            "start": 9,
+            "end": 17,
+            "field": "folder",
+            "value": "b",
+            "negated": false
+          },
+          {
+            "start": 18,
+            "end": 23,
+            "field": "tags",
+            "value": "a",
+            "negated": false
+          },
+          {
+            "start": 24,
+            "end": 29,
+            "field": "tags",
+            "value": "b",
+            "negated": false
+          }
+        ],
+        "errors": []
+      }
+    },
+    {
+      "name": "phrases are lowercased",
+      "query": "\"Mixed CASE phrase\"",
+      "expected": {
+        "terms": [],
+        "phrases": [
+          "mixed case phrase"
+        ],
+        "exclude": [],
+        "any": false,
+        "filters": {},
+        "date": null,
+        "clauses": [],
+        "errors": []
+      }
+    },
+    {
+      "name": "an empty query",
+      "query": "",
+      "expected": {
+        "terms": [],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {},
+        "date": null,
+        "clauses": [],
+        "errors": []
+      }
+    },
+    {
+      "name": "a quote inside a word stays in the word",
+      "query": "x\"y z\"",
+      "expected": {
+        "terms": [
+          "x\"y",
+          "z\""
+        ],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {},
+        "date": null,
+        "clauses": [],
+        "errors": []
+      }
+    },
+    {
+      "name": "several brains and a collection",
+      "query": "brain:\"My Notes\" brain:second in:inbox",
+      "expected": {
+        "terms": [],
+        "phrases": [],
+        "exclude": [],
+        "any": false,
+        "filters": {
+          "brains": [
+            "my notes",
+            "second"
+          ],
+          "collection": "inbox"
+        },
+        "date": null,
+        "clauses": [
+          {
+            "start": 0,
+            "end": 16,
+            "field": "brains",
+            "value": "My Notes",
+            "negated": false
+          },
+          {
+            "start": 17,
+            "end": 29,
+            "field": "brains",
+            "value": "second",
+            "negated": false
+          },
+          {
+            "start": 30,
+            "end": 38,
+            "field": "collection",
+            "value": "inbox",
+            "negated": false
+          }
+        ],
+        "errors": []
+      }
+    }
+  ]
+}

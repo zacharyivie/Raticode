@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { beforeEach, test } from "node:test";
-import { EMPTY_FILTERS, describeQuery, matchesFilters, parseDateBound, parseQuery, queryText, searchLibrary, webSourceUrl, wordDiff, demoteReplaced, newerReports, checkByDue, HEALTH_KINDS, deadLinkSummary, linkReason } from "./secondBrain.js";
+import { EMPTY_FILTERS, describeQuery, formatCitation, isHeadingPassage, sectionName, sectionStarts, matchesFilters, parseDateBound, parseQuery, queryText, searchLibrary, webSourceUrl, wordDiff, demoteReplaced, newerReports, checkByDue, HEALTH_KINDS, deadLinkSummary, linkReason, reportSeriesRows, reportSummary, summaryPatch, SUMMARY_MAX, folderRuleFor, withFolderRule, leftOutBy, loweredBy, folderTree, activeFilterCount } from "./secondBrain.js";
 import * as store from "./secondBrainStore.js";
 
 const doc = (fields) => ({ id: fields.id, brainId: "b", title: "Untitled", path: `${fields.id}.md`, folder: "", type: "note", tags: [], origin: "authored", extraction: "ready", reading: { read: true }, dates: { added: "2026-01-01", modified: "2026-01-01", published: "" }, blocks: [], concepts: [], ...fields });
@@ -13,6 +14,13 @@ test("query syntax separates words, phrases, exclusions and field clauses", () =
   assert.deepEqual(parsed.filters, { tags: ["architecture"], types: ["note"] });
   assert.deepEqual(parsed.date, { field: "published", from: "2025-01-01", to: "2026-06-30" });
   assert.deepEqual(parsed.errors, []);
+});
+
+test("query syntax matches the shared table that Rem's Python parser also runs", () => {
+  // tests/unit/test_brain_queries.py runs the same cases through parse_query.
+  const table = JSON.parse(readFileSync(new URL("../../../tests/fixtures/brain-query-syntax.json", import.meta.url), "utf8"));
+  assert.ok(table.cases.length >= 20);
+  for (const { name, query, expected } of table.cases) assert.deepEqual(parseQuery(query), expected, name);
 });
 
 test("invalid clauses are reported with their text and never silently dropped", () => {
@@ -172,6 +180,44 @@ test("replaced reports rank after current ones and name the chain of newer repor
   assert.deepEqual(newerReports(documents[0], documents).map(item => item.id), ["final", "final2"]);
 });
 
+test("folder rules leave files out, list them after other results and show left-out files only under Left out", () => {
+  const rules = { Archive: "leave-out", "Archive/Keep": "normal", Old: "list-after" };
+  assert.deepEqual(folderRuleFor("Archive/2024/a.md", rules), { folder: "Archive", rule: "leave-out" });
+  assert.equal(folderRuleFor("Archive/Keep/b.md", rules), null);
+  assert.equal(folderRuleFor("Archived/c.md", rules), null);
+  // A rule is stored only where it differs from what the folder inherits.
+  assert.deepEqual(withFolderRule(rules, "Archive/Keep", "leave-out"), { Archive: "leave-out", Old: "list-after" });
+  assert.deepEqual(withFolderRule({}, "Notes", "normal"), {});
+  assert.deepEqual(withFolderRule({ Archive: "leave-out" }, "Archive/Keep", "normal"), { Archive: "leave-out", "Archive/Keep": "normal" });
+
+  const block = text => [{ id: "b1", heading: "", text }];
+  const documents = [
+    doc({ id: "old", path: "Old/plan.md", folder: "Old", blocks: block("harbor rollout") }),
+    doc({ id: "archived", path: "Archive/plan.md", folder: "Archive", blocks: block("harbor rollout"), excluded: true, excludedBy: "Archive" }),
+    doc({ id: "kept", path: "Archive/Keep/plan.md", folder: "Archive/Keep", blocks: block("harbor rollout") }),
+    doc({ id: "mine", path: "Notes/mine.md", folder: "Notes", blocks: block("harbor rollout"), excluded: true }),
+    doc({ id: "notes", path: "Notes/plan.md", folder: "Notes", blocks: block("harbor rollout") }),
+    doc({ id: "gone", path: "Archive/gone.md", folder: "Archive", blocks: [], excluded: true, missing: true, extraction: "unavailable" }),
+  ];
+  const library = { folderRules: { b: rules } };
+  assert.deepEqual(leftOutBy(documents[1], rules), { folder: "Archive" });
+  assert.deepEqual(leftOutBy(documents[3], rules), { folder: "" });
+  assert.equal(leftOutBy(documents[5], rules), null);
+  assert.equal(loweredBy(documents[0], rules), "Old");
+  // The Old folder is listed after current matches; left-out files don't match at all.
+  const { results } = searchLibrary(documents, { text: "harbor" }, library);
+  assert.deepEqual(results.map(result => result.doc.id), ["kept", "notes", "old"]);
+  const filters = { ...EMPTY_FILTERS, leftOut: true };
+  assert.equal(activeFilterCount(filters), 1);
+  assert.deepEqual(searchLibrary(documents, { text: "harbor", filters }, library).results.map(result => result.doc.id).sort(), ["archived", "mine"]);
+  // A folder rule saved a moment ago applies before the library re-indexes.
+  assert.deepEqual(searchLibrary(documents, { text: "harbor" }, { folderRules: { b: {} } }).results.map(result => result.doc.id).sort(), ["archived", "kept", "notes", "old"]);
+  assert.deepEqual(demoteReplaced([{ doc: documents[0] }, { doc: documents[4] }], library).map(result => result.doc.id), ["notes", "old"]);
+  assert.match(describeQuery({ filters }), /left out of search/);
+
+  assert.deepEqual(folderTree(documents, { Empty: "leave-out" }).map(folder => [folder.path, folder.count, folder.depth]), [["Archive", 2, 0], ["Archive/Keep", 1, 1], ["Empty", 0, 0], ["Notes", 2, 0], ["Old", 1, 0]]);
+});
+
 test("check-by dates are due on the day and never for replaced reports", () => {
   const today = new Date(2026, 10, 13);
   assert.equal(checkByDue({ checkBy: "2026-11-13" }, today), true);
@@ -190,4 +236,73 @@ test("dead links are grouped by why they are dead, in a fixed order", () => {
   assert.equal(linkReason({ kind: "link" })[0], "missing");
   assert.equal(linkReason({ kind: "link", reason: "unknown" })[0], "missing");
   assert.equal(linkReason({ kind: "link", reason: "absolute" })[1], "Absolute path inside the brain");
+});
+
+test("the reader names each section once and shows heading passages as headings", () => {
+  const blocks = [
+    { id: "a", heading: "Document", text: "Research · 14 November" },
+    { id: "b", heading: "01 Short answer", text: "01 Short answer" },
+    { id: "c", heading: "01 Short answer", text: "96%\n\nof passages had no heading." },
+    { id: "d", heading: "Findings", text: "# Findings\nMarkdown keeps its own heading line." },
+    { id: "e", heading: "Page 2", page: 2, text: "Page two text." },
+    { id: "f", heading: "Page 2", page: 3, text: "Same label, next page." },
+  ];
+  assert.deepEqual([...sectionStarts(blocks)], ["a", "b", "d", "e", "f"]);
+  assert.deepEqual(blocks.map(isHeadingPassage), [false, true, false, false, false, false]);
+  assert.equal(sectionName(blocks[0]), "");
+  assert.equal(sectionName(blocks[2]), "01 Short answer");
+  const source = { type: "html", author: "Rem", dates: { published: "2026-11-14" } };
+  assert.equal(formatCitation(source, blocks[2]), "Rem, 2026, § 01 Short answer");
+  // A passage before any heading has no section to cite.
+  assert.equal(formatCitation(source, blocks[0]), "Rem, 2026");
+});
+
+test("reports that are editions of one dated series show as one row, newest first", () => {
+  const report = (id, path) => ({ id, brainId: "b", title: id, artifactPath: path, citations: [], claims: [] });
+  const documents = [doc({ id: "d06", path: "Reports/fleet-review-2026-11-06.html" }), doc({ id: "d13", path: "Reports/fleet-review-2026-11-13.html" }), doc({ id: "d20", path: "Reports/fleet-review-2026-11-20.html" }), doc({ id: "dx", path: "Reports/other.html" })];
+  const series = [{ id: "series-1", brainId: "b", stem: "fleet-review", newestId: "d20", notSeries: false, editions: [{ docId: "d20", date: "2026-11-20" }, { docId: "d13", date: "2026-11-13" }, { docId: "d06", date: "2026-11-06" }] }];
+  const reports = [report("r06", "Reports/fleet-review-2026-11-06.html"), report("rx", "Reports/other.html"), report("r20", "Reports/fleet-review-2026-11-20.html"), report("r13", "Reports/fleet-review-2026-11-13.html")];
+  const rows = reportSeriesRows(reports, documents, series);
+  // The series sits where its first report was listed, with the newest edition on the row.
+  assert.deepEqual(rows.map(row => row.report.id), ["r20", "rx"]);
+  assert.equal(rows[0].date, "2026-11-20");
+  assert.deepEqual(rows[0].editions.map(edition => [edition.report.id, edition.date]), [["r13", "2026-11-13"], ["r06", "2026-11-06"]]);
+  assert.equal(rows[1].series, undefined);
+  // A group marked "Not a series" stays as separate rows, and one report alone is a plain row.
+  assert.deepEqual(reportSeriesRows(reports, documents, [{ ...series[0], notSeries: true }]).map(row => row.report.id), ["r06", "rx", "r20", "r13"]);
+  const single = reportSeriesRows([reports[0], reports[1]], documents, series);
+  assert.deepEqual(single.map(row => [row.report.id, row.editions.length, Boolean(row.series)]), [["r06", 0, false], ["rx", 0, false]]);
+});
+
+test("marking a series records it locally", () => {
+  store.getState().series = [{ id: "series-1", brainId: "b", notSeries: false, editions: [] }];
+  store.markSeries("series-1", true);
+  assert.equal(store.getState().series[0].notSeries, true);
+  store.markSeries("series-1", false);
+  assert.equal(store.getState().series[0].notSeries, false);
+});
+
+test("Edit metadata's summary overrides the file's, and clearing it brings the file's back", () => {
+  const fromFile = doc({ id: "s", summary: "File words.", summarySource: "section" });
+  assert.deepEqual(summaryPatch(fromFile, "File words."), {});
+  const edited = { ...fromFile, ...summaryPatch(fromFile, "My words.") };
+  assert.equal(edited.summary, "My words.");
+  assert.equal(edited.summarySource, "metadata");
+  assert.equal(edited.fileSummary, "File words.");
+  for (const back of ["", "File words."]) {
+    const restored = { ...edited, ...summaryPatch(edited, back) };
+    assert.equal(restored.summary, "File words.");
+    assert.equal(restored.summarySource, "section");
+    assert.equal(JSON.parse(JSON.stringify(restored)).fileSummary, undefined);
+  }
+  // Clearing a summary that came from the file leaves it: the file still has it.
+  assert.deepEqual(summaryPatch(fromFile, ""), {});
+  assert.equal(SUMMARY_MAX, 600);
+});
+
+test("a report's summary comes from its saved file, or a PDF's HTML source", () => {
+  const report = { id: "r", brainId: "b", artifactPath: "Reports/r.pdf" };
+  const docs = [doc({ id: "pdf", path: "Reports/r.pdf" }), doc({ id: "src", path: "Reports/r.pdf.html", summary: "In brief." }), doc({ id: "other", brainId: "c", path: "Reports/r.pdf", summary: "Wrong brain." })];
+  assert.equal(reportSummary(report, docs), "In brief.");
+  assert.equal(reportSummary({ ...report, artifactPath: "Reports/none.md" }, docs), "");
 });

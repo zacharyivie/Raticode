@@ -1725,7 +1725,12 @@ async def test_stream_workflow_chat_compacts_long_context(monkeypatch, tmp_path)
     monkeypatch.setattr(chat, "CHAT_COMPACT_CHAR_LIMIT", 20)
 
     async def fake_run_subprocess(*_args, **_kwargs):
-        return 0, "short Rem summary", ""
+        # Codex --json writes records; the summary is the final answer inside them.
+        record = {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "short Rem summary"},
+        }
+        return 0, json.dumps(record) + "\n", ""
 
     async def fake_stream_subprocess(*_args, **_kwargs):
         yield {"type": "chunk", "stream": "stdout", "text": "final\n", "returncode": None}
@@ -1951,7 +1956,8 @@ async def test_stream_workflow_chat_yields_error_on_nonzero_exit(monkeypatch, tm
     ]
 
     assert [event["type"] for event in events] == ["error"]
-    assert events[-1]["error"] == "nope\n"
+    # The CLI's error as plain text, without terminal codes or trailing space.
+    assert events[-1]["error"] == "nope"
 
 
 def option_value(command: list[str], option: str) -> str:
@@ -2330,8 +2336,15 @@ async def test_turns_queue_heavy_commands_through_wrappers_and_the_hook(monkeypa
     assert env[command_slots.LABEL_ENV] == "Fix login"
     assert env[command_slots.ACTIVITY_ENV] == str(command_slots.activity_path(root, "thread-1"))
     hooks = json.loads(argv[argv.index("--settings") + 1])["hooks"]["PreToolUse"]
-    assert hooks[0]["hooks"][0]["command"] == str(root / "hooks" / "claude-pre-tool-use")
+    # The hook runs Raticode's trusted CLI directly; no hook file sits in the data folder.
+    hook_command = hooks[0]["hooks"][0]["command"]
+    assert "slot hook claude" in hook_command and str(root) not in hook_command
     assert "share a few slots with other Rem threads" in prompt
+
+
+def _claude_settings(argv: list[str]) -> dict[str, Any]:
+    """The --settings JSON a Claude turn got; every turn has credential deny rules."""
+    return json.loads(argv[argv.index("--settings") + 1]) if "--settings" in argv else {}
 
 
 @pytest.mark.asyncio
@@ -2344,7 +2357,7 @@ async def test_turns_without_a_shell_or_with_queuing_off_skip_command_slots(monk
     )
     # The hook rewrites commands to start with Raticode, which a turn without a
     # shell may run, so it is left out.
-    assert "--settings" not in seen["argv"]
+    assert "hooks" not in _claude_settings(seen["argv"])
     command_slots.write_settings(
         tmp_path / "command-slots", command_slots.SlotSettings(enabled=False)
     )
@@ -2352,7 +2365,7 @@ async def test_turns_without_a_shell_or_with_queuing_off_skip_command_slots(monk
     (tmp_path / "trusted").rmdir()
     seen, prompt = await _run_fake_claude(monkeypatch, tmp_path, {"chatThreadId": "t2"})
     assert command_slots.ROOT_ENV not in seen["env"]
-    assert "--settings" not in seen["argv"]
+    assert "hooks" not in _claude_settings(seen["argv"])
     assert "share a few slots" not in prompt
 
 

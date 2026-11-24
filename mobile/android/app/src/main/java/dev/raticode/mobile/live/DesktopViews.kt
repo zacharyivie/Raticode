@@ -9,10 +9,10 @@ import org.json.JSONObject
  */
 object DesktopViews {
     const val MAX_PARTS = 48
-    val READS = setOf("overview", "media.image", "media.preview", "rem.home", "rem.draft", "rem.memories", "rem.notices", "rem.task", "rem.thread", RemSearch.SEARCH, RemSearch.HISTORY, "organizations.list", "organizations.read", OrganizationModel.NOTE, "settings.get", "usage.overview", DeveloperLog.OP, DesktopBrowser.TABS) + Kanban.READS + Workflows.READS + SourceControl.READS + FileExplorer.READS
+    val READS = setOf("overview", "media.image", "media.preview", "rem.home", "rem.draft", "rem.memories", RemDecisions.READ, "rem.notices", "rem.task", "rem.thread", RemSearch.SEARCH, RemSearch.HISTORY, "organizations.list", "organizations.read", OrganizationModel.NOTE, "settings.get", "usage.overview", DeveloperLog.OP, DesktopBrowser.TABS, ThreadAccounts.OP, Computers.READ, Computers.PLACEMENT) + Kanban.READS + Workflows.READS + SourceControl.READS + FileExplorer.READS + Posts.READS
     val ACTIONS = setOf("rem.message", "rem.instruct", "rem.task.create", "rem.task.run", "rem.task.pause", "rem.task.resume",
-        "rem.task.delete", "rem.run.cancel", "rem.run.acknowledge", "rem.run.retry_review", RunPause.PAUSE, RunPause.RESUME, RemSleep.WAKE,
-        "rem.memory.add", "rem.memory.edit", "rem.memory.forget", "rem.memory.mode", "rem.memory.undo", VoiceTidy.KEY, "organizations.control", "organizations.task", OrganizationModel.KNOWLEDGE, OrganizationModel.WORKER, WorkSchedule.OP, BacklogPulls.OP, OrgRequests.OP, AutoMode.OP, "swarms.start", "settings.update", "files.link", FileExplorer.OPEN, RemAttachments.OP, DesktopBrowser.OPEN) + Kanban.ACTIONS + Workflows.ACTIONS
+        "rem.task.delete", "rem.run.cancel", "rem.run.acknowledge", RemHome.DISMISS_ALL, "rem.run.retry_review", RunPause.PAUSE, RunPause.RESUME, RemSleep.WAKE,
+        "rem.memory.add", "rem.memory.edit", "rem.memory.forget", "rem.memory.mode", "rem.memory.undo", RemDecisions.CHANGE, VoiceTidy.KEY, "organizations.control", "organizations.task", OrganizationModel.KNOWLEDGE, OrganizationModel.WORKER, WorkSchedule.OP, BacklogPulls.OP, OrgRequests.OP, AutoMode.OP, "swarms.start", "settings.update", "files.link", FileExplorer.OPEN, RemAttachments.OP, DesktopBrowser.OPEN, ThreadAccounts.SIGN_IN, Computers.SET, Computers.PLACE, RunThere.OP) + Kanban.ACTIONS + Workflows.ACTIONS + Workflows.TEST_ACTIONS + Posts.ACTIONS
     val OPERATIONS = READS + ACTIONS
 
     /** The screen a read or action result refreshes. */
@@ -23,9 +23,13 @@ object DesktopViews {
             "organizations.read:" + params.optString("organization_id")
         OrganizationModel.NOTE -> OrganizationModel.NOTE + ":" + params.optString("organization_id") + ":" + params.optString("note_id")
         "settings.update" -> "settings.get"
+        // Changing a computer's limit answers with the whole list.
+        Computers.SET -> Computers.READ
+        // Changing where work runs answers with every placement.
+        Computers.PLACE -> Computers.PLACEMENT
         Kanban.TICKET, Kanban.PARTICIPANT -> Kanban.BOARD
         Kanban.TIMELINE -> Kanban.timelineKey(params)
-        Kanban.SETTINGS, Kanban.SEEN -> Kanban.SELF_WORK
+        Kanban.SETTINGS, Kanban.SEEN, Kanban.STOP -> Kanban.SELF_WORK
         "media.image" -> ChatImages.KEY + params.optString("url")
         "media.preview" -> ChatPreviews.KEY + params.optString("url")
         "rem.draft" -> "rem.draft"
@@ -35,6 +39,8 @@ object DesktopViews {
         RemSearch.HISTORY -> RemSearch.HISTORY
         // Every memory change answers with the memory list; Undo's reply note refreshes with the chat.
         "rem.memories", "rem.memory.add", "rem.memory.edit", "rem.memory.forget", "rem.memory.mode", "rem.memory.undo" -> "rem.memories"
+        // Every decision change answers with the whole list; the chat's cards read their status from it too.
+        RemDecisions.READ, RemDecisions.CHANGE -> RemDecisions.READ
         "files.link" -> ChatLinks.KEY + params.optString("href")
         in FileExplorer.READS -> FileExplorer.viewKey(op, params)
         FileExplorer.OPEN -> FileExplorer.KEY + params.optString("project_id") + "\n" + params.optString("path")
@@ -42,11 +48,25 @@ object DesktopViews {
         VoiceTidy.KEY -> VoiceTidy.KEY
         // Pausing all triggers answers on the workflow list, where its switch is.
         Workflows.PAUSE -> Workflows.LIST
+        // Trying a model and using it answer with the workflow's tests view.
+        Workflows.TESTS, in Workflows.TEST_ACTIONS -> Workflows.testsKey(params.optString("workflow_id"))
+        // Each candidate has its own estimate, so a changed choice never shows the last one's cost.
+        Workflows.ESTIMATE -> Workflows.ESTIMATE + ":" + params.optString("workflow_id") + "|" + params.optJSONArray("models")?.toString().orEmpty()
         // Run, stop, resume and a trigger's switch refresh the workflow screen, whichever run it shows.
         Workflows.READ, in Workflows.ACTIONS -> Workflows.READ + ":" + params.optString("workflow_id")
+        // One trigger's changes at a time, named by its workflow and trigger.
+        Workflows.CHANGES -> Workflows.CHANGES + ":" + params.optString("workflow_id") + "/" + params.optString("trigger_id")
+        // One run's Ask Rem attachment, read once when asked for; it is never a screen.
+        Workflows.FAILURE -> Workflows.failureKey(params)
         // Each filter has its own view, so changing one never shows the last filter's runs as this one's.
         Workflows.RUNS -> Workflows.RUNS + ":" + listOf("since", "status", "workflow_id").joinToString("|") { params.optString(it) }
         in SourceControl.READS - SourceControl.LIST -> SourceControl.viewKey(op, params)
+        // Every decision answers with the whole list.
+        Posts.DECIDE -> Posts.LIST
+        // Each thread's menu has its own choices; a new thread's has none.
+        ThreadAccounts.OP -> ThreadAccounts.key(params.optString("thread_id"))
+        // A sign-in answers with that account's state; provider.accounts carries its code after that.
+        ThreadAccounts.SIGN_IN -> ThreadAccounts.SIGN_IN_KEY + params.optString("name")
         else -> if (op.startsWith("rem.")) "rem.home" else op
     }
 
@@ -65,8 +85,17 @@ object DesktopViews {
             remNoticesFilter = json.optBoolean("rem_notices_filter"), remNoticesWorkflow = json.optBoolean("rem_notices_workflow"), wakeMac = json.opt(WakeOnLan.FIELD) as? String,
             runPause = json.optBoolean("run_pause"), threadPurge = json.optBoolean("thread_purge"),
             workflowRuns = json.optBoolean("workflows") && json.optBoolean("workflow_runs"),
-            workflowTriggers = json.optBoolean("workflows") && json.optBoolean("workflow_triggers"))
+            workflowTriggers = json.optBoolean("workflows") && json.optBoolean("workflow_triggers"),
+            workflowTriggerApproval = json.optBoolean("workflows") && json.optBoolean("workflow_trigger_approval"),
+            workflowFailures = json.optBoolean("workflows") && json.optBoolean("workflow_failures"),
+            workflowTests = json.optBoolean("workflows") && json.optBoolean("workflow_tests"),
+            posts = json.optBoolean("posts"), threadAccounts = json.optBoolean("thread_accounts"),
+            accountSignIn = json.optBoolean("account_sign_in"), remDecisions = json.optBoolean("rem_decisions"),
+            computers = json.optBoolean("computers"), computerPlacement = json.optBoolean("computer_placement"),
+            runThere = json.optBoolean("run_there"))
         Kanban.BOARD -> Kanban.parseBoard(json)
+        Computers.READ -> Computers.parse(json)
+        Computers.PLACEMENT -> Computers.parsePlacement(json)
         Kanban.SELF_WORK -> Kanban.parseSelfWork(json)
         Kanban.TIMELINE -> Kanban.parseTimeline(json)
         DesktopBrowser.TABS -> DesktopBrowser.parse(json)
@@ -80,6 +109,10 @@ object DesktopViews {
         Workflows.LIST -> Workflows.parseList(json)
         Workflows.READ -> Workflows.parse(json)
         Workflows.RUNS -> Workflows.parseRuns(json)
+        Workflows.CHANGES -> Workflows.parseChanges(json)
+        Workflows.TESTS -> Workflows.parseTests(json)
+        Workflows.ESTIMATE -> Workflows.parseEstimate(json)
+        Posts.LIST -> Posts.parse(json)
         in SourceControl.READS -> SourceControl.parseView(key, json)
         in FileExplorer.READS -> FileExplorer.parseView(key, json)
         "rem.home" -> RemHome(json.optString("turn_state", "idle"), json.optString("provider"), json.optString("model"), json.optInt("earlier"),
@@ -88,9 +121,13 @@ object DesktopViews {
             json.optString("turn_label"), json.optString("draft_reply"), json.optBoolean("rich_results"),
             json.optBoolean("draft_deltas"), json.optBoolean("review_retry"), json.optBoolean("memories"),
             json.optBoolean("screen_context"), json.optBoolean("replies"), json.optBoolean("voice_tidy"), json.optBoolean("attachment_files"),
-            TicketMentions.parseIndex(json.optJSONObject("tickets")), json.optBoolean("search"), json.optBoolean("run_pause"))
+            TicketMentions.parseIndex(json.optJSONObject("tickets")), json.optBoolean("search"), json.optBoolean("run_pause"),
+            json.optBoolean("dismiss_all"), json.optBoolean("decisions"), json.optLong("decisions_revision").coerceAtLeast(0),
+            json.optInt("decisions_waiting").coerceAtLeast(0))
+        RemDecisions.READ -> RemDecisions.parse(json)
         "rem.memories" -> RemMemories(json.optString("mode", "on"), json.objects("memories").map {
-            RemMemory(it.optString("id"), it.optString("text"), it.optString("created_at"), it.optString("edited_at"), it.optBoolean("added_by_user")) })
+            RemMemory(it.optString("id"), it.optString("text"), it.optString("created_at"), it.optString("edited_at"), it.optBoolean("added_by_user"),
+                it.optString("project").take(200), it.optString("until").take(80), it.optBoolean("ended")) })
         "rem.task" -> remTask(json).copy(ticketIndex = TicketMentions.parseIndex(json.optJSONObject("tickets")))
         "rem.thread" -> RemThread(json.optString("thread_id"), json.optString("title"), json.optBoolean("running"), json.optInt("earlier"),
             json.objects("messages").map { RemThreadMessage(it.optString("id"), it.optString("role"), it.optString("body"), it.optString("kind"),
@@ -104,14 +141,16 @@ object DesktopViews {
         "organizations.read" -> Organization(json.optString("organization_id"), json.optString("name"), json.optString("description"),
             json.optString("state"), json.strings("projects"),
             json.objects("employees").map { OrganizationEmployee(it.optString("employee_id"), it.optString("name"), it.optString("title"),
-                it.optString("provider"), it.optString("model"), it.optBoolean("paused"), it.optString("reports_to")) },
+                it.optString("provider"), it.optString("model"), it.optBoolean("paused"), it.optString("reports_to"), it.optString("account_id")) },
             json.objects("tasks").map { t -> OrganizationTask(t.optString("task_id"), t.optString("title"), t.optString("description"),
                 t.optString("status"), t.optString("priority"), t.optString("assignee"), t.optLong("revision", 1), t.optBoolean("running"),
                 t.optBoolean("needs_approval"), t.optBoolean("needs_review"), t.optBoolean("attention"), t.optString("block_reason"),
                 t.optString("evidence"), t.optString("due_at"),
                 t.objects("comments").map { OrganizationComment(it.optString("actor"), it.optString("at"), it.optString("body"), it.optString("decision"),
                     it.optString("kind"), it.optString("title"), it.optString("from"), it.optString("to")) },
-                OrganizationModel.parseExtras(t), t.optInt("comment_count")) }, OrganizationModel.parsePlan(json), json.optString("pause_reason"), json.optInt("pending_requests"))
+                OrganizationModel.parseExtras(t), t.optInt("comment_count"), RunThere.parse(t.optJSONObject("suggestion"))) }, OrganizationModel.parsePlan(json), json.optString("pause_reason"), json.optInt("pending_requests"),
+            json.optJSONArray("accounts")?.let { _ -> json.objects("accounts").map { OrgAccount(it.optString("provider"), it.optString("account_id"), it.optString("name")) } },
+            json.optString("placement_wait"))
         "settings.get" -> DesktopSettings(json.optBoolean("available"), json.optInt("pending"),
             json.optJSONObject("values")?.let { v -> v.keys().asSequence().associateWith { k -> v.opt(k)?.takeUnless { it == JSONObject.NULL } } }.orEmpty(),
             json.objects("settings").map { s -> DesktopSetting(s.optString("key"), s.optString("group"), s.optString("label"), s.optString("kind"),
@@ -119,16 +158,21 @@ object DesktopViews {
                 s.optDouble("min", 0.0), s.optDouble("max", 0.0), s.optDouble("step", 1.0)) })
         "usage.overview" -> json.optJSONObject("activity").let { activity -> DesktopUsage(json.optInt("days", 30), json.optString("observed_at"),
             json.objects("accounts").map { a -> UsageAccount(a.optString("label"), a.optString("status"), a.optString("reason"),
-                a.objects("windows").map { w -> UsageWindow(w.optString("label"), w.optDoubleOrNull("used_percent"), w.optString("resets_at")) }) },
+                a.objects("windows").map { w -> UsageWindow(w.optString("label"), w.optDoubleOrNull("used_percent"), w.optString("resets_at"), w.optString("id").take(80)) },
+                a.optString("provider").take(80), a.optString("profile").take(128), a.optString("observed_at").take(80),
+                a.optString("sign_in_state").take(40), a.optJSONObject("rem_next")?.optString("why")?.take(300),
+                UsageCards.parseBurndown(a.optJSONObject("weekly_burndown")), a.optBoolean("phone_sign_in")) },
             activity?.optInt("calls") ?: 0, activity?.optLongOrNull("input_tokens"), activity?.optLongOrNull("output_tokens"),
-            activity?.objects("providers").orEmpty().map { UsageProvider(it.optString("provider"), it.optInt("calls"), it.optLongOrNull("input_tokens"), it.optLongOrNull("output_tokens")) }) }
+            activity?.objects("providers").orEmpty().map { UsageProvider(it.optString("provider"), it.optInt("calls"), it.optLongOrNull("input_tokens"), it.optLongOrNull("output_tokens"), it.optLongOrNull("total_tokens")) },
+            activity?.optLongOrNull("total_tokens"), UsageHistory.parseRange(json.optJSONObject("range")), UsageHistory.parseSeries(json.optJSONObject("series")),
+            UsageCosts.parse(json.optJSONObject("api_cost")), UsageVerified.parse(json.optJSONObject("verified_work"))) }
         else -> json
     }
 
     private fun remMessage(m: JSONObject) = RemMessage(m.optString("id"), m.optString("role"), m.optString("body"), m.optString("created_at"),
         m.optJSONObject("work")?.let { RemWork(it.optString("task_id"), it.optString("run_id"), it.optString("thread_id"), it.optString("title"),
             it.optBoolean("task_available", true), it.optBoolean("thread_available", true), TicketMentions.parseRefs(it.optJSONArray("tickets")),
-            it.optString("self_work").take(20), RunPause.by(it.optString("paused_by"))) },
+            it.optString("self_work").take(20), RunPause.by(it.optString("paused_by")), RemDecisions.parseCard(it.optJSONObject("decision"))) },
         m.optString("state"),
         m.objects("attachments").map { RemFile(it.optString("file_id"), it.optString("name"), it.optLong("size")) },
         m.objects("files").map { RemFile(it.optString("file_id"), it.optString("name"), it.optLong("size")) },
@@ -142,14 +186,17 @@ object DesktopViews {
         if (m.optString("role") == "user") emptyList() else ChatLinks.mentions(m.strings("file_mentions")),
         TicketMentions.parseSelfWork(m.optJSONObject("self_work")).takeIf { m.optJSONObject("work") != null },
         if (m.optString("role") == "user") m.strings("queued_after").filter { it.isNotBlank() }.take(10).map { it.take(160) } else emptyList(),
-        if (m.optString("role") == "user") null else m.optJSONObject("self_work_report")?.let(::selfWorkReport))
+        if (m.optString("role") == "user") null else m.optJSONObject("self_work_report")?.let(::selfWorkReport),
+        // Changes the user asked Rem for, each waiting for OK or settled; only on Rem's own replies.
+        if (m.optString("role") == "user") emptyList() else RemDecisions.parseEdits(m.optJSONArray("decision_edits")))
 
     /** What one period of self-work did, under its report message. An older desktop sends none, and only the body shows. */
     private fun selfWorkReport(r: JSONObject) = RemSelfWorkReport(r.optString("period_id").take(128), r.optString("started_at").take(80),
         r.optString("ended_at").take(80), r.optString("ended_by").take(20),
         r.optJSONObject("counts")?.let { c -> c.keys().asSequence().take(20).mapNotNull { k -> (c.opt(k) as? Number)?.let { k.take(40) to it.toInt().coerceAtLeast(0) } }.toMap() }.orEmpty(),
         r.objects("items").take(30).map { RemSelfWorkItem(it.optString("task_id").take(128), it.optString("run_id").take(128), it.optString("thread_id").take(128),
-            it.optString("title").take(160), it.optString("kind").take(20), it.optString("outcome").take(20), TicketMentions.parseRefs(it.optJSONArray("tickets"))) })
+            it.optString("title").take(160), it.optString("kind").take(20), it.optString("outcome").take(20), TicketMentions.parseRefs(it.optJSONArray("tickets"))) },
+        UsageVerified.reportLine(r.optJSONObject("verified_work")))
 
     /** What a reply shows of the message it refers to. The desktop builds it; the phone only bounds it. */
     private fun remReference(id: String, r: JSONObject): RemReference? = when {
@@ -160,7 +207,7 @@ object DesktopViews {
     }
 
     private fun remMemoryNote(n: JSONObject): RemMemoryNote? {
-        fun entries(key: String) = n.objects(key).take(10).map { RemMemoryEntry(it.optString("id"), it.optString("text"), it.optBoolean("removed")) }
+        fun entries(key: String) = n.objects(key).take(10).map { RemMemoryEntry(it.optString("id"), it.optString("text"), it.optBoolean("removed"), it.optString("until").take(80)) }
         val note = RemMemoryNote(entries("saved"), entries("updated"), entries("forgotten"), n.optInt("refused"), n.optBoolean("undone"))
         return note.takeIf { it.saved.isNotEmpty() || it.updated.isNotEmpty() || it.forgotten.isNotEmpty() || it.refused > 0 }
     }
@@ -186,7 +233,8 @@ object DesktopViews {
             RemCheck(c.optString("id").take(128), c.optString("description").take(600), c.optString("result").take(20), c.optString("evidence").take(1500))
         } else null, TicketMentions.parseRefs(it.optJSONArray("tickets")), it.optString("step").take(20),
         RunPause.by(it.optString("paused_by")),
-        RemSleep.parse(it.optJSONObject("sleep"))) }
+        RemSleep.parse(it.optJSONObject("sleep")),
+        RunThere.parse(it.optJSONObject("suggestion"))) }
 
     private fun remTask(t: JSONObject) = RemTask(t.optString("task_id"), t.optString("title"), t.optString("type"), t.optString("state"),
         t.optLong("revision", 1), t.optJSONObject("schedule").let { s -> RemSchedule(s?.optString("kind") ?: "once", s?.optString("at").orEmpty(),
@@ -310,7 +358,27 @@ data class DesktopOverview(val projects: List<Pair<String, String>>, val rem: Bo
                            /** The desktop answers `workflows.runs`, every workflow's runs in one list. */
                            val workflowRuns: Boolean = false,
                            /** The desktop lists triggers and takes `workflows.trigger` and `workflows.triggers.pause`. */
-                           val workflowTriggers: Boolean = false)
+                           val workflowTriggers: Boolean = false,
+                           /** The desktop lists each trigger's approval and takes workflows.trigger.changes and .approve. */
+                           val workflowTriggerApproval: Boolean = false,
+                           /** The desktop answers `workflows.failure`, what Ask Rem about this failure attaches. */
+                           val workflowFailures: Boolean = false,
+                           /** The desktop answers `workflows.tests` and `.estimate` and takes `.try` and `.use_model`. */
+                           val workflowTests: Boolean = false,
+                           /** The desktop answers `posts.list` and takes `posts.decide`. */
+                           val posts: Boolean = false,
+                           /** The desktop answers `provider.accounts` and takes an `account` with thread creation and settings. */
+                           val threadAccounts: Boolean = false,
+                           /** The desktop takes `provider.account.sign_in` and passes on a sign-in's link and code. */
+                           val accountSignIn: Boolean = false,
+                           /** The desktop answers `rem.decisions` and takes `rem.decision.change`. */
+                           val remDecisions: Boolean = false,
+                           /** The desktop answers `computers.list` and takes `computers.set`. */
+                           val computers: Boolean = false,
+                           /** The desktop answers `computers.placement` and takes `computers.place`. */
+                           val computerPlacement: Boolean = false,
+                           /** Waiting runs and tickets carry a suggestion, and the desktop takes `computers.run_there`. */
+                           val runThere: Boolean = false)
 /**
  * Rem's reply text added since the phone's last `rem.draft` read; [reset] means [text] is the whole draft. [attempt] numbers
  * Rem's model calls within a reply, so a later read can say which one the phone's text came from; an older desktop omits it.
@@ -328,7 +396,9 @@ data class RemWork(val taskId: String, val runId: String, val threadId: String, 
                    /** "ticket", "triage" or "research" for work Rem started on its own; blank for requested work. */
                    val selfWork: String = "",
                    /** For a paused card: "user", or "priority" when self-work made way for the user's own work. */
-                   val pausedBy: String = "")
+                   val pausedBy: String = "",
+                   /** The question this run brings the user, with Rem's recommendation; null for none or from an older desktop. */
+                   val decision: RemDecisionCard? = null)
 /** A file on a Rem chat message: one the phone attached, or one the desktop offered to this phone. */
 data class RemFile(val id: String, val name: String, val size: Long)
 /**
@@ -350,13 +420,17 @@ data class RemMessage(val id: String, val role: String, val body: String, val cr
                       /** On a request the user queued behind other tasks: the titles of those tasks. Rem got it once they succeeded. */
                       val queuedAfter: List<String> = emptyList(),
                       /** On the message posted when self-work stops: the tasks it started in that period. */
-                      val selfWorkReport: RemSelfWorkReport? = null)
+                      val selfWorkReport: RemSelfWorkReport? = null,
+                      /** Changes to decisions the user asked Rem for in this chat, with before and after; OK applies one. */
+                      val decisionEdits: List<RemDecisionEdit> = emptyList())
 /**
  * One period of self-work, from when it started to when it stopped. [endedBy] is `window`, `user` or `condition`; [counts]
  * holds `started`, `finished`, `paused`, `blocked`, `tickets_created`, `tickets_moved` and `proposals`.
  */
 data class RemSelfWorkReport(val periodId: String, val startedAt: String, val endedAt: String, val endedBy: String,
-                             val counts: Map<String, Int>, val items: List<RemSelfWorkItem>)
+                             val counts: Map<String, Int>, val items: List<RemSelfWorkItem>,
+                             /** "3 of 4 tickets passed review first time.", blank from an older desktop or with nothing accepted. */
+                             val verifiedLine: String = "")
 /** A task self-work started: [kind] is `ticket`, `research` or `triage`; [outcome] `finished`, `running`, `paused`, `blocked`, `failed` or `stopped`. */
 data class RemSelfWorkItem(val taskId: String, val runId: String, val threadId: String, val title: String, val kind: String, val outcome: String,
                            val tickets: List<RemTicketRef> = emptyList())
@@ -366,15 +440,19 @@ data class RemSelfWorkItem(val taskId: String, val runId: String, val threadId: 
  */
 data class RemReference(val id: String, val role: String = "", val body: String = "", val createdAt: String = "",
                         val kind: String = "", val title: String = "", val files: Int = 0, val unavailable: Boolean = false)
-/** One memory a reply saved, changed or forgot. [removed] means the user later forgot it, so its words are gone. */
-data class RemMemoryEntry(val id: String, val text: String, val removed: Boolean)
+/** One memory a reply saved, changed or forgot. [removed] means the user later forgot it, so its words are gone.
+ *  [until] is the end date Rem proposed when it saved a fact tied to a date or event; empty for none. */
+data class RemMemoryEntry(val id: String, val text: String, val removed: Boolean, val until: String = "")
 /** What one Rem reply did to its memory, with how many secret-looking items it skipped. The desktop can undo it once. */
 data class RemMemoryNote(val saved: List<RemMemoryEntry>, val updated: List<RemMemoryEntry>, val forgotten: List<RemMemoryEntry>,
                          val refused: Int, val undone: Boolean) {
     val undoable get() = !undone && (saved.isNotEmpty() || updated.isNotEmpty() || forgotten.isNotEmpty())
 }
 /** A fact or preference Rem remembers on the desktop. */
-data class RemMemory(val id: String, val text: String, val createdAt: String, val editedAt: String, val addedByUser: Boolean)
+/** [project] names the project the memory belongs to; empty when it applies to every project.
+ *  [until] is when Rem stops using it (empty for never); [ended] says that has passed, so it is kept but not sent. */
+data class RemMemory(val id: String, val text: String, val createdAt: String, val editedAt: String, val addedByUser: Boolean, val project: String = "",
+                     val until: String = "", val ended: Boolean = false)
 /** [mode] is "on" (use and save), "paused" (use, save nothing new) or "off" (neither). */
 data class RemMemories(val mode: String, val memories: List<RemMemory>)
 /** The chat model and how long Rem took to reply. */
@@ -399,7 +477,9 @@ data class RemRun(val id: String, val state: String, val createdAt: String, val 
                   /** For a paused run: "user", or "priority" when self-work made way for the user's own work. */
                   val pausedBy: String = "",
                   /** The worker's sleep while it waits for something outside Raticode; null when awake or from an older desktop. */
-                  val sleep: RemSleep? = null) {
+                  val sleep: RemSleep? = null,
+                  /** A paired desktop with room while this run waits, offered as Run there; null otherwise or from an older desktop. */
+                  val suggestion: RunThere.Suggestion? = null) {
     /** Neither running nor finished: kept with its thread and worktree until it is resumed. */
     val paused get() = state == RunPause.PAUSED
     val active get() = state in setOf("queued", "executing", "verifying", "repairing", "cancelling")
@@ -504,7 +584,20 @@ data class RemHome(val turnState: String, val provider: String, val model: Strin
                    /** The desktop searches its whole saved chat (`rem.search`) and pages back through it (`rem.history`). */
                    val search: Boolean = false,
                    /** The desktop takes `rem.run.pause` and `rem.run.resume`. */
-                   val runPause: Boolean = false)
+                   val runPause: Boolean = false,
+                   /** The desktop takes [DISMISS_ALL]; an older one would refuse it, so the phone offers Dismiss all only then. */
+                   val dismissAll: Boolean = false,
+                   /** The desktop answers `rem.decisions` and takes `rem.decision.change`; task updates carry their question's status now. */
+                   val decisions: Boolean = false,
+                   /** The decisions' revision when this was read, sent back with a change made from a chat card. */
+                   val decisionsRevision: Long = 0,
+                   /** Requests waiting for the user plus Rem's own auto-mode answers to confirm. */
+                   val decisionsWaiting: Int = 0) {
+    companion object {
+        /** Dismiss all: every task update in one action, with the `run_ids` the phone showed. */
+        const val DISMISS_ALL = "rem.run.acknowledge_all"
+    }
+}
 /** One merged tool or thinking step from a worker's thoughts, as the desktop's thought list shows it. */
 data class RemThreadStep(val kind: String, val title: String, val detail: String, val body: String, val command: String, val status: String)
 /** A work thread entry. Kind `thoughts` is one run of steps: [count] in all, the newest of them in [steps]. */
@@ -517,7 +610,11 @@ data class RemThread(val id: String, val title: String, val running: Boolean, va
 data class OrganizationSummary(val id: String, val name: String, val state: String, val employees: Int, val openTasks: Int, val projects: List<String>,
                                val needsYou: Int = 0, val pauseReason: String = "", val archived: Boolean = false)
 data class OrganizationEmployee(val id: String, val name: String, val title: String, val provider: String, val model: String, val paused: Boolean,
-                                val reportsTo: String = "")
+                                val reportsTo: String = "",
+                                /** The provider account its turns run as; blank for the default sign-in or from an older desktop. */
+                                val accountId: String = "")
+/** One provider account a worker can run as, by its ID, which survives renaming it. */
+data class OrgAccount(val provider: String, val id: String, val name: String)
 /** One entry of a ticket's conversation. A status change has [kind] `status`, a headline and its move; an older desktop sends no kind. */
 data class OrganizationComment(val actor: String, val at: String, val body: String, val decision: String,
                                val kind: String = "", val title: String = "", val from: String = "", val to: String = "")
@@ -527,16 +624,39 @@ data class OrganizationTask(val id: String, val title: String, val description: 
                             /** Key, epic, evidence and notes; null from an older desktop. */
                             val extras: TicketExtras? = null,
                             /** How many entries the whole conversation shows on the desktop; 0 from an older desktop. */
-                            val commentCount: Int = 0)
+                            val commentCount: Int = 0,
+                            /** A paired desktop with room while it waits: Run there, or what to grant; null otherwise. */
+                            val suggestion: RunThere.Suggestion? = null)
 /** [plan] holds the five-section view's parts; an older desktop sends tasks and employees only. */
 data class Organization(val id: String, val name: String, val description: String, val state: String, val projects: List<String>,
                         val employees: List<OrganizationEmployee>, val tasks: List<OrganizationTask>, val plan: OrgPlan? = null,
-                        val pauseReason: String = "", val pendingRequests: Int = 0)
+                        val pauseReason: String = "", val pendingRequests: Int = 0,
+                        /** Every provider's accounts; null from a desktop that can't choose a worker's account. */
+                        val accounts: List<OrgAccount>? = null,
+                        /** Why a running organization's next worker waits for a computer; blank when it doesn't or from an older desktop. */
+                        val placementWait: String = "")
 data class DesktopSetting(val key: String, val group: String, val label: String, val kind: String, val options: List<Pair<String, String>>,
                           val min: Double, val max: Double, val step: Double)
 data class DesktopSettings(val available: Boolean, val pending: Int, val values: Map<String, Any?>, val items: List<DesktopSetting>)
-data class UsageWindow(val label: String, val usedPercent: Double?, val resetsAt: String)
-data class UsageAccount(val label: String, val status: String, val reason: String, val windows: List<UsageWindow>)
-data class UsageProvider(val provider: String, val calls: Int, val inputTokens: Long?, val outputTokens: Long?)
+/** [id] names the window ("five_hour", "seven_day"); blank from an older desktop. */
+data class UsageWindow(val label: String, val usedPercent: Double?, val resetsAt: String, val id: String = "")
+/**
+ * One provider account on the Usage page. [signInState] is an account row's own sign-in state and
+ * [remNext] the reason Rem picks this account next under "choose by usage"; an older desktop sends neither.
+ */
+data class UsageAccount(val label: String, val status: String, val reason: String, val windows: List<UsageWindow>,
+                        val provider: String = "", val profile: String = "", val observedAt: String = "",
+                        val signInState: String = "", val remNext: String? = null,
+                        /** The current weekly window's readings and pace; null from an older desktop or without a weekly window. */
+                        val weekly: UsageBurndown? = null,
+                        /** The desktop can sign this account in from the phone (provider.account.sign_in). */
+                        val phoneSignIn: Boolean = false)
+data class UsageProvider(val provider: String, val calls: Int, val inputTokens: Long?, val outputTokens: Long?, val totalTokens: Long? = null)
+/** [range] and [series] are null from a desktop that only shows the last [days] days. */
 data class DesktopUsage(val days: Int, val observedAt: String, val accounts: List<UsageAccount>, val calls: Int, val inputTokens: Long?,
-                        val outputTokens: Long?, val providers: List<UsageProvider>)
+                        val outputTokens: Long?, val providers: List<UsageProvider>, val totalTokens: Long? = null,
+                        val range: UsageRangeInfo? = null, val series: UsageSeries? = null,
+                        /** Null from a desktop without the API-price estimate. */
+                        val apiCost: UsageCost? = null,
+                        /** Null from a desktop without Usage › Verified work. */
+                        val verifiedWork: VerifiedWork? = null)

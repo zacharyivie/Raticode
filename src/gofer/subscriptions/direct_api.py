@@ -261,7 +261,7 @@ class OpenAiApiSubscription(DirectApiSubscription):
 
 class AnthropicApiSubscription(DirectApiSubscription):
     subscription_name = "anthropic_api"
-    default_model = "claude-3-5-sonnet-latest"
+    default_model = "claude-sonnet-5-5"
 
     def _request(
         self,

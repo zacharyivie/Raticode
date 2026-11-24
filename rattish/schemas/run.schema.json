@@ -10,7 +10,12 @@
         "provider": {"type": "string", "minLength": 1},
         "profile": {"type": ["string", "null"]},
         "model": {"type": "string", "minLength": 1},
-        "effort": {"type": "string", "minLength": 1}
+        "effort": {"type": "string", "minLength": 1},
+        "provider_version": {
+          "description": "The version of the provider app the node started, as its CLI reports it. Only on a node record's provider, and absent for plain API providers, cached answers and runs saved before it was recorded.",
+          "type": "string",
+          "minLength": 1
+        }
       },
       "required": ["provider", "profile", "model", "effort"],
       "additionalProperties": false
@@ -180,7 +185,7 @@
             "$ref": "#/$defs/provider_choice"
           },
           "fallbacks": {
-            "description": "Each switch to the next fallback provider, in order, with the availability error that caused it.",
+            "description": "Each switch to the next fallback provider, in order, with the availability error that caused it. An entry with skipped true is a fallback entry the step passed over: another account of a provider that hit a usage limit (reason rate_limit) earlier in the step.",
             "type": "array",
             "items": {
               "type": "object",
@@ -188,7 +193,8 @@
                 "from": {"$ref": "#/$defs/provider_choice"},
                 "to": {"$ref": "#/$defs/provider_choice"},
                 "reason": {"$ref": "#/$defs/fallback_reason"},
-                "message": {"type": "string"}
+                "message": {"type": "string"},
+                "skipped": {"const": true}
               },
               "required": ["from", "to", "reason", "message"],
               "additionalProperties": false
@@ -241,7 +247,15 @@
           "type": "object",
           "properties": {
             "max_tokens": {"type": ["integer", "null"], "minimum": 1},
-            "max_cost_usd": {"type": ["number", "null"], "exclusiveMinimum": 0}
+            "max_cost_usd": {"type": ["number", "null"], "exclusiveMinimum": 0},
+            "daily_tokens": {
+              "description": "Set on a triggered run whose max_tokens is what was left of a daily limit.",
+              "const": true
+            },
+            "daily_cost": {
+              "description": "Set on a triggered run whose max_cost_usd is what was left of a daily limit.",
+              "const": true
+            }
           },
           "required": ["max_tokens", "max_cost_usd"],
           "additionalProperties": false
@@ -294,6 +308,62 @@
         "not_reused_runs": {"type": "integer", "minimum": 0}
       },
       "required": ["run_id", "rerun_nodes"],
+      "additionalProperties": false
+    },
+    "worktree": {
+      "description": "Where a run of a workspace: worktree workflow worked, and what became of its changes. state: active while it runs, pending while its changes wait to be landed or discarded, no_changes when it changed nothing and was cleaned up, then landed or discarded.",
+      "type": "object",
+      "properties": {
+        "state": {"enum": ["active", "pending", "no_changes", "landed", "discarded"]},
+        "branch": {"type": "string", "minLength": 1},
+        "base_commit": {"type": "string", "minLength": 1},
+        "base_branch": {"type": ["string", "null"]},
+        "repository": {"type": "string", "minLength": 1},
+        "checkout": {"type": "string", "minLength": 1},
+        "root": {"type": "string", "minLength": 1},
+        "project_root": {"type": "string", "minLength": 1},
+        "commit": {"type": ["string", "null"]},
+        "files_changed": {"type": "integer", "minimum": 0},
+        "setup": {"type": ["object", "null"]},
+        "message": {"type": "string"},
+        "landed_commit": {"type": ["string", "null"]},
+        "decided_at": {"type": ["string", "null"]}
+      },
+      "required": ["state", "branch", "base_commit", "base_branch", "repository", "checkout", "root", "project_root"],
+      "additionalProperties": false
+    },
+    "model_overrides": {
+      "description": "Nodes this run used another provider and model on, from a test set's Try another model. The source was not changed; compiled_snapshot is the variant that ran.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "node": {"type": "string", "minLength": 1},
+          "provider": {"type": "string", "minLength": 1},
+          "model": {"type": "string", "minLength": 1},
+          "fromProvider": {"type": ["string", "null"]},
+          "fromModel": {"type": ["string", "null"]}
+        },
+        "required": ["node", "provider", "model"],
+        "additionalProperties": false
+      }
+    },
+    "replayed_from": {
+      "description": "A run started from node_id. The saved results of reused_nodes came from run_id; node_id and everything after it ran from the current source.",
+      "type": "object",
+      "properties": {
+        "run_id": {"type": "string", "minLength": 1},
+        "node_id": {"type": "string", "minLength": 1},
+        "reused_nodes": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "reused_runs": {"type": "integer", "minimum": 0},
+        "not_reused_runs": {"type": "integer", "minimum": 0}
+      },
+      "required": ["run_id", "node_id", "reused_nodes"],
       "additionalProperties": false
     }
   },

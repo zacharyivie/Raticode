@@ -1,0 +1,18 @@
+/* "Context sent": one turn's prompt, part by part, as short labelled bars. */
+.context-sent { font-size: 12px; line-height: 1.45; color: rgb(var(--color-ink)); }
+.context-sent-heading { margin: 0 0 6px; font-size: 12px; font-weight: 600; }
+.context-sent-summary { margin: 0 0 8px; color: rgb(var(--color-muted)); font-variant-numeric: tabular-nums; }
+.context-sent-parts { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
+.context-sent-parts li { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 10px; row-gap: 3px; align-items: baseline; }
+.context-sent-label { min-width: 0; overflow-wrap: anywhere; }
+.context-sent-label em { font-style: normal; color: rgb(var(--color-muted)); }
+.context-sent-size { color: rgb(var(--color-muted)); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.context-sent-bar { grid-column: 1 / -1; display: block; height: 4px; border-radius: 3px; background: rgb(var(--color-line) / .65); overflow: hidden; }
+.context-sent-bar > span { display: block; height: 100%; border-radius: 3px; background: rgb(var(--color-brand)); }
+.context-sent-parts li[data-kept] .context-sent-bar > span { background: rgb(var(--color-muted) / .45); }
+.context-sent-note { margin: 10px 0 0; color: rgb(var(--color-muted)); font-size: 11px; }
+.context-sent-label small { display: block; color: rgb(var(--color-muted)); font-size: 10.5px; }
+.usage-standing { margin-top: 22px; padding-top: 16px; border-top: 1px solid rgb(var(--color-line)); }
+.usage-standing .context-sent-heading { font-size: 12px; }
+.usage-standing .context-sent-parts { gap: 10px; }
+.context-sent-subheading { margin: 16px 0 6px; font-size: 11.5px; font-weight: 600; color: rgb(var(--color-ink)); }

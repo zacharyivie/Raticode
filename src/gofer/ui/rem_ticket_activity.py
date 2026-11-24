@@ -374,10 +374,13 @@ def transition_entry(
         }
     if target == "done":
         verdict = str((run or {}).get("summary_short") or "").strip()
+        # Auto mode accepts what only a person or another machine could prove, and says so.
+        unverified = str((run or {}).get("unverified") or "").strip()
         return {
             "title": "Verified complete, moved to Done",
-            "body": verdict or "The independent review accepted the work.",
-            "details": "",
+            "body": (verdict or "The independent review accepted the work.")
+            + (f" {unverified}" if unverified else ""),
+            "details": unverified,
             "checks": run_checks(run),
         }
     return {"title": f"Moved to {STATUS_LABELS.get(target, target)}", "body": "", "details": ""}

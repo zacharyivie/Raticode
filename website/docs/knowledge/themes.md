@@ -18,6 +18,8 @@ Open **Settings > Memory > Report themes**. The gallery has System, Light, Dark,
 
 A theme applies to later HTML reports, slides and PDFs, wherever they're saved. It doesn't turn on Second Brain, override a format you ask for, or rewrite existing documents.
 
+Rem reads the selected theme and report format when it's about to write a report. It calls the `rules` tool of whichever report tools the thread has: `reports`, a research task's `rem_artifacts`, or `second_brain`. Its instructions only say to do that, so turns that never write a report don't carry the theme's text. A read-only review never saves a report, so it gets the theme as a file and reads it only when a check is about a report's format or design. The file sits in the reviewer's private scratch folder, or in Raticode's data folder for apps that are given access to it. An Antigravity review can only open the project, so it gets the theme in its instructions, as does any other thread with none of those tools.
+
 ## Make your own
 
 1. Choose **New theme** and describe the design. You can attach references by dictation, paste or drag and drop: up to five files, 20 MB each, 40 MB total (the chat limits).

@@ -152,7 +152,8 @@ What the macOS job does, in order:
 
 The entitlements are the same for the app and everything inside it: JIT and unsigned
 executable memory (Electron and Python's native libraries), disabled library
-validation (the backend loads its own libraries, including Vosk, at run time) and
+validation (the backend loads its own libraries, including sherpa-onnx and its ONNX
+Runtime, at run time) and
 audio input (dictation). macOS has no entitlement for speech recognition; the
 `NSSpeechRecognitionUsageDescription` in the app's Info.plist covers it.
 
@@ -334,13 +335,23 @@ Developer ID certificate existed, with Windows signing left optional.
 
 ## Dictation on Mac and Windows
 
-Mac builds include Vosk 0.3.44, the latest published universal2 wheel, and its
-`libvosk.dyld` native library. Other platforms retain Vosk 0.3.45. The app declares
-microphone usage and audio-input entitlements. Before publishing a Mac candidate,
+Every platform bundles sherpa-onnx 2.0.1 (pinned in `pyproject.toml`) for the offline
+model: `sherpa_onnx/lib/_sherpa_onnx*` and its own ONNX Runtime 1.28.2
+(`libonnxruntime.so`, `libonnxruntime.dylib` or `onnxruntime.dll`) next to it, plus
+`sherpa_onnx.libs/libasound` on Linux. `scripts/test-release-packages.py` fails if they
+are missing. On Windows sherpa-onnx's `onnxruntime.dll` has the same name as Raticode's
+own ONNX Runtime 1.30 (`onnxruntime/capi/onnxruntime.dll`); `gofer.ui.offline_speech`
+loads sherpa-onnx's copy by full path before importing it. That has only been tested
+with fakes: before publishing a Windows candidate, download the offline model in the
+packaged app and dictate with it, then check that semantic search (fastembed) still
+works in the same session. Re-run the dictation benchmark before upgrading sherpa-onnx.
+The app declares microphone usage and audio-input entitlements. Before publishing a Mac candidate,
 test Rem recording with microphone access granted and denied, then test Settings >
 Devices microphone input. If access was denied, enable Raticode under System Settings >
-Privacy & Security > Microphone and restart it. The offline speech model is
-downloaded from Settings > Devices and needs an internet connection.
+Privacy & Security > Microphone and restart it. The offline speech model (NVIDIA
+Nemotron 3.5 ASR Streaming 0.6B, about 475 MB from the sherpa-onnx GitHub
+releases) is downloaded from Settings > Devices and needs an internet connection. It
+is never bundled; its license is OpenMDW-1.1 (`packaging/licenses/openmdw-1.1.txt`).
 
 Mac dictation uses Apple's on-device speech recognizer through a small helper,
 `frontend/native/macos/RaticodeSpeech.swift`. `npm run dist:mac` and the release
@@ -674,8 +685,8 @@ the collector. A missing license text, dependency version mismatch, or change fr
 updating that file; do not regenerate it solely to silence a failure.
 
 The collector includes Python runtime dependencies, PyInstaller notices, npm
-production dependencies, Electron/Chromium notices and the documented Vosk and
-lazy-val metadata exceptions. Certifi and tqdm source archives are downloaded
+production dependencies, Electron/Chromium notices and the documented sherpa-onnx
+and lazy-val metadata exceptions. Certifi and tqdm source archives are downloaded
 from their locked URLs and checked against their locked SHA-256 hashes.
 
 The frozen CLI embeds this bundle. Desktop packages also expose it under
@@ -687,7 +698,7 @@ inventory before accepting a backend.
 `native-inventory.json` records the destination, build input and SHA-256 of every
 PyInstaller native library. Review this inventory on each release platform and
 retain the notices and source required by the actual native builds. Package
-metadata alone cannot establish the contents of Vosk's compiled dependencies.
+metadata alone cannot establish the contents of sherpa-onnx's compiled dependencies.
 See `packaging/licenses/README.md` for the known components and source references.
 GitHub's source archive must resolve to the same reviewed commit as the binary
 candidate; keep the lockfiles and build instructions in that commit.

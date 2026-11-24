@@ -460,8 +460,9 @@ def test_claude_profile_command_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ["--permission-mode", "manual"] == cmd[
         cmd.index("--permission-mode") : cmd.index("--permission-mode") + 2
     ]
-    assert cmd.count("--allowedTools") == 2
-    assert "--mcp-server" in cmd
+    # The profile's MCP server is allowed by name; Claude Code has no --mcp-server.
+    assert cmd.count("--allowedTools") == 3
+    assert "mcp__docs" in cmd and "--mcp-server" not in cmd
 
 
 def test_workflow_validation_rejects_missing_profile(tmp_path: Path) -> None:

@@ -42,6 +42,8 @@ object RemNotifications {
     /** Workflow messages: one alert each, told apart by their notice ID, in one group per workflow under a summary alert. */
     private const val WORKFLOW_TAG = "rem-workflow"
     private const val WORKFLOW_SUMMARY_TAG = "rem-workflow-group"
+    /** Rem's questions: one alert each, told apart by their decision ID, which opens Decisions on it. */
+    private const val DECISION_TAG = "rem-decision"
     /** What a workflow message's alert carries for its group's summary to count it. */
     private const val KEY_EXTRA = "dev.raticode.mobile.workflow_key"
     private const val MORE_EXTRA = "dev.raticode.mobile.workflow_more"
@@ -105,10 +107,12 @@ object RemNotifications {
      */
     fun post(context: Context, notices: List<RemNotice>, skipped: Int, dropped: Int = 0) {
         if (!active(context) || (notices.isEmpty() && skipped == 0 && dropped == 0)) return
-        val (chat, workflows) = RemAlertRules.split(notices)
+        val (questions, rest) = RemAlertRules.questions(notices)
+        val (chat, workflows) = RemAlertRules.split(rest)
         val time = java.time.LocalTime.now()
         val silent = RemAlertRules.quiet(quietHours(context), time.hour * 60 + time.minute)
         val now = System.currentTimeMillis()
+        questions.forEach { notifyQuestion(context, RemAlertRules.decisionAlert(it, showText(context), now), silent) }
         if (workflows.isNotEmpty()) notifyWorkflows(context, workflows, silent, now)
         RemAlertRules.missed(dropped)?.let { notifyMissed(context, it, now) }
         if (chat.isEmpty() && skipped == 0) return
@@ -163,6 +167,23 @@ object RemNotifications {
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(workflowPublic(context, RemAlertRules.WORKFLOW_GENERIC)).build())
     }
 
+    /**
+     * One question of Rem's, such as "Rem has a question: Which branch does finished work land on?". A tap opens the Decisions
+     * screen on it; the lock screen keeps Rem's generic text.
+     */
+    private fun notifyQuestion(context: Context, alert: RemAlertRules.DecisionAlert, silent: Boolean) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        channel(context)
+        val id = alert.key.hashCode()
+        val public = NotificationCompat.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_launcher)
+            .setContentTitle(RemAlertRules.LOCK_SCREEN_TITLE).setContentText(RemAlertRules.LOCK_SCREEN_TEXT).build()
+        manager.notify(DECISION_TAG, id, NotificationCompat.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_launcher)
+            .setContentTitle(alert.title).setContentText(alert.text).setStyle(NotificationCompat.BigTextStyle().bigText(alert.text))
+            .setWhen(alert.at).setShowWhen(true).setCategory(NotificationCompat.CATEGORY_REMINDER)
+            .setContentIntent(openRun(context, id, alert.target)).setAutoCancel(true).setSilent(silent).setGroup(if (silent) QUIET_GROUP else null)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(public).build())
+    }
+
     /** Workflow messages deleted on the desktop before this phone read them. Quiet; a tap opens the workflow list. */
     private fun notifyMissed(context: Context, text: String, now: Long) {
         val manager = context.getSystemService(NotificationManager::class.java)
@@ -175,10 +196,11 @@ object RemNotifications {
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(workflowPublic(context, RemAlertRules.WORKFLOW_GENERIC)).build())
     }
 
-    /** Removes the workflow messages' alerts and their groups' summaries, which may show their words. */
+    /** Removes the workflow messages' alerts, their groups' summaries and Rem's questions, which may show their words. */
     private fun clearWorkflows(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java)
-        manager.activeNotifications.filter { it.tag == WORKFLOW_TAG || it.tag == WORKFLOW_SUMMARY_TAG }.forEach { manager.cancel(it.tag, it.id) }
+        manager.activeNotifications.filter { it.tag == WORKFLOW_TAG || it.tag == WORKFLOW_SUMMARY_TAG || it.tag == DECISION_TAG }
+            .forEach { manager.cancel(it.tag, it.id) }
     }
 
     /** The user's reply, shown in the alert at once so Android stops its progress spinner. */

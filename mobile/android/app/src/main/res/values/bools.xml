@@ -3,4 +3,6 @@
   <bool name="voice_mode">false</bool>
   <!-- Share to Rem needs the live connection (Android 10). values-v29 turns it on. -->
   <bool name="share_to_rem">false</bool>
+  <!-- Raticode as default browser and file viewer needs the main screen (Android 10). values-v29 turns it on. -->
+  <bool name="open_with_raticode">false</bool>
 </resources>

@@ -156,8 +156,39 @@ class DesktopControlTest {
         val provider = settings.items.first { it.key == "assistant.provider" }
         assertEquals("enum", provider.kind); assertTrue(provider.options.any { it.first == "codex" })
         assertFalse(settings.items.any { it.key.startsWith("browser.") })
+        // Remove Co-authored-by lines: a backend setting the phone shows as a Rem switch.
+        val coAuthors = settings.items.first { it.key == "commitMessage.stripCoAuthors" }
+        assertEquals("bool", coAuthors.kind); assertEquals("Rem", coAuthors.group)
+        assertEquals(true, settings.values["commitMessage.stripCoAuthors"])
         val usage = DesktopViews.parse("usage.overview", desktop.getJSONObject("usage.overview")) as DesktopUsage
         assertEquals(40.0, usage.accounts.single().windows.single().usedPercent!!, 0.0)
-        assertEquals(12, usage.calls)
+        assertEquals(4, usage.calls)
+        // The token chart: the desktop's period, its buckets and each provider's stacked tokens.
+        assertEquals(1500L, usage.totalTokens)
+        assertEquals("custom", usage.range!!.key); assertEquals("2026-10-01", usage.range!!.startDate)
+        val series = usage.series!!
+        assertEquals("day", series.bucket)
+        assertEquals(listOf("claude_code", "codex", "cursor"), series.providers.map { it.provider })
+        assertNull(series.providers.last().totalTokens)
+        // Each provider's brand colors come from the desktop's palette; one sent without a style has none.
+        assertEquals(UsageSeriesStyle(0xFFD97757, 0xFFC6613F, "solid"), series.providers.first().style)
+        assertEquals("stripes", series.providers[1].style!!.pattern)
+        assertNull(series.providers.last().style)
+        val busy = series.buckets.first { it.start.startsWith("2026-10-06") }
+        assertEquals(mapOf("claude_code" to 900L, "codex" to 300L), busy.providers)
+        assertEquals(1200L, busy.totalTokens)
+        assertEquals(1, series.buckets.first { it.start.startsWith("2026-10-21") }.unknownCalls)
+        assertTrue(series.buckets.any { it.calls == 0 && it.providers.isEmpty() })
+        // By account: each provider account, named and shaded by the desktop, with its own tokens per bucket.
+        assertEquals(listOf("claude_code:work", "claude_code:", "codex:", "cursor:"), series.accounts.map { it.key })
+        assertEquals(listOf("work", "Default sign-in", "Default account", "Default account"), series.accounts.map { it.name })
+        assertEquals(UsageSeriesStyle(0xFFF0C9BC, 0xFF4F2719, "dots"), series.accounts.first().style)
+        assertNull(series.accounts.last().style)
+        assertEquals(mapOf("claude_code:work" to 900L, "codex:" to 300L), busy.accounts)
+        val byAccount = UsageHistory.view(series, UsageSplit.ACCOUNT)
+        assertEquals(listOf("Claude Code · work", "Claude Code · Default sign-in", "Codex · Default account", "Cursor · Default account"),
+            byAccount.providers.map { UsageHistory.pieceName(it) })
+        assertEquals(mapOf("claude_code:work" to 900L, "codex:" to 300L), byAccount.buckets.first { it.start.startsWith("2026-10-06") }.providers)
+        assertEquals(series, UsageHistory.view(series, UsageSplit.PROVIDER))
     }
 }

@@ -38,6 +38,28 @@ button.ticket-pill:focus-visible { outline: 2px solid rgb(var(--color-brand)); o
 .ticket-pill[data-gone] { cursor: default; border-style: dashed; background: transparent; box-shadow: none; color: rgb(var(--color-muted)); }
 .ticket-pill[data-gone] .ticket-pill-title { text-decoration: line-through; }
 
+/* A ticket in a table cell: only its key, as a link. It never breaks at the hyphen, and the
+   column is only as wide as the key. The tooltip and spoken label still give title and status. */
+.ticket-key-link {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: none;
+  color: rgb(var(--color-brand));
+  font: inherit;
+  font-weight: 500;
+  text-decoration: underline;
+  text-decoration-color: currentColor;
+  text-underline-offset: 2px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ticket-key-link[data-inverse] { color: inherit; }
+.ticket-key-link:hover { text-decoration-thickness: 2px; }
+.ticket-key-link:focus-visible { outline: 2px solid rgb(var(--color-brand)); outline-offset: 2px; }
+
 /* The tickets a task card or task lists. */
 .ticket-pills { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
 .ticket-pills .ticket-pill { margin: 0; max-width: 100%; }
@@ -48,4 +70,5 @@ button.ticket-pill:focus-visible { outline: 2px solid rgb(var(--color-brand)); o
 @media (forced-colors: active) {
   .ticket-pill { border-color: ButtonText; }
   .ticket-pill-mark { color: ButtonText; }
+  .ticket-key-link { color: LinkText; }
 }

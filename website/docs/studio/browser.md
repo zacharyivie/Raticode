@@ -59,7 +59,8 @@ If another program connects to Firefox's control connection before Raticode does
 | Address bar, back, forward, reload | Yes | Yes | Firefox's own |
 | Private tabs | Yes | Opens in Raticode (chromium) | Firefox's own private window |
 | Developer tools | Yes | No | Firefox's own |
-| Rem can open and control tabs | Yes | Yes | No |
+| Rem can open and control tabs | Yes | Yes | Yes, after you turn on [Let Rem use Raticode (gecko)](#let-rem-use-raticode-gecko) (Linux) |
+| Share one of your tabs with Rem | Yes | Yes | The tab in front of Firefox's window, after you turn on [Let Rem use Raticode (gecko)](#let-rem-use-raticode-gecko) (Linux) |
 | Media bar | Yes | Yes | Yes (Linux) |
 | Keeps playing when the browser [changes windows](#move-the-browser-to-its-own-window) | Yes | Yes | Yes |
 
@@ -67,7 +68,7 @@ If another program connects to Firefox's control connection before Raticode does
 
 **Settings > Browser > Default browser for new tabs** sets the browser that links, `Ctrl+J` and **Open Browser** use for a new tab.
 
-- Rem's tabs and pages from your phone use it too. When the default is Raticode (gecko), they use Raticode (chromium) instead.
+- Rem's tabs and pages from your phone use it too. When the default is Raticode (gecko), they use Raticode (chromium) instead, unless Rem asks for Raticode (gecko) and you [let it](#let-rem-use-raticode-gecko).
 - Changing it doesn't move tabs that are already open.
 - A choice saved by an earlier version, when the setting was called **Web browser**, carries over: **Raticode** is now **Raticode (chromium)** and **Gecko** is now **Raticode (gecko)**.
 
@@ -85,6 +86,32 @@ Raticode (gecko) is Firefox's own window, with its own tab strip, so the tab bar
 - Gecko tabs saved by an earlier version become that one tab, with their pages inside it.
 - Raticode can't list Firefox's inner tabs or split two of them side by side, because it doesn't control the pages in Firefox's window.
 - For private browsing, use Firefox's **New private window** (`Ctrl+Shift+P`). It opens outside Raticode.
+
+## Make Raticode your computer's default browser
+
+*New in Raticode 0.6.0.* Raticode can be the browser your computer uses for links you open in other apps, such as a link in an email or a chat, and for web pages saved as files (`.html`, `.htm`, `.xhtml`).
+
+Installing Raticode only adds it to the list of browsers. It never makes itself the default. You choose it:
+
+1. Open **Settings > Browser > Default web browser**. It says whether Raticode is the default.
+2. Choose the button for your system:
+   - **Windows**: **Open Windows default apps** opens Settings at Raticode's page. Choose **Set default**, or pick Raticode for `http`, `https` and `.html`. Windows only lets you make this change there.
+   - **macOS**: **Open macOS Desktop & Dock settings**, then set **Default web browser** to Raticode. macOS may ask you to confirm.
+   - **Linux**: **Open system default apps** opens your desktop's settings (KDE Plasma, GNOME, Cinnamon or Xfce). Or choose **Make Raticode the default browser…**, confirm the dialog, and Raticode runs `xdg-settings set default-web-browser` for you.
+3. Choose **Check again** to see the result.
+
+To switch back, pick another browser in the same system settings.
+
+**Settings > Browser > Links from other apps open in** picks the browser for those links: **Raticode (chromium)**, the default, or **Raticode (gecko)**.
+
+- Each link opens in a new tab and brings Raticode's window forward, whether Raticode was closed, minimized or in the background. A link that arrives while Raticode is starting waits until the window has loaded. When Raticode is already running, a second launch hands the link to it and closes.
+- With **Raticode (gecko)**, the link opens in Raticode (gecko)'s one tab: when it's already open, the link becomes a new tab inside Firefox's window, and a line under the tab bar says so. See [Raticode (gecko) is one tab](#raticode-gecko-is-one-tab).
+- Where Raticode (gecko) can't run, such as on Windows and macOS, without Firefox installed, or before the restart it needs on Linux, the link opens in Raticode (chromium) and a line says why.
+- Web pages saved as files always open in Raticode's file preview, which is Raticode (chromium)'s local preview, whichever browser you pick. Rem isn't told about a file opened this way: it doesn't appear in the open files Rem sees. Rem sees a link's tab only if you [share it](#let-rem-use-the-browser), as with any tab.
+- A web-page file from another app opens offline with its scripts off, as in the phone's file viewer. It can't load anything from the internet, so it can't tell a website you opened it, and a line above the page says so. Pages that need their scripts or online pictures show without them. A link you click in it still opens in a Browser tab. A link to a file, including one back to the same page or to a file beside it, opens that file offline with its scripts off too, and a link to a folder asks before opening it as a project. It stays offline with its scripts off after Raticode restarts. Opening the file yourself, from recent files or the terminal, shows it as a normal preview again; links in a preview never do.
+- Only `http` and `https` links and existing web-page files are accepted. Anything else on the command line is ignored.
+
+On Linux, the system can list Raticode only when it's installed as an app: the `.deb`, `.rpm` or AUR package, or an AppImage added to your apps by your desktop's AppImage integration. A development build or an AppImage run on its own says so in Settings.
 
 ## Move the browser to its own window
 
@@ -140,7 +167,7 @@ While a tab plays sound, a thin bar at the top of the main area shows the title,
 Rem doesn't see your tabs unless you share them:
 
 - **Ask Rem about this page** (browser menu) puts the page's title and address into Rem's message box, without sending.
-- **Share this tab with Rem…** lets Rem work in that tab.
+- **Share this tab with Rem…** lets Rem work in that tab. For Raticode (gecko), right-click its tab in the tab bar and choose **Share the Gecko tab in front with Rem…** (see [Share a Gecko tab](#share-a-gecko-tab)).
 - **Browser** in a thread's [tools menu](../rem/resources.md) (off by default) lets Rem open and control its own tabs. They join the tab bar in the background, so you keep your place. When Rem needs your approval in a tab and the Browser plugin isn't in front, a bar at the top names the tab, with **Review** to go to it.
 
 **Settings > Browser** controls what Rem may do:
@@ -158,11 +185,71 @@ Rem doesn't see your tabs unless you share them:
 
 Pages in Rem's own tabs can't write to your clipboard, and a page can't use a pop-up to reach a site Rem may not open. Tabs you share with Rem keep their usual permissions.
 
+### What Rem can do in a tab
+
+In every browser Rem can open, list and close its tabs, go to an address, back, forward and reload, read the page, click, hover, type, press keys, choose from lists, scroll, upload files from the thread's project folders, answer a page's dialogs, wait for text, take a screenshot and run a page script. It can also read and control audio and video: what's playing, the title and artist the page reports, position and volume, and play, pause, seek, volume and mute. Playing or pausing needs no approval; it's the same as pressing the page's play button.
+
+### What Rem reads on a page
+
+When Rem reads a page, it gets what a person looking at the tab could see. Text a page keeps in the page but off the screen is left out:
+
+- text that is fully transparent, faded out with a filter (`filter: opacity(0)`), or inside a part of the page the page has hidden from view (`content-visibility: hidden`)
+- text drawn in no colour, or in the same colour as what's behind it, such as white text on a white page
+- text covered by an opaque box that moves with it when you scroll
+- text in a box squeezed to no width or height, or clipped away completely
+- text placed far outside the page, where nobody can scroll to it
+- text in a font smaller than 2 pixels
+
+When something is left out, Rem's view of the page says **[hidden text skipped]** once, so Rem knows the page holds more than it shows. Text below the fold or inside a box you can scroll still counts: you can scroll to it. So does text under a header or banner that stays in place while you scroll, light text on a dark box, gradient or outlined text, and text under a see-through tint. When Rem can't tell what's behind some text, such as a picture or a gradient, it reads the text.
+
+Whatever Rem learns from a page comes to Rem marked as content of that page, with the site it came from: the page text, what a page script returns, and also the page's address and title, the message of a dialog the page opens, the titles and artists the page reports for audio and video, a field's value, the names of the options Rem chose and the name of a download Raticode blocked. Rem treats it as information, not as instructions. Only you give Rem instructions, so a page that tells Rem to do something can't direct it. Raticode removes invisible control characters from page text and anything that imitates the marks around it, so a page can't make its text look like it comes from outside the page.
+
+**Ask Rem about this page** (and **Ask Rem about this** on something you right-clicked) works the same way: it leaves out text the page hides, says **[hidden text skipped]** when it did, and puts the page's title, the element's details, your selection and the page text in one block marked as content of that page.
+
+Rem chooses the browser for each tab it opens: your default browser, **Raticode (chromium)**, or **Raticode (gecko)**. A tab stays in the browser it opened in.
+
+Rem's tabs never take your keyboard or come to the front. Rem can take screenshots of its tabs in every browser while they're behind other tabs or the Browser plugin isn't showing.
+
+### Let Rem use Raticode (gecko)
+
+Rem can't use Raticode (gecko) until you turn on **Settings > Browser > Raticode (gecko) > Let Rem use Raticode (gecko)** (Linux). Then:
+
+- Rem's Gecko tabs open in the background in Firefox's own window, in a Firefox container of their own. You see them in Firefox's tab strip, and they also join Raticode's tab bar in the Raticode (gecko) group, where you can watch them, pause Rem and answer its approvals.
+- Rem's container starts signed out. It gets only the sign-ins for **Sites where Rem uses your sign-ins**, copied from your Gecko profile. Rem never sees or uses your own Gecko tabs unless you [share one](#share-a-gecko-tab), and your private windows stay out of reach.
+- The same approvals, site lists and download setting apply as in other browsers.
+- Firefox stops filling in saved passwords as pages load, so a sign-in form in Rem's tabs stays empty. Your own Gecko tabs still offer your saved logins: click the username or password field and pick one from its dropdown. Turning the setting off brings automatic filling back, or whatever you had set yourself before.
+- Tabs in the background can play sound once Rem presses play. Firefox normally holds sound in a tab until you've looked at it; this setting turns that hold off. Turning the setting off puts the hold back, or whatever you had set yourself before.
+- Turning it on or off restarts Raticode (gecko). Your tabs come back, but anything playing stops.
+
+#### Share a Gecko tab
+
+Raticode (gecko) is Firefox's own window, so its tabs aren't in Raticode's tab bar. To let Rem work in one of them:
+
+1. Turn on **Let Rem use Raticode (gecko)**.
+2. Bring the tab you want to the front of Firefox's window.
+3. Right-click the Raticode (gecko) tab in the tab bar and choose **Share the Gecko tab in front with Rem…**. A new Rem thread opens with the page attached.
+
+Only regular web pages in Firefox's main window can be shared. Firefox's remote control reports a private window's tabs the same way as regular ones, so Raticode only offers tabs from the window Firefox opened when it started. Private windows never can be shared, and a Gecko profile set to always browse privately can't share at all.
+
+A bar above Firefox's window shows each shared tab. Rem asks there before submitting forms, clicking buttons such as Send or Delete, uploading files or running page scripts, as in any tab you share. Open the bar's Rem button to see what Rem did, pause it, or **Stop sharing**. Sharing also ends when you close the tab or Gecko stops; the tab itself stays open. While shared, the tab keeps your sign-ins, its size, and Firefox's own downloads, file pickers and pop-ups. Approvals show only while the Raticode (gecko) tab is open in the Browser; a request nobody answers is declined after two minutes.
+
+While it's on, Firefox runs with its remote-control port open. Raticode takes that connection as Firefox starts. If another program got there first, the connection fails, or it drops while Firefox keeps running, Raticode closes Firefox so no other program can take control of it, and the Browser says why. Open Raticode (gecko) again to keep browsing. Firefox shows its robot icon in the address bar and tells every website it is remote-controlled. Some sites, including Google's sign-in, refuse to sign in while that's true: turn the setting off to sign in, then turn it back on.
+
+Rem doesn't wait for slow parts of a page, such as an ad frame that never finishes. When Rem opens a page, it carries on once the page's own content has loaded, plus at most about 2 seconds. A click, key press or typing that stays on the same page returns after a fraction of a second. If parts of the page are still loading, Rem is told to read the page again in a moment.
+
 Signing in to a website here doesn't sign in a coding CLI. See [Provider setup](../setup.md) for that.
 
 ## Read project reports
 
-Local HTML files open from the File explorer in Browse mode, in the File explorer's own tabs. A previewed page can load files only from the folder it was opened from, so a page can't read other files on your computer. Markdown files have a rendered preview. **Settings > Editor** chooses whether Markdown and HTML open in preview or edit mode; the mode control switches back to source.
+Local HTML files open from the File explorer in Browse mode, in the File explorer's own tabs. A previewed page can load files only from the folder it was opened from, so a page can't read other files on your computer, including files in another open preview's folder. A `file://` address that names another computer, such as a network share, never opens. Markdown files have a rendered preview. **Settings > Editor** chooses whether Markdown and HTML open in preview or edit mode; the mode control switches back to source.
+
+*New in Raticode 0.6.0.* A previewed page is offline. It loads nothing from the internet, so it can't send what it read from its folder to a website. That includes connections a page makes without loading anything, such as WebRTC calls and connection hints.
+
+- When a page asks for something online, such as a web font, a chart library or a picture, a bar above it says so. Choose **Load remote content** to reload the page with it. Raticode remembers this for that file, by its full path, and other files stay offline.
+- To turn it off again, choose **Block remote content for this file** in the tab's menu.
+- Only a link you click opens a website, in a Browser tab. Clicking or typing anywhere else on the page doesn't let the page open a website or a tab, and neither does an automatic redirect.
+- A website typed into a preview's address bar opens in a Browser tab.
+- Web-page files that another app opened with Raticode never go online and run no scripts, and stay that way when Raticode reopens their tabs after a restart. See [Make Raticode your computer's default browser](#make-raticode-your-computer-s-default-browser).
 
 Reports Rem writes keep their own styling. Raticode doesn't change their CSS or theme. See [Reports, slides and PDF](../knowledge/reports.md).
 

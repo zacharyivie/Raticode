@@ -101,6 +101,46 @@ def current_invocation() -> InvocationContext | None:
     return _invocation.get()
 
 
+@dataclass(slots=True)
+class _NamedInvocation:
+    invocation_id: str
+    taken: bool = False
+
+
+_named: ContextVar[_NamedInvocation | None] = ContextVar("raticode_named_invocation", default=None)
+
+
+@contextmanager
+def named_invocation(invocation_id: str | None) -> Iterator[None]:
+    """Record the next provider call made in this block under ``invocation_id``.
+
+    A record kept about the call elsewhere, such as the sizes of one of Rem's own calls
+    (usage_ledger.record_rem_call), then shares the call's token record ID and the two
+    can be joined. Only the first call takes the ID: a later call in the block gets its
+    own, since a second call under one ID would replace the first one's tokens. The
+    holder is shared by reference, so a call made inside asyncio.run still takes it.
+    """
+    if not invocation_id:
+        yield
+        return
+    token = _named.set(_NamedInvocation(invocation_id))
+    try:
+        yield
+    finally:
+        _named.reset(token)
+
+
+def take_invocation_id() -> str:
+    """The ID for a provider call starting now: a named one (named_invocation) or a new one."""
+    from uuid import uuid4
+
+    named = _named.get()
+    if named is not None and not named.taken:
+        named.taken = True
+        return named.invocation_id
+    return uuid4().hex
+
+
 @contextmanager
 def provider_invocation(invocation_id: str) -> Iterator[InvocationContext]:
     context = InvocationContext(invocation_id)

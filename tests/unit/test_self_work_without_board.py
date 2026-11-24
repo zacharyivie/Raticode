@@ -112,7 +112,7 @@ def test_with_the_board_off_self_work_runs_research_and_makes_no_tickets(board):
     wait_for(lambda: quiet(home), 8)
     # The research saw no board and was asked for ideas, not tickets.
     prompts = research_prompts(home)
-    assert len(prompts) == 3
+    assert len(prompts) == 4
     assert all("Board:" not in p and "duplicates" not in p for p in prompts)
     assert all("doesn't use a ticket board" in p for p in prompts)
     # Nothing on the board was created or touched.
@@ -134,12 +134,12 @@ def test_with_the_board_off_each_project_is_researched_once_a_day(board):
     at(home, 15)
     tick(home)
     wait_for(lambda: quiet(home), 8)
-    assert len(worker_titles(fake)) == 3
+    assert len(worker_titles(fake)) == 4
     # The user comes back and leaves again: nothing new to research yet.
     come_back(home, 20)
     at(home, 40)
     tick(home)
-    assert quiet(home) and len(worker_titles(fake)) == 3
+    assert quiet(home) and len(worker_titles(fake)) == 4
     assert home.self_work.view()["state"]["detail"].startswith("Out of work")
     # A day after the research, it researches again.
     later = 15 + IDEAS_AGAIN_AFTER / timedelta(minutes=1)
@@ -147,7 +147,7 @@ def test_with_the_board_off_each_project_is_researched_once_a_day(board):
     at(home, later + 15)
     tick(home)
     wait_for(lambda: quiet(home), 8)
-    assert len(worker_titles(fake)) == 6
+    assert len(worker_titles(fake)) == 8
 
 
 def come_back(home: RemHome, minutes: float) -> None:

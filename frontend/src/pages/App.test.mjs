@@ -632,7 +632,7 @@ test("device settings show the OS speech recognizer, why it can't be used and th
   const macos = {
     engine: "system",
     system: { id: "macos", name: "macOS speech recognition", available: false, reason: "Speech recognition is off for Raticode. Turn it on in System Settings > Privacy & Security > Speech Recognition." },
-    offline: { name: "Raticode's offline speech model", installed: false, downloadMb: 130 },
+    offline: { name: "Raticode's offline speech model", installed: false, downloadMb: 475 },
   };
   const dom = await mountReact(React.createElement(SettingsHarness), createFetchMock([
     jsonResponse("/api/devices", { experimental_network: false, enabled: true, peers: [] }),
@@ -657,7 +657,7 @@ test("device settings show the OS speech recognizer, why it can't be used and th
     await dom.change(select, "offline");
     await dom.flush();
     assert.deepEqual(saved, [{ engine: "offline" }]);
-    assert.match(dom.text(), /Raticode's offline speech model isn't downloaded yet\. It's about 130 MB/);
+    assert.match(dom.text(), /Raticode's offline speech model isn't downloaded yet\. It's about 475 MB/);
     assert.ok(dom.byText("Download offline model"));
     await dom.click(dom.byText("Check again"));
     await dom.flush();
@@ -669,7 +669,7 @@ test("device settings show the OS speech recognizer, why it can't be used and th
     jsonResponse("/api/chat/transcribe/engines", {
       engine: "system",
       system: { id: "", name: "", available: false, reason: "Linux doesn't include a speech recognizer, so Raticode uses its own offline model." },
-      offline: { name: "Raticode's offline speech model", installed: true, downloadMb: 130 },
+      offline: { name: "Raticode's offline speech model", installed: true, downloadMb: 475 },
     }),
   ]));
   try {
@@ -683,6 +683,41 @@ test("device settings show the OS speech recognizer, why it can't be used and th
     assert.equal(allElements(linux.container).some((node) => node.textContent === "Download offline model"), false);
     assert.equal(allElements(linux.container).some((node) => node.textContent === "Test speech recognition"), false);
   } finally { await linux.unmount(); }
+
+  // Someone who had the old Vosk model is told it was replaced; nothing downloads by itself.
+  const replaced = await mountReact(React.createElement(SettingsHarness), createFetchMock([
+    jsonResponse("/api/devices", { experimental_network: false, enabled: true, peers: [] }),
+    jsonResponse("/api/chat/transcribe/engines", {
+      engine: "system",
+      system: { id: "", name: "", available: false, reason: "Linux doesn't include a speech recognizer, so Raticode uses its own offline model." },
+      offline: { name: "Raticode's offline speech model", installed: false, downloadMb: 475, replaced: true, model: "NVIDIA Nemotron 3.5 ASR Streaming 0.6B", license: "OpenMDW License 1.1" },
+    }),
+  ]));
+  try {
+    await replaced.click(replaced.byText("Devices"));
+    await replaced.flush();
+    await replaced.flush();
+    assert.match(replaced.text(), /Raticode's offline speech model was replaced by a newer one, so the old model was removed\. Download the new one \(about 475 MB\)/);
+    assert.match(replaced.text(), /The model is NVIDIA Nemotron 3\.5 ASR Streaming 0\.6B, under the OpenMDW License 1\.1\. It recognizes English and other languages on its own\./);
+    assert.ok(replaced.byText("Download offline model"));
+  } finally { await replaced.unmount(); }
+
+  // Windows: a hint that the downloaded model replaces the Windows recognizer.
+  const windows = await mountReact(React.createElement(SettingsHarness), createFetchMock([
+    jsonResponse("/api/devices", { experimental_network: false, enabled: true, peers: [] }),
+    jsonResponse("/api/chat/transcribe/engines", {
+      engine: "system",
+      system: { id: "windows", name: "Windows speech recognition", available: true, language: "en-US" },
+      offline: { name: "Raticode's offline speech model", installed: false, downloadMb: 475 },
+    }),
+  ]));
+  try {
+    await windows.click(windows.byText("Devices"));
+    await windows.flush();
+    await windows.flush();
+    assert.deepEqual([...windows.byLabel("Speech recognition").options].map((option) => option.textContent), ["Built into Windows", "Raticode offline model"]);
+    assert.match(windows.text(), /more accurate than the Windows recognizer\. Once it's downloaded, dictation uses it\./);
+  } finally { await windows.unmount(); }
 });
 
 test("device settings download the offline model with progress and test macOS speech recognition", async () => {
@@ -696,9 +731,9 @@ test("device settings download the offline model with progress and test macOS sp
   const name = "Raticode's offline speech model";
   const mb = 1024 * 1024;
   const progress = [
-    { name, installed: false, downloadMb: 130, download: { state: "downloading", receivedBytes: 50 * mb, totalBytes: 125 * mb } },
-    { name, installed: false, downloadMb: 130, download: { state: "installing", receivedBytes: 125 * mb, totalBytes: 125 * mb } },
-    { name, installed: true, downloadMb: 130 },
+    { name, installed: false, downloadMb: 475, download: { state: "downloading", receivedBytes: 50 * mb, totalBytes: 125 * mb } },
+    { name, installed: false, downloadMb: 475, download: { state: "installing", receivedBytes: 125 * mb, totalBytes: 125 * mb } },
+    { name, installed: true, downloadMb: 475 },
   ];
   const requests = [];
   let polls = 0;
@@ -709,12 +744,12 @@ test("device settings download the offline model with progress and test macOS sp
         return { ok: true, status: 200, json: async () => ({
           engine: "system",
           system: { id: "macos", name: "macOS speech recognition", available: true, language: "en-US", reason: "macOS asks for permission to use speech recognition the first time you dictate." },
-          offline: { name, installed: false, downloadMb: 130, download: { state: "failed", receivedBytes: 0, totalBytes: 0, error: "The local speech model couldn't be downloaded: the download server's security certificate couldn't be verified." } },
+          offline: { name, installed: false, downloadMb: 475, download: { state: "failed", receivedBytes: 0, totalBytes: 0, error: "The local speech model couldn't be downloaded: the download server's security certificate couldn't be verified." } },
         }) };
       }
       if (url === "/api/chat/transcribe/model" && options.method === "POST") {
         requests.push(url);
-        return { ok: true, status: 202, json: async () => ({ name, installed: false, downloadMb: 130, download: { state: "starting", receivedBytes: 0, totalBytes: 0 } }) };
+        return { ok: true, status: 202, json: async () => ({ name, installed: false, downloadMb: 475, download: { state: "starting", receivedBytes: 0, totalBytes: 0 } }) };
       }
       if (url === "/api/chat/transcribe/model") {
         const status = progress[Math.min(polls, progress.length - 1)];
@@ -1517,10 +1552,12 @@ test("Settings > Devices turns on dictating from any app and says plainly when t
   const configured = [];
   const suspended = [];
   let answer = { enabled: true, accelerator: "Control+Alt+Space", registered: true, error: "", support: "native", command: "", lastPressedAt: 0 };
+  let retries = 0;
   const desktop = {
     globalDictation: {
       configure: async (options) => { configured.push(options); return { ...answer, enabled: options.enabled }; },
       suspend: async (value) => { suspended.push(value); return answer; },
+      retry: async () => { retries += 1; return { ...answer, state: "approval" }; },
     },
   };
   function SettingsHarness() {
@@ -1560,15 +1597,48 @@ test("Settings > Devices turns on dictating from any app and says plainly when t
     assert.match(dom.text(), /Another app already uses this shortcut/);
     assert.match(dom.text(), /\/opt\/raticode --toggle-dictation/);
 
-    // Raticode as an X11 app on a Wayland desktop: warned, with the fallback.
-    answer = { ...answer, registered: true, error: "", support: "xwayland", lastPressedAt: 0 };
-    await dom.click(dom.byLabel("Dictate to Rem from any app"));
+    // A Wayland desktop: Raticode asked KDE, which added the key. No command, no warning.
+    async function toggleWith(next) {
+      answer = { ...answer, error: "", support: "desktop", lastPressedAt: 0, ...next };
+      await dom.click(dom.byLabel("Dictate to Rem from any app"));
+      await dom.flush();
+      await dom.click(dom.byLabel("Dictate to Rem from any app"));
+      await dom.flush();
+      await dom.flush();
+    }
+    await toggleWith({ registered: true, route: "kde", state: "registered", trigger: "Ctrl+Alt+Space", elsewhere: false });
+    assert.equal(state(), "registered");
+    assert.match(dom.text(), /Ready: Ctrl\+Alt\+Space works in every app\. Raticode added it to KDE's shortcuts, where you can also change it \(System Settings > Keyboard > Shortcuts > Raticode\)\. Turning this off removes it\./);
+    assert.doesNotMatch(dom.text(), /Command for a custom shortcut|X11/);
+    // A key changed in KDE's settings is shown as KDE's.
+    await toggleWith({ registered: true, route: "kde", state: "registered", trigger: "Meta+D", elsewhere: true });
+    assert.match(dom.text(), /Ready: KDE uses Meta\+D for this, as set in System Settings/);
+
+    // The portal's prompt is up, then answered later: the status arrives on its own.
+    await toggleWith({ registered: false, route: "portal", state: "approval", trigger: "" });
+    assert.equal(state(), "approval");
+    assert.match(dom.text(), /Your desktop is asking whether Raticode may use Ctrl\+Alt\+Space in every app\. Answer its prompt to finish\./);
+    assert.doesNotMatch(dom.text(), /Command for a custom shortcut/);
+    // (App passes the main process's { action: "status" } message into this store.)
+    const voiceShortcut = await viteServer.ssrLoadModule("/src/lib/voiceShortcut.js");
+    await React.act(async () => { voiceShortcut.setAnywhereStatus({ ...answer, registered: true, state: "registered", trigger: "Ctrl+Alt+Space" }); });
     await dom.flush();
-    await dom.click(dom.byLabel("Dictate to Rem from any app"));
+    assert.equal(state(), "registered");
+    assert.match(dom.text(), /Ready: Ctrl\+Alt\+Space works in every app\. Your desktop added the shortcut/);
+
+    // Declined: say so, offer to ask again, and the command as a fallback.
+    await toggleWith({ registered: false, route: "portal", state: "declined", trigger: "" });
+    assert.match(dom.text(), /Your desktop's request to add Ctrl\+Alt\+Space was declined/);
+    await dom.click(dom.byText("Ask my desktop again"));
     await dom.flush();
-    await dom.flush();
-    assert.match(dom.text(), /most Wayland desktops only pass Ctrl\+Alt\+Space to X11 apps while one of them is focused/);
-    assert.match(dom.text(), /Command for a custom shortcut/);
+    assert.equal(retries, 1);
+    assert.equal(state(), "approval");
+
+    // No automatic route on this desktop (Sway, say): only then the manual command.
+    await toggleWith({ registered: false, route: "manual", state: "manual", trigger: "" });
+    assert.equal(state(), "manual");
+    assert.match(dom.text(), /Your desktop doesn't let apps add shortcuts\. To use Ctrl\+Alt\+Space from any app, add a shortcut in its keyboard settings that runs the command below\./);
+    assert.match(dom.text(), /Command for a custom shortcut in your desktop's keyboard settings/);
 
     // Recording a new key lets the key through instead of starting dictation.
     await dom.click(dom.byText("Keybindings"));
@@ -2569,6 +2639,44 @@ test("shared dialogs trap focus, close with Escape, and restore focus to the ope
   await dom.unmount();
 });
 
+test("an approval with options shows one button per option and sends the typed reply", async () => {
+  const decisions = [];
+  const approval = {
+    workflowId: "demo",
+    runId: "run-1",
+    nodeId: "channel",
+    message: "Where should this build go?",
+    status: "pending",
+    approvers: [],
+    options: ["Stable", "Beta", "Cancel"],
+    rejectOptions: ["Cancel"],
+    reply: "required",
+  };
+  const dom = await mountReact(
+    React.createElement(canvasModule.ApprovalDecisionOverlay, {
+      approval,
+      node: { id: "channel", label: "Channel" },
+      onDecideApproval: (...args) => decisions.push(args),
+    }),
+    createFetchMock([]),
+  );
+  assert.equal(dom.allByTitle("Approve pending approval").length, 0);
+  assert.equal(dom.allByTitle("Reject pending approval").length, 0);
+  const beta = dom.byTitle("Answer Beta");
+  assert.ok(dom.byTitle("Answer Cancel (counts as a rejection)"));
+  // A required reply keeps the answers disabled until something is typed.
+  assert.equal(reactProps(beta).disabled, true);
+  await dom.change(dom.controlAfterLabel("Reply (required)"), "Internal testers only");
+  assert.equal(reactProps(dom.byTitle("Answer Beta")).disabled, false);
+  await dom.click(dom.byTitle("Answer Beta"));
+  assert.equal(decisions.length, 1);
+  const [sent, decision, , , answer] = decisions[0];
+  assert.equal(sent, approval);
+  assert.equal(decision, "approved");
+  assert.deepEqual(answer, { choice: "Beta", reply: "Internal testers only" });
+  await dom.unmount();
+});
+
 test("every migrated dialog family uses the shared keyboard and focus contract", async (context) => {
   const approval = {
     workflowId: "demo",
@@ -3198,6 +3306,51 @@ test("deleting a Rattish workflow removes its recent-file entry", async () => {
   await dom.unmount();
 });
 
+test("deleting a Rattish workflow names its waiting run worktrees first", async () => {
+  const workflow = {
+    ...workflowFixture({ id: "only", name: "Only workflow" }),
+    sourceFormat: "rattish",
+    sourcePath: "/workspace/.raticode/only/workflow.rattish",
+  };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflow])),
+    jsonResponse("/api/workflows/only/document", {
+      document: { diagnostics: [], preflight: { diagnostics: [] }, source: "Rattish: 1\n" },
+    }),
+    jsonResponse("/api/workflows/only/run-worktrees", { workflowId: "only", pending: 2, runIds: ["r1", "r2"] }),
+    jsonResponse(
+      "/api/workflows/only?sourceFormat=rattish",
+      { deleted: true, runWorktreesRemoved: 2, runWorktreeErrors: [] },
+      { method: "DELETE" },
+    ),
+  ]);
+  const confirmations = [];
+  const originalConfirm = window.confirm;
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock);
+  let approved = false;
+  window.confirm = (message) => { confirmations.push(message); return approved; };
+  try {
+    await dom.flush();
+    await dom.click(dom.byTitle("Workflow actions"));
+    await dom.click(dom.byText("Delete workflow"));
+    await dom.flush();
+    assert.equal(confirmations.length, 1);
+    assert.match(confirmations[0], /2 run worktrees still wait to be landed or discarded/);
+    assert.match(confirmations[0], /removes them and their branches/);
+    assert.equal(fetchMock.calls.some((call) => call.options.method === "DELETE"), false);
+
+    approved = true;
+    await dom.click(dom.byTitle("Workflow actions"));
+    await dom.click(dom.byText("Delete workflow"));
+    await dom.flush();
+    assert.equal(fetchMock.calls.filter((call) => call.options.method === "DELETE").length, 1);
+    assert.match(dom.text(), /Deleted Only workflow and 2 run worktrees/);
+  } finally {
+    window.confirm = originalConfirm;
+    await dom.unmount();
+  }
+});
+
 test("workflow deletion closes source tabs and clears source preview state", () => {
   const source = fs.readFileSync(path.join(repoRoot, "frontend/src/pages/App.jsx"), "utf8");
   const deleteFunction = source.slice(
@@ -3422,6 +3575,140 @@ test("workflow sidebar activities preserve expanded files while opening workflow
   await dom.click(dom.byLabel("File explorer"));
   assert.ok(dom.byText("workflow.rattish"));
   assert.equal(dom.byLabel("File explorer").getAttribute("aria-selected"), "true");
+  await dom.unmount();
+});
+
+test("Code file explorer runs a workflow with a file through the Run dialog", async () => {
+  const fileInput = { type: "file", required: true, file: { accept: [".md"], maxSize: 1024 }, schema: { type: "string", format: "file" } };
+  const workflow = {
+    ...workflowFixture({ id: "summarize", name: "Summarize a file" }),
+    projectName: "gofer-flow",
+    projectRoot: "/workspace/gofer-flow",
+    sourceFormat: "rattish",
+    inputs: { document: fileInput },
+  };
+  const plain = {
+    ...workflowFixture({ id: "plain", name: "No file" }),
+    projectRoot: "/workspace/gofer-flow",
+    sourceFormat: "rattish",
+    inputs: { note: { type: "string", required: false, schema: { type: "string" } } },
+  };
+  const entries = {
+    "/workspace/gofer-flow": [
+      { name: "docs", path: "/workspace/gofer-flow/docs", isDirectory: true, isFile: false },
+      { name: "README.md", path: "/workspace/gofer-flow/README.md", isDirectory: false, isFile: true },
+    ],
+    "/workspace/gofer-flow/docs": [],
+  };
+  const workspace = {
+    async trustProjectRoot() {},
+    async listDirectory({ currentPath }) {
+      return { directory: currentPath, parent: path.dirname(currentPath), entries: entries[currentPath] ?? [] };
+    },
+  };
+  const runs = [];
+  const dom = await mountReact(
+    React.createElement(appModule.WorkflowSidebar, {
+      activeCodePath: "",
+      activeWorkflow: workflow,
+      activeWorkflowId: workflow.id,
+      loading: false,
+      query: "",
+      runState: {},
+      view: "code",
+      workflows: [workflow, plain],
+      width: 272,
+      onCreate() {},
+      onCodeFileOpen() {},
+      onCloseCodeFile() {},
+      onCodeFilesystemChange() {},
+      onDeleteWorkflow() {},
+      onDuplicateWorkflow() {},
+      onQueryChange() {},
+      onRefresh() {},
+      onRenameWorkflow() {},
+      onResizeKeyDown() {},
+      onResizeStart() {},
+      onRunWorkflow(target, preset) { runs.push([target.id, preset]); },
+      onSelect() {},
+      onViewChange() {},
+    }),
+    createFetchMock([]),
+    { desktop: { workspace } },
+  );
+  const contextMenu = async (element) => {
+    const target = dom.ancestor(element, "BUTTON");
+    const event = testEvent(element);
+    event.clientX = 100;
+    event.clientY = 100;
+    await React.act(async () => reactProps(target).onContextMenu(event));
+  };
+  const menuLabels = () => allElements(dom.byLabel("File actions")).filter((element) => element.tagName === "SPAN").map(directText);
+  await dom.flush();
+  await contextMenu(dom.byText("docs"));
+  assert.ok(!menuLabels().includes("Run workflow with this file"), "folders can't fill a file input");
+  await contextMenu(dom.byText("README.md"));
+  const item = allElements(dom.byLabel("File actions")).find((element) => element.tagName === "SPAN" && directText(element) === "Run workflow with this file");
+  await dom.click(dom.ancestor(item, "BUTTON"));
+  const list = dom.byLabel("Workflows with a file input");
+  assert.match(list.textContent, /Summarize a file/);
+  assert.doesNotMatch(list.textContent, /No file/, "only workflows with a file input are listed");
+  await dom.click(allElements(list).find((element) => element.tagName === "BUTTON"));
+  assert.deepEqual(runs, [["summarize", { document: "/workspace/gofer-flow/README.md" }]]);
+  await dom.unmount();
+});
+
+test("RunPreviewDialog takes a file input from Choose file, a drop or a typed path", async () => {
+  const submitted = [];
+  const picked = { "/home/me/notes.md": { name: "notes.md", size: 40, type: "text/markdown" } };
+  const dom = await mountReact(
+    React.createElement(runPreviewModule.default, {
+      plan: { generations: [] },
+      workflow: {
+        id: "summarize",
+        name: "Summarize",
+        inputs: {
+          document: { type: "file", required: true, file: { accept: [".md", "text/*"], maxSize: 100 }, schema: { type: "string", format: "file" } },
+        },
+      },
+      onCancel() {},
+      onRun(parameters) { submitted.push(parameters); },
+    }),
+    createFetchMock([]),
+    { desktop: { getDroppedFilePath: (file) => file.path ?? "" } },
+  );
+  const byId = (id) => allElements(dom.container).find((node) => node.getAttribute?.("id") === id);
+  const picker = allElements(dom.container).find((node) => node.tagName === "INPUT" && node.getAttribute("type") === "file");
+  assert.equal(picker.getAttribute("accept"), ".md,text/*");
+  assert.match(dom.text(), /Choose file/);
+  assert.match(dom.text(), /\.md, text\/\*, up to 100 bytes/);
+
+  await dom.click(dom.byText("Run workflow"));
+  assert.equal(submitted.length, 0);
+  assert.match(dom.text(), /Required/);
+
+  // A dropped file that's too large is refused before Run.
+  const drop = dom.byLabel("Drop a file for document");
+  const dropEvent = testEvent(drop);
+  dropEvent.dataTransfer = { files: [{ name: "big.md", size: 500, type: "text/markdown", path: "/home/me/big.md" }] };
+  await React.act(async () => reactProps(drop).onDrop(dropEvent));
+  assert.equal(byId("run-param-document").value, "/home/me/big.md");
+  await dom.click(dom.byText("Run workflow"));
+  assert.equal(submitted.length, 0);
+  assert.match(dom.text(), /big\.md is 500 bytes, more than the 100 bytes this input takes/);
+
+  // Choose file uses the path Electron gives for the picked file.
+  const chosen = testEvent(picker);
+  chosen.target = { files: [{ ...picked["/home/me/notes.md"], path: "/home/me/notes.md" }], value: "x" };
+  await React.act(async () => reactProps(picker).onChange(chosen));
+  assert.match(dom.text(), /notes\.md/);
+  await dom.click(dom.byText("Run workflow"));
+  assert.deepEqual(submitted, [{ document: "/home/me/notes.md" }]);
+
+  // A typed path is sent as written; the run checks it when it copies the file.
+  await dom.change(byId("run-param-document"), "/srv/report.md");
+  await dom.click(dom.byText("Run workflow"));
+  assert.deepEqual(submitted.at(-1), { document: "/srv/report.md" });
   await dom.unmount();
 });
 
@@ -5992,9 +6279,359 @@ test("Rattish graph restores selection and emits targeted inspector mutations", 
 
   await dom.click(dom.byTitle("Add node"));
   await dom.flush();
+  await dom.click(nodePickerOption(dom, "bash-command"));
+  await dom.flush();
+  assert.deepEqual(mutations.at(-1).at(-1), {
+    kind: "add_node",
+    node: "bash-command-1",
+    node_type: "bash-command",
+  });
+  await dom.unmount();
+});
+
+test("Rattish agent step's Profile menus show accounts with their sign-in state", async () => {
+  const mutations = [];
+  const fallback = [{ provider: "claude-code", profile: "home" }, { provider: "codex" }];
+  const document = {
+    workflowId: "rattish-accounts",
+    source: "Rattish: 1\nWorkflow:\n  name: Accounts\nNode ask:\n  type: agent\n  provider: claude-code\n  profile: work\n  prompt: Say hi.\n",
+    workflow: { name: "Accounts", fields: { name: { value: "Accounts" } } },
+    nodeContracts: [
+      {
+        nodeType: "agent",
+        configurationSchema: {
+          type: "object",
+          properties: {
+            provider: { type: "string", "x-rattish-role": "provider_id" },
+            profile: { type: ["string", "null"] },
+            fallback: {
+              type: "array",
+              items: { type: "object", properties: { provider: { type: "string" }, profile: { type: ["string", "null"] } } },
+            },
+          },
+        },
+        defaults: { profile: null, fallback: [] },
+      },
+    ],
+    graph: {
+      nodes: [
+        {
+          id: "ask",
+          label: "ask",
+          type: "agent",
+          configuration: { provider: "claude-code", profile: "work", fallback },
+          execution: { allow_fail: false, max_concurrency: 1, retry_count: 0, retry_delay_ms: 1000 },
+          authoredFields: { provider: { value: "claude-code" }, profile: { value: "work" }, fallback: { value: fallback }, type: { value: "agent" } },
+          bindings: [],
+          needs: [],
+          diagnostics: [],
+        },
+      ],
+      edges: [],
+    },
+  };
+  const profiles = [
+    { name: "work", subscription: "claude_code", account_id: "aaaaaaaaaaaaaaaa" },
+    { name: "home", subscription: "claude_code", account_id: "bbbbbbbbbbbbbbbb" },
+    { name: "api-key", subscription: "claude_code", model: "sonnet" },
+    { name: "codex-key", subscription: "codex" },
+  ];
+  const accounts = {
+    accounts: [
+      { name: "work", provider: "claude_code", label: "Claude Code · work", state: "needs_sign_in", needs_sign_in: true },
+      { name: "home", provider: "claude_code", label: "Claude Code · home", state: "signed_in", needs_sign_in: false },
+    ],
+    providers: [{ id: "claude_code", label: "Claude Code" }],
+  };
+  const fetchMock = createFetchMock([(url) => {
+    if (url === "/api/provider/profiles") return { ok: true, json: async () => ({ profiles }) };
+    if (url === "/api/provider/accounts") return { ok: true, json: async () => accounts };
+    return null;
+  }]);
+  const workflow = appModule.rattishGraphWorkflow(
+    { ...workflowFixture({ id: "rattish-accounts", name: "Accounts" }), sourceFormat: "rattish", nodes: [], edges: [] },
+    document,
+  );
+  const dom = await mountReact(
+    React.createElement(DagCanvasHarness, {
+      workflow,
+      rattishDocument: document,
+      onRattishMutation(next) {
+        mutations.push(next);
+        return Promise.resolve(null);
+      },
+      onWorkflowChange() {},
+    }),
+    fetchMock,
+  );
+  try {
+    await dom.flush();
+    await dom.pointer(dom.ancestor(dom.byText("ask"), "ARTICLE"), "onPointerDown");
+    await dom.flush();
+    await dom.click(dom.byText("Action"));
+    await dom.flush();
+    const optionTexts = (select) => allElements(select).filter((node) => node.tagName === "OPTION").map(textOf);
+
+    const profile = dom.controlAfterLabel("Profile");
+    assert.equal(reactProps(profile).value, "work");
+    assert.deepEqual(optionTexts(profile), [
+      "None",
+      "work · Claude Code account · Needs sign-in",
+      "home · Claude Code account · Signed in",
+      "api-key (sonnet)",
+    ]);
+    const first = dom.controlAfterLabel("Fallback entry 1 (claude-code) profile");
+    assert.equal(reactProps(first).value, "home");
+    const second = dom.controlAfterLabel("Fallback entry 2 (codex) profile");
+    assert.deepEqual(optionTexts(second), ["None", "codex-key"]);
+
+    await dom.change(second, "codex-key");
+    assert.deepEqual(mutations.at(-1), [
+      {
+        kind: "set_field",
+        target: { node: "ask" },
+        field: "fallback",
+        value: [{ provider: "claude-code", profile: "home" }, { provider: "codex", profile: "codex-key" }],
+      },
+    ]);
+    await dom.change(dom.controlAfterLabel("Profile"), "");
+    assert.deepEqual(mutations.at(-1), [{ kind: "remove_field", target: { node: "ask" }, field: "profile" }]);
+  } finally {
+    await dom.unmount();
+  }
+});
+
+function nodePickerOption(dom, nodeType) {
+  const option = allElements(dom.container).find(
+    (element) => element.getAttribute?.("role") === "option" && element.getAttribute("data-node-type") === nodeType,
+  );
+  assert.ok(option, `Unable to find node picker option: ${nodeType}`);
+  return option;
+}
+
+function nodePickerTypes(dom) {
+  return allElements(dom.container)
+    .filter((element) => element.getAttribute?.("role") === "option")
+    .map((element) => element.getAttribute("data-node-type"));
+}
+
+const pickerContracts = [
+  { nodeType: "agent", category: "ai", summary: "Ask an AI provider to do a task you describe", docsUrl: "https://raticode.dev/docs/nodes/agent", configurationSchema: { type: "object", properties: {} }, defaults: {} },
+  { nodeType: "bash-command", category: "code", summary: "Run one command and capture its output", docsUrl: "https://raticode.dev/docs/nodes/bash-command", configurationSchema: { type: "object", properties: { command: { type: "string" } } }, defaults: {} },
+  { nodeType: "read-file", category: "files", summary: "Read a text file and pass on its content", docsUrl: "https://raticode.dev/docs/nodes/read-file", configurationSchema: { type: "object", properties: { path: { type: "string" } } }, defaults: {} },
+  { nodeType: "write-file", category: "files", summary: "Create, replace or append to a text file", docsUrl: "https://raticode.dev/docs/nodes/write-file", configurationSchema: { type: "object", properties: {} }, defaults: {} },
+  { nodeType: "loop", category: "flow", summary: "Run the next steps once for each item", docsUrl: "https://raticode.dev/docs/nodes/loop", configurationSchema: { type: "object", properties: {} }, defaults: {} },
+  { nodeType: "send-sms", category: "messaging", summary: "Text a phone", docsUrl: "https://raticode.dev/docs/nodes/send-sms", configurationSchema: { type: "object", properties: {} }, defaults: {} },
+];
+
+function pickerGraphNode(id, type, extra = {}) {
+  return {
+    id,
+    label: id,
+    type,
+    configuration: type === "bash-command" ? { command: `echo ${id}` } : {},
+    execution: { allow_fail: false, max_concurrency: 1, retry_count: 0, retry_delay_ms: 1000 },
+    authoredFields: { type: { value: type }, ...(extra.authoredFields ?? {}) },
+    bindings: [],
+    needs: [],
+    diagnostics: [],
+  };
+}
+
+function pickerDocument(nodes, edges = []) {
+  return {
+    workflowId: "rattish-picker",
+    source: "Rattish: 1\nWorkflow:\n  name: Picker\n",
+    workflow: { name: "Picker", fields: { name: { value: "Picker" } } },
+    metadata: { canvas: { nodes: Object.fromEntries(nodes.map((node, index) => [node.id, { x: 100 + index * 330, y: 100 }])) } },
+    nodeContracts: pickerContracts,
+    graph: { nodes, edges },
+  };
+}
+
+async function mountPickerGraph(document, { mutations, changes }) {
+  const workflow = appModule.rattishGraphWorkflow(
+    { ...workflowFixture({ id: "rattish-picker", name: "Picker" }), sourceFormat: "rattish", nodes: [], edges: [] },
+    document,
+  );
+  return mountReact(
+    React.createElement(DagCanvasHarness, {
+      workflow,
+      rattishDocument: document,
+      onRattishMutation(next) {
+        mutations.push(next);
+        const added = next.find((mutation) => mutation.kind === "add_node");
+        if (!added) return Promise.resolve(document);
+        const routed = next.find((mutation) => mutation.kind === "set_routes");
+        return Promise.resolve({
+          ...document,
+          graph: {
+            nodes: [...document.graph.nodes, pickerGraphNode(added.node, added.node_type)],
+            edges: [
+              ...document.graph.edges,
+              ...(routed ? [{ id: `${routed.node}:route:new`, from: routed.node, to: added.node, mode: "unconditional", status: "valid" }] : []),
+            ],
+          },
+        });
+      },
+      onWorkflowChange(next) {
+        changes.push(next);
+      },
+    }),
+    createFetchMock([]),
+  );
+}
+
+test("Add node opens a searchable picker grouped from the Rattish contracts", async () => {
+  const mutations = [];
+  const changes = [];
+  const document = pickerDocument(
+    [pickerGraphNode("prepare", "bash-command"), pickerGraphNode("review", "bash-command")],
+    [{ id: "prepare:route:0", from: "prepare", to: "review", mode: "unconditional", status: "valid" }],
+  );
+  const dom = await mountPickerGraph(document, { mutations, changes });
+
+  await dom.click(dom.byTitle("Add node"));
+  await dom.flush();
+  const picker = dom.byLabel("Add node");
+  assert.equal(picker.getAttribute("role"), "dialog");
+  assert.equal(dom.byTitle("Add node").getAttribute("aria-expanded"), "true");
+  // Groups come in a fixed order; an unknown category from a new contract still shows.
+  const pickerText = textOf(picker);
+  const order = ["Run code", "Files", "AI", "Flow control", "Messaging"].map((label) => pickerText.indexOf(label));
+  assert.ok(order.every((index, position) => index >= 0 && (position === 0 || index > order[position - 1])), pickerText);
+  assert.match(pickerText, /Read a text file and pass on its content/);
+  const docs = allElements(picker).find((element) => element.getAttribute?.("aria-label") === "Read file docs");
+  assert.equal(docs.getAttribute("href"), "https://raticode.dev/docs/nodes/read-file");
+  assert.equal(docs.getAttribute("target"), "_blank");
+
+  const search = dom.byLabel("Search nodes to add");
+  await dom.change(search, "file");
+  assert.deepEqual(nodePickerTypes(dom), ["read-file", "write-file"]);
+  await dom.change(search, "zzz");
+  assert.deepEqual(nodePickerTypes(dom), []);
+  assert.match(dom.text(), /No node matches/);
+  await dom.keyDown(search, "Escape");
+  await dom.flush();
+  assert.equal(allElements(dom.container).some((element) => element.getAttribute?.("data-node-picker") === "true"), false);
+  assert.equal(dom.byTitle("Add node").getAttribute("aria-expanded"), "false");
+  assert.deepEqual(mutations, []);
+
+  // With no node selected, the node is added without a route.
+  await dom.click(dom.byTitle("Add node"));
+  await dom.flush();
+  await dom.change(dom.byLabel("Search nodes to add"), "write");
+  await dom.keyDown(dom.byLabel("Search nodes to add"), "Enter");
+  await dom.flush();
+  assert.deepEqual(mutations.at(-1), [{ kind: "add_node", node: "write-file-1", node_type: "write-file" }]);
+  await dom.unmount();
+});
+
+test("A picked node is routed on from the selected node and placed to its right", async () => {
+  const mutations = [];
+  const changes = [];
+  const document = pickerDocument(
+    [pickerGraphNode("prepare", "bash-command"), pickerGraphNode("review", "bash-command")],
+    [{ id: "prepare:route:0", from: "prepare", to: "review", mode: "unconditional", status: "valid" }],
+  );
+  const dom = await mountPickerGraph(document, { mutations, changes });
+
+  await dom.pointer(dom.ancestor(dom.byText("prepare"), "ARTICLE"), "onPointerDown");
+  await dom.flush();
+  // Selecting a node focuses the graph, so Tab opens the picker; arrows and Enter choose.
+  const canvas = allElements(dom.container).find((element) => element.getAttribute?.("data-graph-visualization") === "true");
+  assert.equal(globalThis.document.activeElement, canvas);
+  await dom.dispatchWindow("keydown", { key: "Tab", code: "Tab", target: canvas });
+  await dom.flush();
+  const search = dom.byLabel("Search nodes to add after prepare");
+  await dom.change(search, "file");
+  await dom.keyDown(search, "ArrowDown");
+  assert.equal(search.getAttribute("aria-activedescendant"), nodePickerOption(dom, "write-file").getAttribute("id"));
+  await dom.keyDown(search, "ArrowUp");
+  await dom.keyDown(search, "Enter");
+  await dom.flush();
+
   assert.deepEqual(mutations.at(-1), [
-    { kind: "add_node", node: "node-1", node_type: "bash-command" },
+    { kind: "set_routes", node: "prepare", routes: ["review", "read-file-1"] },
+    { kind: "add_node", node: "read-file-1", node_type: "read-file" },
   ]);
+  const placed = changes.at(-1).nodes.find((node) => node.id === "read-file-1");
+  const prepare = changes.at(-1).nodes.find((node) => node.id === "prepare");
+  // "review" already sits right of "prepare", so the new node goes one row down.
+  assert.deepEqual({ x: placed.x, y: placed.y }, { x: prepare.x + 330, y: prepare.y + 154 });
+  assert.equal(dom.controlAfterLabel("ID").value, "read-file-1");
+  await dom.unmount();
+});
+
+test("Tab only opens the node picker while the graph itself has focus", async () => {
+  const mutations = [];
+  const changes = [];
+  const dom = await mountPickerGraph(pickerDocument([pickerGraphNode("prepare", "bash-command")]), { mutations, changes });
+  const input = globalThis.document.createElement("input");
+  dom.container.appendChild(input);
+  await dom.dispatchWindow("keydown", { key: "Tab", code: "Tab", target: input });
+  const outside = globalThis.document.createElement("button");
+  dom.container.appendChild(outside);
+  await dom.dispatchWindow("keydown", { key: "Tab", code: "Tab", target: outside });
+  const canvas = allElements(dom.container).find((element) => element.getAttribute?.("data-graph-visualization") === "true");
+  await dom.dispatchWindow("keydown", { key: "Tab", code: "Tab", shiftKey: true, target: canvas });
+  await dom.flush();
+  assert.equal(nodePickerTypes(dom).length, 0);
+  await dom.dispatchWindow("keydown", { key: "Tab", code: "Tab", target: canvas });
+  await dom.flush();
+  assert.equal(nodePickerTypes(dom).length, pickerContracts.length);
+  await dom.unmount();
+});
+
+test("An empty graph offers Add node, and a finished node isn't routed on", async () => {
+  const mutations = [];
+  const changes = [];
+  const empty = await mountPickerGraph(pickerDocument([]), { mutations, changes });
+  assert.match(empty.text(), /This workflow has no nodes yet/);
+  const emptyButton = allElements(empty.container).find((element) => element.getAttribute?.("data-graph-empty-add-node") === "true");
+  await empty.click(emptyButton);
+  await empty.flush();
+  await empty.click(nodePickerOption(empty, "agent"));
+  await empty.flush();
+  assert.deepEqual(mutations.at(-1), [{ kind: "add_node", node: "agent-1", node_type: "agent" }]);
+  await empty.unmount();
+
+  const finished = await mountPickerGraph(
+    pickerDocument([pickerGraphNode("done", "bash-command", { authoredFields: { finish: { value: "pass" } } })]),
+    { mutations, changes },
+  );
+  await finished.pointer(finished.ancestor(finished.byText("done"), "ARTICLE"), "onPointerDown");
+  await finished.flush();
+  await finished.click(finished.byTitle("Add node"));
+  await finished.flush();
+  await finished.click(nodePickerOption(finished, "loop"));
+  await finished.flush();
+  assert.deepEqual(mutations.at(-1), [{ kind: "add_node", node: "loop-1", node_type: "loop" }]);
+  await finished.unmount();
+});
+
+test("The inspector's Type field uses the node picker and sends change_node_type", async () => {
+  const mutations = [];
+  const changes = [];
+  const dom = await mountPickerGraph(pickerDocument([pickerGraphNode("prepare", "bash-command")]), { mutations, changes });
+  await dom.pointer(dom.ancestor(dom.byText("prepare"), "ARTICLE"), "onPointerDown");
+  await dom.flush();
+  const typeButton = allElements(dom.container).find((element) => element.getAttribute?.("data-node-type-field") === "true");
+  assert.match(textOf(typeButton), /Bash command/);
+  await dom.click(typeButton);
+  await dom.flush();
+  const picker = dom.byLabel("Change node type");
+  assert.match(textOf(picker), /Current/);
+  // Choosing the current type changes nothing.
+  await dom.click(nodePickerOption(dom, "bash-command"));
+  await dom.flush();
+  assert.deepEqual(mutations, []);
+  await dom.click(allElements(dom.container).find((element) => element.getAttribute?.("data-node-type-field") === "true"));
+  await dom.flush();
+  await dom.change(dom.byLabel("Search node types"), "agent");
+  await dom.keyDown(dom.byLabel("Search node types"), "Enter");
+  await dom.flush();
+  assert.deepEqual(mutations.at(-1), [{ kind: "change_node_type", node: "prepare", node_type: "agent" }]);
   await dom.unmount();
 });
 
@@ -6097,6 +6734,151 @@ test("Rem task nodes pick their task by title and explain how they run", async (
   assert.match(dom.text(), /Task not found in Rem/);
   assert.match(dom.text(), /This task was deleted or isn.t in Rem/);
   assert.ok(fetchMock.calls.some((call) => String(call.url).endsWith("/rem/tasks")));
+  await dom.unmount();
+});
+
+test("MCP tool nodes pick a server from Rem's list and a tool the server lists", async () => {
+  const mutations = [];
+  const node = (id, configuration) => ({
+    id,
+    label: id,
+    type: "mcp-tool",
+    configuration,
+    execution: { allow_fail: false, max_concurrency: 1, retry_count: 0, retry_delay_ms: 1000 },
+    authoredFields: { type: { value: "mcp-tool" } },
+    bindings: [],
+    needs: [],
+    diagnostics: [],
+  });
+  const defaults = { arguments: {}, sandbox: "on", network: [], working_dir: "." };
+  const document = {
+    workflowId: "mcp-call",
+    source: "Rattish: 1\nWorkflow:\n  name: MCP call\n",
+    workflow: { name: "MCP call", fields: { name: { value: "MCP call" } } },
+    nodeContracts: [
+      {
+        nodeType: "mcp-tool",
+        configurationSchema: {
+          type: "object",
+          properties: {
+            server: { type: "string" },
+            tool: { type: "string" },
+            arguments: { type: ["object", "string"] },
+          },
+        },
+        defaults,
+      },
+    ],
+    graph: {
+      nodes: [
+        node("search", { ...defaults, server: "docs", tool: "search", network: ["api.example.com"] }),
+        node("broken", { ...defaults, server: "flaky", tool: "lookup", sandbox: "off" }),
+      ],
+      edges: [],
+    },
+  };
+  const workflow = appModule.rattishGraphWorkflow(
+    { ...workflowFixture({ id: "mcp-call", name: "MCP call" }), sourceFormat: "rattish", nodes: [], edges: [] },
+    document,
+  );
+  const fetchMock = createFetchMock([
+    (url) =>
+      String(url).endsWith("/rem-resources")
+        ? {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              skillsDir: "",
+              skills: [],
+              mcpServers: [
+                { name: "docs", type: "stdio", command: "docs-mcp", args: [] },
+                { name: "flaky", type: "http", url: "https://flaky.example/mcp" },
+              ],
+            }),
+          }
+        : null,
+    (url) =>
+      String(url).includes("/rem-resources/mcp-tools?name=docs")
+        ? {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              server: "docs",
+              tools: [
+                {
+                  name: "search",
+                  title: "Search the docs",
+                  description: "Finds pages by words.",
+                  inputSchema: {
+                    type: "object",
+                    properties: { query: { type: "string" }, limit: { type: "integer" } },
+                    required: ["query"],
+                  },
+                },
+                { name: "fetch", inputSchema: { type: "object" } },
+              ],
+            }),
+          }
+        : null,
+    (url) =>
+      String(url).includes("/rem-resources/mcp-tools?name=flaky")
+        ? { ok: false, status: 502, json: async () => ({ error: "Couldn't reach the MCP server." }) }
+        : null,
+  ]);
+  const dom = await mountReact(
+    React.createElement(DagCanvasHarness, {
+      workflow,
+      rattishDocument: document,
+      onRattishMutation(next) {
+        mutations.push(next);
+        return Promise.resolve(null);
+      },
+      onWorkflowChange() {},
+    }),
+    fetchMock,
+  );
+
+  // The canvas names the server and tool without opening the node.
+  assert.match(dom.text(), /docs · search/);
+  await dom.pointer(dom.ancestor(dom.byText("search"), "ARTICLE"), "onPointerDown");
+  await dom.flush();
+  await dom.click(dom.byText("Action"));
+  await dom.flush();
+  await dom.flush();
+  await dom.flush();
+  const server = dom.controlAfterLabel("Server");
+  assert.equal(server.tagName, "SELECT");
+  assert.equal(reactProps(server).value, "docs");
+  assert.match(dom.text(), /flaky · HTTP/);
+  const tool = dom.controlAfterLabel("Tool");
+  assert.equal(tool.tagName, "SELECT");
+  assert.match(dom.text(), /Search the docs/);
+  assert.match(dom.text(), /Finds pages by words/);
+  assert.match(dom.text(), /Arguments: query \(string\), limit\? \(integer\)/);
+  assert.match(dom.text(), /Calls one tool on a server from Rem's MCP server list/);
+  // The tools are listed with the step's own network, as a run would start the server.
+  assert.ok(
+    fetchMock.calls.some((call) =>
+      String(call.url).includes("/rem-resources/mcp-tools?name=docs&network=api.example.com"),
+    ),
+  );
+  await dom.change(tool, "fetch");
+  assert.deepEqual(mutations.at(-1), [
+    { kind: "set_field", target: { node: "search" }, field: "tool", value: "fetch" },
+  ]);
+
+  // A server that can't be listed keeps a typed tool name and says why.
+  await dom.pointer(dom.ancestor(dom.byText("broken"), "ARTICLE"), "onPointerDown");
+  await dom.flush();
+  await dom.click(dom.byText("Action"));
+  await dom.flush();
+  await dom.flush();
+  await dom.flush();
+  assert.equal(dom.controlAfterLabel("Tool").tagName, "INPUT");
+  assert.match(dom.text(), /Couldn't reach the MCP server/);
+  assert.ok(
+    fetchMock.calls.some((call) => String(call.url).includes("name=flaky&sandbox=off")),
+  );
   await dom.unmount();
 });
 
@@ -6281,7 +7063,7 @@ test("create workflow dialog starts from a starter and lets its name be optional
   assert.ok(dom.byText("Blank workflow"));
   await dom.change(startFrom, "daily-report");
   await dom.flush();
-  assert.ok(dom.byText("Runs a shell command and saves a dated report. Comes with a test set."));
+  assert.ok(dom.byText("Runs a shell command and saves a dated report. Needs: the claude-code provider. Comes with a test set."));
   assert.equal(
     dom.ancestor(dom.byText("Read the Daily report guide"), "A").getAttribute("href"),
     "https://raticode.dev/docs/starters/daily-report",
@@ -6297,6 +7079,53 @@ test("create workflow dialog starts from a starter and lets its name be optional
     name: "",
     options: { projectRoot: "/repos/raticode", projectGrantId: "", starter: "daily-report" },
   }]);
+  await dom.unmount();
+});
+
+test("create workflow dialog says when a starter needs Git for Windows", async () => {
+  const fetchMock = createFetchMock([
+    (url) => String(url).includes("/rattish/starters")
+      ? {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          starters: [{
+            id: "daily-report",
+            name: "Daily report",
+            summary: "Runs a shell command and saves a dated report.",
+            docsUrl: "https://raticode.dev/docs/starters/daily-report",
+            hasTests: true,
+            needsGitForWindows: true,
+            providers: ["claude-code"],
+            secrets: [],
+            trigger: null,
+          }],
+        }),
+      }
+      : null,
+  ]);
+  const dom = await mountReact(
+    React.createElement(appModule.CreateWorkflowDialog, {
+      defaultProjectRoot: "/repos/raticode",
+      error: "",
+      open: true,
+      saving: false,
+      onClose() {},
+      onCreate() {},
+      onImport() {},
+    }),
+    fetchMock,
+  );
+  await dom.flush();
+
+  assert.ok(dom.byText("Daily report (Needs Git for Windows)"));
+  await dom.change(dom.controlAfterLabel("Start from"), "daily-report");
+  await dom.flush();
+  assert.ok(dom.byText("Runs a shell command and saves a dated report. Needs: Git for Windows, the claude-code provider. Comes with a test set."));
+  assert.equal(
+    dom.ancestor(dom.byText("Install Git for Windows for its shell steps"), "A").getAttribute("href"),
+    "https://git-scm.com/downloads/win",
+  );
   await dom.unmount();
 });
 
@@ -9543,7 +10372,8 @@ test("DagCanvas renders structured run timeline and selected node details", asyn
         status: "completed",
         durationSeconds: 0.25,
         exitCode: 0,
-        provider: { provider: "codex", profile: null, model: "gpt-5", effort: "low" },
+        provider: { provider: "codex", profile: null, model: "gpt-5", effort: "low", provider_version: "0.156.0" },
+        providerApp: "Codex 0.156.0",
         fallbacks: [{
           from: { provider: "claude-code", profile: null, model: "claude-sonnet-5", effort: "high" },
           to: { provider: "codex", profile: null, model: "gpt-5", effort: "low" },
@@ -9640,6 +10470,7 @@ test("DagCanvas renders structured run timeline and selected node details", asyn
   assert.match(dom.text(), /Last run/);
   assert.match(dom.text(), /ReusedYes/);
   assert.match(dom.text(), /Providercodex \(gpt-5\)/);
+  assert.match(dom.text(), /Provider appCodex 0\.156\.0/);
   assert.match(dom.text(), /Switched from claude-code \(claude-sonnet-5\) to codex \(gpt-5\): service overloaded\./);
   assert.ok(dom.byTitle("reused"));
   assert.match(dom.text(), /0\.25s/);
@@ -9803,6 +10634,96 @@ test("DagCanvas offers Run again with the same inputs for Rattish runs that save
       bad: { type: "object" },
     }),
     { token: "pw", pin: 1234, opts: { a: 1 }, bad: "{" },
+  );
+});
+
+test("Run from here in a Rattish node's menu starts a run from that node", async () => {
+  const document = {
+    workflowId: "rattish-run-from",
+    source: "Rattish: 1\nWorkflow:\n  name: Run from\nNode build:\n  type: bash-command\n  command: build\n  to: ship\nNode ship:\n  type: bash-command\n  command: ship\n  needs: build\n",
+    workflow: { name: "Run from", fields: { name: { value: "Run from" } } },
+    nodeContracts: [],
+    graph: {
+      nodes: ["build", "ship"].map((id) => ({
+        id,
+        label: id,
+        type: "bash-command",
+        configuration: { command: id },
+        execution: { allow_fail: false, max_concurrency: 1, retry_count: 0, retry_delay_ms: 1000 },
+        authoredFields: { command: { value: id }, type: { value: "bash-command" } },
+        bindings: [],
+        needs: id === "ship" ? ["build"] : [],
+        diagnostics: [],
+      })),
+      edges: [],
+    },
+  };
+  const workflow = appModule.rattishGraphWorkflow(
+    { ...workflowFixture({ id: "rattish-run-from", name: "Run from" }), sourceFormat: "rattish", nodes: [], edges: [] },
+    document,
+  );
+  const started = [];
+  const dom = await mountReact(
+    React.createElement(DagCanvasHarness, {
+      workflow,
+      rattishDocument: document,
+      onRunFromNode: (nodeId) => started.push(nodeId),
+      onWorkflowChange() {},
+    }),
+    createFetchMock([]),
+  );
+  await dom.pointer(dom.ancestor(dom.byText("ship"), "ARTICLE"), "onContextMenu", { button: 2, clientX: 40, clientY: 50 });
+  await dom.click(dom.byText("Run from here"));
+  assert.deepEqual(started, ["ship"]);
+  // The menu closes once the run is asked for.
+  assert.doesNotMatch(dom.text(), /Run from here/);
+  await dom.unmount();
+
+  // A legacy workflow's menu has no Run from here.
+  const legacy = await mountReact(
+    React.createElement(DagCanvasHarness, {
+      workflow: workflowFixture({ id: "legacy", name: "Legacy" }),
+      onRunFromNode: (nodeId) => started.push(nodeId),
+      onWorkflowChange() {},
+    }),
+    createFetchMock([]),
+  );
+  await legacy.pointer(legacy.ancestor(legacy.byText("Run command"), "ARTICLE"), "onContextMenu", { button: 2, clientX: 40, clientY: 50 });
+  assert.match(legacy.text(), /Duplicate node/);
+  assert.doesNotMatch(legacy.text(), /Run from here/);
+  await legacy.unmount();
+
+  const request = appModule.workflowRunRequest("rattish-run-from", {
+    background: true,
+    fromNode: "ship",
+    reuseRunId: "run-1",
+    parameters: { token: "pw" },
+    expectedRevision: "sha256:abc",
+  });
+  assert.match(request.url, /\/workflows\/rattish-run-from\/run$/);
+  assert.deepEqual(JSON.parse(request.options.body), {
+    dryRun: false,
+    triggerContext: {},
+    background: true,
+    expectedRevision: "sha256:abc",
+    fromNode: "ship",
+    reuseRunId: "run-1",
+    inputs: { token: "pw" },
+  });
+  assert.equal(
+    appModule.runFromNotice({ fromNode: "ship", reusedNodes: ["build"] }),
+    "Running from ship, reusing 1 step from the last run",
+  );
+  assert.equal(appModule.runFromNotice({ fromNode: "build", reusedNodes: [] }), "Running from build");
+  // Approval steps before the step ask again, so Run from here asks first.
+  assert.equal(appModule.runFromConfirmation({ fromNode: "ship", askAgainNodes: [] }), "");
+  assert.equal(
+    appModule.runFromConfirmation({ fromNode: "ship", askAgainNodes: ["approve"] }),
+    "Run from ship? This approval step asks again: approve.",
+  );
+  assert.equal(
+    appModule.runFromConfirmation({ fromNode: "ship", askAgainNodes: ["legal", "release"] }),
+    "Run from ship? These approval steps ask again: legal, release.",
   );
 });
 
@@ -11890,17 +12811,24 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
     "rem",
     "screenContext",
     "textFiles",
+    "workflowShortcuts",
     "workspace",
   ]);
+  // Workflow shortcuts: register the list again, suspend while a key is recorded, and
+  // hear status and "open this run" from the main process.
+  assert.deepEqual(Object.keys(exposed.goferDesktop.workflowShortcuts).sort(), ["onEvent", "suspend", "sync"]);
   // Show Rem your screen: settings in, one screenshot out when asked.
   assert.deepEqual(Object.keys(exposed.goferDesktop.screenContext).sort(), ["capture", "configure", "openPrivacySettings", "sources"]);
   // Dictate to Rem from any app: settings in, phases out, and the trigger from the main process.
-  assert.deepEqual(Object.keys(exposed.goferDesktop.globalDictation).sort(), ["configure", "onTrigger", "report", "suspend"]);
+  assert.deepEqual(Object.keys(exposed.goferDesktop.globalDictation).sort(), ["configure", "onTrigger", "report", "retry", "suspend"]);
   const plain = (value) => JSON.parse(JSON.stringify(value));
   assert.deepEqual(plain(await exposed.goferDesktop.globalDictation.configure({ enabled: true, binding: "Ctrl+Alt+Space" })), {
     channel: "gofer:global-dictation-configure", payload: { enabled: true, binding: "Ctrl+Alt+Space" },
   });
   assert.deepEqual(plain(await exposed.goferDesktop.globalDictation.suspend(true)), { channel: "gofer:global-dictation-suspend", payload: { suspended: true } });
+  assert.deepEqual(plain(await exposed.goferDesktop.globalDictation.retry()), { channel: "gofer:global-dictation-retry", payload: {} });
+  assert.deepEqual(plain(await exposed.goferDesktop.workflowShortcuts.sync()), { channel: "gofer:workflow-shortcuts-sync", payload: {} });
+  assert.deepEqual(plain(await exposed.goferDesktop.workflowShortcuts.suspend(true)), { channel: "gofer:workflow-shortcuts-suspend", payload: { suspended: true } });
   assert.equal(exposed.goferDesktop.appearance.setZoomFactor(2), 1.5);
   assert.equal(exposed.zoomFactors.at(-1), 1.5);
   assert.deepEqual(Object.keys(exposed.goferDesktop.workspace).sort(), [
@@ -11920,6 +12848,7 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
     "gitWorktrees",
     "grantUserPath",
     "listDirectory",
+    "listProjectFiles",
     "missingRecentFiles",
     "missingThreadRoots",
     "movePath",
@@ -11947,6 +12876,7 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
     "clearSiteData",
     "close",
     "create",
+    "defaultBrowser",
     "dismissBlockedPopups",
     "engineStatus",
     "find",
@@ -11970,9 +12900,11 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
     "onBrowserWindow",
     "onCommand",
     "onDownloads",
+    "onExternalOpen",
     "onFirefox",
     "onFrame",
     "onGecko",
+    "onGeckoShared",
     "onLibraryChanged",
     "onMedia",
     "onOpenFile",
@@ -11995,6 +12927,7 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
     "savePdf",
     "setPolicy",
     "setPreferences",
+    "setPreviewRemote",
     "shareWithRem",
     "siteInfo",
     "sitePermission",
@@ -12099,6 +13032,13 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
       path: "/workspace/project/index.html",
       url: "",
     },
+  });
+  // A file another app opened says so; a web address can't claim it.
+  assert.equal(toPlainObject(await exposed.goferBrowser.create({ path: "/downloads/page.html", external: true })).payload.external, true);
+  assert.equal(toPlainObject(await exposed.goferBrowser.create({ url: "https://example.com/", external: true })).payload.external, undefined);
+  assert.deepEqual(toPlainObject(await exposed.goferBrowser.setPreviewRemote("browser-session", true)), {
+    channel: "gofer:browser-action",
+    payload: { action: "preview-remote", id: "browser-session", allowed: true },
   });
   assert.deepEqual(
     toPlainObject(await exposed.goferBrowser.navigate("browser-session", "localhost:5173")),
@@ -12428,6 +13368,7 @@ function DagCanvasHarness({
   onRetentionSettingsChange,
   onRerunRunLog,
   onResumeRunLog,
+  onRunFromNode,
   onWorkflowChange,
   resumable = true,
   retentionSettings,
@@ -12478,6 +13419,7 @@ function DagCanvasHarness({
     onRetentionSettingsChange: handleRetentionSettingsChange,
     onResumeRunLog: resumable ? onResumeRunLog ?? (() => {}) : undefined,
     onRerunRunLog,
+    onRunFromNode,
     onRunWorkflow: () => {},
     onSelectRunLog: () => {},
     onStopRunLog: () => {},
@@ -13330,7 +14272,7 @@ test("Rem tools merge the shared library with thread selections and add new entr
   let library = {
     skillsDir: "/data/skills",
     skills: [{ path: "/data/skills/release-notes", name: "release-notes", description: "Write release notes", origin: "codex", available: true, registered: false }],
-    mcpServers: [{ name: "github", type: "stdio", url: "", command: "npx", args: ["-y", "gh"], description: "GitHub issues", addedBy: "cli" }],
+    mcpServers: [{ name: "github", type: "stdio", url: "", command: "npx", args: ["-y", "gh"], env: ["GH_HOST"], description: "GitHub issues", addedBy: "cli" }],
   };
   const posts = [];
   const fetchMock = createFetchMock([(url, options = {}) => {
@@ -13338,7 +14280,7 @@ test("Rem tools merge the shared library with thread selections and add new entr
     if (options.method === "POST") {
       const body = JSON.parse(options.body);
       posts.push(body);
-      if (body.action === "save_mcp") library = { ...library, mcpServers: [...library.mcpServers, { ...body.server, addedBy: "app" }] };
+      if (body.action === "save_mcp") library = { ...library, mcpServers: [...library.mcpServers.filter((server) => server.name !== body.replace), { ...body.server, addedBy: "app" }] };
     }
     return { ok: true, status: 200, json: async () => library };
   }]);
@@ -13384,6 +14326,65 @@ test("Rem tools merge the shared library with thread selections and add new entr
     assert.deepEqual(saved.mcpServers, [{ name: "docs", type: "http", url: "https://example.com/mcp", command: "", args: [], enabled: true, library: true }]);
     assert.equal(reactProps(dom.byLabel("docs")).checked, true, "a server added here is on for this selection");
     assert.throws(() => dom.byLabel("Server URL"), "the form closes after saving");
+
+    // A local server names the environment variables mcp-tool steps pass to it. The
+    // names go to the library; a thread's selection never carries them.
+    await dom.click(dom.byLabel("Edit server github"));
+    const envField = dom.byLabel("Server environment variables");
+    assert.equal(envField.value, "GH_HOST");
+    await dom.focus(envField);
+    await dom.change(envField, "");
+    assert.equal(envField.value, "");
+    await dom.change(envField, "GH_HOST\nGITHUB_PERSONAL_ACCESS_TOKEN, GH_HOST");
+    await dom.blur(envField);
+    await dom.pointer(dom.ancestor(envField, "FORM"), "onSubmit");
+    await dom.flush();
+    assert.deepEqual(posts.at(-1), {
+      action: "save_mcp",
+      replace: "github",
+      server: { name: "github", type: "stdio", command: "npx", args: ["-y", "gh"], env: ["GH_HOST", "GITHUB_PERSONAL_ACCESS_TOKEN"], description: "GitHub issues" },
+    });
+    await dom.change(dom.byLabel("github"), true);
+    assert.ok(saved.mcpServers.every((server) => !("env" in server)), "thread selections carry no environment names");
+  } finally { await dom.unmount(); }
+});
+
+test("Rem tools clear a local server's package cache and say how much it freed", async () => {
+  const { default: RemResources, cacheSizeText } = await viteServer.ssrLoadModule("/src/components/RemResources.jsx");
+  assert.equal(cacheSizeText(512), "512 bytes");
+  assert.equal(cacheSizeText(12_345_678), "12.3 MB");
+  assert.equal(cacheSizeText(2_500_000_000), "2.5 GB");
+  const library = {
+    skillsDir: "/data/skills",
+    skills: [],
+    mcpServers: [
+      { name: "github", type: "stdio", url: "", command: "npx", args: ["-y", "gh@1.0.0"], env: [], description: "", addedBy: "cli" },
+      { name: "docs", type: "http", url: "https://example.com/mcp", command: "", args: [], env: [], description: "", addedBy: "cli" },
+    ],
+  };
+  const posts = [];
+  let freed = 12_345_678;
+  const fetchMock = createFetchMock([(url, options = {}) => {
+    if (url !== "/api/rem-resources") return null;
+    if (options.method !== "POST") return { ok: true, status: 200, json: async () => library };
+    const body = JSON.parse(options.body);
+    posts.push(body);
+    const payload = { ...library, cacheCleared: freed };
+    freed = 0;
+    return { ok: true, status: 200, json: async () => payload };
+  }]);
+  const value = { shell: true, web: false, skills: [], mcpServers: [] };
+  const dom = await mountReact(React.createElement(RemResources, { value, onChange: () => {} }), fetchMock);
+  try {
+    await dom.flush();
+    assert.throws(() => dom.byLabel("Clear package cache for docs"), "an HTTP server has no package cache");
+    await dom.click(dom.byLabel("Clear package cache for github"));
+    await dom.flush();
+    assert.deepEqual(posts, [{ action: "clear_mcp_cache", name: "github" }]);
+    assert.match(dom.text(), /Cleared 12\.3 MB from github's package cache\. Its next start in a workflow downloads its packages again\./);
+    await dom.click(dom.byLabel("Clear package cache for github"));
+    await dom.flush();
+    assert.match(dom.text(), /github's package cache is already empty\./);
   } finally { await dom.unmount(); }
 });
 
@@ -14221,6 +15222,55 @@ for (const fail of [false, true]) {
   });
 }
 
+
+test("source control commits the message the backend cleaned of Co-authored-by lines, and nothing when it can't check", async () => {
+  let snapshot = { active: true, branch: "main", branches: ["main"], entries: [{ path: "one.txt", status: "M", staged: true, unstaged: false }] };
+  const commits = [];
+  let cleanFails = false;
+  const workspace = {
+    trustProjectRoot: async () => {},
+    listDirectory: async () => ({ entries: [] }),
+    gitStatus: async () => snapshot,
+    gitHistory: async () => ({ active: true, commits: [] }),
+    gitWorktrees: async () => ({ active: true, worktrees: [] }),
+    gitRepoAction: async (_root, action, message) => {
+      if (action !== "commit") return snapshot;
+      commits.push(message);
+      snapshot = { ...snapshot, entries: [] };
+      return snapshot;
+    },
+  };
+  const fetchMock = createFetchMock([(url, options) => {
+    if (url !== "/api/provider/commit-message/clean") return null;
+    if (cleanFails) return { ok: false, status: 503, json: async () => ({ error: "Backend unavailable" }) };
+    const { message } = JSON.parse(options.body);
+    return { ok: true, json: async () => ({ message: message.split("\n").filter(line => !/^co-authored-by[ \t]*:/i.test(line)).join("\n").trimEnd() }) };
+  }]);
+  const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: "/workspace/project" } }), fetchMock, { desktop: { workspace } });
+  try {
+    await dom.click(dom.byLabel("Source control")); await showSourceChanges(dom);
+    await dom.flush();
+    const submit = async (message) => {
+      await dom.change(dom.byLabel("Commit message"), message);
+      const form = dom.ancestor(dom.byLabel("Commit message"), "FORM");
+      await React.act(async () => { reactProps(form).onSubmit(testEvent(form)); });
+      await dom.flush();
+    };
+    cleanFails = true;
+    await submit("Save changes\n\nCo-authored-by: Bot <bot@example.com>");
+    assert.deepEqual(commits, []);
+    assert.match(dom.text(), /Couldn't check the message for Co-authored-by lines, so nothing was committed/);
+    cleanFails = false;
+    await submit("Save changes\n\nCo-authored-by: Bot <bot@example.com>");
+    assert.deepEqual(commits, ["Save changes"]);
+    // A message that never mentions a co-author goes straight to git.
+    snapshot = { ...snapshot, entries: [{ path: "two.txt", status: "M", staged: true, unstaged: false }] };
+    await dom.click(dom.byLabel("Refresh source control")); await dom.flush();
+    const before = fetchMock.calls.filter(call => call.url === "/api/provider/commit-message/clean").length;
+    await submit("Plain message");
+    assert.equal(fetchMock.calls.filter(call => call.url === "/api/provider/commit-message/clean").length, before);
+  } finally { await dom.unmount(); }
+});
 
 test("Windows Markdown links retain drive paths and UNC shares", () => {
   for (const href of ["C:/Users/Alice/My%20Project/readme.md:12", String.raw`C:\Users\Alice\readme.md:12`, String.raw`\\server\share\readme.md`]) {
@@ -15135,6 +16185,21 @@ test("Run on lists paired computers, sends the choice, and locks once a thread s
   assert.equal(reactProps(dom.byLabel("Run on")).value, machines[0].id);
   assert.equal(appModule.chatStreamRequestBody({ provider: "codex", machine: reactProps(select).value }).machine, machines[0].id);
   assert.equal("machine" in appModule.chatStreamRequestBody({ provider: "codex" }), false);
+  // Claude Code threads name their account; other providers and remote desktops never do.
+  assert.equal(appModule.chatStreamRequestBody({ provider: "claude_code", claudeAccount: "work" }).providerProfile, "work");
+  assert.equal("providerProfile" in appModule.chatStreamRequestBody({ provider: "codex", claudeAccount: "work" }), false);
+  assert.equal("providerProfile" in appModule.chatStreamRequestBody({ provider: "claude_code", claudeAccount: "work", machine: machines[0].id }), false);
+  // Every provider with accounts names its own account from Settings > Rem.
+  const providerAccounts = { claude_code: "work", codex: "auto" };
+  assert.equal(appModule.chatStreamRequestBody({ provider: "codex", providerAccounts }).providerProfile, "auto");
+  assert.equal(appModule.chatStreamRequestBody({ provider: "claude_code", providerAccounts }).providerProfile, "work");
+  assert.equal("providerProfile" in appModule.chatStreamRequestBody({ provider: "grok", providerAccounts }), false);
+  assert.equal("providerProfile" in appModule.chatStreamRequestBody({ provider: "codex", providerAccounts, machine: machines[0].id }), false);
+  // The thread's own account wins over Rem's setting, including the default sign-in.
+  assert.equal(appModule.chatStreamRequestBody({ provider: "codex", providerAccounts, threadAccount: "home" }).providerProfile, "home");
+  assert.equal(appModule.chatStreamRequestBody({ provider: "claude_code", providerAccounts, threadAccount: "@default" }).providerProfile, "@default");
+  assert.equal(appModule.chatStreamRequestBody({ provider: "grok", threadAccount: "spare" }).providerProfile, "spare");
+  assert.equal("providerProfile" in appModule.chatStreamRequestBody({ provider: "codex", threadAccount: "home", machine: machines[0].id }), false);
   await dom.unmount();
   const locked = await mountReact(React.createElement(Harness, { locked: true }), createFetchMock([]));
   assert.equal(reactProps(locked.byLabel("Run on")).disabled, true);
@@ -17123,6 +18188,17 @@ test("swarm digest shows orchestrator summaries, current states, and idle diagno
   assert.match(html, /Orchestrator update/);
 });
 
+test("a running swarm says when its next turn waits for a free worker", async () => {
+  const { RunWaiting } = await viteServer.ssrLoadModule("/src/components/SwarmWorkspace.jsx");
+  const reason = "Waiting for a free worker on Studio desktop";
+  const html = renderToStaticMarkup(React.createElement(RunWaiting, { run: { state: "running", waitReason: reason } }));
+  assert.match(html, /role="status"/);
+  assert.match(html, /Waiting for a free worker on Studio desktop/);
+  // A paused or finished run no longer waits, even if an old reason is left on it.
+  assert.equal(renderToStaticMarkup(React.createElement(RunWaiting, { run: { state: "paused", waitReason: reason } })), "");
+  assert.equal(renderToStaticMarkup(React.createElement(RunWaiting, { run: { state: "running" } })), "");
+});
+
 test("swarm digest falls back to assignments and escapes provider text", async () => {
   const { SwarmDigest } = await viteServer.ssrLoadModule("/src/components/SwarmWorkspace.jsx");
   const html = renderToStaticMarkup(React.createElement(SwarmDigest, {
@@ -17159,6 +18235,221 @@ test("browser addresses preserve Windows, UNC and local file paths", () => {
   }
 });
 
+// Settings > Providers shows each app as a summary row; its details open from the chevron.
+async function openProviderDetails(dom, id) {
+  const toggle = allElements(dom.container).find(el => el.getAttribute?.("aria-controls") === `provider-details-${id}`);
+  assert.ok(toggle, `Unable to find ${id} provider row`);
+  if (toggle.getAttribute("aria-expanded") !== "true") await dom.click(toggle);
+  await dom.flush();
+}
+
+// The executable fields sit folded under one "App location" line at the end of a provider's details.
+async function openAppLocation(dom, id) {
+  await openProviderDetails(dom, id);
+  const toggle = allElements(dom.container).find(el => el.getAttribute?.("aria-controls") === `provider-app-location-${id}`);
+  assert.ok(toggle, `Unable to find ${id} App location line`);
+  if (toggle.getAttribute("aria-expanded") !== "true") await dom.click(toggle);
+  await dom.flush();
+}
+
+function providerStatusOf(dom, id) {
+  const row = allElements(dom.container).find(el => el.getAttribute?.("data-provider") === id);
+  assert.ok(row, `Unable to find ${id} provider row`);
+  return allElements(row).find(el => el.getAttribute?.("data-provider-status"))?.getAttribute("data-provider-status");
+}
+
+test("provider rows summarize each app, sign in from the row only when needed, and fold missing apps away", async () => {
+  const { default: ProviderSettings } = await viteServer.ssrLoadModule("/src/components/ProviderSettings.jsx");
+  const efforts = [{ id: "low" }, { id: "high" }];
+  const capabilities = [
+    { id: "claude_code", displayName: "Claude Code", version: "2.1.4", available: true, enabled: true, detected: true, executable: "/bin/claude",
+      discoveryStatus: "ready", supportsBrowserLogin: true, defaultModel: "opus", models: [{ id: "opus", displayName: "Opus", efforts }] },
+    { id: "codex", displayName: "Codex", version: "0.150.0", available: true, enabled: true, detected: true, executable: "/bin/codex",
+      discoveryStatus: "unauthenticated", supportsBrowserLogin: true, error: "Sign in to Codex to discover models.", models: [] },
+    { id: "antigravity", displayName: "Antigravity", available: true, enabled: false, detected: true, executable: "/bin/agy",
+      discoveryStatus: "unauthenticated", supportsBrowserLogin: false, models: [] },
+    { id: "grok", displayName: "Grok", available: true, enabled: true, detected: true, executable: "/bin/grok",
+      discoveryStatus: "timeout", error: "Model discovery timed out.", models: [] },
+    { id: "cursor", displayName: "Cursor", enabled: false, discoveryStatus: "pending", models: [] },
+    { id: "copilot", displayName: "GitHub Copilot", available: false, enabled: false, detected: false, discoveryStatus: "missing", models: [] },
+    { id: "opencode", displayName: "OpenCode", available: false, enabled: false, detected: false, discoveryStatus: "missing", models: [] },
+  ];
+  const accounts = {
+    providers: [{ id: "claude_code", label: "Claude Code", cli: "claude", setup: "", can_copy_setup: false, setup_folder: "" }],
+    accounts: [
+      { name: "work", provider: "claude_code", state: "signed_in" },
+      { name: "home", provider: "claude_code", state: "needs_sign_in", reason: "Not signed in yet." },
+    ],
+    warnings: [],
+  };
+  const auth = [];
+  const saved = [];
+  const fetchMock = createFetchMock([(url, options = {}) => {
+    if (url.startsWith("/api/provider/accounts")) return { ok: true, json: async () => accounts };
+    if (url === "/api/provider/auth" && options.method === "POST") { auth.push(JSON.parse(options.body)); return { ok: true, json: async () => ({ status: "pending" }) }; }
+    if (url.startsWith("/api/provider/auth?")) return { ok: true, json: async () => ({ status: "pending" }) };
+    if (url === "/api/provider/settings") { saved.push(JSON.parse(options.body)); return { ok: true, json: async () => ({ saved: true }) }; }
+    return null;
+  }]);
+  const dom = await mountReact(React.createElement(ProviderSettings, { providerState: { capabilities, loading: false, refresh() {} } }), fetchMock,
+    { desktop: { workspace: { selectPath: async () => "/picked/copilot" } } });
+  const dispatch = window.dispatchEvent;
+  window.dispatchEvent = () => true;
+  const row = id => allElements(dom.container).find(el => el.getAttribute?.("data-provider") === id);
+  const has = (root, label) => allElements(root).some(el => el.getAttribute?.("aria-label") === label);
+  try {
+    await dom.flush();
+    // One summary row per installed app: name, version, status in words, accounts and an Enabled switch.
+    assert.deepEqual(["claude_code", "codex", "antigravity", "grok", "cursor"].map(id => providerStatusOf(dom, id)),
+      ["ready", "needs_sign_in", "needs_sign_in", "error", "checking"]);
+    assert.match(textOf(row("claude_code")), /Claude Code\s*2\.1\.4\s*Ready\s*Signed in\s*· 2 accounts, 1 needs sign-in/);
+    assert.match(textOf(row("codex")), /Needs sign-in/);
+    assert.doesNotMatch(textOf(row("codex")), /Signed in/);
+    assert.match(textOf(row("grok")), /Error.*Model discovery timed out\./);
+    assert.match(textOf(row("cursor")), /Checking/);
+    assert.equal(allElements(dom.container).some(el => el.tagName === "SELECT" && / status$/.test(el.getAttribute("aria-label") ?? "")), false);
+    assert.equal(dom.byLabel("Claude Code enabled").getAttribute("role"), "switch");
+    assert.equal(dom.byLabel("Antigravity enabled").getAttribute("aria-checked"), "false");
+    // Sign in sits on the row only when the app needs it.
+    assert.equal(has(row("claude_code"), "Sign in to Claude Code"), false);
+    assert.equal(has(row("grok"), "Sign in to Grok"), false);
+    assert.equal(has(row("cursor"), "Sign in to Cursor"), false);
+    await dom.click(dom.byLabel("Sign in to Codex")); await dom.flush();
+    assert.deepEqual(auth.at(-1), { provider: "codex", action: "start" });
+    assert.match(textOf(row("codex")), /Complete sign-in in your browser/);
+    assert.ok(dom.byLabel("Cancel Codex sign-in"));
+    // Details stay closed until the chevron opens them.
+    assert.equal(allElements(dom.container).some(el => el.getAttribute?.("aria-label") === "Claude Code executable"), false);
+    const toggle = allElements(row("claude_code")).find(el => el.getAttribute?.("aria-controls") === "provider-details-claude_code");
+    assert.equal(toggle.getAttribute("aria-expanded"), "false");
+    await openProviderDetails(dom, "claude_code");
+    assert.equal(toggle.getAttribute("aria-expanded"), "true");
+    const details = dom.byLabel("Claude Code details");
+    const text = textOf(details);
+    const order = ["Show in model menus", "Default model and effort", "Claude Code accounts", "Runs Claude Code's own sign-in again", "App location"].map(part => text.indexOf(part));
+    assert.ok(order.every((index, at) => index >= 0 && (at === 0 || index > order[at - 1])), `details order: ${order}`);
+    assert.match(text, /work.*home/);
+    // Where the app runs from is one closed line at the end, with a summary; selecting it shows the fields.
+    const location = allElements(details).find(el => el.getAttribute?.("aria-controls") === "provider-app-location-claude_code");
+    assert.equal(location.getAttribute("aria-expanded"), "false");
+    assert.equal(textOf(location), "App locationAutomatic · /bin/claude");
+    assert.ok(text.trimEnd().endsWith("Automatic · /bin/claude"), text);
+    assert.equal(has(details, "Claude Code executable"), false);
+    assert.doesNotMatch(text, /Found: \/bin\/claude|Choose executable…/);
+    await dom.click(location); await dom.flush();
+    assert.equal(location.getAttribute("aria-expanded"), "true");
+    const fields = textOf(details).slice(textOf(details).indexOf("App location"));
+    assert.ok(fields.indexOf("Found: /bin/claude") < fields.indexOf("Executable override"));
+    assert.ok(fields.indexOf("Executable override") < fields.indexOf("Choose executable…"));
+    assert.ok(has(details, "Claude Code executable"));
+    assert.ok(has(details, "Choose Claude Code executable"));
+    // Accounts have their own Sign in again buttons; the app's own sign-in is the last one, after the accounts.
+    await dom.click(allElements(details).filter(el => el.tagName === "BUTTON" && textOf(el) === "Sign in again").at(-1)); await dom.flush();
+    assert.deepEqual(auth.at(-1), { provider: "claude_code", action: "start" });
+    // An app without a browser sign-in opens its details to explain how.
+    await dom.click(dom.byLabel("Sign in to Antigravity")); await dom.flush();
+    assert.match(textOf(dom.byLabel("Antigravity details")), /Run agy in a terminal/);
+    // Apps that weren't found fold into one closed group that still offers Choose executable.
+    assert.equal(row("copilot"), undefined);
+    const group = allElements(dom.container).find(el => el.getAttribute?.("data-provider-group") === "missing");
+    const groupToggle = allElements(group).find(el => el.tagName === "BUTTON");
+    assert.equal(textOf(groupToggle), "Not installed (2)");
+    assert.equal(groupToggle.getAttribute("aria-expanded"), "false");
+    await dom.click(groupToggle);
+    assert.match(textOf(group), /GitHub Copilot.*OpenCode/);
+    // The Not installed group keeps its executable fields open, with no App location line.
+    assert.ok(has(group, "GitHub Copilot executable"));
+    assert.doesNotMatch(textOf(group), /App location/);
+    await dom.click(dom.byLabel("Choose GitHub Copilot executable")); await dom.flush();
+    assert.deepEqual(saved.at(-1), { provider: "copilot", executable: "/picked/copilot" });
+    await dom.click(dom.byLabel("Claude Code enabled"));
+    assert.deepEqual(saved.at(-1), { provider: "claude_code", enabled: false });
+  } finally {
+    window.dispatchEvent = dispatch;
+    await dom.unmount();
+  }
+});
+
+test("Providers puts coding apps first and folds the workflow-only sources behind one-line summaries", async () => {
+  const { default: ProviderSettings, serverSummary, jevSummary } = await viteServer.ssrLoadModule("/src/components/ProviderSettings.jsx");
+  assert.equal(serverSummary(null), "Checking…");
+  assert.equal(serverSummary(false), "Couldn't load");
+  assert.equal(serverSummary([]), "No servers");
+  assert.equal(serverSummary([{}, {}]), "2 servers");
+  assert.equal(jevSummary({ configured: false }), "Jev: no key");
+  assert.equal(jevSummary({ configured: true, enabled: false }), "Jev: key saved, turned off");
+  const capabilities = [{ id: "claude_code", displayName: "Claude Code", available: true, enabled: true, detected: true, executable: "/bin/claude", discoveryStatus: "ready", models: [] }];
+  let profiles = [
+    { name: "ollama", subscription: "openai_api", local: true, loopback: true, api_base_url: "http://127.0.0.1:11434/v1" },
+    { name: "api", subscription: "openai_api" },
+  ];
+  let jev = { provider: "jev", configured: true, enabled: true, models: [] };
+  const fetchMock = createFetchMock([(url, options = {}) => {
+    const method = options.method || "GET";
+    if (url === "/api/provider/profiles" && method === "GET") return { ok: true, json: async () => ({ profiles }) };
+    if (url === "/api/provider/profiles/ollama" && method === "DELETE") { profiles = profiles.filter(profile => profile.name !== "ollama"); return { ok: true, json: async () => ({ deleted: true }) }; }
+    if (url === "/api/classifiers/jev/key" && method === "DELETE") { jev = { ...jev, configured: false }; return { ok: true, json: async () => jev }; }
+    if (url === "/api/classifiers/jev") return { ok: true, json: async () => jev };
+    return null;
+  }]);
+  const dom = await mountReact(React.createElement(ProviderSettings, { providerState: { capabilities, loading: false, refresh() {} } }), fetchMock);
+  const part = name => allElements(dom.container).find(el => el.getAttribute?.("data-provider-part") === name);
+  const source = id => allElements(dom.container).find(el => el.getAttribute?.("data-workflow-source") === id);
+  const toggleOf = id => allElements(source(id)).find(el => el.tagName === "BUTTON" && el.getAttribute("aria-controls") === `${id}-form`);
+  try {
+    await dom.flush();
+    // One short intro sentence, then Coding apps above For workflows only.
+    const intro = allElements(dom.container).find(el => el.tagName === "P");
+    assert.equal((textOf(intro).match(/\./g) ?? []).length, 1, textOf(intro));
+    assert.match(textOf(part("coding-apps")), /^Coding apps/);
+    assert.ok(allElements(part("coding-apps")).some(el => el.getAttribute?.("data-provider") === "claude_code"));
+    assert.match(textOf(part("workflow-only")), /^For workflows only/);
+    assert.ok(dom.text().indexOf("Coding apps") < dom.text().indexOf("For workflows only"));
+    // Both sources start closed, each with a one-line summary and no form.
+    assert.equal(textOf(toggleOf("local-model-servers")), "Local model servers1 server");
+    assert.equal(textOf(toggleOf("classification-models")), "Classification modelsJev: key saved");
+    for (const id of ["local-model-servers", "classification-models"]) assert.equal(toggleOf(id).getAttribute("aria-expanded"), "false");
+    assert.equal(allElements(dom.container).some(el => el.getAttribute?.("aria-label") === "Local model server profile name"), false);
+    assert.equal(allElements(dom.container).some(el => el.getAttribute?.("aria-label") === "Jev API key"), false);
+    // A form opens on demand under the group's heading, and changes there update the summary.
+    await dom.click(toggleOf("local-model-servers")); await dom.flush();
+    assert.equal(toggleOf("local-model-servers").getAttribute("aria-expanded"), "true");
+    assert.ok(dom.byLabel("Local model server profile name"));
+    const servers = allElements(source("local-model-servers")).find(el => el.tagName === "SECTION" && el.getAttribute("aria-labelledby"));
+    assert.equal(servers.getAttribute("aria-labelledby"), "local-model-servers-title");
+    assert.equal(textOf(allElements(dom.container).find(el => el.getAttribute?.("id") === "local-model-servers-title")), "Local model servers");
+    assert.equal(allElements(source("local-model-servers")).filter(el => /^H[1-6]$/.test(el.tagName) && textOf(el) === "Local model servers").length, 0);
+    await dom.click(allElements(source("local-model-servers")).find(el => el.tagName === "BUTTON" && textOf(el) === "Remove")); await dom.flush();
+    assert.match(textOf(toggleOf("local-model-servers")), /No servers$/);
+    await dom.click(toggleOf("classification-models")); await dom.flush();
+    assert.ok(dom.byLabel("Jev API key"));
+    await dom.click(allElements(source("classification-models")).find(el => el.tagName === "BUTTON" && textOf(el) === "Remove key")); await dom.flush();
+    assert.match(textOf(toggleOf("classification-models")), /Jev: no key$/);
+  } finally { await dom.unmount(); }
+});
+
+test("searching Settings for an app name, sign in or accounts lands on Providers", async () => {
+  const { providerSearchText } = settingsPopoverModule;
+  for (const query of ["Claude", "codex", "sign in", "signed in", "accounts", "default model", "effort", "executable", "app location", "version", "for workflows only", "Jev", "Ollama"]) {
+    assert.ok(settingsPopoverModule.settingsCategoriesForQuery(query).includes("providers"), query);
+    assert.ok(providerSearchText([]).toLowerCase().includes(query.toLowerCase()), query);
+  }
+  // A provider the list reports is searchable by its display name too.
+  assert.equal(settingsPopoverModule.settingsCategoriesForQuery("Frobnicator").includes("providers"), false);
+  assert.ok(settingsPopoverModule.settingsCategoriesForQuery("Frobnicator", [{ id: "frob", displayName: "Frobnicator" }]).includes("providers"));
+
+  const dom = await mountReact(React.createElement(settingsPopoverModule.default, {
+    open: true, settings: settingsModule.DEFAULT_APP_SETTINGS, onChange() {}, onClose() {}, onResetAll() {},
+  }), createFetchMock([]));
+  try {
+    for (const query of ["Claude", "sign in", "accounts"]) {
+      await dom.change(dom.byLabel("Search settings"), query); await dom.flush();
+      assert.ok(allElements(dom.container).some(el => el.tagName === "H2" && textOf(el) === "Providers"), `${query} shows Providers`);
+      assert.match(dom.text(), /Coding apps/, query);
+    }
+  } finally { await dom.unmount(); }
+});
+
 test("provider settings preserve executable drafts and save picker paths", async () => {
   const module = await viteServer.ssrLoadModule("/src/components/ProviderSettings.jsx");
   const saved = [];
@@ -17170,6 +18461,7 @@ test("provider settings preserve executable drafts and save picker paths", async
   window.dispatchEvent = event => { events.push(event.type); return true; };
   window.goferDesktop = { workspace: { selectPath: async () => "/picked/codex" } };
   try {
+    await openAppLocation(dom, "codex");
     const input = dom.byLabel("Codex executable");
     await dom.focus(input);
     await dom.change(input, "");
@@ -17178,12 +18470,65 @@ test("provider settings preserve executable drafts and save picker paths", async
     assert.equal(saved.length, 0);
     await dom.blur(input);
     assert.deepEqual(saved[0], { provider: "codex", executable: "/new/codex" });
-    await dom.change(dom.byLabel("Codex status"), "disabled");
+    assert.equal(dom.byLabel("Codex enabled").getAttribute("aria-checked"), "true");
+    await dom.click(dom.byLabel("Codex enabled"));
     assert.deepEqual(saved[1], { provider: "codex", enabled: false });
+    assert.equal(dom.byLabel("Codex enabled").getAttribute("aria-checked"), "false");
     await dom.click(dom.byText("Choose executable…"));
     assert.deepEqual(saved[2], { provider: "codex", executable: "/picked/codex" });
     assert.deepEqual(events, Array(3).fill("raticode:providers-changed"));
   } finally { delete window.goferDesktop; await dom.unmount(); }
+});
+
+test("App location sums up where each app runs from and opens by itself when a saved override wasn't found", async () => {
+  const { default: ProviderSettings, appLocationSummary } = await viteServer.ssrLoadModule("/src/components/ProviderSettings.jsx");
+  assert.equal(appLocationSummary({ detected: true, executable: "/usr/bin/claude" }), "Automatic · /usr/bin/claude");
+  assert.equal(appLocationSummary({ detected: true, executable: "/opt/claude/bin/claude", executableOverride: "/opt/claude/bin/claude" }), "Override · /opt/claude/bin/claude");
+  assert.equal(appLocationSummary({ detected: false, executableOverride: "/opt/claude/bin/claude", discoveryStatus: "missing" }), "Override · /opt/claude/bin/claude · not found");
+  assert.equal(appLocationSummary({ detected: false, executableOverride: "/opt/claude/bin/claude", discoveryStatus: "pending" }), "Override · /opt/claude/bin/claude");
+  assert.equal(appLocationSummary({ detected: false, discoveryStatus: "missing" }), "Automatic · not found");
+  assert.equal(appLocationSummary({ detected: false, discoveryStatus: "pending" }), "Automatic · checking…");
+  const capabilities = [
+    // What the backend sends when a saved override isn't an executable file.
+    { id: "claude_code", displayName: "Claude Code", available: false, enabled: true, detected: false, executable: null,
+      executableOverride: "/opt/claude/bin/claude", discoveryStatus: "missing", supportsBrowserLogin: true, models: [] },
+    { id: "codex", displayName: "Codex", available: true, enabled: true, detected: true, executable: "/opt/codex",
+      executableOverride: "/opt/codex", discoveryStatus: "ready", models: [] },
+    { id: "copilot", displayName: "GitHub Copilot", available: false, enabled: false, detected: false, executable: null,
+      executableOverride: "", discoveryStatus: "missing", models: [] },
+  ];
+  const dom = await mountReact(React.createElement(ProviderSettings, { providerState: { capabilities, loading: false, refresh() {} } }), createFetchMock([]));
+  const toggleOf = id => allElements(dom.container).find(el => el.getAttribute?.("aria-controls") === `provider-app-location-${id}`);
+  const group = () => allElements(dom.container).find(el => el.getAttribute?.("data-provider-group") === "missing");
+  const row = id => allElements(dom.container).find(el => el.tagName === "SECTION" && el.getAttribute?.("data-provider") === id);
+  try {
+    await dom.flush();
+    // The app with an override that wasn't found keeps its row; only apps never pointed anywhere fold into Not installed.
+    assert.ok(row("claude_code"));
+    assert.equal(providerStatusOf(dom, "claude_code"), "error");
+    assert.match(textOf(row("claude_code")), /Claude Code wasn't found at its saved location\./);
+    assert.equal(textOf(allElements(group()).find(el => el.tagName === "BUTTON")), "Not installed (1)");
+    await dom.click(allElements(group()).find(el => el.tagName === "BUTTON"));
+    assert.doesNotMatch(textOf(group()), /Claude Code/);
+    assert.match(textOf(group()), /GitHub Copilot/);
+    await openProviderDetails(dom, "claude_code");
+    await openProviderDetails(dom, "codex");
+    // No models to show and nothing to sign in to until the app is found.
+    assert.doesNotMatch(textOf(dom.byLabel("Claude Code details")), /Sign in again|Show in model menus/);
+    // The override wasn't found, so its fields are already open to fix it.
+    assert.equal(toggleOf("claude_code").getAttribute("aria-expanded"), "true");
+    assert.equal(textOf(toggleOf("claude_code")), "App locationOverride · /opt/claude/bin/claude · not found");
+    assert.equal(dom.byLabel("Claude Code executable").value, "/opt/claude/bin/claude");
+    assert.match(textOf(dom.byLabel("Claude Code details")), /Executable not found/);
+    // A working override stays folded.
+    assert.equal(toggleOf("codex").getAttribute("aria-expanded"), "false");
+    assert.equal(textOf(toggleOf("codex")), "App locationOverride · /opt/codex");
+    assert.equal(allElements(dom.container).some(el => el.getAttribute?.("aria-label") === "Codex executable"), false);
+    // The line still closes on request.
+    await dom.click(toggleOf("claude_code")); await dom.flush();
+    assert.equal(toggleOf("claude_code").getAttribute("aria-expanded"), "false");
+    assert.equal(allElements(dom.container).some(el => el.getAttribute?.("aria-label") === "Claude Code executable"), false);
+  } finally { await dom.unmount(); }
 });
 
 test("provider picker hides disabled providers and opens settings even with none enabled", async () => {
@@ -17236,6 +18581,91 @@ test("Cursor catalog uses model and effort dropdowns without resetting Rem effor
     const request = JSON.parse(fetchMock.calls.find(call => call.url === "/api/chat/stream").options.body);
     assert.equal(request.model, "cursor-grok-4.5");
     assert.equal(request.effort, "medium-fast");
+  } finally { await dom.unmount(); }
+});
+
+test("thread model picker chooses the thread's account, sends it each turn and warns when it changes", async () => {
+  const providers = [{ id: "claude_code", displayName: "Claude Code", available: true, discoveryStatus: "ready",
+    defaultModel: "fable", models: [{ id: "fable", displayName: "Fable" }] }];
+  const accountList = { accounts: [
+    { name: "work", provider: "claude_code", state: "signed_in", needs_sign_in: false,
+      last_reading: { seven_day: 42, five_hour: 10, observed_at: new Date(Date.now() - 2 * 3600_000).toISOString() } },
+    { name: "old", provider: "claude_code", state: "needs_sign_in", needs_sign_in: true, last_reading: null },
+    { name: "other", provider: "codex", state: "signed_in", needs_sign_in: false },
+  ], warnings: [], providers: [] };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers }),
+    jsonResponse("/api/provider/accounts", accountList),
+    jsonResponse("/api/provider/accounts", accountList, { method: "POST" }),
+    (url, options) => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url, options) : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+    width: 380, assistantDefaults: { provider: "claude_code", model: "fable", providerAccounts: { claude_code: "auto" } },
+  }), fetchMock);
+  const accountTrigger = () => allElements(dom.container).find(el => el.getAttribute?.("data-model-picker-part") === "account");
+  const accountOptions = () => {
+    const menu = allElements(dom.container).find(el => el.getAttribute?.("data-picker-menu") === "account");
+    return menu ? allElements(menu).filter(el => el.getAttribute?.("role") === "option") : [];
+  };
+  const hasWarning = () => allElements(dom.container).some(el => el.getAttribute?.("data-account-warning") != null);
+  const option = label => accountOptions().find(el => textOf(el).startsWith(label));
+  const requests = () => fetchMock.calls.filter(call => call.url === "/api/chat/stream").map(call => JSON.parse(call.options.body));
+  async function send(text) {
+    await dom.change(dom.first("textarea"), text);
+    await dom.click(dom.byTitle("Send message"));
+    await dom.flush();
+  }
+  try {
+    await dom.flush();
+    // The menu sits under the provider and starts on Rem's setting.
+    assert.match(textOf(accountTrigger()), /Account.*Rem’s setting · Choose by usage/);
+    await dom.click(accountTrigger());
+    assert.deepEqual(accountOptions().map(el => textOf(el).split(/(?=The provider|Choose by|Signed in|Needs sign-in)/)[0]),
+      ["Rem’s setting", "Default sign-in", "work", "old"]);
+    assert.match(textOf(option("work")), /Signed in · Week 42% · 5h 10% used, 2h ago/);
+    // An account that needs sign-in is shown but can't be picked; its Sign in link starts the sign-in.
+    assert.equal(reactProps(option("old")).disabled, true);
+    assert.match(textOf(option("old")), /Needs sign-in/);
+    await dom.click(allElements(dom.container).find(el => el.getAttribute?.("aria-label") === "Sign in to old"));
+    await dom.flush();
+    const signIn = fetchMock.calls.find(call => call.url === "/api/provider/accounts" && call.options.method === "POST");
+    assert.deepEqual(JSON.parse(signIn.options.body), { action: "sign_in", name: "old" });
+    await dom.click(accountTrigger());
+    await dom.click(option("work"));
+    assert.match(textOf(accountTrigger()), /work/);
+    // A new thread has nothing to warn about.
+    assert.equal(hasWarning(), false);
+    await send("Use the work account");
+    assert.equal(requests()[0].providerProfile, "work");
+    // Later turns keep the thread's account.
+    await send("Still on work");
+    assert.equal(requests()[1].providerProfile, "work");
+    assert.equal(hasWarning(), false);
+    // Changing the account mid-thread warns that a new provider session starts.
+    await dom.click(accountTrigger());
+    await dom.click(option("Default sign-in"));
+    const warning = allElements(dom.container).find(el => el.getAttribute?.("data-account-warning") != null);
+    assert.match(textOf(warning), /next message starts a new Claude Code session on Default sign-in, as switching providers does/);
+    await send("Now on the default sign-in");
+    assert.equal(requests()[2].providerProfile, "@default");
+    assert.match(textOf(dom.container), /switched to Claude Code - fable - .* - default sign-in/);
+    assert.equal(hasWarning(), false);
+    // Back to Rem's setting: the turn names Rem's choice again.
+    await dom.click(accountTrigger());
+    await dom.click(option("Rem’s setting"));
+    await send("Rem decides");
+    assert.equal(requests()[3].providerProfile, "auto");
+  } finally { await dom.unmount(); }
+});
+
+test("providers without accounts show no Account menu", async () => {
+  const module = await viteServer.ssrLoadModule("/src/components/ProviderModelEffortFields.jsx");
+  const dom = await mountReact(React.createElement(module.ProviderModelEffortFields, {
+    capabilities: [{ id: "codex", displayName: "Codex", available: true, models: [{ id: "sol" }] }],
+    onChange() {}, provider: "codex", model: "sol", effort: "", account: null,
+  }), createFetchMock([]));
+  try {
+    assert.equal(allElements(dom.container).some(el => el.getAttribute?.("data-model-picker-part") === "account"), false);
   } finally { await dom.unmount(); }
 });
 
@@ -17732,6 +19162,7 @@ test("provider defaults save, survive remount, apply when switching back, and re
   }
   try {
     await dom.flush();
+    await openProviderDetails(dom, "codex");
     await dom.change(dom.byLabel("Codex default model"), "astra"); await dom.flush();
     await dom.change(dom.byLabel("Codex default effort"), "high"); await dom.flush();
     assert.deepEqual(saved, [{ provider: "codex", defaultModel: "astra", defaultEffort: "" }, { provider: "codex", defaultEffort: "high" }]);
@@ -17739,6 +19170,8 @@ test("provider defaults save, survive remount, apply when switching back, and re
     dom = await mountReact(React.createElement(Harness), fetchMock);
     window.dispatchEvent = dispatch;
     await dom.flush();
+    await openProviderDetails(dom, "codex");
+    await openProviderDetails(dom, "claude_code");
     assert.equal(reactProps(dom.byLabel("Codex default model")).value, "astra");
     assert.equal(reactProps(dom.byLabel("Codex default effort")).value, "high");
     assert.equal(reactProps(dom.byLabel("Claude Code default effort")).disabled, true);
@@ -17763,6 +19196,8 @@ test("provider defaults are unavailable until model discovery is ready and save 
     ], loading: false, refresh() {},
   } }), async () => ({ ok: false, json: async () => ({ error: "Could not save defaults" }) }));
   try {
+    await openProviderDetails(dom, "codex");
+    await openProviderDetails(dom, "grok");
     assert.equal(allElements(dom.container).some(el => el.getAttribute?.("aria-label") === "Grok default model"), false);
     await dom.change(dom.byLabel("Codex default model"), "sol"); await dom.flush();
     assert.match(dom.text(), /Could not save defaults/);
@@ -18597,14 +20032,21 @@ test("provider settings render immediately, update independently and preserve ex
     for (const name of ["Codex", "Claude Code", "Cursor", "GitHub Copilot", "OpenCode", "Antigravity", "Grok"]) assert.ok(dom.byText(name));
     assert.doesNotMatch(dom.text(), /Executable not found/);
     snapshot.resolve({ providers }); await dom.flush();
-    assert.equal(fetchMock.calls.filter(call => call.url.includes("&refresh=1")).length, 2);
+    // Never-checked providers are discovered without forcing the host past its cache.
+    assert.equal(fetchMock.calls.filter(call => call.url.includes("?provider=")).length, 2);
+    assert.equal(fetchMock.calls.filter(call => call.url.includes("&refresh=1")).length, 0);
+    assert.ok(dom.byLabel("Updating Codex"));
+    assert.doesNotMatch(dom.text(), /Refreshing provider information|Discovering provider models/);
+    assert.equal(dom.byLabel("Grok enabled").getAttribute("aria-checked"), "false");
+    assert.equal(dom.byLabel("Codex enabled").getAttribute("aria-checked"), "true");
+    await openAppLocation(dom, "codex");
     assert.match(dom.text(), /Found: \/bin\/codex/);
-    assert.equal(reactProps(dom.byLabel("Grok status")).value, "disabled");
     const input = dom.byLabel("Codex executable");
     await dom.focus(input); await dom.change(input, "");
     codex.resolve({ providers: [{ ...providers[0], available: true, discoveryStatus: "ready", models: [{ id: "fast-model" }] }] });
     await dom.flush();
     assert.ok(dom.byLabel("Codex default model"));
+    assert.equal(providerStatusOf(dom, "codex"), "ready");
     assert.match(dom.text(), /Checking providers/);
     assert.equal(dom.byLabel("Codex executable"), input);
     assert.equal(input.value, "");
@@ -18612,9 +20054,181 @@ test("provider settings render immediately, update independently and preserve ex
     assert.deepEqual(saved, [{ provider: "codex", executable: "/new/codex" }]);
     grok.reject(new Error("Grok is offline")); await dom.flush();
     assert.match(dom.text(), /Grok is offline/);
+    assert.equal(providerStatusOf(dom, "grok"), "error");
     assert.ok(dom.byLabel("Codex default model"));
     assert.doesNotMatch(dom.text(), /Checking providers/);
   } finally { snapshot.resolve({ providers }); codex.resolve({ providers: [] }); grok.resolve({ providers: [] }); await dom.unmount(); }
+});
+
+test("Each provider's accounts sit inside its settings behind Add account, which reveals the account options", async () => {
+  const { default: ProviderSettings } = await viteServer.ssrLoadModule("/src/components/ProviderSettings.jsx");
+  const capabilities = [{ id: "claude_code", displayName: "Claude Code", available: true, enabled: true, detected: true, executable: "/bin/claude" },
+    { id: "grok", displayName: "Grok", available: true, enabled: true, detected: true, executable: "/bin/grok" }];
+  const providers = [
+    { id: "claude_code", label: "Claude Code", cli: "claude", setup: "CLAUDE.md, skills, commands and agents", can_copy_setup: true, setup_folder: "/home/me/.claude" },
+    { id: "stand_in", label: "Stand-in", cli: "stand-in", setup: "", can_copy_setup: false, setup_folder: "", device_sign_in: true },
+  ];
+  let accounts = [
+    { name: "work", provider: "claude_code", label: "Claude Code · work", state: "signed_in", plan: "max_5x", email: "work@example.com", needs_sign_in: false, setup_changes: ["CLAUDE.md", "skills"] },
+    { name: "spare", provider: "stand_in", label: "Stand-in · spare", state: "needs_sign_in", needs_sign_in: true, reason: "Not signed in yet." },
+    { name: "slow", provider: "stand_in", label: "Stand-in · slow", state: "needs_sign_in", needs_sign_in: true, sign_in: { state: "waiting", url: null } },
+  ];
+  const sent = [];
+  const fetchMock = createFetchMock([(url, options = {}) => {
+    if (!url.startsWith("/api/provider/accounts")) return null;
+    const body = options.body ? JSON.parse(options.body) : null;
+    if (body) sent.push(body);
+    if (body?.action === "rename") accounts = accounts.map(account => account.name === body.name ? { ...account, name: body.newName } : account);
+    if (body?.action === "copy_setup") accounts = accounts.map(account => account.name === body.name ? { ...account, setup_changes: [] } : account);
+    const extra = body?.action === "import_setup" ? { copied: ["skills"] } : body?.action === "copy_setup" ? { copied: ["CLAUDE.md", "skills"] } : {};
+    return { ok: true, json: async () => ({ providers, accounts, warnings: [], ...extra }) };
+  }]);
+  const events = [];
+  const dom = await mountReact(React.createElement(ProviderSettings, { providerState: { capabilities, loading: false, refresh() {} } }), fetchMock,
+    { desktop: { workspace: { selectPath: async () => "/picked/setup" } } });
+  const dispatch = window.dispatchEvent;
+  window.dispatchEvent = event => { events.push({ type: event.type, detail: event.detail }); return true; };
+  const button = (text, root = dom.container) => allElements(root).find(el => el.tagName === "BUTTON" && textOf(el) === text);
+  const label = name => allElements(dom.container).find(el => el.getAttribute?.("aria-label") === name);
+  const submit = async form => { await React.act(async () => { reactProps(form).onSubmit(testEvent(form)); }); await dom.flush(); };
+  try {
+    await dom.flush();
+    // The summary row counts the accounts; they open with the rest of the details.
+    const claudeRow = allElements(dom.container).find(el => el.getAttribute?.("data-provider") === "claude_code");
+    assert.match(textOf(claudeRow), /1 account/);
+    assert.equal(allElements(dom.container).some(el => el.getAttribute?.("data-accounts-provider") === "claude_code"), false);
+    await openProviderDetails(dom, "claude_code");
+    await openProviderDetails(dom, "grok");
+    // No separate Accounts section: Claude Code's accounts are inside its own section.
+    assert.equal(allElements(dom.container).some(el => el.tagName === "H3" && textOf(el) === "Accounts"), false);
+    const claude = allElements(dom.container).find(el => el.getAttribute?.("data-accounts-provider") === "claude_code");
+    const claudeSection = dom.ancestor(claude, "SECTION");
+    assert.match(textOf(claudeSection), /^Claude Code/);
+    assert.match(textOf(claude), /Claude Code accounts.*work.*Signed in/);
+    // Grok isn't among this computer's account providers here, so its section has no Add account button.
+    assert.equal(label("Add Grok account"), undefined);
+    // A provider with accounts but no section of its own still lists them.
+    assert.ok(allElements(dom.container).some(el => el.getAttribute?.("data-accounts-provider") === "stand_in"));
+    // A provider with a device-code sign-in (Grok) names it for a computer without a browser.
+    assert.match(dom.text(), /provider account login slow --provider stand_in --device-auth/);
+    // The options stay hidden until Add account is chosen.
+    assert.equal(label("New Claude Code account name"), undefined);
+    assert.equal(label("Claude Code setup folder"), undefined);
+    await dom.click(label("Add Claude Code account"));
+    await dom.change(label("New Claude Code account name"), "home");
+    assert.match(textOf(claude), /Import my CLAUDE\.md, skills, commands and agents/);
+    assert.match(textOf(claude), /Sign in now/);
+    const importBox = allElements(claude).find(el => el.tagName === "INPUT" && el.getAttribute("type") === "checkbox" && textOf(el.parentNode).includes("Import my"));
+    await dom.change(importBox, true);
+    assert.match(textOf(claude), /empty uses \/home\/me\/\.claude/);
+    await dom.click(label("Choose Claude Code setup folder"));
+    await dom.flush();
+    assert.equal(label("Claude Code setup folder").value, "/picked/setup");
+    await submit(label("New Claude Code account"));
+    assert.deepEqual(sent.at(-1), { action: "create", provider: "claude_code", name: "home", copySetup: true, signIn: true, setupFrom: "/picked/setup" });
+    // The form closes once the account is added.
+    assert.equal(label("New Claude Code account name"), undefined);
+    // Sign in still acts on the right provider's account.
+    await dom.click(button("Sign in", allElements(dom.container).find(el => el.getAttribute?.("data-accounts-provider") === "stand_in")));
+    await dom.flush();
+    assert.deepEqual(sent.at(-1), { action: "sign_in", provider: "stand_in", name: "spare" });
+    // A row shows the name, status, plan and email, and only the action it needs: Sign in
+    // for an account that needs it, Cancel sign-in while one waits, none when signed in.
+    const accountRow = name => allElements(dom.container).find(el => el.getAttribute?.("data-account") === name);
+    const rowButtons = name => allElements(accountRow(name).childNodes[0]).filter(el => el.tagName === "BUTTON").map(el => textOf(el) || el.getAttribute("aria-label"));
+    assert.match(textOf(accountRow("work").childNodes[0]), /^work\s*Signed in\s*max_5x\s*work@example\.com$/);
+    assert.deepEqual(rowButtons("work"), ["Actions for work"]);
+    assert.deepEqual(rowButtons("spare"), ["Sign in", "Actions for spare"]);
+    assert.deepEqual(rowButtons("slow"), ["Cancel sign-in", "Actions for slow"]);
+    assert.equal(label("Rename work"), undefined);
+    assert.equal(label("Import setup into work"), undefined);
+    // The rest are in the ⋯ menu, named for the account: Remove last, set apart as a danger action.
+    const menu = () => allElements(dom.container).find(el => el.getAttribute?.("role") === "menu");
+    const menuItems = () => allElements(menu()).filter(el => el.getAttribute?.("role") === "menuitem");
+    const menuItem = text => menuItems().find(el => textOf(el) === text);
+    const trigger = label("Actions for work");
+    assert.equal(trigger.getAttribute("aria-haspopup"), "menu");
+    assert.equal(trigger.getAttribute("aria-expanded"), "false");
+    assert.equal(menu(), undefined);
+    await dom.click(trigger);
+    assert.equal(trigger.getAttribute("aria-expanded"), "true");
+    assert.equal(menu().getAttribute("aria-label"), "Actions for work");
+    assert.deepEqual(menuItems().map(textOf), ["Sign in again", "Rename", "Import setup", "Remove"]);
+    assert.ok(menuItems().every(el => el.getAttribute("class").includes("ui-menu-item")));
+    assert.equal(menuItem("Remove").getAttribute("data-danger"), "true");
+    const menuChildren = allElements(menu()).filter(el => el.parentNode === menu());
+    assert.equal(menuChildren.at(-2).getAttribute("role"), "separator");
+    // Escape inside the menu doesn't close Settings.
+    assert.equal(menu().getAttribute("data-settings-keep-open"), "true");
+    // Keyboard: the first item has focus, arrows move and wrap, Home and End jump, Escape closes and refocuses the button.
+    assert.equal(document.activeElement, menuItem("Sign in again"));
+    await dom.keyDown(menu(), "ArrowDown");
+    assert.equal(document.activeElement, menuItem("Rename"));
+    await dom.keyDown(menu(), "End");
+    assert.equal(document.activeElement, menuItem("Remove"));
+    await dom.keyDown(menu(), "ArrowDown");
+    assert.equal(document.activeElement, menuItem("Sign in again"));
+    await dom.keyDown(menu(), "ArrowUp");
+    assert.equal(document.activeElement, menuItem("Remove"));
+    await dom.keyDown(menu(), "Home");
+    assert.equal(document.activeElement, menuItem("Sign in again"));
+    await dom.keyDown(menu(), "Escape");
+    assert.equal(menu(), undefined);
+    assert.equal(trigger.getAttribute("aria-expanded"), "false");
+    assert.equal(document.activeElement, trigger);
+    // ArrowUp on the button opens the menu at its last item.
+    await dom.keyDown(trigger, "ArrowUp");
+    assert.equal(document.activeElement, menuItem("Remove"));
+    await dom.keyDown(menu(), "Escape");
+    // An account that needs sign-in has Sign in on the row, not Sign in again in the menu.
+    await dom.click(label("Actions for spare"));
+    assert.deepEqual(menuItems().map(textOf), ["Rename", "Remove"]);
+    await dom.keyDown(menu(), "Escape");
+    // Sign in again from the menu signs the same account in.
+    await dom.click(trigger);
+    await dom.click(menuItem("Sign in again")); await dom.flush();
+    assert.deepEqual(sent.at(-1), { action: "sign_in", provider: "claude_code", name: "work" });
+    assert.equal(menu(), undefined);
+    // Remove still asks first, and does nothing when the answer is no.
+    const confirms = [];
+    window.confirm = message => { confirms.push(message); return false; };
+    const before = sent.length;
+    await dom.click(trigger);
+    await dom.click(menuItem("Remove")); await dom.flush();
+    assert.match(confirms.at(-1), /Sign out "work" and delete its Claude Code folder/);
+    assert.equal(sent.length, before);
+    window.confirm = () => true;
+    // Import setup into an existing account, from the provider's own folder: its form opens on the row.
+    await dom.click(trigger);
+    await dom.click(menuItem("Import setup"));
+    assert.ok(dom.ancestor(dom.ancestor(button("Import"), "FORM"), node => node === accountRow("work")));
+    await submit(dom.ancestor(button("Import"), "FORM"));
+    assert.deepEqual(sent.at(-1), { action: "import_setup", provider: "claude_code", name: "work" });
+    assert.match(dom.text(), /Copied skills\./);
+    // A changed setup shows one short line naming the items, and copies only those again.
+    assert.match(textOf(claude), /Differs from your setup in CLAUDE\.md and skills\./);
+    assert.equal(allElements(claude).filter(el => el.getAttribute?.("data-setup-changes") === "true").length, 1);
+    // Copy my setup again stays next to its note on the row, not in the ⋯ menu.
+    assert.equal(label("Copy my setup again into work").parentNode.getAttribute("data-setup-changes"), "true");
+    await dom.click(label("Copy my setup again into work"));
+    await dom.flush();
+    assert.deepEqual(sent.at(-1), { action: "copy_setup", provider: "claude_code", name: "work" });
+    assert.match(textOf(claude), /Copied CLAUDE\.md, skills again\./);
+    assert.doesNotMatch(textOf(claude), /Differs from your setup/);
+    // A provider with nothing to copy never shows the line.
+    assert.equal(label("Copy my setup again into spare"), undefined);
+    // Rename sends the new name and tells the app so Rem's account setting follows it.
+    await dom.click(label("Actions for work"));
+    await dom.click(menuItem("Rename"));
+    await dom.change(label("New name for work"), "job");
+    await submit(dom.ancestor(label("New name for work"), "FORM"));
+    assert.deepEqual(sent.at(-1), { action: "rename", provider: "claude_code", name: "work", newName: "job" });
+    assert.deepEqual(events.find(event => event.type === "raticode:provider-account-renamed")?.detail, { provider: "claude_code", from: "work", to: "job" });
+    assert.match(textOf(claude), /job/);
+  } finally {
+    window.dispatchEvent = dispatch;
+    await dom.unmount();
+  }
 });
 
 test("Jev settings save a key without echoing it, check it, list models and remove it", async () => {
@@ -18763,10 +20377,12 @@ test("provider settings reuse cached rows on remount and survive failed backgrou
   const dom = await mountReact(React.createElement(Harness), fetchMock);
   try {
     await dom.flush();
+    await openProviderDetails(dom, "codex");
     assert.ok(dom.byLabel("Codex default model"));
     await React.act(async () => setVisible(false));
     fail = true;
     await React.act(async () => setVisible(true));
+    await openProviderDetails(dom, "codex");
     assert.ok(dom.byLabel("Codex default model"));
     assert.equal(reactProps(dom.byLabel("Codex default model")).disabled, false);
     assert.match(dom.text(), /Checking providers/);
@@ -18774,13 +20390,15 @@ test("provider settings reuse cached rows on remount and survive failed backgrou
     refresh.reject(new Error("Offline")); await dom.flush();
     assert.match(dom.text(), /Offline/);
     assert.ok(dom.byLabel("Codex default model"));
-    assert.equal(fetchMock.calls.filter(call => call.url.includes("&refresh=1")).length, 2);
+    assert.equal(fetchMock.calls.filter(call => call.url.includes("?provider=codex")).length, 2);
+    assert.equal(fetchMock.calls.filter(call => call.url.includes("&refresh=1")).length, 0);
     await dom.click(dom.byText("Refresh providers")); await dom.flush();
+    assert.equal(fetchMock.calls.filter(call => call.url.includes("?provider=codex&refresh=1")).length, 1);
     assert.ok(dom.byLabel("Codex default model"));
   } finally { snapshot.resolve({ providers: [provider] }); refresh.resolve({ providers: [provider] }); await dom.unmount(); }
 });
 
-test("provider settings reopen refreshes and ignores responses from the previous opening", async () => {
+test("provider settings reopen reloads and ignores responses from the previous opening", async () => {
   const { useProviderSettingsCapabilities } = await viteServer.ssrLoadModule("/src/lib/useProviderSettingsCapabilities.js");
   const requests = [];
   let setOpen;
@@ -18807,6 +20425,70 @@ test("provider settings reopen refreshes and ignores responses from the previous
     assert.match(dom.text(), /New result/);
     assert.doesNotMatch(dom.text(), /Obsolete result/);
   } finally { for (const request of requests) request.resolve({ providers: [] }); await dom.unmount(); }
+});
+
+test("opening Settings twice within 5 minutes reuses recent provider checks and requests no refresh=1", async () => {
+  const minutesAgo = minutes => new Date(Date.now() - minutes * 60000).toISOString();
+  const base = { available: true, enabled: true, detected: true, discoveryStatus: "ready", models: [{ id: "model-a" }] };
+  const snapshot = {
+    codex: { ...base, id: "codex", displayName: "Codex", executable: "/bin/codex", discoveredAt: minutesAgo(3) },
+    grok: { ...base, id: "grok", displayName: "Grok", executable: "/bin/grok", discoveredAt: minutesAgo(10) },
+    claude_code: { ...base, id: "claude_code", displayName: "Claude Code", discoveryStatus: "pending", discoveredAt: null, models: [] },
+  };
+  const grokCheck = createDeferred();
+  let setOpen;
+  function Harness() {
+    const [open, update] = React.useState(true); setOpen = update;
+    return React.createElement(settingsPopoverModule.default, {
+      initialCategory: "providers", onChange() {}, onClose() {}, onResetAll() {}, open, settings: settingsModule.DEFAULT_APP_SETTINGS,
+    });
+  }
+  const fetchMock = createFetchMock([url => {
+    if (url === "/api/provider/capabilities?snapshot=1") return { ok: true, json: async () => ({ providers: Object.values(snapshot) }) };
+    const id = url.match(/^\/api\/provider\/capabilities\?provider=([a-z_]+)/)?.[1];
+    if (!id) return null;
+    const checked = { ...snapshot[id], discoveryStatus: "ready", discoveredAt: new Date().toISOString() };
+    snapshot[id] = checked;
+    const reply = { providers: [checked] };
+    return { ok: true, json: () => id === "grok" && !url.includes("refresh=1") ? grokCheck.promise.then(() => reply) : Promise.resolve(reply) };
+  }]);
+  const capabilityCalls = () => fetchMock.calls.map(call => call.url).filter(url => url.startsWith("/api/provider/capabilities"));
+  const label = name => allElements(dom.container).some(node => node.getAttribute?.("aria-label") === name);
+  const dom = await mountReact(React.createElement(Harness), fetchMock);
+  try {
+    await dom.flush();
+    // Codex was checked 3 minutes ago and is reused; the expired and never-checked rows are asked for.
+    assert.deepEqual(capabilityCalls(), [
+      "/api/provider/capabilities?snapshot=1",
+      "/api/provider/capabilities?provider=grok",
+      "/api/provider/capabilities?provider=claude_code",
+    ]);
+    assert.ok(label("Updating Grok"));
+    assert.equal(label("Updating Codex"), false);
+    assert.match(dom.text(), /Checking providers…/);
+    assert.doesNotMatch(dom.text(), /Refreshing provider information|Discovering provider models/);
+    grokCheck.resolve(); await dom.flush();
+    assert.equal(label("Updating Grok"), false);
+    assert.match(dom.text(), /Checked 3 min ago · Refresh providers/);
+
+    await React.act(async () => setOpen(false));
+    await React.act(async () => setOpen(true));
+    await dom.flush();
+    assert.deepEqual(capabilityCalls().slice(3), ["/api/provider/capabilities?snapshot=1"]);
+    assert.equal(capabilityCalls().filter(url => url.includes("refresh=1")).length, 0);
+    assert.match(dom.text(), /Checked 3 min ago/);
+
+    await dom.click(dom.byText("Refresh providers")); await dom.flush();
+    assert.deepEqual(capabilityCalls().filter(url => url.includes("refresh=1")).sort(), [
+      "/api/provider/capabilities?provider=claude_code&refresh=1",
+      "/api/provider/capabilities?provider=codex&refresh=1",
+      "/api/provider/capabilities?provider=grok&refresh=1",
+    ]);
+    assert.match(dom.text(), /Checked just now/);
+    await React.act(async () => window.dispatchEvent(new CustomEvent("raticode:providers-changed", { detail: { refresh: true } })));
+    await dom.flush();
+    assert.equal(capabilityCalls().filter(url => url.includes("refresh=1")).length, 6);
+  } finally { grokCheck.resolve(); await dom.unmount(); }
 });
 
 
@@ -19125,7 +20807,7 @@ test("thread order changes on user submission and completion, never streamed tho
   }
 });
 
-test("provider model access moves models both ways, persists, and hides denied configured options", async () => {
+test("provider model checklist hides and shows models, persists, and hides denied configured options", async () => {
   const settings = await viteServer.ssrLoadModule("/src/components/ProviderSettings.jsx");
   const picker = await viteServer.ssrLoadModule("/src/components/ProviderModelEffortFields.jsx");
   let deniedModels = [];
@@ -19155,17 +20837,23 @@ test("provider model access moves models both ways, persists, and hides denied c
   let dom = await mountReact(React.createElement(Harness), fetchMock);
   const dispatch = event => { for (const listener of document.listeners[event.type] ?? []) listener(event); return true; };
   window.dispatchEvent = dispatch;
-  async function select(label, values) {
-    await React.act(async () => { reactProps(dom.byLabel(label)).onChange({ target: { selectedOptions: values.map(value => ({ value })) } }); });
-  }
+  const shown = name => reactProps(dom.byLabel(`Show ${name} in model menus`)).checked;
+  const toggle = async (name, value) => { await dom.change(dom.byLabel(`Show ${name} in model menus`), value); await dom.flush(); };
+  const button = text => allElements(dom.container).find(el => el.tagName === "BUTTON" && textOf(el) === text);
   function options(label) { return allElements(dom.byLabel(label)).filter(el => el.tagName === "OPTION").map(el => reactProps(el).value); }
   try {
     await dom.flush();
-    await select("Codex allowed models", ["sol"]);
-    await dom.click(dom.byLabel("Deny selected Codex models")); await dom.flush();
+    await openProviderDetails(dom, "codex");
+    assert.match(dom.text(), /Show in model menus/);
+    assert.match(dom.text(), /2 of 2 shown/);
+    assert.doesNotMatch(dom.text(), /arrows/);
+    assert.throws(() => dom.byLabel("Search Codex models"), /Unable to find/, "two models need no search field");
+    assert.equal(reactProps(button("Show all")).disabled, true);
+    await toggle("Sol", false);
     assert.deepEqual(deniedModels, ["sol"]);
-    assert.deepEqual(options("Codex allowed models"), ["astra"]);
-    assert.deepEqual(options("Codex denied models"), ["sol"]);
+    assert.equal(shown("Sol"), false);
+    assert.equal(shown("Astra"), true);
+    assert.match(dom.text(), /1 of 2 shown/);
     assert.ok(!options("Codex default model").includes("sol"));
     await dom.click(allElements(dom.container).find(el => el.getAttribute?.("data-picker-trigger") === "model"));
     const menu = dom.byLabel("Model options");
@@ -19175,23 +20863,57 @@ test("provider model access moves models both ways, persists, and hides denied c
     dom = await mountReact(React.createElement(Harness), fetchMock);
     window.dispatchEvent = dispatch;
     await dom.flush();
-    assert.deepEqual(options("Codex denied models"), ["sol"]);
-    await select("Codex denied models", ["sol"]);
+    await openProviderDetails(dom, "codex");
+    assert.equal(shown("Sol"), false);
     failSave = true;
-    await dom.click(dom.byLabel("Allow selected Codex models")); await dom.flush();
+    await toggle("Sol", true);
     assert.match(dom.text(), /Could not save models/);
-    assert.deepEqual(options("Codex denied models"), ["sol"]);
+    assert.equal(shown("Sol"), false);
     failSave = false;
-    await dom.click(dom.byLabel("Allow selected Codex models")); await dom.flush();
+    await toggle("Sol", true);
     assert.deepEqual(deniedModels, []);
-    assert.deepEqual(options("Codex allowed models"), ["sol", "astra"]);
-    await select("Codex allowed models", ["sol", "astra"]);
-    await dom.click(dom.byLabel("Deny selected Codex models")); await dom.flush();
+    assert.equal(shown("Sol"), true);
+    await dom.click(button("Hide all")); await dom.flush();
+    assert.deepEqual([...deniedModels].sort(), ["astra", "sol"]);
+    assert.match(dom.text(), /0 of 2 shown/);
     assert.match(dom.text(), /All models are denied/);
-    assert.deepEqual(options("Codex allowed models"), []);
-    await select("Codex denied models", ["sol", "astra"]);
-    await dom.click(dom.byLabel("Allow selected Codex models")); await dom.flush();
+    assert.equal(reactProps(button("Hide all")).disabled, true);
+    await dom.click(button("Show all")); await dom.flush();
     assert.deepEqual(deniedModels, []);
+    assert.match(dom.text(), /2 of 2 shown/);
+  } finally { await dom.unmount(); }
+});
+
+test("provider model checklist searches long model lists and says when none are discovered", async () => {
+  const settings = await viteServer.ssrLoadModule("/src/components/ProviderSettings.jsx");
+  const discoveredModels = Array.from({ length: 9 }, (_, index) => ({ id: `model-${index + 1}`, displayName: `Model ${index + 1}` }));
+  discoveredModels[8] = { id: "gpt-mini", displayName: "Mini" };
+  const providerState = { loading: false, refresh() {}, capabilities: [
+    { id: "codex", displayName: "Codex", available: true, discoveryStatus: "ready", enabled: true, deniedModels: ["model-2"], discoveredModels, models: discoveredModels },
+    { id: "cursor", displayName: "Cursor", available: true, discoveryStatus: "ready", enabled: true, deniedModels: [], models: [] },
+  ] };
+  const fetchMock = createFetchMock([() => null]);
+  const dom = await mountReact(React.createElement(settings.default, { providerState }), fetchMock);
+  const rows = () => allElements(dom.container).filter(el => el.tagName === "INPUT" && /^Show .* in model menus$/.test(el.getAttribute("aria-label") ?? ""));
+  try {
+    await dom.flush();
+    await openProviderDetails(dom, "codex");
+    await openProviderDetails(dom, "cursor");
+    assert.match(dom.text(), /8 of 9 shown/);
+    assert.equal(rows().length, 9);
+    // The ID is the secondary text under the display name.
+    assert.match(dom.text(), /Minigpt-mini/);
+    await dom.change(dom.byLabel("Search Codex models"), "GPT");
+    assert.deepEqual(rows().map(el => el.getAttribute("aria-label")), ["Show Mini in model menus"]);
+    await dom.change(dom.byLabel("Search Codex models"), "model 2");
+    assert.deepEqual(rows().map(el => el.getAttribute("aria-label")), ["Show Model 2 in model menus"]);
+    assert.equal(reactProps(rows()[0]).checked, false);
+    await dom.change(dom.byLabel("Search Codex models"), "nothing like this");
+    assert.equal(rows().length, 0);
+    assert.match(dom.text(), /No models match/);
+    assert.match(dom.text(), /8 of 9 shown/, "the count covers every model, not just matches");
+    assert.match(dom.text(), /No models discovered yet\. Refresh providers after signing in\./);
+    assert.throws(() => dom.byLabel("Search Cursor models"), /Unable to find/);
   } finally { await dom.unmount(); }
 });
 
@@ -19282,6 +21004,42 @@ test("voice tidy settings start from the default provider's fast model and expla
     await React.act(async () => reactProps(dom.byLabel("Use Rem's chat to spell names")).onChange({ target: { checked: false } })); await dom.flush();
     assert.deepEqual(saves.at(-1), { context: false });
     assert.doesNotMatch(dom.text(), /with names from Rem's chat/);
+  } finally { await dom.unmount(); }
+});
+
+test("Remove Co-authored-by lines checkbox saves, survives a reload and says when agents' commits can't be checked", async () => {
+  const settings = await viteServer.ssrLoadModule("/src/components/CommitMessageSettings.jsx");
+  let stored = { stripCoAuthors: false };
+  let status = { agentCommitsChecked: true, helperReady: true };
+  const saves = [];
+  const fetchMock = createFetchMock([(url, options) => {
+    if (url !== "/api/provider/commit-settings") return null;
+    if (options?.method === "POST") {
+      saves.push(JSON.parse(options.body));
+      stored = { ...stored, ...saves.at(-1) };
+      return { ok: true, json: async () => ({ saved: true, ...stored }) };
+    }
+    return { ok: true, json: async () => ({ ...stored, stripCoAuthorsStatus: status }) };
+  }]);
+  let dom = await mountReact(React.createElement(settings.default, { capabilities: [] }), fetchMock);
+  try {
+    await dom.flush();
+    const box = () => dom.byLabel("Remove Co-authored-by lines");
+    assert.equal(reactProps(box()).checked, false, "off until the user checks it");
+    assert.match(dom.text(), /delete every line that starts with Co-authored-by: and leave the rest of the message as written/);
+    await React.act(async () => reactProps(box()).onChange({ target: { checked: true } })); await dom.flush();
+    assert.deepEqual(saves, [{ stripCoAuthors: true }]);
+    assert.equal(reactProps(box()).checked, true);
+    assert.doesNotMatch(dom.text(), /too old/);
+    await dom.unmount();
+    status = { agentCommitsChecked: false, helperReady: true };
+    dom = await mountReact(React.createElement(settings.default, { capabilities: [] }), fetchMock);
+    await dom.flush();
+    assert.equal(reactProps(box()).checked, true);
+    assert.match(dom.text(), /Git is too old to check commits agents make in their own shell/);
+    await React.act(async () => reactProps(box()).onChange({ target: { checked: false } })); await dom.flush();
+    assert.deepEqual(saves.at(-1), { stripCoAuthors: false });
+    assert.doesNotMatch(dom.text(), /too old/);
   } finally { await dom.unmount(); }
 });
 
@@ -19677,7 +21435,7 @@ test("Rem settings expose the auto-hide thoughts switch and save its value", asy
   } finally { await dom.unmount(); }
 });
 
-test("Rem settings set the worker limit and command slots", async () => {
+test("Rem settings point to the worker limit in Settings > Computers and set command slots", async () => {
   const changes = [];
   const props = {
     open: true, initialCategory: "assistant", settings: settingsModule.normalizeAppSettings({}),
@@ -19686,14 +21444,9 @@ test("Rem settings set the worker limit and command slots", async () => {
   const dom = await mountReact(React.createElement(settingsPopoverModule.default, props), createFetchMock([]));
   const rowFor = (text) => dom.ancestor(dom.byText(text), el => allElements(el).some(node => node.tagName === "INPUT" || node.getAttribute?.("role") === "switch"));
   try {
-    const workers = allElements(rowFor("Rem task workers")).find(el => el.tagName === "INPUT");
-    assert.equal(workers.value, "0");
-    // Clearing the field while focused keeps the draft instead of snapping back.
-    await dom.focus(workers);
-    await dom.change(workers, "");
-    assert.equal(workers.value, "");
-    await dom.change(workers, "12");
-    await dom.blur(workers);
+    // The limit moved to this computer's row; Settings > Rem keeps a one-line pointer.
+    assert.doesNotMatch(dom.text(), /Rem task workers/);
+    assert.ok(dom.byText("Worker limit in Settings › Computers"));
     const tests = allElements(rowFor("Test runs at once")).find(el => el.tagName === "INPUT");
     await dom.focus(tests);
     await dom.change(tests, "40");
@@ -19704,7 +21457,6 @@ test("Rem settings set the worker limit and command slots", async () => {
     assert.equal(queue.getAttribute("aria-checked"), "true");
     await dom.click(queue);
     assert.deepEqual(changes, [
-      ["assistant.maxWorkers", 12],
       ["assistant.testSlots", 16],
       ["assistant.commandSlotsEnabled", false],
     ]);
@@ -19848,6 +21600,331 @@ test("Settings > Rem asks before self-work may approve its own tickets, and an o
   } finally { await dom.unmount(); }
 });
 
+test("Settings > Rem sets a daily cap on the Claude Code weekly allowance and shows today's use", async () => {
+  const withCap = (cap, revision, today) => {
+    const base = selfWorkFixture({ revision });
+    return { ...base, self_work: { ...base.self_work,
+      settings: { ...base.self_work.settings, session_token_limit: 0, daily_token_limit: 0, rate_limit_percent: 0, daily_allowance_percent: cap },
+      limits: { ...base.self_work.limits, token_limit_max: 1e12, rate_limit_percent_max: 100, daily_allowance_percent_max: 100 },
+      state: { ...base.self_work.state, limit_reason: "", daily_allowance: today } } };
+  };
+  const mount = fetchMock => mountReact(React.createElement(settingsPopoverModule.default, {
+    open: true, initialCategory: "assistant", settings: settingsModule.normalizeAppSettings({}),
+    onChange() {}, onClose() {}, onResetAll() {},
+  }), fetchMock);
+  const find = (root, testId) => allElements(root).find(node => node.getAttribute?.("data-testid") === testId);
+  const settle = async (dom, testId) => {
+    for (let attempt = 0; attempt < 30 && !find(dom.container, testId); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    return find(dom.container, testId);
+  };
+  const capRow = limits => allElements(limits).find(el => el.tagName === "DIV" && /^Weekly allowance per day/.test(textOf(el)) && allElements(el).some(child => child.tagName === "INPUT"));
+  // A desktop without the setting shows the other limits and no cap row.
+  const older = selfWorkFixture();
+  older.self_work.settings = { ...older.self_work.settings, session_token_limit: 0, daily_token_limit: 0, rate_limit_percent: 0 };
+  older.self_work.limits = { ...older.self_work.limits, token_limit_max: 1e12, rate_limit_percent_max: 100 };
+  let dom = await mount(createFetchMock([jsonResponse("/api/rem/kanban", older)]));
+  try {
+    const limits = await settle(dom, "self-work-limits");
+    assert.ok(limits);
+    assert.doesNotMatch(textOf(limits), /Weekly allowance per day/);
+  } finally { await dom.unmount(); }
+  const off = { cap_percent: 0, used_percent: 0, available: true, message: "" };
+  const noReading = { cap_percent: 15, used_percent: 2, available: false,
+    message: "No current Claude Code usage reading, so self-work starts nothing new. Used today: about 2% of 15%." };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/kanban", withCap(0, 3, off)),
+    jsonResponse("/api/rem/kanban/settings", withCap(15, 4, noReading), { method: "PUT" }),
+  ]);
+  dom = await mount(fetchMock);
+  try {
+    const limits = await settle(dom, "self-work-limits");
+    assert.match(textOf(limits), /How much of a weekly allowance self-work may use each day, from midnight, counted for each account it runs on\. 0 means no cap\./);
+    assert.equal(find(limits, "self-work-daily-allowance"), undefined, "nothing to say with the cap off and no use today");
+    const input = allElements(capRow(limits)).find(el => el.tagName === "INPUT");
+    // The field keeps its draft while focused, then saves on blur.
+    await dom.focus(input);
+    await dom.change(input, "");
+    assert.equal(input.value, "");
+    await dom.change(input, "15");
+    await dom.blur(input);
+    const puts = () => fetchMock.calls.filter(call => call.url === "/api/rem/kanban/settings");
+    for (let attempt = 0; attempt < 30 && !puts().length; attempt += 1) await dom.flush();
+    assert.deepEqual(JSON.parse(puts()[0].options.body), { daily_allowance_percent: 15, expected_revision: 3 });
+    const status = await settle(dom, "self-work-daily-allowance");
+    assert.match(textOf(status), /No current Claude Code usage reading, so self-work starts nothing new/);
+    assert.match(status.getAttribute("class"), /text-amber-700/);
+    assert.match(textOf(limits), /after 15% of a weekly allowance in a day/);
+    assert.match(textOf(limits), /Your own use of the same account at the same time counts too\./);
+  } finally { await dom.unmount(); }
+});
+
+test("Settings > Rem chooses Off, Daily cap or Pace to reset and shows the pace", async () => {
+  const withMode = (mode, revision, paced) => {
+    const base = selfWorkFixture({ revision });
+    return { ...base, self_work: { ...base.self_work,
+      settings: { ...base.self_work.settings, session_token_limit: 0, daily_token_limit: 0, rate_limit_percent: 80,
+        daily_allowance_percent: mode === "daily" ? 14 : 0, allowance_mode: mode, pace_aim_percent: 97, pace_lead_hours: 3 },
+      limits: { ...base.self_work.limits, token_limit_max: 1e12, rate_limit_percent_max: 100, daily_allowance_percent_max: 100,
+        pace_aim_percent_min: 1, pace_aim_percent_max: 100, pace_lead_hours_max: 24 },
+      state: { ...base.self_work.state, limit_reason: "", daily_allowance: { cap_percent: 0, message: "" }, allowance_pace: paced } } };
+  };
+  const mount = fetchMock => mountReact(React.createElement(settingsPopoverModule.default, {
+    open: true, initialCategory: "assistant", settings: settingsModule.normalizeAppSettings({}),
+    onChange() {}, onClose() {}, onResetAll() {},
+  }), fetchMock);
+  const find = (root, testId) => allElements(root).find(node => node.getAttribute?.("data-testid") === testId);
+  const settle = async (dom, testId) => {
+    for (let attempt = 0; attempt < 30 && !find(dom.container, testId); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    return find(dom.container, testId);
+  };
+  const holding = { mode: "pace", state: "ahead", starts: 0,
+    message: "Holding new work: Codex's weekly allowance is 60% used, 3.4% ahead of its pace line (56.6%). Next start around 18:20." };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/kanban", withMode("off", 3, { mode: "off", message: "" })),
+    jsonResponse("/api/rem/kanban/settings", withMode("pace", 4, holding), { method: "PUT" }),
+  ]);
+  const dom = await mount(fetchMock);
+  try {
+    const use = await settle(dom, "self-work-allowance-use");
+    const choices = allElements(use).filter(el => el.getAttribute?.("role") === "radio");
+    assert.deepEqual(choices.map(textOf), ["Off", "Daily cap", "Pace to reset"]);
+    assert.equal(choices[0].getAttribute("aria-checked"), "true");
+    assert.doesNotMatch(textOf(use), /Weekly allowance per day|Aim by reset/);
+    await dom.click(choices[2]);
+    const puts = () => fetchMock.calls.filter(call => call.url === "/api/rem/kanban/settings");
+    for (let attempt = 0; attempt < 30 && !puts().length; attempt += 1) await dom.flush();
+    assert.deepEqual(JSON.parse(puts()[0].options.body), { allowance_mode: "pace", expected_revision: 3 });
+    const status = await settle(dom, "self-work-allowance-pace");
+    assert.match(textOf(status), /^Holding new work: Codex's weekly allowance is 60% used/);
+    assert.match(status.getAttribute("class"), /text-amber-700/);
+    const after = find(dom.container, "self-work-allowance-use");
+    assert.match(textOf(after), /Aim by reset/);
+    assert.match(textOf(after), /Finish before reset/);
+    assert.doesNotMatch(textOf(after), /Weekly allowance per day/);
+    assert.match(textOf(find(dom.container, "self-work-pace-rate-warning")), /Rate limit use stops self-work at 80%, before the pace aim of 97%\./);
+    assert.match(textOf(find(dom.container, "self-work-limits-line")), /Stops starting new work at 80% of a rate limit or while ahead of a pace line to 97% by the weekly reset\./);
+    // Any aim from 1 to 100 saves as typed: 50 leaves half the week for you, not a floor of 80.
+    const aimRow = allElements(after).find(el => el.tagName === "DIV" && /^Aim by reset/.test(textOf(el)) && allElements(el).some(child => child.tagName === "INPUT"));
+    const aimInput = allElements(aimRow).find(el => el.tagName === "INPUT");
+    await dom.focus(aimInput);
+    await dom.change(aimInput, "50");
+    await dom.blur(aimInput);
+    for (let attempt = 0; attempt < 30 && puts().length < 2; attempt += 1) await dom.flush();
+    assert.deepEqual(JSON.parse(puts()[1].options.body), { pace_aim_percent: 50, expected_revision: 4 });
+  } finally { await dom.unmount(); }
+});
+
+test("Settings > Rem chooses which account self-work's runs use, per provider", async () => {
+  const withAccounts = (choice, revision) => {
+    const base = selfWorkFixture({ revision });
+    return { ...base, self_work: { ...base.self_work,
+      settings: { ...base.self_work.settings, provider_accounts: choice ? { claude_code: choice } : {} },
+      accounts: [{ provider: "claude_code", label: "Claude Code", choice, rem_setting: "auto", rem_setting_label: "Choose by usage", accounts: ["home", "work"] }] } };
+  };
+  const mount = fetchMock => mountReact(React.createElement(settingsPopoverModule.default, {
+    open: true, initialCategory: "assistant", settings: settingsModule.normalizeAppSettings({}),
+    onChange() {}, onClose() {}, onResetAll() {},
+  }), fetchMock);
+  const find = (root, testId) => allElements(root).find(node => node.getAttribute?.("data-testid") === testId);
+  const settle = async (dom, testId) => {
+    for (let attempt = 0; attempt < 30 && !find(dom.container, testId); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    return find(dom.container, testId);
+  };
+  // No provider has accounts: no Accounts section.
+  let dom = await mount(createFetchMock([jsonResponse("/api/rem/kanban", selfWorkFixture())]));
+  try {
+    assert.ok(await settle(dom, "self-work-settings"));
+    assert.equal(find(dom.container, "self-work-accounts"), undefined);
+  } finally { await dom.unmount(); }
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/kanban", withAccounts("", 3)),
+    jsonResponse("/api/rem/kanban/settings", withAccounts("home", 4), { method: "PUT" }),
+  ]);
+  dom = await mount(fetchMock);
+  try {
+    const section = await settle(dom, "self-work-accounts");
+    assert.match(textOf(section), /Chat, threads and tasks you create use Rem.s setting\./);
+    const select = allElements(section).find(el => el.tagName === "SELECT" && el.getAttribute("data-provider") === "claude_code");
+    const options = allElements(select).filter(el => el.tagName === "OPTION").map(el => [el.getAttribute("value") ?? el.value, textOf(el)]);
+    assert.deepEqual(options, [["", "Rem’s setting (Choose by usage)"], ["@default", "Default sign-in"], ["auto", "Choose by usage"], ["home", "home"], ["work", "work"]]);
+    await dom.change(select, "home");
+    const puts = () => fetchMock.calls.filter(call => call.url === "/api/rem/kanban/settings");
+    for (let attempt = 0; attempt < 30 && !puts().length; attempt += 1) await dom.flush();
+    assert.deepEqual(JSON.parse(puts()[0].options.body), { provider_accounts: { claude_code: "home" }, expected_revision: 3 });
+  } finally { await dom.unmount(); }
+});
+
+// Settings > Providers with Claude Code's accounts, Rem's saved choice and self-work's own.
+// selfWork: self-work's provider_accounts, or null for a backend without self-work.
+async function mountProviderAccountUses({ remAccounts, selfWork, accounts }) {
+  const capabilities = [{ id: "claude_code", displayName: "Claude Code", available: true, enabled: true, detected: true,
+    executable: "/bin/claude", discoveryStatus: "ready", models: [] }];
+  const providers = [{ id: "claude_code", label: "Claude Code", cli: "claude", setup: "", can_copy_setup: false, setup_folder: "" }];
+  const kanban = () => {
+    const base = selfWorkFixture();
+    return { ...base, self_work: { ...base.self_work, settings: { ...base.self_work.settings, provider_accounts: selfWork },
+      accounts: [{ provider: "claude_code", label: "Claude Code", choice: selfWork.claude_code ?? "", rem_setting: remAccounts.claude_code ?? "",
+        rem_setting_label: "", accounts: accounts.map(account => account.name) }] } };
+  };
+  const fetchMock = createFetchMock([(url) => {
+    if (url.startsWith("/api/provider/settings")) return { ok: true, json: async () => ({ providers: capabilities }) };
+    if (url.startsWith("/api/provider/accounts")) return { ok: true, json: async () => ({ providers, accounts, warnings: [] }) };
+    if (url === "/api/rem/kanban") return selfWork ? { ok: true, json: async () => kanban() } : { ok: false, status: 404, json: async () => ({}) };
+    return null;
+  }]);
+  const settings = settingsModule.normalizeAppSettings({ assistant: { providerAccounts: remAccounts } });
+  const dom = await mountReact(React.createElement(settingsPopoverModule.default, {
+    open: true, initialCategory: "providers", settings, onChange() {}, onClose() {}, onResetAll() {},
+  }), fetchMock);
+  for (let attempt = 0; attempt < 30 && !allElements(dom.container).some(el => el.getAttribute?.("aria-controls") === "provider-details-claude_code"); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+    await dom.flush();
+  }
+  await openProviderDetails(dom, "claude_code");
+  for (let attempt = 0; attempt < 10; attempt += 1) await dom.flush();
+  const section = () => allElements(dom.container).find(el => el.getAttribute?.("data-accounts-provider") === "claude_code");
+  const uses = root => allElements(root).filter(el => el.getAttribute?.("data-account-use")).map(el => [el.getAttribute("data-account-use"), textOf(el)]);
+  const row = name => allElements(section()).find(el => el.getAttribute?.("data-account") === name);
+  const lines = () => allElements(section()).find(el => el.getAttribute?.("aria-label") === "Claude Code accounts in use");
+  return { dom, section, uses, row, lines };
+}
+
+// The test DOM has no selectors, so a Change link's reveal gets a small one for the duration:
+// tag, #id and [attribute="value"] parts joined by spaces.
+function withSimpleQuerySelector(dom) {
+  const proto = Object.getPrototypeOf(dom.container);
+  const original = proto.querySelector;
+  const matches = (el, part) => {
+    const [, tag, id, attr, value] = part.match(/^([a-z]+)?(?:#([\w-]+))?(?:\[([\w-]+)="([^"]*)"\])?$/i) ?? [];
+    if (tag && el.tagName !== tag.toUpperCase()) return false;
+    if (id && (el.id || el.getAttribute?.("id")) !== id) return false;
+    if (attr && el.getAttribute?.(attr) !== value) return false;
+    return Boolean(tag || id || attr);
+  };
+  proto.querySelector = function querySelector(selector) {
+    let scopes = [this];
+    for (const part of selector.trim().split(/\s+/)) scopes = [...new Set(scopes.flatMap(scope => allElements(scope).filter(el => matches(el, part))))];
+    return scopes[0] ?? null;
+  };
+  return () => { proto.querySelector = original; };
+}
+
+async function clickChangeAndSettle(view, label, ready) {
+  const restore = withSimpleQuerySelector(view.dom);
+  try {
+    const change = allElements(view.dom.container).find(el => el.tagName === "BUTTON" && el.getAttribute("aria-label") === label);
+    assert.ok(change, `${label} link`);
+    assert.equal(textOf(change), "Change");
+    await view.dom.click(change);
+    for (let attempt = 0; attempt < 60 && !ready(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+      await view.dom.flush(50);
+    }
+  } finally { restore(); }
+}
+
+const currentCategory = dom => textOf(allElements(dom.container).find(el => el.tagName === "BUTTON" && el.getAttribute("aria-current") === "page"));
+
+test("Settings > Providers labels the chosen accounts for Rem's work and self-work, and Change opens Rem's Accounts row", async () => {
+  const accounts = [
+    { name: "work", provider: "claude_code", label: "Claude Code · work", state: "signed_in", needs_sign_in: false },
+    { name: "home", provider: "claude_code", label: "Claude Code · home", state: "needs_sign_in", needs_sign_in: true, reason: "Not signed in yet." },
+  ];
+  let view = await mountProviderAccountUses({ remAccounts: { claude_code: "work" }, selfWork: { claude_code: "home" }, accounts });
+  try {
+    // Each label sits on its account's row; nothing needs a line of its own.
+    assert.deepEqual(view.uses(view.row("work")), [["rem", "Threads, tasks and Rem’s repliesChange"]]);
+    // A chosen account that's signed out keeps its label, with the existing wording.
+    assert.deepEqual(view.uses(view.row("home")), [["self_work", "Self-work (needs sign-in)Change"]]);
+    assert.equal(view.lines(), undefined);
+    assert.equal(currentCategory(view.dom), "Providers");
+    // Change goes to Settings > Rem and puts focus on Claude Code's Accounts picker.
+    await clickChangeAndSettle(view, "Change the Claude Code account for threads, tasks and Rem’s replies",
+      () => document.activeElement?.getAttribute?.("aria-label") === "Claude Code account");
+    assert.equal(currentCategory(view.dom), "Rem");
+    const focused = document.activeElement;
+    assert.equal(focused.tagName, "SELECT");
+    assert.ok(view.dom.ancestor(focused, "DIV").getAttribute("data-provider-account") === "claude_code");
+    assert.ok(allElements(view.dom.container).some(el => el.getAttribute?.("data-setting-row") === "providerAccounts" && allElements(el).includes(focused)));
+  } finally { await view.dom.unmount(); }
+  // Self-work with no choice of its own follows Rem's: both labels on one row. A removed
+  // account Rem still names gets its own line with the existing "removed" wording.
+  view = await mountProviderAccountUses({ remAccounts: { claude_code: "work" }, selfWork: {}, accounts });
+  try {
+    assert.deepEqual(view.uses(view.row("work")).map(([id]) => id), ["rem", "self_work"]);
+    assert.deepEqual(view.uses(view.row("home")), []);
+  } finally { await view.dom.unmount(); }
+  view = await mountProviderAccountUses({ remAccounts: { claude_code: "old" }, selfWork: { claude_code: "work" }, accounts });
+  try {
+    assert.deepEqual(view.uses(view.lines()), [["rem", "Threads, tasks and Rem’s replies:old (removed)Change"]]);
+    assert.deepEqual(view.uses(view.row("work")), [["self_work", "Self-workChange"]]);
+  } finally { await view.dom.unmount(); }
+});
+
+test("Settings > Providers says Choose by usage on one line and labels no single account", async () => {
+  const accounts = [
+    { name: "work", provider: "claude_code", label: "Claude Code · work", state: "signed_in", needs_sign_in: false },
+    { name: "home", provider: "claude_code", label: "Claude Code · home", state: "signed_in", needs_sign_in: false },
+  ];
+  const view = await mountProviderAccountUses({ remAccounts: { claude_code: "auto" }, selfWork: { claude_code: "auto" }, accounts });
+  try {
+    assert.deepEqual(view.uses(view.lines()), [
+      ["rem", "Threads, tasks and Rem’s replies:Choose by usageChange"],
+      ["self_work", "Self-work:Choose by usageChange"],
+    ]);
+    assert.deepEqual(view.uses(view.row("work")), []);
+    assert.deepEqual(view.uses(view.row("home")), []);
+    // Self-work's Change opens its own Accounts choice in Settings > Rem.
+    await clickChangeAndSettle(view, "Change the Claude Code account self-work uses",
+      () => document.activeElement?.getAttribute?.("id") === "self-work-account-claude_code");
+    assert.equal(currentCategory(view.dom), "Rem");
+    assert.equal(document.activeElement.tagName, "SELECT");
+    assert.equal(document.activeElement.getAttribute("data-provider"), "claude_code");
+  } finally { await view.dom.unmount(); }
+  // Choose by usage with no accounts yet: the line stays, and the no-accounts note doesn't
+  // also claim the default sign-in.
+  const empty = await mountProviderAccountUses({ remAccounts: { claude_code: "auto" }, selfWork: {}, accounts: [] });
+  try {
+    assert.deepEqual(empty.uses(empty.lines()).map(([id, text]) => [id, text]), [
+      ["rem", "Threads, tasks and Rem’s replies:Choose by usageChange"],
+      ["self_work", "Self-work:Choose by usageChange"],
+    ]);
+    assert.match(textOf(empty.section()), /No extra Claude Code accounts\. Add an account/);
+  } finally { await empty.dom.unmount(); }
+});
+
+test("Settings > Providers shows a Default sign-in line when no account is chosen", async () => {
+  const accounts = [{ name: "work", provider: "claude_code", label: "Claude Code · work", state: "signed_in", needs_sign_in: false }];
+  let view = await mountProviderAccountUses({ remAccounts: {}, selfWork: { claude_code: "@default" }, accounts });
+  try {
+    assert.deepEqual(view.uses(view.lines()), [
+      ["rem", "Threads, tasks and Rem’s replies:Default sign-inChange"],
+      ["self_work", "Self-work:Default sign-inChange"],
+    ]);
+    assert.deepEqual(view.uses(view.row("work")), []);
+  } finally { await view.dom.unmount(); }
+  // Without self-work's settings (an older backend), only Rem's line shows.
+  view = await mountProviderAccountUses({ remAccounts: {}, selfWork: null, accounts });
+  try {
+    assert.deepEqual(view.uses(view.lines()), [["rem", "Threads, tasks and Rem’s replies:Default sign-inChange"]]);
+  } finally { await view.dom.unmount(); }
+  // No accounts and nothing chosen: the section's own note covers it, with no extra lines.
+  view = await mountProviderAccountUses({ remAccounts: {}, selfWork: {}, accounts: [] });
+  try {
+    assert.equal(view.lines(), undefined);
+    assert.match(textOf(view.section()), /No extra Claude Code accounts\. Threads and tasks use your default Claude Code sign-in\./);
+  } finally { await view.dom.unmount(); }
+});
+
 test("The board marks a ticket self-work approved on its own and says so in its sheet", async () => {
   const kanbanModule = await viteServer.ssrLoadModule("/src/components/KanbanWorkspace.jsx");
   const base = selfWorkFixture();
@@ -19880,6 +21957,85 @@ test("The board marks a ticket self-work approved on its own and says so in its 
     // It moves and can be cancelled like any ticket, rather than offering Approve and Decline.
     assert.ok(dom.byExactText("To do"));
     assert.ok(!textOf(dom.container).includes("Approve for To do"));
+  } finally { await dom.unmount(); }
+});
+
+test("The board marks a ticket that violates decisions and its sheet says why and what to change", async () => {
+  const kanbanModule = await viteServer.ssrLoadModule("/src/components/KanbanWorkspace.jsx");
+  const base = selfWorkFixture();
+  const reason = "Violates decisions: D-4 (How are workflows written?): it mentions “toml workflows”, which D-4 names as a sign of contradicting it. Self-work won't start it.";
+  const illegal = { ticket_id: "t-bad", scope: "rem", organization_id: "", organization_name: "", key: "REM-9", title: "Support TOML workflows", description: "",
+    status: "blocked", priority: "medium", assignee_id: "rem", assignee: "Rem", proposed: false, auto_approved: false, proposal_reason: "",
+    duplicate_of: "", created_by: "user", created_at: "2026-11-10T11:00:00Z", updated_at: "2026-11-10T11:00:00Z", revision: 2, running: false, paused: "",
+    block_reason: reason, violates_decisions: ["D-4"], violation_reason: reason, summary: "", type: "develop", project_dir: "/work/app", project: "app",
+    backlog_score: 0, skip_reason: "", self_work_scope: "assigned", run_id: "", thread_id: "", branch: "", landed: false };
+  const fixture = { ...base, board: { ...base.board, tickets: [illegal] } };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/kanban", fixture),
+    jsonResponse("/api/rem/kanban/timeline", { ticket: illegal, comments: [], earlier: 0, can_comment: true }, { method: "POST" }),
+  ]);
+  const dom = await mountReact(React.createElement(kanbanModule.default), fetchMock);
+  try {
+    let badge;
+    for (let attempt = 0; attempt < 40 && !badge; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+      badge = allElements(dom.container).find(el => el.getAttribute?.("data-testid") === "ticket-violates");
+    }
+    assert.equal(textOf(badge), "Violates D-4");
+    assert.equal(badge.getAttribute("title"), reason);
+    const card = allElements(dom.container).find(el => el.getAttribute?.("aria-label") === "REM-9 Support TOML workflows");
+    await dom.click(card);
+    let note;
+    for (let attempt = 0; attempt < 30 && !note; attempt += 1) {
+      await dom.flush();
+      note = allElements(dom.container).find(el => el.getAttribute?.("data-testid") === "ticket-violates-detail");
+    }
+    assert.match(textOf(note), /Violates decisions/);
+    assert.match(textOf(note), /D-4 \(How are workflows written\?\)/);
+    assert.match(textOf(note), /Rem can't make an exception for itself/);
+    // The reason shows once, under Violates decisions, not again as a plain Blocked section.
+    const sections = allElements(dom.container).filter(el => el.tagName === "H3" && textOf(el) === "Blocked");
+    assert.equal(sections.length, 0);
+  } finally { await dom.unmount(); }
+});
+
+test("Board cards show the self-work objective a ticket advances, or that self-work leaves it", async () => {
+  const kanbanModule = await viteServer.ssrLoadModule("/src/components/KanbanWorkspace.jsx");
+  const base = selfWorkFixture();
+  const make = (id, key, title, extras = {}) => ({ ticket_id: id, scope: "rem", organization_id: "", organization_name: "", key, title, description: "",
+    status: "todo", priority: "medium", assignee_id: "rem", assignee: "Rem", proposed: false, auto_approved: false, proposal_reason: "",
+    duplicate_of: "", created_by: "user", created_at: "2026-11-10T11:00:00Z", updated_at: "2026-11-10T11:00:00Z", revision: 1, running: false, paused: "",
+    block_reason: "", summary: "", type: "develop", project_dir: "", project: "", backlog_score: 0, skip_reason: "", self_work_scope: "assigned",
+    run_id: "", thread_id: "", branch: "", landed: false, waits_for: [], waiting: false, wait_notice: "", objective: null, objective_left: "", ...extras });
+  const serving = make("t-1", "REM-1", "Render the side pane lazily", { objective: { id: "o1", text: "Improve Raticode UI responsiveness" } });
+  const left = make("t-2", "REM-2", "Export the board to CSV", { status: "backlog",
+    objective_left: "It doesn't advance an open self-work objective, so self-work leaves it where it is. Exporting doesn't change responsiveness." });
+  const plain = make("t-3", "REM-3", "Rewrite the README");
+  const fixture = { ...base, board: { ...base.board, tickets: [serving, left, plain] } };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/kanban", fixture),
+    jsonResponse("/api/rem/kanban/timeline", { ticket: left, comments: [], earlier: 0, can_comment: true }, { method: "POST" }),
+  ]);
+  const dom = await mountReact(React.createElement(kanbanModule.default), fetchMock);
+  const byTestId = id => allElements(dom.container).filter(el => el.getAttribute?.("data-testid") === id);
+  try {
+    for (let attempt = 0; attempt < 40 && !byTestId("ticket-objective").length; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    // One short line on the two cards with something to say; none on the third.
+    const lines = byTestId("ticket-objective");
+    assert.deepEqual(lines.map(textOf).sort(), ["Improve Raticode UI responsiveness", "Not on an objective: self-work leaves it"]);
+    assert.match(lines.find(el => /Not on an objective/.test(textOf(el))).getAttribute("title"), /Exporting doesn't change responsiveness/);
+    await dom.click(allElements(dom.container).find(el => el.getAttribute?.("aria-label") === "REM-2 Export the board to CSV"));
+    let section;
+    for (let attempt = 0; attempt < 30 && !section; attempt += 1) {
+      await dom.flush();
+      section = byTestId("ticket-objective-detail")[0];
+    }
+    assert.match(textOf(section), /self-work leaves it where it is/);
+    assert.match(textOf(section), /Move it to In progress to start it anyway/);
   } finally { await dom.unmount(); }
 });
 
@@ -20130,6 +22286,51 @@ test("Settings > Rem shows timed self-work windows, ends one and shows the last 
     for (let attempt = 0; attempt < 30 && windows(); attempt += 1) await dom.flush();
     assert.equal(windows(), undefined);
     assert.equal(allElements(dom.container).find(node => node.getAttribute?.("data-testid") === "self-work-switch-note"), undefined);
+  } finally { await dom.unmount(); }
+});
+
+test("Settings > Rem shows when self-work stops, edits the condition and the latest time, and clears them", async () => {
+  const base = selfWorkFixture({ enabled: true });
+  const stop = { revision: 3, active: true, condition: "REM-205 to REM-212 are done", no_later_than: "2026-11-21T05:00:00+00:00",
+    no_later_than_label: "12:00 AM tomorrow (America/New_York)", timezone: "America/New_York",
+    label: "Stops when “REM-205 to REM-212 are done”, or at 12:00 AM tomorrow (America/New_York) at the latest",
+    judgment: { met: false, evidence: "REM-210 is still in review.", at: "2026-11-21T01:40:00+00:00", at_label: "8:40 PM today (America/New_York)" },
+    judging: false, judge_failed: false, stopped: null, last: null };
+  const fixture = { ...base, self_work: { ...base.self_work, stop } };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/kanban", fixture),
+    jsonResponse("/api/rem/kanban/stop", fixture, { method: "POST" }),
+  ]);
+  const dom = await mountReact(React.createElement(settingsPopoverModule.default, {
+    open: true, initialCategory: "assistant", settings: settingsModule.normalizeAppSettings({}),
+    onChange() {}, onClose() {}, onResetAll() {},
+  }), fetchMock);
+  const byTestId = id => allElements(dom.container).find(node => node.getAttribute?.("data-testid") === id);
+  try {
+    for (let attempt = 0; attempt < 30 && !byTestId("self-work-stop"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    assert.ok(byTestId("self-work-stop"), "the stop shows under the switch");
+    assert.equal(textOf(byTestId("self-work-stop-label")), stop.label);
+    assert.equal(textOf(byTestId("self-work-stop-judgment")), "Last check 8:40 PM today (America/New_York): not met. REM-210 is still in review.");
+    await dom.click(byTestId("self-work-stop-edit"));
+    assert.equal(reactProps(byTestId("self-work-stop-condition")).value, "REM-205 to REM-212 are done", "Edit starts from the condition");
+    await dom.change(byTestId("self-work-stop-condition"), "REM-205 to REM-209 are done");
+    await dom.change(byTestId("self-work-stop-time"), "23:30");
+    await dom.change(byTestId("self-work-stop-day"), "today");
+    await React.act(async () => {
+      const form = allElements(byTestId("self-work-stop")).find(element => element.tagName === "FORM");
+      reactProps(form).onSubmit(testEvent(form));
+    });
+    const sent = () => fetchMock.calls.filter(call => call.url === "/api/rem/kanban/stop");
+    for (let attempt = 0; attempt < 30 && !sent().length; attempt += 1) await dom.flush();
+    assert.deepEqual(JSON.parse(sent()[0].options.body),
+      { condition: "REM-205 to REM-209 are done", expected_revision: 3, no_later_than: { time: "23:30", day: "today" } });
+    for (let attempt = 0; attempt < 30 && !byTestId("self-work-stop-clear"); attempt += 1) await dom.flush();
+    await dom.click(byTestId("self-work-stop-clear"));
+    for (let attempt = 0; attempt < 30 && sent().length < 2; attempt += 1) await dom.flush();
+    assert.deepEqual(JSON.parse(sent()[1].options.body), { clear: "both", expected_revision: 3 });
   } finally { await dom.unmount(); }
 });
 
@@ -21136,11 +23337,11 @@ test("plugin settings hide, order, and lock the activity rail", async () => {
     await dom.pointer(target, "onDrop", dragEvent);
     // Workflows was missing from the stored order, so it returns after Rem, and
     // Browser, newer than the stored order, after File explorer.
-    assert.deepEqual(changes.at(-1), ["plugins.order", ["files", "browser", "rem", "workflows", "search", "source-control", "kanban", "swarms", "second-brain", "organizations"]]);
+    assert.deepEqual(changes.at(-1), ["plugins.order", ["files", "browser", "rem", "workflows", "search", "source-control", "kanban", "posts", "swarms", "second-brain", "organizations"]]);
     const rail = { currentTarget: { parentElement: { querySelector: () => null } } };
     await dom.keyDown(dom.byLabel("Search"), "ArrowUp", { ...rail, altKey: true });
     // Hidden plugins are skipped, so Search moves above Browser.
-    assert.deepEqual(changes.at(-1), ["plugins.order", ["second-brain", "files", "search", "browser", "rem", "workflows", "source-control", "kanban", "swarms", "organizations"]]);
+    assert.deepEqual(changes.at(-1), ["plugins.order", ["second-brain", "files", "search", "browser", "rem", "workflows", "source-control", "kanban", "posts", "swarms", "organizations"]]);
     await dom.click(dom.byLabel("Lock plugin order"));
     assert.deepEqual(changes.at(-1), ["plugins.locked", true]);
   } finally { await dom.unmount(); }
@@ -21198,7 +23399,7 @@ test("the Plugins settings section toggles, reorders, and restores sidebar plugi
     assert.deepEqual(settings.plugins.preview, { swarms: true });
     assert.equal(dom.byLabel("Show Swarms").getAttribute("aria-checked"), "false", "the row and its switch stay");
     await dom.keyDown(dom.byLabel("Move Rem"), "ArrowDown");
-    assert.deepEqual(changes.at(-1), ["plugins.order", ["workflows", "rem", "files", "browser", "search", "source-control", "kanban", "swarms", "organizations", "second-brain"]]);
+    assert.deepEqual(changes.at(-1), ["plugins.order", ["workflows", "rem", "files", "browser", "search", "source-control", "kanban", "posts", "swarms", "organizations", "second-brain"]]);
   } finally { await dom.unmount(); }
 
   changes.length = 0;
@@ -21627,6 +23828,7 @@ test("an opened task fills the Rem sidebar with a back arrow, and the chat keeps
     jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
     jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [{ id: "m1", role: "rem", created_at: created, body: "Started a research thread.", work: { task_id: "t1", run_id: "r1", thread_id: "thread-worker" } }] }),
     jsonResponse("/api/rem/tasks", { tasks: [{ id: "t1", title: "Sync research", type: "research", revision: 1, state: "enabled", schedule: { kind: "once" }, active_run: { id: "r1", state: "executing", thread_id: "thread-worker" } }] }),
+    jsonResponse("/api/rem/tasks/t1", { task: { id: "t1", title: "Sync research", type: "research", revision: 1, prompt: "Sync the research notes.", state: "enabled", schedule: { kind: "once" } } }),
   ]);
   const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
   const find = predicate => allElements(dom.container).find(predicate);
@@ -21682,6 +23884,739 @@ test("an opened task fills the Rem sidebar with a back arrow, and the chat keeps
   } finally {
     await dom.unmount();
     remStore.resetRemHomeStore();
+  }
+});
+
+test("a task sheet reads its prompt on its own, since the polled task list leaves prompts out", async () => {
+  const remStore = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  remStore.resetRemHomeStore();
+  let detailFails = true;
+  const patches = [];
+  const listed = { id: "t1", title: "Sync research", type: "research", revision: 1, state: "enabled", schedule: { kind: "once" }, active_run: null, last_run: null, acceptance_criteria: [] };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    jsonResponse("/api/rem/tasks", { tasks: [listed] }),
+    (url, options) => url === "/api/rem/tasks/t1" && (options?.method ?? "GET") === "GET" ? (detailFails ? { ok: false, status: 500, json: async () => ({ error: "busy" }) } : { ok: true, status: 200, json: async () => ({ task: { ...listed, prompt: "Sync the research notes." } }) }) : null,
+    (url, options) => {
+      if (url !== "/api/rem/tasks/t1" || options?.method !== "PATCH") return null;
+      patches.push(JSON.parse(options.body));
+      return { ok: true, status: 200, json: async () => ({ task: listed }) };
+    },
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  const find = predicate => allElements(dom.container).find(predicate);
+  const hasLabel = label => allElements(dom.container).some(node => node.getAttribute?.("aria-label") === label);
+  const until = async predicate => {
+    for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  const prompt = () => find(node => node.getAttribute?.("id") === "rem-task-prompt");
+  try {
+    await until(() => hasLabel("Rem"));
+    await dom.click(dom.byLabel("Rem"));
+    await until(() => find(node => node.tagName === "BUTTON" && node.getAttribute("title") === "Research · Sync research"));
+    remStore.openTaskSheet("t1");
+    // A failed read shows the task without an editor, and Try again reads it again.
+    await until(() => find(node => node.tagName === "BUTTON" && node.textContent === "Try again"));
+    assert.equal(prompt(), undefined, "no editor without the prompt");
+    assert.ok(hasLabel("Task: Sync research"));
+    detailFails = false;
+    await dom.click(find(node => node.tagName === "BUTTON" && node.textContent === "Try again"));
+    await until(() => prompt());
+    assert.equal(reactProps(prompt()).value, "Sync the research notes.");
+    // Saving a new name sends only the name: the prompt read on its own isn't a change.
+    await dom.change(dom.byLabel("Task name"), "Sync all research");
+    const save = find(node => node.tagName === "BUTTON" && node.textContent === "Save changes");
+    assert.equal(save.getAttribute("disabled"), null, "a fresh read can be saved");
+    await React.act(async () => {
+      const form = find(node => node.getAttribute?.("id") === "rem-task-form");
+      await reactProps(form).onSubmit(testEvent(form));
+    });
+    await until(() => patches.length);
+    assert.equal(patches.length, 1);
+    assert.equal(patches[0].title, "Sync all research");
+    assert.equal("prompt" in patches[0], false);
+  } finally {
+    await dom.unmount();
+    remStore.resetRemHomeStore();
+  }
+});
+
+test("a waiting Rem task shows the paired desktop with room as Run there, and the pick sends the pin request", async () => {
+  const remStore = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  remStore.resetRemHomeStore();
+  const picks = [];
+  const suggestion = { computer_id: "desk-b", computer_name: "Desktop B", project: "Raticode", text: "Desktop B has room: Run there", pick: true, grant: "" };
+  const waiting = { id: "r1", state: "queued", waiting_reason: "Waiting for a free worker: Workstation is full (4 of 4 running)", suggestion };
+  const listed = { id: "t1", title: "Sync research", type: "research", revision: 1, state: "enabled", schedule: { kind: "once" }, active_run: waiting, last_run: waiting, acceptance_criteria: [] };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    jsonResponse("/api/rem/tasks", { tasks: [listed] }),
+    (url, options) => url === "/api/rem/tasks/t1" && (options?.method ?? "GET") === "GET" ? { ok: true, status: 200, json: async () => ({ task: { ...listed, prompt: "Sync the research notes." } }) } : null,
+    (url, options) => {
+      if (url !== "/api/rem/runs/r1/run_there" || options?.method !== "POST") return null;
+      picks.push(JSON.parse(options.body));
+      return { ok: true, status: 200, json: async () => ({ run: { ...waiting, suggestion: null, waiting_reason: "Starting on Desktop B" } }) };
+    },
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  const find = predicate => allElements(dom.container).find(predicate);
+  const hasLabel = label => allElements(dom.container).some(node => node.getAttribute?.("aria-label") === label);
+  const until = async predicate => {
+    for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  const offer = () => find(node => node.getAttribute?.("data-testid") === "rem-run-there");
+  try {
+    await until(() => hasLabel("Rem"));
+    await dom.click(dom.byLabel("Rem"));
+    await until(() => find(node => node.tagName === "BUTTON" && node.getAttribute("title") === "Research · Sync research"));
+    remStore.openTaskSheet("t1");
+    await until(() => offer());
+    assert.ok(offer(), "the waiting task offers the paired desktop");
+    assert.equal(offer().textContent.replace(/\s+/g, " ").trim(), "Desktop B has room: Run there");
+    assert.equal(picks.length, 0, "nothing is sent until the user picks it");
+    await dom.click(find(node => node.tagName === "BUTTON" && node.textContent === "Run there"));
+    await until(() => picks.length);
+    assert.equal(picks.length, 1);
+    assert.equal(picks[0].computer_id, "desk-b");
+    assert.ok(picks[0].request_id, "the pick is an idempotent request");
+  } finally {
+    await dom.unmount();
+    remStore.resetRemHomeStore();
+  }
+});
+
+test("the Rem sidebar lists self-work objectives above the tasks as a checklist the user can edit", async () => {
+  const remStore = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  remStore.resetRemHomeStore();
+  let objectives = {
+    revision: 3, open: 2, done: 0,
+    items: [
+      { id: "o1", text: "Raise UX quality of the workflow studio", done_when: "", done: false, created_by: "user" },
+      { id: "o2", text: "Improve reliability of the Second Brain tools", done_when: "Nightly passes 3 nights running", done: false, created_by: "rem" },
+    ],
+  };
+  const changes = [];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    (url, options) => {
+      if (!url.startsWith("/api/rem/objectives") || options?.method !== "POST") return null;
+      const change = JSON.parse(options.body);
+      changes.push(change);
+      if (change.action === "check") objectives = { ...objectives, revision: objectives.revision + 1, items: objectives.items.map(item => item.id === change.id ? { ...item, done: true, done_by: "user" } : item) };
+      if (change.action === "add") objectives = { ...objectives, revision: objectives.revision + 1, items: [...objectives.items, { id: "o3", text: change.text, done_when: change.done_when, done: false, created_by: "user" }] };
+      return { ok: true, status: 200, json: async () => objectives };
+    },
+    url => url.startsWith("/api/rem/tasks") ? { ok: true, status: 200, json: async () => ({ objectives, tasks: [{ id: "t1", title: "Polish the node picker", type: "develop", revision: 1, state: "enabled", schedule: { kind: "once" }, active_run: { id: "r1", state: "executing", thread_id: "thread-worker", objective: { id: "o1", text: "Raise UX quality of the workflow studio" } } }] }) } : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  const find = predicate => allElements(dom.container).find(predicate);
+  const until = async predicate => {
+    for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  const section = () => find(node => node.getAttribute?.("aria-label") === "Objectives" && node.tagName === "SECTION");
+  const checkbox = text => find(node => node.tagName === "INPUT" && node.getAttribute("aria-label")?.endsWith(`: ${text}`));
+  try {
+    await until(() => find(node => node.getAttribute?.("aria-label") === "Rem"));
+    await dom.click(dom.byLabel("Rem"));
+    await until(() => checkbox("Raise UX quality of the workflow studio"));
+    const objectivesSection = section();
+    assert.ok(objectivesSection, "an Objectives section shows in the Rem sidebar");
+    const rowTitle = "Develop · Polish the node picker\nFor objective: Raise UX quality of the workflow studio";
+    const taskRow = find(node => node.tagName === "BUTTON" && node.getAttribute("title") === rowTitle);
+    assert.ok(taskRow, "the running task names the objective it serves");
+    const order = allElements(dom.container);
+    assert.ok(order.indexOf(objectivesSection) < order.indexOf(taskRow), "objectives sit above the tasks");
+    assert.match(dom.text(), /1 task on it/, "the objective shows how many running tasks serve it");
+
+    // Checking one off sends the change with the revision the window shows.
+    await dom.change(checkbox("Improve reliability of the Second Brain tools"), true);
+    await until(() => changes.length === 1);
+    assert.deepEqual(changes[0], { action: "check", id: "o2", expected_revision: 3 });
+    await until(() => checkbox("Improve reliability of the Second Brain tools")?.checked === true);
+
+    // Adding one keeps what was typed until it's saved.
+    await dom.click(dom.byLabel("Add objective"));
+    await dom.change(dom.byLabel("Objective"), "  Optimize   performance of file handling ");
+    await dom.change(dom.byLabel("Done when (optional)"), "");
+    await dom.pointer(dom.ancestor(dom.byLabel("Objective"), "FORM"), "onSubmit", { preventDefault() {} });
+    await until(() => changes.length === 2);
+    assert.deepEqual(changes[1], { action: "add", text: "Optimize performance of file handling", done_when: "", expected_revision: 4 });
+    await until(() => checkbox("Optimize performance of file handling"));
+    assert.ok(checkbox("Optimize performance of file handling"));
+
+    // The section folds away and stays folded.
+    await dom.click(find(node => node.tagName === "BUTTON" && node.getAttribute("aria-expanded") === "true" && node.textContent.includes("Objectives")));
+    assert.equal(checkbox("Raise UX quality of the workflow studio"), undefined, "a folded section hides its list");
+    assert.equal(globalThis.window.localStorage.getItem("raticode.rem.objectivesOpen"), "closed");
+  } finally {
+    await dom.unmount();
+    remStore.resetRemHomeStore();
+  }
+});
+
+// A decisions server like rem_decisions.change: a stale expected_revision is a conflict.
+function remDecisionsServer() {
+  const server = { posts: [], conflictOnce: false };
+  server.view = {
+    revision: 7, waiting: 1, provisional: 1, confirmed: 1,
+    items: [
+      { id: "D-5", project: "/workspace", project_name: "workspace", topic: "checks.fast", question: "Which check runs before each commit?", answer: "npm test", recommended: "npm test", why: "It runs in 4 seconds.",
+        evidence: [{ kind: "file", ref: "package.json", excerpt: "\"test\": \"node --test\"" }, { kind: "command", ref: "npm test", excerpt: "42 passed" }], alternatives: [], status: "pending", supersedes: "D-1", tried: "" },
+      { id: "D-4", project: "/home/me/site", project_name: "site", topic: "deploy", question: "Where does the site deploy?", answer: "GitHub Pages", recommended: "GitHub Pages", why: "", evidence: [{ kind: "doc", ref: "README.md" }], alternatives: [], status: "provisional", decided_by: "rem", tried: "" },
+      { id: "D-1", project: "/workspace", project_name: "workspace", topic: "checks.fast", question: "Which check runs before each commit?", answer: "make lint", recommended: "", why: "Lint catches the common mistakes.", evidence: [{ kind: "file", ref: "Makefile", excerpt: "lint: ruff check ." }], alternatives: [], status: "confirmed", decided_by: "user", decided_at: "2026-11-19T09:00:00+00:00", last_check: { passed: false, exit_code: 2, ran_at: "2026-11-21T08:00:00+00:00" },
+        history: [{ at: "2026-11-18T08:00:00+00:00", actor: "rem", action: "requested" }, { at: "2026-11-19T09:00:00+00:00", actor: "user", action: "confirmed", note: "user" }, { at: "2026-11-20T09:00:00+00:00", actor: "raticode", action: "rechecked", note: "found the same answer in the project's files" }] },
+    ],
+  };
+  server.handler = (url, options = {}) => {
+    if (!url.startsWith("/api/rem/decisions")) return null;
+    if (options.method !== "POST") return { ok: true, status: 200, json: async () => structuredClone(server.view) };
+    const change = JSON.parse(options.body);
+    server.posts.push(change);
+    if (url.startsWith("/api/rem/decisions/scan")) {
+      // The scan found the landing branch and filed it as a waiting request.
+      const items = [...server.view.items, { id: "D-9", project: "/workspace", project_name: "workspace", topic: "branch.integration", question: "Which branch does finished work in workspace land on?", answer: "", recommended: "dev", why: "AGENTS.md says work lands there.", evidence: [{ kind: "quote", ref: "AGENTS.md:41", excerpt: "### Before landing on `dev`" }], alternatives: [], status: "pending", tried: "" }];
+      server.view = { ...server.view, revision: server.view.revision + 1, items, waiting: server.view.waiting + 1 };
+      return { ok: true, status: 200, json: async () => ({ ...structuredClone(server.view), scan: { project: "/workspace", topics: {} }, outcomes: [{ topic: "branch.integration", outcome: "pending", id: "D-9" }, { topic: "checks.fast", outcome: "answered", id: "D-1" }] }) };
+    }
+    if (server.conflictOnce) {
+      server.conflictOnce = false;
+      server.view = { ...server.view, revision: server.view.revision + 1 };
+      return { ok: false, status: 409, json: async () => ({ error: "The decisions changed. Check them and try again.", code: "conflict" }) };
+    }
+    if (change.expected_revision !== server.view.revision) return { ok: false, status: 409, json: async () => ({ error: "stale", code: "conflict" }) };
+    const items = server.view.items.map(item => {
+      if (item.id !== change.id) return item;
+      if (change.action === "use") return { ...item, status: "confirmed", decided_by: "user" };
+      if (change.action === "change") return { ...item, status: "confirmed", decided_by: "user", answer: change.answer };
+      if (change.action === "reject") return { ...item, status: "rejected" };
+      return item;
+    }).map(item => change.action === "use" && item.id === "D-1" ? { ...item, status: "superseded", superseded_by: "D-5" } : item);
+    const count = status => items.filter(item => item.status === status).length;
+    server.view = { revision: server.view.revision + 1, items, waiting: count("pending"), provisional: count("provisional"), confirmed: count("confirmed") };
+    return { ok: true, status: 200, json: async () => structuredClone(server.view) };
+  };
+  return server;
+}
+
+test("the Rem sidebar lists decisions waiting for the user, and Use this and Change… send their answer", async () => {
+  const remStore = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  remStore.resetRemHomeStore();
+  const server = remDecisionsServer();
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+    server.handler,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  const find = predicate => allElements(dom.container).find(predicate);
+  const until = async predicate => {
+    for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  const section = () => find(node => node.tagName === "SECTION" && node.getAttribute?.("aria-label") === "Decisions");
+  // The button in the waiting card for this question.
+  const action = (question, label) => {
+    const card = allElements(section() || dom.container).find(node => node.tagName === "LI" && textOf(node).includes(question) && allElements(node).some(child => child.tagName === "BUTTON" && textOf(child) === label));
+    return card && allElements(card).find(child => child.tagName === "BUTTON" && textOf(child) === label);
+  };
+  try {
+    await until(() => find(node => node.getAttribute?.("aria-label") === "Rem"));
+    await dom.click(dom.byLabel("Rem"));
+    await until(() => action("Which check runs before each commit?", "Use this"));
+    // The pane's project (/workspace) shows its own decisions; another project's waits apart.
+    let text = textOf(section());
+    assert.match(text, /2 waiting/, "the heading counts waiting requests and Rem's own answers everywhere");
+    assert.match(text, /Rem recommends/);
+    assert.match(text, /Would replace D-1/);
+    assert.match(text, /package\.json/, "the evidence line names what the answer rests on");
+    assert.match(text, /make lint/, "the decision in force is listed under Decided");
+    assert.match(text, /Raticode's last run of it failed \(exit 2\) on 2026-11-21/, "Raticode's own check result shows under the decided command");
+    assert.doesNotMatch(text, /Where does the site deploy\?/);
+    assert.doesNotMatch(text, /You decided on|Lint catches/, "a decided row is one line until it's opened");
+    assert.equal(allElements(section()).some(node => node.getAttribute?.("title")?.includes("Answer: make lint")), false, "no hover-only details");
+    // Opening it shows who decided it and when, why, the evidence, the check and its history.
+    const rule = () => allElements(section()).find(node => node.tagName === "LI" && node.getAttribute?.("class") === "rem-decision-rule" && textOf(node).includes("make lint"));
+    await dom.click(allElements(rule()).find(node => node.tagName === "BUTTON" && node.getAttribute("aria-expanded") === "false"));
+    text = textOf(rule());
+    assert.match(text, /D-1/);
+    assert.match(text, /Lint catches the common mistakes\./);
+    assert.match(text, /You decided on 2026-11-19\./);
+    assert.match(text, /Makefile\s*lint: ruff check \./, "each piece of evidence shows with its excerpt");
+    assert.match(text, /Raticode's last run of it failed \(exit 2\) on 2026-11-21/);
+    const history = allElements(rule()).find(node => node.tagName === "OL" && node.getAttribute?.("aria-label") === "History");
+    assert.ok(history, "the history list is folded in");
+    const rows = allElements(history).filter(node => node.tagName === "LI").map(textOf);
+    assert.equal(rows.length, 3);
+    assert.match(rows[0], /2026-11-20\s*Raticode Checked again\s*found the same answer in the project's files/, "newest first, with its note");
+    assert.match(rows[1], /2026-11-19\s*You Confirmed$/, "a change with no reason shows no note");
+    assert.match(rows[2], /2026-11-18\s*Rem Asked/);
+    await dom.click(find(node => node.tagName === "BUTTON" && textOf(node) === "1 more waiting in other projects"));
+    text = textOf(section());
+    assert.match(text, /Where does the site deploy\?/, "All projects lists every decision");
+    assert.match(text, /Rem decided \(auto mode\)/);
+
+    // A change made elsewhere first: nothing is saved, the list reloads and says so.
+    server.conflictOnce = true;
+    await dom.click(action("Which check runs before each commit?", "Use this"));
+    await until(() => /This changed elsewhere/.test(textOf(section())));
+    assert.deepEqual(server.posts[0], { action: "use", id: "D-5", expected_revision: 7 });
+    assert.match(textOf(section()), /This changed elsewhere/);
+    await until(() => remStore.getState().decisions.revision === 8);
+
+    // Trying again carries the revision the window now shows.
+    await dom.click(action("Which check runs before each commit?", "Use this"));
+    await until(() => server.posts.length === 2 && remStore.getState().decisions.revision === 9);
+    assert.deepEqual(server.posts[1], { action: "use", id: "D-5", expected_revision: 8 });
+    await until(() => /1 waiting/.test(textOf(section())));
+
+    // Change… keeps what was typed until Enter, then sends the user's own answer.
+    await dom.click(action("Where does the site deploy?", "Change…"));
+    const field = dom.byLabel("Your answer: Where does the site deploy?");
+    await dom.change(field, "");
+    await dom.change(field, "  Netlify ");
+    assert.equal(server.posts.length, 2, "typing alone saves nothing");
+    await dom.keyDown(field, "Enter", { shiftKey: false, nativeEvent: {} });
+    await until(() => server.posts.length === 3);
+    assert.deepEqual(server.posts[2], { action: "change", id: "D-4", answer: "Netlify", expected_revision: 9 });
+    await until(() => remStore.getState().decisions.revision === 10);
+    const heading = allElements(section()).find(node => node.tagName === "BUTTON" && node.getAttribute("aria-expanded") && textOf(node).includes("Decisions"));
+    assert.doesNotMatch(textOf(heading), /waiting/, "the heading shows no count once nothing waits");
+    assert.doesNotMatch(textOf(section()), /Waiting for you/, "nothing waits once both are answered");
+    assert.match(textOf(section()), /Netlify/);
+
+    // Look for answers scans the pane's project; what it finds waits like any request.
+    await dom.click(find(node => node.tagName === "BUTTON" && textOf(node) === "Look for answers in this project"));
+    await until(() => /Found 2 answers/.test(textOf(section())));
+    assert.deepEqual(server.posts.at(-1), { project: "/workspace" });
+    text = textOf(section());
+    assert.match(text, /Found 2 answers: 1 waiting for you, 1 already decided\./);
+    assert.match(text, /Which branch does finished work in workspace land on\?/);
+    assert.match(text, /1 waiting/);
+  } finally {
+    await dom.unmount();
+    remStore.resetRemHomeStore();
+  }
+});
+
+test("an Ask again card shows the current answer, and Keep current answer turns the card down", async () => {
+  const remStore = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  remStore.resetRemHomeStore();
+  const server = remDecisionsServer();
+  const decided = server.view.items.find(item => item.id === "D-1");
+  server.view = {
+    revision: 7, waiting: 1, provisional: 0, confirmed: 2,
+    items: [
+      { id: "D-6", project: "/workspace", project_name: "workspace", topic: "deploy", question: "Where does the site deploy?", answer: "", recommended: "", why: "", evidence: [], alternatives: [], status: "pending", tried: "",
+        supersedes: "D-3", reopened: "You asked again.", asked_again: true, current_answer: "GitHub Pages" },
+      { id: "D-3", project: "/workspace", project_name: "workspace", topic: "deploy", question: "Where does the site deploy?", answer: "GitHub Pages", recommended: "", why: "", evidence: [], alternatives: [], status: "confirmed", decided_by: "user" },
+      decided,
+    ],
+  };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+    server.handler,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  const find = predicate => allElements(dom.container).find(predicate);
+  const until = async predicate => {
+    for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  const section = () => find(node => node.tagName === "SECTION" && node.getAttribute?.("aria-label") === "Decisions");
+  const card = () => allElements(section() || dom.container).find(node => node.tagName === "LI" && node.getAttribute?.("class") === "rem-decision" && textOf(node).includes("Where does the site deploy?"));
+  const button = label => card() && allElements(card()).find(node => node.tagName === "BUTTON" && textOf(node) === label);
+  try {
+    await until(() => find(node => node.getAttribute?.("aria-label") === "Rem"));
+    await dom.click(dom.byLabel("Rem"));
+    await until(() => button("Keep current answer"));
+    const text = textOf(card());
+    assert.match(text, /You asked again/);
+    assert.doesNotMatch(text, /Asked again: You asked again/);
+    assert.match(text, /Current answer\s*GitHub Pages/);
+    assert.match(text, /Would replace D-3/);
+    assert.doesNotMatch(text, /Rem recommends/, "no fresh scan, so no recommendation");
+    assert.ok(button("New answer…"));
+    assert.equal(button("Use this"), undefined);
+    assert.equal(button("Keep current answer").getAttribute("title"), "Keep the current answer and close this question.");
+    await dom.click(button("Keep current answer"));
+    await until(() => server.posts.length === 1);
+    assert.deepEqual(server.posts[0], { action: "reject", id: "D-6", expected_revision: 7 });
+  } finally {
+    await dom.unmount();
+    remStore.resetRemHomeStore();
+  }
+});
+
+test("plan questions show under the plan's title with how many are answered, and the rest come up as they're answered", async () => {
+  const remStore = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  remStore.resetRemHomeStore();
+  const server = remDecisionsServer();
+  const ask = (id, topic, question, recommended, status) => ({ id, project: "/workspace", project_name: "workspace", topic, question, answer: recommended, recommended, why: "", evidence: [{ kind: "file", ref: "AGENTS.md" }], alternatives: [], status, tried: "", plan: "P-1" });
+  server.view = {
+    revision: 7, waiting: 3, queued: 1, provisional: 0, confirmed: 1,
+    items: [
+      ask("D-11", "plan:store", "Where do offline notes live?", "SQLite", "pending"),
+      ask("D-12", "plan:merge", "How do conflicts merge?", "Last write wins", "pending"),
+      { id: "D-5", project: "/workspace", project_name: "workspace", topic: "checks.fast", question: "Which check runs before each commit?", answer: "npm test", recommended: "npm test", why: "", evidence: [], alternatives: [], status: "pending", tried: "" },
+      ask("D-13", "plan:port", "Which sync port?", "8443", "queued"),
+      { ...ask("D-10", "plan:metered", "Sync on metered data?", "No", "confirmed"), decided_by: "user" },
+    ],
+    plans: [{ id: "P-1", title: "Offline sync", goal: "Notes keep working offline", project: "/workspace", status: "asking", questions: ["D-10", "D-11", "D-12", "D-13"], answered: 1, total: 4, waiting: 2, queued: 1 }],
+  };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+    server.handler,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  const find = predicate => allElements(dom.container).find(predicate);
+  const until = async predicate => {
+    for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  const section = () => find(node => node.tagName === "SECTION" && node.getAttribute?.("aria-label") === "Decisions");
+  const plan = () => section() && allElements(section()).find(node => node.tagName === "LI" && node.getAttribute?.("aria-label") === "Plan: Offline sync");
+  try {
+    await until(() => find(node => node.getAttribute?.("aria-label") === "Rem"));
+    await dom.click(dom.byLabel("Rem"));
+    await until(() => plan());
+    const grouped = textOf(plan());
+    assert.match(grouped, /Offline sync\s*1 of 4 answered/);
+    assert.match(grouped, /Where do offline notes live\?/);
+    assert.match(grouped, /How do conflicts merge\?/);
+    assert.match(grouped, /1 more come up as you answer/);
+    assert.doesNotMatch(grouped, /Which check runs before each commit\?/, "a question outside the plan isn't in its group");
+    const text = textOf(section());
+    assert.match(text, /Which check runs before each commit\?/);
+    assert.doesNotMatch(text, /more queued/, "the plan's queued question is counted under the plan only");
+    // Use this on a plan question answers it like any other.
+    const card = allElements(plan()).find(node => node.tagName === "LI" && textOf(node).includes("Where do offline notes live?") && node.getAttribute?.("class") === "rem-decision");
+    await dom.click(allElements(card).find(node => node.tagName === "BUTTON" && textOf(node) === "Use this"));
+    await until(() => server.posts.length === 1);
+    assert.deepEqual(server.posts[0], { action: "use", id: "D-11", expected_revision: 7 });
+  } finally {
+    await dom.unmount();
+    remStore.resetRemHomeStore();
+  }
+});
+
+test("the Rem sidebar shows design decisions with their record, and Edit wording, Replace with… and Add a record send the record's parts", async () => {
+  const remStore = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  remStore.resetRemHomeStore();
+  const posts = [];
+  const storage = { context: "Workers share state between runs.", options: "", consequences: "Back up one file.", check: "", applies_to: ["src/store/**"], forbids: ["src/**/*.json"], signals: ["postgres"] };
+  let view = {
+    revision: 3, waiting: 1, provisional: 0, confirmed: 3,
+    items: [
+      { id: "D-8", project: "/workspace", project_name: "workspace", topic: "conflict:d-3-d-5", question: "These decisions conflict. Replace them with one?", answer: "Indent with tabs everywhere", recommended: "Indent with tabs everywhere", why: "The formatter already uses tabs.", evidence: [], alternatives: [], status: "pending", supersedes_all: ["D-3", "D-5"], conflict: "D-3 says tabs and D-5 says spaces.", tried: "" },
+      { id: "D-7", project: "/workspace", project_name: "workspace", topic: "adr:storage", question: "Where does local data live?", answer: "SQLite in the data folder", recommended: "", why: "One file, no server.", evidence: [], alternatives: [], status: "confirmed", decided_by: "user",
+        remember_as: "record", record: storage, record_path: "docs/decisions/0007-storage.md", record_commit: "abc1234", edited_outside: true,
+        path_counts: { branch: "dev", commit: "abc1234", applies_to: { "src/store/**": 4 }, forbids: { "src/**/*.json": 2 } } },
+      { id: "D-6", project: "/workspace", project_name: "workspace", topic: "adr:errors", question: "How are errors shown?", answer: "Inline, never in a dialog", recommended: "", why: "", evidence: [], alternatives: [], status: "confirmed", decided_by: "user",
+        remember_as: "record", record: { context: "", options: "", consequences: "", check: "", applies_to: [], forbids: [], signals: [] }, record_error: "The landing branch checkout has uncommitted changes." },
+      { id: "D-3", project: "/workspace", project_name: "workspace", topic: "adr:logs", question: "Where do logs go?", answer: "One log file per run", recommended: "", why: "", evidence: [], alternatives: [], status: "confirmed", decided_by: "user",
+        remember_as: "record", record: { context: "", options: "", consequences: "", check: "", applies_to: [], forbids: [], signals: [] }, record_path: "docs/decisions/0003-logs.md",
+        record_restore: "f00d", record_error: "The landing branch checkout has uncommitted changes.",
+        history: [{ at: "2026-11-21T10:00:00+00:00", actor: "raticode", action: "kept the approved text", note: "A Rem run changed docs/decisions/0003-logs.md; only the user changes decisions." }] },
+      { id: "D-2", project: "/workspace", project_name: "workspace", topic: "branch.integration", question: "Which branch does work land on?", answer: "dev", recommended: "", evidence: [], alternatives: [], status: "confirmed", decided_by: "user", remember_as: "fact" },
+    ],
+    // A change the user asked Rem for in chat, still waiting for OK.
+    edits: [{ id: "E-1", decision: "D-6", action: "edit", topic: "adr:errors", question: "How are errors shown?", project: "/workspace", project_name: "workspace", record: true, status: "waiting",
+      changes: [{ field: "answer", label: "Decision", before: "Inline, never in a dialog", after: "Inline, or a toast for background work" }] }],
+  };
+  const pathPosts = [];
+  const handler = (url, options = {}) => {
+    if (!url.startsWith("/api/rem/decisions")) return null;
+    if (url.startsWith("/api/rem/decisions/paths")) {
+      // Typed paths are counted on the landing branch: src/store has files, anything else none.
+      const asked = JSON.parse(options.body);
+      pathPosts.push(asked);
+      const count = (globs, matched) => Object.fromEntries((globs || []).map(glob => [glob, matched(glob)]));
+      return { ok: true, status: 200, json: async () => ({ path_counts: { branch: "dev", commit: "abc1234", applies_to: count(asked.applies_to, glob => glob.startsWith("src/store") ? 4 : 0), forbids: count(asked.forbids, () => 2) }, reason: "" }) };
+    }
+    if (options.method !== "POST") return { ok: true, status: 200, json: async () => structuredClone(view) };
+    const change = JSON.parse(options.body);
+    posts.push(change);
+    if (change.expected_revision !== view.revision) return { ok: false, status: 409, json: async () => ({ error: "stale", code: "conflict" }) };
+    let items = view.items;
+    if (change.action === "edit") {
+      items = items.map(item => item.id === change.id ? { ...item, edited_outside: undefined, record: { ...item.record, ...Object.fromEntries(Object.entries(change).filter(([key]) => key in storage)) } } : item);
+    } else if (change.action === "replace") {
+      const old = items.find(item => item.id === change.id);
+      items = [...items.map(item => item.id === change.id ? { ...item, status: "superseded", superseded_by: "D-10" } : item),
+        { ...old, id: "D-10", answer: change.answer, question: change.question, why: change.why, supersedes: old.id, edited_outside: undefined, record_path: undefined, record: Object.fromEntries(Object.keys(storage).map(key => [key, change[key]])) }];
+    } else if (change.action === "add") {
+      items = [...items, { id: "D-11", project: change.project, question: change.question, answer: change.answer, why: change.why, status: "confirmed", decided_by: "user", remember_as: change.remember_as, record: Object.fromEntries(Object.keys(storage).map(key => [key, change[key]])), evidence: [], alternatives: [] }];
+    } else if (change.action === "use") {
+      items = items.map(item => item.id === change.id ? { ...item, status: "confirmed", decided_by: "user" } : item);
+    }
+    view = { ...view, revision: view.revision + 1, items };
+    return { ok: true, status: 200, json: async () => structuredClone(view) };
+  };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+    handler,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  const find = predicate => allElements(dom.container).find(predicate);
+  const until = async predicate => {
+    for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  const section = () => find(node => node.tagName === "SECTION" && node.getAttribute?.("aria-label") === "Decisions");
+  const recordItem = answer => allElements(section()).find(node => node.tagName === "LI" && node.getAttribute?.("class") === "rem-decision-record" && textOf(node).includes(answer));
+  const toggle = answer => allElements(recordItem(answer)).find(node => node.tagName === "BUTTON" && node.getAttribute("aria-expanded"));
+  const button = (root, label) => allElements(root).find(node => node.tagName === "BUTTON" && textOf(node) === label);
+  const submit = async label => dom.pointer(find(node => node.tagName === "FORM" && node.getAttribute("aria-label") === label), "onSubmit", { preventDefault() {} });
+  try {
+    await until(() => find(node => node.getAttribute?.("aria-label") === "Rem"));
+    await dom.click(dom.byLabel("Rem"));
+    await until(() => section() && /Design decisions/.test(textOf(section())));
+    let text = textOf(section());
+    assert.match(text, /Waiting for you/);
+    assert.match(text, /How Rem works here/, "facts sit apart from design decisions");
+    assert.match(text, /Design decisions/);
+    assert.match(text, /Replaces D-3, D-5/, "a conflict fix names every decision it replaces");
+    assert.match(text, /Conflict:\s*D-3 says tabs and D-5 says spaces\./);
+    assert.match(text, /Rem's fix/);
+    assert.match(text, /Change D-6\?.*Before\s*Inline, never in a dialog.*After\s*Inline, or a toast for background work/s, "a change asked for in chat waits here with its before and after");
+    assert.doesNotMatch(text, /Workers share state between runs/, "a record is one line until it's opened");
+
+    // Opening a record shows its decision, scope chips, folded parts and file.
+    await dom.click(toggle("SQLite in the data folder"));
+    text = textOf(recordItem("SQLite in the data folder"));
+    assert.match(text, /In force/);
+    assert.match(text, /src\/store\/\*\*/);
+    assert.match(text, /Never: src\/\*\*\/\*\.json/);
+    assert.match(text, /src\/store\/\*\*\s*4 files/, "each path shows how many tracked files it matches");
+    assert.match(text, /Never: src\/\*\*\/\*\.json\s*matches 2 files that exist now/, "a Never touch path with files warns");
+    assert.ok(allElements(recordItem("SQLite in the data folder")).some(node => node.tagName === "LI" && node.getAttribute?.("data-warn") === "true" && textOf(node).includes("Never:")));
+    assert.match(text, /Context/);
+    assert.match(text, /Workers share state between runs\./);
+    assert.match(text, /Consequences/);
+    assert.doesNotMatch(text, /Options we didn't choose|How we check it/, "empty parts are left out");
+    assert.match(text, /docs\/decisions\/0007-storage\.md/);
+    assert.match(text, /Edited outside Raticode/);
+    assert.doesNotMatch(text, /---|status:/, "no front matter shows");
+    await dom.click(toggle("Inline, never in a dialog"));
+    assert.match(textOf(recordItem("Inline, never in a dialog")), /Not in the repo yet: The landing branch checkout has uncommitted changes\./);
+    // A record whose file is in the repository is retired, not forgotten; one with no file yet is still forgotten.
+    assert.ok(button(recordItem("SQLite in the data folder"), "Retire"), "a written record offers Retire");
+    assert.equal(button(recordItem("SQLite in the data folder"), "Forget"), undefined);
+    assert.ok(button(recordItem("Inline, never in a dialog"), "Forget"), "a record with no file still offers Forget");
+    // A Rem run changed this one's file: the approved text goes back, so it isn't "not in the repo".
+    assert.match(textOf(recordItem("One log file per run")), /File differs/);
+    await dom.click(toggle("One log file per run"));
+    text = textOf(recordItem("One log file per run"));
+    assert.match(text, /The file differs from the approved text; Raticode puts it back when the checkout is clean/);
+    assert.doesNotMatch(text, /Not in the repo yet/);
+    assert.match(text, /You decided/);
+    assert.match(text, /History\s*1/);
+    assert.match(text, /2026-11-21\s*Raticode Kept the approved text\s*A Rem run changed docs\/decisions\/0003-logs\.md/);
+
+    // Edit wording: each part is its own field; lists stay text until Save, then only changes go.
+    await dom.click(button(recordItem("SQLite in the data folder"), "Edit wording"));
+    const applies = dom.byLabel("Applies to");
+    assert.equal(applies.value, "src/store/**");
+    await dom.change(applies, "");
+    await dom.change(applies, "src/store/**, src/db/");
+    assert.equal(dom.byLabel("Applies to").value, "src/store/**, src/db/", "what's typed stays as typed");
+    // The typed paths are counted a moment later and warn before saving, without blocking it.
+    const warnings = () => find(node => node.getAttribute?.("aria-label") === "Path warnings");
+    await until(() => warnings() && /src\/db\//.test(textOf(warnings())));
+    assert.match(textOf(warnings()), /Applies to src\/db\/ matches no files on dev\./);
+    assert.match(textOf(warnings()), /Never touch src\/\*\*\/\*\.json matches 2 files that exist now\./);
+    assert.deepEqual(pathPosts.at(-1), { id: "D-7", applies_to: ["src/store/**", "src/db/"], forbids: ["src/**/*.json"] });
+    await dom.change(dom.byLabel("Consequences"), "Back up one file every day.");
+    await dom.change(dom.byLabel("Note for the history"), "Clearer wording");
+    assert.equal(posts.length, 0, "typing alone saves nothing");
+    await submit("Edit wording");
+    await until(() => posts.length === 1 && remStore.getState().decisions.revision === 4);
+    assert.deepEqual(posts[0], { action: "edit", id: "D-7", consequences: "Back up one file every day.", applies_to: ["src/store/**", "src/db/"], note: "Clearer wording", expected_revision: 3 });
+    await until(() => !/Edited outside Raticode/.test(textOf(recordItem("SQLite in the data folder"))));
+    assert.match(textOf(recordItem("SQLite in the data folder")), /src\/db\//);
+
+    // Replace with…: the form starts from the record and sends the whole new decision.
+    await dom.click(button(recordItem("SQLite in the data folder"), "Replace with…"));
+    const decision = dom.byLabel("New decision");
+    assert.equal(decision.value, "SQLite in the data folder");
+    await dom.change(decision, "Postgres on the shared server");
+    await dom.change(dom.byLabel("Never touch"), "");
+    await dom.change(dom.byLabel("Note for the history"), "Workers now run on many machines");
+    await submit("Replace with a new decision");
+    await until(() => posts.length === 2 && remStore.getState().decisions.revision === 5);
+    assert.deepEqual(posts[1], {
+      action: "replace", id: "D-7", answer: "Postgres on the shared server", why: "One file, no server.", question: "Where does local data live?",
+      context: "Workers share state between runs.", options: "", consequences: "Back up one file every day.", check: "", applies_to: ["src/store/**", "src/db/"], forbids: [], signals: ["postgres"],
+      note: "Workers now run on many machines", expected_revision: 4,
+    });
+    await until(() => recordItem("Postgres on the shared server"));
+    assert.ok(recordItem("Postgres on the shared server"), "the new decision is in force");
+
+    // Add a record for the pane's project.
+    await dom.click(button(section(), "Add a record"));
+    await dom.change(dom.byLabel("What it's about"), "How are dates stored?");
+    await dom.change(dom.byLabel("Decision"), "  UTC ISO strings ");
+    await dom.change(dom.byLabel("Applies to"), "src/store/**");
+    await submit("Add a design decision");
+    await until(() => posts.length === 3);
+    assert.deepEqual(posts[2], {
+      action: "add", project: "/workspace", question: "How are dates stored?", answer: "UTC ISO strings", why: "", remember_as: "record",
+      context: "", options: "", consequences: "", check: "", applies_to: ["src/store/**"], forbids: [], signals: [], expected_revision: 5,
+    });
+    await until(() => recordItem("UTC ISO strings"));
+
+    // Use this on the conflict fix approves the one replacement.
+    const fix = allElements(section()).find(node => node.tagName === "LI" && textOf(node).includes("Replaces D-3, D-5"));
+    await dom.click(button(fix, "Use this"));
+    await until(() => posts.length === 4);
+    assert.deepEqual(posts[3], { action: "use", id: "D-8", expected_revision: 6 });
+  } finally {
+    await dom.unmount();
+    remStore.resetRemHomeStore();
+  }
+});
+
+test("a task update's decision card in Rem's chat follows the live list, and a fallback card fills the message box", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  const workspace = await viteServer.ssrLoadModule("/src/components/RemHomeWorkspace.jsx");
+  store.resetRemHomeStore();
+  store.setRemHomeContext(null);
+  const server = remDecisionsServer();
+  const snapshot = { id: "D-5", topic: "checks.fast", question: "Which check runs before each commit?", recommended: "npm test", why: "It runs in 4 seconds.", evidence: server.view.items[0].evidence, alternatives: [], status: "pending", tried: "" };
+  const created = new Date().toISOString();
+  const messages = [
+    { id: "u1", role: "rem", kind: "task_update", body: "I need one answer before I go on.", created_at: created, work: { task_id: "t1", run_id: "r1", thread_id: "w1", state: "blocked", needs_user: true, decision: snapshot } },
+    { id: "u2", role: "rem", kind: "task_update", body: "I couldn't settle this one.", created_at: created, work: { task_id: "t2", run_id: "r2", thread_id: "w2", state: "blocked", needs_user: true,
+      decision: { title: "Rem couldn't settle this. Here is what it found.", question: "Which branch ships on Friday?", found: "Both dev and stage have the fix.", candidate: "stage", fallback: true } } },
+    { id: "u3", role: "rem", kind: "task_update", body: "I need to know the port.", created_at: created, work: { task_id: "t3", run_id: "r3", thread_id: "w3", state: "running", needs_user: false,
+      decision: { ...snapshot, id: "D-404", topic: "dev.port", question: "Which port does the dev server use?", status: "withdrawn" } } },
+  ];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+    (url) => url.startsWith("/api/rem/threads/") ? { ok: true, json: async () => ({ metadata: { id: url.split("/").at(-1), title: "Work", updatedAt: created }, messages: [] }) } : null,
+    server.handler,
+  ]);
+  const dom = await mountReact(React.createElement(workspace.default), fetchMock);
+  const chat = () => dom.byLabel("Conversation with Rem");
+  const button = label => allElements(chat()).find(node => node.tagName === "BUTTON" && textOf(node) === label);
+  try {
+    await store.refreshRemHome();
+    await dom.flush();
+    assert.match(textOf(chat()), /Rem recommends:\s*npm test/);
+    assert.match(textOf(chat()), /What it found/);
+    assert.match(textOf(chat()), /A possible answer, not checked:\s*stage/);
+    assert.ok(button("Change…"), "a waiting card offers Change…");
+    assert.match(textOf(chat()), /Which port does the dev server use\?\s*You withdrew this question/, "a question the user forgot while it waited says so");
+    assert.doesNotMatch(textOf(chat()), /No longer listed/);
+    await dom.click(button("Use this"));
+    for (let attempt = 0; attempt < 100 && !/Decided:\s*npm test/.test(textOf(chat())); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    assert.deepEqual(server.posts[0], { action: "use", id: "D-5", expected_revision: 7 });
+    assert.match(textOf(chat()), /Decided:\s*npm test/, "the card shows the live status, not the message's snapshot");
+    assert.equal(button("Use this"), undefined, "a decided card has no buttons");
+
+    // A fallback card has no id: answering it quotes the question in the message box.
+    await dom.click(button("Answer it yourself…"));
+    assert.equal(store.getState().composerRequest.text, "> Which branch ships on Friday?\n\n");
+  } finally {
+    await dom.unmount();
+    store.resetRemHomeStore();
+  }
+});
+
+test("a change the user asked Rem for in chat shows before and after, and only OK applies it", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  const workspace = await viteServer.ssrLoadModule("/src/components/RemHomeWorkspace.jsx");
+  store.resetRemHomeStore();
+  store.setRemHomeContext(null);
+  const created = new Date().toISOString();
+  const card = (id, decision, status = "waiting") => ({
+    id, decision, action: "edit", topic: "adr:storage", question: "Where does local data live?", project: "/workspace", project_name: "workspace", record: true, status,
+    changes: [{ field: "answer", label: "Decision", before: "SQLite in the data folder", after: "Postgres on the shared server" }],
+  });
+  let messages = [
+    { id: "q1", role: "user", body: "Update D-7 to use Postgres", created_at: created },
+    { id: "reply-q1", role: "rem", body: "Here's the change. Nothing changes until you press OK.", created_at: created, decision_edits: [card("E-2", "D-7")] },
+    { id: "reply-q2", role: "rem", body: "And this one.", created_at: created, decision_edits: [card("E-3", "D-6")] },
+  ];
+  const posts = [];
+  const view = { revision: 4, waiting: 0, provisional: 0, confirmed: 2, items: [], edits: [] };
+  const fetchMock = createFetchMock([
+    url => url.startsWith("/api/rem/conversation") ? { ok: true, status: 200, json: async () => ({ conversation: { id: "rem", turn_state: "idle" }, messages: structuredClone(messages) }) } : null,
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+    (url, options = {}) => {
+      if (!url.startsWith("/api/rem/decisions")) return null;
+      if (options.method !== "POST") return { ok: true, status: 200, json: async () => structuredClone(view) };
+      const change = JSON.parse(options.body);
+      posts.push(change);
+      if (change.id === "E-3") return { ok: false, status: 409, json: async () => ({ error: "D-6 changed after Rem showed you this. Cancel it and ask Rem again.", code: "conflict" }) };
+      // The desktop rewrites the card under the reply once it is settled.
+      messages = messages.map(message => message.id === "reply-q1" ? { ...message, decision_edits: [card("E-2", "D-7", "applied")] } : message);
+      return { ok: true, status: 200, json: async () => structuredClone(view) };
+    },
+  ]);
+  const dom = await mountReact(React.createElement(workspace.default), fetchMock);
+  const chat = () => dom.byLabel("Conversation with Rem");
+  const cardOf = id => allElements(chat()).find(node => node.getAttribute?.("class")?.includes("rem-decision-edit") && textOf(node).includes(id));
+  const button = (root, label) => allElements(root).find(node => node.tagName === "BUTTON" && textOf(node) === label);
+  try {
+    await store.refreshRemHome();
+    await dom.flush();
+    const text = textOf(cardOf("E-2"));
+    assert.match(text, /Change D-7\?/);
+    assert.match(text, /Before\s*SQLite in the data folder/);
+    assert.match(text, /After\s*Postgres on the shared server/);
+    assert.ok(button(cardOf("E-2"), "Cancel"), "a waiting change offers Cancel");
+    await dom.click(button(cardOf("E-2"), "OK"));
+    for (let attempt = 0; attempt < 100 && !/Applied to D-7/.test(textOf(cardOf("E-2"))); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    assert.deepEqual(posts[0], { action: "confirm_edit", id: "E-2" }, "OK sends no revision: the desktop checks the decision itself");
+    assert.match(textOf(cardOf("E-2")), /Applied to D-7/);
+    assert.equal(button(cardOf("E-2"), "OK"), undefined, "a settled card has no buttons");
+
+    // A decision that changed since the card says why OK was refused, and stays waiting.
+    await dom.click(button(cardOf("E-3"), "OK"));
+    for (let attempt = 0; attempt < 100 && !/changed after Rem showed you this/.test(textOf(cardOf("E-3"))); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    assert.match(textOf(cardOf("E-3")), /D-6 changed after Rem showed you this/);
+    assert.ok(button(cardOf("E-3"), "Cancel"));
+  } finally {
+    await dom.unmount();
+    store.resetRemHomeStore();
   }
 });
 
@@ -21806,6 +24741,93 @@ test("Organizations leaves the sidebar when its backend switch is off", async ()
       // Off in the backend means the feature appears only in Feature Preview.
       assert.equal(hasLabel("Organizations"), enabled);
     } finally { await dom.unmount(); }
+  }
+});
+
+test("a web-page file another app opened reopens offline with scripts off after a restart", async () => {
+  const created = [];
+  const browser = {
+    adopt: async () => null,
+    close: async () => null,
+    create: async (options) => { created.push(options); return { clientId: options.clientId, id: `session-${created.length}`, loading: false, url: "file:///page", engine: "raticode", external: options.external === true }; },
+    gecko: async () => ({ available: true, supported: true, executable: "/usr/bin/firefox", running: false, placed: false }),
+    library: async () => ({}),
+    onCommand: () => () => {},
+    onGecko: () => () => {},
+    onState: () => () => {},
+    platform: "linux",
+    setPolicy: async () => null,
+    setPreferences: async () => null,
+  };
+  const page = "/home/me/Downloads/page.html";
+  const report = "/home/me/project/report.html";
+  const dom = await mountReact(React.createElement(appModule.default), createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+  ]), { browser, storage: {
+    "raticode.editorSession.v2": JSON.stringify({ version: 2, paths: [page, report], activePath: page, activity: "files", mainContent: "editor", externalPaths: [page] }),
+  } });
+  try {
+    for (let attempt = 0; attempt < 200 && !created.some(options => options.path === page); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    const opened = created.find(options => options.path === page);
+    assert.ok(opened, "the restored tab opened its file");
+    assert.equal(opened.external, true, "the restored file from another app lost scripts off");
+    // A project file restored beside it is an ordinary preview.
+    assert.equal(created.find(options => options.path === report)?.external, undefined);
+    // The flag is saved again for the next restart.
+    assert.deepEqual(JSON.parse(globalThis.window.localStorage.getItem("raticode.editorSession.v2")).externalPaths, [page]);
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test("a link inside a file from another app never reopens it, or a sibling, with scripts on", async () => {
+  const created = [];
+  let openFile = null;
+  const browser = {
+    adopt: async () => null,
+    close: async () => null,
+    create: async (options) => { created.push(options); return { clientId: options.clientId, id: `session-${created.length}`, loading: false, url: "file:///page", engine: "raticode", external: options.external === true }; },
+    gecko: async () => ({ available: true, supported: true, executable: "/usr/bin/firefox", running: false, placed: false }),
+    library: async () => ({}),
+    onCommand: () => () => {},
+    onGecko: () => () => {},
+    onOpenFile: (handler) => { openFile = handler; return () => { openFile = null; }; },
+    onState: () => () => {},
+    platform: "linux",
+    setPolicy: async () => null,
+    setPreferences: async () => null,
+  };
+  const page = "/home/me/Downloads/page.html";
+  const sibling = "/home/me/Downloads/other.html";
+  const dom = await mountReact(React.createElement(appModule.default), createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+  ]), { browser, storage: {
+    "raticode.editorSession.v2": JSON.stringify({ version: 2, paths: [page], activePath: page, activity: "files", mainContent: "editor", externalPaths: [page] }),
+  } });
+  const saved = () => JSON.parse(globalThis.window.localStorage.getItem("raticode.editorSession.v2") || "{}").externalPaths || [];
+  try {
+    for (let attempt = 0; attempt < 200 && (!openFile || !created.some(options => options.path === page)); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    assert.ok(openFile, "the studio listens for links from pages");
+    // The page links to itself and to a file beside it, and the user clicks both.
+    await React.act(async () => { openFile({ href: `file://${page}`, fromPage: true, external: true }); });
+    await React.act(async () => { openFile({ href: `file://${sibling}`, fromPage: true, external: true }); });
+    for (let attempt = 0; attempt < 200 && !saved().includes(sibling); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    assert.ok(saved().includes(page), "a link back to the file dropped scripts off");
+    assert.ok(saved().includes(sibling), "a file linked from a file of another app opened with scripts on");
+    for (const options of created.filter(item => item.path === page || item.path === sibling)) {
+      assert.equal(options.external, true, `${options.path} was created with scripts on`);
+    }
+  } finally {
+    await dom.unmount();
   }
 });
 
@@ -23232,6 +26254,7 @@ test("Rem polls that find nothing new download, store and re-render nothing", as
     const answer = (version, payload, keep = {}) => ({ ok: true, json: async () => known === version ? { unchanged: true, version, ...keep } : { ...payload, version } });
     if (path === "/api/rem/conversation") return answer(`c${messages.length}`, { conversation: { id: "rem", turn_state: "idle" }, messages: structuredClone(messages), context_ready: true }, { context_ready: true });
     if (path === "/api/rem/tasks") return answer(`t-${phase}`, { tasks: [{ id: "task", active_run: { id: "run", thread_id: "worker", state: "executing", phase_label: phase } }] });
+    if (path === "/api/rem/decisions") return answer("d1", { revision: 1, items: [], waiting: 0, provisional: 0, confirmed: 0 });
     if (path === "/api/rem/threads/worker") return answer(`w${transcript.length}`, { metadata: { id: "worker", title: "Worker", managedRunId: "run" }, messages: transcript, running: true });
     return null;
   }]);
@@ -23250,7 +26273,7 @@ test("Rem polls that find nothing new download, store and re-render nothing", as
     urls.length = 0;
     await store.refreshRemHome();
     // The version travels in a header, so each poll's address stays the same.
-    assert.deepEqual(urls.sort(), ["/api/rem/conversation known=c1", "/api/rem/tasks known=t-Working", "/api/rem/threads/worker known=w1"]);
+    assert.deepEqual(urls.sort(), ["/api/rem/conversation known=c1", "/api/rem/decisions known=d1", "/api/rem/tasks known=t-Working", "/api/rem/threads/worker known=w1"]);
     assert.equal(emitted, 0, "An unchanged poll doesn't re-render Rem");
     assert.equal(store.getState(), first);
     assert.equal(synced.length, 1, "An unchanged thread isn't announced again");
@@ -23571,6 +26594,86 @@ test("Rem's memory panel lists, corrects and forgets remembered facts", async ()
   }
 });
 
+test("Rem's memory panel tags, filters and moves project memories", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  store.resetRemHomeStore();
+  const created = new Date().toISOString();
+  const projects = [{ root: "/work/site", name: "Site" }, { root: "/work/app", name: "App" }];
+  let memories = [
+    { id: "g", text: "Prefers short replies.", created_at: created },
+    { id: "s", text: "Site deploys from main.", created_at: created, project: "/work/site", project_name: "Site" },
+  ];
+  const named = root => projects.find(project => project.root === root)?.name;
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "c", turn_state: "idle" }, messages: [] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+    (url, options) => {
+      const method = options.method || "GET";
+      if (url === "/api/rem/memories" && method === "GET") return { ok: true, json: async () => ({ memories, mode: "on", projects }) };
+      if (url === "/api/rem/memories" && method === "POST") {
+        const body = JSON.parse(options.body);
+        memories = [{ id: "n", text: body.text, created_at: created, added_by: "user", ...(body.project ? { project: body.project, project_name: named(body.project) } : {}) }, ...memories];
+        return { ok: true, json: async () => ({ memories, mode: "on", projects }) };
+      }
+      if (url === "/api/rem/memories/g" && method === "PATCH") {
+        const { project } = JSON.parse(options.body);
+        memories = memories.map(item => item.id === "g" ? { ...item, project, project_name: named(project) } : item);
+        return { ok: true, json: async () => ({ memories, mode: "on", projects }) };
+      }
+      return null;
+    },
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  const settle = async (done) => {
+    for (let attempt = 0; attempt < 30 && !done(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  try {
+    await dom.click(dom.byLabel("Rem"));
+    await settle(() => store.getState().status === "ready" && dom.container.querySelector('[aria-label="Rem options"]'));
+    await dom.click(dom.byLabel("Rem options"));
+    await settle(() => textOf(dom.container).includes("What Rem remembers…"));
+    await dom.click(dom.ancestor(dom.byText("What Rem remembers…"), "BUTTON"));
+    await settle(() => textOf(dom.container).includes("Site deploys from main."));
+    const panel = () => dom.ancestor(dom.byExactText("What Rem remembers"), node => node.getAttribute?.("role") === "dialog");
+    const button = (scope, label) => allElements(scope).find(node => node.tagName === "BUTTON" && textOf(node) === label);
+    const item = text => dom.ancestor(dom.byText(text), "LI");
+    const tags = () => allElements(panel()).filter(node => String(node.getAttribute?.("class") || node.className || "").includes("rem-memory-tag")).map(textOf);
+    // Only the project memory carries a tag.
+    assert.deepEqual(tags(), ["Site"]);
+    await dom.change(dom.byLabel("Show"), "/work/site");
+    await settle(() => !textOf(panel()).includes("Prefers short replies."));
+    assert.match(textOf(panel()), /Site deploys from main\./);
+    await dom.change(dom.byLabel("Show"), "");
+    await settle(() => !textOf(panel()).includes("Site deploys from main."));
+    assert.match(textOf(panel()), /Prefers short replies\./);
+    await dom.change(dom.byLabel("Show"), "*");
+    await settle(() => textOf(panel()).includes("Site deploys from main."));
+
+    // Moving a memory to a project sends only the project, not unchanged text.
+    await dom.click(button(item("Prefers short replies."), "Edit"));
+    await dom.change(dom.byLabel("Applies to"), "/work/app");
+    await dom.click(button(panel(), "Save"));
+    await settle(() => tags().includes("App"));
+    const patch = fetchMock.calls.find(call => call.url === "/api/rem/memories/g");
+    assert.deepEqual(JSON.parse(patch.options.body), { project: "/work/app" });
+
+    await dom.change(dom.byLabel("Something for Rem to remember"), "Site builds with Vite.");
+    await dom.change(dom.byLabel("For"), "/work/site");
+    await dom.click(button(panel(), "Add"));
+    await settle(() => textOf(panel()).includes("Site builds with Vite."));
+    const added = fetchMock.calls.find(call => call.url === "/api/rem/memories" && call.options.method === "POST");
+    assert.deepEqual(JSON.parse(added.options.body), { text: "Site builds with Vite.", project: "/work/site" });
+    assert.match(textOf(item("Site builds with Vite.")), /Site/);
+  } finally {
+    await dom.unmount();
+    store.resetRemHomeStore();
+  }
+});
+
 test("Rem's memory controls pause saving, add a memory and undo what a reply saved", async () => {
   const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
   store.resetRemHomeStore();
@@ -23640,6 +26743,98 @@ test("Rem's memory controls pause saving, add a memory and undo what a reply sav
     await settle(() => textOf(panel()).includes("added by you"));
     assert.match(textOf(panel()), /Works in Eastern time/);
     assert.equal(dom.byLabel("Something for Rem to remember").value, "");
+  } finally {
+    await dom.unmount();
+    store.resetRemHomeStore();
+  }
+});
+
+test("Rem's memory end dates show in the save note, dim ended memories and offer Keep", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  store.resetRemHomeStore();
+  const created = new Date().toISOString();
+  // Noon UTC keeps the same day in every timezone the tests run in.
+  const future = `${new Date().getFullYear() + 1}-06-30T12:00:00+00:00`;
+  const past = "2020-03-01T12:00:00+00:00";
+  let memories = [
+    { id: "trip", text: "Flying to Oslo.", created_at: created, until: future, ended: false },
+    { id: "call", text: "On call this week.", created_at: created, until: past, ended: true },
+    { id: "tea", text: "Prefers tea.", created_at: created },
+  ];
+  const conversation = () => ({
+    conversation: { id: "c", turn_state: "idle" },
+    messages: [
+      { id: "m1", role: "user", body: "Off to Oslo", created_at: created },
+      { id: "reply-m1", role: "rem", body: "Noted.", created_at: created, memory: { saved: [{ id: "trip", text: "Flying to Oslo.", until: future }] } },
+    ],
+  });
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([])),
+    (url) => url === "/api/rem/conversation" ? { ok: true, json: async () => conversation() } : null,
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+    (url, options) => {
+      const method = options.method || "GET";
+      if (url === "/api/rem/memories" && method === "GET") return { ok: true, json: async () => ({ memories, mode: "on" }) };
+      const id = url.startsWith("/api/rem/memories/") && method === "PATCH" ? url.split("/").pop() : null;
+      if (id) {
+        const { until } = JSON.parse(options.body);
+        memories = memories.map(item => {
+          if (item.id !== id) return item;
+          const rest = { ...item };
+          delete rest.until;
+          delete rest.ended;
+          return until ? { ...rest, until: `${until}T23:59:59+00:00`, ended: false } : rest;
+        });
+        return { ok: true, json: async () => ({ memories, mode: "on" }) };
+      }
+      return null;
+    },
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  const settle = async (done) => {
+    for (let attempt = 0; attempt < 30 && !done(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  const button = (scope, label) => allElements(scope).find(node => node.tagName === "BUTTON" && textOf(node) === label);
+  const buttons = scope => allElements(scope).filter(node => node.tagName === "BUTTON").map(textOf);
+  try {
+    await dom.click(dom.byLabel("Rem"));
+    await settle(() => textOf(dom.container).includes("Saved to memory"));
+    // The note says when Rem stops using the fact, next to its Undo.
+    const note = dom.ancestor(dom.byText("Saved to memory until Jun 30"), node => String(node.getAttribute?.("class") || node.className || "").includes("rem-memory-note"));
+    assert.match(textOf(note), /Saved to memory until Jun 30, \d{4}: “Flying to Oslo\.”/);
+    assert.ok(button(note, "Undo"));
+
+    await dom.click(dom.byLabel("Rem options"));
+    await settle(() => textOf(dom.container).includes("What Rem remembers…"));
+    await dom.click(dom.ancestor(dom.byText("What Rem remembers…"), "BUTTON"));
+    await settle(() => textOf(dom.container).includes("On call this week."));
+    const item = text => dom.ancestor(dom.byExactText(text), "LI");
+    // An ended memory is dimmed with Keep and Forget; the others can get an end date.
+    assert.equal(item("On call this week.").getAttribute("data-ended"), "true");
+    assert.match(textOf(item("On call this week.")), /Ended Mar 1, 2020/);
+    assert.deepEqual(buttons(item("On call this week.")), ["Keep", "Forget"]);
+    assert.equal(item("Flying to Oslo.").getAttribute("data-ended"), null);
+    assert.match(textOf(item("Flying to Oslo.")), /Until Jun 30, \d{4}/);
+    assert.deepEqual(buttons(item("Prefers tea.")), ["Edit", "Set an end date", "Forget"]);
+
+    await dom.click(button(item("On call this week."), "Keep"));
+    await settle(() => item("On call this week.").getAttribute("data-ended") === null);
+    const kept = fetchMock.calls.find(call => call.url === "/api/rem/memories/call");
+    assert.deepEqual(JSON.parse(kept.options.body), { until: null });
+    assert.doesNotMatch(textOf(item("On call this week.")), /Ended/);
+
+    await dom.click(button(item("Prefers tea."), "Set an end date"));
+    await settle(() => dom.container.querySelector('[aria-label="End date"]'));
+    const year = new Date().getFullYear() + 2;
+    await dom.change(dom.byLabel("End date"), `${year}-01-15`);
+    await dom.click(button(item("Prefers tea."), "Save"));
+    await settle(() => textOf(item("Prefers tea.")).includes("Until"));
+    const dated = fetchMock.calls.find(call => call.url === "/api/rem/memories/tea");
+    assert.deepEqual(JSON.parse(dated.options.body), { until: `${year}-01-15` });
+    assert.match(textOf(item("Prefers tea.")), new RegExp(`Until Jan 15, ${year}`));
   } finally {
     await dom.unmount();
     store.resetRemHomeStore();
@@ -23738,6 +26933,144 @@ test("Problems show runtime node failures and let the user reveal the failed run
     await dom.click(problem);
     assert.equal(revealed[0].nodeId, "digest");
     assert.equal(revealed[0].runtime, true);
+  } finally { await dom.unmount(); }
+});
+
+
+test("Problems show a skipped preflight check as an info note, not an error", async () => {
+  const panel = await viteServer.ssrLoadModule("/src/components/UnifiedBottomPanel.jsx");
+  const span = { start: { line: 6, column: 1, offset: 0 } };
+  const diagnostics = [
+    { severity: "info", code: "RATTISH_PREFLIGHT_MCP_TOOL_CHECK_SKIPPED", phase: "preflight", message: "Tool check skipped: this server runs unsandboxed. Check it with Raticode rem mcp tools fake.", span },
+    { severity: "error", code: "RATTISH_UNKNOWN_NODE", phase: "semantic", message: "Node 'shpi' doesn't exist.", span },
+  ];
+  const dom = await mountReact(React.createElement(panel.default, { diagnostics }), createFetchMock([]));
+  try {
+    await dom.click(dom.byText("Problems"));
+    const row = (text) => allElements(dom.container).find(node => node.tagName === "BUTTON" && textOf(node).includes(text));
+    const icon = (text) => allElements(row(text)).find(node => node.tagName.toLowerCase() === "svg").getAttribute("class");
+    assert.match(icon("Tool check skipped"), /lucide-info/);
+    assert.match(icon("Tool check skipped"), /text-sky-700/);
+    assert.doesNotMatch(icon("Tool check skipped"), /text-red-600/);
+    assert.match(icon("doesn't exist"), /text-red-600/);
+  } finally { await dom.unmount(); }
+});
+
+
+test("Ask Rem about this failure attaches a run's summary from every run surface without sending", async () => {
+  const panel = await viteServer.ssrLoadModule("/src/components/UnifiedBottomPanel.jsx");
+  const runs = await viteServer.ssrLoadModule("/src/lib/workflowRuns.js");
+  const ask = await viteServer.ssrLoadModule("/src/lib/askRemAboutFailure.js");
+  const summary = await viteServer.ssrLoadModule("/src/components/RunSummary.jsx");
+  const text = "Raticode workflow run, attached with Ask Rem about this failure.\n----- BEGIN UNTRUSTED RUN OUTPUT 0a0b0c0d -----\nNode: digest (type: bash-command), failed\n----- END UNTRUSTED RUN OUTPUT 0a0b0c0d -----\n";
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rattish/runs/r-9/failure?workflowId=digest&nodeId=digest", { name: "run-failure-r-9-digest.txt", text, nodeId: "digest" }),
+    jsonResponse("/api/rattish/runs/r-9/failure?workflowId=digest", { name: "run-failure-r-9-digest.txt", text, nodeId: "digest" }),
+    jsonResponse("/api/rattish/runs/gone/failure?workflowId=digest", { error: "Run 'gone' was not found." }, { ok: false, status: 404 }),
+  ]);
+  const asked = [];
+  const listen = (event) => asked.push(event.detail);
+  const attached = async () => { const [file] = asked.at(-1).files; return { name: file.name, type: file.type, text: await file.text(), draft: asked.at(-1).draft }; };
+  const runtime = runs.workflowRunProblems({ digest: { status: "error", message: "exit 3" } });
+  const source = { severity: "error", code: "RATTISH_UNKNOWN_NODE", phase: "semantic", message: "Node 'shpi' doesn't exist.", span: { start: { line: 4, column: 3 } } };
+  const onAskRemAboutDiagnostic = (diagnostic) => diagnostic.runtime
+    ? ask.askRemAboutRunFailure({ workflowId: "digest", runId: "r-9", nodeId: diagnostic.nodeId })
+    : ask.askRemAboutDiagnostic(diagnostic, { workflowName: "Digest", workflowPath: "/p/workflow.rattish", diagnostics: [source] });
+  const askButtons = (dom) => allElements(dom.container).filter(node => node.getAttribute?.("data-testid") === "ask-rem-failure");
+  const dom = await mountReact(React.createElement(panel.default, {
+    diagnostics: [source, ...runtime],
+    onAskRemAboutDiagnostic,
+    runsProps: {
+      records: [
+        { key: "a", runId: "r-9", workflowId: "digest", workflowName: "Digest", status: "error", projectPath: "/p" },
+        { key: "b", runId: "r-8", workflowId: "digest", workflowName: "Digest", status: "success", projectPath: "/p" },
+        { key: "c", runId: "gone", workflowId: "digest", workflowName: "Digest", status: "disconnected", projectPath: "/p" },
+      ],
+      onAskRem: (record) => ask.askRemAboutRunFailure({ workflowId: record.workflowId, runId: record.runId }),
+    },
+  }), fetchMock);
+  window.addEventListener("gofer:rem-attach-files", listen);
+  try {
+    // Problems: each entry has its own button; a run failure reads the run's summary.
+    await dom.click(dom.byText("Problems"));
+    assert.equal(askButtons(dom).length, 2);
+    assert.ok(dom.byLabel("Ask Rem about this failure: digest: RUN_NODE_FAILED"));
+    await dom.click(dom.byLabel("Ask Rem about this failure: digest: RUN_NODE_FAILED"));
+    await dom.flush();
+    assert.equal(asked.length, 1);
+    assert.deepEqual(await attached(), { name: "run-failure-r-9-digest.txt", type: "text/plain", text, draft: "" });
+    // A source problem is built here: the file, the line and the problem, marked untrusted.
+    await dom.click(dom.byLabel("Ask Rem about this failure: RATTISH_UNKNOWN_NODE"));
+    const problem = await attached();
+    assert.equal(problem.name, "workflow-problem-RATTISH_UNKNOWN_NODE.txt");
+    assert.match(problem.text, /Workflow file: \/p\/workflow\.rattish\nProblem: error RATTISH_UNKNOWN_NODE at line 4, column 3/);
+    assert.match(problem.text, /BEGIN UNTRUSTED WORKFLOW TEXT/);
+    // The entry itself still reveals the problem.
+    assert.ok(allElements(dom.container).find(node => node.tagName === "BUTTON" && textOf(node).includes("digest: exit 3")));
+
+    // Runs: failed and interrupted runs offer it, a passed run doesn't.
+    await dom.click(dom.byText("Runs"));
+    await dom.flush();
+    const labels = askButtons(dom).map(node => node.getAttribute("aria-label")).filter(label => label.includes(" in run "));
+    assert.deepEqual(labels.sort(), ["Ask Rem about this failure in run gone of Digest", "Ask Rem about this failure in run r-9 of Digest"]);
+    await dom.click(dom.byLabel("Ask Rem about this failure in run r-9 of Digest"));
+    await dom.flush();
+    assert.equal(asked.length, 3);
+    // A run the backend can't read says why on the button, and nothing is attached.
+    await dom.click(dom.byLabel("Ask Rem about this failure in run gone of Digest"));
+    await dom.flush();
+    assert.equal(asked.length, 3);
+    assert.ok(dom.byText("Run 'gone' was not found."));
+    assert.ok(dom.byExactText("Try again"));
+  } finally {
+    window.removeEventListener("gofer:rem-attach-files", listen);
+    await dom.unmount();
+  }
+  assert.ok(summary.default);
+});
+
+test("Run Timeline and Workflow runs offer Ask Rem on failed rows only", async () => {
+  const askedRows = [];
+  const timeline = await mountReact(React.createElement(canvasModule.RunTimelinePanel, {
+    embedded: true,
+    text: "run",
+    title: "Workflow log",
+    onAskRem: row => askedRows.push(row),
+    runEvents: [
+      { sequence: 1, type: "node_completed", nodeId: "build", status: "completed", attempt: 1, occurredAt: "2026-11-16T10:00:00Z", message: "Activation 1 success." },
+      { sequence: 2, type: "node_completed", nodeId: "lint", status: "allowed_failure", attempt: 1, occurredAt: "2026-11-16T10:00:01Z", message: "Lint found 2 problems." },
+      { sequence: 3, type: "node_completed", nodeId: "ship", status: "failed", attempt: 1, occurredAt: "2026-11-16T10:00:02Z", message: "Command exited with status 3." },
+      { sequence: 4, type: "workflow_completed", nodeId: "workflow", status: "failed", occurredAt: "2026-11-16T10:00:03Z", message: "Node 'ship' failed." },
+    ],
+  }), createFetchMock([]));
+  try {
+    await timeline.flush();
+    const labels = allElements(timeline.container).filter(node => node.getAttribute?.("data-testid") === "ask-rem-failure").map(node => node.getAttribute("aria-label"));
+    assert.deepEqual(labels, ["Ask Rem about this failure: lint", "Ask Rem about this failure: ship", "Ask Rem about this failure: workflow"]);
+    await timeline.click(timeline.byLabel("Ask Rem about this failure: ship"));
+    await timeline.flush();
+    assert.deepEqual(askedRows.map(row => row.node), ["ship"]);
+    // Asking doesn't expand or collapse the row.
+    assert.equal(timeline.ancestor(timeline.byLabel("Ask Rem about this failure: ship"), "TR").getAttribute("title"), "Expand log row");
+  } finally { await timeline.unmount(); }
+
+  const View = workflowRunsViewModule.default;
+  const opened = [];
+  const askedRuns = [];
+  const load = async () => {
+    const payload = allRunsPayload();
+    payload.runs.push({ ...payload.runs[0], id: "r-0", status: "disconnected" });
+    return payload;
+  };
+  const dom = await mountReact(React.createElement(View, { load, poll: () => () => {}, onOpenRun: run => opened.push(run), onAskRem: run => askedRuns.push(run) }), createFetchMock([]));
+  try {
+    await dom.flush();
+    const labels = allElements(dom.container).filter(node => node.getAttribute?.("data-testid") === "ask-rem-failure").map(node => node.getAttribute("aria-label"));
+    assert.deepEqual(labels, ["Ask Rem about this failure in run r-3 of Release check", "Ask Rem about this failure in run r-0 of Release check"]);
+    await dom.click(dom.byLabel("Ask Rem about this failure in run r-3 of Release check"));
+    await dom.flush();
+    assert.deepEqual(askedRuns.map(run => [run.workflowId, run.id]), [["release", "r-3"]]);
+    assert.deepEqual(opened, [], "asking doesn't open the run");
   } finally { await dom.unmount(); }
 });
 
@@ -23921,6 +27254,33 @@ test("the Downloads button animates when a download finishes", async () => {
   await dom.unmount();
 });
 
+test("local HTML previews offer Load remote content, and files from other apps say they're offline", async () => {
+  const created = [];
+  const previewState = { id: "s1", clientId: "tab", ready: true, loading: false, url: "file:///project/report.html", profile: "preview", remoteContent: { allowed: false, blocked: 0 } };
+  const fake = fakeBrowserBridge({
+    create: async (options) => { created.push(options); return previewState; },
+    setPreviewRemote: async (...args) => { fake.calls.push(["setPreviewRemote", ...args]); return null; },
+  });
+  const dom = await mountBrowser(fake, { localPath: "/project/report.html", initialUrl: "about:blank" });
+  assert.equal(created[0].external, undefined);
+  assert.equal(dom.container.querySelector("[data-testid='browser-remote-content-bar']"), null, "no bar until something was blocked");
+  await React.act(async () => fake.push({ remoteContent: { allowed: false, blocked: 3 } }));
+  assert.ok(dom.byText("asked for content from the internet"));
+  await dom.click(dom.byExactText("Load remote content"));
+  assert.deepEqual(fake.calls.at(-1), ["setPreviewRemote", "s1", true]);
+  await React.act(async () => fake.push({ remoteContent: { allowed: true, blocked: 0 } }));
+  assert.equal(dom.container.querySelector("[data-testid='browser-remote-content-bar']"), null);
+  await dom.unmount();
+
+  const external = fakeBrowserBridge({ create: async (options) => { created.push(options); return { ...previewState, external: true }; } });
+  const externalDom = await mountBrowser(external, { localPath: "/home/me/Downloads/page.html", initialUrl: "about:blank", external: true });
+  assert.equal(created.at(-1).external, true);
+  assert.ok(externalDom.byText("Opened from another app"));
+  await React.act(async () => external.push({ external: true, remoteContent: { allowed: false, blocked: 2 } }));
+  assert.equal(externalDom.container.querySelector("[data-testid='browser-remote-content-bar']"), null, "a file from another app can't be allowed online");
+  await externalDom.unmount();
+});
+
 test("browser prompts ask inside the tab and send only the user's answer", async () => {
   const fake = fakeBrowserBridge();
   const dom = await mountBrowser(fake);
@@ -24049,6 +27409,28 @@ test("browser settings normalize Rem's site lists and safety options", () => {
   assert.deepEqual(toPlainObject(appModule.browserPolicyFromSettings(settings.browser)).remSignInSites, ["github.com", "mail.google.com"]);
 });
 
+test("Settings > Browser lets Raticode become the computer's default browser and picks the browser for links from other apps", () => {
+  const markup = renderToStaticMarkup(React.createElement(settingsPopoverModule.default, {
+    open: true, initialCategory: "browser", settings: settingsModule.normalizeAppSettings({}), onChange() {}, onClose() {}, onResetAll() {},
+  }));
+  assert.match(markup, /Default web browser/);
+  assert.match(markup, /Raticode never changes it by itself/);
+  // Outside the desktop app there is no system to register with.
+  assert.match(markup, /Only Raticode&#x27;s desktop app can be the computer&#x27;s web browser/);
+  assert.match(markup, /Links from other apps open in/);
+  assert.match(markup, /<select aria-label="Links from other apps open in"[^>]*><option value="raticode" selected="">Raticode \(chromium\)<\/option><option value="gecko">Raticode \(gecko\)<\/option><\/select>/);
+  const gecko = renderToStaticMarkup(React.createElement(settingsPopoverModule.default, {
+    open: true, initialCategory: "browser", settings: settingsModule.normalizeAppSettings({ browser: { externalEngine: "gecko" } }), onChange() {}, onClose() {}, onResetAll() {},
+  }));
+  assert.match(gecko, /<select aria-label="Links from other apps open in"[^>]*><option value="raticode">Raticode \(chromium\)<\/option><option value="gecko" selected="">Raticode \(gecko\)<\/option>/);
+});
+
+test("web pages another app opened with Raticode are left out of the open files Rem sees", () => {
+  const paths = ["/work/app.py", "/home/me/Downloads/page.html", "raticode-browser:abc"];
+  assert.deepEqual(appModule.editorFileReferences(paths, {}), ["/work/app.py", "/home/me/Downloads/page.html"]);
+  assert.deepEqual(appModule.editorFileReferences(paths, {}, new Set(["/home/me/Downloads/page.html"])), ["/work/app.py"]);
+});
+
 test("Settings > Browser offers Raticode (chromium), Raticode (gecko), Firefox, Chrome and Edge as the default for new tabs and sends the choice to the desktop", () => {
   const settings = settingsModule.normalizeAppSettings({ browser: { engine: "firefox" } });
   const markup = renderToStaticMarkup(React.createElement(settingsPopoverModule.default, {
@@ -24097,6 +27479,368 @@ test("Ctrl+Shift+T reopens closed browser tabs from anywhere in the studio", () 
   assert.equal(command?.scope, "global");
   const appSource = fs.readFileSync(path.join(repoRoot, "frontend/src/pages/App.jsx"), "utf8");
   assert.match(appSource, /if \(action === "browser\.reopenClosedTab"\) reopenClosedBrowserTabRef\.current\?\.\(\);/);
+});
+
+test("Settings > Computers sets this computer's worker limit on its row, and search still finds it as Rem task workers", async () => {
+  const computers = [
+    { id: "a", name: "Studio", this_computer: true, state: "online", max_threads: 4, running_threads: 1, capacity: 3, effective_threads: 4, max_threads_setting: 0, default_max_threads: 4 },
+    { id: "b", name: "Tower", this_computer: false, state: "online", max_threads: 8, running_threads: 0, capacity: 8, effective_threads: 8, max_threads_setting: null, default_max_threads: null },
+  ];
+  const placement = { strategies: ["overflow", "balanced", "manual"], default_strategy: "overflow", order: ["a", "b"], computers: [], consumers: [] };
+  const changes = [];
+  const dom = await mountReact(React.createElement(settingsPopoverModule.default, {
+    open: true, initialCategory: "computers", settings: settingsModule.normalizeAppSettings({}),
+    onChange: (key, value) => changes.push([key, value]), onClose() {}, onResetAll() {},
+  }), createFetchMock([jsonResponse("/api/computers", { computers }), jsonResponse("/api/computers/placement", placement)]));
+  try {
+    await dom.flush();
+    await dom.flush();
+    const rowOf = (id) => allElements(dom.container).find((node) => node.getAttribute?.("data-computer") === id);
+    const limit = allElements(rowOf("a")).find((el) => el.tagName === "INPUT" && el.getAttribute("aria-label") === "Worker limit");
+    assert.ok(limit, "this computer's row has a Worker limit input");
+    assert.match(textOf(rowOf("a")), /Worker limit/);
+    assert.equal(limit.value, "0");
+    // 0 is Auto, and the row says the number Auto picks here.
+    const help = textOf(allElements(rowOf("a")).find((node) => node.getAttribute?.("data-testid") === "worker-limit-help"));
+    assert.match(help, /0 = Auto, which picks 4 from this computer's cores and memory/);
+    assert.match(help, /Rem tasks, self-work, phone turns, organization workers, swarm turns and work from other desktops/);
+    assert.doesNotMatch(dom.text(), /Rem task workers/);
+    // A paired desktop's limit is changed on that desktop, so its row has no field.
+    assert.equal(allElements(rowOf("b")).some((el) => el.tagName === "INPUT"), false);
+    await dom.focus(limit);
+    await dom.change(limit, "3");
+    await dom.blur(limit);
+    assert.deepEqual(changes, [["assistant.maxWorkers", 3]]);
+  } finally { await dom.unmount(); }
+  // Settings search still finds the row under its old name.
+  assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("rem task workers"), ["computers"]);
+  assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("worker limit"), ["computers"]);
+});
+
+test("Settings > Computers says why work can't run on a paired desktop, or what it shares", async () => {
+  const { default: ComputersSettings } = await viteServer.ssrLoadModule("/src/components/ComputersSettings.jsx");
+  const computers = [
+    { id: "a", name: "Studio", this_computer: true, state: "online", max_threads: 4, running_threads: 0, capacity: 4, effective_threads: 4, catalog: null, work_reason: null },
+    { id: "b", name: "Tower", this_computer: false, state: "online", max_threads: 8, running_threads: 0, capacity: 8, effective_threads: 8, catalog: { state: "unsupported" }, work_reason: "Update Raticode on Tower so it can say which of its projects match" },
+    { id: "c", name: "Desk", this_computer: false, state: "online", max_threads: 2, running_threads: 0, capacity: 2, effective_threads: 2, catalog: { state: "shared", projects: [{ id: "p", name: "Raticode" }], providers: ["codex"] }, work_reason: null },
+  ];
+  const placement = { strategies: ["overflow", "balanced", "manual"], default_strategy: "overflow", order: ["a", "b", "c"], computers: [], consumers: [] };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/computers", { computers }),
+    jsonResponse("/api/computers/placement", placement),
+  ]);
+  const dom = await mountReact(React.createElement(ComputersSettings), fetchMock);
+  try {
+    await dom.flush();
+    await dom.flush();
+    const lines = allElements(dom.container).filter((node) => node.getAttribute?.("data-testid") === "computer-work");
+    assert.equal(lines.length, 2);
+    assert.match(dom.text(), /Update Raticode on Tower so it can say which of its projects match/);
+    assert.match(dom.text(), /Shares 1 project with this computer: Raticode; allows Codex\. Each start also needs the same repository open there\. Work doesn't start on other computers yet\./);
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test("Settings > Computers reads each row's running workers by kind and lists this computer's", async () => {
+  const { default: ComputersSettings } = await viteServer.ssrLoadModule("/src/components/ComputersSettings.jsx");
+  const computers = [
+    {
+      id: "a", name: "Studio", this_computer: true, state: "online", max_threads: 4, running_threads: 4, capacity: 0, effective_threads: 4,
+      running_by_kind: { rem: 1, phone: 0, organizations: 2, swarms: 1 },
+      running_work: [
+        { kind: "organizations", label: "Acme · Ada" },
+        { kind: "rem", label: "Fix the login page" },
+        { kind: "organizations", label: "Acme · Grace" },
+        { kind: "swarms", label: "Release team" },
+      ],
+    },
+    { id: "b", name: "Tower", this_computer: false, state: "online", max_threads: 8, running_threads: 3, capacity: 5, effective_threads: 8, running_by_kind: { rem: 0, phone: 1, organizations: 2, swarms: 0 }, running_work: null },
+    { id: "c", name: "Old desk", this_computer: false, state: "online", max_threads: 2, running_threads: 1, capacity: 1, effective_threads: 2, running_by_kind: null, running_work: null },
+  ];
+  const placement = { strategies: ["overflow", "balanced", "manual"], default_strategy: "overflow", order: ["a", "b", "c"], computers: [], consumers: [] };
+  const fetchMock = createFetchMock([jsonResponse("/api/computers", { computers }), jsonResponse("/api/computers/placement", placement)]);
+  const dom = await mountReact(React.createElement(ComputersSettings), fetchMock);
+  try {
+    await dom.flush();
+    await dom.flush();
+    const rows = allElements(dom.container).filter((node) => node.getAttribute?.("data-testid") === "computer-running").map((node) => node.textContent);
+    assert.deepEqual(rows, [
+      "4 of 4 running: 2 organization workers, 1 Rem task, 1 swarm turn · Room for 0",
+      "3 of 8 running: 2 organization workers, 1 phone turn · Room for 5",
+      // An older desktop shares only its total.
+      "1 of 2 running · Room for 1",
+    ]);
+    // Only this computer's row expands to list what its workers are.
+    const lists = allElements(dom.container).filter((node) => node.getAttribute?.("data-testid") === "computer-running-work");
+    assert.equal(lists.length, 1);
+    assert.equal(lists[0].tagName.toLowerCase(), "details");
+    const text = lists[0].textContent;
+    assert.match(text, /What's running/);
+    for (const label of ["Acme · Ada", "Fix the login page", "Acme · Grace", "Release team"]) assert.ok(text.includes(label), label);
+    assert.match(text, /Fix the login pageRem task/);
+    assert.match(text, /Release teamswarm turn/);
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test("Settings > Computers lists each computer, saves the order and each placement, and shows refusals by the row", async () => {
+  const { default: ComputersSettings } = await viteServer.ssrLoadModule("/src/components/ComputersSettings.jsx");
+  const computers = [
+    { id: "a", name: "Studio", this_computer: true, state: "online", max_threads: 4, running_threads: 2, capacity: 1, effective_threads: 3, cpu_pressure: 35, memory_pressure: 0 },
+    { id: "b", name: "Laptop", this_computer: false, state: "offline", max_threads: null, running_threads: 0, capacity: 0, effective_threads: 0, cpu_pressure: null, memory_pressure: null },
+  ];
+  let placement = {
+    strategies: ["overflow", "balanced", "manual"],
+    default_strategy: "overflow",
+    order: ["a", "b"],
+    computers: computers.map(({ id, name, state, this_computer }) => ({ id, name, state, this_computer })),
+    consumers: [
+      { consumer: "rem", kind: "rem", name: "Rem", strategy: "overflow", saved: false, computers: [], shared: [], missing_computers: [] },
+      { consumer: "org:acme", kind: "organization", name: "Acme", strategy: "manual", saved: true, computers: ["b", "gone-1234567"], shared: [], missing_computers: ["gone-1234567"] },
+    ],
+  };
+  const posts = [];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/computers", { computers }),
+    (url, options = {}) => {
+      if (url !== "/api/computers/placement") return null;
+      if (options.method !== "POST") return { ok: true, status: 200, json: async () => placement };
+      const body = JSON.parse(options.body);
+      posts.push(body);
+      if (body.order?.includes("missing")) return { ok: false, status: 400, json: async () => ({ error: "No computer with the ID missing" }) };
+      if (body.order) {
+        placement = { ...placement, order: body.order };
+      } else if (body.consumer === "org:acme" && body.computers?.includes("a") && !body.shared?.includes("a")) {
+        return { ok: false, status: 400, json: async () => ({ error: "Studio is already assigned to Rem; mark it shared to let both use it" }) };
+      } else {
+        placement = { ...placement, consumers: placement.consumers.map((c) => c.consumer === body.consumer ? { ...c, strategy: body.strategy, saved: true, computers: body.computers ?? [], shared: body.shared ?? [], missing_computers: [] } : c) };
+      }
+      return { ok: true, status: 200, json: async () => placement };
+    },
+  ]);
+  const dom = await mountReact(React.createElement(ComputersSettings), fetchMock);
+  try {
+    await dom.flush();
+    await dom.flush();
+    const text = dom.text();
+    assert.match(text, /Studio/);
+    assert.match(text, /This computer/);
+    assert.match(text, /2 of 4 running/);
+    assert.match(text, /Room for 1, pressure lowers its limit to 3/);
+    assert.match(text, /Pressure: CPU 35%, memory 0%/);
+    assert.match(text, /Offline/);
+    assert.match(text, /No room while offline/);
+    assert.equal(reactProps(dom.byLabel("Move Studio up")).disabled, true);
+    assert.equal(reactProps(dom.byLabel("Move Laptop down")).disabled, true);
+
+    // Move up saves the new order, and the list follows it.
+    await dom.click(dom.byLabel("Move Laptop up"));
+    await dom.flush();
+    assert.deepEqual(posts.at(-1), { order: ["b", "a"] });
+    const rows = allElements(dom.container).filter((node) => node.getAttribute?.("data-computer"));
+    assert.deepEqual(rows.map((row) => row.getAttribute("data-computer")), ["b", "a"]);
+
+    // An unpaired computer still assigned shows as missing under its organization.
+    assert.match(dom.text(), /Missing: Unpaired computer gone-123/);
+
+    // A strategy change saves at once; manual waits for a computer before it saves.
+    await dom.change(dom.byLabel("Where Rem runs"), "balanced");
+    await dom.flush();
+    assert.deepEqual(posts.at(-1), { consumer: "rem", strategy: "balanced" });
+    const before = posts.length;
+    await dom.change(dom.byLabel("Where Rem runs"), "manual");
+    await dom.flush();
+    assert.equal(posts.length, before, "manual with no computer isn't sent");
+    assert.match(dom.text(), /Pick at least one computer/);
+    await dom.change(dom.byLabel("Studio for Rem"), true);
+    await dom.flush();
+    assert.deepEqual(posts.at(-1), { consumer: "rem", strategy: "manual", computers: ["a"] });
+
+    // A refusal shows next to the row it belongs to and keeps the edit.
+    await dom.change(dom.byLabel("Unpaired computer gone-123 for Acme"), false);
+    await dom.flush();
+    assert.deepEqual(posts.at(-1), { consumer: "org:acme", strategy: "manual", computers: ["b"] });
+    await dom.change(dom.byLabel("Studio for Acme"), true);
+    await dom.flush();
+    const acme = allElements(dom.container).find((node) => node.getAttribute?.("data-consumer") === "org:acme");
+    const alert = allElements(acme).find((node) => node.getAttribute?.("role") === "alert");
+    assert.match(textOf(alert), /already assigned to Rem; mark it shared/);
+    assert.equal(reactProps(dom.byLabel("Studio for Acme")).checked, true);
+    await dom.change(dom.byLabel("Share Studio for Acme"), true);
+    await dom.flush();
+    assert.deepEqual(posts.at(-1), { consumer: "org:acme", strategy: "manual", computers: ["b", "a"], shared: ["a"] });
+    assert.equal(allElements(acme).some((node) => node.getAttribute?.("role") === "alert"), false);
+  } finally { await dom.unmount(); }
+});
+
+test("Settings > Computers warns under a placement whose work can't start anywhere", async () => {
+  const { default: ComputersSettings } = await viteServer.ssrLoadModule("/src/components/ComputersSettings.jsx");
+  const computers = [
+    { id: "a", name: "Studio", this_computer: true, state: "online", max_threads: 4, running_threads: 0, capacity: 4, effective_threads: 4 },
+    { id: "b", name: "Desktop B", this_computer: false, state: "online", max_threads: 4, running_threads: 0, capacity: 4, effective_threads: 4 },
+  ];
+  const notice = "Rem's work starts only on this computer for now, so with only Desktop B picked, every task waits. A waiting research or conversation task can still go to Desktop B when you pick Run there.";
+  const placement = {
+    strategies: ["overflow", "balanced", "manual"],
+    default_strategy: "overflow",
+    order: ["a", "b"],
+    computers: computers.map(({ id, name, state, this_computer }) => ({ id, name, state, this_computer })),
+    consumers: [
+      { consumer: "rem", kind: "rem", name: "Rem", strategy: "manual", saved: true, computers: ["b"], shared: [], missing_computers: [], notice },
+      { consumer: "org:acme", kind: "organization", name: "Acme", strategy: "manual", saved: true, computers: ["a"], shared: [], missing_computers: [], notice: "" },
+    ],
+  };
+  const fetchMock = createFetchMock([jsonResponse("/api/computers", { computers }), jsonResponse("/api/computers/placement", placement)]);
+  const dom = await mountReact(React.createElement(ComputersSettings), fetchMock);
+  try {
+    await dom.flush();
+    await dom.flush();
+    // The intro says where work starts, not that it fills computers top to bottom.
+    assert.match(dom.text(), /Work starts on this computer for now\. A paired desktop takes work only when you pick Run there on waiting work, or through an organization's fleet execution target\./);
+    assert.doesNotMatch(dom.text(), /top to bottom/);
+    const row = (key) => allElements(dom.container).find((node) => node.getAttribute?.("data-consumer") === key);
+    const notices = (key) => allElements(row(key)).filter((node) => node.getAttribute?.("data-testid") === "placement-notice");
+    const [shown] = notices("rem");
+    assert.equal(textOf(shown), notice);
+    assert.match(shown.getAttribute("class"), /text-warning/);
+    // A placement that includes this computer shows nothing.
+    assert.equal(notices("org:acme").length, 0);
+  } finally { await dom.unmount(); }
+});
+
+test("Settings sections in quick open match the Settings sidebar", async () => {
+  const { SETTINGS_SECTIONS } = await viteServer.ssrLoadModule("/src/lib/settingsSections.js");
+  assert.deepEqual(SETTINGS_SECTIONS.map((section) => section.id), settingsPopoverModule.settingsCategoriesForQuery(""));
+});
+
+function paletteDialog(dom) {
+  return allElements(dom.container).find((element) => element.getAttribute?.("role") === "dialog" && element.getAttribute?.("data-command-palette") != null);
+}
+
+function paletteRows(dom) {
+  return allElements(dom.container).filter((element) => element.getAttribute?.("role") === "option" && element.getAttribute?.("data-palette-item") != null);
+}
+
+// The palette loads lazily, so the first opening can take a few turns.
+async function flushPalette(dom, { open = false } = {}) {
+  for (let index = 0; index < 4; index++) await dom.flush(10);
+  for (let index = 0; index < 80 && open && !paletteDialog(dom); index++) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await dom.flush(10);
+  }
+}
+
+test("Ctrl+Shift+P opens the command palette with keys, Escape closes it, and Ctrl+P switches to quick open", async () => {
+  const dom = await mountReact(React.createElement(appModule.default), createFetchMock([jsonResponse("/api/workflows", workflowsPayload([]))]));
+  try {
+    await dom.flush();
+    await dom.dispatchWindow("keydown", { code: "KeyP", ctrlKey: true, shiftKey: true, key: "P" });
+    await flushPalette(dom, { open: true });
+    assert.equal(paletteDialog(dom)?.getAttribute("data-command-palette"), "commands");
+    const settingsRow = paletteRows(dom).find((row) => textOf(row).includes("Open settings"));
+    assert.match(textOf(settingsRow), /Ctrl\+,/);
+    const runRow = paletteRows(dom).find((row) => textOf(row).includes("Run workflow"));
+    assert.equal(runRow.getAttribute("aria-disabled"), "true");
+    assert.match(textOf(runRow), /Open a workflow first/);
+    for (const label of ["New workflow", "All workflow runs", "Pause all triggers", "Go to Browser tabs", "Settings: Devices"]) {
+      assert.ok(paletteRows(dom).some((row) => textOf(row).includes(label)), `missing ${label}`);
+    }
+    // Experimental plugins whose Feature Preview is off aren't offered.
+    assert.ok(!paletteRows(dom).some((row) => textOf(row).includes("Go to Posts")));
+
+    const input = allElements(dom.container).find((element) => element.getAttribute?.("role") === "combobox");
+    await dom.change(input, "keybind");
+    assert.match(textOf(paletteRows(dom)[0]), /Settings: Keybindings/);
+    await dom.keyDown(input, "Escape");
+    await flushPalette(dom);
+    assert.equal(paletteDialog(dom), undefined);
+
+    await dom.dispatchWindow("keydown", { code: "KeyP", ctrlKey: true, key: "p" });
+    await flushPalette(dom, { open: true });
+    assert.equal(paletteDialog(dom)?.getAttribute("data-command-palette"), "files");
+    assert.match(dom.text(), /Open a project to search its files/);
+    await dom.dispatchWindow("keydown", { code: "KeyP", ctrlKey: true, shiftKey: true, key: "P" });
+    await flushPalette(dom, { open: true });
+    assert.equal(paletteDialog(dom)?.getAttribute("data-command-palette"), "commands", "the other key switches lists");
+    await dom.dispatchWindow("keydown", { code: "KeyP", ctrlKey: true, shiftKey: true, key: "P" });
+    await flushPalette(dom);
+    assert.equal(paletteDialog(dom), undefined, "the same key closes it");
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test("The palette keys give way to a focused terminal or code editor", async () => {
+  const dom = await mountReact(React.createElement(appModule.default), createFetchMock([jsonResponse("/api/workflows", workflowsPayload([]))]));
+  try {
+    await dom.flush();
+    for (const selector of [".monaco-editor", ".xterm"]) {
+      const target = { closest: (query) => (query.includes(selector) ? {} : null) };
+      let prevented = false;
+      await dom.dispatchWindow("keydown", { code: "KeyP", ctrlKey: true, key: "p", target, preventDefault() { prevented = true; } });
+      await dom.dispatchWindow("keydown", { code: "KeyP", ctrlKey: true, shiftKey: true, key: "P", target, preventDefault() { prevented = true; } });
+      await flushPalette(dom);
+      assert.equal(paletteDialog(dom), undefined, `opened from ${selector}`);
+      assert.equal(prevented, false, `${selector} keeps the key`);
+    }
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test("Quick open chooses a Settings section and remembers it as recent", async () => {
+  const dom = await mountReact(React.createElement(appModule.default), createFetchMock([jsonResponse("/api/workflows", workflowsPayload([]))]));
+  try {
+    await dom.flush();
+    await dom.dispatchWindow("keydown", { code: "KeyP", ctrlKey: true, key: "p" });
+    await flushPalette(dom, { open: true });
+    const input = allElements(dom.container).find((element) => element.getAttribute?.("role") === "combobox");
+    await dom.change(input, "keybindings");
+    await dom.keyDown(input, "Enter");
+    await flushPalette(dom);
+    await flushPalette(dom);
+    assert.equal(paletteDialog(dom), undefined);
+    assert.ok(allElements(dom.container).some((element) => element.tagName === "H2" && textOf(element).trim() === "Keybindings")
+      || allElements(dom.container).some((element) => element.getAttribute?.("aria-current") && textOf(element).includes("Keybindings")), "Settings opened at Keybindings");
+    assert.deepEqual(JSON.parse(window.localStorage.getItem("raticode.palette.recent.v1")).files, ["settings:keybindings"]);
+    await dom.dispatchWindow("keydown", { code: "Escape", key: "Escape" });
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test("A palette command that starts work names the workflow before Enter", async () => {
+  const { default: CommandPalette, paletteFooterText } = await viteServer.ssrLoadModule("/src/components/CommandPalette.jsx");
+  const chosen = [];
+  const items = [
+    { id: "command:view.graph", commandId: "view.graph", group: "Application", label: "Show graph editor", keyLabel: "Ctrl+1" },
+    { id: "command:workflow.run", commandId: "workflow.run", group: "Workflow", label: "Run workflow", keyLabel: "Ctrl+Enter", startsWork: "Summarize a link", detail: "Runs Summarize a link" },
+    { id: "command:terminal.close", commandId: "terminal.close", group: "Terminal", label: "Close terminal", disabled: true, disabledReason: "Press it in a terminal." },
+  ];
+  const dom = await mountReact(React.createElement(CommandPalette, { items, mode: "commands", onChoose: (item) => chosen.push(item.id), onClose() {} }), createFetchMock([]));
+  try {
+    const input = allElements(dom.container).find((element) => element.getAttribute?.("role") === "combobox");
+    assert.equal(paletteFooterText(items[1]), "Enter runs Summarize a link");
+    await dom.change(input, "run");
+    assert.match(textOf(paletteRows(dom)[0]), /Run workflow.*Runs Summarize a link/);
+    assert.match(dom.text(), /Enter runs Summarize a link/);
+    await dom.change(input, "");
+    await dom.keyDown(input, "ArrowDown");
+    assert.equal(paletteRows(dom)[1].getAttribute("aria-selected"), "true");
+    assert.match(dom.text(), /Enter runs Summarize a link/);
+    await dom.keyDown(input, "ArrowDown");
+    await dom.keyDown(input, "Enter");
+    assert.deepEqual(chosen, [], "a disabled row isn't chosen");
+    assert.match(dom.text(), /Press it in a terminal\./);
+    await dom.keyDown(input, "ArrowDown");
+    assert.equal(paletteRows(dom)[0].getAttribute("aria-selected"), "true", "the selection wraps");
+    await dom.keyDown(input, "Enter");
+    assert.deepEqual(chosen, ["command:view.graph"]);
+  } finally {
+    await dom.unmount();
+  }
 });
 
 test("Layout settings apply arrangements, terminal location and reset", async () => {
@@ -24580,17 +28324,23 @@ test("provider menus show Claude Code's full models, keep a saved alias, and lea
       React.createElement(settings.default, { providerState: state }),
       React.createElement(picker.ProviderModelEffortFields, { ...state, provider: "claude_code", model: "fable", onChange() {} }));
   }
-  const fetchMock = createFetchMock([(url) => {
+  const saved = [];
+  const fetchMock = createFetchMock([(url, options) => {
     if (url.startsWith("/api/provider/capabilities")) return { ok: true, json: async () => ({ providers }) };
     if (url === "/api/provider/commit-settings") return { ok: true, json: async () => ({}) };
+    if (url === "/api/provider/settings") { saved.push(JSON.parse(options.body).deniedModels); return { ok: true, json: async () => ({ saved: true }) }; }
     return null;
   }]);
   const dom = await mountReact(React.createElement(Harness), fetchMock);
   function options(label) { return allElements(dom.byLabel(label)).filter(el => el.tagName === "OPTION").map(el => reactProps(el).value); }
   try {
     await dom.flush();
-    assert.deepEqual(options("Claude Code allowed models"), ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "sonnet[1m]"]);
-    assert.deepEqual(options("Claude Code denied models"), ["haiku"]);
+    await openProviderDetails(dom, "claude_code");
+    const checklist = allElements(dom.container).filter(el => el.tagName === "INPUT" && /^Show .* in model menus$/.test(el.getAttribute("aria-label") ?? ""));
+    assert.deepEqual(checklist.map(el => [el.getAttribute("aria-label").slice(5, -15), reactProps(el).checked]), [
+      ["Opus 5.5", true], ["Sonnet 5.5", true], ["Haiku 5.5", true], ["Sonnet 5.5 (1M context)", true], ["Haiku alias (Haiku 5.5)", false],
+    ]);
+    assert.match(dom.text(), /4 of 5 shown/);
     assert.deepEqual(options("Claude Code default model"), ["", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "sonnet[1m]"]);
     await dom.click(allElements(dom.container).find(el => el.getAttribute?.("data-picker-trigger") === "model"));
     const menu = textOf(dom.byLabel("Model options"));
@@ -24599,6 +28349,11 @@ test("provider menus show Claude Code's full models, keep a saved alias, and lea
     assert.match(menu, /Fable alias \(Fable 5\.1\)/);
     assert.doesNotMatch(menu, /configured, not reported/);
     assert.doesNotMatch(menu, /Haiku alias/);
+    // Showing a hidden alias again keeps its row, so it doesn't vanish under the pointer.
+    await dom.change(dom.byLabel("Show Haiku alias (Haiku 5.5) in model menus"), true); await dom.flush();
+    assert.deepEqual(saved, [[]]);
+    assert.equal(reactProps(dom.byLabel("Show Haiku alias (Haiku 5.5) in model menus")).checked, true);
+    assert.match(dom.text(), /5 of 5 shown/);
   } finally { await dom.unmount(); }
 });
 
@@ -24620,6 +28375,7 @@ function rattishTriggersFetch(state) {
       if (!String(url).includes("/rattish/triggers")) return null;
       const method = options.method ?? "GET";
       const body = options.body ? JSON.parse(options.body) : undefined;
+      if (method === "GET" && String(url).endsWith("/changes")) return json({ changes: state.changes });
       if (method === "GET") return json(state.payload);
       if (String(url).endsWith("/login")) {
         state.payload = { ...state.payload, login: { ...state.payload.login, enabled: body.enabled } };
@@ -24658,6 +28414,64 @@ test("Rattish triggers state plainly when they can fire and offer Start at login
   } finally { await dom.unmount(); }
 });
 
+test("adding a trigger to a workflow with unsandboxed steps asks for confirmation", async () => {
+  const state = {
+    payload: rattishTriggersPayload({
+      sandbox: { unsandboxed: [{ node: "fix", provider: "cursor", reason: "Cursor has no sandbox Raticode can turn on" }] },
+    }),
+    saved: [],
+    respond: (body) => ({
+      ok: true,
+      status: 201,
+      json: async () => ({ trigger: { id: "trg_new", kind: "cron", config: body.config }, token: null }),
+    }),
+  };
+  const dom = await mountReact(
+    React.createElement(triggersSectionModule.RattishTriggersSection, { workflowId: "digest" }),
+    rattishTriggersFetch(state),
+  );
+  try {
+    await dom.flush();
+    assert.match(dom.text(), /Runs unsandboxed/);
+    assert.match(dom.text(), /fix on cursor: Cursor has no sandbox Raticode can turn on/);
+    await dom.click(dom.byExactText("Add trigger"));
+    await dom.change(dom.controlAfterLabel("Cron expression"), "0 9 * * 1-5");
+    await dom.click(dom.byExactText("Add trigger"));
+    await dom.flush();
+    assert.equal(state.saved.length, 0);
+    assert.match(dom.text(), /1 step will run with nobody watching and no sandbox\. Add the trigger anyway\?/);
+    await dom.click(dom.byExactText("Add anyway"));
+    await dom.flush();
+    assert.equal(state.saved.length, 1);
+    assert.equal(state.saved[0].body.kind, "cron");
+  } finally { await dom.unmount(); }
+});
+
+test("the Triggers section warns about a retiring model with its date and replacement", async () => {
+  const message =
+    "Model 'claude-sonnet-4-5' is deprecated and retires on November 30, 2026; after that, runs that use it fail. Move to 'claude-sonnet-5-5'.";
+  const state = {
+    payload: rattishTriggersPayload({
+      models: {
+        notices: [
+          { node: "summarize", provider: "anthropic-api", model: "claude-sonnet-4-5", state: "deprecated", retires: "2026-11-30", replacement: "claude-sonnet-5-5", message },
+        ],
+      },
+    }),
+    saved: [],
+    respond: () => null,
+  };
+  const dom = await mountReact(
+    React.createElement(triggersSectionModule.RattishTriggersSection, { workflowId: "digest" }),
+    rattishTriggersFetch(state),
+  );
+  try {
+    await dom.flush();
+    assert.match(dom.text(), /Model retiring/);
+    assert.ok(dom.text().includes(`summarize on anthropic-api: ${message}`));
+  } finally { await dom.unmount(); }
+});
+
 test("a schedule is added with its time zone and overlap policy", async () => {
   const state = {
     payload: rattishTriggersPayload(),
@@ -24678,6 +28492,8 @@ test("a schedule is added with its time zone and overlap policy", async () => {
     await dom.change(dom.controlAfterLabel("Cron expression"), "0 9 * * 1-5");
     assert.equal(dom.controlAfterLabel("Time zone").value, "America/New_York");
     await dom.change(dom.controlAfterLabel("If this workflow is already running"), "queue");
+    assert.equal(dom.controlAfterLabel("Time limit").value, "6h");
+    await dom.change(dom.controlAfterLabel("Time limit"), "2h");
     await dom.click(dom.byExactText("Add trigger"));
     await dom.flush();
     assert.equal(state.saved.length, 1);
@@ -24685,11 +28501,49 @@ test("a schedule is added with its time zone and overlap policy", async () => {
       label: "",
       overlap: "queue",
       missed: "record",
+      runEditsWithoutApproval: false,
+      maxRunSeconds: 7200,
       config: { expression: "0 9 * * 1-5", timezone: "America/New_York" },
       inputs: {},
       workflowId: "digest",
       kind: "cron",
     });
+  } finally { await dom.unmount(); }
+});
+
+test("a trigger's daily limit is saved from its form and shown on its card with any warning", async () => {
+  const saved = {
+    id: "trg_1", kind: "cron", label: "", enabled: true, overlap: "skip", missed: "record", inputs: {},
+    config: { expression: "0 9 * * *", timezone: "UTC" }, dailyMaxCostUsd: null, dailyMaxTokens: null,
+  };
+  const state = {
+    payload: rattishTriggersPayload({ triggers: [saved] }),
+    saved: [],
+    respond: (body) => {
+      const trigger = { ...saved, dailyMaxCostUsd: body.dailyMaxCostUsd ?? null, dailyLimit: {
+        summary: "$1.20 of $1.00 used today", reached: true, timezone: "UTC",
+      } };
+      state.payload = rattishTriggersPayload({ triggers: [trigger] });
+      return { ok: true, status: 200, json: async () => ({ trigger, warnings: ["Node 'review' uses codex, which may not report what a call costs."] }) };
+    },
+  };
+  const dom = await mountReact(
+    React.createElement(triggersSectionModule.RattishTriggersSection, { workflowId: "digest" }),
+    rattishTriggersFetch(state),
+  );
+  try {
+    await dom.flush();
+    await dom.click(dom.byExactText("Edit"));
+    const cost = dom.controlAfterLabel("Estimated cost (USD)");
+    await dom.change(cost, "");
+    await dom.change(dom.controlAfterLabel("Estimated cost (USD)"), "1");
+    assert.equal(dom.controlAfterLabel("Estimated cost (USD)").value, "1");
+    await dom.click(dom.byExactText("Save"));
+    await dom.flush();
+    assert.equal(state.saved.length, 1);
+    assert.deepEqual(state.saved[0].body, { label: "", overlap: "skip", missed: "record", runEditsWithoutApproval: false, config: saved.config, inputs: {}, dailyMaxCostUsd: 1 });
+    assert.match(dom.text(), /may not report what a call costs/);
+    assert.match(dom.text(), /Daily limit: \$1\.20 of \$1\.00 used today\. Triggered starts are skipped until midnight \(UTC\)\./);
   } finally { await dom.unmount(); }
 });
 
@@ -24807,6 +28661,336 @@ test("failed and missed trigger runs are visible with their reasons", async () =
     await dom.flush();
     assert.deepEqual(state.saved.at(-1), { url: state.saved.at(-1).url, body: { enabled: false } });
     assert.ok(state.saved.at(-1).url.endsWith("/rattish/triggers/trg_1"));
+  } finally { await dom.unmount(); }
+});
+
+test("a changed workflow is reviewed as a diff and approved at the version shown", async () => {
+  const trigger = {
+    id: "trg_1",
+    kind: "cron",
+    label: "Morning digest",
+    enabled: true,
+    overlap: "skip",
+    missed: "record",
+    inputs: {},
+    config: { expression: "0 9 * * *", timezone: "UTC" },
+    approval: { state: "changed", fingerprint: "sha256:new", approvedFingerprint: "sha256:old", changedFiles: 1 },
+    latestEvent: { id: 3, triggerId: "trg_1", status: "skipped", at: "2026-11-16T09:00:00+00:00" },
+  };
+  const state = {
+    payload: rattishTriggersPayload({
+      triggers: [trigger],
+      scheduler: { running: true, owner: "app", watchErrors: {} },
+      events: [
+        { id: 3, triggerId: "trg_1", status: "skipped", at: "2026-11-16T09:00:00+00:00", message: "Workflow changed since you approved it.", count: 2 },
+      ],
+    }),
+    changes: {
+      state: "changed",
+      fingerprint: "sha256:new",
+      approvedAt: "2026-11-15T09:00:00+00:00",
+      approvedBy: "studio",
+      truncated: false,
+      files: [
+        { path: "scripts/tidy.py", role: "script", roleLabel: "Script", change: "changed", diffAvailable: true, truncated: false,
+          diff: "--- approved/scripts/tidy.py\n+++ now/scripts/tidy.py\n@@ -1 +1 @@\n-print(1)\n+print(2)" },
+        { path: "prompts/old.md", role: "prompt", roleLabel: "Prompt file", change: "removed", diffAvailable: true, truncated: false, diff: "" },
+      ],
+    },
+    saved: [],
+    respond: () => ({ ok: true, status: 200, json: async () => ({ trigger: { ...trigger, approval: { state: "approved" } } }) }),
+  };
+  const dom = await mountReact(
+    React.createElement(triggersSectionModule.RattishTriggersSection, { workflowId: "digest" }),
+    rattishTriggersFetch(state),
+  );
+  try {
+    await dom.flush();
+    assert.match(dom.text(), /Workflow changed since you approved it\. Triggered starts are skipped until you approve it\./);
+    assert.match(dom.text(), /Workflow changed since you approved it\./);
+    await dom.click(dom.byExactText("Review changes"));
+    await dom.flush();
+    assert.ok(dom.byLabel("Changes to scripts/tidy.py"));
+    assert.match(dom.text(), /\+print\(2\)/);
+    assert.match(dom.text(), /The workflow no longer runs this file\./);
+    assert.match(dom.text(), /approved .+ by saving it in Studio/);
+
+    state.payload = { ...state.payload, triggers: [{ ...trigger, approval: { state: "approved" } }] };
+    await dom.click(dom.byExactText("Approve this version"));
+    await dom.flush();
+    const approval = state.saved.at(-1);
+    assert.ok(approval.url.endsWith("/rattish/triggers/trg_1/approve"));
+    assert.deepEqual(approval.body, { fingerprint: "sha256:new" });
+    assert.doesNotMatch(dom.text(), /Review changes/);
+  } finally { await dom.unmount(); }
+});
+
+test("a workflow that changed again is not approved and the new diff loads", async () => {
+  const trigger = {
+    id: "trg_1", kind: "cron", label: "Digest", enabled: true, overlap: "skip", missed: "record", inputs: {},
+    config: { expression: "0 9 * * *", timezone: "UTC" }, approval: { state: "changed" },
+  };
+  const changes = (fingerprint, line) => ({
+    state: "changed", fingerprint, files: [
+      { path: "workflow.rattish", role: "workflow", roleLabel: "Workflow", change: "changed", diffAvailable: true, truncated: false, diff: `@@ -1 +1 @@\n${line}` },
+    ],
+  });
+  const state = {
+    payload: rattishTriggersPayload({ triggers: [trigger], scheduler: { running: true, owner: "app", watchErrors: {} } }),
+    changes: changes("sha256:first", "+first edit"),
+    saved: [],
+    respond: () => {
+      state.changes = changes("sha256:second", "+second edit");
+      return { ok: false, status: 409, json: async () => ({ error: "The workflow changed again since you opened its changes. Review them again.", conflict: true }) };
+    },
+  };
+  const dom = await mountReact(
+    React.createElement(triggersSectionModule.RattishTriggersSection, { workflowId: "digest" }),
+    rattishTriggersFetch(state),
+  );
+  try {
+    await dom.flush();
+    await dom.click(dom.byExactText("Review changes"));
+    await dom.flush();
+    assert.match(dom.text(), /\+first edit/);
+    await dom.click(dom.byExactText("Approve this version"));
+    await dom.flush();
+    assert.deepEqual(state.saved.at(-1).body, { fingerprint: "sha256:first" });
+    assert.match(dom.text(), /changed again since you opened its changes/);
+    assert.match(dom.text(), /\+second edit/);
+    assert.doesNotMatch(dom.text(), /\+first edit/);
+  } finally { await dom.unmount(); }
+});
+
+function waitingTrigger(overrides = {}) {
+  return {
+    id: "trg_1", kind: "cron", label: "Digest", enabled: false, overlap: "skip", missed: "record", inputs: {},
+    config: { expression: "0 9 * * *", timezone: "UTC" }, approval: { state: "changed" }, ...overrides,
+  };
+}
+
+const WAITING_CHANGES = {
+  state: "changed", fingerprint: "sha256:waiting", truncated: false, unseen: [], files: [
+    { path: "prompts/ask.md", role: "prompt", roleLabel: "Prompt file", change: "changed", diffAvailable: true, truncated: false,
+      diff: "@@ -1 +1 @@\n-Say hello.\n+Delete the inbox." },
+  ],
+};
+
+test("turning on a trigger with a change waiting opens Review changes and approves nothing", async () => {
+  const state = {
+    payload: rattishTriggersPayload({ triggers: [waitingTrigger()], scheduler: { running: true, owner: "app", watchErrors: {} } }),
+    changes: WAITING_CHANGES,
+    saved: [],
+    respond: (body) => ({ ok: true, status: 200, json: async () => ({ trigger: waitingTrigger({ enabled: body.enabled }), warnings: [] }) }),
+  };
+  const dom = await mountReact(
+    React.createElement(triggersSectionModule.RattishTriggersSection, { workflowId: "digest" }),
+    rattishTriggersFetch(state),
+  );
+  try {
+    await dom.flush();
+    assert.doesNotMatch(dom.text(), /Saving doesn't approve/);
+    await dom.change(dom.byLabel("Digest enabled"), true);
+    await dom.flush();
+    await dom.flush();
+    assert.deepEqual(state.saved.map((item) => item.body), [{ enabled: true }]);
+    assert.ok(dom.byLabel("Workflow changes"));
+    assert.match(dom.text(), /Saving doesn't approve changes waiting for review/);
+    assert.match(dom.text(), /\+Delete the inbox\./);
+    assert.equal(state.saved.filter((item) => item.url.endsWith("/approve")).length, 0);
+  } finally { await dom.unmount(); }
+});
+
+test("saving an edit to a trigger with a change waiting opens Review changes", async () => {
+  const trigger = waitingTrigger({ enabled: true });
+  const state = {
+    payload: rattishTriggersPayload({ triggers: [trigger], scheduler: { running: true, owner: "app", watchErrors: {} } }),
+    changes: WAITING_CHANGES,
+    saved: [],
+    respond: () => ({ ok: true, status: 200, json: async () => ({ trigger, warnings: [] }) }),
+  };
+  const dom = await mountReact(
+    React.createElement(triggersSectionModule.RattishTriggersSection, { workflowId: "digest" }),
+    rattishTriggersFetch(state),
+  );
+  try {
+    await dom.flush();
+    await dom.click(dom.byExactText("Edit"));
+    await dom.click(dom.byExactText("Save"));
+    await dom.flush();
+    await dom.flush();
+    assert.equal(state.saved.length, 1);
+    assert.ok(state.saved[0].url.endsWith("/rattish/triggers/trg_1"));
+    assert.ok(dom.byLabel("Workflow changes"));
+    assert.match(dom.text(), /Saving doesn't approve changes waiting for review/);
+    assert.ok(dom.byExactText("Approve this version"));
+  } finally { await dom.unmount(); }
+});
+
+test("approving changes that weren't shown in full asks again, names the files and opens them", async () => {
+  const trigger = waitingTrigger({ enabled: true });
+  const state = {
+    payload: rattishTriggersPayload({ triggers: [trigger], scheduler: { running: true, owner: "app", watchErrors: {} } }),
+    changes: {
+      state: "changed", fingerprint: "sha256:long", truncated: true,
+      files: [
+        { path: "prompts/ask.md", absolutePath: "/work/project/prompts/ask.md", role: "prompt", roleLabel: "Prompt file", change: "changed",
+          diffAvailable: true, truncated: true, diff: "@@ -1,3000 +1,3000 @@\n+line 1" },
+        { path: "scripts/tidy.py", absolutePath: "/work/project/scripts/tidy.py", role: "script", roleLabel: "Script", change: "changed",
+          diffAvailable: true, truncated: true, diff: "" },
+        { path: "data/model.bin", absolutePath: "/work/project/data/model.bin", role: "script", roleLabel: "Script", change: "changed",
+          diffAvailable: false, truncated: false, diff: "" },
+      ],
+      unseen: [
+        { path: "prompts/ask.md", absolutePath: "/work/project/prompts/ask.md", roleLabel: "Prompt file", reason: "cut" },
+        { path: "scripts/tidy.py", absolutePath: "/work/project/scripts/tidy.py", roleLabel: "Script", reason: "cut" },
+        { path: "data/model.bin", absolutePath: "/work/project/data/model.bin", roleLabel: "Script", reason: "unreadable" },
+      ],
+    },
+    saved: [],
+    respond: () => ({ ok: true, status: 200, json: async () => ({ trigger: { ...trigger, approval: { state: "approved" } } }) }),
+  };
+  const opened = [];
+  const dom = await mountReact(
+    React.createElement(triggersSectionModule.RattishTriggersSection, { workflowId: "digest" }),
+    rattishTriggersFetch(state),
+    { desktop: { workspace: { openPath: async (path) => opened.push(path) } } },
+  );
+  try {
+    await dom.flush();
+    await dom.click(dom.byExactText("Review changes"));
+    await dom.flush();
+    assert.match(dom.text(), /The diff was cut short\. Open the file to read the rest\./);
+    assert.match(dom.text(), /Not shown: the diffs above use up what Review changes shows/);
+
+    await dom.click(dom.byExactText("Approve this version"));
+    await dom.flush();
+    assert.equal(state.saved.length, 0);
+    const question = dom.byLabel("Approve changes you haven't seen?");
+    assert.ok(question);
+    assert.match(question.textContent, /couldn't show all of these 3 files' changes/);
+    assert.match(question.textContent, /prompts\/ask\.md/);
+    assert.match(question.textContent, /Its diff was cut short/);
+    assert.match(question.textContent, /Binary or too large to show/);
+
+    await dom.click(dom.byLabel("Open data/model.bin"));
+    await dom.flush();
+    assert.deepEqual(opened, ["/work/project/data/model.bin"]);
+
+    await dom.click(dom.byExactText("Back"));
+    assert.doesNotMatch(dom.text(), /Approve without seeing all/);
+    await dom.click(dom.byExactText("Approve this version"));
+    await dom.click(dom.byExactText("Approve without seeing all"));
+    await dom.flush();
+    assert.equal(state.saved.length, 1);
+    assert.ok(state.saved[0].url.endsWith("/rattish/triggers/trg_1/approve"));
+    assert.deepEqual(state.saved[0].body, { fingerprint: "sha256:long", acceptUnseen: true });
+  } finally { await dom.unmount(); }
+});
+
+test("an MCP server whose package has no exact version shows a warning and asks again before approving", async () => {
+  const trigger = waitingTrigger({ enabled: true });
+  const state = {
+    payload: rattishTriggersPayload({ triggers: [trigger], scheduler: { running: true, owner: "app", watchErrors: {} } }),
+    changes: {
+      state: "changed", fingerprint: "sha256:unpinned", truncated: false,
+      files: [
+        { path: "mcp-server:github", absolutePath: "", role: "mcp_server", roleLabel: "MCP server", change: "added",
+          diffAvailable: true, truncated: false, diff: "--- approved/mcp-server:github\n+++ now/mcp-server:github\n+command: \"npx\"",
+          unpinned: ["@modelcontextprotocol/server-github"],
+          warning: "Package version not pinned: each run fetches the newest release" },
+      ],
+      unseen: [
+        { path: "mcp-server:github", absolutePath: "", roleLabel: "MCP server", reason: "unpinned",
+          packages: ["@modelcontextprotocol/server-github"] },
+      ],
+    },
+    saved: [],
+    respond: () => ({ ok: true, status: 200, json: async () => ({ trigger: { ...trigger, approval: { state: "approved" } } }) }),
+  };
+  const dom = await mountReact(
+    React.createElement(triggersSectionModule.RattishTriggersSection, { workflowId: "digest" }),
+    rattishTriggersFetch(state),
+    { desktop: { workspace: { openPath: async () => {} } } },
+  );
+  try {
+    await dom.flush();
+    await dom.click(dom.byExactText("Review changes"));
+    await dom.flush();
+    assert.match(dom.text(), /Package version not pinned: each run fetches the newest release \(@modelcontextprotocol\/server-github\)/);
+
+    await dom.click(dom.byExactText("Approve this version"));
+    await dom.flush();
+    assert.equal(state.saved.length, 0);
+    const question = dom.byLabel("Approve changes you haven't seen?");
+    assert.match(question.textContent, /This MCP server runs a package with no exact version/);
+    assert.doesNotMatch(question.textContent, /couldn't show/);
+    // A server's definition has no file to open.
+    assert.doesNotMatch(question.textContent, /\bOpen\b/);
+    await dom.click(dom.byExactText("Approve anyway"));
+    await dom.flush();
+    assert.deepEqual(state.saved[0].body, { fingerprint: "sha256:unpinned", acceptUnseen: true });
+  } finally { await dom.unmount(); }
+});
+
+test("a refusal naming unseen files turns into the second question", async () => {
+  const trigger = waitingTrigger({ enabled: true });
+  let calls = 0;
+  const state = {
+    payload: rattishTriggersPayload({ triggers: [trigger], scheduler: { running: true, owner: "app", watchErrors: {} } }),
+    // An older answer without the unseen list: the desktop still refuses and names them.
+    changes: { ...WAITING_CHANGES, unseen: undefined },
+    saved: [],
+    respond: () => {
+      calls += 1;
+      if (calls === 1) {
+        return { ok: false, status: 409, json: async () => ({
+          error: "Some changes weren't shown in full: prompts/ask.md (diff cut short).",
+          unseen: [{ path: "prompts/ask.md", absolutePath: "/work/project/prompts/ask.md", reason: "cut" }],
+        }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ trigger: { ...trigger, approval: { state: "approved" } } }) };
+    },
+  };
+  const dom = await mountReact(
+    React.createElement(triggersSectionModule.RattishTriggersSection, { workflowId: "digest" }),
+    rattishTriggersFetch(state),
+  );
+  try {
+    await dom.flush();
+    await dom.click(dom.byExactText("Review changes"));
+    await dom.flush();
+    await dom.click(dom.byExactText("Approve this version"));
+    await dom.flush();
+    assert.deepEqual(state.saved[0].body, { fingerprint: "sha256:waiting" });
+    assert.match(dom.byLabel("Approve changes you haven't seen?").textContent, /prompts\/ask\.md/);
+    await dom.click(dom.byExactText("Approve without seeing all"));
+    await dom.flush();
+    assert.deepEqual(state.saved[1].body, { fingerprint: "sha256:waiting", acceptUnseen: true });
+  } finally { await dom.unmount(); }
+});
+
+test("Run edits without approval is off by default and saved when turned on", async () => {
+  const state = {
+    payload: rattishTriggersPayload(),
+    saved: [],
+    respond: () => ({ ok: true, status: 201, json: async () => ({ trigger: { id: "trg_new", kind: "webhook" }, token: "rtw_x" }) }),
+  };
+  const dom = await mountReact(
+    React.createElement(triggersSectionModule.RattishTriggersSection, { workflowId: "digest" }),
+    rattishTriggersFetch(state),
+  );
+  try {
+    await dom.flush();
+    await dom.click(dom.byExactText("Add trigger"));
+    await dom.click(dom.byExactText("Webhook"));
+    assert.equal(dom.controlAfterLabel("Run edits without approval").checked, false);
+    assert.match(dom.text(), /skips its starts until you review the change and approve it/);
+    await dom.change(dom.controlAfterLabel("Run edits without approval"), true);
+    assert.match(dom.text(), /Nobody reviews the edit first/);
+    await dom.click(dom.byExactText("Add trigger"));
+    await dom.flush();
+    assert.equal(state.saved[0].body.runEditsWithoutApproval, true);
   } finally { await dom.unmount(); }
 });
 
@@ -24958,6 +29142,87 @@ test("a conflicting patch can't be accepted and offers asking the worker to reba
   } finally { await dom.unmount(); }
 });
 
+function runChangesFetch(state) {
+  const json = (body, status = 200) => ({ ok: status < 400, status, json: async () => body });
+  return createFetchMock([
+    (url, options = {}) => {
+      const match = String(url).match(/\/api\/rattish\/runs\/([^/]+)\/(changes|land|discard)/);
+      if (!match) return null;
+      state.calls.push({ action: match[2], method: options.method || "GET", url: String(url), body: options.body ? JSON.parse(options.body) : null });
+      if (match[2] === "changes") return json(state.changes);
+      if (match[2] === "land") return json(state.landResult);
+      return json({ discarded: true, branch: state.changes.branch, worktree: { ...state.changes.worktree, state: "discarded" } });
+    },
+  ]);
+}
+
+const runWorktree = (state = "pending") => ({ runId: "20261116T000000Z-abc", state, branch: "raticode/run/fix-20261116T000000Z-abc", baseBranch: "main", filesChanged: 1, setup: null, message: "" });
+const runChanges = (merge = { state: "fast_forward", conflicts: [] }) => ({
+  ...reviewPatch(merge), branch: "raticode/run/fix-20261116T000000Z-abc", baseBranch: "main", worktree: runWorktree(), runId: "20261116T000000Z-abc", workflowId: "fix",
+});
+
+test("a worktree run's Changes tab lands its branch after a confirm, with the tip the user reviewed", async () => {
+  const panel = await viteServer.ssrLoadModule("/src/components/RunChangesPanel.jsx");
+  const state = { calls: [], changes: runChanges(), landResult: { landed: true, how: "fast_forward", branch: "raticode/run/fix-20261116T000000Z-abc", baseBranch: "main", commit: "b".repeat(40) } };
+  const changed = [];
+  const saved = { IntersectionObserver: globalThis.IntersectionObserver, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, ResizeObserver: globalThis.ResizeObserver };
+  Object.assign(globalThis, { IntersectionObserver: class { observe() {} disconnect() {} }, requestAnimationFrame: () => 1, cancelAnimationFrame: () => {}, ResizeObserver: class { observe() {} disconnect() {} } });
+  const dom = await mountReact(React.createElement(panel.default, { worktree: runWorktree(), workflowId: "fix", onChanged: result => changed.push(result) }), runChangesFetch(state));
+  try {
+    await dom.flush();
+    assert.equal(state.calls[0].url.endsWith("/api/rattish/runs/20261116T000000Z-abc/changes?workflowId=fix"), true);
+    assert.match(dom.text(), /Lands cleanly in main \(fast-forward\)/);
+    assert.match(dom.text(), /1 file, \+1 −1/);
+    assert.match(dom.text(), /waiting for you to land or discard it/);
+    await dom.click(dom.byText("Land in main"));
+    assert.match(dom.text(), /Land raticode\/run\/fix-20261116T000000Z-abc in main\? Nothing is pushed\./);
+    await dom.click(dom.byText("Land it"));
+    await dom.flush();
+    const land = state.calls.find(call => call.action === "land");
+    assert.deepEqual([land.method, land.body], ["POST", { workflowId: "fix", expectedTip: "a".repeat(40) }]);
+    assert.match(dom.text(), /Landed raticode\/run\/fix-20261116T000000Z-abc in main \(fast-forward\)\. Nothing was pushed\./);
+    assert.equal(changed.length, 1);
+  } finally {
+    await dom.unmount();
+    Object.assign(globalThis, saved);
+  }
+});
+
+test("a worktree run's Changes tab discards after a confirm and shows conflicts without landing", async () => {
+  const panel = await viteServer.ssrLoadModule("/src/components/RunChangesPanel.jsx");
+  const state = { calls: [], changes: runChanges({ state: "conflict", conflicts: ["app.py"] }) };
+  const saved = { IntersectionObserver: globalThis.IntersectionObserver, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, ResizeObserver: globalThis.ResizeObserver };
+  Object.assign(globalThis, { IntersectionObserver: class { observe() {} disconnect() {} }, requestAnimationFrame: () => 1, cancelAnimationFrame: () => {}, ResizeObserver: class { observe() {} disconnect() {} } });
+  const dom = await mountReact(React.createElement(panel.default, { worktree: runWorktree(), workflowId: "fix" }), runChangesFetch(state));
+  try {
+    await dom.flush();
+    assert.match(dom.text(), /Conflicts with main in 1 file/);
+    assert.match(dom.text(), /can't land yet\. Nothing was changed\./);
+    assert.equal(reactProps(dom.byText("Land in main")).disabled, true);
+    await dom.click(dom.byExactText("Discard"));
+    assert.match(dom.text(), /Discard these changes\? Raticode removes the worktree and branch/);
+    await dom.click(dom.byText("Discard them"));
+    await dom.flush();
+    assert.deepEqual(state.calls.filter(call => call.method === "POST").map(call => call.action), ["discard"]);
+    assert.match(dom.text(), /Discarded raticode\/run\/fix-20261116T000000Z-abc and its worktree\./);
+  } finally {
+    await dom.unmount();
+    Object.assign(globalThis, saved);
+  }
+});
+
+test("the bottom panel shows a Changes tab only for a run with a worktree", async () => {
+  const bottom = await viteServer.ssrLoadModule("/src/components/UnifiedBottomPanel.jsx");
+  const without = renderToStaticMarkup(React.createElement(bottom.default, { changesProps: { worktree: null } }));
+  assert.doesNotMatch(without, />Changes</);
+  const withChanges = renderToStaticMarkup(React.createElement(bottom.default, { changesProps: { worktree: runWorktree() } }));
+  assert.match(withChanges, />Changes</);
+  assert.match(withChanges, /to review/);
+  const landed = renderToStaticMarkup(React.createElement(bottom.default, { changesProps: { worktree: runWorktree("landed") } }));
+  assert.match(landed, />Changes</);
+  assert.doesNotMatch(landed, /to review/);
+});
+
 test("a ticket's merge status says what Accept will do", () => {
   const { acceptLabel, mergeStatus, patchSize, landedMessage } = ticketReviewModule;
   const patch = reviewPatch();
@@ -24996,6 +29261,38 @@ test("an organization ticket's conversation shows each comment once and counts w
   assert.equal(markup.split(">Accepted<").length - 1, 1, markup);
   assert.match(markup, /Work complete, moved to In review/);
   assert.match(markup, /In review → Done/);
+});
+
+test("the worker editor lists its provider's accounts and saves the chosen account's ID", async () => {
+  const organization = {
+    revision: 3,
+    config: { name: "Desk", projectRoots: [], employees: [{ id: "builder", name: "Builder", provider: "codex", model: "cli-default", permissionMode: "workspace-write", persona: "", responsibilities: [], instructions: "", paused: false, heartbeatSeconds: 0 }] },
+    runtime: { tasks: [], claims: {}, knowledge: {}, links: {}, attempts: {} },
+  };
+  const model = organizationModelModule.buildModel(organization);
+  const acts = [];
+  const ctx = { organizationId: "o1", busy: false, onAct: async (...args) => { acts.push(args); return {}; }, onOpen: () => {}, close: () => {}, replace: () => {} };
+  const accounts = [
+    { provider: "codex", name: "work", account_id: "aaaaaaaaaaaaaaaa", state: "signed_in" },
+    { provider: "claude_code", name: "personal", account_id: "cccccccccccccccc", state: "signed_in" },
+  ];
+  const dom = await mountReact(React.createElement(organizationSheetModule.default, { model, trail: ["worker:builder"], setTrail: () => {}, listLabel: "Org chart", ctx }),
+    createFetchMock([jsonResponse("/api/provider/accounts", { accounts })]));
+  try {
+    await dom.flush();
+    const select = dom.byLabel("Account");
+    // The default sign-in, then only the worker's own provider's accounts.
+    assert.deepEqual(allElements(select).filter(node => node.tagName === "OPTION").map(node => textOf(node)), ["Default sign-in", "work"]);
+    assert.equal(select.value, "");
+    await dom.change(select, "aaaaaaaaaaaaaaaa");
+    assert.match(textOf(dom.container), /Its runs count toward this account’s usage and limits/);
+    await dom.click(dom.ancestor(dom.byText("Save worker"), "BUTTON"));
+    assert.equal(acts.length, 1);
+    const [action, params] = acts[0];
+    assert.equal(action, "configure");
+    assert.equal(params.config.employees[0].account, "aaaaaaaaaaaaaaaa");
+    assert.match(params.reason, /Updated Builder: account/);
+  } finally { await dom.unmount(); }
 });
 
 test("Run check shows a worker's command in full, hidden characters spelled out, before running it", async () => {
@@ -25234,6 +29531,104 @@ test("the Tests panel shows expected cost, results per case and the change since
     const run = posts.find((item) => item.url.endsWith("/tests/run"));
     assert.deepEqual(run.body, { skipJudge: false, expectedRevision: payload.revision });
     assert.ok(dom.byText("Stop"));
+  } finally { await dom.unmount(); }
+});
+
+test("Try another model shows both expected costs first, runs both, compares each case and uses the model through the editor", async () => {
+  const payload = { ...workflowTestsFixture(), modelNodes: [{ node: "write", type: "agent", provider: "codex", model: "gpt-5.5" }] };
+  const posts = [];
+  const used = [];
+  const variant = { key: "write=claude-code:claude-sonnet-5-5", models: [{ node: "write", provider: "claude-code", model: "claude-sonnet-5-5", fromProvider: "codex", fromModel: "gpt-5.5" }] };
+  const side = (status, costUsd, durationMs) => ({ status, costUsd, durationMs, modelCalls: 1, runId: "r" });
+  const tried = {
+    ...payload.latest,
+    id: "try-1",
+    status: "passed",
+    variant,
+    baselineId: "base-1",
+    comparison: null,
+    modelComparison: {
+      baselineId: "base-1",
+      baselineReused: false,
+      variant,
+      sentence: "Current model passed 1/2 for $0.02; the candidate passed 2/2 for $0.01. Cases: 1 fixed.",
+      summary: { fixed: 1, broke: 0, same: 1, changed: 0, pending: 0 },
+      cases: [
+        { id: "cats", name: "Cats", current: side("passed", 0.01, 1200), candidate: side("passed", 0.005, 800), change: "same" },
+        { id: "dogs", name: "Dogs", current: side("failed", 0.01, 900), candidate: side("passed", 0.005, 700), change: "fixed" },
+      ],
+      totals: {
+        current: { passed: 1, cases: 2, costUsd: 0.02, costComplete: true, durationMs: 2100 },
+        candidate: { passed: 2, cases: 2, costUsd: 0.01, costComplete: true, durationMs: 1500 },
+      },
+    },
+  };
+  const dom = await mountReact(
+    React.createElement(workflowTestsPanelModule.default, {
+      workflowId: "summarizer",
+      workflowName: "Summarizer",
+      onUseModel: async (mutations) => { used.push(mutations); return { savedRevision: "x" }; },
+    }),
+    createFetchMock([
+      (url) => (String(url).includes("/provider/capabilities")
+        ? { ok: true, status: 200, json: async () => ({ providers: [
+          { id: "codex", displayName: "Codex", available: true, models: [{ id: "gpt-5.5" }] },
+          { id: "claude_code", displayName: "Claude Code", available: true, models: [{ id: "claude-sonnet-5-5", displayName: "Sonnet 5.5" }] },
+        ] }) }
+        : null),
+      (url, options = {}) => {
+        if (!String(url).includes("/workflows/summarizer/tests")) return null;
+        if ((options.method ?? "GET") === "GET") return { ok: true, status: 200, json: async () => payload };
+        const body = JSON.parse(options.body);
+        posts.push({ url: String(url), body });
+        if (String(url).endsWith("/tests/estimate")) {
+          return { ok: true, status: 200, json: async () => ({ revision: payload.revision, variant, estimate: {
+            current: { reused: false, summary: "About $0.03 for 2 cases (3 model calls), measured on the last test runs.", totals: { costUsd: 0.03, costComplete: true } },
+            candidate: { variant, summary: "2 cases make 3 model calls. The dollar cost is unknown until a test run reports it.", totals: { costUsd: null, costComplete: false } },
+            totals: { costUsd: 0.03, costComplete: false },
+          } }) };
+        }
+        if (String(url).endsWith("/tests/run")) return { ok: true, status: 202, json: async () => ({ result: tried }) };
+        return null;
+      },
+    ]),
+  );
+  try {
+    await dom.flush();
+    await dom.click(dom.byText("Try another model"));
+    await dom.flush();
+    const form = dom.byLabel("Try another model");
+    assert.match(textOf(form), /now codex gpt-5\.5/);
+    assert.equal(reactProps(dom.ancestor(dom.byText("Run both"), "BUTTON")).disabled, true);
+    await dom.change(dom.controlAfterLabel("Provider"), "claude-code");
+    await dom.change(dom.controlAfterLabel("Model"), "claude-sonnet-5-5");
+    await dom.click(dom.byText("Check cost"));
+    await dom.flush();
+    const estimate = posts.find((item) => item.url.endsWith("/tests/estimate"));
+    assert.deepEqual(estimate.body, {
+      skipJudge: false,
+      models: [{ node: "write", provider: "claude-code", model: "claude-sonnet-5-5" }],
+      expectedRevision: payload.revision,
+    });
+    assert.match(textOf(form), /Current model.*About \$0\.03 for 2 cases/);
+    assert.match(textOf(form), /Candidate.*dollar cost is unknown/);
+    await dom.click(dom.byText("Run both"));
+    await dom.flush();
+    const run = posts.find((item) => item.url.endsWith("/tests/run"));
+    assert.deepEqual(run.body.models, estimate.body.models);
+
+    const table = dom.byLabel("Current model against the candidate");
+    const text = textOf(table);
+    assert.match(text, /Current model against write: claude-code claude-sonnet-5-5/);
+    assert.match(text, /DogsFailed\$0\.010\.9sPassed\$0\.00500\.7sFixed/);
+    assert.match(text, /Total1\/2 passed\$0\.022\.1s2\/2 passed\$0\.011\.5s/);
+    assert.match(dom.text(), /tried write: claude-code claude-sonnet-5-5/);
+    await dom.click(dom.byText("Use this model"));
+    await dom.flush();
+    assert.deepEqual(used, [[
+      { kind: "set_field", target: { node: "write" }, field: "provider", valueSource: "claude-code" },
+      { kind: "set_field", target: { node: "write" }, field: "model", value: "claude-sonnet-5-5" },
+    ]]);
   } finally { await dom.unmount(); }
 });
 
@@ -25737,6 +30132,8 @@ test("workflow runs view marks a run whose model step switched provider", async 
   const load = async () => {
     const payload = allRunsPayload();
     payload.runs[1] = { ...payload.runs[1], fallbacks: [{ nodeId: "ask", reason: "rate_limit", line }] };
+    // Only an account passed over at a usage limit: not a switch, so no mark.
+    payload.runs[0] = { ...payload.runs[0], fallbacks: [{ nodeId: "ask", reason: "rate_limit", skipped: true, line: "ask: Skipped claude-code profile work-account (claude-sonnet-5)." }] };
     return payload;
   };
   const dom = await mountReact(React.createElement(View, { load, poll: () => () => {} }), createFetchMock([]));
@@ -25827,6 +30224,55 @@ test("workflow runs view pauses and resumes every trigger with one switch", asyn
   }
 });
 
+test("workflow runs view sets and removes a daily limit for every trigger", async () => {
+  const View = workflowRunsViewModule.default;
+  const budgets = [];
+  let budget = { maxCostUsd: null, maxTokens: null };
+  const today = () => (budget.maxCostUsd === null && budget.maxTokens === null ? null : {
+    scope: "computer", timezone: "UTC", reached: budget.maxCostUsd === 0.5,
+    summary: budget.maxCostUsd === 0.5 ? "$0.62 of $0.50 used today" : "$0 of $5.00 and 0 of 20,000 tokens used today",
+  });
+  const state = () => ({
+    pause: { paused: false, pausedAt: null }, triggers: 1, enabled: 1,
+    scheduler: { running: true, paused: false }, dailyBudget: { budget, today: today() },
+  });
+  const triggers = {
+    pauseState: async () => state(),
+    setPaused: async () => state(),
+    setBudget: async (next) => { budgets.push(next); budget = next; return { ...state().dailyBudget, warnings: ["Node 'review' uses codex, which may not report what a call costs."] }; },
+  };
+  const dom = await mountReact(
+    React.createElement(View, { load: async () => allRunsPayload(), poll: () => () => {}, triggers }),
+    createFetchMock([]),
+  );
+  try {
+    await dom.flush();
+    assert.match(dom.text(), /No daily limit for triggered runs\./);
+    await dom.click(dom.byExactText("Set daily limit"));
+    await dom.change(dom.byLabel("Daily cost limit for all triggers"), "nope");
+    await dom.click(dom.byExactText("Save"));
+    await dom.flush();
+    assert.match(dom.text(), /daily cost limit must be a number/);
+    assert.equal(budgets.length, 0);
+
+    await dom.change(dom.byLabel("Daily cost limit for all triggers"), "5");
+    await dom.change(dom.byLabel("Daily token limit for all triggers"), "20000");
+    await dom.click(dom.byExactText("Save"));
+    await dom.flush();
+    assert.deepEqual(budgets.at(-1), { maxCostUsd: 5, maxTokens: 20000 });
+    assert.match(dom.text(), /Daily limit: \$0 of \$5\.00 and 0 of 20,000 tokens used today\./);
+    assert.match(dom.text(), /may not report what a call costs/);
+
+    await dom.click(dom.byExactText("Change"));
+    await dom.click(dom.byExactText("Remove limit"));
+    await dom.flush();
+    assert.deepEqual(budgets.at(-1), { maxCostUsd: null, maxTokens: null });
+    assert.match(dom.text(), /No daily limit for triggered runs\./);
+  } finally {
+    await dom.unmount();
+  }
+});
+
 test("the away card's workflow line counts runs since the user left and opens the list there", async () => {
   const { useAwayWorkflowRuns } = remAwayReportModule;
   const { openWorkflowRuns, WORKFLOW_RUNS_EVENT } = await viteServer.ssrLoadModule("/src/lib/allWorkflowRuns.js");
@@ -25895,3 +30341,750 @@ test("All workflow runs opens every workflow's runs, and a row opens that run in
 function allElementsWithLabel(dom, label) {
   try { return dom.byLabel(label); } catch { return null; }
 }
+
+test("workflow shortcuts: the menu item, the Add shortcut dialog and Settings > Devices", async () => {
+  const dialogModule = await viteServer.ssrLoadModule("/src/components/WorkflowShortcutDialog.jsx");
+  const syncs = [];
+  const suspends = [];
+  const desktop = {
+    globalDictation: { suspend: async (on) => { suspends.push(["dictation", on]); } },
+    workflowShortcuts: {
+      sync: async () => { syncs.push(true); return { support: "native", shortcuts: [{ id: "aaaaaaaaaaa1", registered: true, error: "" }] }; },
+      suspend: async (on) => { suspends.push(["workflows", on]); },
+      onEvent: () => () => {},
+    },
+  };
+
+  // The workflow's menu offers Add shortcut… when the desktop app can register keys.
+  let asked = 0;
+  const listStatus = { key: "idle", label: "Idle", tone: "muted" };
+  const itemDom = await mountReact(React.createElement(workflowListItemModule.default, {
+    active: false, listStatus, workflow: { id: "wf-a", name: "Tidy" },
+    onAddShortcut: () => { asked += 1; },
+    onDelete() {}, onDuplicate() {}, onEditFile() {}, onRename() {}, onRun: null, onSelect() {}, onStop: null,
+  }), createFetchMock([]), { desktop });
+  try {
+    await itemDom.click(itemDom.byLabel("Tidy actions"));
+    await itemDom.click(itemDom.byText("Add shortcut…"));
+    assert.equal(asked, 1);
+  } finally { await itemDom.unmount(); }
+
+  // The dialog says what the key does, refuses the dictation shortcut's key and saves.
+  const saved = [];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflow-shortcuts/target?workflowId=wf-b", {
+      shortcut: null,
+      target: { mode: "text", input: "article", inputLabel: "Article", textInputs: [{ name: "article", label: "Article" }], problem: "" },
+    }),
+    jsonResponse("/api/workflow-shortcuts", { shortcuts: [{ id: "aaaaaaaaaaa1", workflowId: "wf-a", workflowName: "Tidy", binding: "Ctrl+Alt+KeyT" }] }),
+    (url, options = {}) => {
+      if (url !== "/api/workflow-shortcuts" || options.method !== "POST") return null;
+      saved.push(JSON.parse(options.body));
+      return { ok: true, status: 200, json: async () => ({ shortcut: { id: "bbbbbbbbbbb2" } }) };
+    },
+  ]);
+  let closed = 0;
+  const dialogDom = await mountReact(React.createElement(dialogModule.default, {
+    workflow: { id: "wf-b", name: "Summarize" },
+    settings: settingsModule.DEFAULT_APP_SETTINGS,
+    onClose: () => { closed += 1; },
+  }), fetchMock, { desktop });
+  try {
+    await dialogDom.flush();
+    await dialogDom.flush();
+    assert.match(dialogDom.text(), /Opens a small Run sheet filled with the clipboard for Article/);
+    const recorder = allElements(dialogDom.container).find((node) => node.getAttribute?.("data-shortcut-recorder"));
+    await dialogDom.click(recorder);
+    assert.deepEqual(suspends, [["dictation", true], ["workflows", true]]);
+    await dialogDom.keyDown(recorder, " ", { code: "Space", ctrlKey: true, altKey: true });
+    assert.deepEqual(suspends.at(-1), ["workflows", false]);
+    assert.match(dialogDom.text(), /is the Dictate to Rem from any app shortcut/);
+    assert.equal(reactProps(dialogDom.byText("Save shortcut")).disabled, true);
+    // Another workflow's key is refused too.
+    await dialogDom.click(recorder);
+    await dialogDom.keyDown(recorder, "t", { code: "KeyT", ctrlKey: true, altKey: true });
+    assert.match(dialogDom.text(), /already runs Tidy/);
+    await dialogDom.click(recorder);
+    await dialogDom.keyDown(recorder, "r", { code: "KeyR", ctrlKey: true, altKey: true });
+    assert.equal(reactProps(dialogDom.byText("Save shortcut")).disabled, false);
+    await dialogDom.click(dialogDom.byText("Save shortcut"));
+    await dialogDom.flush();
+    assert.deepEqual(saved, [{ workflowId: "wf-b", binding: "Mod+Alt+KeyR", input: "article" }]);
+    assert.equal(syncs.length, 1);
+    assert.equal(closed, 1);
+  } finally { await dialogDom.unmount(); }
+
+  // Settings > Devices lists every shortcut with what it does, its state and Remove.
+  const removed = [];
+  const settingsFetch = createFetchMock([
+    jsonResponse("/api/devices", { experimental_network: false, enabled: true, peers: [] }),
+    jsonResponse("/api/workflow-shortcuts?details=1", { shortcuts: [{
+      id: "aaaaaaaaaaa1", workflowId: "wf-a", workflowName: "Tidy", binding: "Ctrl+Alt+KeyT", input: null,
+      target: { mode: "run", summary: "Runs the workflow straight away." },
+    }] }),
+    (url, options = {}) => {
+      if (options.method !== "DELETE") return null;
+      removed.push(url);
+      return { ok: true, status: 200, json: async () => ({ removed: { id: "aaaaaaaaaaa1" } }) };
+    },
+  ]);
+  const settingsDom = await mountReact(React.createElement(settingsPopoverModule.default, {
+    initialCategory: "devices", onChange() {}, onClose() {}, onResetAll() {}, open: true, settings: settingsModule.DEFAULT_APP_SETTINGS,
+  }), settingsFetch, { desktop });
+  try {
+    await settingsDom.flush();
+    await settingsDom.flush();
+    const text = settingsDom.text();
+    assert.match(text, /Workflow shortcuts/);
+    assert.match(text, /Tidy/);
+    assert.match(text, /Runs the workflow straight away\./);
+    assert.match(text, /Ready in every app\./);
+    await settingsDom.click(settingsDom.byLabel("Remove the Ctrl+Alt+T shortcut for Tidy"));
+    await settingsDom.flush();
+    assert.deepEqual(removed, ["/api/workflow-shortcuts/aaaaaaaaaaa1"]);
+  } finally { await settingsDom.unmount(); }
+  assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("workflow shortcuts"), ["devices"]);
+});
+
+test("workflow shortcuts: a changed workflow shows Changed: review, and the notice opens its review", async () => {
+  const shortcutsModule = await viteServer.ssrLoadModule("/src/lib/workflowShortcuts.js");
+  const desktop = {
+    workflowShortcuts: {
+      sync: async () => ({ support: "native", shortcuts: [{ id: "aaaaaaaaaaa1", registered: true, error: "" }] }),
+      suspend: async () => {},
+      onEvent: () => () => {},
+    },
+  };
+  let state = "changed";
+  const approvals = [];
+  const changes = {
+    state: "changed",
+    approvedAt: "2026-11-16T10:00:00+00:00",
+    approvedBy: "desktop",
+    fingerprint: "sha256:new",
+    files: [
+      { path: "scripts/tidy.py", absolutePath: "/p/scripts/tidy.py", role: "script", roleLabel: "Script", change: "changed", diff: "--- approved/scripts/tidy.py\n+++ now/scripts/tidy.py\n@@ -1 +1 @@\n-print('tidy')\n+print('gone')", diffAvailable: true, truncated: false },
+      { path: "data.bin", absolutePath: "/p/data.bin", role: "script", roleLabel: "Script", change: "changed", diff: "", diffAvailable: false, truncated: false },
+    ],
+    truncated: false,
+    unseen: [{ path: "data.bin", absolutePath: "/p/data.bin", roleLabel: "Script", reason: "unreadable" }],
+  };
+  const settingsFetch = createFetchMock([
+    jsonResponse("/api/devices", { experimental_network: false, enabled: true, peers: [] }),
+    (url) => url === "/api/workflow-shortcuts?details=1" ? { ok: true, status: 200, json: async () => ({ shortcuts: [{
+      id: "aaaaaaaaaaa1", workflowId: "wf-a", workflowName: "Tidy", binding: "Ctrl+Alt+KeyT", input: null,
+      target: { mode: "run", summary: "Runs the workflow straight away." },
+      approval: { state, fingerprint: "sha256:new" },
+    }] }) } : null,
+    jsonResponse("/api/workflow-shortcuts/aaaaaaaaaaa1/changes", { changes }),
+    (url, options = {}) => {
+      if (url !== "/api/workflow-shortcuts/aaaaaaaaaaa1/approve" || options.method !== "POST") return null;
+      approvals.push(JSON.parse(options.body));
+      state = "approved";
+      return { ok: true, status: 200, json: async () => ({ shortcut: { id: "aaaaaaaaaaa1" } }) };
+    },
+  ]);
+  // The notice's click asks Settings to open this shortcut's review before it mounts.
+  shortcutsModule.requestShortcutReview("aaaaaaaaaaa1");
+  const settingsDom = await mountReact(React.createElement(settingsPopoverModule.default, {
+    initialCategory: "devices", onChange() {}, onClose() {}, onResetAll() {}, open: true, settings: settingsModule.DEFAULT_APP_SETTINGS,
+  }), settingsFetch, { desktop });
+  try {
+    for (let index = 0; index < 4; index += 1) await settingsDom.flush();
+    const review = settingsDom.byLabel("Changed: review the changes to Tidy");
+    assert.equal(review.textContent, "Changed: review");
+    assert.equal(review.getAttribute("aria-expanded"), "true");
+    let text = settingsDom.text();
+    assert.match(text, /approved .* on this computer/);
+    assert.match(text, /scripts\/tidy\.py/);
+    assert.match(text, /Binary or too large to show/);
+
+    // Approving asks a second time for the file that couldn't be shown.
+    await settingsDom.click(settingsDom.byText("Approve this version"));
+    await settingsDom.flush();
+    assert.deepEqual(approvals, []);
+    assert.ok(settingsDom.byLabel("Approve changes you haven't seen?"));
+    await settingsDom.click(settingsDom.byText("Approve without seeing all"));
+    for (let index = 0; index < 3; index += 1) await settingsDom.flush();
+    assert.deepEqual(approvals, [{ fingerprint: "sha256:new", acceptUnseen: true }]);
+    text = settingsDom.text();
+    assert.doesNotMatch(text, /Changed: review/);
+    assert.doesNotMatch(text, /Approve this version/);
+  } finally { await settingsDom.unmount(); }
+  assert.equal(shortcutsModule.takeShortcutReview(), "");
+  assert.equal(shortcutsModule.reviewLabel({ approval: { state: "unapproved" } }), "Not approved: review");
+  assert.equal(shortcutsModule.needsReview({ approval: { state: "approved" } }), false);
+});
+
+test("The Posts dashboard approves the exact version shown, offers Publish on a due LinkedIn post and has no select-all approve", async () => {
+  const postsModule = await viteServer.ssrLoadModule("/src/components/SocialPostsWorkspace.jsx");
+  const variant = (id, platform, label, state, extra = {}) => ({ id, account_id: `${platform}-1`, account_name: "Raticode", platform, platform_label: label,
+    delivery: platform === "linkedin" ? "tap_to_publish" : "api", text: "Raticode 0.6 is out https://raticode.dev/download", link: "", media: [], options: {},
+    state, remote_id: "", url: "", message: "", chars: 40, limit: 280, cost_usd: platform === "x" ? 0.2 : null, next_retry_at: null, open_url: "", ...extra });
+  const proposed = { id: "p1", title: "Release note", state: "proposed", review_state: "proposed", revision: 3, scheduled_at: "2026-11-18T15:00:00Z", timezone: "UTC",
+    late_window_minutes: 120, created_by: "workflow:release@abc", created_at: "2026-11-16T10:00:00Z", updated_at: "2026-11-16T10:00:00Z", rationale: "New tag", sources: [],
+    content_hash: "hash-shown", approval: null, flags: [{ kind: "link", message: "Links to evil.example, which isn't on your list." }], filled_in: true, previous: null,
+    variants: [variant("v1", "x", "X", "pending")] };
+  const due = { ...proposed, id: "p2", title: "LinkedIn note", state: "due", review_state: "approved", content_hash: "hash-due", flags: [], filled_in: false,
+    approval: { by: "user", at: "2026-11-16T10:00:00Z", content_hash: "hash-due" }, variants: [variant("v2", "linkedin", "LinkedIn", "due", { limit: 3000, options: { article_title: "Card title the user sees", visibility: "CONNECTIONS" } })] };
+  const fixture = { posts: [proposed, due], accounts: [], paused: false, settings: { link_allowlist: ["raticode.dev"], late_window_minutes: 120 },
+    platforms: [{ id: "x", label: "X", api: true, text_limit: 280 }, { id: "linkedin", label: "LinkedIn", api: true, text_limit: 3000 }] };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/social", fixture),
+    jsonResponse("/api/social/posts/p1/approve", { ...proposed, state: "scheduled" }, { method: "POST" }),
+    jsonResponse("/api/social/posts/p2/variants/v2/publish", due, { method: "POST" }),
+  ]);
+  const dom = await mountReact(React.createElement(postsModule.default), fetchMock);
+  try {
+    for (let attempt = 0; attempt < 40 && !textOf(dom.container).includes("Release note"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    const text = textOf(dom.container);
+    for (const lane of ["Needs review", "Scheduled", "Due now", "Published", "Problems"]) assert.ok(text.includes(lane), lane);
+    assert.match(text, /Links to evil\.example/);
+    assert.match(text, /Filled in by Workflow release/);
+    assert.ok(!/approve all|select all/i.test(text), "each post needs its own approval or its own tick");
+    // Every option the post sends is on its card, not only in the editor.
+    assert.match(text, /Link card title:?\s*Card title the user sees/);
+    assert.match(text, /Who can see it:?\s*Connections only/);
+    await dom.click(dom.byText("Approve and schedule"));
+    await dom.flush();
+    const approve = fetchMock.calls.find(call => call.url === "/api/social/posts/p1/approve");
+    assert.deepEqual(JSON.parse(approve.options.body), { content_hash: "hash-shown", publish_now: false });
+    await dom.click(dom.byExactText("Publish"));
+    await dom.flush();
+    const publish = fetchMock.calls.find(call => call.url === "/api/social/posts/p2/variants/v2/publish");
+    assert.deepEqual(JSON.parse(publish.options.body), { content_hash: "hash-due" });
+  } finally { await dom.unmount(); }
+});
+
+function postsFixture(extra = {}) {
+  return {
+    posts: [], accounts: [], paused: false, settings: { link_allowlist: ["raticode.dev"], late_window_minutes: 120 },
+    platforms: [
+      { id: "discord", label: "Discord", api: true, text_limit: 2000 }, { id: "x", label: "X", api: true, text_limit: 280 },
+      { id: "linkedin", label: "LinkedIn", api: true, text_limit: 3000, fold_chars: 210, fold_lines: 3 }, { id: "facebook", label: "Facebook Page", api: true, text_limit: 63206 },
+      { id: "youtube", label: "YouTube", api: true, text_limit: 5000 }, { id: "patreon", label: "Patreon", api: false, text_limit: 70000 },
+    ],
+    ...extra,
+  };
+}
+
+test("Posts templates: a starter fills the editor from its blanks, Save as template keeps the blanks, and timing notes and folds show", async () => {
+  const x = { id: "x-1", platform: "x", platform_label: "X", name: "@raticode", enabled: true, quiet: false, status: "connected" };
+  const linkedin = { id: "li-1", platform: "linkedin", platform_label: "LinkedIn", name: "Zack", enabled: true, quiet: false, status: "connected" };
+  const starter = { id: "starter-release", name: "New release", description: "Announce a version.", builtin: true, title: "{product} {version} is out", blanks: ["product", "version"],
+    variants: [{ platform: "x", text: "{product} {version} is out" }, { platform: "discord", text: "**{version}**" }] };
+  const mine = { id: "template-1", name: "Weekly", builtin: false, title: "Week", blanks: [], variants: [{ platform: "linkedin", text: "This week" }] };
+  const long = "Line one\nLine two\nLine three\nLine four is after the fold";
+  const proposed = { id: "p1", title: "Long one", state: "proposed", review_state: "proposed", revision: 1, scheduled_at: "2031-11-18T15:00:00Z", timezone: "UTC", created_by: "rem",
+    content_hash: "h1", flags: [], timing: [{ kind: "spacing", message: "Zack: “Other” is 60 minutes after this one." }],
+    variants: [{ id: "v1", account_id: "li-1", account_name: "Zack", platform: "linkedin", platform_label: "LinkedIn", delivery: "tap_to_publish", text: long, link: "", media: [], options: {}, state: "pending" }] };
+  const { dom, fetchMock } = await mountPosts(postsFixture({ accounts: [x, linkedin], posts: [proposed], templates: [mine, starter] }), [
+    jsonResponse("/api/social/templates", { ...mine, id: "template-2" }, { method: "POST" }),
+    jsonResponse("/api/social/templates/template-1", { ok: true }, { method: "DELETE" }),
+  ]);
+  try {
+    const text = textOf(dom.container);
+    assert.match(text, /Zack: “Other” is 60 minutes after this one\./, "the card shows the spacing note");
+    assert.match(text, /see more/, "the card marks LinkedIn's fold");
+
+    await dom.click(dom.byText("Templates"));
+    assert.match(textOf(dom.container), /Your templates 1/);
+    assert.match(textOf(dom.container), /Starters 1/);
+    assert.ok(!allElements(dom.container).some(node => node.getAttribute?.("aria-label") === "New release" && textOf(node).includes("Delete")), "starters can't be deleted");
+    await dom.click(allElements(dom.container).find(node => node.tagName === "BUTTON" && textOf(node) === "Delete"));
+    assert.equal(fetchMock.calls.filter(call => call.options.method === "DELETE").length, 0, "Delete asks first");
+    await dom.click(allElements(dom.container).filter(node => node.tagName === "BUTTON" && textOf(node) === "Delete").at(-1));
+    await dom.flush();
+    assert.equal(fetchMock.calls.filter(call => call.url === "/api/social/templates/template-1" && call.options.method === "DELETE").length, 1);
+
+    // Use opens the editor on that template's blanks.
+    const card = allElements(dom.container).find(node => node.tagName === "ARTICLE" && node.getAttribute("aria-label") === "New release");
+    await dom.click(allElements(card).find(node => node.tagName === "BUTTON" && textOf(node).includes("Use")));
+    await dom.change(dom.controlAfterLabel("Product"), "Raticode");
+    await dom.change(dom.controlAfterLabel("Version"), "0.6");
+    await dom.click(dom.byText("Use this template"));
+    assert.equal(dom.controlAfterLabel("Title").value, "Raticode 0.6 is out");
+    assert.equal(allElements(dom.container).find(node => node.tagName === "TEXTAREA").value, "Raticode 0.6 is out");
+    assert.match(textOf(dom.container), /Left out Discord: no account connected/);
+
+    await dom.click(dom.byText("Save as template"));
+    await dom.change(dom.byLabel("Template name"), "My release");
+    await dom.change(allElements(dom.container).find(node => node.tagName === "TEXTAREA"), "{product} {version}: {headline}");
+    await dom.click(dom.byText("Save template"));
+    await dom.flush();
+    assert.deepEqual(sentBodies(fetchMock, "/api/social/templates"), [{ name: "My release", title: "Raticode 0.6 is out", variants: [{ platform: "x", text: "{product} {version}: {headline}" }] }]);
+    assert.match(textOf(dom.container), /Saved “My release” to your templates/);
+    assert.equal(sentBodies(fetchMock, "/api/social/posts").length, 0, "saving a template makes no post");
+  } finally { await dom.unmount(); }
+});
+
+async function mountPosts(fixture, handlers = []) {
+  const postsModule = await viteServer.ssrLoadModule("/src/components/SocialPostsWorkspace.jsx");
+  const fetchMock = createFetchMock([...handlers, jsonResponse("/api/social", fixture)]);
+  const dom = await mountReact(React.createElement(postsModule.default), fetchMock);
+  for (let attempt = 0; attempt < 40 && textOf(dom.container).includes("Loading posts"); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+    await dom.flush();
+  }
+  return { dom, fetchMock };
+}
+
+const sentBodies = (fetchMock, url, method = "POST") => fetchMock.calls.filter(call => call.url === url && (call.options.method ?? "GET") === method).map(call => JSON.parse(call.options.body || "{}"));
+
+test("Posts: several clean proposals can be approved together, each pinned to its own version, and warned posts stay out", async () => {
+  const variant = (id, platform) => ({ id, account_id: `${platform}-1`, account_name: "Raticode", platform, platform_label: platform, delivery: "api", text: "Short post", link: "", media: [], options: {}, state: "pending" });
+  const review = (id, title, hash, flags = []) => ({ id, title, state: "proposed", review_state: "proposed", revision: 1, scheduled_at: "2031-11-18T15:00:00Z", timezone: "UTC",
+    created_by: "rem", content_hash: hash, flags, variants: [variant(`${id}-v`, "x")] });
+  const fixture = postsFixture({ posts: [review("a", "First", "hash-a"), review("b", "Second", "hash-b"), review("c", "Warned", "hash-c", [{ kind: "link", message: "Links to evil.example" }])] });
+  const { dom, fetchMock } = await mountPosts(fixture);
+  try {
+    assert.ok(!allElementsWithLabel(dom, "Select all"), "there is no select-all");
+    for (const title of ["First", "Second", "Warned"]) await dom.change(dom.byLabel(`Select ${title}`), true);
+    assert.match(textOf(dom.container), /3 selected · 1 with warnings or text over a limit need their own review/);
+    await dom.click(dom.byText("Approve 2"));
+    assert.match(textOf(dom.container), /Approve 2 posts\?/);
+    assert.equal(fetchMock.calls.filter(call => call.url.endsWith("/approve")).length, 0, "nothing is approved before the confirmation");
+    await dom.click(dom.byText("Yes, approve 2"));
+    await dom.flush();
+    const approvals = fetchMock.calls.filter(call => call.url.endsWith("/approve"));
+    assert.deepEqual(approvals.map(call => [call.url, JSON.parse(call.options.body)]), [
+      ["/api/social/posts/a/approve", { content_hash: "hash-a", publish_now: false }],
+      ["/api/social/posts/b/approve", { content_hash: "hash-b", publish_now: false }],
+    ]);
+  } finally { await dom.unmount(); }
+});
+
+test("Posts > Accounts: the guided Discord connect checks the address, saves once, tests the login and says it worked", async () => {
+  const account = { id: "discord-1", platform: "discord", platform_label: "Discord", name: "Community", enabled: true, quiet: false, daily_cap: 10, monthly_cap: 100, options: {}, status: "connected" };
+  const { dom, fetchMock } = await mountPosts(postsFixture(), [
+    jsonResponse("/api/social/accounts", account, { method: "POST" }),
+    jsonResponse("/api/social/accounts/discord-1/check", { ...account, remote_name: "announcements" }, { method: "POST" }),
+  ]);
+  try {
+    await dom.click(dom.byExactText("Accounts"));
+    assert.match(textOf(dom.container), /Connect your first account/);
+    assert.ok(!allElements(dom.container).some(node => node.tagName === "TEXTAREA"), "no text areas for logins or settings");
+    await dom.click(dom.byText("Connect Discord"));
+    await dom.flush();
+    assert.match(textOf(dom.container), /Copy Webhook URL/);
+    const webhook = allElements(dom.container).find(node => node.getAttribute?.("id") === "sp-login-webhook_url");
+    assert.equal(webhook.getAttribute("type"), "url");
+    await dom.change(webhook, "https://example.com/not-a-webhook");
+    const form = allElements(dom.container).find(node => node.tagName === "FORM");
+    await dom.pointer(form, "onSubmit");
+    assert.match(textOf(dom.container), /isn't a Discord webhook address/);
+    assert.equal(sentBodies(fetchMock, "/api/social/accounts").length, 0, "an invalid address is never sent");
+    await dom.change(webhook, "https://discord.com/api/webhooks/123/abc-DEF");
+    await dom.change(allElements(dom.container).find(node => node.getAttribute?.("id") === "sp-connect-name"), "Community");
+    await dom.pointer(form, "onSubmit");
+    await dom.flush();
+    assert.deepEqual(sentBodies(fetchMock, "/api/social/accounts"), [{ platform: "discord", name: "Community", secrets: { webhook_url: "https://discord.com/api/webhooks/123/abc-DEF" }, options: {} }]);
+    assert.equal(fetchMock.calls.filter(call => call.url === "/api/social/accounts/discord-1/check").length, 1);
+    assert.match(textOf(dom.container), /Community is connected/);
+    assert.match(textOf(dom.container), /“announcements”/);
+  } finally { await dom.unmount(); }
+});
+
+test("Posts > Accounts: secrets are masked, a failed test keeps the saved account and Disconnect asks first", async () => {
+  const account = { id: "x-1", platform: "x", platform_label: "X", name: "@raticode", enabled: true, quiet: false, daily_cap: 5, monthly_cap: 60, options: {}, status: "connected" };
+  const { dom, fetchMock } = await mountPosts(postsFixture({ accounts: [account] }), [
+    jsonResponse("/api/social/accounts/x-1/check", { error: "X answered 401." }, { method: "POST", ok: false, status: 400 }),
+    jsonResponse("/api/social/accounts/x-1", { ok: true }, { method: "DELETE" }),
+  ]);
+  try {
+    await dom.click(dom.byExactText("Accounts"));
+    await dom.click(dom.byExactText("Test"));
+    await dom.flush();
+    assert.match(textOf(dom.container), /X answered 401\./);
+    await dom.click(dom.byText("Replace login"));
+    await dom.flush();
+    const token = allElements(dom.container).find(node => node.getAttribute?.("id") === "sp-login-access_token");
+    assert.equal(token.getAttribute("type"), "password");
+    await dom.click(dom.byLabel("Show access token"));
+    assert.equal(allElements(dom.container).find(node => node.getAttribute?.("id") === "sp-login-access_token").getAttribute("type"), "text");
+    await dom.click(dom.byExactText("Disconnect"));
+    assert.equal(fetchMock.calls.filter(call => (call.options.method ?? "GET") === "DELETE").length, 0, "Disconnect asks before deleting the login");
+    assert.match(textOf(dom.container), /Its login is deleted from your keychain/);
+    const confirm = dom.byLabel("Confirm disconnect");
+    await dom.click(allElements(confirm).find(node => node.tagName === "BUTTON" && textOf(node) === "Disconnect"));
+    await dom.flush();
+    assert.equal(fetchMock.calls.filter(call => call.url === "/api/social/accounts/x-1" && call.options.method === "DELETE").length, 1);
+  } finally { await dom.unmount(); }
+});
+
+test("Posts > Accounts: X connects with four API keys by default, and OAuth 2.0 is the other choice", async () => {
+  const discord = { id: "discord-1", platform: "discord", platform_label: "Discord", name: "Community", enabled: true, quiet: false, daily_cap: 10, monthly_cap: 100, options: {}, status: "connected" };
+  const saved = { id: "x-2", platform: "x", platform_label: "X", name: "@raticode", auth: "api_keys", enabled: true, quiet: false, daily_cap: 10, monthly_cap: 100, options: {}, status: "connected" };
+  const { dom, fetchMock } = await mountPosts(postsFixture({ accounts: [discord] }), [
+    jsonResponse("/api/social/accounts", saved, { method: "POST" }),
+    jsonResponse("/api/social/accounts/x-2/check", { ...saved, remote_name: "@raticode" }, { method: "POST" }),
+  ]);
+  const field = key => allElements(dom.container).find(node => node.getAttribute?.("id") === `sp-login-${key}`);
+  try {
+    await dom.click(dom.byExactText("Accounts"));
+    await dom.click(allElements(dom.container).find(node => node.tagName === "BUTTON" && /Posts automatically · X charges/.test(textOf(node))));
+    await dom.flush();
+    const choice = allElements(dom.container).find(node => node.getAttribute?.("aria-labelledby") === "sp-connect-method");
+    const pressed = () => allElements(choice).filter(node => node.tagName === "BUTTON" && node.getAttribute("aria-pressed") === "true").map(textOf);
+    assert.deepEqual(pressed(), ["API keys"]);
+    assert.match(textOf(dom.container), /Read and write/);
+    assert.doesNotMatch(textOf(dom.container), /Generate your user access token and refresh token/);
+    assert.deepEqual(["api_key", "api_secret", "access_token", "access_token_secret"].map(key => Boolean(field(key))), [true, true, true, true]);
+    assert.equal(field("refresh_token"), undefined);
+    const form = allElements(dom.container).find(node => node.tagName === "FORM");
+    await dom.change(field("access_token"), "123-token");
+    await dom.pointer(form, "onSubmit");
+    assert.match(textOf(dom.container), /Paste the access token secret/);
+    assert.equal(sentBodies(fetchMock, "/api/social/accounts").length, 0, "three of four keys are never sent");
+    // The other way shows OAuth 2.0's fields and starts empty.
+    assert.deepEqual(allElements(choice).filter(node => node.tagName === "BUTTON").map(textOf), ["API keys", "Sign in (OAuth 2.0)", "Paste OAuth 2.0 token"]);
+    await dom.click(allElements(choice).find(node => node.tagName === "BUTTON" && textOf(node) === "Paste OAuth 2.0 token"));
+    assert.deepEqual(pressed(), ["Paste OAuth 2.0 token"]);
+    assert.ok(field("refresh_token") && !field("api_key"));
+    assert.equal(field("access_token").value || "", "");
+    await dom.click(allElements(choice).find(node => node.tagName === "BUTTON" && textOf(node) === "API keys"));
+    for (const [key, value] of [["api_key", "ck"], ["api_secret", "cs"], ["access_token", "123-token"], ["access_token_secret", "ts"]]) await dom.change(field(key), value);
+    await dom.pointer(form, "onSubmit");
+    await dom.flush();
+    assert.deepEqual(sentBodies(fetchMock, "/api/social/accounts"), [{ platform: "x", name: "", auth: "api_keys", secrets: { api_key: "ck", api_secret: "cs", access_token: "123-token", access_token_secret: "ts" }, options: {} }]);
+    assert.match(textOf(dom.container), /is connected/);
+  } finally { await dom.unmount(); }
+});
+
+test("Posts > Accounts: YouTube signs in through the browser, waits for the sign-in, then tests it; Discord says it has no sign-in", async () => {
+  const google = { available: true, label: "Google", fixed_port: false, default_port: null, redirect_host: "127.0.0.1", callback_path: "/callback", secret_required: true, timeout_seconds: 300 };
+  const fixture = postsFixture();
+  fixture.platforms = fixture.platforms.map(item => (item.id === "youtube" ? { ...item, sign_in: google } : item.id === "discord" ? { ...item, sign_in: { available: false, reason: "webhook" } } : item));
+  const account = { id: "youtube-1", platform: "youtube", platform_label: "YouTube", name: "YouTube", enabled: true, quiet: false, daily_cap: 10, monthly_cap: 100, options: { privacy: "public" }, status: "connected", signed_in: true };
+  const waiting = { id: "s1", platform: "youtube", status: "waiting", opened: true, seconds_left: 299, authorize_url: "https://accounts.google.com/o/oauth2/v2/auth?state=fake", redirect_uri: "http://127.0.0.1:50123/callback", pages: [], account: null, error: "" };
+  let polls = 0;
+  const status = (url, options = {}) => {
+    if (url !== "/api/social/accounts/sign-in/s1" || (options.method ?? "GET") !== "GET") return null;
+    polls += 1;
+    // A fresh object each time, as a real response would be.
+    const payload = polls > 1 ? { ...waiting, status: "done", authorize_url: "", account } : { ...waiting, seconds_left: 298 };
+    return { ok: true, status: 200, json: async () => payload };
+  };
+  const { dom, fetchMock } = await mountPosts(fixture, [
+    jsonResponse("/api/social/accounts/sign-in", waiting, { method: "POST" }),
+    status,
+    jsonResponse("/api/social/accounts/youtube-1/check", { ...account, remote_name: "Raticode" }, { method: "POST" }),
+  ]);
+  const field = key => allElements(dom.container).find(node => node.getAttribute?.("id") === `sp-signin-${key}`);
+  try {
+    await dom.click(dom.byExactText("Accounts"));
+    await dom.click(allElements(dom.container).find(node => node.tagName === "BUTTON" && /Uploads videos with a title/.test(textOf(node))));
+    await dom.flush();
+    const choice = allElements(dom.container).find(node => node.getAttribute?.("aria-labelledby") === "sp-connect-method");
+    const pressed = allElements(choice).filter(node => node.tagName === "BUTTON" && node.getAttribute("aria-pressed") === "true").map(textOf);
+    assert.deepEqual(pressed, ["Sign in"], "signing in is YouTube's default");
+    assert.ok(field("client_id") && field("client_secret") && !field("port"), "Google takes any port, so there's no port to set");
+    assert.match(textOf(dom.container), /Desktop app/);
+    const form = allElements(dom.container).find(node => node.tagName === "FORM");
+    await dom.pointer(form, "onSubmit");
+    assert.match(textOf(dom.container), /Paste the client ID/);
+    assert.equal(sentBodies(fetchMock, "/api/social/accounts/sign-in").length, 0, "nothing starts without the app's client ID");
+    await dom.change(field("client_id"), "fake.apps.googleusercontent.com");
+    await dom.change(field("client_secret"), "fake-secret");
+    await dom.pointer(form, "onSubmit");
+    await dom.flush();
+    assert.deepEqual(sentBodies(fetchMock, "/api/social/accounts/sign-in"), [{ platform: "youtube", name: "", client_id: "fake.apps.googleusercontent.com", client_secret: "fake-secret", options: { privacy: "public" } }]);
+    assert.match(textOf(dom.container), /Finish signing in on Google's page/);
+    assert.ok(dom.byText("Copy sign-in link") && dom.byText("Cancel sign-in"));
+    // The panel asks for progress once a second until the backend says it's done.
+    for (let tries = 0; tries < 6 && !/is connected/.test(textOf(dom.container)); tries += 1) {
+      await dom.flush(1000);
+      await dom.flush();
+    }
+    assert.equal(polls, 2);
+    assert.match(textOf(dom.container), /is connected/);
+    assert.match(textOf(dom.container), /signed in as “Raticode”/);
+    assert.equal(fetchMock.calls.filter(call => call.url === "/api/social/accounts/youtube-1/check").length, 1);
+    await dom.click(dom.byText("Connect another account"));
+    await dom.click(allElements(dom.container).find(node => node.tagName === "BUTTON" && /Posts to a channel automatically/.test(textOf(node))));
+    await dom.flush();
+    assert.match(textOf(dom.container), /no account to sign in to/);
+  } finally { await dom.unmount(); }
+});
+
+test("Posts > Accounts: trusted sites are chips and the late limit is a choice, each saved as you change it", async () => {
+  const { dom, fetchMock } = await mountPosts(postsFixture(), [jsonResponse("/api/social/settings", { ok: true }, { method: "PUT" })]);
+  try {
+    await dom.click(dom.byExactText("Accounts"));
+    const add = dom.byLabel("Add to trusted sites");
+    await dom.change(add, "https://Docs.Example.com/guide");
+    await dom.keyDown(add, "Enter");
+    await dom.flush();
+    await dom.change(add, "no spaces allowed");
+    await dom.keyDown(add, "Enter");
+    assert.match(textOf(dom.container), /doesn't look like a website address/);
+    await dom.click(dom.byExactText("6 hours"));
+    await dom.flush();
+    assert.deepEqual(sentBodies(fetchMock, "/api/social/settings", "PUT"), [{ link_allowlist: ["raticode.dev", "docs.example.com"] }, { late_window_minutes: 360 }]);
+  } finally { await dom.unmount(); }
+});
+
+test("Posts editor: a scheduled time is read in the chosen time zone, and Duplicate starts a fresh copy for review", async () => {
+  const account = { id: "x-1", platform: "x", platform_label: "X", name: "@raticode", enabled: true, quiet: false, status: "connected" };
+  const published = { id: "p9", title: "Launch", state: "published", revision: 2, scheduled_at: "2031-01-01T10:00:00Z", timezone: "UTC", created_by: "user", content_hash: "h9", flags: [],
+    variants: [{ id: "v9", account_id: "x-1", account_name: "@raticode", platform: "x", platform_label: "X", text: "We launched", link: "", options: {}, media: [], state: "published", delivery: "api" }] };
+  const slots = { slots: [{ at: "2031-12-02T17:00:00+00:00", fits: ["x"], reason: "X usually does best mid-morning, Tue-Thu." }], note: "General guidance" };
+  const { dom, fetchMock } = await mountPosts(postsFixture({ accounts: [account], posts: [published] }), [
+    jsonResponse("/api/social/posts", { ok: true }, { method: "POST" }),
+    url => url.startsWith("/api/social/times?") ? { ok: true, status: 200, json: async () => slots } : null,
+  ]);
+  const editorForm = () => allElements(dom.container).find(node => node.tagName === "FORM" && node.getAttribute("aria-labelledby") === "sp-editor-h");
+  try {
+    await dom.click(dom.byText("Duplicate"));
+    assert.match(textOf(dom.container), /Duplicate post/);
+    assert.equal(dom.controlAfterLabel("Title").value, "Copy of Launch");
+    await dom.pointer(editorForm(), "onSubmit");
+    await dom.flush();
+    const copy = sentBodies(fetchMock, "/api/social/posts")[0];
+    assert.equal(copy.scheduled_at, null);
+    assert.deepEqual(copy.variants, [{ account_id: "x-1", text: "We launched", link: "", options: {}, media: [] }]);
+
+    await dom.click(dom.byText("New post"));
+    await dom.click(allElements(dom.container).find(node => node.tagName === "BUTTON" && textOf(node).includes("@raticode") && node.getAttribute("aria-pressed") === "false"));
+    await dom.change(allElements(dom.container).find(node => node.tagName === "TEXTAREA"), "Hello from Denver");
+    await dom.change(dom.controlAfterLabel("At a set time"), true);
+    await dom.change(dom.controlAfterLabel("Date and time"), "2031-12-01T09:00");
+    await dom.change(dom.controlAfterLabel("Time zone"), "America/Denver");
+    // Good times come from the backend, for the chosen account in the chosen zone.
+    for (let attempt = 0; attempt < 60 && !textOf(dom.container).includes("Good times"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    assert.match(textOf(dom.container), /Good times for X/);
+    assert.ok(allElements(dom.container).some(node => node.tagName === "BUTTON" && /mid-morning/.test(node.getAttribute("title") || "")), "each time says why");
+    assert.match(textOf(dom.container), /not a reading of your audience/);
+    const asked = fetchMock.calls.filter(call => call.url.startsWith("/api/social/times?")).at(-1).url;
+    assert.equal(new URL(asked, "http://x").searchParams.get("target"), "x-1");
+    assert.equal(new URL(asked, "http://x").searchParams.get("tz"), "America/Denver");
+    await dom.change(dom.controlAfterLabel("Date and time"), "2031-12-01T09:00");
+    assert.match(textOf(dom.container), /Saving puts the post in Needs review/);
+    await dom.pointer(editorForm(), "onSubmit");
+    await dom.flush();
+    const scheduled = sentBodies(fetchMock, "/api/social/posts")[1];
+    assert.equal(scheduled.scheduled_at, "2031-12-01T16:00:00.000Z");
+    assert.equal(scheduled.timezone, "America/Denver");
+    assert.ok(!editorForm(), "the editor closes after saving");
+  } finally { await dom.unmount(); }
+});
+
+test("the tab in front of Raticode (gecko) can be shared with Rem from the tab menu, and its approvals show above Firefox's window", async () => {
+  const geckoCalls = [];
+  let sharedListener = null;
+  const sharedTab = { id: "gecko-shared-1", url: "https://music.test/watch", title: "PS GFY", agent: { label: "Rem", shared: true, paused: false, dialog: null, log: [] }, prompts: [] };
+  const browser = {
+    adopt: async () => null,
+    close: async () => null,
+    create: async (options) => ({ clientId: options.clientId, id: "session-1", loading: false, src: "data:text/html,page", url: options.url, engine: "raticode" }),
+    gecko: async (action, options) => {
+      geckoCalls.push([action, options]);
+      if (action === "share-with-rem") return { id: sharedTab.id, url: sharedTab.url, title: sharedTab.title };
+      if (action === "shared-tabs") return [];
+      if (action === "shared-action") return [];
+      return { available: true, supported: true, executable: "/usr/bin/firefox", running: true, placed: true, remControl: true };
+    },
+    library: async (action) => (action === "engine-status" ? { firefox: { available: true }, chrome: { available: true }, edge: { available: false } } : {}),
+    onCommand: () => () => {},
+    onGecko: () => () => {},
+    onGeckoShared: (callback) => { sharedListener = callback; return () => { sharedListener = null; }; },
+    onState: () => () => {},
+    platform: "linux",
+    setPolicy: async () => null,
+    setPreferences: async () => null,
+  };
+  const geckoTab = "raticode-browser:gecko";
+  const composer = await viteServer.ssrLoadModule("/src/lib/remComposer.js");
+  const dom = await mountReact(React.createElement(appModule.default), createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+  ]), { browser, storage: {
+    "raticode.settings.v1": JSON.stringify({ browser: { engine: "gecko" } }),
+    // A Chrome tab in front first: the Gecko view measures what's drawn over it once shown.
+    "raticode.editorSession.v2": JSON.stringify({ version: 2, paths: ["raticode-browser:chrome", geckoTab], activePath: "raticode-browser:chrome", activity: "browser", mainContent: "editor", browserTabs: { "raticode-browser:chrome": { url: "https://chrome.test/", title: "Chrome page", engine: "chrome" }, [geckoTab]: { url: "https://music.test/", title: "Music", engine: "gecko" } } }),
+  } });
+  const settle = async (check) => {
+    for (let attempt = 0; attempt < 200 && !check(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  // The new thread's composer holds the draft.
+  const messageBox = () => allElements(dom.container).find(node => node.tagName === "TEXTAREA" && /PS GFY/.test(node.value || ""));
+  const byText = (text) => allElements(dom.container).find(node => node.tagName === "BUTTON" && textOf(node).trim() === text);
+  document.elementFromPoint = () => null;
+  try {
+    const badge = () => allElements(dom.container).find(node => node.getAttribute?.("data-browser-engine") === "gecko");
+    await settle(() => Boolean(badge()));
+    const tab = dom.ancestor(badge(), node => typeof (Object.keys(node).find(key => key.startsWith("__reactProps$")) && reactProps(node).onContextMenu) === "function");
+    await React.act(async () => reactProps(tab).onContextMenu(testEvent(tab, { clientX: 100, clientY: 40 })));
+    await settle(() => typeof sharedListener === "function");
+    assert.equal(typeof sharedListener, "function", "the Gecko view follows its shared tabs");
+    const share = byText("Share the Gecko tab in front with Rem…");
+    assert.ok(share, "the Gecko tab's menu offers sharing");
+    await dom.click(share);
+    await settle(() => geckoCalls.some(([action]) => action === "share-with-rem") && /PS GFY/.test(messageBox()?.value || ""));
+    const [, options] = geckoCalls.find(([action]) => action === "share-with-rem");
+    assert.equal(typeof options.threadId, "string");
+    assert.ok(options.threadId.length > 0, "the tab is shared with the new thread");
+    assert.match(messageBox()?.value || "",  /^I shared the Raticode \(gecko\) tab “PS GFY” with you\. Use it to $/);
+
+    // Rem asks before a consequential click; the bar above Firefox's window answers.
+    await React.act(async () => sharedListener([{ ...sharedTab, prompts: [{ requestId: "request-1", kind: "rem-confirm", action: "click", label: "Place order", url: sharedTab.url, agentLabel: "Rem" }] }]));
+    await settle(() => Boolean(allElements(dom.container).find(node => node.getAttribute?.("aria-label") === "Rem needs approval")));
+    const bar = allElements(dom.container).find(node => node.getAttribute?.("data-testid") === "gecko-shared-tab");
+    assert.match(textOf(bar), /Rem can use your Gecko tab PS GFY/);
+    assert.match(textOf(bar), /wants to Place order on music\.test/);
+    await dom.click(allElements(bar).find(node => node.tagName === "BUTTON" && textOf(node).trim() === "Approve"));
+    await settle(() => geckoCalls.some(([action]) => action === "shared-action"));
+    assert.deepEqual(geckoCalls.find(([action]) => action === "shared-action")[1], { id: "gecko-shared-1", command: "respond", requestId: "request-1", response: "approve" });
+    // Sharing ended elsewhere: the bar goes.
+    await React.act(async () => sharedListener([]));
+    await dom.flush();
+    assert.equal(allElements(dom.container).some(node => node.getAttribute?.("data-testid") === "gecko-shared-tab"), false);
+  } finally {
+    composer.resetRemComposer();
+    await dom.unmount();
+  }
+});
+
+test("thread info shows the size of each part the newest turn sent", async () => {
+  const contextReads = [];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture()])),
+    jsonResponse("/api/provider/capabilities", {
+      providers: [{ id: "codex", displayName: "Codex", available: true, models: [] }],
+    }),
+    (url) => (url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Sized reply"}}\n'])(url) : null),
+    (url) => {
+      const match = /^\/api\/rem\/threads\/([^/]+)\/context\?limit=1$/.exec(url);
+      if (!match) return null;
+      contextReads.push(decodeURIComponent(match[1]));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          thread_id: match[1],
+          turn_count: 2,
+          turns: [{
+            sent_chars: 4120,
+            sent_tokens_estimate: 1030,
+            parts: [
+              { key: "identity", label: "Identity and task instructions", chars: 4000, tokens_estimate: 1000, sent: true },
+              { key: "brain", label: "Second Brain rules", chars: 800, tokens_estimate: 200, sent: false },
+              { key: "conversation", label: "Conversation", chars: 120, tokens_estimate: 30, sent: true },
+            ],
+          }],
+        }),
+      };
+    },
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock);
+  try {
+    await dom.flush();
+    assert.equal(dom.allByTitle("Thread info").length, 0);
+    await dom.change(dom.first("textarea"), "How big is this turn?");
+    await dom.click(dom.byTitle("Send message")); await dom.flush();
+    assert.match(dom.text(), /Sized reply/);
+    const button = dom.byTitle("Thread info");
+    assert.equal(button.getAttribute("aria-expanded"), "false");
+    const before = (dom.text().match(/How big is this turn\?/g) || []).length;
+    await dom.click(button); await dom.flush();
+    assert.equal(button.getAttribute("aria-expanded"), "true");
+    assert.equal(contextReads.length, 1);
+    const text = dom.text();
+    assert.match(text, /Context sent/);
+    assert.match(text, /~1k tokens sent · instructions kept from the previous turn/);
+    assert.match(text, /Identity and task instructions~1k tokens/);
+    assert.match(text, /Second Brain rules · kept~200 tokens/);
+    assert.match(text, /Newest of 2 turns\. Tokens are estimated as characters ÷ 4\./);
+    // Sizes only: besides the thread's title, the popover shows none of the prompt's text.
+    assert.equal((text.match(/How big is this turn\?/g) || []).length, before + 1);
+    await dom.click(button); await dom.flush();
+    assert.doesNotMatch(dom.text(), /Newest of 2 turns/);
+  } finally { await dom.unmount(); }
+});
+
+test("the usage page ranks Rem's biggest standing parts over the last week", async () => {
+  const { StandingParts } = await viteServer.ssrLoadModule("/src/components/ContextSent.jsx");
+  const html = renderToStaticMarkup(React.createElement(StandingParts, {
+    standing: {
+      days: 7,
+      turns: 3,
+      parts: [
+        { key: "brain", label: "Second Brain rules", turns: 3, sent_turns: 2, average_chars: 900, average_tokens_estimate: 225, sent_chars: 1800, sent_tokens_estimate: 450 },
+        { key: "identity", label: "Identity and task instructions", turns: 3, sent_turns: 3, average_chars: 100, average_tokens_estimate: 25, sent_chars: 300, sent_tokens_estimate: 75 },
+      ],
+    },
+  }));
+  assert.match(html, /Biggest standing parts, last 7 days/);
+  assert.ok(html.indexOf("Second Brain rules") < html.indexOf("Identity and task instructions"));
+  assert.match(html, /~450 tokens sent/);
+  assert.match(html, /~225 tokens each · sent in 2 of 3 turns/);
+  const empty = renderToStaticMarkup(React.createElement(StandingParts, { standing: { days: 7, turns: 0, parts: [] } }));
+  assert.match(empty, /No Rem turns recorded in the last 7 days/);
+});
+
+test("the usage page shows Rem's own calls with the standing parts", async () => {
+  const { StandingParts } = await viteServer.ssrLoadModule("/src/components/ContextSent.jsx");
+  const html = renderToStaticMarkup(React.createElement(StandingParts, {
+    standing: {
+      days: 7,
+      turns: 1,
+      calls: 3,
+      parts: [
+        { id: "chat_reply:workspace.desktop", key: "workspace.desktop", call: "chat_reply", label: "Chat reply: Desktop thread list", turns: 3, sent_turns: 3, average_chars: 140000, average_tokens_estimate: 35000, sent_chars: 420000, sent_tokens_estimate: 105000 },
+        { key: "identity", label: "Identity and task instructions", turns: 1, sent_turns: 1, average_chars: 100, average_tokens_estimate: 25, sent_chars: 100, sent_tokens_estimate: 25 },
+      ],
+      rem_calls: [
+        { call: "chat_reply", label: "Chat reply", calls: 3, reasked: 1, failed: 0, average_tokens_estimate: 100000, max_tokens_estimate: 110000, sent_chars: 1200000, sent_tokens_estimate: 300000, reported_calls: 2, input_tokens: 240000, cache_read_tokens: 200000, cache_write_tokens: 30000, current_version: { version: "0123456789ab", calls: 2, re_asked: 0, failed: 0, first_seen: "" } },
+        { call: "task_update", label: "Task update", calls: 1, reasked: 0, failed: 0, average_tokens_estimate: 500, max_tokens_estimate: 500, sent_chars: 2000, sent_tokens_estimate: 500, reported_calls: 0, input_tokens: null, cache_read_tokens: null, cache_write_tokens: null, current_version: null },
+      ],
+    },
+  }));
+  assert.match(html, /across 1 turn and 3 calls of Rem(&#x27;|')s own/);
+  assert.match(html, /Chat reply: Desktop thread list/);
+  assert.match(html, /~35k tokens each · sent in 3 of 3 calls/);
+  assert.match(html, /Rem(&#x27;|')s own calls/);
+  assert.match(html, /3 calls · ~100k tokens each · largest ~110k tokens/);
+  assert.match(html, /1 re-asked · 0 failed/);
+  assert.match(html, /~300k tokens sent/);
+  // The provider's own token counts: exact, so no ~, and only for a kind that reported them.
+  assert.match(html, /Reported: 240k tokens input · 200k tokens read from cache · 30k tokens written to cache/);
+  assert.equal(html.match(/Reported:/g).length, 1);
+  // The per-kind totals stay, and a kind whose rules version is known adds one line for it.
+  assert.match(html, /Current rules: 0 re-asked · 0 failed of 2 calls/);
+  assert.equal(html.match(/Current rules:/g).length, 1);
+});
+
+test("a waiting question says which ticket asked it and that its run waits, and opens the task", async () => {
+  const remStore = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  const { default: RemDecisions } = await viteServer.ssrLoadModule("/src/components/RemDecisions.jsx");
+  remStore.resetRemHomeStore();
+  const run = { run_id: "run-1", task_id: "task-1", ticket: "REM-1", label: "REM-1" };
+  const item = { id: "D-5", project: "/workspace", project_name: "workspace", topic: "checks.fast", question: "Which check runs before each commit?",
+    answer: "npm test", recommended: "npm test", why: "", evidence: [], alternatives: [], status: "pending", tried: "",
+    asked: { by: "run", label: "REM-1", ticket: "REM-1", task_id: "task-1", task_title: "Place work on computers", at: "2026-11-21T12:00:00+00:00", waiting: [run], went_on: [], opens: "task-1" } };
+  const decisions = { revision: 1, waiting: 1, items: [item] };
+  const dom = await mountReact(React.createElement(RemDecisions, { decisions, project: "/workspace" }), createFetchMock([]));
+  const card = allElements(dom.container).find(node => node.tagName === "LI" && node.getAttribute?.("class") === "rem-decision");
+  const text = textOf(card);
+  assert.match(text, /Asked by REM-1/);
+  assert.match(text, /REM-1 waits for this/);
+  const line = allElements(card).find(node => node.tagName === "BUTTON" && textOf(node).startsWith("Asked by REM-1"));
+  assert.equal(line.getAttribute("title"), "Place work on computers · Open the task");
+  await dom.click(line);
+  assert.deepEqual(remStore.getState().sheet, { mode: "task", taskId: "task-1" });
+  await dom.unmount();
+  remStore.resetRemHomeStore();
+  // A run that went on without it says so, and a question from Rem's chat opens nothing.
+  const wentOn = renderToStaticMarkup(React.createElement(RemDecisions, { decisions: { ...decisions, items: [{ ...item, asked: { ...item.asked, waiting: [], went_on: [run] } }] }, project: "/workspace" }));
+  assert.match(wentOn, /REM-1 went on without it/);
+  const chat = renderToStaticMarkup(React.createElement(RemDecisions, { decisions: { ...decisions, items: [{ ...item, asked: { by: "chat", label: "Rem's chat", at: item.asked.at, waiting: [], went_on: [], opens: "" } }] }, project: "/workspace" }));
+  assert.match(chat, /<p class="rem-decision-asked"[^>]*>Asked by Rem/);
+});

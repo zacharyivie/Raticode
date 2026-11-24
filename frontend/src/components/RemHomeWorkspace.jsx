@@ -9,8 +9,11 @@ import RemChatSearch from "./RemChatSearch.jsx";
 // Files on a reply; a paired phone that asked receives them too.
 import { ReplyFiles } from "./RemMedia.jsx";
 import { OutcomeGlyph, RemMenu, typeLabel } from "./RemHomeParts.jsx";
+import { WorkflowDraftForMessage } from "./RemWorkflowDraft.jsx";
+import { DecisionCard, DecisionEditCard } from "./RemDecisions.jsx";
 import { FoldPinContext, FoldableText, revealFold, FollowUps, MessageActions, MessageDetails, NewMessagesPill, ProgressSteps, ReplyQuote, ResultActions, ResultCard } from "./RemRichParts.jsx";
 import { bodyWithoutCardLinks, latestRemMessageId, latestSuggestionMessageId, remPresence } from "../lib/remRich.js";
+import { selfWorkVerifiedLine } from "../lib/verifiedWork.js";
 import { chatRows, criteriaSummary, conversationMessages, messageStamp, messagesByDay, selfWorkBatchLine, selfWorkReportItems, statusLine, latestWorkMessageIds, workStatus } from "../lib/remHome.js";
 import { cardTickets } from "../lib/ticketMentions.js";
 import { TicketPills } from "./TicketPill.jsx";
@@ -345,7 +348,7 @@ const Message = memo(function Message({ message, first, now, tasks, tickets = nu
       </div>
       {message.failed ? <p className="rem-msg-failed">Didn’t send. <button type="button" onClick={() => retryRemMessage(message.id)}>Try again</button> <button type="button" onClick={() => editRemMessage(message.id)}>Edit</button></p>
         : message.pending && message.waiting ? <p className="rem-msg-waiting" role="status">Sends when Rem finishes replying</p>
-        : <div className="rem-msg-foot">{message.pending ? null : <MessageActions message={message} />}{message.screen_capture ? <ScreenSentChip name={message.screen_capture} /> : null}{message.source === "workflow" ? <WorkflowSource workflow={message.workflow} /> : null}{message.source === "after" ? <QueuedSource after={message.queued_after} /> : null}{stamp}</div>}
+        : <div className="rem-msg-foot">{message.pending ? null : <MessageActions message={message} />}{message.screen_capture ? <ScreenSentChip name={message.screen_capture} /> : null}{message.source === "workflow" ? <WorkflowSource workflow={message.workflow} /> : null}{message.source === "after" ? <QueuedSource after={message.queued_after} /> : null}{message.source === "plan" ? <span className="rem-msg-source" title="Raticode sent this when you settled the plan's last question, so Rem files the work.">Your plan's answers</span> : null}{stamp}</div>}
     </div>;
   }
   // A Rem message right after another Rem message gets a faint rule above it (data-follows).
@@ -357,12 +360,16 @@ const Message = memo(function Message({ message, first, now, tasks, tickets = nu
         <MarkdownContent onOpenRelativeLink={onOpenLink} compact className="rem-markdown" fileMentions={message.file_mentions} loadWebImages={Boolean(message.sources?.length || message.result?.sources?.length)} tickets={tickets} value={message.result ? bodyWithoutCardLinks(message.body, message.result) : message.body} />
       </FoldableText>
       <MessageDetails details={message.details} fileMentions={message.file_mentions} tickets={tickets} onOpenLink={onOpenLink} />
+      {message.kind === "self_work_report" ? <SelfWorkVerifiedLine message={message} /> : null}
       {message.kind === "self_work_report" ? <SelfWorkReportItems message={message} tasks={tasks} /> : null}
       <ResultCard result={message.result} body={message.body} onOpenLink={onOpenLink} />
       {message.files?.length ? <ReplyFiles files={message.files} onOpenLink={onOpenLink} /> : null}
       {message.work ? <WorkCard work={message.work} tasks={tasks} live={live} tickets={tickets} /> : null}
+      {message.work?.decision ? <DecisionCard card={message.work.decision} /> : null}
       <ResultActions message={message} tasks={tasks} live={live} onOpenLink={onOpenLink} />
+      <WorkflowDraftForMessage message={message} tasks={tasks} live={live} />
       <MemoryNote messageId={message.id} memory={message.memory} />
+      {message.role !== "user" && Array.isArray(message.decision_edits) ? message.decision_edits.map(card => <DecisionEditCard key={card.id} card={card} />) : null}
       {followUps ? <FollowUps suggestions={message.suggestions} /> : null}
       {/* The time and the message's actions (Reply, Copy, model and time) share one line. */}
       <div className="rem-msg-foot">{stamp}<MessageActions message={message} /></div>
@@ -386,6 +393,13 @@ const SelfWorkBatch = memo(function SelfWorkBatch({ messages, first, now, taskLi
     </div>
   </div>;
 });
+
+// "3 of 4 tickets passed review first time" in the period, from Usage › Verified work. Shown
+// on the card only: the report's text, which Rem reads back, never carries it.
+function SelfWorkVerifiedLine({ message }) {
+  const line = selfWorkVerifiedLine(message);
+  return line ? <p className="rem-sw-verified">{line}</p> : null;
+}
 
 // What one self-work period did, under the report Rem posted when it ended: each thing it
 // worked on and how it went. A row opens its task, or its thread when the task is gone.

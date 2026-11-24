@@ -21,8 +21,9 @@ Fleet depends on experimental device networking and compatible desktop versions.
 Fleet targets are desktops, not phones.
 
 - Both sides must keep their trusted identity and have a route: the local network, or your own Tailscale network if you opt in. There's no internet relay.
+- When a computer moves to another network, it tells its paired desktops its new address on its next exchange with them, usually within half a minute (see [Staying connected](../mobile/pairing.md#staying-connected)). A desktop that can't reach the other at all can't learn the new address until one of them makes contact.
 - A working connection grants no project access and no permission to run anything.
-- **Run threads from this desktop**, on a paired desktop's entry, lets that desktop start Rem threads that run on this computer. They pick this computer under **Run on**.
+- **Run threads from this desktop**, on a paired desktop's entry, lets that desktop start Rem threads that run on this computer. They pick this computer under **Run on**. Turning this off, revoking that desktop or unpairing it stops any of its tasks still running here.
 
 ## Inspect before sending work
 

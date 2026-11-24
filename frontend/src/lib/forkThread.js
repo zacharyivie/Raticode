@@ -40,7 +40,7 @@ export function forkThreadHistory(parent, history, throughId, newId, now = new D
     id: newId, title: `${parent.title || "Thread"} (fork)`, createdAt: now, updatedAt: now,
     forkedFromThreadId: parent.id, forkedFromMessageId: throughId,
   };
-  for (const field of ["provider", "model", "effort", "resources", "permissionsByProvider", "projectRoot", "projectName", "projectBranch", "workflowId", "workflowName", "scopeMode"]) {
+  for (const field of ["provider", "model", "effort", "resources", "permissionsByProvider", "accountsByProvider", "projectRoot", "projectName", "projectBranch", "workflowId", "workflowName", "scopeMode"]) {
     if (parent[field] !== undefined) thread[field] = structuredClone(parent[field]);
   }
   return { thread, messages };

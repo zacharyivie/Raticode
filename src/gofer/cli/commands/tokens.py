@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 import typer
 
 from gofer.cli.output import emit_json, format_option, wants_json
-from gofer.utils.paths import get_data_dir
 
 if TYPE_CHECKING:
     from gofer.ui.headless import AgentTokenStore
@@ -21,13 +20,20 @@ app = typer.Typer(
     ),
     no_args_is_help=True,
 )
-_DATA_DIR = typer.Option(None, "--data-dir", help="Raticode data directory")
+_DATA_DIR = typer.Option(
+    None,
+    "--data-dir",
+    help="Raticode data directory. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the "
+    "standard folder.",
+)
 
 
 def _store(data_dir: Path | None) -> AgentTokenStore:
+    from gofer.cli.client import resolve_data_dir
     from gofer.ui.headless import AgentTokenStore
 
-    return AgentTokenStore(data_dir or get_data_dir())
+    # The same folder the CLI's clients discover the backend in.
+    return AgentTokenStore(resolve_data_dir(data_dir))
 
 
 def _refuse_agent_session() -> None:
@@ -53,6 +59,12 @@ def create(
     expires_days: int | None = typer.Option(
         None, "--expires-days", min=1, help="Stop accepting the token after this many days."
     ),
+    private_brains: bool = typer.Option(
+        False,
+        "--private-brains",
+        help="Let the token read Second Brains with Allow cloud processing off. Only for "
+        "scripts that keep what they read on this computer.",
+    ),
     data_dir: Path | None = _DATA_DIR,
 ) -> None:
     """Create an agent token and write it to a new owner-only file. It is never printed."""
@@ -64,7 +76,7 @@ def create(
         raise typer.Exit(2)
     store = _store(data_dir)
     try:
-        token = store.create(name, expires_days=expires_days)
+        token = store.create(name, expires_days=expires_days, private_brains=private_brains)
     except HeadlessError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(2) from exc
@@ -75,6 +87,12 @@ def create(
         typer.echo(f"Error: couldn't write {output}: {exc}", err=True)
         raise typer.Exit(1) from exc
     typer.echo(f"Created agent token {name!r} in {output}", err=True)
+    if private_brains:
+        typer.echo(
+            "It can read private Second Brains. Keep it in scripts whose output stays on "
+            "this computer.",
+            err=True,
+        )
 
 
 @app.command("list")
@@ -100,7 +118,10 @@ def list_tokens(
     for token in tokens:
         expiry = token["expiresAt"] or "never"
         state = "expired" if token["expired"] else "active"
-        typer.echo(f"{token['name']}\t{state}\tcreated {token['createdAt']}\texpires {expiry}")
+        brains = "\tprivate brains" if token["privateBrains"] else ""
+        typer.echo(
+            f"{token['name']}\t{state}\tcreated {token['createdAt']}\texpires {expiry}{brains}"
+        )
 
 
 @app.command("revoke")

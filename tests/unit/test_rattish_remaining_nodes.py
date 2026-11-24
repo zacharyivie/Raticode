@@ -232,13 +232,21 @@ async def test_local_vectorize_stops_scanning_at_limit(tmp_path, monkeypatch):
     )
     seen = []
 
-    def bounded_scan(self, pattern):
-        for entry in entries:
-            seen.append(entry)
-            yield entry
+    # Path is patched for the whole process, so scans of other folders (a background
+    # thread another test left, for one) pass through and aren't counted.
+    def bounded(original: Any) -> Any:
+        def scan(self: Path, pattern: str, *args: Any, **kwargs: Any) -> Any:
+            if Path(self).resolve() != docs.resolve():
+                yield from original(self, pattern, *args, **kwargs)
+                return
+            for entry in entries:
+                seen.append(entry)
+                yield entry
 
-    monkeypatch.setattr(Path, "rglob", bounded_scan)
-    monkeypatch.setattr(Path, "glob", bounded_scan)
+        return scan
+
+    monkeypatch.setattr(Path, "rglob", bounded(Path.rglob))
+    monkeypatch.setattr(Path, "glob", bounded(Path.glob))
     monkeypatch.setattr(runtime, "DEFAULT_RESOURCE_LIMITS", ResourceLimits(max_files_scanned=2))
     result = await execute_node(ir, "index")
     assert result.outcome == "failure"
@@ -653,30 +661,29 @@ def test_tabular_loop_accepts_exact_item_limit_and_preserves_newlines(
 def test_xlsx_loop_bounds_rows_and_closes_workbook(tmp_path, monkeypatch, row_count):
     from datetime import datetime
 
-    openpyxl = pytest.importorskip("openpyxl")
-    path = tmp_path / "rows.xlsx"
-    workbook = openpyxl.Workbook()
-    sheet = workbook.active
-    sheet.append(["name", "when"])
-    for index in range(row_count):
-        sheet.append([str(index), datetime(2026, 1, 1)])
-    workbook.save(path)
-    workbook.close()
-    original_load = openpyxl.load_workbook
-    closed = []
+    from gofer.utils import xlsx
+    from tests.helpers.xlsx_files import write_xlsx
 
-    def load_workbook(*args, **kwargs):
-        loaded = original_load(*args, **kwargs)
-        close = loaded.close
+    pytest.importorskip("python_calamine")
+    path = write_xlsx(
+        tmp_path / "rows.xlsx",
+        [
+            [["name", "when"]]
+            + [
+                [str(index), ("xml", '<c r="{ref}" s="2"><v>46023</v></c>')]
+                for index in range(row_count)
+            ]
+        ],
+    )
+    original_open = xlsx.open_xlsx_rows
+    opened = []
 
-        def record_close():
-            closed.append(True)
-            close()
+    def open_rows(*args, **kwargs):
+        rows = original_open(*args, **kwargs)
+        opened.append(rows)
+        return rows
 
-        monkeypatch.setattr(loaded, "close", record_close)
-        return loaded
-
-    monkeypatch.setattr(openpyxl, "load_workbook", load_workbook)
+    monkeypatch.setattr(xlsx, "open_xlsx_rows", open_rows)
     monkeypatch.setattr(runtime, "DEFAULT_RESOURCE_LIMITS", ResourceLimits(max_fanout_items=2))
     context = runtime.RuntimeContext(tmp_path, "test", "test", {}, (), {})
     if row_count > 2:
@@ -687,7 +694,16 @@ def test_xlsx_loop_bounds_rows_and_closes_workbook(tmp_path, monkeypatch, row_co
         assert items == [
             {"name": str(index), "when": datetime(2026, 1, 1)} for index in range(row_count)
         ]
-    assert closed == [True]
+    assert [rows.closed for rows in opened] == [True]
+
+
+def test_xlsx_loop_without_the_reader_names_the_extra(tmp_path, monkeypatch):
+    path = tmp_path / "rows.xlsx"
+    path.write_bytes(b"")
+    monkeypatch.setitem(sys.modules, "python_calamine", None)
+    context = runtime.RuntimeContext(tmp_path, "test", "test", {}, (), {})
+    with pytest.raises(ValueError, match="xlsx optional dependency"):
+        runtime._tabular_loop_items(path, context)
 
 
 @pytest.mark.anyio

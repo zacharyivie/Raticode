@@ -139,6 +139,7 @@ def test_default_settings_skip_reading_when_under_keep_last(workflow, monkeypatc
         raise AssertionError("records were read")
 
     monkeypatch.setattr(run_retention, "load_run_records", fail)
+    monkeypatch.setattr(run_retention, "summary_run_records", fail)
 
     assert (
         run_retention.apply_run_retention(data_dir, registered.workflow_id, _logs(registered)) == []
@@ -152,7 +153,7 @@ def test_failed_clean_up_does_not_change_the_run(workflow, monkeypatch) -> None:
     def broken(*args: object, **kwargs: object) -> None:
         raise OSError("disk unplugged")
 
-    monkeypatch.setattr(run_retention, "run_record_paths", broken)
+    monkeypatch.setattr(run_retention, "run_record_count", broken)
 
     result = anyio.run(lambda: run_rattish_file(registered.entrypoint, data_dir=data_dir))
 

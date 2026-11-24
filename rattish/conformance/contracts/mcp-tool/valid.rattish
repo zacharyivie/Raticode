@@ -1,0 +1,15 @@
+Rattish: 1
+Workflow:
+  name: MCP tool contract
+Node example:
+  type: mcp-tool
+  server: docs
+  tool: search
+  arguments:
+    query: release notes
+    limit: 5
+  output-schema:
+    type: object
+  call-timeout: 30s
+  network:
+    - api.example.com

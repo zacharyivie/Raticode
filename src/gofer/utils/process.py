@@ -78,6 +78,20 @@ def credential_env(name: str) -> str:
     return os.environ.get(name) or _SEALED_CREDENTIALS.get(name, "")
 
 
+# An override naming variables the child must not get, space-separated. A provider
+# account sets it so a parent's OPENAI_API_KEY or ANTHROPIC_API_KEY can't replace the
+# account folder's own sign-in: overrides only add, so removing needs a marker.
+UNSET_ENV = "RATICODE_UNSET_ENV"
+
+
+def without_unset_env(env: dict[str, str]) -> dict[str, str]:
+    """``env`` without the variables UNSET_ENV names, and without the marker itself."""
+    result = dict(env)
+    for name in result.pop(UNSET_ENV, "").split():
+        result.pop(name, None)
+    return result
+
+
 def build_subprocess_env(
     overrides: dict[str, str] | None = None, *, inherit_parent: bool = True
 ) -> dict[str, str]:
@@ -85,6 +99,7 @@ def build_subprocess_env(
     env = dict(os.environ) if inherit_parent else {}
     _sanitize_packaged_runtime_env(env)
     env.update(overrides or {})
+    env = without_unset_env(env)
     # These credentials authorize Studio, desktop path grants, browser grants and the
     # Raticode API, or point at the headless secrets folder; none is for child providers
     # or workflow commands. Strip them even from a copied parent env.
@@ -93,6 +108,11 @@ def build_subprocess_env(
     # Marks providers, Rem workers and workflow commands as agents: the CLI then
     # refuses to read the headless owner token (gofer.ui.headless).
     env["RATICODE_AGENT_SESSION"] = "1"
+    # Settings > Rem > Remove Co-authored-by lines: a commit-msg hook for every
+    # commit made in this child, including an agent's own `git commit`.
+    from gofer.core.commit_attribution import hook_environment
+
+    env.update(hook_environment(env))
     return env
 
 
@@ -102,21 +122,27 @@ NO_REPOSITORY_PROGRAMS = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/d
 
 # Repository-scoped settings that name commands git runs on file contents: clean, smudge
 # and process filters (``add``, ``status``, ``checkout``/``worktree add``), diff textconv
-# and external diff drivers, and merge drivers (rebase, merge). Same list as the desktop's
-# git-status.cjs, plus merge drivers, which the backend's landing step can reach. The lfs
-# keys name programs git-lfs runs from inside its own filter.
+# and external diff drivers, merge drivers (rebase, merge), and hooks named in config
+# (``hook.<name>.command``, git 2.54 and later), which ``core.hooksPath`` doesn't turn off
+# and ``--no-verify`` only partly skips: post-commit, post-checkout and
+# reference-transaction still run. Same list as the desktop's git-status.cjs, plus merge
+# drivers, which the backend's landing step can reach. The lfs keys name programs git-lfs
+# runs from inside its own filter. Raticode's own commit-msg hook comes in at command
+# scope (GIT_CONFIG_PARAMETERS), so it is never one of these.
 _REPOSITORY_COMMAND_KEYS = (
     r"^(filter\..+\.(clean|smudge|process)|diff\..+\.(textconv|command)|merge\..+\.driver"
+    r"|hook\..+\.command"
     r"|lfs\.customtransfer\..+\.path|lfs\.standalonetransferagent"
     r"|lfs\.extension\..+\.(clean|smudge))$"
 )
 _TRUSTED_FILTER_COMMAND = re.compile(r"^git-lfs (?:filter-process|clean -- %f|smudge -- %f)$")
 _REPOSITORY_SCOPES = {"local", "worktree"}
 # What replaces each planted command. An empty filter means no filter, but an empty
-# textconv, external diff or merge driver makes git fail, so those get programs that read
-# nothing from the repository: textconv ``cat`` leaves the text unchanged, an external
-# diff ``true`` prints nothing (the backend's diffs pass --no-ext-diff anyway), and merge
-# driver ``false`` reports a conflict instead of silently keeping one side.
+# textconv, external diff, merge driver or hook makes git fail, so those get programs that
+# read nothing from the repository: textconv ``cat`` leaves the text unchanged, an external
+# diff ``true`` prints nothing (the backend's diffs pass --no-ext-diff anyway), a hook
+# ``true`` succeeds without doing anything, and merge driver ``false`` reports a conflict
+# instead of silently keeping one side.
 _HARMLESS_COMMAND = {
     "clean": "",
     "smudge": "",
@@ -163,9 +189,11 @@ def untrusted_repository_git_env(directory: Path | str, env: dict[str, str]) -> 
     """``env`` for git in a checkout an agent can edit: no repository-named programs.
 
     Pair it with NO_REPOSITORY_PROGRAMS on the command line. It overrides every filter,
-    textconv, external diff and merge driver command the repository's own config (local or
-    worktree scope) names, so ``git add -A``, ``status``, ``worktree add`` and merges the
-    backend runs itself can't run them outside the sandbox (CWE-78). Filters from the
+    textconv, external diff, merge driver and hook command the repository's own config
+    (local or worktree scope) names, so ``git add -A``, ``status``, ``commit``,
+    ``worktree add`` and merges the backend runs itself can't run them outside the sandbox
+    (CWE-78). That includes the config of a folder a checkout's ``.git`` file points at,
+    which git reads at local scope. Filters from the
     user's global or system config, and git-lfs installed with ``git lfs install --local``,
     still run, unless the repository names its own git-lfs programs.
 

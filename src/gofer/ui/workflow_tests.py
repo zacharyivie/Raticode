@@ -2,6 +2,10 @@
 
 Test runs go to a background thread like background workflow runs. The panel polls
 the saved result, which ``run_test_set`` rewrites after each case.
+
+Try another model sends ``models`` (``[{node, provider, model}]``) to the estimate and
+the run. The panel's Use this model doesn't come here: it edits the node through the
+graph editor like any other edit, so the open editor stays in step.
 """
 
 from __future__ import annotations
@@ -15,11 +19,17 @@ import anyio
 
 from gofer.rattish.artifacts import RattishArtifactError, compile_rattish_file
 from gofer.rattish.diagnostics import RattishError
+from gofer.rattish.model_overrides import (
+    ModelOverrideError,
+    model_nodes,
+    model_overrides_from_json,
+)
 from gofer.rattish.run_service import new_run_id
 from gofer.rattish.test_sets import (
     WorkflowTestError,
     enforce_cost_limit,
     estimate_test_set,
+    latest_result,
     list_test_results,
     prepare_test_run,
     read_test_result,
@@ -76,6 +86,7 @@ def workflow_tests_payload(workflow_id: str, data_dir: Path) -> dict[str, Any]:
         "results": [],
         "latest": None,
         "activeResultId": _active_result_id(data_dir, workflow.workflow_id),
+        "modelNodes": [],
     }
     try:
         compiled = compile_rattish_file(
@@ -90,8 +101,9 @@ def workflow_tests_payload(workflow_id: str, data_dir: Path) -> dict[str, Any]:
     directory = results_directory(workflow.entrypoint, workflow.workflow_id, data_dir)
     history = list_test_results(directory)
     payload["results"] = [result_summary(item) for item in history]
-    if history:
-        payload["latest"] = with_comparison(history[0], history)
+    latest = latest_result(history)
+    if latest is not None:
+        payload["latest"] = with_comparison(latest, history)
     try:
         test_set = read_test_set(path)
     except WorkflowTestError as exc:
@@ -103,6 +115,7 @@ def workflow_tests_payload(workflow_id: str, data_dir: Path) -> dict[str, Any]:
         return payload
     payload["testSet"] = test_set or {"testSetVersion": 1, "cases": []}
     if compiled is not None:
+        payload["modelNodes"] = model_nodes(compiled.ir)
         payload["revision"] = compiled.ir["source"]["source_fingerprint"]
         payload["estimate"] = estimate_test_set(compiled.ir, payload["testSet"], history)
         payload["judgeEstimateSkipped"] = estimate_test_set(
@@ -122,25 +135,17 @@ def save_workflow_tests_payload(
     return workflow_tests_payload(workflow.workflow_id, data_dir)
 
 
-def start_workflow_tests_payload(
-    workflow_id: str, data_dir: Path, body: dict[str, Any]
-) -> dict[str, Any]:
-    """Start a test run in the background and return its first saved state."""
-    workflow = _workflow(workflow_id, data_dir)
+def _prepare(workflow: RegisteredWorkflow, data_dir: Path, body: dict[str, Any]) -> Any:
     case_ids = body.get("caseIds")
     if case_ids is not None and (
         not isinstance(case_ids, list) or not all(isinstance(item, str) for item in case_ids)
     ):
         raise WorkflowTestError("caseIds must be a list of case IDs.")
     skip_judge = body.get("skipJudge", False)
-    max_cost = body.get("maxCostUsd")
     if not isinstance(skip_judge, bool):
         raise WorkflowTestError("skipJudge must be true or false.")
-    if max_cost is not None and (
-        isinstance(max_cost, bool) or not isinstance(max_cost, (int, float)) or max_cost < 0
-    ):
-        raise WorkflowTestError("maxCostUsd must be a number of dollars.")
     try:
+        models = model_overrides_from_json(body.get("models"))
         prepared = prepare_test_run(
             workflow.entrypoint,
             case_ids=case_ids or None,
@@ -148,7 +153,10 @@ def start_workflow_tests_payload(
             data_dir=data_dir,
             workflow_id=workflow.workflow_id,
             project_root=workflow.project_root,
+            models=models,
         )
+    except ModelOverrideError as exc:
+        raise WorkflowTestError(str(exc)) from exc
     except (RattishError, RattishArtifactError, OSError) as exc:
         raise WorkflowTestError(f"The workflow can't be tested: {exc}") from exc
     expected_revision = body.get("expectedRevision")
@@ -156,7 +164,34 @@ def start_workflow_tests_payload(
         raise WorkflowTestError(
             "The workflow changed since the panel loaded. Check the expected cost again."
         )
-    enforce_cost_limit(prepared.estimate, float(max_cost) if max_cost is not None else None)
+    return prepared
+
+
+def estimate_workflow_tests_payload(
+    workflow_id: str, data_dir: Path, body: dict[str, Any]
+) -> dict[str, Any]:
+    """The expected cost of a run, for both models when ``models`` tries another one."""
+    workflow = _workflow(workflow_id, data_dir)
+    prepared = _prepare(workflow, data_dir, body)
+    return {
+        "revision": prepared.ir["source"]["source_fingerprint"],
+        "estimate": prepared.cost_estimate,
+        "variant": prepared.variant,
+    }
+
+
+def start_workflow_tests_payload(
+    workflow_id: str, data_dir: Path, body: dict[str, Any]
+) -> dict[str, Any]:
+    """Start a test run in the background and return its first saved state."""
+    workflow = _workflow(workflow_id, data_dir)
+    max_cost = body.get("maxCostUsd")
+    if max_cost is not None and (
+        isinstance(max_cost, bool) or not isinstance(max_cost, (int, float)) or max_cost < 0
+    ):
+        raise WorkflowTestError("maxCostUsd must be a number of dollars.")
+    prepared = _prepare(workflow, data_dir, body)
+    enforce_cost_limit(prepared.cost_estimate, float(max_cost) if max_cost is not None else None)
     if not prepared.cases:
         raise WorkflowTestError("The test set has no cases to run.")
     key = _key(data_dir, workflow.workflow_id)

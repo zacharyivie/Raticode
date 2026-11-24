@@ -249,6 +249,8 @@ const RattishEditor = forwardRef(function RattishEditor({
       modelRef.current = model;
       const editor = monaco.editor.create(containerRef.current, {
         automaticLayout: false,
+        // Keep the hidden textarea input, as in CodeWorkspace.
+        editContext: false,
         cursorBlinking: "smooth",
         fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
         fontSize: 13,

@@ -1,22 +1,26 @@
 """Raticode's own git commands in checkouts agents can edit run no repository-named programs.
 
 A worker can write ``.git/config`` and ``.gitattributes`` in its checkout. Clean, smudge
-and process filters, textconv and external diff drivers, and merge drivers named there
-would otherwise run outside any sandbox when the backend stages, checks out, diffs or
-reads status (CWE-78). Scratch repositories only.
+and process filters, textconv and external diff drivers, merge drivers and hooks named
+there would otherwise run outside any sandbox when the backend stages, commits, checks
+out, diffs or reads status (CWE-78). Scratch repositories only.
 """
 
 from __future__ import annotations
 
+import os
+import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from gofer.ui import organization_repository, swarm_workspaces
+from gofer.rattish import run_worktrees
+from gofer.ui import organization_repository, swarm_workspaces, ticket_patch
 from gofer.ui.rem_home_worktree import ensure_worktree, release_worktree
-from gofer.utils.process import untrusted_repository_git_env
+from gofer.utils.process import NO_REPOSITORY_PROGRAMS, untrusted_repository_git_env
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
 
@@ -193,3 +197,210 @@ def test_organization_and_swarm_git_run_no_planted_filter(tmp_path):
     swarm_workspaces.git(repo, "diff", "HEAD")
 
     assert not marker.exists(), marker.read_text()
+
+
+# Hooks named in config ------------------------------------------------------------------
+#
+# Git 2.54 and later run ``hook.<name>.command`` for each ``hook.<name>.event``. Neither
+# ``core.hooksPath`` nor ``--no-verify`` stops them all: post-commit, prepare-commit-msg,
+# post-checkout and reference-transaction still run.
+
+
+def git_version() -> tuple[int, ...]:
+    try:
+        text = subprocess.run(
+            ["git", "--version"], capture_output=True, text=True, check=False
+        ).stdout
+    except OSError:
+        return ()
+    found = re.search(r"(\d+)\.(\d+)", text)
+    return tuple(int(part) for part in found.groups()) if found else ()
+
+
+needs_config_hooks = pytest.mark.skipif(
+    git_version() < (2, 54), reason="hooks named in config need git 2.54 or later"
+)
+
+HOOK_EVENTS = (
+    "pre-commit",
+    "prepare-commit-msg",
+    "commit-msg",
+    "post-commit",
+    "post-checkout",
+    "reference-transaction",
+    "post-index-change",
+    "pre-auto-gc",
+)
+
+
+def plant_hooks(repo: Path, marker: Path, *scope: str, name: str = "planted") -> None:
+    """Name a hook for every event Raticode's commits and checkouts can reach."""
+    for event in HOOK_EVENTS:
+        run(repo, "config", *scope, "--add", f"hook.{name}.event", event)
+    run(repo, "config", *scope, f"hook.{name}.command", f"echo ran >> {shlex.quote(str(marker))}")
+
+
+def plant_at(scope: str, repo: Path, checkout: Path, marker: Path) -> None:
+    """Hooks at local scope (the shared config) or in ``checkout``'s config.worktree."""
+    if scope == "local":
+        plant_hooks(repo, marker)
+    else:
+        run(repo, "config", "extensions.worktreeConfig", "true")
+        plant_hooks(checkout, marker, "--worktree")
+
+
+def hooks_run_for_plain_git(checkout: Path, marker: Path) -> bool:
+    """The planted hooks are live: an ordinary commit runs them."""
+    run(checkout, "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "plain")
+    ran = marker.exists()
+    marker.unlink(missing_ok=True)
+    return ran
+
+
+def run_checkout(repo: Path, data_dir: Path) -> run_worktrees.RunWorktree:
+    planned = run_worktrees.plan(data_dir, repo, "wf", "run-1")
+    run_worktrees.create(planned)
+    return planned
+
+
+def commit_with_run_worktrees(checkout: Path) -> None:
+    branch = run(checkout, "symbolic-ref", "--short", "HEAD").strip()
+    assert run_worktrees.commit_changes(checkout, "Run", branch=branch)
+
+
+def commit_with_ticket_patch(checkout: Path) -> None:
+    branch = run(checkout, "symbolic-ref", "--short", "HEAD").strip()
+    assert ticket_patch.commit_leftovers(str(checkout), "Ticket", branch=branch)
+
+
+def commit_with_rem_release(checkout: Path) -> None:
+    branch = run(checkout, "symbolic-ref", "--short", "HEAD").strip()
+    base = run(checkout, "rev-parse", "HEAD").strip()
+    repository = run(checkout, "rev-parse", "--show-toplevel").strip()
+    summary = release_worktree(
+        {
+            "checkout": str(checkout),
+            "root": str(checkout),
+            "repository": str(repository),
+            "branch": branch,
+            "base": base,
+        },
+        "Task",
+    )
+    assert "couldn't commit" not in summary
+
+
+COMMIT_SITES = {
+    "run_worktrees.commit_changes": commit_with_run_worktrees,
+    "ticket_patch.commit_leftovers": commit_with_ticket_patch,
+    "rem_home_worktree.release_worktree": commit_with_rem_release,
+}
+
+
+@needs_config_hooks
+@pytest.mark.parametrize("scope", ["local", "worktree"])
+@pytest.mark.parametrize("site", list(COMMIT_SITES))
+def test_commits_run_no_hook_named_in_repository_config(tmp_path, scope, site):
+    repo = repository(tmp_path)
+    planned = run_checkout(repo, tmp_path / "data")
+    marker = tmp_path / "marker"
+    plant_at(scope, repo, planned.checkout, marker)
+    assert hooks_run_for_plain_git(planned.checkout, marker)
+    tip = run(repo, "rev-parse", planned.branch).strip()
+    (planned.checkout / "b.txt").write_text("new\n")
+
+    COMMIT_SITES[site](planned.checkout)
+
+    assert not marker.exists(), marker.read_text()
+    assert run(repo, "rev-parse", planned.branch).strip() != tip
+    assert "b.txt" in run(repo, "show", "--name-only", "--format=", planned.branch)
+
+
+@needs_config_hooks
+@pytest.mark.parametrize("scope", ["local", "worktree"])
+def test_worktree_add_runs_no_hook_named_in_repository_config(tmp_path, scope):
+    repo = repository(tmp_path)
+    marker = tmp_path / "marker"
+    plant_at(scope, repo, repo, marker)
+    run(repo, "worktree", "add", "-q", "-b", "plain", str(tmp_path / "plain"))
+    assert marker.exists()  # The planted post-checkout and reference-transaction hooks.
+    marker.unlink()
+
+    run_checkout(repo, tmp_path / "data")
+    ensure_worktree(
+        {
+            "checkout": str(tmp_path / "data" / "rem-worktrees" / "run"),
+            "root": str(tmp_path / "data" / "rem-worktrees" / "run"),
+            "repository": str(repo),
+            "branch": "rem/task-run",
+            "base": run(repo, "rev-parse", "HEAD").strip(),
+        }
+    )
+
+    assert not marker.exists(), marker.read_text()
+    assert (tmp_path / "data" / "rem-worktrees" / "run" / "a.txt").is_file()
+
+
+@needs_config_hooks
+@pytest.mark.parametrize("site", list(COMMIT_SITES))
+def test_a_dot_git_file_pointed_at_a_planted_git_folder_runs_no_hooks(tmp_path, site):
+    # An agent rewrote its checkout's .git file to name a git folder it made itself. Git
+    # reads that folder's config at local scope, so its hooks are blanked like any other.
+    repo = repository(tmp_path)
+    planned = run_checkout(repo, tmp_path / "data")
+    (tmp_path / "planted").mkdir()
+    planted = repository(tmp_path / "planted") / ".git"
+    run(planted.parent, "checkout", "-q", "-b", "agent")
+    marker = tmp_path / "marker"
+    plant_hooks(planted.parent, marker)
+    (planned.checkout / ".git").write_text(f"gitdir: {planted}\n")
+    assert hooks_run_for_plain_git(planned.checkout, marker)
+    (planned.checkout / "b.txt").write_text("new\n")
+
+    COMMIT_SITES[site](planned.checkout)
+
+    assert not marker.exists(), marker.read_text()
+
+
+@needs_config_hooks
+def test_hooks_from_the_command_line_still_run(tmp_path):
+    # Raticode's own Co-authored-by hook comes in through GIT_CONFIG_PARAMETERS at command
+    # scope. It is never blanked, and git reads those entries after GIT_CONFIG_COUNT, so a
+    # repository hook of the same name can't replace it either.
+    repo = repository(tmp_path)
+    marker, own = tmp_path / "marker", tmp_path / "own"
+    plant_hooks(repo, marker)
+    # A repository command under the same name, trying to replace Raticode's.
+    run(repo, "config", "hook.own.command", f"echo ran >> {shlex.quote(str(marker))}")
+    command = f"echo own >> {shlex.quote(str(own))}"
+    parameters = f"'hook.own.event'='post-commit' 'hook.own.command'={shlex.quote(command)}"
+    existing = os.environ.get("GIT_CONFIG_PARAMETERS", "").strip()
+    env = {
+        **os.environ,
+        "GIT_CONFIG_PARAMETERS": f"{existing} {parameters}".strip(),
+    }
+
+    found = settings(untrusted_repository_git_env(repo, env))
+    assert found["hook.planted.command"] == "true"
+    assert found["hook.own.command"] == "true"  # The repository's own entry, local scope.
+    subprocess.run(
+        [
+            "git",
+            *NO_REPOSITORY_PROGRAMS,
+            "-C",
+            str(repo),
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x",
+        ],
+        check=True,
+        capture_output=True,
+        env=untrusted_repository_git_env(repo, env),
+    )
+
+    assert not marker.exists(), marker.read_text()
+    assert own.read_text() == "own\n"

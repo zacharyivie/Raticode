@@ -409,6 +409,7 @@ async def test_script_contracts_compile_preflight_and_execute_with_explicit_deli
         "script_path": script_name,
         "args": ["explicit-argument"],
         "env": {"BUILD_MODE": "configured"},
+        **({"shell": "auto"} if node_type == "shell-script" else {}),
     }
     assert [item["id"] for item in node["preflight_checks"]] == [
         "interpreter-available",

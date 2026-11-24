@@ -109,3 +109,18 @@ test("damaged browser data is kept aside, reported, and not overwritten by the n
   // A missing file is normal on first start and stays quiet.
   assert.ok(!warnings.some((message) => /history\.json/.test(message)));
 });
+
+test("local files allowed to load remote content are remembered by full path", () => {
+  const { store, directory } = storeAt();
+  const file = path.join(directory, "project", "report.html");
+  assert.equal(store.previewRemoteAllowed(file), false);
+  assert.equal(store.setPreviewRemote(file, true), true);
+  assert.equal(store.setPreviewRemote("report.html", true), false, "a relative path is refused");
+  store.flush();
+  const reloaded = createBrowserStore(directory);
+  assert.equal(reloaded.previewRemoteAllowed(file), true);
+  assert.equal(reloaded.previewRemoteAllowed(path.join(directory, "project", "other.html")), false);
+  assert.equal(reloaded.setPreviewRemote(file, false), false);
+  reloaded.flush();
+  assert.equal(createBrowserStore(directory).previewRemoteAllowed(file), false);
+});

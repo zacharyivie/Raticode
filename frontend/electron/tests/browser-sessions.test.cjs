@@ -11,6 +11,7 @@ const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { createBrowserSessions, remOwnerForThread, sameProfile, sanitizePromptResponse } = require("../browser-sessions.cjs");
 const { createBrowserStore } = require("../browser-store.cjs");
+const { browserContentZoomFactor } = require("../browser-utils.cjs");
 const { PARTITIONS } = require("../browser-policy.cjs");
 
 let nextId = 100;
@@ -45,6 +46,7 @@ class FakeProfile extends EventEmitter {
   setDevicePermissionHandler(handler) { this.deviceHandler = handler; }
   setCertificateVerifyProc(proc) { this.verifyProc = proc; }
   setSpellCheckerEnabled(value) { this.spellcheck = value; }
+  setProxy(config) { this.proxy = config; }
   setSpellCheckerLanguages(value) { this.languages = value; }
   async clearStorageData() { this.cookieList = []; }
   async clearCache() { this.cacheCleared = true; }
@@ -89,6 +91,7 @@ class FakeContents extends EventEmitter {
   setBackgroundThrottling(value) { this.throttling = value; }
   setZoomFactor(value) { this.zoom = value; }
   setWindowOpenHandler(handler) { this.openHandler = handler; }
+  setWebRTCIPHandlingPolicy(value) { this.webrtcPolicy = value; }
   getURL() { return this.url; }
   getTitle() { return this.title; }
   isLoading() { return false; }
@@ -146,7 +149,7 @@ function fakeWindow(name) {
   };
 }
 
-function harness({ policy, dialog: dialogOverrides = {}, openWith = null, logs = null, firefox = null, chrome = null, chromium = {}, quarantine = "", beforeInstall = null, resolvePath = null } = {}) {
+function harness({ policy, dialog: dialogOverrides = {}, openWith = null, logs = null, firefox = null, chrome = null, chromium = {}, gecko = null, quarantine = "", beforeInstall = null, resolvePath = null, resolvePreviewPath = null, createSessions = createBrowserSessions } = {}) {
   const profiles = Object.fromEntries(Object.values(PARTITIONS).map((name) => [name, new FakeProfile(name)]));
   const owner = Object.assign(new EventEmitter(), {
     id: 1,
@@ -158,7 +161,8 @@ function harness({ policy, dialog: dialogOverrides = {}, openWith = null, logs =
   });
   const mainWindow = Object.assign(fakeWindow("main"), { webContents: owner });
   mainWindow.contentView.owner = mainWindow;
-  const popout = fakeWindow("popout");
+  // The Browser's own window shows the studio's DOM in a page of its own, with its own zoom.
+  const popout = Object.assign(fakeWindow("popout"), { webContents: { id: 2, zoom: 1, isDestroyed: () => false, getZoomFactor() { return this.zoom; } } });
   popout.contentView.owner = popout;
   let popoutOpen = false;
   const views = [];
@@ -177,7 +181,7 @@ function harness({ policy, dialog: dialogOverrides = {}, openWith = null, logs =
     getPreferredSystemLanguages: () => ["fr-FR", "en-US"],
     userAgentFallback: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Raticode/0.3.9 Chrome/156.0.8078.49 Electron/45.1.0 Safari/537.36",
   };
-  const browsers = createBrowserSessions({
+  const browsers = createSessions({
     app,
     Menu: { buildFromTemplate: (template) => { menus.push(template); return { template, popup() {} }; } },
     clipboard: { writeText() {}, readText: () => "from the clipboard" },
@@ -195,6 +199,7 @@ function harness({ policy, dialog: dialogOverrides = {}, openWith = null, logs =
       if (!fs.existsSync(target)) throw new Error(`Path does not exist: ${target}`);
       return target;
     }),
+    ...(resolvePreviewPath ? { resolvePreviewPath } : {}),
     store,
     openWith,
     quarantineDir: quarantine || path.join(directory, "quarantine"),
@@ -203,6 +208,7 @@ function harness({ policy, dialog: dialogOverrides = {}, openWith = null, logs =
     firefox,
     chrome,
     chromium,
+    gecko,
     privateCleanupDelayMs: 1,
     WebContentsView: fakeViewClass(owner, profiles, contentsById, views, viewHooks),
     preloadPath: "/app/browser-preload.cjs",
@@ -687,10 +693,14 @@ test("Ask Rem about this works on local files the same way as on web pages", asy
   const preview = open({ path: file });
   const scripts = [];
   preview.contents.title = "Report";
-  preview.contents.executeJavaScriptInIsolatedWorld = async (world, [script]) => { scripts.push([world, script.code]); return { selection: "", text: "Report" }; };
+  preview.contents.executeJavaScriptInIsolatedWorld = async (world, [script]) => { scripts.push([world, script.code]); return { value: { selection: "", text: "Report", hidden: false } }; };
   const context = await browsers.browserAction(event, { id: preview.id, action: "page-context" });
   assert.deepEqual(context, { url: pathToFileURL(file).toString(), title: "Report", selection: "", text: "Report" });
   assert.equal(scripts.length, 1);
+  // It reads with Rem's page reader, which leaves out text the page hides, and says so.
+  assert.match(scripts[0][1], /__raticodeAgent\("readable"/);
+  preview.contents.executeJavaScriptInIsolatedWorld = async () => ({ value: { selection: "", text: "Shown", hidden: true } });
+  assert.equal((await browsers.browserAction(event, { id: preview.id, action: "page-context" })).text, "[hidden text skipped]\nShown");
   assert.notEqual(scripts[0][0], 0, "the page's own scripts cannot see or change the request");
   // A preview that has left its file offers nothing to ask about.
   const blank = open({ path: file });
@@ -938,10 +948,12 @@ test("a tab's view follows its slot into the Browser's own window and back, stil
   assert.equal(mainWindow.children.includes(tab.view), false);
   assert.equal(tab.contents.loaded.length, loads);
   assert.equal(tab.contents.isDestroyed(), false);
+  // There the slot is measured in that window's zoom, not the studio's.
+  assert.deepEqual(tab.view.bounds, { x: 0, y: 36, width: 900, height: 640 });
   // Hidden keeps its size, so the page doesn't lay out again.
   browsers.browserAction(event, { id: tab.id, action: "place", x: 0, y: 0, width: 0, height: 0, visible: false, host: "popout" });
   assert.equal(tab.view.visible, false);
-  assert.deepEqual(tab.view.bounds, { x: 0, y: 45, width: 1125, height: 800 });
+  assert.deepEqual(tab.view.bounds, { x: 0, y: 36, width: 900, height: 640 });
   // A picture of the page for when Raticode draws over it.
   assert.match((await browsers.browserAction(event, { id: tab.id, action: "view-snapshot" })).snapshot, /^data:image\/jpeg;base64,/);
   // The window closing hands its views back to Raticode's, hidden.
@@ -960,6 +972,43 @@ test("a tab's view follows its slot into the Browser's own window and back, stil
   const other = open({ url: "https://b.test/" });
   other.contents.close();
   assert.equal(browsers.browserAction(event, { id: other.id, action: "adopt", webContentsId: -1 }).closed, true);
+});
+
+test("a popped-out tab is placed and zoomed by the Browser window's zoom, not Raticode's", () => {
+  const { browsers, event, open, owner, mainWindow, popout, setPopoutOpen } = harness();
+  const tab = open({ url: "https://a.test/" });
+  const slot = { x: 4, y: 36.4, width: 800, height: 600, visible: true };
+  let ownerZoom = 1;
+  owner.getZoomFactor = () => ownerZoom;
+  setPopoutOpen(true);
+  for (const [main, window] of [[1.25, 1.25], [0.8, 0.8], [1.25, 1], [0.8, 1], [1, 1.5]]) {
+    ownerZoom = main;
+    popout.webContents.zoom = window;
+    browsers.browserAction(event, { id: tab.id, action: "place", ...slot, host: "popout" });
+    assert.deepEqual(popout.children, [tab.view]);
+    const expected = { x: Math.round(slot.x * window), y: Math.round(slot.y * window), width: Math.round(slot.width * window), height: Math.round(slot.height * window) };
+    assert.deepEqual(tab.view.bounds, expected, `app at ${main}, Browser window at ${window}`);
+    // The page is zoomed like the window it's in.
+    assert.equal(tab.contents.zoom, browserContentZoomFactor(window, 1), `page zoom with the Browser window at ${window}`);
+    // Raticode's zoom changing leaves a popped-out tab at its window's zoom.
+    ownerZoom = main === 1.5 ? 1 : 1.5;
+    browsers.ownerZoom(event);
+    assert.equal(tab.contents.zoom, browserContentZoomFactor(window, 1));
+  }
+  // Back in Raticode's window, its zoom again.
+  ownerZoom = 1.25;
+  browsers.browserAction(event, { id: tab.id, action: "place", ...slot, host: "main" });
+  assert.ok(mainWindow.children.includes(tab.view));
+  assert.deepEqual(tab.view.bounds, { x: 5, y: 46, width: 1000, height: 750 });
+  assert.equal(tab.contents.zoom, browserContentZoomFactor(1.25, 1));
+  ownerZoom = 0.8;
+  browsers.ownerZoom(event);
+  assert.equal(tab.contents.zoom, browserContentZoomFactor(0.8, 1));
+  // A Browser window that has gone falls back to Raticode's zoom.
+  setPopoutOpen(false);
+  popout.webContents.zoom = 1.5;
+  browsers.browserAction(event, { id: tab.id, action: "place", ...slot, host: "popout" });
+  assert.deepEqual(tab.view.bounds, { x: 3, y: 29, width: 640, height: 480 });
 });
 
 test("open in default browser accepts web pages and local HTML only", async () => {
@@ -986,17 +1035,18 @@ test("HTML previews hand file links to the studio and websites to tabs", () => {
   const ipc = (url) => preview.contents.emit("ipc-message", { senderFrame: preview.contents.mainFrame }, "gofer:browser-link-clicked", { url, disposition: "foreground" });
   for (const href of ["file:///repo/guide.md", "file:///outside/app.py:12:3"]) {
     ipc(href);
-    assert.deepEqual(sent("gofer:browser-open-file").at(-1), { href });
+    assert.deepEqual(sent("gofer:browser-open-file").at(-1), { href, fromPage: true });
   }
   preview.contents.input();
   ipc("https://example.com/docs");
   assert.deepEqual(sent("gofer:browser-open-tab").at(-1), { url: "https://example.com/docs", background: false, engine: "raticode" });
+  // A page script opening a site right after the click is not a link the user clicked.
   assert.deepEqual(preview.contents.openHandler({ url: "http://example.com/", disposition: "foreground-tab" }), { action: "deny" });
-  assert.deepEqual(sent("gofer:browser-open-tab").at(-1), { url: "http://example.com/", background: false, engine: "raticode" });
+  assert.equal(sent("gofer:browser-open-tab").length, 1);
   for (const url of ["javascript:alert(1)", "data:text/html,hello"]) {
     assert.deepEqual(preview.contents.openHandler({ url }), { action: "deny" });
   }
-  assert.equal(sent("gofer:browser-open-tab").length, 2);
+  assert.equal(sent("gofer:browser-open-tab").length, 1);
   // Once a preview shows a website, that page cannot reach local files.
   preview.contents.url = "https://example.com/";
   ipc("file:///outside/private.md");
@@ -1642,11 +1692,12 @@ test("a local HTML preview can only read files inside the folder it was granted"
   try {
     const { open, profiles } = harness({ resolvePath });
     const guard = profiles[PARTITIONS.preview].beforeRequest;
-    assert.deepEqual(guard.filter.urls, ["file://*/*"]);
-    const decide = (url) => { let result; guard.listener({ url }, (value) => { result = value; }); return result; };
+    assert.deepEqual(guard.filter.urls, ["file://*/*", "http://*/*", "https://*/*", "ws://*/*", "wss://*/*"]);
+    let webContentsId = 9999;
+    const decide = (url) => { let result; guard.listener({ url, webContentsId }, (value) => { result = value; }); return result; };
     // Before any preview opens, nothing on disk is reachable.
     assert.deepEqual(decide(pathToFileURL(path.join(project, "index.html")).href), { cancel: true });
-    open({ path: path.join(project, "index.html"), grantId: "grant-1" });
+    webContentsId = open({ path: path.join(project, "index.html"), grantId: "grant-1" }).contents.id;
     assert.deepEqual(decide(pathToFileURL(path.join(project, "index.html")).href), { cancel: false });
     assert.deepEqual(decide(pathToFileURL(path.join(project, "style.css")).href), { cancel: false });
     assert.deepEqual(decide(pathToFileURL(secret).href), { cancel: true });
@@ -1658,4 +1709,332 @@ test("a local HTML preview can only read files inside the folder it was granted"
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("local HTML previews stay offline until the user loads remote content for that file", async () => {
+  const { browsers, event, open, profiles, sent, store, directory, views } = harness();
+  const report = path.join(directory, "report.html");
+  const chart = path.join(directory, "chart.html");
+  fs.writeFileSync(report, "<p>report</p>");
+  fs.writeFileSync(chart, "<img src='https://example.com/chart.png'>");
+  const guard = profiles[PARTITIONS.preview].beforeRequest;
+  const decide = (details) => { let result; guard.listener(details, (value) => { result = value; }); return result; };
+  const one = open({ path: report });
+  const two = open({ path: chart });
+  // Network requests from a preview are cancelled, and counted for its bar.
+  for (const url of ["https://example.com/x", "http://127.0.0.1:9/post", "ws://127.0.0.1:9/", "wss://example.com/"]) {
+    assert.deepEqual(decide({ url, webContentsId: one.contents.id }), { cancel: true }, url);
+  }
+  // A request no open preview made is cancelled too.
+  assert.deepEqual(decide({ url: "https://example.com/", webContentsId: 9999 }), { cancel: true });
+  assert.deepEqual(sent("gofer:browser-state").filter((state) => state.id === one.id).at(-1).remoteContent, { allowed: false, blocked: 1 });
+  // The offline profile's only way out is a proxy that isn't there, and its
+  // pages' WebRTC may use only proxied routes, so routes the guard can't see
+  // (WebRTC, preconnect) lead nowhere too.
+  assert.deepEqual(profiles[PARTITIONS.preview].proxy, { mode: "fixed_servers", proxyRules: "http://127.0.0.1:9", proxyBypassRules: "<-loopback>" });
+  assert.equal(profiles[PARTITIONS.previewOnline].proxy, undefined);
+  assert.equal(one.contents.webrtcPolicy, "disable_non_proxied_udp");
+  assert.equal(one.state.partition, PARTITIONS.preview);
+  // Allowing one file moves its previews to the online profile, in a new view
+  // at the same place, and lets only that file online.
+  browsers.browserAction(event, { id: one.id, action: "place", x: 1, y: 2, width: 300, height: 200, visible: true });
+  const offlineContents = one.contents;
+  const state = browsers.browserAction(event, { id: one.id, action: "preview-remote", allowed: true });
+  assert.deepEqual(state.remoteContent, { allowed: true, blocked: 0 });
+  assert.equal(offlineContents.destroyed, true);
+  const onlineView = views.at(-1);
+  assert.equal(onlineView.webPreferences.partition, PARTITIONS.previewOnline);
+  assert.equal(onlineView.webContents.url, pathToFileURL(report).href);
+  assert.equal(onlineView.webContents.webrtcPolicy, undefined);
+  assert.equal(onlineView.visible, true);
+  assert.equal(onlineView.bounds.width, 300);
+  assert.equal(store.previewRemoteAllowed(report), true);
+  const decideOnline = (details) => { let result; profiles[PARTITIONS.previewOnline].beforeRequest.listener(details, (value) => { result = value; }); return result; };
+  assert.deepEqual(decideOnline({ url: "https://example.com/x", webContentsId: onlineView.webContents.id }), { cancel: false });
+  assert.deepEqual(decide({ url: "https://example.com/x", webContentsId: two.contents.id }), { cancel: true });
+  // The online profile still keeps previews inside their folder.
+  assert.deepEqual(decideOnline({ url: "file:///etc/passwd", webContentsId: onlineView.webContents.id }), { cancel: true });
+  // A later preview of the same file remembers it.
+  const three = open({ path: report });
+  assert.equal(three.state.partition, PARTITIONS.previewOnline);
+  assert.deepEqual(decideOnline({ url: "https://example.com/x", webContentsId: three.contents.id }), { cancel: false });
+  // The online page moving to a file that isn't allowed goes back offline first.
+  const navigateOnline = (url) => { let prevented = false; views.at(-1).webContents.emit("will-navigate", { preventDefault: () => { prevented = true; } }, url); return prevented; };
+  assert.equal(navigateOnline(pathToFileURL(chart).href), true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(views.at(-1).webPreferences.partition, PARTITIONS.preview);
+  assert.equal(views.at(-1).webContents.url, pathToFileURL(chart).href);
+  browsers.browserAction(event, { id: one.id, action: "preview-remote", allowed: false });
+  assert.equal(store.previewRemoteAllowed(report), false);
+  assert.equal(views.at(-1).webPreferences.partition, PARTITIONS.preview);
+  // Web tabs can't use the action.
+  const web = open({ url: "https://example.com/" });
+  assert.throws(() => browsers.browserAction(event, { id: web.id, action: "preview-remote", allowed: true }), /Only local HTML previews/);
+  // A file another app opened runs no scripts and can never go online.
+  const external = open({ path: chart, external: true });
+  assert.equal(views.at(-1).webPreferences.javascript, false);
+  assert.equal(views.find((view) => view.webContents === one.contents).webPreferences.javascript, undefined);
+  assert.equal(external.state.external, true);
+  assert.equal(one.state.external, false);
+  assert.throws(() => browsers.browserAction(event, { id: external.id, action: "preview-remote", allowed: true }), /never load remote content/);
+  // The external flag only applies to local files.
+  open({ url: "https://example.com/", external: true });
+  assert.notEqual(views.at(-1).webPreferences.javascript, false);
+});
+
+test("a local preview hands websites to Browser tabs only for a link the user clicked", async () => {
+  const { browsers, event, open, sent, directory } = harness();
+  const file = path.join(directory, "report.html");
+  fs.writeFileSync(file, "<a href='https://example.com/'>site</a>");
+  const preview = open({ path: file });
+  const navigate = (url) => { let prevented = false; preview.contents.emit("will-navigate", { preventDefault: () => { prevented = true; } }, url); return prevented; };
+  // A page script going to a website, or opening one, goes nowhere.
+  assert.equal(navigate("https://example.com/?data=secret"), true);
+  assert.deepEqual(preview.contents.openHandler({ url: "https://example.com/?data=secret", disposition: "foreground-tab" }), { action: "deny" });
+  assert.equal(sent("gofer:browser-open-tab").length, 0);
+  // A click anywhere doesn't let the page's script, or a meta refresh, open
+  // a site: Raticode's preload hands over real link clicks before any navigation.
+  preview.contents.input();
+  assert.equal(navigate("https://example.com/docs?data=secret"), true);
+  assert.deepEqual(preview.contents.openHandler({ url: "https://example.com/?data=secret", disposition: "foreground-tab" }), { action: "deny" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sent("gofer:browser-open-tab").length, 0);
+  // A file from another app runs no scripts, so Raticode's own script world
+  // notes the link the user clicked; only that address opens, once.
+  const external = open({ path: file, external: true });
+  const worlds = [];
+  let clicked = null;
+  external.contents.executeJavaScriptInIsolatedWorld = async (world, [script]) => {
+    worlds.push(world);
+    if (script.code.includes("addEventListener")) return true;
+    const taken = clicked;
+    clicked = null;
+    return taken;
+  };
+  external.contents.emit("dom-ready");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(worlds.length, 1, "the click recorder is installed in each document");
+  const navigateExternal = (url) => { let prevented = false; external.contents.emit("will-navigate", { preventDefault: () => { prevented = true; } }, url); return prevented; };
+  const settled = () => new Promise((resolve) => setTimeout(resolve, 5));
+  external.contents.input();
+  assert.equal(navigateExternal("https://example.com/refresh"), true);
+  await settled();
+  assert.equal(sent("gofer:browser-open-tab").length, 0, "a navigation with no link click opened a tab");
+  clicked = { url: "https://example.com/other", age: 20 };
+  assert.equal(navigateExternal("https://example.com/refresh"), true);
+  await settled();
+  assert.equal(sent("gofer:browser-open-tab").length, 0, "a navigation to another address than the clicked link opened a tab");
+  clicked = { url: "https://example.com/docs", age: 60000 };
+  assert.equal(navigateExternal("https://example.com/docs"), true);
+  await settled();
+  assert.equal(sent("gofer:browser-open-tab").length, 0, "an old click opened a tab");
+  clicked = { url: "https://example.com/docs", age: 20 };
+  assert.equal(navigateExternal("https://example.com/docs"), true);
+  await settled();
+  assert.deepEqual(sent("gofer:browser-open-tab").at(-1), { url: "https://example.com/docs", background: false, engine: "raticode" });
+  // The click was used up.
+  assert.equal(navigateExternal("https://example.com/docs"), true);
+  await settled();
+  assert.equal(sent("gofer:browser-open-tab").length, 1);
+  // A link with a target opens the same way, through the window handler.
+  clicked = { url: "https://example.com/new", age: 10 };
+  assert.deepEqual(external.contents.openHandler({ url: "https://example.com/new", disposition: "foreground-tab" }), { action: "deny" });
+  await settled();
+  assert.equal(sent("gofer:browser-open-tab").at(-1).url, "https://example.com/new");
+  // Links to other local files still navigate inside the preview's grant.
+  assert.equal(navigate(pathToFileURL(file).href), false);
+  // A website typed into a preview's address bar opens in a Browser tab.
+  browsers.browserAction(event, { id: preview.id, action: "navigate", url: "https://example.org/" });
+  assert.deepEqual(sent("gofer:browser-open-tab").at(-1), { url: "https://example.org/", background: false, engine: "raticode" });
+  assert.equal(preview.contents.loaded.length, 0);
+});
+
+// Raticode (gecko) as gecko-control.cjs presents it: the tab in front of
+// Gecko's window can be shared, and sharing ends by letting go of it.
+function fakeGecko({ enabled = true } = {}) {
+  const engine = fakeFirefox();
+  const released = [];
+  return Object.assign(engine, {
+    released,
+    status: () => ({ available: enabled, enabled, executable: "/usr/bin/firefox", running: true, problem: "" }),
+    shareableTab: async () => ({ context: "users-gecko-tab", url: "https://music.example/watch", title: "Music" }),
+    adoptContext: async (context) => { engine.calls.push(["adopt", context]); return { context, generation: 1 }; },
+    release: (context) => { released.push(context); },
+  });
+}
+
+test("the user's Gecko tab can be shared with Rem under the shared-tab approvals, and stays open when sharing ends", async () => {
+  const off = harness({ gecko: fakeGecko({ enabled: false }) });
+  await assert.rejects(off.browsers.shareGeckoTab(off.owner, "thread-1"), /Let Rem use Raticode \(gecko\)/);
+
+  const gecko = fakeGecko();
+  const { browsers, owner } = harness({ gecko });
+  await assert.rejects(browsers.shareGeckoTab(owner, ""), /Choose a Rem thread/);
+  const shared = await browsers.shareGeckoTab(owner, "thread-1", "Rem");
+  assert.equal(shared.url, "https://music.example/watch");
+  assert.deepEqual(gecko.calls.find(([name]) => name === "adopt"), ["adopt", "users-gecko-tab"]);
+  // The shared tab is never resized to fit a Raticode view.
+  assert.equal(gecko.sent("browsingContext.setViewport").length, 0);
+  const [session] = browsers.agentTabs(remOwnerForThread("thread-1"));
+  assert.equal(session.id, shared.id);
+  assert.equal(session.engine, "gecko");
+  assert.equal(session.agent.shared, true);
+  await assert.rejects(browsers.shareGeckoTab(owner, "thread-2"), /already shared/);
+
+  // Rem's consequential actions wait for the user, who answers in the Gecko view.
+  const approval = browsers.confirmAgent(session, { action: "click", label: "Place order", url: "https://music.example/watch" });
+  const [listed] = browsers.geckoSharedTabs();
+  const request = listed.prompts.find((item) => item.kind === "rem-confirm");
+  assert.equal(request.label, "Place order");
+  assert.throws(() => browsers.geckoSharedAction({ id: session.id, command: "respond", requestId: "someone-else" }), /already been answered/);
+  browsers.geckoSharedAction({ id: session.id, command: "respond", requestId: request.requestId, response: "approve" });
+  assert.equal(await approval, true);
+  browsers.geckoSharedAction({ id: session.id, command: "pause", paused: true });
+  assert.equal(browsers.geckoSharedTabs()[0].agent.paused, true);
+
+  browsers.geckoSharedAction({ id: session.id, command: "stop" });
+  assert.deepEqual(gecko.released, ["users-gecko-tab"]);
+  assert.equal(gecko.sent("browsingContext.close").length, 0);
+  assert.deepEqual(browsers.agentTabs(remOwnerForThread("thread-1")), []);
+  assert.deepEqual(browsers.geckoSharedTabs(), []);
+  assert.throws(() => browsers.geckoSharedAction({ id: session.id, command: "stop" }), /isn't shared/);
+
+  // Closing the tab in Gecko, or Gecko stopping, ends the sharing too.
+  const again = await browsers.shareGeckoTab(owner, "thread-1");
+  gecko.contexts.get("users-gecko-tab").handleEvent("browsingContext.contextDestroyed", { context: "users-gecko-tab" });
+  assert.equal(browsers.geckoSharedTabs().some((item) => item.id === again.id), false);
+  await browsers.shareGeckoTab(owner, "thread-1");
+  browsers.streamStopped("gecko", "Raticode (gecko) stopped");
+  assert.deepEqual(browsers.geckoSharedTabs(), []);
+  assert.equal(gecko.sent("browsingContext.close").length, 0);
+});
+
+test("with the app's own path resolver, a preview still can't read files outside its grant", () => {
+  // main.js's resolvePath only checks that a file exists. The guard must ask the
+  // grant-checking resolver instead, or every existing file on disk is readable.
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "preview-wiring-")));
+  const project = path.join(root, "project");
+  const other = path.join(root, "other");
+  const secret = path.join(root, "secret.txt");
+  fs.mkdirSync(path.join(project, "docs"), { recursive: true });
+  fs.mkdirSync(other);
+  fs.writeFileSync(path.join(project, "docs", "index.html"), "<p>report</p>");
+  fs.writeFileSync(path.join(project, "style.css"), "p{}");
+  fs.writeFileSync(path.join(other, "page.html"), "<p>loose</p>");
+  fs.writeFileSync(path.join(other, "notes.txt"), "next to it");
+  fs.writeFileSync(secret, "private");
+  fs.symlinkSync(secret, path.join(project, "docs", "linked.txt"));
+  const grants = new Map([["grant-1", project]]);
+  const resolvePreviewPath = (target, { grantId } = {}) => {
+    const allowed = grants.get(grantId);
+    const real = fs.realpathSync(target);
+    if (!allowed || path.relative(allowed, real).startsWith("..")) throw new Error("outside");
+    return real;
+  };
+  try {
+    const { open, profiles } = harness({ resolvePreviewPath });
+    const guard = profiles[PARTITIONS.preview].beforeRequest;
+    let webContentsId = 0;
+    const decide = (file) => { let result; guard.listener({ url: pathToFileURL(file).href, webContentsId }, (value) => { result = value; }); return result.cancel === false; };
+    webContentsId = open({ path: path.join(project, "docs", "index.html"), grantId: "grant-1" }).contents.id;
+    assert.equal(decide(path.join(project, "docs", "index.html")), true);
+    assert.equal(decide(path.join(project, "style.css")), true, "the grant covers the whole project");
+    assert.equal(decide(secret), false);
+    assert.equal(decide(path.join(project, "docs", "linked.txt")), false, "a link out of the grant is refused");
+    assert.equal(decide("/etc/passwd"), false);
+    // A preview opened without a grant reads only inside its own file's folder.
+    webContentsId = open({ url: pathToFileURL(path.join(other, "page.html")).href }).contents.id;
+    assert.equal(decide(path.join(other, "notes.txt")), true);
+    assert.equal(decide(secret), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a preview reads only its own folder, not the folder of another open preview", () => {
+  // The guard used to let a file through when any open preview could read it, so
+  // a page in one folder could read everything another preview's folder held.
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "preview-own-")));
+  const first = path.join(root, "first");
+  const second = path.join(root, "second");
+  fs.mkdirSync(first);
+  fs.mkdirSync(second);
+  fs.writeFileSync(path.join(first, "a.html"), "<p>a</p>");
+  fs.writeFileSync(path.join(first, "shared.css"), "p{}");
+  fs.writeFileSync(path.join(second, "b.html"), "<p>b</p>");
+  fs.writeFileSync(path.join(second, "only-b.txt"), "B's notes");
+  try {
+    const { open, profiles } = harness();
+    const guard = profiles[PARTITIONS.preview].beforeRequest;
+    const decide = (file, webContentsId) => { let result; guard.listener({ url: pathToFileURL(file).href, webContentsId }, (value) => { result = value; }); return result; };
+    const a = open({ url: pathToFileURL(path.join(first, "a.html")).href });
+    const b = open({ url: pathToFileURL(path.join(second, "b.html")).href });
+    assert.deepEqual(decide(path.join(first, "shared.css"), a.contents.id), { cancel: false });
+    assert.deepEqual(decide(path.join(second, "only-b.txt"), b.contents.id), { cancel: false });
+    // Preview A asks for a file only preview B's folder holds.
+    assert.deepEqual(decide(path.join(second, "only-b.txt"), a.contents.id), { cancel: true });
+    assert.deepEqual(decide(path.join(first, "a.html"), b.contents.id), { cancel: true });
+    // A request no open preview made reads nothing, even inside an open preview's folder.
+    assert.deepEqual(decide(path.join(first, "shared.css"), 9999), { cancel: true });
+    assert.deepEqual(decide(path.join(first, "shared.css"), undefined), { cancel: true });
+    // A page navigating itself is held to its own folder the same way.
+    let prevented = false;
+    a.contents.emit("will-navigate", { preventDefault: () => { prevented = true; } }, pathToFileURL(path.join(second, "only-b.txt")).href);
+    assert.equal(prevented, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a preview's file:// request naming another computer is refused before any disk call", (t) => {
+  // On Windows file://host/share/x.html is a network share path, and resolving it
+  // contacts that host with the user's sign-in. The host is refused before
+  // fileURLToPath or realpath ever sees it.
+  const resolved = [];
+  const { open, profiles, directory } = harness({ resolvePreviewPath: (target) => { resolved.push(target); throw new Error("outside"); } });
+  fs.writeFileSync(path.join(directory, "page.html"), "<p>page</p>");
+  const page = open({ path: path.join(directory, "page.html") });
+  const guard = profiles[PARTITIONS.preview].beforeRequest;
+  const decide = (url) => { let result; guard.listener({ url, webContentsId: page.contents.id }, (value) => { result = value; }); return result; };
+  const realpath = t.mock.method(fs, "realpathSync");
+  for (const url of ["file://evil-host/share/x.html", "file://EVIL-HOST/share/x.html", "file://127.0.0.1/c$/x.html", "file://evil-host:445/share/x.html"]) {
+    assert.deepEqual(decide(url), { cancel: true }, url);
+  }
+  assert.equal(realpath.mock.callCount(), 0);
+  assert.deepEqual(resolved, []);
+  // file://localhost/ is this computer, and still reads inside the preview's own folder.
+  assert.deepEqual(decide(`file://localhost${pathToFileURL(path.join(directory, "page.html")).pathname}`), { cancel: false });
+  assert.ok(realpath.mock.callCount() > 0);
+  // A page link to a network share isn't handed to the studio either.
+  let prevented = false;
+  page.contents.emit("will-navigate", { preventDefault: () => { prevented = true; } }, "file://evil-host/share/x.html");
+  assert.equal(prevented, true);
+});
+
+test("on Windows, where a file:// host is a network share path, the guard still never resolves it", (t) => {
+  // Node turns file://host/share into \\host\share only on Windows, so load the
+  // module with Windows file URL rules to check the order there.
+  const url = require("node:url");
+  const toPath = url.fileURLToPath;
+  const converted = [];
+  t.mock.method(url, "fileURLToPath", (value, options) => { converted.push(String(value)); return toPath(value, { ...options, windows: true }); });
+  const modulePath = require.resolve("../browser-sessions.cjs");
+  delete require.cache[modulePath];
+  let windowsSessions;
+  try {
+    ({ createBrowserSessions: windowsSessions } = require("../browser-sessions.cjs"));
+  } finally {
+    delete require.cache[modulePath];
+  }
+  const { open, profiles, directory } = harness({ createSessions: windowsSessions });
+  fs.writeFileSync(path.join(directory, "page.html"), "<p>page</p>");
+  const page = open({ path: path.join(directory, "page.html") });
+  const guard = profiles[PARTITIONS.preview].beforeRequest;
+  const realpath = t.mock.method(fs, "realpathSync");
+  converted.length = 0;
+  let result;
+  guard.listener({ url: "file://evil-host/share/x.html", webContentsId: page.contents.id }, (value) => { result = value; });
+  assert.deepEqual(result, { cancel: true });
+  assert.deepEqual(converted, []);
+  assert.equal(realpath.mock.callCount(), 0);
 });

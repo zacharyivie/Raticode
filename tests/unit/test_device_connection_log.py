@@ -241,9 +241,8 @@ def test_tailscale_state_is_logged_only_when_it_changes(caplog):
     ]
 
 
-def test_a_changed_local_address_is_reported_once(caplog, monkeypatch):
-    caplog.set_level(logging.DEBUG, logger="gofer")
-    addresses = iter(["192.168.1.20", "10.0.0.7", "10.0.0.7", "192.168.1.20"])
+def test_a_new_local_address_is_followed_once_two_checks_agree(monkeypatch):
+    addresses = iter(["10.0.0.7", "10.0.0.9", "10.0.0.9", "127.0.0.1", "192.168.1.20"])
     monkeypatch.setattr(control_module, "default_device_host", lambda _enabled: next(addresses))
     fake = SimpleNamespace(
         host_detected=True,
@@ -251,16 +250,39 @@ def test_a_changed_local_address_is_reported_once(caplog, monkeypatch):
         listener=object(),
         host="192.168.1.20",
         host_checked=0.0,
+        host_pending=None,
+        host_change_noted="10.0.0.9",
+    )
+    seen = []
+    for _ in range(5):
+        fake.host_checked = 0.0
+        seen.append(DeviceControl._host_to_follow(fake))
+    # A passing address is never followed; one that holds is. Losing the network keeps
+    # the listener, and being back on the old address clears an earlier failure.
+    assert seen == [None, None, "10.0.0.9", None, None]
+    assert fake.host_pending is None and fake.host_change_noted is None
+
+
+def test_the_address_is_rechecked_at_most_every_fifteen_seconds(monkeypatch):
+    calls: list[bool] = []
+
+    def lookup(enabled: bool) -> str:
+        calls.append(enabled)
+        return "10.0.0.7"
+
+    monkeypatch.setattr(control_module, "default_device_host", lookup)
+    fake = SimpleNamespace(
+        host_detected=True,
+        experimental_network=True,
+        listener=object(),
+        host="192.168.1.20",
+        host_checked=0.0,
+        host_pending=None,
         host_change_noted=None,
     )
-    for _ in range(4):
-        fake.host_checked = 0.0
-        DeviceControl._note_host_change(fake)
-    [line] = _messages(caplog, "gofer.devices.control")
-    assert line.startswith(
-        "This computer's local network address changed from 192.168.1.20 to 10.0.0.7"
-    )
-    assert fake.host_change_noted is None  # Back on the old address, so a new move reports.
+    DeviceControl._host_to_follow(fake)
+    assert DeviceControl._host_to_follow(fake) is None
+    assert calls == [True]
 
 
 def test_a_fixed_or_local_only_address_is_never_rechecked(monkeypatch):
@@ -272,4 +294,4 @@ def test_a_fixed_or_local_only_address_is_never_rechecked(monkeypatch):
         {"host_detected": True, "experimental_network": False, "listener": object()},
         {"host_detected": True, "experimental_network": True, "listener": None},
     ):
-        DeviceControl._note_host_change(SimpleNamespace(host_checked=0.0, **values))
+        assert DeviceControl._host_to_follow(SimpleNamespace(host_checked=0.0, **values)) is None

@@ -19,6 +19,7 @@ const {
   BrowserWindow,
   WebContentsView,
   Menu,
+  Notification,
   Tray,
   desktopCapturer,
   globalShortcut,
@@ -76,7 +77,7 @@ const { createBrowserSessions } = require("./browser-sessions.cjs");
 const { createBrowserStore } = require("./browser-store.cjs");
 const { createOpenWith } = require("./open-with.cjs");
 const { PARTITIONS: BROWSER_PARTITIONS } = require("./browser-policy.cjs");
-const { searchProject, replaceProject } = require("./project-search.cjs");
+const { listProjectFiles, searchProject, replaceProject } = require("./project-search.cjs");
 const { createAppLog, redactLog } = require("./app-log.cjs");
 const { createBackendOutput } = require("./backend-log.cjs");
 const { createMainErrorHandler, createTerminalOutput, describeError, rejectionLevel } = require("./main-errors.cjs");
@@ -93,12 +94,17 @@ let logsClosing = false;
 const REPORT_THEMES = ["auto", "light", "dark", "sepia", "vaporwave", "steam", "carbon", "botanical", "blueprint", "arcade", "sakura", "deep-sea", "solarpunk", "noir", "candy-lab", "cosmic"];
 let applicationLog;
 const { registerIpcHandlers } = require("./ipc-handlers.cjs");
+const { createDefaultBrowser, createExternalOpenQueue, externalOpensFromArgv } = require("./default-browser.cjs");
 const { createFirefoxEngine } = require("./firefox-engine.cjs");
 const { createGeckoWindow } = require("./gecko-window.cjs");
+const { createGeckoControl } = require("./gecko-control.cjs");
 const { createBrowserWindowManager } = require("./browser-window.cjs");
 const { X11_SWITCH, relaunchNeeded } = require("./gecko-display.cjs");
-const { createGlobalDictation, hasToggleFlag, shortcutSupport, toggleCommand } = require("./global-dictation.cjs");
-const { MAC_PRIVACY_URL, captureSupport, createScreenContext, createScreenShortcut } = require("./screen-context.cjs");
+const { DESKTOP_SHORTCUT_ID, createGlobalDictation, hasToggleFlag, shortcutSupport, toAccelerator, toggleCommand } = require("./global-dictation.cjs");
+const { MAC_PRIVACY_URL, SCREEN_SHORTCUT_ID, captureSupport, createScreenContext, createScreenShortcut } = require("./screen-context.cjs");
+const { createLinuxShortcuts, desktopFileInstalled } = require("./linux-shortcuts.cjs");
+const { DESKTOP_PREFIX: WORKFLOW_SHORTCUT_PREFIX, createWorkflowShortcuts, runCommand: workflowShortcutCommand, shortcutFromArgv } = require("./workflow-shortcuts.cjs");
+const { createRunSheet } = require("./workflow-run-sheet.cjs");
 const { CHROME, EDGE, createChromiumEngine } = require("./chromium-engine.cjs");
 const { BACKEND_FEATURES, featureEnv, featureStates, readFeatureChoices, writeFeatureChoice } = require("./feature-preview.cjs");
 const { inspectPath, missingRecentFiles, missingThreadRoots } = require("./path-info.cjs");
@@ -218,8 +224,9 @@ if (!isSmokeTest && !process.env.VITE_DEV_SERVER_URL && relaunchNeeded({ userDat
 
 const singleInstanceLock = isSmokeTest || app.requestSingleInstanceLock();
 if (!singleInstanceLock) {
-  // `--toggle-dictation` only reaches the running Raticode; it says nothing of its own.
-  if (!isProduction && !hasToggleFlag(process.argv)) {
+  // `--toggle-dictation`, `--run-workflow-shortcut` and links from other apps only
+  // reach the running Raticode; they say nothing of their own.
+  if (!isProduction && !hasToggleFlag(process.argv) && !shortcutFromArgv(process.argv) && !externalOpensFromArgv(process.argv).length) {
     // The running window may come from another checkout with different code.
     // Say so instead of silently focusing it as if this launch had worked.
     console.error(
@@ -230,6 +237,53 @@ if (!singleInstanceLock) {
   }
   app.quit();
   process.exit(isProduction ? 0 : 1);
+}
+
+// Links and web pages other apps hand to Raticode when it is the default browser.
+// They wait here until the window has loaded and asks for them.
+const externalOpenQueue = createExternalOpenQueue();
+function receiveExternalOpens(items) {
+  if (!items?.length || isSmokeTest) return false;
+  const now = externalOpenQueue.add(items);
+  if (now.length && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("gofer:external-open", { items: now });
+  if (app.isReady()) showMainWindow();
+  return true;
+}
+if (!isSmokeTest) {
+  receiveExternalOpens(externalOpensFromArgv(process.argv));
+  // macOS hands links and files over as events, also before the app is ready.
+  app.on("open-url", (event, url) => {
+    event.preventDefault();
+    receiveExternalOpens(externalOpensFromArgv(["", url], { defaultApp: false }));
+  });
+  app.on("open-file", (event, filePath) => {
+    event.preventDefault();
+    receiveExternalOpens(externalOpensFromArgv(["", filePath], { defaultApp: false }));
+  });
+}
+let defaultBrowserManager = null;
+function defaultBrowser() {
+  defaultBrowserManager ||= createDefaultBrowser({
+    packaged: app.isPackaged,
+    openExternal: (url) => shell.openExternal(url),
+    isDefaultProtocolClient: (scheme) => app.isDefaultProtocolClient(scheme),
+    confirm: async ({ title, message, detail, confirmLabel }) => {
+      const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+      const options = { type: "question", title, message, detail, buttons: [confirmLabel, "Cancel"], defaultId: 1, cancelId: 1, noLink: true };
+      const result = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
+      return result.response === 0;
+    },
+  });
+  return defaultBrowserManager;
+}
+async function defaultBrowserAction(_event, options = {}) {
+  switch (options?.action) {
+    case "take-opens": return externalOpenQueue.take();
+    case "status": return defaultBrowser().status();
+    case "open-settings": return defaultBrowser().openSettings();
+    case "make-default": return defaultBrowser().makeDefault();
+    default: throw new Error("Unknown default browser action.");
+  }
 }
 
 let lastWindowArgs = null;
@@ -358,6 +412,8 @@ function createWindow(apiBaseUrl, { show = true } = {}) {
   });
   // A reloaded or crashed studio has lost the tabs it moved; close their window.
   mainWindow.webContents.on("did-start-navigation", (details) => {
+    // Until the new page asks, links from other apps wait in the queue.
+    if (details?.isMainFrame && !details.isSameDocument) externalOpenQueue.reset();
     if (details?.isMainFrame && !details.isSameDocument) void browserWindow().closeNow();
   });
   mainWindow.webContents.on("render-process-gone", () => void browserWindow().closeNow());
@@ -811,6 +867,7 @@ app.whenReady().then(async () => {
     const backend = await backendReady;
     activeApiBaseUrl = backend.apiBaseUrl;
     activeUiApiToken = backend.apiToken;
+    if (!isSmokeTest) void workflowShortcuts.sync();
   } catch (error) {
     if (isSmokeTest) {
       console.error(
@@ -856,9 +913,18 @@ function createBackgroundTray() {
 
 // `Raticode --toggle-dictation` (bound to a key in the desktop's own shortcut settings
 // where apps can't register keys) starts or stops dictation without showing the window.
-app.on("second-instance", (_event, argv) => {
+app.on("second-instance", (_event, argv, workingDirectory) => {
+  // A link or web page another app opened with Raticode: shown in the running window.
+  if (receiveExternalOpens(externalOpensFromArgv(argv, { cwd: workingDirectory || process.cwd() }))) return;
   if (hasToggleFlag(argv)) {
     globalDictation.trigger("command");
+    return;
+  }
+  // `Raticode --run-workflow-shortcut=ID`, bound to a key where a desktop won't let apps
+  // add shortcuts, presses that workflow shortcut.
+  const workflowShortcut = shortcutFromArgv(argv);
+  if (workflowShortcut) {
+    void workflowShortcuts.press(workflowShortcut);
     return;
   }
   showMainWindow();
@@ -937,12 +1003,66 @@ ipcMain.on("gofer:dictation-overlay-action", (event, action) => {
   }
 });
 
+// On a Wayland desktop apps can't grab keys, so Raticode asks the desktop (KDE's shortcut
+// service, the Global Shortcuts portal, or GNOME's custom shortcuts) to add its system-wide
+// shortcuts, only while they are turned on. See linux-shortcuts.cjs.
+const dictationSupport = shortcutSupport({ ozonePlatform: app.commandLine.getSwitchValue("ozone-platform") });
+const dictationCommand = process.platform === "linux"
+  ? toggleCommand({ packaged: app.isPackaged, appPath: app.getAppPath(), configHome: process.env.XDG_CONFIG_HOME || "" })
+  : "";
+function runGsettings(args) {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let child;
+    try {
+      child = spawn("gsettings", args, { stdio: ["ignore", "pipe", "ignore"], timeout: 5000 });
+    } catch {
+      resolve({ code: 1, stdout: "" });
+      return;
+    }
+    child.stdout.on("data", (chunk) => { if (stdout.length < 65536) stdout += chunk; });
+    child.on("error", () => resolve({ code: 1, stdout: "" }));
+    child.on("close", (code) => resolve({ code: code ?? 1, stdout }));
+  });
+}
+const desktopShortcuts = dictationSupport.kind === "desktop" && !isSmokeTest
+  ? createLinuxShortcuts({
+    // The portal names apps by their installed desktop file (package.json desktopName).
+    appId: String(process.env.CHROME_DESKTOP || "gofer-flow.desktop").replace(/\.desktop$/, ""),
+    hasDesktopFile: (id) => desktopFileInstalled(id),
+    // A development copy gets its own KDE entry, so it never answers the installed app's key.
+    component: app.isPackaged
+      ? { unique: "raticode", friendly: "Raticode" }
+      : { unique: "raticode-dev", friendly: "Raticode (development)" },
+    runGsettings,
+    gnomeCommand: (id) => {
+      if (id === DESKTOP_SHORTCUT_ID) return dictationCommand;
+      if (id.startsWith(WORKFLOW_SHORTCUT_PREFIX)) return workflowShortcutCommand(dictationCommand, id.slice(WORKFLOW_SHORTCUT_PREFIX.length));
+      return "";
+    },
+    onPress: (id) => {
+      if (id === DESKTOP_SHORTCUT_ID) globalDictation.trigger("shortcut");
+      else if (id === SCREEN_SHORTCUT_ID && screenShortcut.status().enabled) screenShortcut.press();
+      else if (id.startsWith(WORKFLOW_SHORTCUT_PREFIX)) void workflowShortcuts.press(id.slice(WORKFLOW_SHORTCUT_PREFIX.length));
+    },
+    onChange: (linux) => {
+      const status = globalDictation.desktopChanged(linux);
+      screenShortcut.desktopChanged(linux);
+      const workflows = workflowShortcuts.desktopChanged(linux);
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isLoading()) {
+        mainWindow.webContents.send("gofer:global-dictation", { action: "status", status });
+        mainWindow.webContents.send("gofer:workflow-shortcuts", { action: "status", status: workflows });
+      }
+    },
+  })
+  : null;
+app.on("will-quit", () => { void desktopShortcuts?.dispose(); });
+
 const globalDictation = createGlobalDictation({
   globalShortcut,
-  support: shortcutSupport({ ozonePlatform: app.commandLine.getSwitchValue("ozone-platform") }),
-  command: process.platform === "linux"
-    ? toggleCommand({ packaged: app.isPackaged, appPath: app.getAppPath(), configHome: process.env.XDG_CONFIG_HOME || "" })
-    : "",
+  support: dictationSupport,
+  desktopShortcuts,
+  command: dictationCommand,
   send: (message) => {
     if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading()) return false;
     mainWindow.webContents.send("gofer:global-dictation", message);
@@ -991,8 +1111,87 @@ async function askAboutScreen() {
     screenShortcutBusy = false;
   }
 }
-const screenShortcut = createScreenShortcut({ globalShortcut, onPress: () => void askAboutScreen() });
+const screenShortcut = createScreenShortcut({ globalShortcut, desktopShortcuts, onPress: () => void askAboutScreen() });
 app.on("will-quit", () => screenShortcut.dispose());
+
+// Workflow shortcuts: a system-wide key that runs one workflow while Raticode runs. The
+// backend keeps the list; see workflow-shortcuts.cjs and workflow-run-sheet.cjs.
+async function backendRequest(method, requestPath, body) {
+  if (!activeApiBaseUrl) throw new Error("Raticode's backend isn't ready yet. Try again in a moment.");
+  const headers = { "Content-Type": "application/json" };
+  if (activeUiApiToken) headers.Authorization = `Bearer ${activeUiApiToken}`;
+  const response = await fetch(`${activeApiBaseUrl}${requestPath}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(45000),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const failure = { status: response.status };
+    // A press of a changed workflow's shortcut: workflow-shortcuts.cjs opens Review changes.
+    if (typeof payload?.code === "string") Object.assign(failure, { code: payload.code, state: String(payload.state || ""), workflowName: String(payload.workflowName || "") });
+    throw Object.assign(new Error(typeof payload?.error === "string" ? payload.error : `The backend answered ${response.status}.`), failure);
+  }
+  return payload;
+}
+// Electron forgets a notice's click handler when nothing holds the notice.
+const shownNotices = new Set();
+function showWorkflowNotice({ title, body = "", onClick }) {
+  if (isQuitting || isSmokeTest || !Notification.isSupported()) return null;
+  const notice = new Notification({ title: String(title).slice(0, 120), body: String(body).slice(0, 300) });
+  shownNotices.add(notice);
+  const forget = () => shownNotices.delete(notice);
+  notice.on("click", () => { forget(); onClick?.(); });
+  notice.on("close", forget);
+  notice.show();
+  return { close: () => { forget(); try { notice.close(); } catch { /* Already gone. */ } } };
+}
+function openWorkflowRun(run) {
+  showMainWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const send = () => mainWindow?.webContents.send("gofer:workflow-shortcuts", { action: "open-run", run });
+  if (mainWindow.webContents.isLoading()) mainWindow.webContents.once("did-finish-load", send);
+  else send();
+}
+// A changed workflow's notice was clicked: Settings > Devices opens its Review changes.
+function openWorkflowShortcutReview({ shortcutId, workflowName } = {}) {
+  showMainWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const send = () => mainWindow?.webContents.send("gofer:workflow-shortcuts", { action: "review", shortcutId, workflowName });
+  if (mainWindow.webContents.isLoading()) mainWindow.webContents.once("did-finish-load", send);
+  else send();
+}
+const runSheet = createRunSheet({
+  BrowserWindow,
+  screen,
+  ipcMain,
+  pagePath: path.join(__dirname, "workflow-run-sheet.html"),
+  preloadPath: path.join(__dirname, "workflow-run-sheet-preload.cjs"),
+  quitting: () => isQuitting || isSmokeTest,
+});
+const workflowShortcuts = createWorkflowShortcuts({
+  globalShortcut,
+  desktopShortcuts,
+  api: backendRequest,
+  readClipboard: () => clipboard.readText(),
+  sheet: runSheet,
+  notify: showWorkflowNotice,
+  openRun: openWorkflowRun,
+  openReview: openWorkflowShortcutReview,
+  showApp: showMainWindow,
+  commandFor: (id) => workflowShortcutCommand(dictationCommand, id),
+});
+app.on("will-quit", () => workflowShortcuts.dispose());
+// The dictation shortcuts come first: a workflow shortcut lets go of a key they take.
+const reservedShortcutKeys = { dictation: "", screen: "" };
+function reserveShortcutKey(kind, accelerator) {
+  reservedShortcutKeys[kind] = accelerator || "";
+  const keys = {};
+  if (reservedShortcutKeys.dictation) keys[reservedShortcutKeys.dictation] = "Dictate to Rem from any app";
+  if (reservedShortcutKeys.screen) keys[reservedShortcutKeys.screen] = "Ask Rem about your screen";
+  return workflowShortcuts.reserve(keys);
+}
 
 let lifecycleApproved = false;
 let lifecyclePending = null;
@@ -1086,11 +1285,16 @@ function setupIpcHandlers() {
   });
   registerIpcHandlers(ipcMain, {
     completeLifecycle,
-    configureGlobalDictation: (_event, options = {}) => globalDictation.configure({
-      enabled: options?.enabled === true,
-      binding: typeof options?.binding === "string" ? options.binding.slice(0, 80) : "",
-      label: typeof options?.label === "string" ? options.label.slice(0, 80) : "",
-    }),
+    defaultBrowser: defaultBrowserAction,
+    configureGlobalDictation: async (_event, options = {}) => {
+      const settings = {
+        enabled: options?.enabled === true,
+        binding: typeof options?.binding === "string" ? options.binding.slice(0, 80) : "",
+        label: typeof options?.label === "string" ? options.label.slice(0, 80) : "",
+      };
+      await reserveShortcutKey("dictation", settings.enabled ? toAccelerator(settings.binding).accelerator : "");
+      return globalDictation.configure(settings);
+    },
     reportGlobalDictation: (_event, state = {}) => globalDictation.report({
       phase: String(state?.phase ?? ""),
       global: state?.global === true,
@@ -1098,10 +1302,15 @@ function setupIpcHandlers() {
       sent: state?.sent === true,
     }),
     suspendGlobalDictation: (_event, { suspended } = {}) => globalDictation.suspend(suspended === true),
-    configureScreenContext: (_event, options = {}) => {
+    retryGlobalDictation: () => globalDictation.retry(),
+    syncWorkflowShortcuts: () => workflowShortcuts.sync(),
+    suspendWorkflowShortcuts: (_event, { suspended } = {}) => workflowShortcuts.suspend(suspended === true),
+    configureScreenContext: async (_event, options = {}) => {
       const enabled = options?.enabled === true;
       const status = screenContext.configure({ enabled });
-      const shortcut = screenShortcut.configure({
+      const screenKey = enabled && options?.shortcut === true && typeof options?.binding === "string" ? toAccelerator(options.binding.slice(0, 80)).accelerator : "";
+      await reserveShortcutKey("screen", screenKey);
+      const shortcut = await screenShortcut.configure({
         enabled: enabled && options?.shortcut === true,
         binding: typeof options?.binding === "string" ? options.binding.slice(0, 80) : "",
       });
@@ -1138,7 +1347,15 @@ function setupIpcHandlers() {
     browserAction: (event, options) => browsers.browserAction(event, options),
     browserLibrary: (event, options) => browsers.browserLibrary(event, options),
     browserOwnerZoom: (event) => browsers.ownerZoom(event),
-    gecko: (_event, options = {}) => geckoWindow.handle(String(options?.action || ""), options),
+    gecko: (event, options = {}) => {
+      const action = String(options?.action || "");
+      // Sharing the user's Gecko tab with Rem: the tab is Firefox's own, so
+      // its Rem controls live with Gecko rather than with a Raticode tab.
+      if (action === "share-with-rem") return browsers.shareGeckoTab(event.sender, typeof options.threadId === "string" ? options.threadId.slice(0, 200) : "", typeof options.label === "string" ? options.label.slice(0, 60) : "Rem");
+      if (action === "shared-tabs") return browsers.geckoSharedTabs();
+      if (action === "shared-action") return browsers.geckoSharedAction(options);
+      return geckoWindow.handle(action, options);
+    },
     browserWindow: (_event, options = {}) => browserWindow().handle(String(options?.action || "")),
     browserPolicy: (event, options) => browsers.setPolicy(event, options?.policy),
     createBrowser: (event, options) => browsers.createBrowser(event, options),
@@ -1175,6 +1392,7 @@ function setupIpcHandlers() {
     },
     installDownloadedUpdate,
     listDirectory,
+    listProjectFiles: (_event, options = {}) => listProjectFiles(resolveExactPath(options.projectRoot, { grantId: options.grantId, mustExist: true })),
     searchProject: (_event, options = {}) => searchProject(resolveExactPath(options.projectRoot, { grantId: options.grantId, mustExist: true }), options),
     replaceProject: (_event, options = {}) => replaceProject(resolveExactPath(options.projectRoot, { grantId: options.grantId, mustExist: true }), options),
     openLogsFolder,
@@ -1244,6 +1462,12 @@ const edgeEngine = createChromiumEngine({
   log: (level, message) => applicationLog?.write(level, "browser", message),
 });
 
+// Rem's tabs in Raticode (gecko), when the user lets Rem use it.
+const geckoControl = createGeckoControl({
+  stagingDir: path.join(app.getPath("userData"), "browser", "gecko-downloads"),
+  log: (level, message) => applicationLog?.write(level, "browser", message),
+});
+
 const browsers = createBrowserSessions({
   app,
   Menu,
@@ -1254,6 +1478,8 @@ const browsers = createBrowserSessions({
   webContents,
   getMainWindow: () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null),
   resolvePath: (targetPath, options) => resolveExactPath(targetPath, options),
+  // resolveExactPath ignores grants, so a preview's file:// requests need the grant check.
+  resolvePreviewPath: (targetPath, options) => getIpcSecurity().resolveGrantedPath(targetPath, options),
   store: createBrowserStore(path.join(app.getPath("userData"), "browser")),
   log: (level, message) => applicationLog?.write(level, "browser", message),
   openWith: createOpenWith(),
@@ -1261,11 +1487,18 @@ const browsers = createBrowserSessions({
   firefox: firefoxEngine,
   chrome: chromeEngine,
   chromium: { edge: edgeEngine },
+  gecko: geckoControl,
   nativeImage,
   WebContentsView,
   preloadPath: browserPreloadPath,
   // A Raticode (chromium) tab's view sits in whichever window shows the Browser.
   getHostWindow: (host) => (host === "popout" ? browserWindow().window : null),
+  // Both windows that can show Raticode (gecko) show its shared tabs.
+  onGeckoShared: (tabs) => {
+    for (const target of [mainWindow, browserWindow().window]) {
+      if (target && !target.isDestroyed()) target.webContents.send("gofer:gecko-shared", tabs);
+    }
+  },
 });
 firefoxEngine.events.on("exit", () => browsers.firefoxStopped());
 // Firefox tabs come back once the user closes the window they signed in with.
@@ -1274,6 +1507,7 @@ chromeEngine.events.on("exit", () => browsers.streamStopped("chrome"));
 chromeEngine.events.on("sign-in-window-closed", () => void browsers.reviveStreamTabs("chrome"));
 edgeEngine.events.on("exit", () => browsers.streamStopped("edge"));
 edgeEngine.events.on("sign-in-window-closed", () => void browsers.reviveStreamTabs("edge"));
+geckoControl.events.on("exit", () => browsers.streamStopped("gecko", "Raticode (gecko) stopped"));
 
 // Gecko: real Firefox, its window placed inside Raticode's.
 const geckoWindow = createGeckoWindow({
@@ -1282,6 +1516,7 @@ const geckoWindow = createGeckoWindow({
   getWindow: (host) => (host === "popout" && browserWindow().window) || (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null),
   log: (level, message) => applicationLog?.write(level, "browser", message),
   x11Switch: app.commandLine.getSwitchValue("ozone-platform") === "x11",
+  control: geckoControl,
   ask: async ({ message, detail }) => (await dialog.showMessageBox(mainWindow, { type: "question", buttons: ["Import", "Cancel"], defaultId: 1, cancelId: 1, message, detail })).response === 0,
   onState: (state) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("gofer:gecko-state", state); },
   relaunch: async () => {
@@ -1960,7 +2195,7 @@ async function downloadAndInstallUpdate() {
     logUpdaterError(error);
     const message = describeUpdateError(error);
     setUpdateState({ downloading: false, verifying: false, error: message });
-    throw new Error(message);
+    throw new Error(message, { cause: error });
   }
   return getUpdateState();
 }
@@ -2486,7 +2721,7 @@ async function readTextFile(_event, options = {}) {
     if (["ENOENT", "ENOTDIR"].includes(error.code || error.cause?.code)) {
       return { content: null, missing: true, path: targetPath };
     }
-    if (error.code === "ERR_FILE_TOO_LARGE") throw new Error("File is too large to edit in Raticode.");
+    if (error.code === "ERR_FILE_TOO_LARGE") throw new Error("File is too large to edit in Raticode.", { cause: error });
     throw error;
   }
   if (content.includes(0)) {
@@ -3102,6 +3337,7 @@ async function replaceBackendWindow() {
     const backend = await backendReady;
     activeApiBaseUrl = backend.apiBaseUrl;
     activeUiApiToken = backend.apiToken;
+    void workflowShortcuts.sync();
     if (backendErrorWindow && !backendErrorWindow.isDestroyed()) {
       backendErrorWindow.close();
     }

@@ -23,7 +23,7 @@ def login(monkeypatch):
     return auth.ProviderAuthSessions(), process, spawn
 
 
-@pytest.mark.parametrize("provider", ["cursor", "codex", "claude_code", "copilot"])
+@pytest.mark.parametrize("provider", ["cursor", "codex", "claude_code", "copilot", "grok"])
 def test_browser_login_uses_provider_cli_and_same_config(login, monkeypatch, provider):
     sessions, process, spawn = login
     monkeypatch.setenv("XDG_CONFIG_HOME", "/isolated/config")

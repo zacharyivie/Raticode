@@ -87,6 +87,8 @@ export default function PairedDevices() {
   const [unlock, setUnlock] = useState(null);
   // The action and device of the change being saved, so its switch can say so.
   const [saving, setSaving] = useState("");
+  // The address move the user dismissed, by its time, so a later move shows again.
+  const [dismissedMove, setDismissedMove] = useState(null);
   useEffect(() => {
     const update = event => setSyncError(event.detail);
     window.addEventListener("gofer:device-sync-status", update);
@@ -113,6 +115,12 @@ export default function PairedDevices() {
   useEffect(() => {
     if (invite && (invite.expires_at * 1000 <= now)) setInvite(null);
   }, [invite, now]);
+  // The computer moved to another network after this code was made, so the code points
+  // at the old address. The backend has already withdrawn it.
+  const movedAt = status?.lan_moved?.at || 0;
+  useEffect(() => {
+    if (invite && movedAt * 1000 > invite.created_at) setInvite(null);
+  }, [invite, movedAt]);
 
   async function action(body) {
     setBusy(true);
@@ -125,7 +133,7 @@ export default function PairedDevices() {
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Device action failed.");
-      if (body.action === "invite") { setInvite(result); setCopied(false); }
+      if (body.action === "invite") { setInvite({ ...result, created_at: Date.now() }); setCopied(false); }
       if (body.action === "preview") setPreview(result);
       if (body.action === "pair") { setUri(""); setPreview(null); }
       if (body.action === "cancel_invitation") setInvite(null);
@@ -166,6 +174,10 @@ export default function PairedDevices() {
       <Pill tone={status.lan_available ? "success" : "warning"}>{status.lan_available ? "Local network available" : "Local network unavailable"}</Pill>
       <Pill tone={status.rem_ready ? "success" : "warning"}>{status.rem_ready ? "Rem ready" : "Rem unavailable"}</Pill>
     </div>}
+    {status.enabled && status.lan_moved?.from && status.lan_moved.at !== dismissedMove && <div role="status" aria-label="Network change" className="flex items-start justify-between gap-3 rounded-md bg-warning-soft px-3 py-2 text-warning">
+      <p>This computer moved to another network at {when(status.lan_moved.at)}. Phones on Wi-Fi now reach it at <span className="select-text font-mono">{status.lan_moved.to}:{status.port}</span>. Phones connected through Tailscale pick this up by themselves; on other phones, enter it under More › Connection › Set desktop address.</p>
+      <button type="button" className={`${button} shrink-0`} onClick={() => setDismissedMove(status.lan_moved.at)}>Dismiss</button>
+    </div>}
     {(error || status.error) && <p role="alert" className="rounded-md bg-danger-soft px-3 py-2 text-danger">{error || status.error}</p>}
     {status.enabled && !status.rem_ready && <p role="alert" className="rounded-md bg-warning-soft px-3 py-2 text-warning">Restart the desktop backend to restore Rem messaging.</p>}
     {syncError && <p role="alert" className="rounded-md bg-danger-soft px-3 py-2 text-danger">Thread sync needs attention: {syncError}</p>}
@@ -190,7 +202,7 @@ export default function PairedDevices() {
         <label className="block space-y-1"><span className="font-medium">Name this computer</span>
           <span className="block text-muted">Shown on the phone or computer you pair with.</span>
           <input className={input} value={name} maxLength={80} onChange={e => setName(e.target.value)} /></label>
-        {!status.lan_available && <p role="status" className="rounded-md bg-warning-soft px-3 py-2 text-warning">This computer has no local network address. Connect it to your Wi-Fi network or set RATICODE_DEVICE_HOST, then restart Raticode.</p>}
+        {!status.lan_available && <p role="status" className="rounded-md bg-warning-soft px-3 py-2 text-warning">This computer has no local network address. Connect it to your Wi-Fi network and Raticode starts listening there within half a minute. To use a fixed address instead, set RATICODE_DEVICE_HOST and restart Raticode.</p>}
         {pairingMode === "phone" ? <>
           <p className="text-muted">Your phone connects only over the same Wi-Fi network as this computer. There is no internet relay.</p>
           <ol className="space-y-4">

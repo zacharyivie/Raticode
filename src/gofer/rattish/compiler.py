@@ -27,6 +27,7 @@ from gofer.rattish.diagnostics import (
     RattishDiagnostic,
     SourcePosition,
     SourceSpan,
+    did_you_mean,
 )
 from gofer.rattish.ir_validation import (
     InvalidRattishIrError,
@@ -53,6 +54,9 @@ from gofer.rattish.schema_compat import (
 IR_SCHEMA_ID = "urn:raticode:rattish:schema:ir-1.json"
 JSON_SCHEMA_ID = "https://json-schema.org/draft/2020-12/schema"
 RATTISH_COMPILER_VERSION = "0.2.2"
+
+# Where a run's nodes work: the project folder, or a git worktree made for each run.
+WORKSPACES = ("project", "worktree")
 
 _COMMON_NODE_FIELDS = {
     "allow-fail",
@@ -249,6 +253,7 @@ class RattishCompiler:
             "max-tokens",
             "max-cost-usd",
             "timeout",
+            "workspace",
         }
         for name, field in fields.items():
             if name not in supported:
@@ -294,6 +299,7 @@ class RattishCompiler:
             "timeout_ms": self._optional_duration(
                 fields.get("timeout"), "timeout", context, diagnostics
             ),
+            "workspace": self._workspace(fields.get("workspace"), context, diagnostics),
             "inputs": inputs,
             "outputs": [],
             "_input_schemas": input_schemas,
@@ -352,6 +358,9 @@ class RattishCompiler:
                         type_field["value"]["span"],
                         context,
                         details={"node": node_id, "type": node_type},
+                        suggestions=did_you_mean(
+                            node_type, [item.node_type for item in self.contracts]
+                        ),
                     )
                 )
                 continue
@@ -437,6 +446,8 @@ class RattishCompiler:
                 )
             else:
                 output_schema, dependencies = workflow_output, workflow_dependencies
+            if contract.node_type == "approval-gate":
+                output_schema = self._approval_output_schema(output_schema, configuration)
             if provider_resolution is not None:
                 provider_ids: set[str] = set()
                 for choice in (provider_resolution, *provider_resolution.get("fallback", ())):
@@ -567,6 +578,10 @@ class RattishCompiler:
                 )
             if contract.node_type == "jev":
                 self._validate_jev_configuration(
+                    node_id, declaration, configuration, context, diagnostics
+                )
+            if contract.node_type == "approval-gate":
+                self._validate_approval_configuration(
                     node_id, declaration, configuration, context, diagnostics
                 )
             if contract.node_type == "local-vectorize":
@@ -913,12 +928,76 @@ class RattishCompiler:
                         )
                     )
                 default = {"present": True, "value": default_value}
-            schemas[name] = schema
-            inputs.append(
-                {"name": name, "required": required, "schema": schema, "default": default}
+            file_options = self._file_input_options(
+                name, schema, parts, definition, default_entry, context, diagnostics
             )
+            schemas[name] = schema
+            declaration: dict[str, Any] = {
+                "name": name,
+                "required": required,
+                "schema": schema,
+                "default": default,
+            }
+            if file_options is not None:
+                declaration["file"] = file_options
+            inputs.append(declaration)
         inputs.sort(key=lambda item: item["name"])
         return inputs, schemas
+
+    def _file_input_options(
+        self,
+        name: str,
+        schema: Mapping[str, Any],
+        parts: Mapping[str, Any],
+        definition: Mapping[str, Any],
+        default_entry: Mapping[str, Any] | None,
+        context: CompileContext,
+        diagnostics: list[RattishDiagnostic],
+    ) -> dict[str, Any] | None:
+        """A file input's ``accept`` and ``max-size``, lowered; None for other inputs."""
+        from gofer.rattish import file_inputs
+
+        def problem(message: str, span: Any) -> None:
+            diagnostics.append(
+                self._diagnostic("RATTISH_INVALID_FIELD_VALUE", "semantic", message, span, context)
+            )
+
+        accept_entry = parts.get("accept")
+        size_entry = parts.get("max_size")
+        if not file_inputs.is_file_schema(schema):
+            if file_inputs.contains_file_format(schema):
+                problem(
+                    f'Workflow input {name!r}: format "file" works only on the input\'s own '
+                    'schema, written as {"type": "string", "format": "file"}.',
+                    definition["span"],
+                )
+            for entry, field_name in ((accept_entry, "accept"), (size_entry, "max-size")):
+                if entry is not None:
+                    problem(
+                        f"Workflow input {name!r}: {field_name} applies only to file inputs, "
+                        'whose schema is {"type": "string", "format": "file"}.',
+                        entry["value"]["span"],
+                    )
+            return None
+        if default_entry is not None:
+            problem(
+                f"File input {name!r} can't have a default. Make it optional instead "
+                "(required: false), and choose the file when you run the workflow.",
+                default_entry["value"]["span"],
+            )
+        options: dict[str, Any] = {"accept": [], "max_size": file_inputs.DEFAULT_MAX_SIZE}
+        if accept_entry is not None:
+            patterns, error = file_inputs.parse_accept(self._value(accept_entry["value"]))
+            if error is not None:
+                problem(f"File input {name!r}: {error}", accept_entry["value"]["span"])
+            options["accept"] = patterns
+        if size_entry is not None:
+            size, error = file_inputs.parse_size(self._value(size_entry["value"]))
+            if error is not None or size is None:
+                problem(f"File input {name!r}: {error}", size_entry["value"]["span"])
+            else:
+                options["max_size"] = size
+        return options
 
     def _workflow_outputs(
         self,
@@ -1494,6 +1573,52 @@ class RattishCompiler:
                         f"Jev node {node_id!r}: request-timeout can be at most 60s.",
                     )
 
+    def _report_unknown_fields(
+        self,
+        node_id: str,
+        declaration: Mapping[str, Any],
+        contract: LoadedNodeContract,
+        instance: Any,
+        context: CompileContext,
+        diagnostics: list[RattishDiagnostic],
+    ) -> bool:
+        """Report each unknown top-level field at its own line, with the closest real names.
+
+        Returns False when the fields can't be matched to the source, so the caller
+        reports the schema's own message instead.
+        """
+        properties = contract.document["configuration_schema"].get("properties", {})
+        if not isinstance(instance, Mapping) or not isinstance(properties, Mapping):
+            return False
+        unknown = [name for name in instance if name not in properties and name != "cache"]
+        if not unknown:
+            return False
+        spans = {
+            entry["name"]["canonical"].replace("-", "_"): entry["name"]["span"]
+            for entry in declaration.get("entries", [])
+            if isinstance(entry, Mapping) and isinstance(entry.get("name"), Mapping)
+        }
+        if any(name not in spans for name in unknown):
+            return False
+        fields = sorted(name.replace("_", "-") for name in properties)
+        candidates = [*fields, *_COMMON_NODE_FIELDS, "to", "needs", "with"]
+        for name in unknown:
+            source_name = name.replace("_", "-")
+            suggestions = did_you_mean(source_name, candidates)
+            suggestions += (f"{contract.node_type} fields: {', '.join(fields)}.",)
+            diagnostics.append(
+                self._diagnostic(
+                    "RATTISH_UNKNOWN_FIELD",
+                    "semantic",
+                    f"Node {node_id!r} has no field {source_name!r}.",
+                    spans[name],
+                    context,
+                    details={"node": node_id, "path": [], "field": source_name},
+                    suggestions=suggestions,
+                )
+            )
+        return True
+
     def _validate_configuration(
         self,
         node_id: str,
@@ -1537,6 +1662,10 @@ class RattishCompiler:
                         contract.document["configuration_schema"].get("properties", {})
                     ) == {"cache"}:
                         continue
+                if not list(error.absolute_path) and self._report_unknown_fields(
+                    node_id, declaration, contract, error.instance, context, diagnostics
+                ):
+                    continue
             elif error.validator == "not":
                 code = "RATTISH_MUTUALLY_EXCLUSIVE_FIELDS"
             diagnostics.append(
@@ -1812,6 +1941,7 @@ class RattishCompiler:
                             draft.declaration["span"],
                             context,
                             details={"node": draft.node_id, "target": needed},
+                            suggestions=did_you_mean(needed, drafts),
                         )
                     )
             seen_routes: set[str] = set()
@@ -1827,6 +1957,7 @@ class RattishCompiler:
                             route["target"]["span"],
                             context,
                             details={"source_node": draft.node_id, "target": target},
+                            suggestions=did_you_mean(target, drafts),
                         )
                     )
                 signature = json.dumps(
@@ -1949,15 +2080,31 @@ class RattishCompiler:
                 )
                 if compatible:
                     continue
+                if not draft.activation_contexts:
+                    # Nothing routes to the node, the usual cause for a new author.
+                    message = (
+                        f"Node {draft.node_id!r} never runs: it waits for {needed!r}, "
+                        "but no route reaches it."
+                    )
+                    suggestions: tuple[str, ...] = (
+                        f"Add 'to: {draft.node_id}' to the node that should start it, "
+                        f"usually {needed!r}.",
+                    )
+                else:
+                    message = (
+                        f"Requirement {needed!r} cannot complete in an activation lineage "
+                        f"used by {draft.node_id!r}."
+                    )
+                    suggestions = ()
                 diagnostics.append(
                     self._diagnostic(
                         "RATTISH_INCOMPATIBLE_ACTIVATION_LINEAGE",
                         "semantic",
-                        f"Requirement {needed!r} cannot complete in an activation lineage "
-                        f"used by {draft.node_id!r}.",
+                        message,
                         draft.declaration["span"],
                         context,
                         details={"node": draft.node_id, "target": needed},
+                        suggestions=suggestions,
                     )
                 )
 
@@ -2847,6 +2994,147 @@ class RattishCompiler:
                     return
                 schema = items
 
+    def _validate_approval_configuration(
+        self,
+        node_id: str,
+        declaration: Mapping[str, Any],
+        configuration: Mapping[str, Any],
+        context: CompileContext,
+        diagnostics: list[RattishDiagnostic],
+    ) -> None:
+        def problem(field: str, message: str) -> None:
+            diagnostics.append(
+                self._diagnostic(
+                    "RATTISH_INVALID_FIELD_VALUE",
+                    "semantic",
+                    message,
+                    declaration["span"],
+                    context,
+                    details={"node": node_id, "field": field},
+                )
+            )
+
+        options = configuration.get("options")
+        options = [str(item) for item in options] if isinstance(options, list) else []
+        reject_options = configuration.get("reject_options")
+        reject_options = (
+            [str(item) for item in reject_options] if isinstance(reject_options, list) else []
+        )
+        folded = [option.casefold() for option in options]
+        if len(set(folded)) != len(folded):
+            problem(
+                "options",
+                f"Approval gate {node_id!r} lists the same option twice; options must differ "
+                "by more than capital letters.",
+            )
+        if reject_options and not options:
+            problem(
+                "reject-options",
+                f"Approval gate {node_id!r}: reject-options needs options to choose from.",
+            )
+            return
+        unknown = [option for option in reject_options if option not in options]
+        if unknown:
+            problem(
+                "reject-options",
+                f"Approval gate {node_id!r}: reject-options names "
+                f"{', '.join(repr(item) for item in unknown)}, which isn't in options "
+                f"({', '.join(options)}).",
+            )
+
+    @staticmethod
+    def _approval_output_schema(
+        schema: Mapping[str, Any], configuration: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Narrow choice to the gate's own options, so routes can be checked against them."""
+        options = configuration.get("options")
+        if not isinstance(options, list) or not options:
+            return dict(schema)
+        properties = dict(schema.get("properties") or {})
+        properties["choice"] = {
+            "type": ["string", "null"],
+            "enum": [*(str(option) for option in options), None],
+        }
+        return {**schema, "properties": properties}
+
+    def _approval_choice_options(
+        self, reference: Mapping[str, Any], drafts: Mapping[str, _NodeDraft]
+    ) -> list[str] | None:
+        """The options of an approval gate a reference reads the choice of, else None."""
+        if reference.get("root") != "node" or reference.get("channel") != "output":
+            return None
+        path = reference.get("path") or []
+        if len(path) != 1 or path[0].get("kind") != "member" or path[0].get("value") != "choice":
+            return None
+        producer = drafts.get(str(reference.get("symbol")))
+        if producer is None or producer.contract.node_type != "approval-gate":
+            return None
+        options = producer.configuration.get("options")
+        return [str(item) for item in options] if isinstance(options, list) else []
+
+    def _validate_approval_choice_literals(
+        self,
+        predicate: Mapping[str, Any],
+        route: Mapping[str, Any],
+        drafts: Mapping[str, _NodeDraft],
+        context: CompileContext,
+        diagnostics: list[RattishDiagnostic],
+    ) -> None:
+        kind = predicate.get("kind")
+        if kind == "logical":
+            for side in ("left", "right"):
+                self._validate_approval_choice_literals(
+                    predicate[side], route, drafts, context, diagnostics
+                )
+            return
+        if kind == "not":
+            self._validate_approval_choice_literals(
+                predicate["operand"], route, drafts, context, diagnostics
+            )
+            return
+        if kind != "comparison" or predicate.get("operator") not in {"==", "!="}:
+            return
+        for reference_side, literal_side in (("left", "right"), ("right", "left")):
+            operand = predicate[reference_side]
+            literal = predicate[literal_side]
+            if operand.get("kind") != "reference" or literal.get("kind") != "literal":
+                continue
+            value = literal.get("value")
+            if not isinstance(value, str):
+                continue
+            options = self._approval_choice_options(operand["reference"], drafts)
+            if options is None or value in options:
+                continue
+            gate = operand["reference"]["symbol"]
+            if not options:
+                message = (
+                    f"Route compares node.{gate}.output.choice with {value!r}, but approval "
+                    f"gate {gate!r} has no options, so its choice is always null."
+                )
+                suggestion = f"Add options to {gate!r} or branch on its approved field."
+            else:
+                close = next((o for o in options if o.casefold() == value.casefold()), None)
+                message = (
+                    f"Route compares node.{gate}.output.choice with {value!r}, which isn't "
+                    f"an option of approval gate {gate!r} ({', '.join(options)})."
+                )
+                suggestion = (
+                    f"Options match exactly; did you mean {close!r}?"
+                    if close is not None
+                    else "Use one of the listed options, or add this one to options."
+                )
+            diagnostics.append(
+                self._diagnostic(
+                    "RATTISH_APPROVAL_CHOICE_UNKNOWN",
+                    "semantic",
+                    message,
+                    route["span"],
+                    context,
+                    details={"node": gate, "value": value, "options": options},
+                    suggestions=(suggestion,),
+                )
+            )
+
     def _lower_route(
         self,
         route: Mapping[str, Any],
@@ -2867,6 +3155,7 @@ class RattishCompiler:
         )
         if predicate is not None:
             self._validate_lowered_predicate(predicate, route, context, diagnostics)
+            self._validate_approval_choice_literals(predicate, route, drafts, context, diagnostics)
         return {
             "target": route["target"]["canonical"],
             "mode": mode_map[route["mode"]],
@@ -3262,6 +3551,7 @@ class RattishCompiler:
                     declaration["span"],
                     context,
                     details={"node": node_id, "provider": provider_id},
+                    suggestions=self._provider_suggestions(provider_id, context),
                 )
             )
             return None
@@ -3290,6 +3580,14 @@ class RattishCompiler:
             return None
         resolution["fallback"] = fallback
         return resolution
+
+    @staticmethod
+    def _provider_suggestions(provider_id: str, context: CompileContext) -> tuple[str, ...]:
+        known = sorted({value.provider_id for value in context.provider_contracts.values()})
+        suggestions = did_you_mean(provider_id, known)
+        if known:
+            suggestions += ("Providers: " + ", ".join(known) + ".",)
+        return suggestions
 
     @staticmethod
     def _provider_contract(provider_id: str, context: CompileContext) -> ProviderContract | None:
@@ -3350,6 +3648,7 @@ class RattishCompiler:
                         span,
                         context,
                         details={"node": node_id, "provider": provider_id, "fallback": index},
+                        suggestions=self._provider_suggestions(provider_id, context),
                     )
                 )
                 unresolved = True
@@ -3385,6 +3684,48 @@ class RattishCompiler:
                 }
             )
         return None if unresolved else resolved
+
+    def _mcp_argument_key_warnings(
+        self,
+        value: Mapping[str, Any],
+        node_id: str,
+        context: CompileContext,
+        diagnostics: list[RattishDiagnostic],
+    ) -> None:
+        """Warn when an unquoted argument key changes spelling, such as maxResults.
+
+        Rattish map keys compare case-insensitively, but MCP tools match argument names
+        exactly. A JSON object or a quoted key keeps the spelling.
+        """
+        if value.get("kind") == "list":
+            for item in value.get("items") or []:
+                self._mcp_argument_key_warnings(item, node_id, context, diagnostics)
+            return
+        if value.get("kind") != "map":
+            return
+        for entry in value.get("entries") or []:
+            key = entry["key"]
+            if key.get("kind") == "identifier" and key["source"] != key["canonical"]:
+                diagnostics.append(
+                    RattishDiagnostic(
+                        code="RATTISH_MCP_ARGUMENT_KEY_CHANGED",
+                        severity="warning",
+                        phase="semantic",
+                        message=(
+                            f"Argument {key['source']!r} of node {node_id!r} is read as "
+                            f"{key['canonical']!r}: unquoted keys ignore case, and the tool "
+                            "matches names exactly."
+                        ),
+                        file=context.entrypoint,
+                        span=self._span(key["span"]),
+                        details={"node": node_id, "key": key["source"]},
+                        suggestions=(
+                            f'Quote the key ("{key["source"]}": ...) or write arguments as a '
+                            "JSON object.",
+                        ),
+                    )
+                )
+            self._mcp_argument_key_warnings(entry["value"], node_id, context, diagnostics)
 
     def _run_static_diagnostics(
         self,
@@ -3429,6 +3770,41 @@ class RattishCompiler:
             }
             self._plaintext_secret_warnings(
                 declaration, node_id, secret_fields, context, diagnostics
+            )
+        if contract.document["node_type"] == "mcp-tool" and "arguments" in declared_fields:
+            self._mcp_argument_key_warnings(
+                declared_fields["arguments"]["value"], node_id, context, diagnostics
+            )
+        if (
+            "sandbox_off" in rules
+            and configuration.get("sandbox") == "off"
+            and "sandbox" in declared_fields
+        ):
+            sandbox_rule = next(
+                item for item in static_diagnostics if item["rule"] == "sandbox_off"
+            )
+            what = (
+                f"MCP tool step {node_id!r} turns its sandbox off, so its local server"
+                if contract.document["node_type"] == "mcp-tool"
+                else f"Agent {node_id!r} turns its sandbox off, so its shell"
+            )
+            diagnostics.append(
+                RattishDiagnostic(
+                    code=sandbox_rule["code"],
+                    severity=sandbox_rule["severity"],
+                    phase="semantic",
+                    message=(
+                        f"{what} can change any file you can, read your credentials and reach "
+                        "any host."
+                    ),
+                    file=context.entrypoint,
+                    span=self._span(declared_fields["sandbox"]["name"]["span"]),
+                    details={"node": node_id, "field": "sandbox"},
+                    suggestions=(
+                        "Remove sandbox: off and list the hosts the step needs in network, "
+                        "unless the step can't work inside the sandbox.",
+                    ),
+                )
             )
         if (
             "blank_prompt" in rules
@@ -3560,6 +3936,31 @@ class RattishCompiler:
             )
             return None
         return value
+
+    def _workspace(
+        self,
+        field: Mapping[str, Any] | None,
+        context: CompileContext,
+        diagnostics: list[RattishDiagnostic],
+    ) -> str:
+        """Where the run's nodes work: the project folder, or a new git worktree per run."""
+        if field is None:
+            return "project"
+        value = self._value(field["value"])
+        if value not in WORKSPACES:
+            diagnostics.append(
+                self._diagnostic(
+                    "RATTISH_INVALID_FIELD_VALUE",
+                    "semantic",
+                    "workspace must be project or worktree.",
+                    field["value"]["span"],
+                    context,
+                    details={"field": "workspace"},
+                    suggestions=did_you_mean(str(value), list(WORKSPACES)),
+                )
+            )
+            return "project"
+        return str(value)
 
     def _optional_positive_number(
         self,
@@ -3905,6 +4306,7 @@ class RattishCompiler:
         *,
         details: dict[str, Any] | None = None,
         severity: Literal["error", "warning"] = "error",
+        suggestions: tuple[str, ...] = (),
     ) -> RattishDiagnostic:
         return RattishDiagnostic(
             code=code,
@@ -3914,6 +4316,7 @@ class RattishCompiler:
             file=context.entrypoint,
             span=self._span(span),
             details=details or {},
+            suggestions=suggestions,
         )
 
     @staticmethod

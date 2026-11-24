@@ -9,10 +9,12 @@ import androidx.compose.ui.unit.dp
 
 /** Production entry point. Simulator state is never loaded into live conversations. */
 @Composable
-fun RaticodeApp(notificationThread: String? = null, consumeNotification: () -> Unit = {}, offerVoiceSetup: Boolean = false, consumeVoiceOffer: () -> Unit = {}) {
+fun RaticodeApp(notificationThread: String? = null, consumeNotification: () -> Unit = {}, offerVoiceSetup: Boolean = false, consumeVoiceOffer: () -> Unit = {},
+                externalLink: String? = null, consumeExternalLink: () -> Unit = {}) {
     if (Build.VERSION.SDK_INT >= 29) {
         LiveScreen(initialThread = notificationThread?.takeIf { it.startsWith("live:") }?.removePrefix("live:"),
-            consumeInitialThread = consumeNotification, offerVoiceSetup = offerVoiceSetup, consumeVoiceOffer = consumeVoiceOffer)
+            consumeInitialThread = consumeNotification, offerVoiceSetup = offerVoiceSetup, consumeVoiceOffer = consumeVoiceOffer,
+            externalLink = externalLink, consumeExternalLink = consumeExternalLink)
     } else {
         Surface(Modifier.fillMaxSize()) {
             Column(Modifier.safeDrawingPadding().padding(24.dp)) {

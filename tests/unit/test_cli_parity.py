@@ -254,6 +254,10 @@ class GoferUiRequestHandler:
         if method == "POST" and action == "approve":
             pass
 
+    def _dispatch_workflow_shortcuts(self, method, path, query):
+        if method == "GET" and not action:
+            pass
+
     def _dispatch_GET(self):
         if parsed.path == "/api/health":
             pass

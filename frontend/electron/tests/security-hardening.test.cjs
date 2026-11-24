@@ -460,8 +460,15 @@ test("Rem, Markdown and HTML shared file opener requests a user grant and uses i
     } } },
     openCodeFile: (...args) => opened.push(args),
     setTopBarNotice: notice => notices.push(notice),
+    // Files another app opened with Raticode are kept out of what Rem sees; this is how they're recorded.
+    setExternalFilePaths: (update) => { external = update(external); },
   });
+  let external = new Set();
+  await open(link, { lineNumber: 12, column: 3, preview: true, external: true });
+  assert.deepEqual([...external], [file]);
   await open(link, { lineNumber: 12, column: 3, preview: true });
+  assert.deepEqual([...external], []);
+  opened.shift();
   assert.equal(opened.length, 1);
   assert.equal(opened[0][0], file);
   assert.equal(opened[0][1].lineNumber, 12);

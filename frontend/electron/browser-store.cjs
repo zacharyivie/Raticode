@@ -1,11 +1,12 @@
-// Browsing history, bookmarks, per-site settings and the downloads list.
+// Browsing history, bookmarks, per-site settings, the downloads list and the
+// local HTML files allowed to load content from the internet.
 // Small JSON files in the app profile, written atomically and readable only
 // by the current user. Each list is capped so files stay fast to load.
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const LIMITS = { history: 10000, bookmarks: 5000, downloads: 200, sites: 5000 };
+const LIMITS = { history: 10000, bookmarks: 5000, downloads: 200, sites: 5000, previewRemote: 2000 };
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function createBrowserStore(directory, { now = () => Date.now(), writeDelayMs = 400 } = {}) {
@@ -14,17 +15,20 @@ function createBrowserStore(directory, { now = () => Date.now(), writeDelayMs = 
     bookmarks: path.join(directory, "bookmarks.json"),
     sites: path.join(directory, "site-settings.json"),
     downloads: path.join(directory, "downloads.json"),
+    previewRemote: path.join(directory, "preview-remote-content.json"),
   };
   const data = {
     history: readJson(files.history, []),
     bookmarks: readJson(files.bookmarks, []),
     sites: readJson(files.sites, {}),
     downloads: readJson(files.downloads, []),
+    previewRemote: readJson(files.previewRemote, {}),
   };
   if (!Array.isArray(data.history)) data.history = [];
   if (!Array.isArray(data.bookmarks)) data.bookmarks = [];
   if (!data.sites || typeof data.sites !== "object" || Array.isArray(data.sites)) data.sites = {};
   if (!Array.isArray(data.downloads)) data.downloads = [];
+  if (!data.previewRemote || typeof data.previewRemote !== "object" || Array.isArray(data.previewRemote)) data.previewRemote = {};
   // Downloads cannot resume across restarts; report them as interrupted.
   data.downloads = data.downloads.map((item) => (
     item?.state === "progressing" ? { ...item, state: "interrupted", paused: false } : item
@@ -260,6 +264,25 @@ function createBrowserStore(directory, { now = () => Date.now(), writeDelayMs = 
     schedule("downloads");
   }
 
+  // Local HTML previews load nothing from the internet until the user allows
+  // it for that file. Keyed by the file's full path.
+  function previewRemoteAllowed(filePath) {
+    return typeof filePath === "string" && Object.hasOwn(data.previewRemote, filePath);
+  }
+
+  function setPreviewRemote(filePath, allowed) {
+    if (typeof filePath !== "string" || !path.isAbsolute(filePath) || filePath.length > 4096) return false;
+    if (allowed) data.previewRemote[filePath] = now();
+    else delete data.previewRemote[filePath];
+    const paths = Object.keys(data.previewRemote);
+    if (paths.length > LIMITS.previewRemote) {
+      paths.sort((a, b) => data.previewRemote[a] - data.previewRemote[b]);
+      for (const stale of paths.slice(0, paths.length - LIMITS.previewRemote)) delete data.previewRemote[stale];
+    }
+    schedule("previewRemote");
+    return previewRemoteAllowed(filePath);
+  }
+
   return {
     addBookmark,
     bookmarkFor,
@@ -273,12 +296,14 @@ function createBrowserStore(directory, { now = () => Date.now(), writeDelayMs = 
     forgetPrivateDownloads,
     listDownloads,
     listSites,
+    previewRemoteAllowed,
     recordVisit,
     removeBookmark,
     removeDownload,
     removeHistory,
     searchHistory,
     setPermission,
+    setPreviewRemote,
     site,
     suggest,
     updateBookmark,

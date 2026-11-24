@@ -23,6 +23,14 @@ export function isStreamedEngine(engine) {
   return STREAMED.has(engine);
 }
 
+// Whether a tab in the studio's browser view draws frames streamed from
+// another browser. Rem's Raticode (gecko) tabs are background tabs in Gecko's
+// Firefox, streamed like Firefox tabs; the user's own Gecko tab is Firefox's
+// window and never reaches this view.
+export function streamsIntoView(engine) {
+  return STREAMED.has(engine) || engine === "gecko";
+}
+
 // The name people see: "Raticode (chromium)", "Raticode (gecko)", "Chrome".
 export function engineLabel(engine) {
   return NAMES.get(engine) || NAMES.get("raticode");

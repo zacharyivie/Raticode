@@ -21,13 +21,11 @@ license_collector = runpy.run_path(str(Path(SPECPATH) / "scripts/collect-license
 license_collector["collect"](Path(SPECPATH) / "dist/third-party-licenses")
 datas = [("dist/third-party-licenses", "third-party-licenses")]
 datas += copy_metadata("raticode")
-datas += collect_data_files("openpyxl")
 datas += collect_data_files("tzdata")
 for package in ("fastembed", "onnxruntime", "tokenizers", "huggingface_hub", "pypdf", "bibtexparser"):
     datas += collect_data_files(package)
-if find_spec("vosk") is None:
-    raise RuntimeError("Vosk is required for Rem transcription in release builds")
-datas += collect_data_files("vosk", excludes=["**/*.dyld"])
+if find_spec("sherpa_onnx") is None:
+    raise RuntimeError("sherpa-onnx is required for offline dictation in release builds")
 datas += [
     ("src/gofer/devices/protocol", "gofer/devices/protocol"),
     ("rattish/contracts", "gofer/rattish/assets/contracts"),
@@ -42,23 +40,32 @@ hiddenimports = []
 hiddenimports += collect_submodules("apscheduler")
 hiddenimports += collect_submodules("gofer")
 hiddenimports += collect_submodules("segno")
-hiddenimports += collect_submodules("openpyxl")
+hiddenimports += collect_submodules("python_calamine")
 hiddenimports += collect_submodules("pydantic")
 hiddenimports += collect_submodules("pydantic_settings")
 hiddenimports += collect_submodules("sqlalchemy")
 hiddenimports += collect_submodules("typer")
 hiddenimports += collect_submodules("watchdog.observers")
-hiddenimports += collect_submodules("vosk")
+hiddenimports += collect_submodules("sherpa_onnx")
 for package in ("fastembed", "onnxruntime", "tokenizers", "pypdf", "bibtexparser"):
     hiddenimports += collect_submodules(package)
 
-# The Mac wheel calls its Mach-O library libvosk.dyld. Treat it as a binary
-# so PyInstaller checks its architecture and signs it with the other libraries.
+# sherpa-onnx keeps its native module and its own ONNX Runtime in sherpa_onnx/lib, and
+# the Linux wheel adds libasound in sherpa_onnx.libs. The module finds them relative
+# to itself (RPATH $ORIGIN on Linux and macOS, its own folder on Windows), so they keep
+# their folders. Windows' copy is also named onnxruntime.dll, like Raticode's own
+# ONNX Runtime; gofer.ui.offline_speech loads sherpa-onnx's copy by full path first.
+# Only the module and its ONNX Runtime are needed; the wheel's C and C++ API libraries
+# aren't used from Python. A throwaway Linux build of exactly this collection imported
+# sherpa-onnx and decoded audio, with the libraries at 12.1 MiB compressed.
 binaries = collect_dynamic_libs(
-    "vosk", search_patterns=["*.dll", "*.dylib", "lib*.so", "*.dyld"]
+    "sherpa_onnx", search_patterns=["_sherpa_onnx*", "*onnxruntime*"]
 )
-if not binaries:
-    raise RuntimeError("The Vosk native speech library is missing")
+_speech_names = [Path(source).name for source, _ in binaries]
+if not any(name.startswith("_sherpa_onnx") for name in _speech_names) or not any(
+    "onnxruntime" in name for name in _speech_names
+):
+    raise RuntimeError("The sherpa-onnx native speech library is missing")
 for package in ("onnxruntime", "numpy", "tokenizers"):
     binaries += collect_dynamic_libs(package)
 

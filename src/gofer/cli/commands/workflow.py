@@ -1879,17 +1879,10 @@ def _find_approval_request(
 
 
 def _approval_waiter_is_live(request: ApprovalRequest) -> bool:
-    if request.waiter_pid is None:
-        return False
-    try:
-        os.kill(request.waiter_pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    from gofer.utils.pids import pid_alive
+
+    # Never os.kill(pid, 0): on Windows that ends the waiting run.
+    return pid_alive(request.waiter_pid)
 
 
 def _resume_decided_approval(
@@ -2032,6 +2025,9 @@ def _decide_legacy_approval(
     by: str | None,
     notes: str,
     data_dir: Path | None,
+    *,
+    choice: str | None = None,
+    reply: str = "",
 ) -> None:
     from gofer.core.approvals import ApprovalStore
 
@@ -2058,18 +2054,28 @@ def _decide_legacy_approval(
                 if allowed
                 else "This gate names no approvers, so --by isn't used; leave it out."
             )
+        if request.options and choice is None and decision != "approved":
+            raise ValueError(
+                "This approval has options instead of Reject; answer with approve --choice "
+                "and one of: " + ", ".join(request.options) + "."
+            )
         decided = store.decide(
             request.workflow_id,
             run_id,
             node_id,
-            "approved" if decision == "approved" else "rejected",
+            None if request.options else ("approved" if decision == "approved" else "rejected"),
             decided_by=by or "cli",
             notes=notes,
+            choice=choice,
+            reply=reply,
         )
     except ValueError as exc:
         err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
-    label = "Approved" if decision == "approved" else "Rejected"
+    picked = decided.decision.choice if decided.decision is not None else None
+    label = (
+        f"Answered {picked}:" if picked else ("Approved" if decision == "approved" else "Rejected")
+    )
     console.print(f"[green]{label}[/green] {request.workflow_id} {run_id} {node_id}")
     if _is_rattish_approval(decided, data_dir):
         # The Rattish run waiting at this gate reads the decision from the same store;
@@ -2107,11 +2113,20 @@ def approve(
         help="Workflow ID when run/node IDs are not unique",
     ),
     by: str | None = typer.Option(None, "--by", help=_APPROVER_HELP),
+    choice: str | None = typer.Option(
+        None,
+        "--choice",
+        help="The option to answer with, for a gate that lists options instead of Approve "
+        "and Reject",
+    ),
+    reply: str = typer.Option("", "--reply", help="Typed reply, for a gate that asks for one"),
     notes: str = typer.Option("", "--notes", help="Decision notes"),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Approve a pending approval gate. Refused inside Rem and worker turns (exit 5)."""
-    _decide_legacy_approval("approved", run_id, node_id, workflow, by, notes, data_dir)
+    _decide_legacy_approval(
+        "approved", run_id, node_id, workflow, by, notes, data_dir, choice=choice, reply=reply
+    )
 
 
 @app.command("reject")
@@ -2125,11 +2140,12 @@ def reject(
         help="Workflow ID when run/node IDs are not unique",
     ),
     by: str | None = typer.Option(None, "--by", help=_APPROVER_HELP),
+    reply: str = typer.Option("", "--reply", help="Typed reply, for a gate that asks for one"),
     notes: str = typer.Option("", "--notes", help="Decision notes"),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Reject a pending approval gate. Refused inside Rem and worker turns (exit 5)."""
-    _decide_legacy_approval("rejected", run_id, node_id, workflow, by, notes, data_dir)
+    _decide_legacy_approval("rejected", run_id, node_id, workflow, by, notes, data_dir, reply=reply)
 
 
 @app.command("validate")
@@ -3420,6 +3436,22 @@ def edit(
         console.print("[yellow]Edit cancelled.[/yellow]")
 
 
+def _run_worktrees_text(count: int) -> str:
+    return f"{count} run worktree{'' if count == 1 else 's'}"
+
+
+def _pending_run_worktrees(workflow_id: str, data_dir: Path | None) -> int:
+    """How many of the workflow's run worktrees wait to be landed or discarded."""
+    from gofer.rattish import run_worktrees
+
+    found = _through_backend(
+        data_dir, "GET", f"/workflows/{quote(workflow_id, safe='')}/run-worktrees"
+    )
+    if isinstance(found, dict):
+        return int(found.get("pending") or 0)
+    return len(run_worktrees.unlanded_run_ids(data_dir or get_data_dir(), workflow_id.lower()))
+
+
 @app.command("rm")
 def rm(
     workflow: str = typer.Argument(..., help="Workflow ID or path to TOML file"),
@@ -3437,22 +3469,36 @@ def rm(
     rattish_id = _rattish_workflow_id(workflow, data_dir)
     if rattish_id is not None:
         if not yes:
-            typer.confirm(f"Delete Rattish workflow '{rattish_id}' and its folder?", abort=True)
+            pending = _pending_run_worktrees(rattish_id, data_dir)
+            them = "it and its branch" if pending == 1 else "them and their branches"
+            waiting = (
+                f" It has {_run_worktrees_text(pending)} waiting to be landed or discarded;"
+                f" deleting removes {them}, and their changes are lost."
+                if pending
+                else ""
+            )
+            typer.confirm(
+                f"Delete Rattish workflow '{rattish_id}' and its folder?{waiting}", abort=True
+            )
         sent = _through_backend(
             data_dir,
             "DELETE",
             f"/workflows/{quote(rattish_id, safe='')}",
             query={"sourceFormat": "rattish"},
         )
-        if sent is not _NO_BACKEND:
-            console.print(f"[green]Deleted[/green] {rattish_id}")
-            return
-        try:
-            delete_workflow_payload(rattish_id, data_dir, source_format="rattish")
-        except WorkflowUpdateError as exc:
-            err_console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(1)
-        console.print(f"[green]Deleted[/green] {rattish_id}")
+        if sent is _NO_BACKEND:
+            try:
+                sent = delete_workflow_payload(rattish_id, data_dir, source_format="rattish")
+            except WorkflowUpdateError as exc:
+                err_console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(1)
+        result = sent if isinstance(sent, dict) else {}
+        removed = int(result.get("runWorktreesRemoved") or 0)
+        branches = "its branch" if removed == 1 else "their branches"
+        detail = f" and {_run_worktrees_text(removed)} with {branches}" if removed else ""
+        console.print(f"[green]Deleted[/green] {rattish_id}{detail}")
+        for error in result.get("runWorktreeErrors") or []:
+            err_console.print(f"[yellow]Couldn't remove run worktree {error}[/yellow]")
         return
     try:
         wf = _resolve_workflow(workflow, data_dir)
@@ -3470,7 +3516,17 @@ def rm(
     cleanup_base = data_dir or path.parent
 
     if not yes:
-        typer.confirm(f"Delete workflow '{wf.config.id}' ({path})?", abort=True)
+        # Runs of a workflow file outside the data folder keep their logs beside it.
+        extra = [
+            folder
+            for folder in (
+                cleanup_base / "logs" / wf.config.id,
+                cleanup_base / "agent-memory" / wf.config.id,
+            )
+            if folder.exists()
+        ]
+        also = f" This also deletes {' and '.join(map(str, extra))}." if extra else ""
+        typer.confirm(f"Delete workflow '{wf.config.id}' ({path})?{also}", abort=True)
 
     if resolved_path.suffix != ".toml":
         sent = _through_backend(data_dir, "DELETE", f"/workflows/{quote(wf.config.id, safe='')}")
@@ -3658,9 +3714,16 @@ def create(
     dest = output or get_data_dir()
     dest.mkdir(parents=True, exist_ok=True)
     path = dest / f"{wf_id}.toml"
+    if path.exists():
+        err_console.print(
+            f"[red]{path} already exists.[/red] Choose another --name, or delete it first."
+        )
+        raise typer.Exit(1)
+    # A TOML basic string, so quotes and line breaks in the name can't add keys or nodes.
+    quoted_name = json.dumps(name, ensure_ascii=False)
     content = f"""[workflow]
 id = "{wf_id}"
-name = "{name}"
+name = {quoted_name}
 
 # [workflow.schedule]
 # cron_expression = "0 9 * * 1-5"

@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, MoreHorizontal, Plus } from "lucide-react";
-import { groupTasks, statusLine } from "../lib/remHome.js";
-import { connectRemHome, deleteRemTask, openNewTask, openTaskSheet, showRemMessage, useRemHome } from "../lib/remHomeStore.js";
+import { CheckCheck, ChevronDown, ChevronRight, MoreHorizontal, Plus, Target } from "lucide-react";
+import { dismissibleUpdates, groupTasks, statusLine } from "../lib/remHome.js";
+import { acknowledgeAllRemRuns, connectRemHome, deleteRemTask, openNewTask, openTaskSheet, showRemMessage, useRemHome } from "../lib/remHomeStore.js";
+import { taskObjective } from "../lib/remObjectives.js";
 import { RemMenu, TaskGlyph, taskActions, typeLabel } from "./RemHomeParts.jsx";
+import RemObjectives from "./RemObjectives.jsx";
+import RemDecisions from "./RemDecisions.jsx";
 import TaskSheet from "./RemTaskSheet.jsx";
 import RatFaceIcon from "./RatFaceIcon.jsx";
 import "./RemHome.css";
@@ -27,27 +30,49 @@ function TaskRow({ task, activity }) {
       </div>
     </li>;
   }
+  // The self-work objective this task's run serves, if any: one short line, full text on hover.
+  const objective = taskObjective(task);
   return <li className="rem-task-row" data-kind={activity.kind} data-tone={activity.tone}>
-    <button type="button" className="rem-task-open" title={`${typeLabel(task.type)} · ${task.title}`} onClick={open}>
+    <button type="button" className="rem-task-open" title={`${typeLabel(task.type)} · ${task.title}${objective ? `\nFor objective: ${objective.text}` : ""}`} onClick={open}>
       <span className="rem-task-glyph"><TaskGlyph activity={activity} type={task.type} /></span>
-      <span className="rem-task-text"><strong>{task.title}</strong><small>{activity.label}</small></span>
+      <span className="rem-task-text"><strong>{task.title}</strong><small>{activity.label}</small>
+        {objective ? <small className="rem-task-objective"><Target size={10} aria-hidden="true" /><span>{objective.text}</span></small> : null}
+      </span>
     </button>
     <RemMenu label={`${task.title} actions`} className="rem-task-menu" trigger={<MoreHorizontal size={15} />} items={taskActions(task, activity, { onEdit: open, onDelete: () => setConfirming(true) })} />
   </li>;
 }
 
-function Group({ group }) {
+// Dismiss all in the Needs you / Updates heading: every update at once. Runs that ask
+// the user something and tasks on hold aren't counted and stay in the group.
+function DismissAll({ group, now }) {
+  const [busy, setBusy] = useState(false);
+  const updates = dismissibleUpdates(group.items.map(item => item.task), now);
+  if (!updates.length) return null;
+  const staying = group.items.length - updates.length;
+  const what = `${updates.length} task ${updates.length === 1 ? "update" : "updates"}`;
+  const title = `Dismiss ${what}.${staying ? ` ${staying} that ${staying === 1 ? "needs" : "need"} your answer or ${staying === 1 ? "is" : "are"} on hold ${staying === 1 ? "stays" : "stay"}.` : ""} Nothing is stopped or deleted.`;
+  return <button type="button" className="rem-side-dismiss-all" disabled={busy} title={title} aria-label={`Dismiss all: ${what}`}
+    onClick={async () => { setBusy(true); try { await acknowledgeAllRemRuns(updates); } finally { setBusy(false); } }}>
+    <CheckCheck size={12} aria-hidden="true" /><span>Dismiss all</span><small>{updates.length}</small>
+  </button>;
+}
+
+function Group({ group, now }) {
   const [open, setOpen] = useState(group.id !== "done");
   return <section className="rem-side-group" aria-label={group.label}>
-    <button type="button" className="rem-side-group-heading" aria-expanded={open} onClick={() => setOpen(!open)}>
-      {open ? <ChevronDown size={12} aria-hidden="true" /> : <ChevronRight size={12} aria-hidden="true" />}
-      <span>{group.label}</span><small>{group.items.length}</small>
-    </button>
+    <div className="rem-side-group-head">
+      <button type="button" className="rem-side-group-heading" aria-expanded={open} onClick={() => setOpen(!open)}>
+        {open ? <ChevronDown size={12} aria-hidden="true" /> : <ChevronRight size={12} aria-hidden="true" />}
+        <span>{group.label}</span><small>{group.items.length}</small>
+      </button>
+      {group.id === "attention" ? <DismissAll group={group} now={now} /> : null}
+    </div>
     {open ? <ul>{group.items.map(({ task, activity }) => <TaskRow key={task.id} task={task} activity={activity} />)}</ul> : null}
   </section>;
 }
 
-export default function RemHomeSidebar({ active, open, onOpen, projectOptions = [] }) {
+export default function RemHomeSidebar({ active, open, onOpen, projectOptions = [], projectRoot = "" }) {
   const store = useRemHome();
   const now = useMinuteClock();
   useEffect(() => (active ? connectRemHome() : undefined), [active]);
@@ -68,8 +93,10 @@ export default function RemHomeSidebar({ active, open, onOpen, projectOptions = 
       <button type="button" className="rem-side-icon" aria-label="New task" title="New task" onClick={openNewTask}><Plus size={16} /></button>
     </div>
     <div className="rem-side-scroll">
+      {store.status === "ready" || store.objectives.items.length ? <RemObjectives objectives={store.objectives} tasks={store.tasks} /> : null}
+      {store.decisions.items.length ? <RemDecisions decisions={store.decisions} project={projectRoot} /> : null}
       {store.status === "loading" && !store.tasks.length ? <p role="status" className="rem-side-hint">Checking in with Rem…</p>
-        : groups.length ? groups.map(group => <Group key={group.id} group={group} />)
+        : groups.length ? groups.map(group => <Group key={group.id} group={group} now={now} />)
           : <div className="rem-side-empty">
             <p>Nothing on Rem’s plate yet.</p>
             <p>Ask in the conversation, or add a task that runs on a schedule.</p>

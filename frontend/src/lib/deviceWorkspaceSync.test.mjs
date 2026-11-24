@@ -333,6 +333,10 @@ test("phones see display settings only and their changes go through normal setti
   const changed = applyPhoneSettings(settings, [{ id: "a", values: { "appearance.theme": "dark", "browser.remConfirm": "never", "assistant.provider.x": 1 } }]);
   assert.equal(changed.appearance.theme, "dark");
   assert.equal(changed.browser.remConfirm, "signed-in");
+  // Settings > Rem > <provider> account: one value per provider, from the phone too.
+  const accounts = applyPhoneSettings({ assistant: { providerAccounts: { claude_code: "work" } } },
+    [{ id: "c", values: { "assistant.providerAccounts.codex": "auto", "assistant.providerAccounts.Bad-Id": "x", "assistant.providerAccounts.a.b": "x" } }]);
+  assert.deepEqual(accounts.assistant.providerAccounts, { claude_code: "work", codex: "auto" });
   const engine = applyPhoneSettings(settings, [{ id: "b", values: { "browser.engine": "firefox", "browser.remSites": [] } }]);
   assert.deepEqual(engine.browser, { remConfirm: "signed-in", engine: "firefox" });
   assert.equal(settings.appearance.theme, "light");

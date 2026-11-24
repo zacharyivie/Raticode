@@ -41,6 +41,22 @@ def _fail(exc: Exception) -> NoReturn:
     raise typer.Exit(1)
 
 
+def _refuse_in_agent_turn(action: str) -> None:
+    """Keep changes to things the user already trusts, and restores, with the user.
+
+    An agent turn may add new skills and MCP servers, which stay off until the user
+    turns them on in Thread tools, but not replace or remove existing ones.
+    """
+    from gofer.cli.client import ExitCode, in_agent_session
+
+    if in_agent_session():
+        err_console.print(
+            f"[red]Error:[/red] Only you can {action}. This command is running inside a "
+            "Raticode agent turn; run it from your own terminal or use the app."
+        )
+        raise typer.Exit(int(ExitCode.AUTH))
+
+
 def _print_json(value: object) -> None:
     typer.echo(json.dumps(value, indent=2))
 
@@ -78,10 +94,14 @@ def _servers_table(servers: list[dict[str, object]]) -> None:
 
     table = Table("Server", "Type", "Connection", "Description", title="MCP servers")
     for server in servers:
+        names = server.get("env") or []
+        connection = rem_library.describe_mcp(server)
+        if isinstance(names, list) and names:
+            connection += "\nenv: " + ", ".join(map(str, names))
         table.add_row(
             str(server["name"]),
             "HTTP" if server["type"] == "http" else "Local program",
-            rem_library.describe_mcp(server),
+            connection,
             str(server.get("description", "")),
         )
     console.print(table)
@@ -158,9 +178,10 @@ def remove_skill(
     path: Path = typer.Argument(..., help="Registered skill folder"),
     data_dir: Path | None = _DATA_DIR,
 ) -> None:
-    """Unregister a skill folder. Files are not deleted."""
+    """Unregister a skill folder. Files are not deleted. Refused inside an agent turn."""
     from gofer.core import rem_library
 
+    _refuse_in_agent_turn("remove a Rem skill")
     try:
         removed = rem_library.remove_skill(
             data_dir or get_data_dir(), str(path.expanduser().resolve())
@@ -192,7 +213,10 @@ def list_servers(data_dir: Path | None = _DATA_DIR, output: str = _FORMAT) -> No
     epilog=(
         "Examples:\n\n"
         "  Raticode rem mcp add docs --url https://example.com/mcp\n\n"
-        "  Raticode rem mcp add github -- npx -y @modelcontextprotocol/server-github"
+        "  Raticode rem mcp add github --env GITHUB_PERSONAL_ACCESS_TOKEN -- "
+        "github-mcp-server stdio\n\n"
+        "A package runner (npx, uvx) should name an exact version, such as "
+        "npx -y PACKAGE@1.2.3, or each run fetches the newest release."
     ),
 )
 def add_server(
@@ -200,16 +224,36 @@ def add_server(
     command: list[str] | None = typer.Argument(None, help="Local program and arguments, after --"),
     url: str | None = typer.Option(None, "--url", help="HTTP or HTTPS MCP endpoint"),
     description: str = typer.Option("", "--description", "-d", help="What the server provides"),
-    replace: bool = typer.Option(False, "--replace", help="Update an existing server"),
+    env: list[str] | None = typer.Option(
+        None,
+        "--env",
+        help=(
+            "Environment variable a local server needs in mcp-tool steps (repeat it). "
+            "Only the name is stored"
+        ),
+    ),
+    replace: bool = typer.Option(
+        False, "--replace", help="Update an existing server. Refused inside an agent turn"
+    ),
     data_dir: Path | None = _DATA_DIR,
 ) -> None:
-    """Add an MCP server that any provider can use in Rem threads."""
+    """Add an MCP server that any provider can use in Rem threads.
+
+    An mcp-tool workflow step starts a local server with a small base environment
+    (home folder, user, PATH, shell, terminal, locale and temporary-folder variables) and
+    the variables named with --env, taken from Raticode's environment. Rem threads
+    start servers through their provider and don't use --env.
+    """
     from pydantic import ValidationError
 
     from gofer.core import rem_library
 
+    if replace:
+        _refuse_in_agent_turn("replace an MCP server that's already in Rem's library")
     if bool(url) == bool(command):
         _fail(ValueError("Give either --url or a local program after --"))
+    if url and env:
+        _fail(ValueError("--env is for a local program; an HTTP server isn't started here"))
     server: dict[str, object] = (
         {"name": name, "type": "http", "url": url, "description": description}
         if url
@@ -219,6 +263,7 @@ def add_server(
             "command": (command or [""])[0],
             "args": (command or [])[1:],
             "description": description,
+            "env": list(env or []),
         }
     )
     try:
@@ -234,14 +279,119 @@ def add_server(
     console.print("Turn it on in Thread tools to use it in a Rem thread.")
 
 
+@mcp_app.command(
+    "tools",
+    epilog=(
+        "Examples:\n\n"
+        "  Raticode rem mcp tools github --network api.github.com --network registry.npmjs.org\n\n"
+        "  Raticode rem mcp tools docs --format json"
+    ),
+)
+def server_tools(
+    name: str = typer.Argument(..., help="Server name from Raticode rem mcp list"),
+    network: list[str] | None = typer.Option(
+        None,
+        "--network",
+        help="Host a local server may reach, as in an mcp-tool step (repeat it, or use any)",
+    ),
+    no_sandbox: bool = typer.Option(
+        False, "--no-sandbox", help="Start a local server unsandboxed, like sandbox: off"
+    ),
+    timeout: float = typer.Option(30.0, "--timeout", min=1, help="Seconds to wait"),
+    data_dir: Path | None = _DATA_DIR,
+    output: str = _FORMAT,
+) -> None:
+    """Start an MCP server and list its tools with their arguments.
+
+    A local server starts in the same sandbox as an mcp-tool workflow step, in the
+    current folder. Use it to pick a tool and write its arguments.
+    """
+    from gofer.rattish import mcp_tool
+
+    try:
+        listing = mcp_tool.server_tools(
+            data_dir or get_data_dir(),
+            name,
+            network=mcp_tool.parse_network(network),
+            sandbox=not no_sandbox,
+            working_dir=Path.cwd(),
+            timeout_seconds=timeout,
+        )
+    except mcp_tool.McpToolError as exc:
+        _fail(ValueError(exc.message))
+    if wants_json(output, aliases=("table",)):
+        _print_json(listing)
+        return
+    if not listing["tools"]:
+        console.print(f"MCP server {name} has no tools.")
+        return
+    table = Table(title=f"Tools on {name}")
+    table.add_column("Tool", style="bold")
+    table.add_column("Arguments")
+    table.add_column("Description")
+    for tool in listing["tools"]:
+        schema = tool.get("inputSchema") or {}
+        required = set(schema.get("required") or [])
+        names = [
+            f"{key}{'' if key in required else '?'}: {(value or {}).get('type', 'any')}"
+            for key, value in (schema.get("properties") or {}).items()
+        ]
+        table.add_row(tool["name"], "\n".join(names) or "none", tool.get("description", ""))
+    console.print(table)
+
+
+@mcp_app.command(
+    "clear-cache",
+    epilog=(
+        "Examples:\n\n  Raticode rem mcp clear-cache github\n\n  Raticode rem mcp clear-cache --all"
+    ),
+)
+def clear_server_cache(
+    name: str | None = typer.Argument(None, help="Server name from Raticode rem mcp list"),
+    all_servers: bool = typer.Option(False, "--all", help="Clear every server's package cache"),
+    data_dir: Path | None = _DATA_DIR,
+    output: str = _FORMAT,
+) -> None:
+    """Clear the package cache of a local MCP server that mcp-tool steps start.
+
+    A server started with npx or uvx keeps its downloaded packages between starts. After
+    this, its next start downloads them again.
+    """
+    from gofer.core import rem_library
+
+    if bool(name) == all_servers:
+        _fail(ValueError("Name one MCP server, or use --all"))
+    try:
+        freed = rem_library.clear_mcp_cache(data_dir or get_data_dir(), name)
+    except ValueError as exc:
+        _fail(exc)
+    if wants_json(output, aliases=("table",)):
+        _print_json({"server": name, "all": all_servers, "bytesFreed": freed})
+        return
+    target = "every MCP server's" if all_servers else f"MCP server {name}'s"
+    console.print(f"Cleared {target} package cache ({_size_text(freed)} freed).")
+
+
+def _size_text(size: int) -> str:
+    if size < 1000:
+        return f"{size} bytes"
+    value = float(size)
+    for unit in ("KB", "MB", "GB"):
+        value /= 1000
+        if value < 1000:
+            break
+    return f"{value:.1f} {unit}"
+
+
 @mcp_app.command("remove")
 def remove_server(
     name: str = typer.Argument(...),
     data_dir: Path | None = _DATA_DIR,
 ) -> None:
-    """Remove an MCP server from the Rem library."""
+    """Remove an MCP server from the Rem library. Refused inside an agent turn."""
     from gofer.core import rem_library
 
+    _refuse_in_agent_turn("remove an MCP server from Rem's library")
     try:
         removed = rem_library.remove_mcp_server(data_dir or get_data_dir(), name)
     except ValueError as exc:
@@ -295,7 +445,8 @@ def restore_db(
     Raticode keeps the last few checked copies of Rem's database, taken at startup and
     once a day. This moves the current database and its -wal/-shm files aside (they are
     kept, not deleted) and puts the newest copy that still passes its check in place.
-    Rem posts what was restored, and from when, in its chat on the next start.
+    Rem posts what was restored, and from when, in its chat on the next start. Only
+    --list works inside a Raticode agent turn.
     """
     from gofer.ui import rem_db_backups as backups
 
@@ -314,6 +465,7 @@ def restore_db(
             table.add_row(item["name"], _local_time(item["taken_at"]), str(item["size"]))
         console.print(table)
         return
+    _refuse_in_agent_turn("restore Rem's database")
     live = root / backups.STORE_FILE
     if not force and _lease_held(live):
         _fail(

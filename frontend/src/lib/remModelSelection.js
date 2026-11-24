@@ -1,13 +1,22 @@
 // Record the selection on submitted user messages, never on picker changes.
 // Keeping the divider with its message preserves it through paging and forks.
-export function remModelSelection(provider, model, effort, capability) {
+// account is the thread's own account choice for the provider (threadAccounts.js),
+// left out when the thread follows Rem's account setting.
+export function remModelSelection(provider, model, effort, capability, account = "") {
   const modelCapability = capability?.models?.find(item => item.id === model);
-  return { provider, model: model || "cli-default", effort: effort || modelCapability?.defaultEffort || "" };
+  return { provider, model: model || "cli-default", effort: effort || modelCapability?.defaultEffort || "", ...(account ? { account } : {}) };
+}
+
+function accountPart(account) {
+  if (account === "@default") return "default sign-in";
+  return account || "Rem’s account setting";
 }
 
 export function remModelSwitchBanner(previous, selection, providerName) {
-  if (!previous || ["provider", "model", "effort"].every(key => previous[key] === selection[key])) return null;
-  return `switched to ${providerName || selection.provider} - ${selection.model === "cli-default" ? "CLI default" : selection.model} - ${selection.effort || "default effort"}`;
+  const accountChanged = (previous?.account || "") !== (selection.account || "");
+  if (!previous || (!accountChanged && ["provider", "model", "effort"].every(key => previous[key] === selection[key]))) return null;
+  const account = selection.account || accountChanged ? ` - ${accountPart(selection.account)}` : "";
+  return `switched to ${providerName || selection.provider} - ${selection.model === "cli-default" ? "CLI default" : selection.model} - ${selection.effort || "default effort"}${account}`;
 }
 
 export async function previousRemModelSelection(repository, threadId, messages, editedMessageId = null) {

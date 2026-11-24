@@ -108,7 +108,14 @@ def test_workflows_need_phone_access_and_are_advertised(phone, tmp_path):
     assert plain(send("desktop.read", "workflows.list")["value"]) == {
         "workflows": [],
         "earlier": 0,
-        "triggers": {"paused": False, "paused_at": "", "count": 0, "enabled": 0},
+        "triggers": {
+            "paused": False,
+            "paused_at": "",
+            "count": 0,
+            "enabled": 0,
+            "daily_limit": "",
+            "limit_reached": False,
+        },
     }
 
 
@@ -126,6 +133,7 @@ def test_views_show_open_project_workflows_without_paths(desk, tmp_path):
     assert entry["name"] == "Phone check" and entry["project_name"] == "Notes"
     assert entry["status"] == "idle" and entry["latest_run"] is None
     assert entry["description"] == "3 nodes, 2 routes."
+    assert entry["text_inputs"] == []
 
     view = send("desktop.read", "workflows.read", {"workflow_id": shown.workflow_id})["value"]
     text = json.dumps(view)
@@ -289,13 +297,33 @@ def test_runs_keep_the_desktop_safeguards(desk):
     assert refused == {"ok": False, "code": "invalid", "detail": module.NEEDS_INPUTS}
 
     # A workflow with errors shows why it can't run.
-    broken = add(root, "Broken", "Rattish: 1\nWorkflow:\n  name: Broken\nNode x:\n  type: nope\n")
+    broken = add(
+        root, "Broken", "Rattish: 1\nWorkflow:\n  name: Broken\nNode x:\n  type: write-fil\n"
+    )
     listed = {
         w["workflow_id"]: w for w in send("desktop.read", "workflows.list")["value"]["workflows"]
     }
     assert listed[broken.workflow_id]["status"] == "invalid"
     view = send("desktop.read", "workflows.read", {"workflow_id": broken.workflow_id})["value"]
-    assert view["controls"]["run"] == {"allowed": False, "reason": module.INVALID}
+    # The same first error and fix hint the desktop's workflow list shows.
+    assert view["controls"]["run"] == {
+        "allowed": False,
+        "reason": "This workflow has an error. Line 5: No node contract is available for "
+        "'write-fil'. Did you mean 'write-file'? Fix it on your computer.",
+    }
+
+    # A workflow that compiles but fails preflight names the first problem too.
+    unready = add(
+        root,
+        "Unready",
+        "Rattish: 1\nWorkflow:\n  name: Unready\nNode x:\n  type: read-file\n"
+        "  path: missing-notes.txt\n",
+    )
+    ready_view = send("desktop.read", "workflows.read", {"workflow_id": unready.workflow_id})
+    reason = ready_view["value"]["controls"]["run"]["reason"]
+    assert ready_view["value"]["controls"]["run"]["allowed"] is False
+    assert reason.startswith("This workflow can't run yet: ")
+    assert "missing-notes.txt" in reason
     assert view["nodes"] == [] and view["revision"] == ""
     assert ran == []
 
@@ -411,7 +439,12 @@ def test_run_and_node_statuses_map_to_the_phone_vocabulary(desk):
         "status": "running",
         "rattishRun": {"status": "running", "started_at": "t0", "duration_ms": 0},
         "runNodes": {
-            "a": {"status": "success", "startedAt": "t1", "finishedAt": "t2"},
+            "a": {
+                "status": "success",
+                "startedAt": "t1",
+                "finishedAt": "t2",
+                "providerApp": "Claude Code 2.3.1",
+            },
             "b": {"status": "allowed_failure"},
             "c": {"status": "disconnected"},
         },
@@ -421,7 +454,7 @@ def test_run_and_node_statuses_map_to_the_phone_vocabulary(desk):
     view = phone_workflows._detail(detail, {"r1": ["d"]}, registered, "Notes", graph)
     assert view["status"] == "waiting" and view["summary"] == "Waiting for approval"
     assert [(n["status"], n["detail"]) for n in view["nodes"]] == [
-        ("succeeded", ""),
+        ("succeeded", "Provider: Claude Code 2.3.1."),
         ("failed", "Failed, allowed to continue"),
         ("interrupted", ""),
         ("waiting", "Waiting for approval"),
@@ -532,6 +565,21 @@ def test_the_run_form_is_built_from_the_input_schema(desk):
     # A password inside an input counts too, as it does when the run saves its inputs.
     assert fields["login"]["secret"] is True and "default" not in fields["login"]
     assert ran == []
+
+
+def test_the_list_names_text_inputs_shared_text_can_fill(desk):
+    app, peer, context, send, add, _, _, base = desk
+    root = context["projects"][0]["root"]
+    workflow = add(root, "Phone check", INPUTS_SOURCE)
+    broken = add(root, "Broken", "Rattish: 1\nWorkflow:\n  name: Broken\nNode x:\n  type: nope\n")
+    listed = {
+        entry["workflow_id"]: entry
+        for entry in send("desktop.read", "workflows.list")["value"]["workflows"]
+    }
+    # Choices, numbers, JSON and password inputs can't take shared text.
+    assert listed[workflow.workflow_id]["text_inputs"] == [{"name": "target", "label": "Target"}]
+    assert listed[broken.workflow_id]["text_inputs"] == []
+    assert "kept-on-desktop" not in json.dumps(listed)
 
 
 def test_phone_inputs_are_checked_then_reach_the_run(desk):
@@ -815,6 +863,48 @@ def test_phone_lists_a_workflows_triggers_and_turns_them_off_and_on(desk, tmp_pa
     assert store.get(cron.id).enabled is False
 
 
+def test_phone_shows_daily_limits_and_when_they_are_reached(desk):
+    from gofer.rattish.triggers import TriggerStore
+
+    _, _, context, send, add, _, _, base = desk
+    root = context["projects"][0]["root"]
+    shown = add(root, "Phone check")
+    store = TriggerStore(base)
+    capped, _ = store.create(
+        kind="cron",
+        source_path=shown.entrypoint,
+        config={"expression": "0 9 * * *", "timezone": "UTC"},
+        daily_max_cost_usd=2,
+    )
+    plain, _ = store.create(kind="webhook", source_path=shown.entrypoint)
+    store.set_daily_budget(max_tokens=1000)
+
+    view = send("desktop.read", "workflows.read", {"workflow_id": shown.workflow_id})["value"]
+    listed = {item["trigger_id"]: item for item in view["triggers"]}
+    assert listed[capped.id]["daily_limit"] == "Daily limit: $0 of $2.00 used today."
+    assert listed[capped.id]["limit_reached"] is False
+    assert listed[plain.id]["daily_limit"] == "" and listed[plain.id]["limit_reached"] is False
+    # The Time limit shows read-only: 6 hours unless changed on the computer.
+    assert listed[capped.id]["time_limit"] == "Time limit: 6 h"
+    store.update(plain.id, max_run_seconds=None)
+    view = send("desktop.read", "workflows.read", {"workflow_id": shown.workflow_id})["value"]
+    assert {item["trigger_id"]: item for item in view["triggers"]}[plain.id][
+        "time_limit"
+    ] == "No time limit"
+    summary = send("desktop.read", "workflows.list")["value"]["triggers"]
+    assert summary["daily_limit"] == "Daily limit: 0 of 1,000 tokens used today."
+
+    store.start_spend("run-a", capped.id, datetime.now(UTC))
+    store.finish_spend("run-a", cost_usd=2.5, tokens=1200)
+    view = send("desktop.read", "workflows.read", {"workflow_id": shown.workflow_id})["value"]
+    reached = {item["trigger_id"]: item for item in view["triggers"]}[capped.id]
+    assert reached["limit_reached"] is True
+    assert "skipped until midnight (UTC)" in reached["daily_limit"]
+    summary = send("desktop.read", "workflows.list")["value"]["triggers"]
+    assert summary["limit_reached"] is True
+    assert summary["daily_limit"].startswith("Daily limit: 1,200 of 1,000 tokens used today.")
+
+
 def test_phone_pauses_and_resumes_all_triggers_keeping_each_setting(desk):
     from gofer.rattish.triggers import TriggerStore
 
@@ -863,3 +953,458 @@ def test_phone_pauses_and_resumes_all_triggers_keeping_each_setting(desk):
     )["value"]
     assert resumed["paused"] is False and resumed["message"].startswith("Triggers resumed: 1 of 2")
     assert store.get(on.id).enabled is True and store.get(off.id).enabled is False
+
+
+def test_phone_reviews_and_approves_a_changed_trigger_workflow(desk):
+    from gofer.devices.phone_guard import LOCKED_DETAIL
+    from gofer.rattish.triggers import TriggerStore, approval_status
+
+    app, peer, context, send, add, _, _, base = desk
+    root = context["projects"][0]["root"]
+    shown = add(root, "Phone check")
+    store = TriggerStore(base)
+    cron, _ = store.create(
+        kind="cron", source_path=shown.entrypoint, config={"expression": "0 9 * * *"}
+    )
+    ask = {"workflow_id": shown.workflow_id, "trigger_id": cron.id}
+
+    view = send("desktop.read", "workflows.read", {"workflow_id": shown.workflow_id})["value"]
+    assert view["triggers"][0]["approval"] == "approved"
+    assert view["triggers"][0]["approval_message"] == ""
+    assert view["triggers"][0]["run_edits_without_approval"] is False
+    assert send("desktop.read", "overview")["value"]["workflow_trigger_approval"] is True
+
+    shown.entrypoint.write_text(
+        shown.entrypoint.read_text(encoding="utf-8") + "# edited by an agent\n", encoding="utf-8"
+    )
+    view = send("desktop.read", "workflows.read", {"workflow_id": shown.workflow_id})["value"]
+    assert view["triggers"][0]["approval"] == "changed"
+    assert view["triggers"][0]["approval_message"] == "Workflow changed since you approved it."
+
+    changes = send("desktop.read", "workflows.trigger.changes", ask)["value"]
+    assert changes["approval"] == "changed"
+    assert "+# edited by an agent" in changes["files"][0]["diff"]
+    assert changes["files"][0]["diff_available"] is True
+    assert root not in json.dumps(changes) and str(base) not in json.dumps(changes)
+    assert changes["files"][0]["change"] == "changed"
+    assert changes["files"][0]["kind"] == "Workflow"
+
+    # Approving names the version the phone showed (the schema requires it); one that
+    # moved on since is refused.
+    shown.entrypoint.write_text(
+        shown.entrypoint.read_text(encoding="utf-8") + "# and again\n", encoding="utf-8"
+    )
+    stale = send(
+        "desktop.action",
+        "workflows.trigger.approve",
+        {**ask, "fingerprint": changes["fingerprint"]},
+    )
+    assert stale == {"ok": False, "code": "conflict", "detail": module.CHANGED_AGAIN}
+    assert approval_status(store, store.get(cron.id)).state == "changed"
+
+    fresh = send("desktop.read", "workflows.trigger.changes", ask)["value"]
+    approved = send(
+        "desktop.action",
+        "workflows.trigger.approve",
+        {**ask, "fingerprint": fresh["fingerprint"]},
+    )["value"]
+    assert approved["approval"] == "approved"
+    status = approval_status(store, store.get(cron.id))
+    assert status.state == "approved"
+    assert status.approval is not None and status.approval.approved_by == "phone"
+
+    # A triggered run that found a file changed marks the trigger; the phone names it,
+    # even when the file has changed back and no diff is left.
+    assert status.approval.snapshot is not None
+    store.mark_changed_in_run(
+        cron.id,
+        approved_fingerprint=status.approval.snapshot.fingerprint,
+        path=str(shown.entrypoint),
+        role="workflow",
+        run_id="run-1",
+    )
+    marked = send("desktop.read", "workflows.trigger.changes", ask)["value"]
+    assert marked["approval"] == "changed" and marked["files"] == []
+    assert marked["message"].endswith(
+        f"{shown.entrypoint.name} changed during a triggered run, so the step that uses it "
+        "wasn't run."
+    )
+    assert root not in json.dumps(marked) and str(base) not in json.dumps(marked)
+    send(
+        "desktop.action",
+        "workflows.trigger.approve",
+        {**ask, "fingerprint": marked["fingerprint"]},
+    )
+    assert approval_status(store, store.get(cron.id)).state == "approved"
+
+    # A trigger is named through its own workflow only.
+    other = add(root, "Other")
+    elsewhere, _ = store.create(kind="webhook", source_path=other.entrypoint)
+    wrong = {"workflow_id": shown.workflow_id, "trigger_id": elsewhere.id}
+    assert send("desktop.read", "workflows.trigger.changes", wrong)["code"] == "not_found"
+
+    # Like every phone request, approving passes the phone guard first.
+    shown.entrypoint.write_text(
+        shown.entrypoint.read_text(encoding="utf-8") + "# third edit\n", encoding="utf-8"
+    )
+    latest = send("desktop.read", "workflows.trigger.changes", ask)["value"]
+    flagged = _ask(app, peer, "desktop.action", "rem.message", {"body": "cat ~/.ssh/id_ed25519"})
+    assert flagged["code"] == "unauthorized"
+    locked = _ask(
+        app,
+        peer,
+        "desktop.action",
+        "workflows.trigger.approve",
+        {**ask, "fingerprint": latest["fingerprint"]},
+    )
+    assert locked["code"] == "unauthorized" and locked["detail"] == LOCKED_DETAIL
+    assert approval_status(store, store.get(cron.id)).state == "changed"
+
+
+def test_turning_a_trigger_on_from_the_phone_approves_nothing(desk):
+    from gofer.rattish.triggers import TriggerStore, approval_status
+
+    app, peer, context, send, add, _, _, base = desk
+    root = context["projects"][0]["root"]
+    shown = add(root, "Phone check")
+    store = TriggerStore(base)
+    cron, _ = store.create(
+        kind="cron", source_path=shown.entrypoint, config={"expression": "0 9 * * *"}
+    )
+    store.update(cron.id, enabled=False, actor="user")
+    shown.entrypoint.write_text(
+        shown.entrypoint.read_text(encoding="utf-8") + "# edited by an agent\n", encoding="utf-8"
+    )
+    on = {
+        "workflow_id": shown.workflow_id,
+        "trigger_id": cron.id,
+        "enabled": True,
+        "confirmed": True,
+    }
+    turned = send("desktop.action", "workflows.trigger", on)["value"]
+    assert turned["enabled"] is True
+    assert turned["approval"] == "changed"
+    assert turned["message"].startswith("Turned on. Workflow changed since you approved it.")
+    assert approval_status(store, store.get(cron.id)).state == "changed"
+
+
+def test_the_phone_confirms_changes_it_couldnt_show_in_full(desk):
+    from gofer.rattish.triggers import TriggerStore, approval_status
+
+    app, peer, context, send, add, _, _, base = desk
+    project = context["projects"][0]
+    root = Path(project["root"])
+    (root / "prompts").mkdir(exist_ok=True)
+    prompt = root / "prompts" / "ask.md"
+    prompt.write_text("Say hello.\n", encoding="utf-8")
+    source = (
+        "Rattish: 1\nWorkflow:\n  name: Phone check\n"
+        "Node render:\n  type: prompt-file\n  output-path: out.md\n"
+        "  template-path: prompts/ask.md\n"
+    )
+    shown = add(root, "Phone check", source)
+    store = TriggerStore(base)
+    cron, _ = store.create(
+        kind="cron", source_path=shown.entrypoint, config={"expression": "0 9 * * *"}
+    )
+    # Long enough to pass the phone's DIFF_LIMIT, short enough for the desktop's lines.
+    line = "x" * 100
+    prompt.write_text("".join(f"{index} {line}\n" for index in range(1000)), encoding="utf-8")
+    ask = {"workflow_id": shown.workflow_id, "trigger_id": cron.id}
+    changes = send("desktop.read", "workflows.trigger.changes", ask)["value"]
+    assert changes["project_id"] == project["id"]
+    assert changes["unseen_hidden"] == 0
+    (file,) = changes["files"]
+    assert file["truncated"] is True and file["unseen"] == "cut"
+    assert file["open_path"] == "prompts/ask.md"
+    assert len(file["diff"]) <= module.DIFF_LIMIT
+    assert "hidden" not in file
+
+    refused = send(
+        "desktop.action",
+        "workflows.trigger.approve",
+        {**ask, "fingerprint": changes["fingerprint"]},
+    )
+    assert refused["code"] == "invalid"
+    assert "prompts/ask.md (diff cut short)" in refused["detail"]
+    assert str(root) not in refused["detail"]
+    assert approval_status(store, store.get(cron.id)).state == "changed"
+
+    approved = send(
+        "desktop.action",
+        "workflows.trigger.approve",
+        {**ask, "fingerprint": changes["fingerprint"], "unseen_confirmed": True},
+    )["value"]
+    assert approved["approval"] == "approved"
+    assert approval_status(store, store.get(cron.id)).state == "approved"
+
+    # A short change shows in full, so no second confirmation is needed.
+    prompt.write_text(
+        "".join(f"{index} {'y' if index == 0 else 'x'}{line[1:]}\n" for index in range(1000)),
+        encoding="utf-8",
+    )
+    small = send("desktop.read", "workflows.trigger.changes", ask)["value"]
+    assert small["files"][0]["unseen"] == ""
+    done = send(
+        "desktop.action",
+        "workflows.trigger.approve",
+        {**ask, "fingerprint": small["fingerprint"]},
+    )["value"]
+    assert done["approval"] == "approved"
+
+
+def test_the_phone_warns_about_an_unpinned_mcp_server_and_asks_again(desk):
+    from gofer.core import rem_library
+    from gofer.rattish.mcp_packages import UNPINNED_WARNING
+    from gofer.rattish.triggers import TriggerStore, approval_status
+
+    app, peer, context, send, add, _, _, base = desk
+    root = Path(context["projects"][0]["root"])
+
+    def server(*args: str, replace: str | None = "gh") -> None:
+        definition = {"name": "gh", "type": "stdio", "command": "npx", "args": list(args)}
+        rem_library.save_mcp_server(base, definition, replace=replace)
+
+    server("-y", "server@1.0.0", replace=None)
+    source = (
+        "Rattish: 1\nWorkflow:\n  name: Phone check\n"
+        "Node call:\n  type: mcp-tool\n  server: gh\n  tool: list_issues\n"
+    )
+    shown = add(root, "Phone check", source)
+    store = TriggerStore(base)
+    cron, _ = store.create(
+        kind="cron", source_path=shown.entrypoint, config={"expression": "0 9 * * *"}
+    )
+    server("-y", "server")
+    ask = {"workflow_id": shown.workflow_id, "trigger_id": cron.id}
+    changes = send("desktop.read", "workflows.trigger.changes", ask)["value"]
+    (file,) = changes["files"]
+    assert file["kind"] == "MCP server"
+    assert file["unseen"] == "unpinned"
+    assert file["warning"] == UNPINNED_WARNING
+    assert file["open_path"] == ""
+
+    refused = send(
+        "desktop.action",
+        "workflows.trigger.approve",
+        {**ask, "fingerprint": changes["fingerprint"]},
+    )
+    assert refused["code"] == "invalid"
+    assert "mcp-server:gh (package version not pinned" in refused["detail"]
+    assert approval_status(store, store.get(cron.id)).state == "changed"
+
+    approved = send(
+        "desktop.action",
+        "workflows.trigger.approve",
+        {**ask, "fingerprint": changes["fingerprint"], "unseen_confirmed": True},
+    )["value"]
+    assert approved["approval"] == "approved"
+
+    # A pinned server shows no warning and needs no second yes.
+    server("-y", "server@2.0.0")
+    pinned = send("desktop.read", "workflows.trigger.changes", ask)["value"]
+    assert pinned["files"][0]["unseen"] == "" and pinned["files"][0]["warning"] == ""
+    done = send(
+        "desktop.action",
+        "workflows.trigger.approve",
+        {**ask, "fingerprint": pinned["fingerprint"]},
+    )["value"]
+    assert done["approval"] == "approved"
+
+
+FILE_SOURCE = (
+    "Rattish: 1\nWorkflow:\n  name: Phone check\n  inputs:\n"
+    '    document:\n      schema: {"type": "string", "format": "file", "title": "Document"}\n'
+    '      required: true\n      accept: [".txt", "image/*"]\n      max-size: 64\n'
+    '    tone:\n      schema: {"type": "string"}\n      required: false\n'
+    "Node work:\n  type: bash-command\n  command: fake-only\n"
+)
+
+
+def test_a_shared_file_fills_a_file_input_and_is_copied_into_the_run(desk):
+    from uuid import uuid4
+
+    from gofer.rattish.file_inputs import run_files_dir, uploads_dir
+    from tests.unit.test_device_desktop_control import _upload
+
+    app, peer, context, send, add, release, ran, base = desk
+    workflow = add(context["projects"][0]["root"], "Phone check", FILE_SOURCE)
+    listed = send("desktop.read", "workflows.list")["value"]["workflows"][0]
+    assert listed["file_inputs"] == [
+        {"name": "document", "label": "Document", "accept": [".txt", "image/*"], "max_size": 64}
+    ]
+    assert listed["text_inputs"] == [{"name": "tone", "label": "tone"}]
+    fields = {
+        field["name"]: field
+        for field in send("desktop.read", "workflows.read", {"workflow_id": workflow.workflow_id})[
+            "value"
+        ]["inputs"]
+    }
+    assert fields["document"]["kind"] == "file" and fields["document"]["max_size"] == 64
+
+    revision = source_revision(workflow.entrypoint.read_text())
+    params = {"workflow_id": workflow.workflow_id, "expected_revision": revision}
+    channel = app.desktop.files_thread(peer)
+    # Without the file the run is refused, as a required input is.
+    assert send("desktop.action", "workflows.run", {**params, "inputs": {}})["detail"] == (
+        "Fill in Document."
+    )
+    too_big = _upload(app, peer, channel, b"x" * 65, 900)
+    refused = send(
+        "desktop.action",
+        "workflows.run",
+        {**params, "inputs": {}, "file_ids": {"document": too_big}},
+    )
+    assert refused["code"] == "invalid" and "more than the 64 bytes" in refused["detail"]
+    gone = send(
+        "desktop.action",
+        "workflows.run",
+        {**params, "inputs": {}, "file_ids": {"document": str(uuid4())}},
+    )
+    assert gone["detail"] == module.UPLOAD_GONE
+    assert ran == []
+
+    # _upload names the file photo.png, which image/* accepts.
+    shared = _upload(app, peer, channel, b"shared bytes", 910)
+    answer = send(
+        "desktop.action",
+        "workflows.run",
+        {**params, "inputs": {"tone": "brief"}, "file_ids": {"document": shared}},
+    )["value"]
+    assert answer["message"] == "Started on your computer."
+    wait_for(lambda: {"ran": list(ran)}, lambda v: v["ran"] == ["work"])
+    record = api._rattish_run_artifact_path(base, workflow.workflow_id, answer["run_id"])
+    copy = run_files_dir(record) / "document" / "photo.png"
+    assert copy.read_bytes() == b"shared bytes"
+    assert json.loads(record.read_text())["input_names"] == ["document", "tone"]
+    # The run took the upload, and the phone's copy on the channel is gone too.
+    assert list(uploads_dir(base).iterdir()) == []
+    with pytest.raises(Exception, match="file_unavailable"):
+        app.files.metadata(peer, channel, shared)
+    release.set()
+
+
+def test_phone_reads_a_failure_for_ask_rem_without_folder_paths(desk, tmp_path):
+    app, peer, context, send, add, _, _, base = desk
+    root = context["projects"][0]["root"]
+    workflow = add(root, "Phone check")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    hidden = add(elsewhere, "Hidden")
+    assert send("desktop.read", "overview")["value"]["workflow_failures"] is True
+
+    async def failing(node, run_context, bindings):
+        output = {"stdout": f"wrote {root}/out.txt", "stderr": "", "exit_code": 2}
+        return HandlerResult(False, output)
+
+    async def run(entry) -> str:
+        result = await run_rattish_file(
+            entry.entrypoint,
+            data_dir=base,
+            handlers=NodeHandlerRegistry({"raticode.bash_command": failing}),
+        )
+        return str(result.document["run_id"])
+
+    run_id = anyio.run(run, workflow)
+    params = {"workflow_id": workflow.workflow_id, "run_id": run_id}
+    answer = send("desktop.read", "workflows.failure", params)["value"]
+    assert answer["run_id"] == run_id and answer["node_id"] == "build"
+    assert answer["name"] == f"run-failure-{run_id}-build.txt"
+    text = answer["text"]
+    assert "UNTRUSTED RUN OUTPUT" in text and "Node: build (type: bash-command), failed" in text
+    # The project and data folders are named, as everywhere else on the phone.
+    assert root not in text and str(base) not in text
+    assert "Workflow file: Notes/" in text and "wrote Notes/out.txt" in text
+
+    named = send("desktop.read", "workflows.failure", {**params, "node_id": "build"})
+    assert named["value"]["node_id"] == "build"
+    missing = send("desktop.read", "workflows.failure", {**params, "node_id": "lint"})
+    assert missing == {"ok": False, "code": "not_found", "detail": module.NO_FAILURE}
+    gone = send("desktop.read", "workflows.failure", {**params, "run_id": "20990101T000000Z-x"})
+    assert gone["code"] == "not_found"
+
+    hidden_run = anyio.run(run, hidden)
+    refused = send(
+        "desktop.read",
+        "workflows.failure",
+        {"workflow_id": hidden.workflow_id, "run_id": hidden_run},
+    )
+    assert refused == {"ok": False, "code": "not_found", "detail": module.NOT_OPEN}
+
+
+def test_phone_tries_another_model_and_uses_it_through_the_editor(desk, monkeypatch):
+    from gofer.rattish.test_sets import save_test_set, workflow_tests_file
+    from tests.unit.test_rattish_model_trials import SUMMARIZER, case_set, providers
+
+    app, _, context, send, add, _, _, base = desk
+    root = context["projects"][0]["root"]
+    workflow = add(root, "Summarizer", SUMMARIZER)
+    save_test_set(workflow_tests_file(workflow.entrypoint), case_set())
+    current, candidate = providers()
+    monkeypatch.setattr(
+        "gofer.rattish.provider_runtime.default_provider_subscriptions",
+        lambda: {"codex": current, "claude_code": candidate},
+    )
+    app.workspace.providers = [{"id": "claude_code", "models": ["claude-sonnet-5-5"]}]
+    app.workspace._providers_read = time.monotonic()
+    assert send("desktop.read", "overview")["value"]["workflow_tests"] is True
+    ident = {"workflow_id": workflow.workflow_id}
+
+    view = send("desktop.read", "workflows.tests", ident)["value"]
+    assert root not in json.dumps(view) and str(base) not in json.dumps(view)
+    assert view["cases"] == 2 and view["result"] is None
+    assert [item["node"] for item in view["model_nodes"]] == ["write"]
+    assert view["model_nodes"][0]["provider"] == "codex"
+    assert view["providers"] == [{"id": "claude-code", "models": ["claude-sonnet-5-5"]}]
+    models = [{"node": "write", "provider": "claude-code", "model": "claude-sonnet-5-5"}]
+    tried = {**ident, "expected_revision": view["revision"], "models": models}
+
+    stale = send(
+        "desktop.read", "workflows.tests.estimate", {**tried, "expected_revision": "sha256:old"}
+    )
+    assert stale["code"] == "conflict"
+    estimate = send("desktop.read", "workflows.tests.estimate", tried)["value"]
+    assert estimate["current"]["reused"] is False and estimate["current"]["summary"]
+    assert estimate["candidate"]["label"] == "write: claude-code claude-sonnet-5-5"
+    assert estimate["total"] == "Unknown"
+
+    # Running needs the phone's confirmation after it showed both costs: the protocol
+    # schema refuses the request without it, and so does the desktop.
+    from gofer.devices import workflow_tests
+    from gofer.devices.desktop_control import Refused
+
+    with pytest.raises(Refused, match="Check the expected cost"):
+        workflow_tests.start_try(workflow, base, tried)
+    started = send("desktop.action", "workflows.tests.try", {**tried, "confirmed": True})["value"]
+    assert started["message"].startswith("Trying the model")
+    done = wait_for(
+        lambda: send("desktop.read", "workflows.tests", ident)["value"],
+        lambda value: bool(value["result"]) and value["result"]["status"] not in {"running"},
+        timeout=30,
+    )
+    result = done["result"]
+    assert result["tried"] == "write: claude-code claude-sonnet-5-5"
+    rows = {row["case_id"]: row for row in result["comparison"]["rows"]}
+    assert rows["dogs"]["current"]["status"] == "failed"
+    assert rows["dogs"]["candidate"]["status"] == "passed"
+    assert rows["dogs"]["change"] == "fixed"
+    assert rows["dogs"]["current"]["cost"] == "$0.02"
+    assert rows["dogs"]["candidate"]["cost"] == "$0.0050"
+    assert rows["dogs"]["candidate"]["time"].endswith("s")
+    totals = result["comparison"]["totals"]
+    assert (totals["current"]["passed"], totals["candidate"]["passed"]) == (1, 2)
+    assert result["use"] == {"allowed": True, "reason": ""}
+    source = workflow.entrypoint.read_text(encoding="utf-8")
+    assert "claude-code" not in source
+
+    use = {**ident, "expected_revision": result["revision"], "models": result["models"]}
+    assert (
+        send(
+            "desktop.action", "workflows.tests.use_model", {**use, "expected_revision": "sha256:x"}
+        )["code"]
+        == "conflict"
+    )
+    used = send("desktop.action", "workflows.tests.use_model", use)["value"]
+    assert used["message"].startswith("write now uses claude-code claude-sonnet-5-5")
+    assert "provider: claude-code" in workflow.entrypoint.read_text(encoding="utf-8")
+    assert used["result"]["stale"] is True and used["result"]["use"]["allowed"] is False

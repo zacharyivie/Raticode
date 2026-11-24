@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import io
+import tarfile
 import threading
 import time
-import zipfile
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
@@ -117,100 +117,151 @@ async def test_http_cancellation_closes_active_socket():
         assert await anyio.to_thread.run_sync(disconnected.wait, 1)
 
 
-def archive_bytes(
-    entries: list[tuple[str | zipfile.ZipInfo, bytes]], compression: int = zipfile.ZIP_STORED
-) -> bytes:
+def tar_bytes(entries: list[tuple[str, bytes, bytes]]) -> bytes:
+    """A .tar.bz2 archive; each entry is (name, body, tar type such as REGTYPE or SYMTYPE)."""
     output = io.BytesIO()
-    with zipfile.ZipFile(output, "w", compression=compression) as archive:
-        for name, body in entries:
-            if isinstance(name, str):
-                member = zipfile.ZipInfo(name)
-                # Preserve malicious names that ZipInfo normalizes on Windows.
-                member.filename = name
-                member.compress_type = compression
+    with tarfile.open(fileobj=output, mode="w:bz2") as archive:
+        for name, body, kind in entries:
+            member = tarfile.TarInfo(name)
+            member.type = kind
+            if kind == tarfile.REGTYPE:
+                member.size = len(body)
+                archive.addfile(member, io.BytesIO(body))
             else:
-                member = name
-            archive.writestr(member, body)
+                member.linkname = body.decode()
+                archive.addfile(member)
     return output.getvalue()
 
 
-@pytest.mark.parametrize("name", ["../outside", "/outside", "C:/outside", "x\\y", "x/../../bad"])
-def test_model_archive_rejects_unsafe_paths(tmp_path, name):
-    with zipfile.ZipFile(io.BytesIO(archive_bytes([(name, b"x")]))) as archive:
-        assert archive.infolist()[0].orig_filename == name
-        with pytest.raises(media.ChatMediaError, match="unsafe path"):
-            media._safe_extract_zip(archive, tmp_path)
-    assert [p for p in tmp_path.iterdir() if p.name != "gofer-env"] == []
+def model_entry(name: str) -> str:
+    return f"{media.OFFLINE_MODEL_ARCHIVE_DIR}/{name}"
 
 
-def test_model_archive_rejects_windows_normalized_path(tmp_path):
-    with zipfile.ZipFile(io.BytesIO(archive_bytes([("x\\y", b"x")]))) as archive:
-        member = archive.infolist()[0]
-        assert member.orig_filename == "x\\y"
-        # Reproduce Windows ZIP reading on every platform.
-        member.filename = "x/y"
-        with pytest.raises(media.ChatMediaError, match="unsafe path"):
-            media._safe_extract_zip(archive, tmp_path)
-    assert [p for p in tmp_path.iterdir() if p.name != "gofer-env"] == []
+def extract(raw: bytes, target) -> None:
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r|bz2") as archive:
+        media._extract_model_files(archive, target)
 
 
-def test_model_archive_rejects_links_and_amplification(tmp_path):
-    link = zipfile.ZipInfo("link")
-    link.external_attr = 0o120777 << 16
-    for entries, compression in [
-        ([(link, b"outside")], zipfile.ZIP_STORED),
-        ([("bomb", b"0" * 100000)], zipfile.ZIP_DEFLATED),
-    ]:
-        with zipfile.ZipFile(io.BytesIO(archive_bytes(entries, compression))) as archive:
-            with pytest.raises(media.ChatMediaError):
-                media._safe_extract_zip(archive, tmp_path)
-    assert [p for p in tmp_path.iterdir() if p.name != "gofer-env"] == []
+@pytest.fixture
+def one_file_model(monkeypatch):
+    monkeypatch.setattr(media, "OFFLINE_MODEL_FILES", {"tokens.txt": "unused"})
+
+
+@pytest.mark.parametrize(
+    "name", ["../outside", "/outside", "C:/outside", "x\\y", "x/../../bad", "../tokens.txt"]
+)
+def test_model_archive_never_writes_unexpected_paths(tmp_path, one_file_model, name):
+    target = tmp_path / "model"
+    target.mkdir()
+    raw = tar_bytes([(name, b"x", tarfile.REGTYPE)])
+    with pytest.raises(media.ChatMediaError, match="incomplete"):
+        extract(raw, target)
+    assert list(target.iterdir()) == []
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name != "gofer-env") == ["model"]
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [(model_entry("tokens.txt"), b"/etc/passwd", tarfile.SYMTYPE)],
+        [(model_entry("tokens.txt"), b"/etc/passwd", tarfile.LNKTYPE)],
+        [(model_entry("tokens.txt"), b"", tarfile.DIRTYPE)],
+        [
+            (model_entry("tokens.txt"), b"a", tarfile.REGTYPE),
+            (model_entry("tokens.txt"), b"b", tarfile.REGTYPE),
+        ],
+    ],
+    ids=["symlink", "hardlink", "directory", "repeated"],
+)
+def test_model_archive_rejects_links_and_repeated_files(tmp_path, one_file_model, entries):
+    target = tmp_path / "model"
+    target.mkdir()
+    with pytest.raises(media.ChatMediaError, match="unsafe path"):
+        extract(tar_bytes(entries), target)
 
 
 @pytest.mark.parametrize(
     "budget",
-    ["VOSK_MODEL_MAX_ENTRIES", "VOSK_MODEL_MAX_FILE_BYTES", "VOSK_MODEL_MAX_EXPANDED_BYTES"],
+    [
+        "OFFLINE_MODEL_MAX_ENTRIES",
+        "OFFLINE_MODEL_MAX_FILE_BYTES",
+        "OFFLINE_MODEL_MAX_EXPANDED_BYTES",
+    ],
 )
-def test_model_archive_enforces_extraction_budgets(tmp_path, monkeypatch, budget):
+def test_model_archive_enforces_extraction_budgets(tmp_path, monkeypatch, one_file_model, budget):
     monkeypatch.setattr(media, budget, 1)
-    with zipfile.ZipFile(io.BytesIO(archive_bytes([("a", b"aa"), ("b", b"bb")]))) as archive:
-        with pytest.raises(media.ChatMediaError):
-            media._safe_extract_zip(archive, tmp_path)
-    assert [p for p in tmp_path.iterdir() if p.name != "gofer-env"] == []
+    target = tmp_path / "model"
+    target.mkdir()
+    raw = tar_bytes(
+        [("README.md", b"aa", tarfile.REGTYPE), (model_entry("tokens.txt"), b"bb", tarfile.REGTYPE)]
+    )
+    with pytest.raises(media.ChatMediaError):
+        extract(raw, target)
+
+
+def test_model_archive_skips_everything_but_the_model_files(tmp_path, one_file_model):
+    target = tmp_path / "model"
+    target.mkdir()
+    raw = tar_bytes(
+        [
+            (model_entry("README.md"), b"readme", tarfile.REGTYPE),
+            (model_entry("test_wavs/0.wav"), b"RIFF", tarfile.REGTYPE),
+            (model_entry("tokens.txt"), b"<unk> 0", tarfile.REGTYPE),
+        ]
+    )
+    extract(raw, target)
+    assert [p.name for p in target.iterdir()] == ["tokens.txt"]
+    assert (target / "tokens.txt").read_bytes() == b"<unk> 0"
 
 
 @pytest.mark.parametrize("failure", ["hash", "layout", None])
 def test_model_install_checks_digest_layout_and_promotes_atomically(tmp_path, monkeypatch, failure):
     content = b"model fixture"
-    name = media.VOSK_MODEL_NAME
-    raw = archive_bytes([(f"{name}/am/final.mdl", content)])
+    raw = tar_bytes([(model_entry("tokens.txt"), content, tarfile.REGTYPE)])
     monkeypatch.setattr(media, "urlopen", lambda *a, **kw: io.BytesIO(raw))
+    monkeypatch.setattr(media, "OFFLINE_MODEL_FREE_BYTES", 0)
     monkeypatch.setattr(
-        media, "VOSK_MODEL_SHA256", "bad" if failure == "hash" else hashlib.sha256(raw).hexdigest()
+        media,
+        "OFFLINE_MODEL_SHA256",
+        "bad" if failure == "hash" else hashlib.sha256(raw).hexdigest(),
     )
     monkeypatch.setattr(
         media,
-        "VOSK_MODEL_FILES",
+        "OFFLINE_MODEL_FILES",
         {
-            "am/final.mdl": hashlib.sha256(content).hexdigest(),
+            "tokens.txt": hashlib.sha256(content).hexdigest(),
             **({"missing": "bad"} if failure == "layout" else {}),
         },
     )
-    target = tmp_path / name
+    target = tmp_path / media.OFFLINE_MODEL_NAME
     if failure:
         with pytest.raises(media.ChatMediaError):
-            media._ensure_vosk_model(target)
+            media._ensure_offline_model(target)
         assert not target.exists()
         assert [p for p in tmp_path.iterdir() if p.name != "gofer-env"] == []
     else:
-        media._ensure_vosk_model(target)
-        assert (target / "am/final.mdl").read_bytes() == content
+        media._ensure_offline_model(target)
+        assert (target / "tokens.txt").read_bytes() == content
+        # The model's license asks that copies carry its notice.
+        notice = (target / media.OFFLINE_MODEL_NOTICE_FILE).read_text()
+        assert "OpenMDW License Agreement, version 1.1" in notice
+        assert "nvidia/nemotron-3.5-asr-streaming-0.6b" in notice
+        assert sorted(p.name for p in target.iterdir()) == ["NOTICE.txt", "tokens.txt"]
         monkeypatch.setattr(
             media, "urlopen", lambda *a, **kw: pytest.fail("cached model downloaded")
         )
-        media._ensure_vosk_model(target)
-        (target / "am/final.mdl").write_bytes(b"tampered")
-        assert not media._valid_vosk_model(target)
+        media._ensure_offline_model(target)
+        (target / "tokens.txt").write_bytes(b"tampered")
+        assert not media._valid_offline_model(target)
+
+
+def test_model_install_refuses_to_start_without_disk_space(tmp_path, monkeypatch):
+    monkeypatch.setattr(media, "urlopen", lambda *a, **kw: pytest.fail("download started"))
+    monkeypatch.setattr(
+        media.shutil, "disk_usage", lambda _path: SimpleNamespace(free=300 * 1000 * 1000)
+    )
+    with pytest.raises(media.ChatMediaError, match=r"about 1\.2 GB of free disk space.*0\.3 GB"):
+        media._ensure_offline_model(tmp_path / media.OFFLINE_MODEL_NAME)
 
 
 @pytest.mark.parametrize("scheme", ["http", "https"])
@@ -246,13 +297,17 @@ def test_existing_model_rejects_extra_native_resources_and_links(tmp_path, monke
     folder = tmp_path / "model"
     folder.mkdir()
     (folder / "model").write_bytes(b"known")
-    monkeypatch.setattr(media, "VOSK_MODEL_FILES", {"model": hashlib.sha256(b"known").hexdigest()})
-    assert media._valid_vosk_model(folder)
+    monkeypatch.setattr(
+        media, "OFFLINE_MODEL_FILES", {"model": hashlib.sha256(b"known").hexdigest()}
+    )
+    assert media._valid_offline_model(folder)
+    (folder / media.OFFLINE_MODEL_NOTICE_FILE).write_text("notice")
+    assert media._valid_offline_model(folder)
     (folder / "extra.conf").write_text("injected resource")
-    assert not media._valid_vosk_model(folder)
+    assert not media._valid_offline_model(folder)
     (folder / "extra.conf").unlink()
     (folder / "unknown").mkdir()
-    assert not media._valid_vosk_model(folder)
+    assert not media._valid_offline_model(folder)
     (folder / "unknown").rmdir()
     (tmp_path / "alias").symlink_to(folder, target_is_directory=True)
-    assert not media._valid_vosk_model(tmp_path / "alias")
+    assert not media._valid_offline_model(tmp_path / "alias")

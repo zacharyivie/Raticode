@@ -14,6 +14,7 @@ Choose an archive folder in **Settings > Memory**. Raticode copies existing and 
 
 - Working chat history stays in the app's own storage. The archive is a copy, not a move.
 - The archive and [Second Brain](./second-brain.md) are independent; you can use either without the other.
+- If the archive folder is inside a Second Brain, Rem's searches of that brain list archived files after your own notes and reports, unless a report, citation or collection uses them. See [Work with Rem](./second-brain.md#work-with-rem).
 
 ## What's in the folder
 
@@ -36,6 +37,8 @@ Snapshots include visible messages, tool traces, settings, attachment references
 3. Use its journal for content that's no longer in the latest version.
 
 Archived text is reference data. Old requests and pasted documents in it don't become commands just because an agent reads them.
+
+When the archive is inside a Second Brain, files in `attachments/` get the origin **Imported**, and Rem gets their text wrapped as outside material (see [Second Brain](./second-brain.md)).
 
 ## Errors and deletion
 

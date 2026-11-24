@@ -47,7 +47,8 @@ internal fun destinationIcon(page: String): ImageVector = when (page) {
     "Rem" -> ThreadIcons.Rem; "Threads" -> ThreadIcons.Threads; "Organizations" -> ThreadIcons.Organizations
     "Swarms" -> ThreadIcons.Swarms; "SourceControl" -> ThreadIcons.SourceControl; "Explorer" -> ThreadIcons.Folder; "Workflows" -> ThreadIcons.Workflows
     "Approvals" -> ThreadIcons.Approvals; "Usage" -> ThreadIcons.Usage; "Voice" -> ThreadIcons.Mic
-    "Settings" -> ThreadIcons.Settings; "Developer" -> ThreadIcons.Log; "Browser" -> ThreadIcons.Browser; "Kanban" -> ThreadIcons.Kanban; else -> ThreadIcons.More
+    "Settings" -> ThreadIcons.Settings; "Developer" -> ThreadIcons.Log; "Browser" -> ThreadIcons.Browser; "Kanban" -> ThreadIcons.Kanban
+    "Posts" -> ThreadIcons.Megaphone; else -> ThreadIcons.More
 }
 
 /** A back arrow for Rem and Threads, whose own headers have none, when they were opened from More rather than the bar. */

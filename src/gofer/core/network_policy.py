@@ -156,6 +156,17 @@ def resolve_host_addresses(host: str, port: int | None) -> Iterable[str]:
     return {record[4][0] for record in records if record[4] and isinstance(record[4][0], str)}
 
 
+def allowlist_match(host: str, address: str | None, allowlist: Iterable[str]) -> str | None:
+    """The network-allowlist entry that admits this host or address, or None."""
+    entries = tuple(_parse_allowlist(allowlist))
+    matched = _host_allowlist_match(_normalize_host(host), entries)
+    if matched is None and address is not None:
+        parsed = _parse_ip(address)
+        if parsed is not None:
+            matched = _address_allowlist_match(parsed, entries)
+    return matched
+
+
 def network_policy_warnings(url: str, allowlist: Iterable[str] = ()) -> list[str]:
     if "{{" in url and "}}" in url:
         return []
@@ -185,12 +196,38 @@ def _validate_address(
     return NetworkPolicyResult(url=url, host=host, port=port)
 
 
+# IPv6 ranges that carry an IPv4 address Python's is_global doesn't look inside: the
+# deprecated IPv4-compatible form (::a.b.c.d) and NAT64's well-known prefix, which a
+# NAT64 network routes to that IPv4 address.
+_EMBEDDED_V4 = (
+    ipaddress.ip_network("::/96"),
+    ipaddress.ip_network("64:ff9b::/96"),
+    # IPv4-translated addresses (::ffff:0:a.b.c.d), used by stateless IP/ICMP translation.
+    ipaddress.ip_network("::ffff:0:0:0/96"),
+)
+
+
+def is_global_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """``is_global``, judging an IPv6 address that carries an IPv4 one by that IPv4 one."""
+    if isinstance(address, ipaddress.IPv6Address):
+        # Site-local (fec0::/10) is deprecated but still routes to the local site, and
+        # Python counts it as global.
+        if address.is_site_local:
+            return False
+        if address.ipv4_mapped is not None:
+            return address.ipv4_mapped.is_global
+        for network in _EMBEDDED_V4:
+            if address in network:
+                return ipaddress.IPv4Address(int(address) & 0xFFFFFFFF).is_global
+    return address.is_global
+
+
 def _address_is_blocked(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return (
         address.is_loopback
         # Shared address space (100.64.0.0/10) is neither private nor global.
         # It can route to internal carrier/VPN services and needs explicit consent.
-        or not address.is_global
+        or not is_global_address(address)
         or address.is_link_local
         or address.is_multicast
         or address.is_reserved

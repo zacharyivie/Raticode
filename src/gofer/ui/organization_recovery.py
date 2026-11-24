@@ -15,6 +15,13 @@ Two kinds of stuck work recover by themselves:
 
 The retry state lives in ``runtime["retries"]`` and Rem's reopen count in
 ``runtime["autoReopens"]``, both keyed by ticket ID and cleared when a run finishes well.
+
+A result that reviewers keep sending back would otherwise loop until the ticket's run
+limit: run, hand in, sent back, run again. ``runtime["sendBacks"]`` counts the times in a
+row a worker reviewer or Rem sent a ticket's result back (revise or reject). After
+``MAX_SEND_BACKS`` the next result waits for the user: no worker reviewer is asked, Rem's
+Auto mode review leaves it alone, and Rem doesn't reopen a rejection. Accepting the
+result, or the user's own review or reopen, starts the count again.
 """
 
 from __future__ import annotations
@@ -28,6 +35,8 @@ from gofer.ui.rem_ticket_activity import RETRY_REASON
 RETRY_SECONDS = (60, 300, 900)
 # Times Rem may reopen one ticket in Auto mode before it waits for the user.
 MAX_REM_REOPENS = 2
+# Times in a row reviewers other than the user may send one result back.
+MAX_SEND_BACKS = 3
 NO_FINAL = "The last run ended without a final response"
 # Block reasons for runs that stopped without a clean result. Rem may look at these.
 STOPPED_REASONS = frozenset(
@@ -115,6 +124,37 @@ def blocked_spell(task: dict[str, Any]) -> str:
     return f"{task.get('blockReason') or ''}|{at}"
 
 
+def send_backs(org: dict[str, Any], task: dict[str, Any]) -> int:
+    """Times in a row a worker reviewer or Rem sent this ticket's result back."""
+    return int((org["runtime"].get("sendBacks") or {}).get(task["id"], 0))
+
+
+def send_backs_spent(org: dict[str, Any], task: dict[str, Any]) -> bool:
+    """Whether this ticket's next result waits for the user's own review."""
+    return send_backs(org, task) >= MAX_SEND_BACKS
+
+
+def count_send_back(
+    runtime: dict[str, Any], task: dict[str, Any], actor: str, decision: str
+) -> str:
+    """Record one review decision. Returns a note for the ticket when the limit is reached.
+
+    The user's own decision, or any acceptance, starts the count again.
+    """
+    rounds = runtime.setdefault("sendBacks", {})
+    if actor == "user" or decision == "accept":
+        rounds.pop(task["id"], None)
+        return ""
+    rounds[task["id"]] = int(rounds.get(task["id"], 0)) + 1
+    if rounds[task["id"]] != MAX_SEND_BACKS:
+        return ""
+    return (
+        f"Reviewers sent this result back {MAX_SEND_BACKS} times in a row. To stop the loop, "
+        "the next result waits for your own review: no worker reviewer is asked, and in Auto "
+        "mode Rem neither reviews it nor reopens it."
+    )
+
+
 def rem_unblock_pending(org: dict[str, Any], task: dict[str, Any]) -> bool:
     """Whether Rem still has to look at this blocked spell (Auto mode or not)."""
     looked = (org["runtime"].get("autoUnblocked") or {}).get(task["id"])
@@ -144,6 +184,8 @@ def rem_may_reopen(org: dict[str, Any], task: dict[str, Any]) -> bool:
         )
     ):
         return False
+    if reason.startswith(REJECTED_PREFIX) and send_backs_spent(org, task):
+        return False
     if task.get("turns", 0) >= org["config"].get("maxTaskTurns", 0):
         return False
     return int((org["runtime"].get("autoReopens") or {}).get(task["id"], 0)) < MAX_REM_REOPENS
@@ -156,11 +198,12 @@ def review_marker(task: dict[str, Any]) -> str:
 
 def reviewer_can_check_in(org: dict[str, Any], task: dict[str, Any]) -> bool:
     """Whether the worker named as the ticket's reviewer can get a check-in to review it:
-    an unheld worker other than its assignee, assigned to the ticket's project."""
+    an unheld worker other than its assignee, assigned to the ticket's project, while
+    reviewers haven't sent the result back ``MAX_SEND_BACKS`` times in a row."""
     from gofer.ui.organization_store import has_assignment, task_root, within_self_work
 
     eid = task.get("reviewer")
-    if not eid or eid == task.get("assignee"):
+    if not eid or eid == task.get("assignee") or send_backs_spent(org, task):
         return False
     employee = next((e for e in org["config"]["employees"] if e["id"] == eid), None)
     if employee is None or employee.get("paused"):

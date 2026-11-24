@@ -34,6 +34,7 @@ from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from gofer.ui import rem_verified_work as verified
 from gofer.ui.rem_home_models import ACTIVE, ClockTime, SelfWorkRequest
 
 SCHEDULE_KEY = "self_work_schedule"
@@ -663,6 +664,8 @@ def build_report(
                 "outcome": outcome,
                 "summary": str(run.get("summary_short") or "")[:300],
                 "tickets": list(run.get("tickets") or [])[:10],
+                # The self-work objective the run served, if it served one.
+                "objective": str((run.get("objective") or {}).get("text") or "")[:200],
                 "new": new,
             }
         )
@@ -715,12 +718,27 @@ def build_report(
         }
     )
     merged = [r for r in rows if r.get("kind") == "duplicate_merged"]
+    # Tickets self-work left where they were because they advance no open objective.
+    off_objective = list(
+        dict.fromkeys(
+            key(r.get("ticket_id")) or str(r.get("title") or "")
+            for r in rows
+            if r.get("kind") == "off_objective"
+        )
+    )
+    # Why self-work started nothing new during the period, such as its daily cap.
+    limits = [
+        str(r.get("text") or "")
+        for r in rows
+        if r.get("kind") == "note" and r.get("limit") and r.get("text")
+    ]
     counts.update(
         tickets_created=len(tickets_created),
         tickets_moved=len(tickets_moved),
         proposals=len(proposals),
         auto_approved=len(auto_approved),
         duplicates_merged=len(merged),
+        off_objective=len(off_objective),
     )
     return {
         "period_id": period["id"],
@@ -733,19 +751,29 @@ def build_report(
         "proposals": [p for p in proposals if p][:20],
         "auto_approved": [a for a in auto_approved if a][:20],
         "tickets_moved": [key(t) for t in tickets_moved if key(t)][:20],
+        "off_objective": [t for t in off_objective if t][:20],
+        "limits": list(dict.fromkeys(limits))[-5:],
+        # "31 of 40 tickets passed review first time" for the card. The user sees it; the
+        # chat text (report_text), which Rem reads back as history, never carries it.
+        "verified_work": verified.report_numbers(db, started_at, ended_at),
     }
 
 
 def empty(report: dict[str, Any]) -> bool:
     counts = report["counts"]
-    return not report["items"] and not any(
-        counts.get(k)
-        for k in (
-            "tickets_created",
-            "tickets_moved",
-            "proposals",
-            "auto_approved",
-            "duplicates_merged",
+    return (
+        not report["items"]
+        and not report.get("limits")
+        and not any(
+            counts.get(k)
+            for k in (
+                "tickets_created",
+                "tickets_moved",
+                "proposals",
+                "auto_approved",
+                "duplicates_merged",
+                "off_objective",
+            )
         )
     )
 
@@ -775,6 +803,8 @@ def summary(report: dict[str, Any]) -> str:
         parts.append(f"moved {_count(counts['tickets_moved'], 'ticket')}")
     if counts["duplicates_merged"]:
         parts.append(f"merged {_count(counts['duplicates_merged'], 'duplicate')}")
+    if counts.get("off_objective"):
+        parts.append(f"left {_count(counts['off_objective'], 'ticket')} off the objectives alone")
     if not parts:
         return "Self-work didn't start or change anything."
     text = ", ".join(parts)
@@ -786,6 +816,8 @@ ENDED_BY = {
     "user": "you turned it off",
     "condition": "the tasks it waited for finished",
     "request": "you asked for this report; self-work is still on",
+    "done_when": "its stop condition was met",
+    "no_later_than": "it reached the latest stop time you set",
 }
 
 
@@ -810,9 +842,11 @@ def report_text(report: dict[str, Any], clock: datetime, ended_by: str) -> str:
     for item in report["items"]:
         keys = " ".join(ref.get("key", "") for ref in item["tickets"] if ref.get("key"))
         detail = f": {item['summary']}" if item["summary"] and item["outcome"] != "running" else ""
+        serves = item.get("objective") or ""
         lines.append(
             f"- {words.get(item['outcome'], item['outcome'].title())}: “{item['title']}”"
             + (f" ({keys})" if keys else "")
+            + (f", for “{serves}”" if serves and serves not in item["title"] else "")
             + detail
         )
     if report["tickets_created"]:
@@ -821,26 +855,46 @@ def report_text(report: dict[str, Any], clock: datetime, ended_by: str) -> str:
         lines.append("- Approved by self-work on its own: " + ", ".join(report["auto_approved"]))
     if report["proposals"]:
         lines.append("- Proposed for your approval: " + ", ".join(report["proposals"]))
+    if report.get("off_objective"):
+        lines.append(
+            "- Left where they are, not advancing an open objective: "
+            + ", ".join(report["off_objective"])
+        )
+    for text in report.get("limits") or []:
+        lines.append(f"- {text}")
+    if report.get("stop_line"):
+        # The user's stop condition and the evidence Rem judged it on.
+        lines.append(str(report["stop_line"]))
     if report["counts"]["running"] and ended_by != "request":
         lines.append("Tasks still running finish in their threads; self-work starts nothing new.")
     return "\n".join(lines)[:6000]
 
 
 def close_period(
-    db: sqlite3.Connection, clock: datetime, ended_by: str
+    db: sqlite3.Connection,
+    clock: datetime,
+    ended_by: str,
+    *,
+    stop: dict[str, Any] | None = None,
+    stop_line: str = "",
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
     """End the period running now; returns (report, message) to post, or None.
 
     The period is cleared in the same transaction, so it is reported once. An empty
     period returns its report with an empty message, so the caller can say so in a line.
+    ``stop`` and ``stop_line`` carry the user's stop condition and its evidence, if any;
+    a period that stopped for its condition is reported even when it did nothing else.
     """
     schedule = read(db)
     period = schedule.pop("period", None)
     if not period:
         return None
     report = build_report(db, period, clock, default_zone())
+    if stop:
+        report["stop"] = stop
+        report["stop_line"] = stop_line
     message: dict[str, Any] = {}
-    if not empty(report):
+    if not empty(report) or ended_by in {"done_when", "no_later_than"}:
         message = {
             "id": f"self-work-period-{period['id']}",
             "body": report_text(report, clock, ended_by),

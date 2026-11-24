@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Code2, Copy, Loader2, MoreVertical, PencilLine, Play, Square, Trash2 } from "lucide-react";
+import { Code2, Copy, Keyboard, Loader2, MoreVertical, PencilLine, Play, Square, Trash2 } from "lucide-react";
 import { formatRunAge } from "../lib/workflowRuns.js";
 import { workflowFolderLabel } from "../lib/workflowFolder.js";
 
-const WORKFLOW_MENU_SIZE = { width: 200, height: 214 };
+const WORKFLOW_MENU_SIZE = { width: 200, height: 250 };
 
 // Keeps the fixed-position menu inside the viewport.
 function menuPosition(clientX, clientY, viewportWidth = window.innerWidth, viewportHeight = window.innerHeight) {
@@ -38,6 +38,7 @@ export function workflowListSubtitle(listStatus, now = Date.now()) {
 export default function WorkflowListItem({
   active,
   listStatus,
+  onAddShortcut,
   onDelete,
   onDuplicate,
   onEditFile,
@@ -283,6 +284,12 @@ export default function WorkflowListItem({
             <Copy size={15} />
             Duplicate workflow
           </button>
+          {onAddShortcut ? (
+            <button className={itemClass} role="menuitem" type="button" onClick={menuAction(onAddShortcut)}>
+              <Keyboard size={15} />
+              Add shortcut…
+            </button>
+          ) : null}
           <div className="my-1 border-t border-line" />
           <button
             className={`${itemClass} !text-red-700 hover:!bg-red-50 focus:!bg-red-50 dark:hover:!bg-[#3a2424] dark:focus:!bg-[#3a2424]`}

@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { AlertCircle, CheckCircle2, Circle, CircleSlash, Loader2, Square, Unplug, X } from "lucide-react";
+import AskRemButton from "./AskRemButton.jsx";
+import { runCanAskRem } from "../lib/askRemAboutFailure.js";
 import { distinctWorkflowRunRecords, exactWorkflowRunStopPath, formatRunAge, sortWorkflowRunsNewestFirst, workflowRunSummary } from "../lib/workflowRuns";
 
 const LABELS = { running: "Running", queued: "Queued", submitting: "Submitting", stopping: "Stop requested", success: "Succeeded", error: "Failed", stopped: "Stopped", cancelled: "Cancelled", disconnected: "Disconnected", unknown: "Unknown" };
@@ -26,7 +28,7 @@ function runTiming(record, now = Date.now()) {
   return `${formatRunAge(record.startedAt, now)} · ${Number.isFinite(finished) ? "took" : "running for"} ${duration}`;
 }
 
-export default function RunSummary({ embedded = false, records = [], projectPath = "", onReview, onStop, onClose, onRefresh, loading = false, connectionError = "" }) {
+export default function RunSummary({ embedded = false, records = [], projectPath = "", onAskRem, onReview, onStop, onClose, onRefresh, loading = false, connectionError = "" }) {
   const [scope, setScope] = useState("all");
   const [pending, setPending] = useState(new Set());
   const [error, setError] = useState("");
@@ -62,6 +64,7 @@ export default function RunSummary({ embedded = false, records = [], projectPath
         <RunStatus status={record.status} />
         {record.unread && <span className="text-indigo-700 dark:text-indigo-300">Unread result</span>}
         <button type="button" onClick={() => onReview?.(record)} className="rounded px-2 py-1 text-indigo-700 hover:bg-indigo-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500 dark:text-indigo-300 dark:hover:bg-zinc-800">{record.status === "error" ? "Review failure" : "Open run"}</button>
+        {onAskRem && runCanAskRem(record.status) ? <AskRemButton label={`Ask Rem about this failure in run ${record.runId} of ${record.workflowName}`} onAsk={() => onAskRem(record)} /> : null}
         {exactWorkflowRunStopPath(record) && <button type="button" disabled={pending.has(record.key)} onClick={() => void stop(record)} aria-label={`Stop run ${record.runId} of ${record.workflowName}`} className="inline-flex items-center gap-1 rounded border border-zinc-300 px-2 py-1 hover:bg-zinc-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500 disabled:opacity-50 dark:border-zinc-600 dark:hover:bg-zinc-800"><Square size={11} aria-hidden="true" />{pending.has(record.key) ? "Stopping…" : "Stop"}</button>}
       </li>)}</ul>
     </div>

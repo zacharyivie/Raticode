@@ -243,3 +243,15 @@ export function workflowRunProblems(nodes = {}, events = []) {
   }
   return [...failures.values()].map(failure => ({ ...failure, severity: "error", runtime: true, code: failure.code || "RUN_NODE_FAILED" }));
 }
+
+// A triggered run that hit its provider's usage limit and resumes after the reset, as
+// run lists show it: "Waiting for usage limit · resumes 05:02". "" for any other run.
+export function usageLimitWaitText(run, locale = undefined) {
+  const wait = run?.usageLimitWait;
+  if (!wait) return "";
+  const label = wait.label || "Waiting for usage limit";
+  const resumeAt = wait.resumeAt ? new Date(wait.resumeAt) : null;
+  if (!resumeAt || Number.isNaN(resumeAt.getTime())) return label;
+  const time = resumeAt.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
+  return `${label} · resumes ${time}`;
+}

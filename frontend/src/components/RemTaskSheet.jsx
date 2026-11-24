@@ -7,17 +7,38 @@ import {
   runSleep, sleepBudget, startsWhen, taskActivity, taskMessages, taskRecap, taskToDraft, validateDraft, weekdayShort,
 } from "../lib/remHome.js";
 import TaskChecks from "./RemTaskChecks.jsx";
+import { WorkflowDraftCard } from "./RemWorkflowDraft.jsx";
 import { WorktreeSetupNotice } from "./WorktreeSetup.jsx";
+import { ThreadContextSent } from "./ContextSent.jsx";
 import { TicketPills } from "./TicketPill.jsx";
 import { taskTickets } from "../lib/ticketMentions.js";
-import { closeTaskSheet, createRemTask, deleteRemTask, openRemThread, openTaskSheet, updateRemTask } from "../lib/remHomeStore.js";
+import { closeTaskSheet, createRemTask, deleteRemTask, loadRemTask, openRemThread, openTaskSheet, runRemRunThere, updateRemTask } from "../lib/remHomeStore.js";
 
 // One task, shown in the Rem sidebar in place of the task list: live status above
 // a small editor with the four task sections plus "Done when". Edits stay local
 // until saved, then go to the server as a revision. The back arrow returns to
 // every task, like leaving a thread.
 export default function TaskSheet({ sheet, tasks, projectOptions, now, messages, onShowMessage, active = true, tickets = null }) {
-  const task = sheet.mode === "task" ? tasks.find(item => item.id === sheet.taskId) : null;
+  const listed = sheet.mode === "task" ? tasks.find(item => item.id === sheet.taskId) : null;
+  // Task lists leave prompts out, so the sheet reads this task's on its own, again after
+  // each new revision. An older backend still lists prompts and needs no read.
+  const needsDetail = Boolean(listed) && !("prompt" in listed);
+  const [detail, setDetail] = useState(null);
+  const [detailTry, setDetailTry] = useState(0);
+  useEffect(() => {
+    if (!needsDetail) return undefined;
+    let live = true;
+    const id = listed.id;
+    // A failed read after a new revision keeps the prompt already shown; Save waits.
+    void loadRemTask(id).then(found => {
+      if (live) setDetail(previous => (found ? { id, revision: found.revision, prompt: found.prompt ?? "" } : previous?.id === id && !previous.failed ? { ...previous, retry: true } : { id, failed: true }));
+    });
+    return () => { live = false; };
+  }, [listed?.id, listed?.revision, needsDetail, detailTry]);
+  const detailFor = needsDetail && detail?.id === listed.id && !detail.failed ? detail : null;
+  // A read from before the newest revision keeps the form showing but can't be saved.
+  const fresh = !needsDetail || detailFor?.revision === listed.revision;
+  const task = !listed ? null : !needsDetail ? listed : detailFor ? { ...listed, prompt: detailFor.prompt } : null;
   const projects = useMemo(() => [...new Set([task?.project_dir, ...projectOptions].filter(Boolean))], [task?.project_dir, projectOptions]);
   const [baseline, setBaseline] = useState(() => (task ? taskToDraft(task) : newTaskDraft({ project_dir: "" })));
   const [draft, setDraft] = useState(baseline);
@@ -28,7 +49,7 @@ export default function TaskSheet({ sheet, tasks, projectOptions, now, messages,
   const baselineRef = useRef(baseline);
   baselineRef.current = baseline;
   const dirtyRef = useRef(false);
-  const revision = task?.revision;
+  const revision = task ? `${task.revision}:${fresh}` : "";
   // Adopt server edits while the form is untouched; keep the person's draft otherwise.
   useEffect(() => {
     if (!task) return;
@@ -37,7 +58,7 @@ export default function TaskSheet({ sheet, tasks, projectOptions, now, messages,
     setDraft(current => (JSON.stringify(current) === JSON.stringify(previous) ? next : current));
     setBaseline(next);
   }, [revision]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { if (!task) promptRef.current?.focus(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (sheet.mode !== "task") promptRef.current?.focus(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   // Escape closes an unchanged sheet while it is showing; it never throws away typed edits.
   useEffect(() => {
     if (!active) return undefined;
@@ -46,10 +67,26 @@ export default function TaskSheet({ sheet, tasks, projectOptions, now, messages,
     return () => window.removeEventListener("keydown", key);
   }, [active]);
 
-  if (sheet.mode === "task" && !task) {
+  if (sheet.mode === "task" && !listed) {
     return <aside className="rem-sheet" aria-label="Task">
       <header className="rem-sheet-header"><BackToTasks /><h3>Task</h3></header>
       <p className="rem-sheet-gone">This task was deleted. Its threads and results stay in your thread history.</p>
+    </aside>;
+  }
+  if (listed && !task) {
+    // Status and updates show at once; the editor waits for the prompt.
+    const failed = detail?.id === listed.id && detail.failed;
+    return <aside className="rem-sheet" aria-label={`Task: ${listed.title}`} aria-busy={!failed}>
+      <header className="rem-sheet-header"><BackToTasks /><h3>{listed.title}</h3></header>
+      <div className="rem-sheet-scroll">
+        <TaskStatus task={listed} activity={taskActivity(listed, now)} now={now} />
+        <TaskTickets task={listed} tickets={tickets} />
+        <TaskUpdates messages={taskMessages(messages, listed.id)} onShowMessage={onShowMessage} now={now} />
+        {failed ? <div className="rem-sheet-gone" role="alert">
+          <p>This task's details couldn't be loaded.</p>
+          <button type="button" className="rem-button" onClick={() => setDetailTry(count => count + 1)}>Try again</button>
+        </div> : <p className="rem-sheet-gone" role="status">Loading this task…</p>}
+      </div>
     </aside>;
   }
 
@@ -66,7 +103,7 @@ export default function TaskSheet({ sheet, tasks, projectOptions, now, messages,
     event?.preventDefault();
     const found = validateDraft(draft);
     setErrors(found);
-    if (Object.keys(found).length || saving) return;
+    if (Object.keys(found).length || saving || !fresh) return;
     setSaving(true);
     const result = task ? await updateRemTask(task, patch) : await createRemTask(draftToRequest(draft));
     setSaving(false);
@@ -85,6 +122,7 @@ export default function TaskSheet({ sheet, tasks, projectOptions, now, messages,
     <div className="rem-sheet-scroll">
       {task ? <TaskStatus task={task} activity={activity} now={now} /> : null}
       {task ? <TaskTickets task={task} tickets={tickets} /> : null}
+      {task ? <TaskContextSent task={task} /> : null}
       {task ? <TaskUpdates messages={taskMessages(messages, task.id)} onShowMessage={onShowMessage} now={now} /> : null}
       <form id="rem-task-form" className="rem-sheet-form" onSubmit={save}>
         <Field label="What should Rem do?" error={errors.prompt} htmlFor="rem-task-prompt">
@@ -118,9 +156,10 @@ export default function TaskSheet({ sheet, tasks, projectOptions, now, messages,
         <p>Delete this task?{running ? " Its current run stops." : ""} Finished threads stay in your history.</p>
         <div><button type="button" className="rem-button" data-variant="danger" autoFocus onClick={() => { setConfirmDelete(false); closeTaskSheet(); void deleteRemTask(task); }}>Delete task</button><button type="button" className="rem-button" onClick={() => setConfirmDelete(false)}>Keep</button></div>
       </div> : <>
+        {!fresh && detail?.retry ? <p className="rem-sheet-steer" role="alert">This task's newest version couldn't be read, so saving waits. <button type="button" className="rem-quiet-button" onClick={() => setDetailTry(count => count + 1)}>Try again</button></p> : null}
         {steering ? <p className="rem-sheet-steer"><Sparkles size={13} aria-hidden="true" />Rem will update the running thread with these changes.</p> : null}
         <div className="rem-sheet-actions">
-          <button type="submit" form="rem-task-form" className="rem-button" data-variant="primary" disabled={!dirty || saving}>{saving ? "Saving…" : task ? (steering ? "Save and update" : "Save changes") : draft.schedule.kind === "once" ? ((draft.after || []).length ? "Queue task" : "Start task") : "Save task"}</button>
+          <button type="submit" form="rem-task-form" className="rem-button" data-variant="primary" disabled={!dirty || saving || !fresh}>{saving ? "Saving…" : task ? (steering ? "Save and update" : "Save changes") : draft.schedule.kind === "once" ? ((draft.after || []).length ? "Queue task" : "Start task") : "Save task"}</button>
           {task && dirty ? <button type="button" className="rem-button" onClick={() => { setDraft(baseline); setErrors({}); }}>Discard</button> : null}
           <span className="rem-spacer" />
           {task ? <button type="button" className="rem-button" data-variant="quiet-danger" aria-label="Delete task" title="Delete task" onClick={() => setConfirmDelete(true)}><Trash2 size={14} aria-hidden="true" /></button> : null}
@@ -138,6 +177,17 @@ function TaskTickets({ task, tickets }) {
     <h4 id="rem-sheet-tickets-title">Tickets</h4>
     <TicketPills refs={refs} index={tickets} limit={12} label="Tickets for this task" />
   </section>;
+}
+
+// How big each part of the work thread's newest prompt was. Read only once opened.
+function TaskContextSent({ task }) {
+  const run = task.active_run?.thread_id ? task.active_run : task.last_run;
+  const [open, setOpen] = useState(false);
+  if (!run?.thread_id) return null;
+  return <details className="rem-task-context" onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary>Context sent</summary>
+    {open ? <ThreadContextSent threadId={run.thread_id} refreshKey={`${run.id}:${run.state}`} heading="Newest worker turn" headingLevel={5} /> : null}
+  </details>;
 }
 
 function BackToTasks() {
@@ -221,6 +271,16 @@ function Criteria({ criteria, onChange }) {
   </div>;
 }
 
+// A paired desktop with room for this waiting task. Nothing goes there until it's picked.
+function RunThere({ task, suggestion }) {
+  const [sending, setSending] = useState(false);
+  const pick = () => { setSending(true); void runRemRunThere(task).finally(() => setSending(false)); };
+  return <p className="rem-status-note rem-run-there" data-testid="rem-run-there">
+    <span>{suggestion.computer_name} has room:</span>{" "}
+    <button type="button" className="rem-link-button" disabled={sending} onClick={pick} title={`Run this task on ${suggestion.computer_name}${suggestion.project ? ` in its ${suggestion.project} project` : ""}`}>Run there</button>
+  </p>;
+}
+
 const STEPS = [["executing", "Working"], ["verifying", "Checking"], ["succeeded", "Done"]];
 function stepIndex(state) { return state === "repairing" ? 1 : state === "succeeded" ? 2 : Math.max(0, STEPS.findIndex(([key]) => key === state)); }
 
@@ -236,8 +296,9 @@ function TaskStatus({ task, activity, now }) {
       {run.state !== "queued" && run.state !== "cancelling" ? <ol className="rem-steps" aria-label="Progress">
         {STEPS.map(([key, label], index) => <li key={key} data-state={index < current ? "done" : index === current ? "current" : "next"} aria-current={index === current ? "step" : undefined}>{index === 1 && run.state === "repairing" ? "Fixing" : label}</li>)}
       </ol> : null}
-      {run.state === "repairing" ? <TaskChecks criteria={run.criteria} label="What the review found" /> : null}
+      {run.state === "repairing" ? <TaskChecks criteria={run.criteria} notes={run.review_notes} label="What the review found" /> : null}
       {runSleep(run) ? <p className="rem-status-note" data-sleep="true">{sleepBudget(runSleep(run))}. It holds no worker while it sleeps.</p> : null}
+      {run.state === "queued" && run.suggestion?.pick ? <RunThere task={task} suggestion={run.suggestion} /> : null}
       <WorktreeSetupNotice setup={run.worktree_setup} />
       <StatusActions run={run} controls={controls} />
     </section>;
@@ -264,7 +325,8 @@ function TaskStatus({ task, activity, now }) {
   return <section className="rem-status" aria-label="Last run" data-tone={tone}>
     <div className="rem-status-line"><OutcomeGlyph status={{ ...info, tone, state: last.state, type: task.type }} /><strong>{last.state === "succeeded" ? taskRecap(last.summary_short || info.label) : plainMarkdown(last.summary_short) || info.label}</strong>{last.finished_at ? <small>{formatWhen(last.finished_at, now, { past: true })}</small> : null}</div>
     {criteriaSummary(last.criteria) ? <p className="rem-status-note">{criteriaSummary(last.criteria)}</p> : null}
-    <TaskChecks criteria={last.criteria} label="Checks from the last run" />
+    <TaskChecks criteria={last.criteria} notes={last.review_notes} label="Checks from the last run" />
+    <WorkflowDraftCard task={task} />
     <WorktreeSetupNotice setup={last.worktree_setup} />
     {task.state === "paused" ? <p className="rem-status-note">Schedule paused</p> : task.next_occurrence_at ? <p className="rem-status-note">Next run {formatWhen(task.next_occurrence_at, now)}</p> : null}
     <StatusActions run={last} controls={controls} />

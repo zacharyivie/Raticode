@@ -46,7 +46,7 @@ class CancelledWork:
         self.done = threading.Event()
         self.error: str | None = None
 
-    def claim(self) -> dict[str, Any] | None:
+    def claim(self, **_kinds: bool) -> dict[str, Any] | None:
         return None
 
     def authorized(self, peer: str, thread: str) -> bool:

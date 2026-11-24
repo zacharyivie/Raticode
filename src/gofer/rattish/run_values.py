@@ -13,10 +13,10 @@ to 1 MiB. A run whose values don't fit saves none of them, and its record says w
 so Resume and Run again explain instead of starting with partial values.
 
 The file goes when its run goes: ``delete_run_files`` removes the record, its stop
-marker and this file together, and every place here that deletes a Rattish run calls
-it. Each run also ends by sweeping values whose record is gone
-(``remove_orphaned_values``), so a run deleted some other way, such as by hand or by
-an older clean-up, doesn't leave its inputs behind.
+marker, this file and the run's file input copies (``file_inputs``) together, and
+every place here that deletes a Rattish run calls it. Each run also ends by sweeping
+values whose record is gone (``remove_orphaned_values``), so a run deleted some other
+way, such as by hand or by an older clean-up, doesn't leave its inputs behind.
 """
 
 from __future__ import annotations
@@ -234,8 +234,14 @@ def merge_withheld_inputs(
 
 
 def delete_run_files(record: Path) -> None:
-    """Delete a run: its record, stop marker and saved values. Missing files are fine."""
+    """Delete a run: its record, stop marker, saved values and file input copies.
+
+    Missing files are fine.
+    """
+    from gofer.rattish.file_inputs import remove_tree, run_files_dir
+
     folder = record.parent.resolve()
+    remove_tree(run_files_dir(record))
     for path in (
         folder / record.name,
         folder / f"{record.stem}.stop",

@@ -316,8 +316,126 @@ def memory_total_bytes() -> int | None:
         return None
 
 
+# Below this share busy a computer is under no pressure; at 100% it is under full
+# pressure. Used for Windows CPU busy time and memory load, which have no stall reading.
+BUSY_FREE_PERCENT = 80.0
+# macOS memory pressure level (kern.memorystatus_vm_pressure_level) as pressure.
+MAC_PRESSURE_LEVELS = {1: 0.0, 2: 50.0, 4: 90.0}
+_COMMAND_SECONDS = 2.0
+# How long a system command's reading is reused (``_command_output``).
+_COMMAND_CACHE_SECONDS = 1.5
+_command_cache: dict[tuple[str, ...], tuple[float, str | None]] = {}
+_command_cache_lock = threading.Lock()
+
+
+def busy_pressure(busy_percent: float) -> float:
+    """Pressure from a busy share: (busy % - 80) x 5, from 0 to 100.
+
+    80% busy or less is 0, 90% is 50 and 100% is 100.
+    """
+    return max(0.0, min(100.0, (float(busy_percent) - BUSY_FREE_PERCENT) * 5))
+
+
+def _command_output(argv: list[str]) -> str | None:
+    """A short system command's output, or None when it fails.
+
+    A reading younger than ``_COMMAND_CACHE_SECONDS`` is reused: the phone bridge and
+    every start read macOS memory several times a second, and each read would
+    otherwise start sysctl or vm_stat again.
+    """
+    key = tuple(argv)
+    now = time.monotonic()
+    with _command_cache_lock:
+        cached = _command_cache.get(key)
+        if cached is not None and now - cached[0] < _COMMAND_CACHE_SECONDS:
+            return cached[1]
+    try:
+        done = subprocess.run(
+            argv, capture_output=True, text=True, timeout=_COMMAND_SECONDS, check=False
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        output = None
+    else:
+        output = done.stdout if done.returncode == 0 else None
+    with _command_cache_lock:
+        _command_cache[key] = (time.monotonic(), output)
+    return output
+
+
+def _mac_pressure_level() -> str | None:
+    return _command_output(["/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level"])
+
+
+def _mac_vm_stat() -> str | None:
+    return _command_output(["/usr/bin/vm_stat"])
+
+
+def _windows_memory_status() -> tuple[int, int] | None:
+    """Windows memory load (0-100% in use) and available bytes, from GlobalMemoryStatusEx."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class MemoryStatusEx(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", wintypes.DWORD),
+                ("dwMemoryLoad", wintypes.DWORD),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MemoryStatusEx()
+        status.dwLength = ctypes.sizeof(MemoryStatusEx)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):  # type: ignore[attr-defined]
+            return None
+        return int(status.dwMemoryLoad), int(status.ullAvailPhys)
+    except Exception:  # noqa: BLE001 - any failure means no reading
+        return None
+
+
+def _mac_available_bytes() -> int | None:
+    """Free plus inactive pages times the page size, from vm_stat."""
+    text = _mac_vm_stat()
+    if not text:
+        return None
+    page = re.search(r"page size of (\d+) bytes", text)
+    pages: dict[str, int] = {}
+    for line in text.splitlines():
+        key, _, value = line.partition(":")
+        if key.strip() in {"Pages free", "Pages inactive"}:
+            try:
+                pages[key.strip()] = int(value.strip().rstrip("."))
+            except ValueError:
+                return None
+    if page is None or len(pages) != 2:
+        return None
+    return (pages["Pages free"] + pages["Pages inactive"]) * int(page.group(1))
+
+
+def _mac_memory_pressure() -> float | None:
+    text = _mac_pressure_level()
+    try:
+        return MAC_PRESSURE_LEVELS.get(int((text or "").strip()))
+    except ValueError:
+        return None
+
+
 def memory_available_bytes() -> int | None:
-    """Memory the kernel can hand out without swapping, when it reports one."""
+    """Memory the system can hand out without swapping, when it reports one.
+
+    Linux: MemAvailable from /proc/meminfo. macOS: free plus inactive pages from
+    vm_stat. Windows: available physical memory from GlobalMemoryStatusEx.
+    """
+    if sys.platform == "darwin":
+        return _mac_available_bytes()
+    if sys.platform == "win32":
+        status = _windows_memory_status()
+        return status[1] if status is not None else None
     try:
         with open("/proc/meminfo", encoding="ascii") as meminfo:
             for line in meminfo:
@@ -346,7 +464,17 @@ def swap_used_share() -> float | None:
 
 
 def memory_pressure() -> float | None:
-    """Share of the last ten seconds some task stalled waiting for memory (Linux PSI)."""
+    """Memory pressure from 0 to 100, or None without a reading.
+
+    Linux: the share of the last ten seconds some task stalled waiting for memory
+    (PSI). macOS: the kernel's pressure level, normal 0, warning 50 and critical 90.
+    Windows: the memory load (share of memory in use) through ``busy_pressure``.
+    """
+    if sys.platform == "darwin":
+        return _mac_memory_pressure()
+    if sys.platform == "win32":
+        status = _windows_memory_status()
+        return busy_pressure(status[0]) if status is not None else None
     try:
         with open("/proc/pressure/memory", encoding="ascii") as pressure:
             for line in pressure:
@@ -579,18 +707,22 @@ HOOK_WORDS = (
 )
 
 
-def hook_script(cli: Path) -> str:
+def hook_command(cli: Path) -> str:
+    """The Claude Code PreToolUse hook as one shell command, given in --settings.
+
+    It is never a file in the data folder: Claude Code runs hooks outside its sandbox,
+    and Codex turns can write the data folder, so a hook file there could be rewritten
+    by one turn and run unsandboxed by the next. Only ``cli``, Raticode's trusted copy
+    outside the data folder, runs, and only for commands that may need a slot.
+    """
     words = "|".join(f"*{_shell_quote(word)}*" for word in HOOK_WORDS)
     return "\n".join(
         [
-            "#!/bin/sh",
-            "# Raticode command slot hook for Claude Code. Raticode rewrites this file.",
             "input=$(cat)",
             f'case "$input" in {words})',
             f"  printf '%s' \"$input\" | exec {_shell_quote(str(cli))} slot hook claude;;",
             "esac",
             "exit 0",
-            "",
         ]
     )
 
@@ -605,7 +737,7 @@ def install(root: Path, cli: Path, search_path: str | None = None) -> Path:
     """
     root = root.resolve()
     bin_dir = root / "bin"
-    for folder in (bin_dir, root / "hooks", root / "slots", root / "queue", root / "activity"):
+    for folder in (bin_dir, root / "slots", root / "queue", root / "activity"):
         folder.mkdir(parents=True, exist_ok=True)
     folders = [
         folder
@@ -621,7 +753,9 @@ def install(root: Path, cli: Path, search_path: str | None = None) -> Path:
         else:
             with contextlib.suppress(OSError):
                 target.unlink()
-    _write_if_changed(root / "hooks" / "claude-pre-tool-use", hook_script(cli), 0o700)
+    # Older versions kept the hook as a file here, where an agent could rewrite it.
+    with contextlib.suppress(OSError):
+        (root / "hooks" / "claude-pre-tool-use").unlink()
     for kind in CLASSES:
         for index in range(MAX_SLOTS):
             path = _slot_path(root, kind, index)
@@ -644,24 +778,23 @@ def last_activity(root: Path, thread_id: str) -> float | None:
         return None
 
 
-def claude_hook_settings(root: Path) -> dict[str, Any]:
+def claude_hook_settings(cli: Path) -> dict[str, Any]:
     """Claude Code settings that route shell calls through the hook."""
-    hook = root / "hooks" / "claude-pre-tool-use"
     return {
         "hooks": {
             "PreToolUse": [
                 {
                     "matcher": "Bash",
-                    "hooks": [{"type": "command", "command": str(hook), "timeout": 30}],
+                    "hooks": [{"type": "command", "command": hook_command(cli), "timeout": 30}],
                 }
             ]
         }
     }
 
 
-def claude_settings(root: Path) -> str:
+def claude_settings(cli: Path) -> str:
     """Claude Code ``--settings`` JSON that routes shell calls through the hook."""
-    return json.dumps(claude_hook_settings(root), separators=(",", ":"))
+    return json.dumps(claude_hook_settings(cli), separators=(",", ":"))
 
 
 _systemd_lock = threading.Lock()
@@ -897,6 +1030,27 @@ def swap_blocked() -> str | None:
     if used is not None and used >= SWAP_USED_LIMIT:
         return f"swap is {used:.0%} full"
     return None
+
+
+def memory_hold() -> str | None:
+    """Why this computer starts no new worker for want of memory, or None.
+
+    Under ``WORKER_MEMORY_FLOOR`` of free memory, or with swap at
+    ``SWAP_USED_LIMIT``, a new worker waits. The answer is the detail a waiting
+    start shows in brackets, such as "0.9 GB available" or "swap is 85% full";
+    ``memory_wait_reason`` makes the whole reason. The worker claims
+    (gofer.core.worker_claims) apply it only once a worker already runs, so the
+    first worker on a computer always starts.
+    """
+    available = memory_available_bytes()
+    if available is not None and available < WORKER_MEMORY_FLOOR:
+        return f"{available / 1024**3:.1f} GB available"
+    return swap_blocked()
+
+
+def memory_wait_reason(detail: str) -> str:
+    """The reason a held start shows: "Waiting for free memory (0.9 GB available)"."""
+    return f"Waiting for free memory ({detail})"
 
 
 def _describe(entries: list[dict[str, Any]]) -> str:

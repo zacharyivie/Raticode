@@ -16,7 +16,8 @@ export function flushCodeDrafts() {
   clearTimeout(persistenceTimer);
   return saveCodeDrafts(textEditorSessions);
 }
-if (typeof window !== "undefined") {
+// A test's stand-in window may have no listeners; drafts then simply aren't flushed on exit.
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
   window.addEventListener("beforeunload", flushCodeDrafts);
   window.addEventListener("pagehide", flushCodeDrafts);
 }

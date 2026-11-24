@@ -32,6 +32,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
@@ -53,6 +54,13 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.raticode.mobile.live.*
+import dev.raticode.mobile.share.WorkflowShare
+import dev.raticode.mobile.share.WorkflowShareInbox
+import dev.raticode.mobile.share.WorkflowShareStore
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.time.Duration
 import java.time.Instant
@@ -138,9 +146,19 @@ internal fun WorkflowsRow(client: LiveClient, onClick: () -> Unit) {
 
 @RequiresApi(29)
 @Composable
-internal fun WorkflowsPage(client: LiveClient, onBack: (() -> Unit)?, openRun: Pair<String, String>? = null, consumeOpenRun: () -> Unit = {}) {
+internal fun WorkflowsPage(client: LiveClient, onBack: (() -> Unit)?, openRun: Pair<String, String>? = null, consumeOpenRun: () -> Unit = {},
+                           onAskRem: ((java.io.File, String) -> Unit)? = null) {
     var open by rememberSaveable { mutableStateOf<String?>(null) }
     var runId by rememberSaveable { mutableStateOf<String?>(null) }
+    // The trigger whose changes are under review, and the file whose diff is open.
+    var reviewing by rememberSaveable { mutableStateOf<String?>(null) }
+    var reviewFile by rememberSaveable { mutableStateOf<String?>(null) }
+    // A changed file opened in the file viewer from Review changes, by project ID and path, to read what its diff couldn't show.
+    var reviewOpen by rememberSaveable { mutableStateOf<String?>(null) }
+    var reviewProject by rememberSaveable { mutableStateOf("") }
+    // Try another model: the workflow whose tests are open, and the candidate whose cost is shown with the revision it is for.
+    var testing by rememberSaveable { mutableStateOf<String?>(null) }
+    var estimating by remember { mutableStateOf<Pair<List<TriedModel>, String>?>(null) }
     // A tapped workflow message opens its run; one that named no workflow opens the list.
     LaunchedEffect(openRun) {
         openRun?.let { (workflow, run) -> open = workflow.ifBlank { null }; runId = run.ifBlank { null }.takeIf { workflow.isNotBlank() }; consumeOpenRun() }
@@ -151,17 +169,77 @@ internal fun WorkflowsPage(client: LiveClient, onBack: (() -> Unit)?, openRun: P
     var status by rememberSaveable { mutableStateOf("") }
     var only by rememberSaveable { mutableStateOf("") }
     val showRuns = allRuns && client.workflowRuns == true
+    // Text shared to Run a workflow waits here until a workflow and its input are chosen and Run is tapped.
+    val context = LocalContext.current
+    val share = WorkflowShareInbox.pending
+    val scope = rememberCoroutineScope()
+    // A shared file is read and uploaded only once Run is tapped; this says how that is going or why it stopped.
+    var upload by remember(share?.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(share?.id) {
+        val waiting = share?.takeIf { it.target == null } ?: return@LaunchedEffect
+        reviewing = null; reviewFile = null; reviewOpen = null; allRuns = false; runId = null
+        // A direct-share shortcut names its workflow; the share sheet's own entry, or a share with no text, starts at the list.
+        val named = waiting.workflowId?.takeIf { waiting.text.isNotEmpty() }
+        open = named
+        named?.let { WorkflowShareInbox.target(it) }
+    }
+    // Ask Rem about this failure: once the desktop answers, its text goes to Rem's message box as a file. Nothing sends.
+    val failureRead = client.runFailure
+    var askRemProblem by remember { mutableStateOf("") }
+    LaunchedEffect(failureRead?.failure) {
+        val failure = failureRead?.failure ?: return@LaunchedEffect
+        val file = runCatching { dev.raticode.mobile.data.HandoffFiles.write(context.cacheDir, failure.text) }.getOrNull()
+        client.clearRunFailure()
+        askRemProblem = if (file == null) "Couldn't prepare the run for Rem. Free some phone storage and try again." else ""
+        if (file != null) onAskRem?.invoke(file, failure.name)
+    }
+    // Leaving the chosen workflow goes back to choosing one.
+    LaunchedEffect(open) { if (share?.target != null && share.target != open) WorkflowShareInbox.target(null) }
+    BackHandler(enabled = open == null && share != null) { WorkflowShareInbox.clear() }
     // input_form tells the desktop this phone shows the Run form, so a workflow that needs inputs can run from here.
+    val inTests = open != null && testing == open && reviewing == null
     val params = when {
+        inTests && estimating != null -> Workflows.estimateParams(open.orEmpty(), estimating!!.second, estimating!!.first)
+        inTests -> Workflows.testsParams(open.orEmpty())
+        open != null && reviewing != null -> JSONObject().put("workflow_id", open).put("trigger_id", reviewing)
         open != null -> JSONObject().put("workflow_id", open).put("input_form", true).apply { runId?.let { put("run_id", it) } }
         showRuns -> Workflows.runsParams(since, status, only)
         else -> JSONObject()
     }
-    val op = if (open != null) Workflows.READ else if (showRuns) Workflows.RUNS else Workflows.LIST
-    DisposableEffect(op, params.toString()) { client.openDesktop(op, params); onDispose { client.openDesktop(null) } }
-    BackHandler(enabled = open != null) { open = null; runId = null }
+    val op = when {
+        inTests && estimating != null -> Workflows.ESTIMATE
+        inTests -> Workflows.TESTS
+        open != null && reviewing != null -> Workflows.CHANGES
+        open != null -> Workflows.READ
+        showRuns -> Workflows.RUNS
+        else -> Workflows.LIST
+    }
+    // Keyed on reviewOpen too: the file viewer reads its own text while open, and the changes come back when it closes.
+    DisposableEffect(op, params.toString(), reviewOpen) { client.openDesktop(op, params); onDispose { client.openDesktop(null) } }
+    BackHandler(enabled = open != null) {
+        when {
+            reviewOpen != null -> reviewOpen = null
+            reviewFile != null -> reviewFile = null
+            reviewing != null -> reviewing = null
+            inTests && estimating != null -> estimating = null
+            inTests -> testing = null
+            else -> { open = null; runId = null }
+        }
+    }
     Column(Modifier.fillMaxSize()) {
-        if (open == null) {
+        if (open == null && share != null) {
+            Header("Run a workflow", if (client.connected) "With what you shared" else "Offline", onBack = WorkflowShareInbox::clear, backLabel = "Cancel")
+            Box(Modifier.weight(1f)) {
+                WorkflowGate(client, Workflows.LIST, "Loading workflows…") {
+                    (client.desktopViews[Workflows.LIST] as? WorkflowList)?.let { list ->
+                        ShareWorkflowPicker(share, list, WorkflowScreenState(client.connected, Workflows.LIST in client.desktopBusy,
+                            client.desktopErrors[Workflows.LIST], null), onRetry = client::refreshDesktop, onCancel = WorkflowShareInbox::clear) {
+                            WorkflowShareInbox.target(it); open = it; runId = null
+                        }
+                    }
+                }
+            }
+        } else if (open == null) {
             Header("Workflows", if (client.connected) "On your desktop" else "Offline", onBack)
             if (client.workflowRuns == true) Row(Modifier.padding(horizontal = 16.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(!allRuns, { allRuns = false }, label = { Text("Workflows") }, modifier = Modifier.testTag("workflowsTab"))
@@ -191,6 +269,52 @@ internal fun WorkflowsPage(client: LiveClient, onBack: (() -> Unit)?, openRun: P
                     }
                 }
             }
+        } else if (inTests) {
+            val workflowId = open.orEmpty()
+            val testsKey = Workflows.testsKey(workflowId)
+            val tests = client.desktopViews[testsKey] as? WorkflowTests
+            val estimateKey = DesktopViews.key(op, params).takeIf { op == Workflows.ESTIMATE }
+            val name = (client.desktopViews[Workflows.READ + ":" + workflowId] as? Workflow)?.summary?.name
+            Header("Tests", name.orEmpty(), onBack = { if (estimating != null) estimating = null else testing = null })
+            Box(Modifier.weight(1f)) {
+                WorkflowGate(client, testsKey, "Loading the tests…") {
+                    if (tests != null) {
+                        val key = estimateKey ?: testsKey
+                        WorkflowTestsView(tests, WorkflowScreenState(client.connected, testsKey in client.desktopBusy, client.desktopErrors[key], null),
+                            estimate = estimateKey?.let { client.desktopViews[it] as? TestEstimate }, checking = estimating != null,
+                            onRetry = client::refreshDesktop, onEstimate = { estimating = it to tests.revision }, onChange = { estimating = null },
+                            onTry = { models ->
+                                client.desktopAction(Workflows.TRY, Workflows.tryAction(workflowId, estimating?.second ?: tests.revision, models))
+                                estimating = null
+                            },
+                            onUse = { result -> client.desktopAction(Workflows.USE_MODEL, Workflows.useModelAction(workflowId, result)) })
+                    }
+                }
+            }
+        } else if (reviewing != null && reviewOpen != null) {
+            FileViewerPage(client, reviewProject, "", reviewOpen.orEmpty(), null, "", "file", false, null) { reviewOpen = null }
+        } else if (reviewing != null) {
+            val workflowId = open.orEmpty()
+            val shown = client.desktopViews[Workflows.READ + ":" + workflowId] as? Workflow
+            val trigger = shown?.triggers?.firstOrNull { it.id == reviewing }
+            val key = DesktopViews.key(Workflows.CHANGES, params)
+            val changes = client.desktopViews[key] as? TriggerChanges
+            val file = changes?.files?.firstOrNull { it.path == reviewFile }
+            Header(if (file != null) file.path else "Review changes", if (file != null) file.kind else trigger?.title.orEmpty(),
+                onBack = { if (reviewFile != null) reviewFile = null else reviewing = null })
+            Box(Modifier.weight(1f)) {
+                WorkflowGate(client, key, "Loading the changes…") {
+                    if (file != null) TriggerFileDiff(file)
+                    else if (changes != null) TriggerReview(changes, WorkflowScreenState(client.connected, key in client.desktopBusy,
+                        client.desktopErrors[key], null), onRetry = client::refreshDesktop, onFile = { reviewFile = it.path },
+                        onOpen = if (changes.projectId.isNotBlank() && client.fileExplorer == true) { file ->
+                            reviewProject = changes.projectId; reviewOpen = file.openPath
+                        } else null,
+                        onCancel = { reviewing = null }) { shown, unseenConfirmed ->
+                        client.desktopAction(Workflows.APPROVE, Workflows.approveAction(workflowId, shown, unseenConfirmed)); reviewing = null
+                    }
+                }
+            }
         } else {
             val key = DesktopViews.key(Workflows.READ, params)
             val workflow = client.desktopViews[key] as? Workflow
@@ -201,17 +325,94 @@ internal fun WorkflowsPage(client: LiveClient, onBack: (() -> Unit)?, openRun: P
                 WorkflowGate(client, key, "Loading this workflow…") {
                     if (workflow != null) {
                         val notice = client.workflowNotice?.takeIf { it.first == workflow.id }?.second
+                        val shared = share?.takeIf { it.target == workflow.id }?.let { waiting ->
+                            val choices = waiting.file?.let { file -> WorkflowShare.fileInputs(workflow.inputs.orEmpty().filter { it.kind == "file" }
+                                .map { WorkflowFileInput(it.name, it.label, it.accept, it.maxSize) }, file) } ?: WorkflowShare.textInputs(workflow.inputs)
+                            val remembered = remember(workflow.id, waiting.id) { WorkflowShareStore.input(context, workflow.id) }
+                            var picked by remember(workflow.id, waiting.id) { mutableStateOf<String?>(null) }
+                            SharedRun(waiting.text, waiting.notices, choices,
+                                picked?.takeIf { name -> choices.any { it.name == name } } ?: WorkflowShare.inputFor(choices, remembered),
+                                onChoose = { picked = it; WorkflowShareStore.rememberInput(context, workflow.id, it) }, onDiscard = WorkflowShareInbox::clear,
+                                file = waiting.file, status = upload)
+                        }
                         WorkflowDetail(workflow, runId, WorkflowScreenState(client.connected, key in client.desktopBusy, client.desktopErrors[key], notice),
                             onSelectRun = { runId = it }, onRetry = client::refreshDesktop, onDismissNotice = client::dismissWorkflowNotice,
-                            onRunWithInputs = { inputs -> client.desktopAction("workflows.run", workflowAction(workflow, "workflows.run", null, inputs)) },
+                            shared = shared,
+                            askRem = if (onAskRem != null && client.workflowFailures == true) { run -> askRemProblem = ""; client.askRemAboutRun(workflow.id, run) } else null,
+                            onTests = if (client.workflowTests == true) { { estimating = null; testing = workflow.id } } else null,
+                            askingRem = failureRead?.let { it.failure == null && it.error.isEmpty() } == true,
+                            askRemError = failureRead?.error?.takeIf { it.isNotBlank() } ?: askRemProblem,
+                            onRunWithInputs = { inputs ->
+                                val file = shared?.file
+                                val input = shared?.input
+                                if (file != null && input != null) {
+                                    // Upload first, the way Share to Rem does, then ask for the run with the uploaded file's ID.
+                                    upload = "Uploading ${file.name} to your computer…"
+                                    scope.launch {
+                                        val uploaded = uploadSharedFile(client, file)
+                                        uploaded.onFailure { upload = it.message ?: "The upload didn't finish. Try again." }
+                                        uploaded.onSuccess { id ->
+                                            upload = null
+                                            client.desktopAction("workflows.run", workflowAction(workflow, "workflows.run", null, inputs)
+                                                .put("file_ids", JSONObject().put(input, id)))
+                                            WorkflowShareStore.rememberInput(context, workflow.id, input)
+                                            WorkflowShareStore.used(context, workflow.id, workflow.summary.name)
+                                            WorkflowShareInbox.clear()
+                                        }
+                                    }
+                                } else {
+                                    client.desktopAction("workflows.run", workflowAction(workflow, "workflows.run", null, inputs))
+                                    // The run request is queued; the shared text is now only in it. The workflow becomes a direct-share shortcut.
+                                    if (shared?.input != null) {
+                                        WorkflowShareStore.rememberInput(context, workflow.id, shared.input)
+                                        WorkflowShareStore.used(context, workflow.id, workflow.summary.name)
+                                        WorkflowShareInbox.clear()
+                                    }
+                                }
+                            },
                             onAction = { action, run -> client.desktopAction(action, workflowAction(workflow, action, run)) },
-                            onTrigger = { trigger, enabled -> client.desktopAction(Workflows.TRIGGER, Workflows.triggerAction(workflow, trigger, enabled)) })
+                            onTrigger = { trigger, enabled ->
+                                client.desktopAction(Workflows.TRIGGER, Workflows.triggerAction(workflow, trigger, enabled))
+                                // Turning a trigger on approves nothing, so a change waiting for review opens right away.
+                                if (enabled && trigger.needsApproval && client.workflowTriggerApproval == true) { reviewing = trigger.id; reviewFile = null }
+                            },
+                            onReview = if (client.workflowTriggerApproval == true) { trigger -> reviewing = trigger.id; reviewFile = null } else null)
                     }
                 }
             }
         }
     }
 }
+
+/**
+ * Uploads a shared file on the phone's Rem file channel, as Share to Rem does, and returns its file ID once the
+ * computer has all of it. The computer checks it against the file input and copies it into the run.
+ */
+@RequiresApi(29)
+private suspend fun uploadSharedFile(client: LiveClient, file: WorkflowShare.SharedFile): Result<String> {
+    if ((client.desktopViews["rem.home"] as? RemHome)?.filesThread == null) {
+        // The file channel is named in Rem's chat view; read it once if this session hasn't yet.
+        client.shareStart()
+        try {
+            withTimeoutOrNull(UPLOAD_CONNECT_MS) { snapshotFlow { (client.desktopViews["rem.home"] as? RemHome)?.filesThread }.first { it != null } }
+                ?: return Result.failure(IllegalStateException("Couldn't reach your computer to upload the file. Try again."))
+        } finally { client.shareStop() }
+    }
+    val imported = CompletableDeferred<Result<String>>()
+    client.importRemFile(android.net.Uri.parse(file.uri), file.name, onFailed = { imported.complete(Result.failure(IllegalStateException(it))) }) {
+        imported.complete(Result.success(it))
+    }
+    val id = (withTimeoutOrNull(UPLOAD_READ_MS) { imported.await() } ?: Result.failure(IllegalStateException("Reading ${file.name} took too long.")))
+        .getOrElse { return Result.failure(IllegalStateException("Couldn't read ${file.name}: ${it.message}")) }
+    val state = withTimeoutOrNull(UPLOAD_SEND_MS) {
+        snapshotFlow { client.files.firstOrNull { it.id == id }?.state }.first { it == null || it == "available" || it == "failed" || it == "cancelled" }
+    }
+    return if (state == "available") Result.success(id) else Result.failure(IllegalStateException("The upload didn't finish. Try again."))
+}
+
+private const val UPLOAD_CONNECT_MS = 20_000L
+private const val UPLOAD_READ_MS = 120_000L
+private const val UPLOAD_SEND_MS = 600_000L
 
 /**
  * A run names the saved version the phone showed, so a workflow changed on the desktop since is refused rather than run unseen.
@@ -243,7 +444,7 @@ private fun WorkflowGate(client: LiveClient, key: String, loading: String, conte
 
 /** Offline, refused and answered states shown above a loaded view, so stale data is never mistaken for live data. */
 @Composable
-private fun WorkflowBanners(state: WorkflowScreenState, onRetry: () -> Unit, onDismissNotice: () -> Unit = {}) {
+internal fun WorkflowBanners(state: WorkflowScreenState, onRetry: () -> Unit, onDismissNotice: () -> Unit = {}) {
     if (!state.online) Banner("Offline. Showing what your desktop last sent. Run, stop and resume return when you reconnect.", MaterialTheme.colorScheme.surfaceVariant)
     else if (state.error != null) Banner(state.error, MaterialTheme.colorScheme.errorContainer, "Try again", onRetry)
     if (state.busy && state.online) Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically,
@@ -331,6 +532,9 @@ private fun PauseAllTriggers(pause: TriggerPause, enabled: Boolean, onChange: (B
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text("Pause all triggers", style = MaterialTheme.typography.titleSmall)
                 Text(pauseText(pause), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (pause.dailyLimit.isNotBlank()) Text(pause.dailyLimit, style = MaterialTheme.typography.bodySmall,
+                    color = if (pause.limitReached) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag("triggersDailyLimit"))
             }
             Switch(checked = pause.paused, onCheckedChange = null, enabled = enabled)
         }
@@ -400,7 +604,9 @@ internal fun allRunLine(row: AllWorkflowRun): String = listOf(
 @Composable
 internal fun WorkflowDetail(workflow: Workflow, selectedRun: String?, state: WorkflowScreenState, onSelectRun: (String?) -> Unit,
                             onRetry: () -> Unit, onDismissNotice: () -> Unit, onRunWithInputs: (JSONObject) -> Unit = {},
-                            onTrigger: (WorkflowTrigger, Boolean) -> Unit = { _, _ -> }, onAction: (String, String?) -> Unit) {
+                            onTrigger: (WorkflowTrigger, Boolean) -> Unit = { _, _ -> }, onReview: ((WorkflowTrigger) -> Unit)? = null,
+                            shared: SharedRun? = null, askRem: ((String) -> Unit)? = null, askingRem: Boolean = false,
+                            askRemError: String = "", onTests: (() -> Unit)? = null, onAction: (String, String?) -> Unit) {
     var tab by rememberSaveable(workflow.id) { mutableStateOf("graph") }
     var node by remember { mutableStateOf<WorkflowNode?>(null) }
     var confirm by remember { mutableStateOf<Pair<String, String?>?>(null) }
@@ -410,9 +616,25 @@ internal fun WorkflowDetail(workflow: Workflow, selectedRun: String?, state: Wor
     // The detail shown is for the chosen run only once the desktop sent it.
     val detail = workflow.run?.takeIf { selectedRun == null || it.run.id == selectedRun }
     val statuses = detail?.nodes?.associateBy { it.nodeId }.orEmpty()
+    // Shared text opens the Run sheet by itself once, when the input is known and the desktop allows a run.
+    var chooseInput by remember(shared?.text) { mutableStateOf(false) }
+    var sharedOpened by remember(shared?.text) { mutableStateOf(false) }
+    val canRunShared = shared?.input != null && workflow.runControl.allowed && !workflow.inputs.isNullOrEmpty()
+    LaunchedEffect(shared?.text, shared?.input, canRunShared) {
+        if (shared == null || sharedOpened) return@LaunchedEffect
+        if (canRunShared) { sharedOpened = true; confirm = "workflows.run" to null }
+        else if (shared.input == null && shared.choices.size > 1) { sharedOpened = true; chooseInput = true }
+    }
     Column(Modifier.fillMaxSize()) {
         WorkflowBanners(state, onRetry, onDismissNotice)
-        RunCard(workflow, detail, selectedRun, state, onLatest = { onSelectRun(null) }) { action, run -> confirm = action to run }
+        if (shared != null) SharedRunCard(shared, enabled = canRunShared && state.online && !state.busy,
+            onRun = { confirm = "workflows.run" to null }, onChooseInput = { chooseInput = true })
+        RunCard(workflow, detail, selectedRun, state, onLatest = { onSelectRun(null) }, askRem = askRem, askingRem = askingRem,
+            askRemError = askRemError) { action, run -> confirm = action to run }
+        // Try another model on this workflow's tests; the desktop runs both and the workflow only changes on Use this model.
+        if (onTests != null) TextButton(onClick = onTests, modifier = Modifier.padding(horizontal = 8.dp).testTag("workflowTests")) {
+            Text("Tests · Try another model")
+        }
         PrimaryTabRow(selectedTabIndex = tabs.indexOf(tab).coerceAtLeast(0)) {
             Tab(tab == "graph", { tab = "graph" }, text = { Text("Graph") })
             Tab(tab == "steps", { tab = "steps" }, text = { Text("Steps") })
@@ -427,7 +649,7 @@ internal fun WorkflowDetail(workflow: Workflow, selectedRun: String?, state: Wor
                 "graph" -> if (workflow.nodes.isEmpty()) Note("This workflow has no steps the desktop can show.", Modifier.padding(20.dp))
                     else WorkflowGraph(workflow, layout, statuses, Modifier.fillMaxSize()) { node = it }
                 "steps" -> WorkflowSteps(workflow, layout, statuses) { node = it }
-                "triggers" -> WorkflowTriggers(workflow, enabled = state.online && !state.busy) { trigger, on ->
+                "triggers" -> WorkflowTriggers(workflow, enabled = state.online && !state.busy, onReview = onReview) { trigger, on ->
                     if (on) turnOn = trigger else onTrigger(trigger, false)
                 }
                 else -> WorkflowRuns(workflow, detail?.run?.id ?: selectedRun) { onSelectRun(it); tab = "graph" }
@@ -443,14 +665,23 @@ internal fun WorkflowDetail(workflow: Workflow, selectedRun: String?, state: Wor
             text = { Text(buildString {
                 append("It starts ${workflow.summary.name.ifBlank { "this workflow" }} on your computer without asking, each time it fires. ")
                 append("Runs use the trigger's saved inputs; approvals and limits still apply.")
+                if (trigger.needsApproval) append(" Turning it on doesn't approve the changes since you last approved it: Review changes opens next, and triggered starts are skipped until you approve them.")
                 if (workflow.triggersPaused) append(" All triggers are paused, so it waits until you resume them.")
             }) },
             confirmButton = { TextButton(onClick = { onTrigger(trigger, true); turnOn = null }, modifier = Modifier.testTag("triggerOnConfirm")) { Text("Turn on") } },
             dismissButton = { TextButton(onClick = { turnOn = null }) { Text("Cancel") } })
     }
+    if (chooseInput && shared != null) SharedInputChooser(shared, onDismiss = { chooseInput = false }) { name ->
+        shared.onChoose(name); chooseInput = false
+        if (workflow.runControl.allowed && !workflow.inputs.isNullOrEmpty()) confirm = "workflows.run" to null
+    }
     val form = workflow.inputs.orEmpty()
     confirm?.takeIf { it.first == "workflows.run" && form.isNotEmpty() }?.let {
-        RunSheet(workflow, form, state, onDismiss = { confirm = null }) { inputs -> onRunWithInputs(inputs); confirm = null }
+        val prefill = shared?.input?.let { mapOf(it to shared.prefill) }.orEmpty()
+        val label = shared?.input?.let { name -> shared.choices.firstOrNull { it.name == name }?.label }
+        RunSheet(workflow, form, state, prefill = prefill,
+            note = label?.let { if (shared.file != null) "The shared file goes in $it. " + WorkflowShare.FILE_CAUTION else "What you shared is in $it. " + WorkflowShare.CAUTION },
+            onDismiss = { confirm = null }) { inputs -> onRunWithInputs(inputs); confirm = null }
     }
     confirm?.takeUnless { it.first == "workflows.run" && form.isNotEmpty() }?.let { (action, run) ->
         val name = workflow.summary.name.ifBlank { "this workflow" }
@@ -486,8 +717,12 @@ internal fun WorkflowDetail(workflow: Workflow, selectedRun: String?, state: Wor
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-internal fun RunSheet(workflow: Workflow, inputs: List<WorkflowInput>, state: WorkflowScreenState, onDismiss: () -> Unit, onRun: (JSONObject) -> Unit) {
-    var drafts by remember(workflow.id, workflow.revision) { mutableStateOf(RunForm.drafts(inputs)) }
+internal fun RunSheet(workflow: Workflow, inputs: List<WorkflowInput>, state: WorkflowScreenState, prefill: Map<String, String> = emptyMap(),
+                      note: String? = null, onDismiss: () -> Unit, onRun: (JSONObject) -> Unit) {
+    // Shared text replaces its input's default; it is never put in a password field.
+    var drafts by remember(workflow.id, workflow.revision, prefill) {
+        mutableStateOf(RunForm.drafts(inputs) + prefill.filterKeys { name -> inputs.any { it.name == name && (it.kind == "text" || it.kind == "file") && !it.secret } })
+    }
     var errors by remember(workflow.id, workflow.revision) { mutableStateOf<Map<String, String>>(emptyMap()) }
     val name = workflow.summary.name.ifBlank { "this workflow" }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
@@ -496,6 +731,8 @@ internal fun RunSheet(workflow: Workflow, inputs: List<WorkflowInput>, state: Wo
             Text("Run $name", style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text("Raticode starts a new run on your computer with these inputs. Its approvals and limits still apply.",
                 style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (note != null) Text(note, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.tertiary,
+                modifier = Modifier.testTag("workflowRunShareNote"))
             inputs.forEach { input ->
                 RunInputField(input, drafts[input.name].orEmpty(), errors[input.name]) { value ->
                     drafts = drafts + (input.name to value); errors = errors - input.name
@@ -533,6 +770,14 @@ private fun RunInputField(input: WorkflowInput, draft: String, error: String?, o
     }
     val tag = Modifier.testTag("runInput:${input.name}")
     when (input.kind) {
+        // Only a file shared from another app fills a file input; the sheet shows which one.
+        "file" -> Column(tag, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(label, style = MaterialTheme.typography.bodyLarge)
+            if (input.description.isNotBlank()) Text(input.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(draft.ifEmpty { if (input.needed) RunForm.FILE_NEEDED else "No file. Share one to Raticode from another app to fill this." },
+                style = MaterialTheme.typography.bodyMedium, color = if (draft.isEmpty()) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface)
+            if (error != null) Text(error, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
         "boolean" -> Row(tag.fillMaxWidth().toggleable(draft == "true", role = Role.Switch) { onChange(it.toString()) }.padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -589,6 +834,7 @@ private fun PreviewList(title: String, items: List<String>, color: Color) {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun RunCard(workflow: Workflow, detail: WorkflowRunDetail?, selectedRun: String?, state: WorkflowScreenState, onLatest: () -> Unit,
+                    askRem: ((String) -> Unit)? = null, askingRem: Boolean = false, askRemError: String = "",
                     onAction: (String, String?) -> Unit) {
     // The detail may carry fewer fields than the run history entry for the same run.
     val run = (detail?.run ?: workflow.runs.firstOrNull { it.id == selectedRun } ?: workflow.shownRun)?.let { shown ->
@@ -634,7 +880,15 @@ private fun RunCard(workflow: Workflow, detail: WorkflowRunDetail?, selectedRun:
                     enabled = ready && rerun.allowed && detail != null, modifier = Modifier.testTag("workflowRerun")) {
                     Icon(ThreadIcons.Play, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Run again with the same inputs")
                 }
+                // Puts the run's failure in Rem's message box as a file; the user writes the question and sends it.
+                if (askRem != null && run != null && !run.active && Workflows.canAskRem(run.status)) OutlinedButton(onClick = { askRem(run.id) },
+                    enabled = state.online && !askingRem && detail != null, modifier = Modifier.testTag("workflowAskRem")) {
+                    Icon(ThreadIcons.Rem, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp))
+                    Text(if (askingRem) "Preparing for Rem…" else "Ask Rem about this failure")
+                }
             }
+            if (askRemError.isNotBlank()) Text(askRemError, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.testTag("workflowAskRemError"))
             // Say why a control is off; a disabled button alone does not explain itself.
             val reasons = buildList {
                 if (active != null && !workflow.stopControl.allowed) add("Stop: " + workflow.stopControl.reason.ifBlank { "Your desktop doesn't allow stopping this run." })
@@ -797,7 +1051,8 @@ private fun WorkflowSteps(workflow: Workflow, layout: GraphLayout, statuses: Map
 
 /** A workflow's triggers: what starts it, when it next runs and how its last start went, each with its own switch. */
 @Composable
-private fun WorkflowTriggers(workflow: Workflow, enabled: Boolean, onSwitch: (WorkflowTrigger, Boolean) -> Unit) {
+private fun WorkflowTriggers(workflow: Workflow, enabled: Boolean, onReview: ((WorkflowTrigger) -> Unit)? = null,
+                             onSwitch: (WorkflowTrigger, Boolean) -> Unit) {
     val triggers = workflow.triggers.orEmpty()
     LazyColumn(Modifier.fillMaxSize().testTag("workflowTriggers"), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (workflow.triggersPaused) item {
@@ -814,10 +1069,23 @@ private fun WorkflowTriggers(workflow: Workflow, enabled: Boolean, onSwitch: (Wo
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         Text(triggerNextText(trigger, workflow.triggersPaused), style = MaterialTheme.typography.bodySmall,
                             color = if (trigger.enabled && workflow.triggersPaused) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurface)
+                        if (trigger.dailyLimit.isNotBlank()) Text(trigger.dailyLimit, style = MaterialTheme.typography.bodySmall,
+                            color = if (trigger.limitReached) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("triggerDailyLimit:${trigger.id}"))
+                        if (trigger.timeLimit.isNotBlank()) Text(trigger.timeLimit, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("triggerTimeLimit:${trigger.id}"))
                         trigger.lastResult?.let { last ->
                             WorkflowStatus(Workflows.triggerStatus(last.status), text = "Last: " + Workflows.triggerResultLabel(last.status) +
                                 (last.at.takeIf { it.isNotBlank() }?.let { " · ${whenText(it, past = true)}" } ?: ""))
                             if (last.message.isNotBlank()) Text(last.message, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
+                        // Triggered starts are skipped until the user approves the workflow as it is now.
+                        if (trigger.needsApproval) {
+                            Text(trigger.approvalMessage, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.testTag("triggerApproval:${trigger.id}"))
+                            if (onReview != null) OutlinedButton(onClick = { onReview(trigger) }, enabled = enabled,
+                                modifier = Modifier.testTag("triggerReview:${trigger.id}")) { Text("Review changes") }
+                            else Text(Workflows.UPDATE_APPROVAL, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                     Switch(checked = trigger.enabled, onCheckedChange = null, enabled = enabled)
@@ -825,6 +1093,106 @@ private fun WorkflowTriggers(workflow: Workflow, enabled: Boolean, onSwitch: (Wo
             }
         }
         item { Note("Add or change triggers in Raticode on your computer. Turning one on from here asks first.") }
+    }
+}
+
+/**
+ * Review changes: each file that differs from the version this trigger was approved to run, then Approve this version,
+ * which approves exactly what is listed here. A file opens its diff. When the phone couldn't show a file's whole change,
+ * Approve this version asks a second time, names those files and offers to open them ([onOpen], null when it can't).
+ */
+@Composable
+internal fun TriggerReview(changes: TriggerChanges, state: WorkflowScreenState, onRetry: () -> Unit, onFile: (TriggerChangedFile) -> Unit,
+                           onCancel: () -> Unit, onOpen: ((TriggerChangedFile) -> Unit)? = null,
+                           onApprove: (TriggerChanges, Boolean) -> Unit) {
+    var askUnseen by remember(changes.fingerprint) { mutableStateOf(false) }
+    Column(Modifier.fillMaxSize()) {
+        WorkflowBanners(state, onRetry) {}
+        LazyColumn(Modifier.weight(1f).testTag("triggerReview"), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            item { Note(triggerReviewText(changes)) }
+            items(changes.files, key = { it.change + ":" + it.path }) { file ->
+                Surface(onClick = { onFile(file) }, shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surface,
+                    modifier = Modifier.fillMaxWidth().testTag("triggerFile:${file.path}")) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(file.path, style = MaterialTheme.typography.titleSmall, fontFamily = FontFamily.Monospace, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text("${file.kind} · ${Workflows.fileChangeLabel(file.change)}", style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (file.unseen.isNotBlank() || file.warning.isNotBlank()) Text(
+                            file.warning.ifBlank { Workflows.unseenLabel(file.unseen) }, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("triggerUnseen:${file.path}"))
+                    }
+                }
+            }
+            if (changes.truncated) item { Note("Some diffs are long, so only their start is shown. See all of them on your computer.") }
+        }
+        Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+            TextButton(onClick = onCancel) { Text("Not now") }
+            Button(onClick = { if (changes.needsUnseenConfirm) askUnseen = true else onApprove(changes, false) },
+                enabled = state.online && !state.busy && changes.approval != "approved" && changes.fingerprint.isNotBlank(),
+                modifier = Modifier.testTag("triggerApprove")) { Text("Approve this version") }
+        }
+    }
+    if (askUnseen) UnseenConfirm(changes, onOpen = onOpen?.let { open -> { file: TriggerChangedFile -> askUnseen = false; open(file) } },
+        onBack = { askUnseen = false }) { askUnseen = false; onApprove(changes, true) }
+}
+
+/** The second question before approving changes the phone couldn't show in full, naming each file. */
+@Composable
+private fun UnseenConfirm(changes: TriggerChanges, onOpen: ((TriggerChangedFile) -> Unit)?, onBack: () -> Unit, onConfirm: () -> Unit) {
+    val files = changes.unseen
+    AlertDialog(onDismissRequest = onBack, modifier = Modifier.testTag("triggerUnseenConfirm"),
+        title = { Text("Approve changes you haven't seen?") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(unseenConfirmText(changes))
+                files.forEach { file ->
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Column(Modifier.weight(1f)) {
+                            Text(file.path, style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text(Workflows.unseenLabel(file.unseen), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if (onOpen != null && file.openPath.isNotBlank()) TextButton(onClick = { onOpen(file) },
+                            modifier = Modifier.testTag("triggerUnseenOpen:${file.path}")) { Text("Open") }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onConfirm, modifier = Modifier.testTag("triggerUnseenApprove")) { Text("Approve without seeing all") } },
+        dismissButton = { TextButton(onClick = onBack) { Text("Back") } })
+}
+
+/** Why Approve this version asks again: which changes the phone couldn't show, and which MCP servers can change. */
+internal fun unseenConfirmText(changes: TriggerChanges): String {
+    val unpinned = changes.unseen.count { it.unseen == "unpinned" }
+    val count = changes.unseen.size - unpinned
+    val parts = mutableListOf<String>()
+    if (count > 0) parts += if (count == 1) "Your phone couldn't show all of this file's change." else "Your phone couldn't show all of these $count files' changes."
+    if (changes.unseenHidden > 0) parts += "${changes.unseenHidden} more changed ${if (changes.unseenHidden == 1) "file isn't" else "files aren't"} listed here."
+    if (count > 0 || changes.unseenHidden > 0) parts += "Open them to read what changed, or review them on your computer, before you approve."
+    if (unpinned > 0) parts += (if (unpinned == 1) "This MCP server runs a package with no exact version, " else "These $unpinned MCP servers run packages with no exact version, ") +
+        "so each run fetches the newest release, which nobody has reviewed. Pin a version in Rem's MCP server list (pkg@1.2.3 or pkg==1.2.3) to stop that."
+    return parts.joinToString(" ")
+}
+
+/** The line above a trigger's changed files: why it waits and when its version was last approved. */
+internal fun triggerReviewText(changes: TriggerChanges): String = when (changes.approval) {
+    "approved" -> "Nothing to approve: this trigger runs the workflow as it is now."
+    "missing" -> "The workflow file is missing on your computer, so this trigger's runs fail until it's back."
+    else -> buildString {
+        append(changes.message.ifBlank { "Workflow changed since you approved it." })
+        append(" Triggered starts are skipped until you approve this version.")
+        if (changes.approvedAt.isNotBlank()) append(" You last approved it ${whenText(changes.approvedAt, past = true)}.")
+        if (changes.files.isEmpty()) append(" No file's text differs, but the workflow now uses its files differently.")
+    }
+}
+
+/** One changed file's diff, in the same view as Source control's. */
+@Composable
+private fun TriggerFileDiff(file: TriggerChangedFile) {
+    when {
+        file.change == "removed" && file.diff.isBlank() -> Note("The workflow no longer runs this file.", Modifier.padding(20.dp))
+        file.change == "missing" && file.diff.isBlank() -> Note("The workflow names this file, but it isn't on your computer.", Modifier.padding(20.dp))
+        else -> DiffView(SourceDiff(file.path, "trigger", file.diff, file.truncated, binary = !file.diffAvailable), "", "", null)
     }
 }
 

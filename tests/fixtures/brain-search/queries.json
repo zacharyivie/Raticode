@@ -1,0 +1,157 @@
+{
+  "format": "raticode-brain-search-test-set",
+  "version": 1,
+  "pairs": [
+    {
+      "id": "q01",
+      "query": "How often should I feed my sourdough starter and when is it ready to bake with?",
+      "path": "Inbox/sourdough-starter.md"
+    },
+    {
+      "id": "q02",
+      "query": "Make pizza dough with the sourdough starter and a long cold proof",
+      "path": "Recipes/sourdough-pizza-dough.md"
+    },
+    {
+      "id": "q03",
+      "query": "Cook a Thai green curry with coconut milk and chicken",
+      "path": "Recipes/thai-green-curry.md"
+    },
+    {
+      "id": "q04",
+      "query": "Put the smart plugs and cameras on their own VLAN so they cannot reach my laptops",
+      "path": "Reports/home-network-vlan-plan.html"
+    },
+    {
+      "id": "q05",
+      "query": "Set up guest Wi-Fi isolation and firewall rules on the router",
+      "path": "Reports/home-network-vlan-plan.html"
+    },
+    {
+      "id": "q06",
+      "query": "Compare the rooftop solar installer quotes and their warranties",
+      "path": "Reports/solar-panel-quote-comparison.md"
+    },
+    {
+      "id": "q07",
+      "query": "Is a home battery worth it with the new net metering rules?",
+      "path": "Reports/solar-panel-quote-comparison.md"
+    },
+    {
+      "id": "q08",
+      "query": "Brown spots with yellow rings on the tomato leaves, what do I do?",
+      "path": "Projects/garden/tomato-blight.md"
+    },
+    {
+      "id": "q09",
+      "query": "What soil and compost mix should go in the new raised beds?",
+      "path": "Projects/garden/raised-bed-soil-mix.md"
+    },
+    {
+      "id": "q10",
+      "query": "Check that the restic backups to Backblaze still restore",
+      "path": "Reports/backup-strategy-restic.md"
+    },
+    {
+      "id": "q11",
+      "query": "How many snapshots do we keep, and what is the retention policy for laptop backups?",
+      "path": "Reports/backup-strategy-restic.md"
+    },
+    {
+      "id": "q12",
+      "query": "Why does my Kotlin coroutine keep running after it was cancelled?",
+      "path": "Notes/kotlin-coroutines-cancellation.md"
+    },
+    {
+      "id": "q13",
+      "query": "Add a deadline to an asyncio task in Python and handle the timeout",
+      "path": "Notes/python-asyncio-timeouts.md"
+    },
+    {
+      "id": "q14",
+      "query": "How should I store the e-bike battery over the winter?",
+      "path": "Reports/ebike-battery-care.html"
+    },
+    {
+      "id": "q15",
+      "query": "Plan three days in Lisbon including a day trip to Sintra",
+      "path": "Travel/lisbon-trip-itinerary.md"
+    },
+    {
+      "id": "q16",
+      "query": "Which temples should we visit in Kyoto and when do they close?",
+      "path": "Travel/kyoto-temples-shortlist.md"
+    },
+    {
+      "id": "q17",
+      "query": "When should I rebalance between the stock and bond funds?",
+      "path": "Finance/index-fund-rebalancing.md"
+    },
+    {
+      "id": "q18",
+      "query": "What paperwork do I need to gather before filing taxes?",
+      "path": "Finance/tax-receipts-checklist.md"
+    },
+    {
+      "id": "q19",
+      "query": "Build a twelve week training schedule for a half marathon",
+      "path": "Health/running-plan-half-marathon.md"
+    },
+    {
+      "id": "q20",
+      "query": "Does coffee in the afternoon hurt my deep sleep?",
+      "path": "Health/sleep-tracking-findings.md"
+    },
+    {
+      "id": "q21",
+      "query": "The SQLite WAL file keeps growing and never shrinks",
+      "path": "Reports/sqlite-wal-checkpoint-notes.md"
+    },
+    {
+      "id": "q22",
+      "query": "Postgres table bloat from dead tuples, tune autovacuum",
+      "path": "Reports/postgres-vacuum-tuning.md"
+    },
+    {
+      "id": "q23",
+      "query": "Hot water smells like rotten eggs, should I replace the anode rod?",
+      "path": "Home/water-heater-anode.md"
+    },
+    {
+      "id": "q24",
+      "query": "Dishwasher shows E24 and will not drain",
+      "path": "Home/dishwasher-error-codes.html"
+    },
+    {
+      "id": "q25",
+      "query": "Notes on protecting long blocks of focused work from email and distractions",
+      "path": "Reading/book-notes-deep-work.md"
+    },
+    {
+      "id": "q26",
+      "query": "How do I stack a new habit onto an existing routine?",
+      "path": "Reading/book-notes-atomic-habits.md"
+    },
+    {
+      "id": "q27",
+      "query": "What should a new engineer get done in their first week?",
+      "path": "Work/onboarding-checklist-new-hire.md"
+    },
+    {
+      "id": "q28",
+      "query": "Write up the postmortem for when customers could not resolve our API domain",
+      "path": "Work/incident-review-dns-outage.md"
+    },
+    {
+      "id": "q29",
+      "query": "Why did monitoring miss the outage, and which alerts should we add?",
+      "path": "Work/incident-review-dns-outage.md"
+    },
+    {
+      "id": "q30",
+      "query": "Keep the lithium battery between thirty and sixty percent when parked",
+      "path": "Reports/ebike-battery-care.html"
+    }
+  ],
+  "pruned": []
+}

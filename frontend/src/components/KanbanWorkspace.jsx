@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { Building2, Check, ExternalLink, FolderX, Gauge, Hourglass, PauseCircle, Play, Plus, Search, Sparkles, TriangleAlert, X } from "lucide-react";
-import { COLUMNS, PRIORITIES, STATUS_LABELS, canDropOn, canEditWaits, columnTickets, filterTickets, findRequestedTicket, modeLabel, onKanbanTicket, ownerFilters, participantOf, pausedLabel, saveParticipant, scopeNote, selfWorkLine, sendTicket, takeKanbanTicket, usageSentence, usageShort, useKanban, waitChoices, waitsChange, waitsLine } from "../lib/remKanban.js";
+import { Building2, Check, ExternalLink, FolderX, Gauge, Hourglass, PauseCircle, Play, Plus, Search, ShieldAlert, ShieldCheck, Sparkles, Target, TriangleAlert, X } from "lucide-react";
+import { COLUMNS, PRIORITIES, STATUS_LABELS, canDropOn, canEditWaits, columnTickets, filterTickets, findRequestedTicket, guardrailTag, modeLabel, objectiveLine, onKanbanTicket, ownerFilters, participantOf, pausedLabel, saveParticipant, scopeNote, selfWorkLine, sendTicket, takeKanbanTicket, usageSentence, usageShort, useKanban, violatesLine, waitChoices, waitsChange, waitsLine } from "../lib/remKanban.js";
 import { openRemThread } from "../lib/remHomeStore.js";
 import { GLOBAL_BOARD, GLOBAL_BOARD_FILTERS, GLOBAL_FILTER_KEYS, activeFilterCount, liveGlobalFilters, resetFilters, useBoardFilters } from "../lib/boardFilters.js";
 import KanbanPeople, { PersonAvatar } from "./KanbanPeople.jsx";
@@ -97,6 +97,7 @@ export default function KanbanWorkspace() {
 function Card({ ticket, person, onOpen }) {
   const note = scopeNote(ticket);
   const waits = waitsLine(ticket);
+  const objective = objectiveLine(ticket);
   return <article className={`oh-card ${ticket.running ? "is-running" : ""} ${ticket.status === "blocked" && !ticket.paused ? "flagged" : ""} ${ticket.paused ? "is-paused" : ""}`} draggable={!ticket.running && !ticket.proposed}
     onDragStart={event => { event.dataTransfer.setData("text/plain", ticket.ticket_id); event.dataTransfer.effectAllowed = "move"; }}
     onClick={onOpen} onKeyDown={event => { if (event.key === "Enter") onOpen(); }} tabIndex={0} role="button" aria-label={`${ticket.key} ${ticket.title}`}>
@@ -107,6 +108,7 @@ function Card({ ticket, person, onOpen }) {
     {ticket.wait_notice ? <div className="kb-wait-notice" title={ticket.wait_notice} data-testid="ticket-wait-notice"><TriangleAlert size={12} aria-hidden="true" /><span>{ticket.wait_notice}</span></div>
       : waits ? <div className="kb-waits" title={ticket.waits_for.filter(item => item.status !== "done").map(item => `${item.key} ${item.title}`).join("\n")} data-testid="ticket-waits"><Hourglass size={12} aria-hidden="true" /><span>{waits}</span></div> : null}
     {ticket.skip_reason ? <div className="kb-scope" title={ticket.skip_reason}><FolderX size={12} aria-hidden="true" /><span>Rem left this out: {ticket.skip_reason}</span></div> : null}
+    {objective ? <div className={`kb-objective ${objective.off ? "is-off" : ""}`} title={objective.detail} data-testid="ticket-objective"><Target size={11} aria-hidden="true" /><span>{objective.short}</span></div> : null}
     {ticket.running ? <div className="livebar" aria-hidden="true"><i /></div> : null}
     <div className="row3">
       {person ? <PersonAvatar person={person} small /> : <span className="oh-av" style={{ background: "var(--faint)" }} title="Unassigned">?</span>}
@@ -115,6 +117,8 @@ function Card({ ticket, person, onOpen }) {
       {usageShort(ticket.usage) ? <span className="kb-usage" title={usageSentence(ticket.usage)} data-testid="ticket-usage"><Gauge size={11} aria-hidden="true" />{usageShort(ticket.usage)}</span> : null}
       {ticket.proposed ? <span className="kb-proposed"><Sparkles size={11} />Your approval</span> : null}
       {ticket.auto_approved ? <span className="kb-auto" title="Self-work approved this on its own; you haven't reviewed it"><Sparkles size={11} aria-hidden="true" />Auto-approved</span> : null}
+      {violatesLine(ticket) ? <span className="kb-violates" title={ticket.violation_reason || "It contradicts a decision in force, so self-work won't start it."} data-testid="ticket-violates"><ShieldAlert size={11} aria-hidden="true" />{violatesLine(ticket)}</span> : null}
+      {guardrailTag(ticket) ? <span className="kb-guardrail" title="A guardrail retro proposed this to stop a failure that came back in two or more runs" data-testid="ticket-guardrail"><ShieldCheck size={11} aria-hidden="true" />{guardrailTag(ticket)}</span> : null}
       {ticket.paused ? <span className="kb-paused"><PauseCircle size={11} aria-hidden="true" />{pausedLabel(ticket.paused)}</span> : null}
     </div>
   </article>;
@@ -131,6 +135,7 @@ function TicketSheet({ ticket, board, act, apply, onClose }) {
   const [reviewing, setReviewing] = useState(false);
   const projects = board.participants.find(item => item.kind === "rem")?.assignable || [];
   const note = scopeNote(ticket);
+  const objective = objectiveLine(ticket);
   const [reason, setReason] = useState("");
   const [destination, setDestination] = useState("");
   const [worker, setWorker] = useState("");
@@ -156,8 +161,10 @@ function TicketSheet({ ticket, board, act, apply, onClose }) {
     {ticket.auto_approved ? <p className="kb-auto-note" role="note" data-testid="ticket-auto-approved"><Sparkles size={13} aria-hidden="true" /><span>Approved by self-work, not by you, because auto-approval is on in Settings &gt; Rem. Edit, move or cancel it like any ticket.</span></p> : null}
     {ticket.proposal_reason ? <div className="kb-section"><h3>Why Rem suggests this</h3><p>{ticket.proposal_reason}</p></div> : null}
     {ticket.skip_reason ? <div className="kb-section"><h3>Why Rem left this out</h3><p>{ticket.skip_reason}</p></div> : null}
+    {objective ? <div className="kb-section" data-testid="ticket-objective-detail"><h3>Objective</h3><p>{objective.detail}{objective.off ? " Move it to In progress to start it anyway." : ""}</p></div> : null}
     {ticket.summary ? <div className="kb-section"><h3>Result</h3><p>{ticket.summary}</p></div> : null}
-    {ticket.block_reason ? <div className="kb-section"><h3>{ticket.paused ? pausedLabel(ticket.paused) : "Blocked"}</h3><p>{ticket.block_reason}</p></div> : null}
+    {violatesLine(ticket) ? <div className="kb-section kb-violates-note" role="note" data-testid="ticket-violates-detail"><h3><ShieldAlert size={13} aria-hidden="true" />Violates decisions</h3><p>{ticket.violation_reason || `It contradicts ${ticket.violates_decisions.join(", ")}.`}</p><p className="kb-hint">Self-work won't start it, and Rem can't make an exception for itself. Edit the ticket, or change the decision in Rem's Decisions list, and Rem checks it again.</p></div>
+      : ticket.block_reason ? <div className="kb-section"><h3>{ticket.paused ? pausedLabel(ticket.paused) : "Blocked"}</h3><p>{ticket.block_reason}</p></div> : null}
     {ticket.usage ? <div className="kb-section" data-testid="ticket-usage-detail"><h3>Usage</h3><p>{usageSentence(ticket.usage)}</p></div> : null}
     {ticket.thread_id ? <button className="oh-btn" type="button" onClick={() => openRemThread(ticket.thread_id)}><ExternalLink size={13} />Open its thread</button> : null}
     {hasPatch(ticket) ? <div className="kb-section"><h3>Changes</h3>

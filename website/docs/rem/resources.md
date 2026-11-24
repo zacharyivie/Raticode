@@ -32,6 +32,8 @@ A skill describes a procedure. It doesn't grant file access. Skills installed in
 
 - **HTTP:** use the server's URL, without credentials in it.
 - **Local:** give the program and each argument separately. Raticode starts the program directly; it doesn't pass the text to a shell.
+- **Environment variables for workflows** (local servers, optional): names, one per line, of the variables an [`mcp-tool`](../nodes/mcp-tool.md#environment-variables) workflow step passes to the server, such as its token. Only names are stored. A Rem thread ignores them: the provider starts the server with its own environment. New in 0.6.0.
+- **Clear package cache** (the eraser on a local server): deletes the packages that [`mcp-tool`](../nodes/mcp-tool.md#package-cache) steps keep for the server between starts, so its next start downloads them again. Rem threads don't use this cache. New in 0.6.0.
 
 Set up the server's own sign-in with its instructions. The provider must support MCP too, and a server's name in the list doesn't prove its tools are available in the current turn.
 
@@ -49,10 +51,15 @@ Raticode rem skill remove PATH
 Raticode rem mcp list
 Raticode rem mcp add NAME ...
 Raticode rem mcp remove NAME
+Raticode rem mcp clear-cache NAME
+Raticode rem mcp tools NAME
 ```
 
 - `skill path` prints Raticode's own skills folder, where `skill new` creates skills.
 - `skill remove` unregisters a skill and leaves its files.
+- `mcp add NAME --env VAR -- COMMAND ARGS` names a variable a local server gets in [`mcp-tool`](../nodes/mcp-tool.md#environment-variables) steps. Repeat `--env` for more.
+- `mcp tools NAME` starts a server the way an [`mcp-tool` step](../nodes/mcp-tool.md) would and lists its tools. `--network HOST` (repeat it, or `any`) and `--no-sandbox` match the step's `network` and `sandbox` fields, and `--timeout` defaults to 30 seconds. *New in 0.6.0.*
+- `mcp remove` also deletes the server's [package cache](../nodes/mcp-tool.md#package-cache). `mcp clear-cache NAME` clears just the cache, and `--all` clears every server's.
 - Entries added here appear in **Thread tools**, off until you turn them on per thread.
 - `Raticode rem --help` lists every option.
 

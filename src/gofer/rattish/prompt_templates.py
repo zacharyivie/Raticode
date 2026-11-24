@@ -52,9 +52,11 @@ def render_template_value(template: str, values: Mapping[str, Any]) -> Any:
     canonical_values = {name.lower(): value for name, value in values.items()}
     protected = template.replace("{{{{", _OPEN_SENTINEL).replace("}}}}", _CLOSE_SENTINEL)
 
-    exact = _PLACEHOLDER.fullmatch(protected)
-    if exact is not None:
-        placeholder = _parse_expression(exact.group(1).strip())
+    # Only a template that is one placeholder keeps the native value. fullmatch alone would
+    # read "{{a}}: {{b}}" as one placeholder named "a}}: {{b".
+    matches = list(_PLACEHOLDER.finditer(protected))
+    if len(matches) == 1 and matches[0].span() == (0, len(protected)):
+        placeholder = _parse_expression(matches[0].group(1).strip())
         return _placeholder_value(placeholder, canonical_values)
 
     def replace(match: re.Match[str]) -> str:

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { BookOpen, ChevronDown, ChevronUp, Copy, ExternalLink, Eye, EyeOff, FileClock, Highlighter, Library, ListTree, MessageSquareQuote, MoreHorizontal, PanelLeft, Plus, Quote, Search, Sparkles, Star, Trash2, X, ZoomIn, ZoomOut, Link2, CircleCheck } from "lucide-react";
-import { checkByDue, extractionLabel, formatCitation, formatDay, formatTime, formatBytes, newerReports, originLabel, parseQuery, typeLabel, webSourceUrl } from "../lib/secondBrain.js";
+import { checkByDue, extractionLabel, formatCitation, formatDay, formatTime, formatBytes, isHeadingPassage, newerReports, originLabel, parseQuery, sectionName, sectionStarts, typeLabel, webSourceUrl } from "../lib/secondBrain.js";
 import { activateTab, closeTab, pinTab, openDocument, toggleReading, saveCitation, removeCitation, addToCollection, evidenceItem, openDialog, notify, libraryFor, documentById, navigate, confirmReplacement } from "../lib/secondBrainStore.js";
 import { Empty, Menu, Pill, Segmented, TypeIcon, askRem } from "./SecondBrainParts.jsx";
 import Connections from "./SecondBrainConnections.jsx";
@@ -60,6 +60,15 @@ function ReportFamily({ doc, store }) {
   </section>;
 }
 
+const SUMMARY_SOURCES = { file: "Written in the file", section: "First paragraph of the file’s summary section", metadata: "Set in Edit metadata" };
+
+function DocumentSummary({ doc }) {
+  return <section className="sb-doc-summary" aria-labelledby="sb-doc-summary-title"><h4 id="sb-doc-summary-title">Summary</h4>
+    {doc.summary ? <><p>{doc.summary}</p><small className="sb-hint">{SUMMARY_SOURCES[doc.summarySource] || "Summary"} · Rem reads this first. It describes the document and is never cited.</small></>
+      : <p className="sb-hint">No summary. Add one in Edit metadata, or give the file a Summary, Short answer, TL;DR, Abstract or Key findings section.</p>}
+  </section>;
+}
+
 function DocumentDetails({ doc, store }) {
   const library = libraryFor(store, doc.brainId);
   const citations = library.citationsByDoc[doc.id] || [];
@@ -71,6 +80,7 @@ function DocumentDetails({ doc, store }) {
     ["Check by", doc.checkBy ? `${formatDay(doc.checkBy)}${checkByDue(doc) ? " · due now" : ""}` : "Not set"],
     ["Origin", originLabel(doc.origin)], ["Extraction", extractionLabel(doc.extraction)], ["Size", formatBytes(doc.size)], ["Document ID", <code className="sb-mono" key="i">{doc.id}</code>]];
   return <div className="sb-details">
+    <DocumentSummary doc={doc} />
     <section><div className="sb-details-head"><h4>Metadata</h4><button type="button" className="sb-mini-button" onClick={() => openDialog("edit-metadata", { docId: doc.id })}>Edit metadata</button></div><dl className="sb-facts">{facts.map(([term, value]) => <div key={term}><dt>{term}</dt><dd>{value}</dd></div>)}</dl></section>
     <ReportFamily doc={doc} store={store} />
     <section><h4>Versions</h4><ol className="sb-versions">{versions.map((version, index) => { const used = reportsUsing.filter(report => report.sourceVersions.some(source => source.docId === doc.id && source.version === version.hash)); return <li key={version.hash + index}>
@@ -106,6 +116,7 @@ export default function SecondBrainReader({ brain, view, store, search, collecti
   const citations = doc ? library.citationsByDoc[doc.id] || [] : [];
   const focusQuote = doc && view.focus?.docId === doc.id ? view.focus.quote || "" : "";
   const marks = [...terms.map(needle => ({ needle, kind: "hit" })), ...(find.open && find.text.length > 1 ? [{ needle: find.text, kind: "find" }] : []), ...citations.map(citation => ({ needle: citation.quote, kind: "cited" })), ...(focusQuote ? [{ needle: focusQuote, kind: "focus" }] : [])];
+  const starts = useMemo(() => sectionStarts(doc?.blocks || []), [doc?.blocks]);
   const findTotal = doc && find.open && find.text.length > 1 ? doc.blocks.reduce((total, block) => total + ranges(block.text, find.text, "find").length, 0) : 0;
   const hitTotal = doc ? doc.blocks.reduce((total, block) => total + terms.reduce((sum, term) => sum + ranges(block.text, term, "hit").length, 0), 0) : 0;
 
@@ -208,15 +219,15 @@ export default function SecondBrainReader({ brain, view, store, search, collecti
       {hitTotal && mode === "reading" ? <div className="sb-hits"><Highlighter size={13} aria-hidden="true" /><span>{hitTotal} search match{hitTotal === 1 ? "" : "es"} in this document</span><button type="button" className="sb-icon-button" aria-label="Previous search match" onClick={() => stepHit(-1)}><ChevronUp size={14} /></button><button type="button" className="sb-icon-button" aria-label="Next search match" onClick={() => stepHit(1)}><ChevronDown size={14} /></button></div> : null}
       <div ref={bodyRef} className="sb-reader-body" data-mode={mode} data-toc={toc && mode === "reading" ? true : undefined} onMouseUp={mode === "reading" ? () => setTimeout(captureSelection, 0) : undefined}>
         {mode === "reading" ? <>
-          {toc ? <nav className="sb-toc" aria-label="Contents"><p>Contents</p><ol>{doc.blocks.map(block => <li key={block.id}><button type="button" data-active={flash === block.id || undefined} onClick={() => articleRef.current?.querySelector(`[data-block="${block.id}"]`)?.scrollIntoView({ block: "start" })}>{block.page ? <small>p. {block.page}</small> : null}{block.heading}</button></li>)}</ol></nav> : null}
+          {toc ? <nav className="sb-toc" aria-label="Contents"><p>Contents</p><ol>{doc.blocks.filter(block => starts.has(block.id) && (sectionName(block) || block.page)).map(block => <li key={block.id}><button type="button" data-active={flash === block.id || undefined} onClick={() => articleRef.current?.querySelector(`[data-block="${block.id}"]`)?.scrollIntoView({ block: "start" })}>{block.page ? <small>p. {block.page}</small> : null}{block.heading}</button></li>)}</ol></nav> : null}
           <article ref={articleRef} className="sb-doc" style={{ fontSize: `${(15 * zoom) / 100}px` }}>
             {doc.missing ? <div className="sb-doc-warning" role="note"><strong>The original file is unavailable.</strong> These are retained passages from its last indexed version. Restore the source file to read the current original.</div> : null}
             {doc.extraction === "ocr" ? <div className="sb-doc-warning" role="note"><strong>No searchable text yet.</strong> This PDF contains page images. Run OCR from Library health to extract text; OCR text is labeled and kept separate from the original page.<button type="button" className="sb-mini-button" onClick={() => navigate("health")}>Open Library health</button></div> : null}
             {doc.extraction === "failed" ? <div className="sb-doc-warning" data-tone="danger" role="note"><strong>Extraction failed.</strong> {doc.blocks[0]?.text} The original file is unchanged.<button type="button" className="sb-mini-button" onClick={() => navigate("health")}>Fix in Library health</button></div> : null}
             {doc.extraction !== "failed" ? <h1>{doc.title}</h1> : null}
             {doc.extraction === "ready" || doc.extraction === "pending" || doc.missing ? doc.blocks.map(block => <section key={block.id} data-block={block.id} data-flash={flash === block.id || undefined}>
-              <h2>{block.heading}{block.page ? <small> · page {block.page}</small> : null}</h2>
-              <p>{decorate(block.text, marks).map((part, index) => {
+              {starts.has(block.id) && !isHeadingPassage(block) && (sectionName(block) || block.page) ? <h2>{block.heading}{block.page ? <small> · page {block.page}</small> : null}</h2> : null}
+              <p {...(isHeadingPassage(block) ? { className: "sb-doc-heading", role: "heading", "aria-level": 2 } : {})}>{decorate(block.text, marks).map((part, index) => {
                 if (!part.kinds.length) return <span key={index}>{part.text}</span>;
                 const isFind = part.kinds.includes("find");
                 if (isFind) findCounter += 1;

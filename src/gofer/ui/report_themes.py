@@ -2,9 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from pathlib import Path
 from typing import Any
 
 from gofer.ui.report_outputs import report_format_rules
+from gofer.utils.atomic_output import (
+    atomic_binary_output,
+    mkdir_without_links,
+    open_binary_input,
+)
+
+# The fields of a report theme setting that its rules depend on.
+THEME_FIELDS = ("enabled", "theme", "format", "instructions")
+MAX_THEME_FILE_BYTES = 64 * 1024
 
 REPORT_THEME_PROMPTS = {
     "auto": "System: design coordinated light and dark palettes using prefers-color-scheme. "
@@ -103,3 +115,77 @@ def report_theme_rules(config: dict[str, Any] | None) -> str:
         "This preference applies wherever a report is saved. It does not require Second Brain "
         "or change the user's requested output format."
     )
+
+
+def report_rules_pointer(tools: list[str]) -> str:
+    """The one line a turn prompt carries instead of the report rules themselves."""
+    named = " or ".join(f"`rules` on {tool}" for tool in tools)
+    return (
+        "Before you write a report, slides, a PDF or another informational file (notes, "
+        f"summaries, audits, plans, handoffs, guides), call {named} for the report format "
+        "and design rules."
+    )
+
+
+def write_theme_file(data_dir: Path, config: dict[str, Any]) -> Path:
+    """The theme setting as a file a report or Second Brain tool server reads its rules from.
+
+    A custom theme is up to 12,000 characters, too long for a server's command line, which
+    some providers copy into their own. Files are named by their content, so a turn reuses
+    the file an earlier turn wrote for the same setting.
+    """
+    payload = json.dumps(
+        {key: config[key] for key in THEME_FIELDS if key in config}, sort_keys=True
+    ).encode("utf-8")
+    folder = data_dir.resolve() / "report-themes"
+    mkdir_without_links(folder)
+    target = folder / f"{hashlib.sha256(payload).hexdigest()[:32]}.json"
+    try:
+        with atomic_binary_output(target, exclusive=True) as output:
+            output.write(payload)
+    except FileExistsError:
+        pass
+    return target
+
+
+def write_rules_file(folder: Path, config: dict[str, Any] | None) -> Path | None:
+    """The report format and design rules as a text file a turn without report tools reads.
+
+    A read-only review never saves a report, so it only needs the rules to judge one.
+    The file replaces whatever has its name, so the turn always reads Raticode's text.
+    Named by content, so a resumed session's instructions stay the same.
+    """
+    rules = report_theme_rules(config)
+    if not rules:
+        return None
+    payload = rules.encode("utf-8")
+    mkdir_without_links(folder)
+    target = folder.resolve() / f"report-rules-{hashlib.sha256(payload).hexdigest()[:16]}.txt"
+    with atomic_binary_output(target) as output:
+        output.write(payload)
+    return target
+
+
+def report_rules_file_pointer(path: str) -> str:
+    """The one line a turn with no report tools carries instead of the report rules."""
+    return (
+        "This turn has no report tools. The report format and design rules are in the file "
+        f"{path}; read it when you need to judge a report's format or design."
+    )
+
+
+def read_theme_file(path: Path) -> dict[str, Any]:
+    """The theme setting write_theme_file stored. Raises ValueError for anything else."""
+    try:
+        with open_binary_input(path) as handle:
+            data = handle.read(MAX_THEME_FILE_BYTES + 1)
+        config = json.loads(data) if len(data) <= MAX_THEME_FILE_BYTES else None
+    except (OSError, ValueError) as exc:
+        raise ValueError("The report theme file can't be read.") from exc
+    if not isinstance(config, dict) or set(config) - set(THEME_FIELDS):
+        raise ValueError("The report theme file isn't a report theme setting.")
+    if not all(
+        isinstance(config.get(key, ""), str) for key in ("theme", "format", "instructions")
+    ) or not isinstance(config.get("enabled", True), bool):
+        raise ValueError("The report theme file isn't a report theme setting.")
+    return config

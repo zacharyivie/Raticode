@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { Check, Circle, CircleHelp, X } from "lucide-react";
-import { checkGroups } from "../lib/remHome.js";
+import { Check, Circle, CircleHelp, StickyNote, X } from "lucide-react";
+import { checkGroups, reviewNotes } from "../lib/remHome.js";
 
 // Reasons longer than this, or over three lines, start folded.
 const LONG_REASON = 240;
@@ -10,6 +10,7 @@ const OUTCOMES = {
   unresolved: { icon: CircleHelp, heading: "Unresolved" },
   unchecked: { icon: Circle, heading: "Not checked" },
   passed: { icon: Check, heading: "Passed" },
+  notes: { icon: StickyNote, heading: "Notes" },
 };
 
 function Reason({ text }) {
@@ -36,11 +37,13 @@ function CheckList({ items, outcome }) {
 }
 
 // Which checks of one run failed or stayed unresolved, each with the reviewer's
-// reason, apart from the run's one-line summary. Passed checks fold away below.
+// reason, apart from the run's one-line summary. Passed checks fold away below,
+// and so do the review's notes: findings that never send the work back.
 // Nothing shows before a review has looked at any check: the count line above
 // already says the checks haven't run.
-export default function TaskChecks({ criteria, label = "Checks" }) {
+export default function TaskChecks({ criteria, notes, label = "Checks" }) {
   const groups = checkGroups(criteria);
+  const kept = reviewNotes(notes);
   if (!groups.reviewed) return null;
   const open = ["failed", "unresolved", "unchecked"].filter(outcome => groups[outcome].length);
   return <section className="rem-checks" aria-label={label}>
@@ -51,6 +54,10 @@ export default function TaskChecks({ criteria, label = "Checks" }) {
     {groups.passed.length ? <details className="rem-check-group" data-outcome="passed">
       <summary>{OUTCOMES.passed.heading} · {groups.passed.length}</summary>
       <CheckList items={groups.passed} outcome="passed" />
+    </details> : null}
+    {kept.length ? <details className="rem-check-group" data-outcome="notes">
+      <summary>{OUTCOMES.notes.heading} · {kept.length}</summary>
+      <CheckList items={kept} outcome="notes" />
     </details> : null}
   </section>;
 }

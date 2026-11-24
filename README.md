@@ -992,6 +992,10 @@ python -m pytest -n 8 --dist worksteal   # or plain `python -m pytest` for one p
 cd frontend && npm test && npm run check:build
 ```
 
+Before a branch lands on `dev`, `python3 scripts/check-dev.py` runs ruff, mypy, the
+repository-wide tests and the website docs check, and prints one PASS or FAIL line
+for each.
+
 Frontend checks are split by runtime:
 
 - `npm test` runs the Node-based React/helper tests in one process, with the

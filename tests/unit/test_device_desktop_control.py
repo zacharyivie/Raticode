@@ -99,6 +99,13 @@ class RemStore:
         assert summary
         return [self.task]
 
+    def task_detail(self, identity: str, *, summary: bool = False) -> dict[str, Any]:
+        # rem.task reads only the task the phone opened.
+        found = next((t for t in self.tasks(summary=summary) if t.get("id") == identity), None)
+        if found is None:
+            raise KeyError(identity)
+        return found
+
     def thread_ids(self) -> list[str]:
         return ["thread1"]
 
@@ -117,6 +124,10 @@ class RemStore:
     def mutate_run(self, identity: str, payload: dict[str, Any], action: str) -> dict[str, Any]:
         self.mutations.append((action, identity))
         return {}
+
+    def dismiss_updates(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.mutations.append(("dismiss_updates", payload))
+        return {"dismissed": [], "count": 0, "needs_you": 0}
 
     conversation_setting: dict[str, Any] = {"turn_state": "idle"}
 
@@ -172,6 +183,10 @@ def phone(application, tmp_path):
             event(kind, next(sequence), thread_id=None, payload={"op": op, "params": params or {}}),
         )
         results = [r for r in replies if r["type"] == "desktop.result"]
+        if not results:
+            # Refused before the desktop looked at it, such as by the protocol schema.
+            [error] = [r["payload"] for r in replies if r["type"] == "error"]
+            return {"ok": False, "code": error["code"], "detail": error["detail"]}
         first = results[0]["payload"]
         if not first["ok"]:
             return {"ok": False, "code": first["code"], "detail": first["detail"]}
@@ -273,6 +288,22 @@ def test_rem_results_carry_no_paths_and_actions_use_desktop_services(phone):
     assert rem.store.mutations == [("cancel", "run1")]
     send("desktop.action", "rem.instruct", {"thread_id": "thread1", "body": "Also lint"})
     assert rem.calls[-1][1][0] == "thread1"
+
+
+def test_dismiss_all_dismisses_the_updates_the_phone_showed_in_one_action(phone):
+    app, peer, _context, send = phone
+    app.desktop.enable(peer, True)
+    # Phones offer Dismiss all only when the desktop says it takes the action.
+    assert send("desktop.read", "rem.home")["value"]["dismiss_all"] is True
+    store = app.desktop.rem.store
+    shown = send("desktop.action", "rem.run.acknowledge_all", {"run_ids": ["run1", "run2", 7, ""]})
+    assert shown["ok"] and "tasks" in shown["value"]
+    action, payload = store.mutations[-1]
+    assert action == "dismiss_updates"
+    # Only text IDs are passed on; the request ID makes a repeated event run once.
+    assert payload["run_ids"] == ["run1", "run2", "7"] and payload["request_id"]
+    send("desktop.action", "rem.run.acknowledge_all", {})
+    assert "run_ids" not in store.mutations[-1][1]
 
 
 def test_large_results_are_split_into_bounded_parts(phone):
@@ -529,6 +560,43 @@ def test_organizations_use_the_desktop_manager(phone, tmp_path):
         manager.close()
 
 
+def test_organization_read_says_why_the_next_worker_waits_for_a_computer(phone, tmp_path):
+    app, peer, context, send = phone
+    app.desktop.enable(peer, True)
+
+    async def stream(**_: Any) -> Any:
+        if False:
+            yield {}
+
+    manager = OrganizationManager(tmp_path / "orgs", stream=stream, start_runtime=False)
+    root = context["projects"][0]["root"]
+    try:
+        app.desktop.organizations = manager
+        org = manager.call(
+            root,
+            "user",
+            {"action": "create", "params": {"config": {"name": "Eng", "projectRoots": [root]}}},
+        )
+        reason = "Waiting for a free worker: Workstation is full (2 of 2 running)"
+
+        def waiting(state: str) -> Any:
+            def change(current: dict[str, Any]) -> dict[str, Any]:
+                current["runtime"].update(state=state, placementWait=reason)
+                return {"probe": True}
+
+            return change
+
+        manager.store.mutate("", org["id"], "test", "probe", waiting("running"))
+        read = send("desktop.read", "organizations.read", {"organization_id": org["id"]})
+        assert read["value"]["placement_wait"] == reason
+        # A paused organization starts nothing, so it isn't waiting for a computer.
+        manager.store.mutate("", org["id"], "test", "probe", waiting("paused"))
+        read = send("desktop.read", "organizations.read", {"organization_id": org["id"]})
+        assert read["value"]["placement_wait"] == ""
+    finally:
+        manager.close()
+
+
 def test_swarms_start_in_shared_projects_only(phone):
     app, peer, context, send = phone
     root = context["projects"][0]["root"]
@@ -585,6 +653,277 @@ def test_settings_round_trip_through_the_desktop_window(phone):
     window["editor"]["fontSize"] = 15
     assert app.desktop.exchange_settings(window, [queued[0]["id"]]) == {"changes": []}
     assert send("desktop.read", "settings.get")["value"]["pending"] == 0
+
+
+def test_phone_picks_rems_account_per_provider(phone, tmp_path):
+    """Desktop settings > Rem > <provider> account: default, choose by usage or one account."""
+    from gofer.core.provider_accounts import create_account
+
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    data_dir = tmp_path / "accounts-data"
+    app.desktop.rem.data_dir = data_dir
+    create_account("work", provider="claude_code", data_dir=data_dir)
+    window: dict[str, Any] = {
+        "assistant": {"provider": "claude_code", "providerAccounts": {"claude_code": "auto"}}
+    }
+    app.desktop.exchange_settings(window, [])
+    key = "assistant.providerAccounts.claude_code"
+    view = send("desktop.read", "settings.get")["value"]
+    item = next(s for s in view["settings"] if s["key"] == key)
+    assert item["kind"] == "enum" and item["label"] == "Claude Code account"
+    assert "provider" not in item
+    assert item["options"] == [
+        ["", "Default sign-in"],
+        ["auto", "Choose by usage"],
+        ["work", "Claude Code · work"],
+    ]
+    assert view["values"][key] == "auto"
+    assert "assistant.claudeAccount" not in view["values"]
+    refused = send("desktop.action", "settings.update", {"changes": {key: "missing"}})
+    assert refused["code"] == "invalid"
+    send("desktop.action", "settings.update", {"changes": {key: "work"}})
+    queued = app.desktop.exchange_settings(window, [])["changes"]
+    assert queued[-1]["values"] == {key: "work"}
+
+
+def test_phone_turns_co_author_removal_on_without_the_window(phone):
+    """Settings > Rem > Remove Co-authored-by lines lives in the backend, so it applies now."""
+    from gofer.core.provider_preferences import strip_co_authors_enabled
+
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    key = "commitMessage.stripCoAuthors"
+    view = send("desktop.read", "settings.get")["value"]
+    item = next(s for s in view["settings"] if s["key"] == key)
+    assert item == {
+        "key": key,
+        "group": "Rem",
+        "label": "Remove Co-authored-by lines from commits",
+        "kind": "bool",
+    }
+    assert view["values"][key] is False
+    # No window snapshot yet: a window setting waits, this one doesn't.
+    changed = send("desktop.action", "settings.update", {"changes": {key: True}})["value"]
+    assert changed["values"][key] is True and changed["pending"] == 0
+    assert strip_co_authors_enabled() is True
+    assert send("desktop.action", "settings.update", {"changes": {key: "yes"}})["code"] == (
+        "invalid"
+    )
+    window = {"appearance": {"theme": "light"}, "commitMessage": {"stripCoAuthors": False}}
+    assert app.desktop.exchange_settings(window, []) == {"changes": []}
+    # The window never overrides or receives it.
+    assert send("desktop.read", "settings.get")["value"]["values"][key] is True
+    mixed = send(
+        "desktop.action",
+        "settings.update",
+        {"changes": {key: False, "appearance.theme": "dark"}},
+    )["value"]
+    assert mixed["values"][key] is False and mixed["pending"] == 1
+    assert strip_co_authors_enabled() is False
+    queued = app.desktop.exchange_settings(window, [])["changes"]
+    assert queued[0]["values"] == {"appearance.theme": "dark"}
+
+
+def test_phone_usage_and_self_work_report_carry_verified_work(phone, tmp_path):
+    """The phone's Usage page and report card get the numbers the CLI and desktop show."""
+    from datetime import UTC, datetime, timedelta
+
+    from gofer.core.usage_history import resolve_range
+    from gofer.core.usage_service import usage_overview
+    from gofer.devices.desktop_control import DesktopControl
+    from gofer.ui.rem_verified_work import verified_work
+    from tests.unit.test_rem_verified_work import LINE, seed_history
+
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    data = tmp_path / "verified-data"
+    data.mkdir()
+    seed_history(data, datetime.now(UTC) - timedelta(days=1))
+    app.desktop.usage = lambda **period: usage_overview(data, **period)
+    view = send("desktop.read", "usage.overview", {"range": "30d", "tz": "UTC"})["value"]
+    expected = verified_work(data, resolve_range(period="30d", tz="UTC"))
+    assert view["verified_work"]["line"] == LINE
+    for key in ("accepted", "first_pass", "repairs_per_ticket", "blocked_causes", "step_ins"):
+        assert view["verified_work"][key] == expected[key]
+    assert view["verified_work"]["project_check"] == expected["project_check"]
+    assert view["verified_work"]["project_check"]["flaky"] == 1
+    report = {
+        "items": [],
+        "counts": {"finished": 3},
+        "verified_work": {"line": LINE, "accepted": 3, "first_pass": 1, "blocked": True},
+    }
+    item = DesktopControl._rem_message(
+        {
+            "id": "r",
+            "role": "assistant",
+            "body": "Report",
+            "kind": "self_work_report",
+            "self_work_report": report,
+        }
+    )
+    assert item["self_work_report"]["verified_work"] == {
+        "line": LINE,
+        "accepted": 3,
+        "first_pass": 1,
+    }
+
+
+def test_phone_usage_asks_for_its_period_and_gets_the_token_chart(phone, tmp_path):
+    from gofer.core.usage_ledger import record_invocation
+    from gofer.core.usage_service import usage_overview
+
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    data = tmp_path / "usage-data"
+    record_invocation(
+        invocation_id="phone-usage",
+        provider="codex",
+        data_dir=data,
+        metadata={"input_tokens": 90, "output_tokens": 10},
+    )
+    record_invocation(
+        invocation_id="phone-usage-work",
+        provider="codex",
+        profile="work",
+        data_dir=data,
+        metadata={"input_tokens": 20, "output_tokens": 0},
+    )
+    asked: list[dict[str, Any]] = []
+
+    def usage(**period: Any) -> dict[str, Any]:
+        asked.append(period)
+        return usage_overview(data, **period)
+
+    app.desktop.usage = usage
+    view = send("desktop.read", "usage.overview", {"range": "6mo", "tz": "UTC"})["value"]
+    assert asked[-1] == {"period": "6mo", "start": None, "end": None, "tz": "UTC"}
+    assert view["range"]["key"] == "6mo" and view["days"] == 180
+    assert view["activity"]["total_tokens"] == 120
+    assert view["series"]["bucket"] == "week"
+    assert view["series"]["providers"] == [
+        {
+            "provider": "codex",
+            "total_tokens": 120,
+            "calls": 2,
+            # The phone draws each provider in the desktop's brand palette.
+            "style": {"dark": "#10A37F", "light": "#0D8A6B", "pattern": "stripes"},
+        }
+    ]
+    assert sum(b["providers"].get("codex", 0) for b in view["series"]["buckets"]) == 120
+    # And each account, for the chart's By account switch, in a shade of that palette.
+    from gofer.core.provider_colors import account_style
+
+    assert view["series"]["accounts"] == [
+        {
+            "key": "codex:",
+            "provider": "codex",
+            "profile": None,
+            "name": "Default account",
+            "total_tokens": 100,
+            "calls": 1,
+            "style": {"dark": "#10A37F", "light": "#0D8A6B", "pattern": "stripes"},
+        },
+        {
+            "key": "codex:work",
+            "provider": "codex",
+            "profile": "work",
+            "name": "work",
+            "total_tokens": 20,
+            "calls": 1,
+            "style": account_style("codex", 1),
+        },
+    ]
+    assert sum(b["accounts"].get("codex:work", 0) for b in view["series"]["buckets"]) == 20
+    custom = send(
+        "desktop.read",
+        "usage.overview",
+        {"range": "custom", "start": "2026-01-01", "end": "2026-01-31", "tz": "UTC"},
+    )["value"]
+    assert custom["range"]["start_date"] == "2026-01-01" and custom["range"]["days"] is None
+    # A phone with no period gets the desktop's default, as older phones always did.
+    assert send("desktop.read", "usage.overview")["value"]["range"]["key"] == "30d"
+    refused = send(
+        "desktop.read", "usage.overview", {"range": "custom", "start": "2026-02-01", "end": "x"}
+    )
+    assert refused["ok"] is False and refused["code"] == "invalid"
+
+
+def test_phone_usage_shows_api_cost_without_plan_prices(phone, tmp_path):
+    from gofer.core.usage_ledger import record_invocation
+    from gofer.core.usage_service import usage_overview
+    from gofer.devices.desktop_control import ACTION_OPS
+
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    data = tmp_path / "usage-data"
+    record_invocation(
+        invocation_id="priced",
+        provider="claude_code",
+        model="claude-opus-5-5",
+        data_dir=data,
+        metadata={"input_tokens": 2_000_000, "cache_read_tokens": 1_000_000, "output_tokens": 0},
+    )
+    record_invocation(
+        invocation_id="unpriced",
+        provider="codex",
+        model="cli-default",
+        data_dir=data,
+        metadata={"input_tokens": 10, "output_tokens": 1},
+    )
+    app.desktop.usage = lambda **period: usage_overview(data, **period)
+    cost = send("desktop.read", "usage.overview", {"range": "7d"})["value"]["api_cost"]
+    assert cost["total"]["cost_usd"] > 0 and cost["total"]["lower_bound"] is True
+    codex = next(p for p in cost["providers"] if p["provider"] == "codex")
+    assert codex["cost_usd"] is None and codex["unpriced_models"] == ["cli-default"]
+    # Saved vs API and the phone's plan-price action were removed.
+    assert not {"savings", "plans", "plan_providers"} & cost.keys()
+    assert "usage.plans.save" not in ACTION_OPS
+
+
+def test_phone_usage_cards_carry_sign_in_state_and_rems_next_account(phone):
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    windows = [
+        {
+            "id": "five_hour",
+            "label": "Five-hour allowance",
+            "used_percent": 20,
+            "resets_at": "2026-11-17T14:14:00+00:00",
+        },
+        {"id": "seven_day", "label": "Weekly allowance", "remaining_percent": 70},
+    ]
+    overview = {
+        "days": 30,
+        "accounts": [
+            {
+                "provider": "claude_code",
+                "profile": "work",
+                "label": "Claude Code",
+                "status": "available",
+                "sign_in_state": "signed_in",
+                "windows": windows,
+                "rem_next": {"why": "Most room left: 30% of its weekly allowance used."},
+            },
+            {
+                "provider": "claude_code",
+                "profile": "home",
+                "label": "Claude Code",
+                "status": "auth_required",
+                "needs_sign_in": True,
+                "sign_in_state": "needs_sign_in",
+                "windows": [],
+            },
+        ],
+    }
+    app.desktop.usage = lambda **_period: overview
+    work, home = send("desktop.read", "usage.overview")["value"]["accounts"]
+    assert work["profile"] == "work" and work["sign_in_state"] == "signed_in"
+    assert work["rem_next"] == {"why": "Most room left: 30% of its weekly allowance used."}
+    assert [w["id"] for w in work["windows"]] == ["five_hour", "seven_day"]
+    assert [w["used_percent"] for w in work["windows"]] == [20, 30]
+    assert home["status"] == "needs sign-in" and home["sign_in_state"] == "needs_sign_in"
+    assert "rem_next" not in home
 
 
 def test_unpairing_forgets_desktop_control(phone):
@@ -1539,6 +1878,708 @@ def test_phone_reads_and_changes_rem_memories_like_the_desktop_panel(phone, home
     assert shown["memory"]["undone"] is True
 
 
+def test_phone_memory_list_tags_project_memories_by_name(phone, home, tmp_path):
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    app.desktop.rem = home
+    root = tmp_path / "Site"
+    root.mkdir()
+    home.configure({"provider": "codex", "projects": [{"root": str(root), "name": "Site"}]})
+    home.add_memory({"text": "Deploys from main", "project": str(root)})
+    home.add_memory({"text": "Prefers tea"})
+    listed = send("desktop.read", "rem.memories")["value"]["memories"]
+    tags = {item["text"]: item["project"] for item in listed}
+    # The phone gets the project's name for the tag, never its folder path.
+    assert tags == {"Deploys from main": "Site", "Prefers tea": ""}
+    # Editing the words on the phone keeps the memory in its project.
+    project_item = next(item for item in listed if item["project"])
+    edited = send(
+        "desktop.action",
+        "rem.memory.edit",
+        {"memory_id": project_item["id"], "text": "Deploys from tags"},
+    )["value"]["memories"]
+    assert {item["text"]: item["project"] for item in edited}["Deploys from tags"] == "Site"
+
+
+def test_phone_sets_an_end_date_and_keeps_an_ended_memory(phone, home):
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    app.desktop.rem = home
+    home.add_memory({"text": "Kids are at camp"})
+    (item,) = send("desktop.read", "rem.memories")["value"]["memories"]
+    assert item["until"] == "" and item["ended"] is False
+    dated = send(
+        "desktop.action", "rem.memory.edit", {"memory_id": item["id"], "until": "2099-07-04"}
+    )["value"]["memories"][0]
+    assert dated["until"].startswith("2099-07-04T23:59:59") and dated["ended"] is False
+    assert dated["text"] == "Kids are at camp"
+    # An end that has passed shows as ended; Keep (until null) clears it.
+    with home.store.connect() as db:
+        saved = home.store.setting(db, "memories")
+        saved[item["id"]]["until"] = "2026-01-01T00:00:00+00:00"
+        home.store.set_setting(db, "memories", saved)
+    assert send("desktop.read", "rem.memories")["value"]["memories"][0]["ended"] is True
+    kept = send("desktop.action", "rem.memory.edit", {"memory_id": item["id"], "until": None})
+    assert kept["value"]["memories"][0] == {**dated, "until": "", "ended": False}
+    # A past day is refused, as on the desktop.
+    refused = send(
+        "desktop.action", "rem.memory.edit", {"memory_id": item["id"], "until": "2020-01-01"}
+    )
+    assert refused["ok"] is False
+
+
+def _file_decision(home, project: Path, topic: str = "checks.fast") -> dict[str, Any]:
+    from gofer.ui import rem_decisions
+
+    (project / "package.json").write_text('{"scripts": {"test": "vitest"}}')
+    request = rem_decisions.DecisionRequest.model_validate(
+        {
+            "topic": topic,
+            "question": "Which command runs the fast checks?",
+            "recommendation": {
+                "answer": "npm test",
+                "why": "package.json defines it.",
+                "evidence": [
+                    {"kind": "quote", "ref": str(project / "package.json"), "excerpt": "vitest"}
+                ],
+            },
+            "alternatives": [{"answer": "make check", "why_not": "No Makefile here."}],
+        }
+    )
+    checked, _ = rem_decisions.check_evidence(request, str(project))
+    with home.store.connect() as db:
+        _, item = rem_decisions.file_request(
+            db, home.store, checked, project=str(project), decides_alone=False
+        )
+    return item
+
+
+def test_phone_reads_and_answers_rem_decisions_like_the_desktop_panel(phone, home, tmp_path):
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    app.desktop.rem = home
+    overview = send("desktop.read", "overview")["value"]
+    assert overview["rem_decisions"] is True
+    project = tmp_path / "Site"
+    project.mkdir()
+    item = _file_decision(home, project)
+
+    listed = send("desktop.read", "rem.decisions")["value"]
+    assert listed["waiting"] == 1 and listed["more"] == 0
+    (shown,) = listed["decisions"]
+    assert shown["id"] == item["id"] and shown["status"] == "pending"
+    assert shown["recommended"] == "npm test" and shown["why"] == "package.json defines it."
+    assert shown["alternatives"] == [{"answer": "make check", "why_not": "No Makefile here."}]
+    # The phone sees the project's name, and a file outside it by name only; never a folder.
+    assert shown["project"] == "Site"
+    assert shown["evidence"][0]["ref"] == "package.json"
+    assert str(tmp_path) not in json.dumps(listed)
+    assert [h["action"] for h in shown["history"]] == ["requested"]
+
+    # A stale revision is refused, and nothing changes.
+    stale = send(
+        "desktop.action",
+        "rem.decision.change",
+        {"action": "use", "id": item["id"], "expected_revision": listed["revision"] - 1},
+    )
+    assert stale == {"ok": False, "code": "conflict", "detail": module.DECISION_CHANGED}
+    used = send(
+        "desktop.action",
+        "rem.decision.change",
+        {"action": "use", "id": item["id"], "expected_revision": listed["revision"]},
+    )["value"]
+    (confirmed,) = used["decisions"]
+    assert confirmed["status"] == "confirmed" and confirmed["answer"] == "npm test"
+    assert confirmed["decided_by"] == "user" and used["revision"] == listed["revision"] + 1
+
+    edited = send(
+        "desktop.action",
+        "rem.decision.change",
+        {
+            "action": "edit",
+            "id": item["id"],
+            "expected_revision": used["revision"],
+            "answer": "npm run test:fast",
+        },
+    )["value"]
+    assert edited["decisions"][0]["answer"] == "npm run test:fast"
+    reopened = send(
+        "desktop.action",
+        "rem.decision.change",
+        {"action": "reopen", "id": item["id"], "expected_revision": edited["revision"]},
+    )["value"]
+    # Ask again files a new card; the decision stays in force until it is answered.
+    asked, kept = reopened["decisions"]
+    assert asked["status"] == "pending" and asked["asked_again"] is True
+    assert asked["supersedes"] == item["id"] and asked["current_answer"] == "npm run test:fast"
+    assert kept["id"] == item["id"] and kept["status"] == "confirmed"
+    changed = send(
+        "desktop.action",
+        "rem.decision.change",
+        {
+            "action": "change",
+            "id": asked["id"],
+            "expected_revision": reopened["revision"],
+            "answer": "  ",
+        },
+    )
+    assert changed["code"] == "invalid" and "answer" in changed["detail"]
+    rejected = send(
+        "desktop.action",
+        "rem.decision.change",
+        {
+            "action": "reject",
+            "id": asked["id"],
+            "expected_revision": reopened["revision"],
+            "reason": "Not now",
+        },
+    )["value"]
+    # Turning the card down keeps the current answer.
+    assert [(d["id"], d["status"]) for d in rejected["decisions"]] == [
+        (item["id"], "confirmed"),
+        (asked["id"], "rejected"),
+    ]
+    assert rejected["decisions"][1]["history"][-1]["note"] == "Not now"
+    # Retire is its own action from the phone too: the schema and the desktop accept it, and
+    # a decision with no record file is told to use Forget instead.
+    retire = send(
+        "desktop.action",
+        "rem.decision.change",
+        {"action": "retire", "id": item["id"], "expected_revision": rejected["revision"]},
+    )
+    assert retire["code"] == "invalid" and "forget this one instead" in retire["detail"]
+    forgotten = send(
+        "desktop.action",
+        "rem.decision.change",
+        {"action": "forget", "id": item["id"], "expected_revision": rejected["revision"]},
+    )["value"]
+    assert [d["id"] for d in forgotten["decisions"]] == [asked["id"]]
+    missing = send(
+        "desktop.action",
+        "rem.decision.change",
+        {"action": "use", "id": item["id"], "expected_revision": forgotten["revision"]},
+    )
+    assert missing["code"] == "not_found"
+
+
+def test_phone_looks_again_in_a_decisions_project_and_sees_raticodes_check(phone, home, tmp_path):
+    from gofer.ui import rem_decisions
+
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    app.desktop.rem = home
+    project = tmp_path / "Site"
+    project.mkdir()
+    (project / "package.json").write_text('{\n  "scripts": {\n    "test": "vitest run"\n  }\n}\n')
+    item = _file_decision(home, project)
+    listed = send("desktop.read", "rem.decisions")["value"]
+    used = send(
+        "desktop.action",
+        "rem.decision.change",
+        {"action": "use", "id": item["id"], "expected_revision": listed["revision"]},
+    )["value"]
+    assert used["decisions"][0]["last_check"] is None
+    assert used["decisions"][0]["carried_over"] is False
+    with home.store.connect() as db:
+        rem_decisions.note_check(
+            db,
+            home.store,
+            item["id"],
+            passed=False,
+            result={
+                "passed": False,
+                "exit_code": 1,
+                "ran_at": "2026-11-21T08:00:00+00:00",
+                "seconds": 2.5,
+                "output": "secret log",
+                "folder": str(project),
+            },
+        )
+    shown = send("desktop.read", "rem.decisions")["value"]
+    assert shown["decisions"][0]["last_check"] == {
+        "passed": False,
+        "exit_code": 1,
+        "ran_at": "2026-11-21T08:00:00+00:00",
+        "seconds": 2.5,
+    }
+    # Its output and folder stay on the desktop.
+    assert "secret log" not in json.dumps(shown) and str(tmp_path) not in json.dumps(shown)
+    # Look again scans the decision's project by its ID: the phone sends no folder. The
+    # decision in force stays; the scan's own finding is the same answer, so nothing new.
+    scanned = send(
+        "desktop.action",
+        "rem.decision.change",
+        {"action": "scan", "id": item["id"], "expected_revision": shown["revision"]},
+    )["value"]
+    (kept,) = [d for d in scanned["decisions"] if d["topic"] == "checks.fast"]
+    assert kept["id"] == item["id"] and kept["status"] == "confirmed"
+    stale = send(
+        "desktop.action",
+        "rem.decision.change",
+        {"action": "scan", "id": item["id"], "expected_revision": shown["revision"] - 1},
+    )
+    assert stale["code"] == "conflict"
+
+
+def test_phone_decision_changes_stay_within_the_contract(phone, home):
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    app.desktop.rem = home
+    # Adding a decision names a project by folder, so it stays on the desktop and the CLI.
+    added = send(
+        "desktop.action",
+        "rem.decision.change",
+        {"action": "add", "id": "D-1", "expected_revision": 0, "answer": "x"},
+    )
+    assert added["ok"] is False
+    unrevised = send("desktop.action", "rem.decision.change", {"action": "use", "id": "D-1"})
+    assert unrevised["ok"] is False
+    # The desktop checks the same rules again, whatever reaches it.
+    rem = app.desktop.rem
+    with pytest.raises(module.Refused) as refused:
+        app.desktop._rem_decision_change(rem, {"action": "add", "id": "D-1"})
+    assert refused.value.code == "invalid"
+    with pytest.raises(module.Refused) as refused:
+        app.desktop._rem_decision_change(
+            rem, {"action": "use", "id": "D-1", "expected_revision": True}
+        )
+    assert refused.value.code == "invalid"
+
+
+def _record_book(revision: int = 4) -> dict[str, Any]:
+    """A decisions book with one design decision record in force and a conflict's fix."""
+    record = {
+        "context": "Sessions lived in Redis. " + "x" * 2000,
+        "options": "Keep Redis; move to Postgres.",
+        "consequences": "Session reads go through the app's database.",
+        "check": "No change adds a Redis client. " + "y" * 900,
+        "applies_to": ["src/sessions/**", *(f"src/part{n}/**" for n in range(12))],
+        "forbids": ["src/**/redis*.py", "z" * 300, 7],
+        "signals": ["redis"],
+    }
+    return {
+        "revision": revision,
+        "waiting": 1,
+        "provisional": 0,
+        "confirmed": 1,
+        "items": [
+            {
+                "id": "D-6",
+                "project": "/home/me/Site",
+                "project_name": "Site",
+                "topic": "conflict:d-3-d-4",
+                "question": "These decisions conflict: D-3, D-4. Replace them with one?",
+                "answer": "Store sessions in SQLite.",
+                "recommended": "Store sessions in SQLite.",
+                "status": "pending",
+                "remember_as": "record",
+                "record": record,
+                "conflict": "D-3 keeps Redis while D-4 removes it, see /home/me/Site/notes.md",
+                "supersedes_all": ["D-3", "D-4", "D-5", "D-7", "D-8", "D-9", "D-10"],
+                "history": [],
+            },
+            {
+                "id": "D-4",
+                "project": "/home/me/Site",
+                "project_name": "Site",
+                "topic": "adr:sessions",
+                "question": "Where do sessions live?",
+                "answer": "Store sessions in SQLite.",
+                "status": "confirmed",
+                "remember_as": "record",
+                "record": record,
+                "record_path": "docs/decisions/0004-sessions.md",
+                "record_error": "",
+                "edited_outside": True,
+                "history": [],
+            },
+            {
+                "id": "D-2",
+                "project": "/home/me/Site",
+                "project_name": "Site",
+                "topic": "checks.fast",
+                "question": "Which command runs the fast checks?",
+                "answer": "npm test",
+                "status": "confirmed",
+                "remember_as": "fact",
+                "record": {"context": "not a record"},
+                "record_path": "docs/decisions/9999.md",
+                "edited_outside": True,
+                "history": [],
+            },
+            {
+                "id": "D-1",
+                "project": None,
+                "topic": "tone",
+                "question": "How should Rem write?",
+                "answer": "Plainly.",
+                "status": "confirmed",
+                "history": [],
+            },
+        ],
+    }
+
+
+class _RecordRem:
+    """A Rem whose decisions are one record book; it keeps what each change asked for."""
+
+    def __init__(self) -> None:
+        self.book = _record_book()
+        self.changes: list[dict[str, Any]] = []
+
+    def decisions(self) -> dict[str, Any]:
+        return self.book
+
+    def change_decisions(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from gofer.ui.rem_decisions import DecisionRefused
+
+        if payload.get("expected_revision") not in (None, self.book["revision"]):
+            raise DecisionRefused("conflict", "The decisions changed.")
+        self.changes.append(payload)
+        self.book = {**self.book, "revision": self.book["revision"] + 1}
+        return self.book
+
+
+def test_queued_questions_reach_the_phone_as_queued_with_their_count(phone):
+    app, _, _, _ = phone
+    book = _record_book()
+    queued = {**book["items"][0], "id": "D-9", "topic": "t9", "status": "queued"}
+    shown = app.desktop._rem_decisions({"decisions": {**book, "queued": 1, "items": [queued]}})
+    # Never shown as a waiting card: the phone lists it under "N more queued".
+    assert shown["queued"] == 1
+    assert shown["decisions"][0]["status"] == "queued"
+
+
+def test_decision_records_reach_the_phone_bounded_and_without_folders(phone):
+    app, _, _, _ = phone
+    shown = app.desktop._rem_decisions({"decisions": _record_book()})
+    fix, record, fact, memory = shown["decisions"]
+    # A conflict's fix names what it replaces (at most 5) and why, with no folder in it.
+    assert fix["supersedes_all"] == ["D-3", "D-4", "D-5", "D-7", "D-8"]
+    assert fix["conflict"] == "D-3 keeps Redis while D-4 removes it, see notes.md"
+    assert fix["remember_as"] == "record" and fix["record_path"] == ""
+    # A record's parts, each section and list bounded.
+    assert record["remember_as"] == "record"
+    assert record["record_path"] == "docs/decisions/0004-sessions.md"
+    assert record["edited_outside"] is True and record["record_error"] == ""
+    parts = record["record"]
+    assert len(parts["context"]) == 1500 and parts["context"].startswith("Sessions lived")
+    assert len(parts["check"]) == 600
+    assert parts["options"] == "Keep Redis; move to Postgres."
+    assert len(parts["applies_to"]) == 10 and parts["applies_to"][0] == "src/sessions/**"
+    assert parts["forbids"] == ["src/**/redis*.py", "z" * 200]
+    assert parts["signals"] == ["redis"]
+    # A fact or a memory carries no record, whatever the stored entry holds.
+    assert fact["remember_as"] == "fact" and fact["record"] is None
+    assert fact["record_path"] == "" and fact["edited_outside"] is False
+    assert memory["remember_as"] == "memory" and memory["record"] is None
+    assert memory["supersedes_all"] == [] and memory["conflict"] == ""
+    assert "/home/me" not in json.dumps(shown)
+
+
+def test_record_not_in_the_repository_says_why(phone):
+    app, _, _, _ = phone
+    book = _record_book()
+    book["items"][1] = {
+        **book["items"][1],
+        "record_path": "",
+        "record_error": "The project at /home/me/Site isn't a git repository.",
+    }
+    (_, record, _, _) = app.desktop._rem_decisions({"decisions": book})["decisions"]
+    assert record["record_path"] == ""
+    assert record["record_error"] == "The project at Site isn't a git repository."
+    assert record["record_restore"] is False
+
+
+def test_record_a_rem_run_changed_tells_the_phone_without_the_hash(phone):
+    app, _, _, _ = phone
+    book = _record_book()
+    book["items"][1] = {
+        **book["items"][1],
+        "record_restore": "9f2c" * 16,
+        "record_error": "The landing branch checkout has uncommitted changes.",
+    }
+    book["items"][2] = {**book["items"][2], "record_restore": "abcd"}
+    shown = app.desktop._rem_decisions({"decisions": book})
+    (_, record, fact, _) = shown["decisions"]
+    # Only whether a restore waits: the phone says the file differs, not "not in the repo yet".
+    assert record["record_restore"] is True
+    assert record["record_path"] == "docs/decisions/0004-sessions.md"
+    assert fact["record_restore"] is False, "only a design decision has a file"
+    assert "9f2c" not in json.dumps(shown)
+
+
+def test_phone_replace_and_record_edit_reach_the_store(phone):
+    app, _, _, _ = phone
+    rem = _RecordRem()
+    replaced = app.desktop._rem_decision_change(
+        rem,
+        {
+            "action": "replace",
+            "id": "D-4",
+            "expected_revision": 4,
+            "answer": "Store sessions in Postgres.",
+            "question": "Where do sessions live?",
+            "why": "We run Postgres already.",
+            "context": "c" * 1600,
+            "options": "Keep SQLite.",
+            "consequences": "One database.",
+            "check": "k" * 700,
+            "applies_to": ["src/sessions/**"],
+            "forbids": ["src/**/sqlite*.py"],
+            "signals": ["sqlite"],
+            "note": "From the phone",
+        },
+    )
+    assert rem.changes[-1] == {
+        "action": "replace",
+        "id": "D-4",
+        "expected_revision": 4,
+        "answer": "Store sessions in Postgres.",
+        "question": "Where do sessions live?",
+        "why": "We run Postgres already.",
+        "note": "From the phone",
+        "context": "c" * 1500,
+        "options": "Keep SQLite.",
+        "consequences": "One database.",
+        "check": "k" * 600,
+        "applies_to": ["src/sessions/**"],
+        "forbids": ["src/**/sqlite*.py"],
+        "signals": ["sqlite"],
+    }
+    assert replaced["revision"] == 5
+    # An edit sends only the parts it changes.
+    app.desktop._rem_decision_change(
+        rem,
+        {
+            "action": "edit",
+            "id": "D-4",
+            "expected_revision": 5,
+            "consequences": "One database, backed up nightly.",
+            "applies_to": [],
+        },
+    )
+    assert rem.changes[-1] == {
+        "action": "edit",
+        "id": "D-4",
+        "expected_revision": 5,
+        "consequences": "One database, backed up nightly.",
+        "applies_to": [],
+    }
+    # Record parts mean nothing to the other actions, so they don't pass through.
+    app.desktop._rem_decision_change(
+        rem, {"action": "use", "id": "D-6", "expected_revision": 6, "context": "x"}
+    )
+    assert rem.changes[-1] == {"action": "use", "id": "D-6", "expected_revision": 6}
+    # A stale revision is still a conflict.
+    with pytest.raises(module.Refused) as refused:
+        app.desktop._rem_decision_change(
+            rem, {"action": "replace", "id": "D-4", "expected_revision": 1, "answer": "x"}
+        )
+    assert refused.value.code == "conflict"
+    assert str(refused.value) == module.DECISION_CHANGED
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"applies_to": "src/**"},
+        {"forbids": ["ok", 3]},
+        {"signals": ["x"] * 11},
+        {"applies_to": ["x" * 201]},
+        {"context": ["not text"]},
+        {"check": 5},
+        {"note": None},
+    ],
+    ids=["glob-text", "glob-number", "too-many", "too-long", "context-list", "check", "note"],
+)
+def test_phone_record_changes_refuse_bad_types(phone, bad):
+    app, _, _, _ = phone
+    rem = _RecordRem()
+    with pytest.raises(module.Refused) as refused:
+        app.desktop._rem_decision_change(
+            rem, {"action": "edit", "id": "D-4", "expected_revision": 4, **bad}
+        )
+    assert refused.value.code == "invalid"
+    assert rem.changes == []
+
+
+def test_phone_replaces_a_decision_through_the_real_store(phone, home, tmp_path):
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    app.desktop.rem = home
+    project = tmp_path / "Site"
+    project.mkdir()
+    item = _file_decision(home, project)
+    listed = send("desktop.read", "rem.decisions")["value"]
+    used = send(
+        "desktop.action",
+        "rem.decision.change",
+        {"action": "use", "id": item["id"], "expected_revision": listed["revision"]},
+    )["value"]
+    replaced = send(
+        "desktop.action",
+        "rem.decision.change",
+        {
+            "action": "replace",
+            "id": item["id"],
+            "expected_revision": used["revision"],
+            "answer": "npm run test:fast",
+            "why": "It skips the slow browser tests.",
+            "note": "From the phone",
+        },
+    )["value"]
+    by_id = {d["id"]: d for d in replaced["decisions"]}
+    old = by_id[item["id"]]
+    (new,) = [d for d in replaced["decisions"] if d["id"] != item["id"]]
+    assert old["status"] == "superseded" and old["superseded_by"] == new["id"]
+    assert new["status"] == "confirmed" and new["answer"] == "npm run test:fast"
+    assert new["supersedes"] == item["id"] and new["remember_as"] == "fact"
+    assert new["history"][-1]["note"] == "From the phone"
+    stale = send(
+        "desktop.action",
+        "rem.decision.change",
+        {
+            "action": "replace",
+            "id": new["id"],
+            "expected_revision": used["revision"],
+            "answer": "x",
+        },
+    )
+    assert stale == {"ok": False, "code": "conflict", "detail": module.DECISION_CHANGED}
+
+
+def test_phone_presses_ok_on_a_change_the_user_asked_rem_for(phone, home, tmp_path):
+    from gofer.ui import rem_decisions
+
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    app.desktop.rem = home
+    project = tmp_path / "Site"
+    project.mkdir()
+    item = _file_decision(home, project)
+    home.change_decisions({"action": "use", "id": item["id"]})
+    asked = f"Change {item['id']} to npm run test:fast please"
+    with home.store.connect() as db:
+        entry, _ = rem_decisions.propose_edit(
+            db,
+            home.store,
+            rem_decisions.DecisionEdit(id=item["id"], answer="npm run test:fast", said=asked),
+            message=asked,
+        )
+        assert entry is not None
+        home.store.message(
+            db,
+            "Check it below.",
+            identity="reply-asked",
+            decision_edits=[rem_decisions.edit_card(entry)],
+        )
+    shown = next(
+        m for m in send("desktop.read", "rem.home")["value"]["messages"] if m["id"] == "reply-asked"
+    )
+    (card,) = shown["decision_edits"]
+    assert card["id"] == entry["id"] and card["status"] == "waiting" and card["project"] == "Site"
+    assert card["changes"] == [
+        {"field": "answer", "label": "Decision", "before": "npm test", "after": "npm run test:fast"}
+    ]
+    assert str(tmp_path) not in json.dumps(shown)
+    listed = send("desktop.read", "rem.decisions")["value"]
+    assert [e["id"] for e in listed["edits"]] == [entry["id"]]
+    # OK: the decision changes through the desktop's store, whatever revision the phone had.
+    done = send(
+        "desktop.action",
+        "rem.decision.change",
+        {"action": "confirm_edit", "id": entry["id"], "expected_revision": 0},
+    )["value"]
+    assert (
+        next(d for d in done["decisions"] if d["id"] == item["id"])["answer"] == "npm run test:fast"
+    )
+    assert done["edits"] == []
+    shown = next(
+        m for m in send("desktop.read", "rem.home")["value"]["messages"] if m["id"] == "reply-asked"
+    )
+    assert shown["decision_edits"][0]["status"] == "applied"
+    # Pressing it twice says why, and changes nothing.
+    again = send(
+        "desktop.action",
+        "rem.decision.change",
+        {"action": "confirm_edit", "id": entry["id"], "expected_revision": 0},
+    )
+    assert again["ok"] is False and "already made" in again["detail"]
+
+
+def test_task_update_cards_carry_the_decision_and_its_status_now(phone, home, tmp_path):
+    from gofer.ui import rem_decisions
+
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    app.desktop.rem = home
+    project = tmp_path / "Site"
+    project.mkdir()
+    item = _file_decision(home, project)
+    fallback = rem_decisions.fallback_request(
+        "Deploy now?", f"Found {project}/deploy.sh but no notes.", None
+    )
+    work = {"task_id": "t1", "run_id": "r1", "thread_id": "th1", "title": "Checks"}
+    with home.store.connect() as db:
+        home.store.message(
+            db,
+            rem_decisions.waiting_text(item),
+            identity="update-1",
+            kind="task_update",
+            work={**work, "needs_user": True, "decision": rem_decisions.card(item)},
+        )
+        home.store.message(
+            db,
+            rem_decisions.waiting_text(fallback),
+            identity="update-2",
+            kind="task_update",
+            work={**work, "needs_user": True, "decision": fallback},
+        )
+    view = send("desktop.read", "rem.home")["value"]
+    assert view["decisions"] is True and view["decisions_waiting"] == 1
+    messages = {m["id"]: m for m in view["messages"]}
+    card = messages["update-1"]["work"]["decision"]
+    assert card["id"] == item["id"] and card["recommended"] == "npm test"
+    assert card["status"] == "pending" and card["live_status"] == "pending"
+    assert card["evidence"][0]["ref"] == "package.json"
+    plain = messages["update-2"]["work"]["decision"]
+    assert plain["fallback"] is True and "id" not in plain and "live_status" not in plain
+    assert plain["question"] == "Deploy now?" and str(tmp_path) not in plain["found"]
+
+    # Answered on the desktop: the card still says what it asked, and its status now.
+    home.change_decisions({"action": "use", "id": item["id"]})
+    view = send("desktop.read", "rem.home")["value"]
+    card = next(m for m in view["messages"] if m["id"] == "update-1")["work"]["decision"]
+    assert card["status"] == "pending" and card["live_status"] == "confirmed"
+    assert view["decisions_waiting"] == 0
+    assert view["decisions_revision"] == send("desktop.read", "rem.decisions")["value"]["revision"]
+
+
+def test_a_question_forgotten_while_it_waited_reaches_the_phone_as_withdrawn(phone, home, tmp_path):
+    from gofer.ui import rem_decisions
+
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    app.desktop.rem = home
+    project = tmp_path / "Site"
+    project.mkdir()
+    item = _file_decision(home, project)
+    work = {"task_id": "t1", "run_id": "r1", "thread_id": "th1", "title": "Checks"}
+    with home.store.connect() as db:
+        home.store.message(
+            db,
+            rem_decisions.waiting_text(item),
+            identity="update-1",
+            kind="task_update",
+            work={**work, "needs_user": True, "decision": rem_decisions.card(item)},
+        )
+    home.change_decisions({"action": "forget", "id": item["id"]})
+    view = send("desktop.read", "rem.home")["value"]
+    card = next(m for m in view["messages"] if m["id"] == "update-1")["work"]["decision"]
+    assert card["status"] == "withdrawn" and card["live_status"] == ""
+
+
 def test_phone_alerts_cover_only_its_own_requests_and_their_tasks(phone, home):
     app, peer, _, send = phone
     assert send("desktop.read", "rem.notices")["code"] == "unauthorized"
@@ -1649,7 +2690,14 @@ def check_phone_can_read(answer: dict[str, Any]) -> None:
     """What the phone's parser relies on, and only ever keeps."""
     assert 0 < len(answer["mark"]) <= 256
     for notice in answer["notices"]:
-        assert notice["kind"] in {"reply", "task_update", "proposals", "organization", "workflow"}
+        assert notice["kind"] in {
+            "reply",
+            "task_update",
+            "proposals",
+            "organization",
+            "workflow",
+            "decision",
+        }
         assert notice.get("reason", "needs_you") in ALL_ALERTS
         assert 0 < len(notice["id"]) <= 128 and len(notice["body"]) <= 1500
 
@@ -2717,6 +3765,59 @@ def test_workflow_notices_reach_the_phone_under_their_own_switch(phone, home):
     assert legacy["notices"] == [] and legacy["mark"].endswith(".3")
 
 
+def test_a_waiting_question_reaches_the_phone_under_needs_you(phone, home):
+    from gofer.core.phone_alerts import PhoneAlertStore
+
+    app, peer, _, send = alerting_phone(phone, home)
+    first = send("desktop.read", "rem.notices", {"include": ["needs_you"]})["value"]
+    alerts = PhoneAlertStore(Path(home.data_dir))
+    assert alerts.add_decision(
+        decision_id="D-7",
+        question="Publish to /home/me/site/out or keep it local?",
+        project_name="site",
+        recommended="Keep it local",
+    )
+    params = {"after": first["cursor"], "include": ["needs_you"], "mark": first["mark"]}
+    read = send("desktop.read", "rem.notices", params)["value"]
+    check_phone_can_read(read)
+    [notice] = read["notices"]
+    assert (notice["kind"], notice["reason"], notice["needs_user"]) == (
+        "decision",
+        "needs_you",
+        True,
+    )
+    assert notice["id"] == "decision-D-7" and notice["project_name"] == "site"
+    # The same fields as the protocol's fixture, which the phone's own tests parse.
+    fixture = Path(__file__).parents[2] / (
+        "src/gofer/devices/protocol/v2/fixtures/desktop.result.rem-notices-decision.json"
+    )
+    [shown] = json.loads(json.loads(fixture.read_text())["payload"]["body"])["notices"]
+    assert notice.keys() == shown.keys() and notice["decision"].keys() == shown["decision"].keys()
+    # Local paths stay on the computer, as in every alert about work the phone didn't ask for.
+    assert notice["body"] == "Rem has a question: Publish to out or keep it local?"
+    assert notice["decision"] == {
+        "id": "D-7",
+        "question": "Publish to out or keep it local?",
+        "recommended": "Keep it local",
+        "fallback": False,
+    }
+    # One notice per decision, however often it is filed again.
+    assert (
+        alerts.add_decision(decision_id="D-7", question="Again?", project_name="", recommended="")
+        is None
+    )
+    # Without the switch the position moves on and the question stays on the computer.
+    assert alerts.add_decision(
+        decision_id="D-8", question="Again?", project_name="", recommended=""
+    )
+    other = send(
+        "desktop.read",
+        "rem.notices",
+        {"after": first["cursor"], "include": ["finished"], "mark": read["mark"]},
+    )["value"]
+    assert other["notices"] == []
+
+
 def test_workflow_notices_fold_per_run_and_report_what_was_dropped(phone, home, monkeypatch):
     from gofer.core import phone_alerts
 
@@ -2770,3 +3871,138 @@ def test_workflow_notices_fold_per_run_and_report_what_was_dropped(phone, home, 
     # digest is on every read answer, added by the desktop for change checks.
     assert set(shown) == set(late) - {"digest"}
     assert {key for n in shown["notices"] for key in n} == set(late["notices"][0])
+
+
+def test_phone_rem_reads_skip_building_tasks_while_nothing_changed(phone, home, monkeypatch):
+    from tests.unit.test_rem_home import recipe
+
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    app.desktop.rem = home
+    daily = {"kind": "daily", "local_time": "09:00", "timezone": "UTC"}
+    ids = [
+        home.create_task(
+            {
+                "request_id": f"phone-list-{n}",
+                **recipe(
+                    type="reminder", title=f"Remind {n}", prompt=f"Remind me {n}", schedule=daily
+                ),
+            }
+        )["task"]["id"]
+        for n in range(3)
+    ]
+    built: list[str] = []
+    summarized: list[str] = []
+    view, summary = home.store.task_view, app.desktop._task_summary
+
+    def counted_view(db: Any, task: dict[str, Any], *, summary: bool = False) -> dict[str, Any]:
+        built.append(task["id"])
+        shown: dict[str, Any] = view(db, task, summary=summary)
+        return shown
+
+    def counted_summary(peer: str, task: dict[str, Any], catalog: Any = None) -> dict[str, Any]:
+        summarized.append(task["id"])
+        shown: dict[str, Any] = summary(peer, task, catalog)
+        return shown
+
+    monkeypatch.setattr(home.store, "task_view", counted_view)
+    monkeypatch.setattr(app.desktop, "_task_summary", counted_summary)
+
+    first = send("desktop.read", "rem.home")["value"]
+    assert sorted(t["task_id"] for t in first["tasks"]) == sorted(ids)
+    assert not any("prompt" in t for t in first["tasks"])
+    assert (len(built), len(summarized)) == (3, 3)
+    # The same build answers the next polls: no task view and no phone summary again.
+    assert send("desktop.read", "rem.home", {"known": first["digest"]})["value"] == {
+        "unchanged": True,
+        "digest": first["digest"],
+    }
+    assert send("desktop.read", "rem.home")["value"]["tasks"] == first["tasks"]
+    assert (len(built), len(summarized)) == (3, 3)
+
+    # rem.task reads only the task the phone opened, with its prompt, in the same reply.
+    opened = send("desktop.read", "rem.task", {"task_id": ids[1]})["value"]
+    assert opened["task_id"] == ids[1] and opened["prompt"] == "Remind me 1"
+    assert built[3:] == [ids[1]] and summarized[3:] == [ids[1]]
+    assert send("desktop.read", "rem.task", {"task_id": "gone"})["code"] == "not_found"
+
+    # A write to a task is counted, so the next poll builds the list again.
+    with home.store.connect() as db:
+        task = home.store.get(db, "tasks", ids[0])
+        home.store.put(db, "tasks", {**task, "title": "Remind sooner"})
+    again = send("desktop.read", "rem.home")["value"]
+    assert "Remind sooner" in {t["title"] for t in again["tasks"]}
+    assert len(built) == 4 + 3 and len(summarized) == 4 + 3
+
+
+def test_plan_questions_reach_the_phone_grouped_by_plan_without_folders(phone):
+    app, _, _, _ = phone
+    item = {
+        "id": "D-12",
+        "topic": "plan:store",
+        "question": "Where do offline notes live?",
+        "recommended": "SQLite",
+        "status": "pending",
+        "project": "/home/me/Notes",
+        "project_name": "Notes",
+        "plan": "P-1",
+    }
+    shown = app.desktop._rem_decisions(
+        {
+            "decisions": {
+                "revision": 4,
+                "items": [item, {**item, "id": "D-13", "plan": "P-1" * 20}],
+                "plans": [
+                    {
+                        "id": "P-1",
+                        "title": "Offline sync",
+                        "goal": "g" * 400,
+                        "project": "/home/me/Notes",
+                        "status": "asking",
+                        "answered": 2,
+                        "total": 5,
+                        "waiting": 1,
+                        "queued": 2,
+                    },
+                    {"id": "P-2", "title": "Old", "status": "weird", "total": -3},
+                    {"title": "No ID"},
+                ],
+            }
+        }
+    )
+    assert shown["decisions"][0]["plan"] == "P-1"
+    assert len(shown["decisions"][1]["plan"]) == 16
+    first, second = shown["plans"]
+    assert first == {
+        "id": "P-1",
+        "title": "Offline sync",
+        "goal": "g" * 300,
+        "project": "Notes",
+        "status": "asking",
+        "answered": 2,
+        "total": 5,
+        "waiting": 1,
+        "queued": 2,
+    }
+    assert second["status"] == "asking" and second["total"] == 0
+    assert "/home/me" not in json.dumps(shown)
+
+
+def test_phone_decisions_carry_who_asked_without_local_paths():
+    asked = {
+        "by": "run",
+        "label": "REM-1",
+        "ticket": "REM-1",
+        "task_id": "task-1",
+        "task_title": "Fix /home/user/app/src/main.py",
+        "at": "2026-11-21T12:00:00+00:00",
+        "waiting": [{"run_id": "run-1", "task_id": "task-1", "ticket": "REM-1", "label": "REM-1"}],
+        "went_on": [],
+        "opens": "task-1",
+    }
+    item = {"id": "D-1", "topic": "t", "question": "Which?", "status": "pending", "asked": asked}
+    sent = module._decision_item(item)["asked"]
+    assert sent["label"] == "REM-1" and sent["opens"] == "task-1"
+    assert sent["waiting"] == asked["waiting"] and sent["went_on"] == []
+    assert "/home/user" not in sent["task_title"]
+    assert module._decision_item({**item, "status": "confirmed", "asked": None})["asked"] is None

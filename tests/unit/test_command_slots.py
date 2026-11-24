@@ -493,17 +493,17 @@ def test_claude_hook_rewrites_only_hidden_commands(monkeypatch: pytest.MonkeyPat
     assert claude_hook({"tool_name": "Bash", "tool_input": rewritten}, gof) is None
 
 
-def test_hook_script_skips_python_for_ordinary_commands(tmp_path: Path) -> None:
+def test_hook_command_skips_python_for_ordinary_commands(tmp_path: Path) -> None:
     gof = tmp_path / "gof"
     gof.write_text("#!/bin/sh\ncat >/dev/null\necho called\n")
     gof.chmod(0o755)
-    install(tmp_path / "slots", gof, "")
-    hook = tmp_path / "slots" / "hooks" / "claude-pre-tool-use"
+    hook = command_slots.hook_command(gof)
 
     def call(command: str) -> str:
+        # Claude Code runs a hook's command through the shell, with the call on stdin.
         payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
         return subprocess.run(
-            [str(hook)], input=payload, capture_output=True, text=True, check=True
+            ["sh", "-c", hook], input=payload, capture_output=True, text=True, check=True
         ).stdout.strip()
 
     assert call("ls -la") == ""
@@ -545,10 +545,24 @@ def test_scoped_command_uses_the_slice_only_when_asked() -> None:
 
 
 def test_claude_settings_register_the_hook(tmp_path: Path) -> None:
-    settings = json.loads(command_slots.claude_settings(tmp_path))
+    cli = tmp_path / ".gofer-trusted-bin" / "Raticode"
+    settings = json.loads(command_slots.claude_settings(cli))
     (entry,) = settings["hooks"]["PreToolUse"]
     assert entry["matcher"] == "Bash"
-    assert entry["hooks"][0]["command"] == str(tmp_path / "hooks" / "claude-pre-tool-use")
+    assert entry["hooks"][0]["command"] == command_slots.hook_command(cli)
+
+
+def test_the_hook_is_never_a_file_an_agent_could_rewrite(tmp_path: Path) -> None:
+    """Claude Code runs hooks outside its sandbox; Codex turns can write the data folder."""
+    root = tmp_path / "data" / "command-slots"
+    old = root / "hooks" / "claude-pre-tool-use"
+    old.parent.mkdir(parents=True)
+    old.write_text("#!/bin/sh\necho planted\n")
+    install(root, tmp_path / "gof", "")
+    assert not old.exists()
+    cli = tmp_path / ".gofer-trusted-bin" / "Raticode"
+    command = command_slots.hook_command(cli)
+    assert str(cli) in command and str(root) not in command
 
 
 def test_last_activity_reads_the_heartbeat(tmp_path: Path) -> None:

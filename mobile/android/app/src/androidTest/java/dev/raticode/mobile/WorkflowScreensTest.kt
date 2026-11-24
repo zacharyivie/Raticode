@@ -159,6 +159,25 @@ class WorkflowScreensTest {
         assertEquals(listOf("workflows.resume" to "r3"), actions)
     }
 
+    @Test fun askRemAboutThisFailureIsOfferedOnFailedRunsOnly() {
+        val asked = mutableListOf<String>()
+        var running by mutableStateOf(false)
+        var error by mutableStateOf("")
+        compose.setContent {
+            Phone(320, 568) { WorkflowDetail(workflow(running = running), null, WorkflowScreenState(true, false, null, null), {}, {}, {},
+                askRem = { asked += it }, askRemError = error) { _, _ -> } }
+        }
+        compose.onNodeWithTag("workflowAskRem").assertIsEnabled().assertTextContains("Ask Rem about this failure").performClick()
+        assertEquals(listOf("r3"), asked)
+        error = "Update Raticode on your computer to ask Rem about a failed run from this phone."
+        compose.waitForIdle()
+        compose.onNodeWithTag("workflowAskRemError").assertTextEquals(error)
+        shot("ask-rem-failure-small")
+        running = true
+        compose.waitForIdle()
+        compose.onAllNodesWithTag("workflowAskRem").assertCountEquals(0)
+    }
+
     @Test fun runAgainNeedsConfirmationAndNamesInputsThePhoneCannotFill() {
         val actions = mutableListOf<Pair<String, String?>>()
         var control by mutableStateOf(WorkflowControl(true, ""))

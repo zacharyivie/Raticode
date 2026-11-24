@@ -111,6 +111,49 @@ The cost is the provider's own estimate for each call. Claude Code reports one; 
 
 The [starter workflows](../starters/index.md) that use an agent (Test and fix, Summarize new files and Daily report) set a small `max-cost-usd` as an example. Change it or set it to `none` in the workflow's **General** settings.
 
+## Run in a worktree
+
+::: info New in 0.6.0
+`workspace: worktree` is new in Raticode 0.6.0.
+:::
+
+By default a run works in the project folder, so its file edits land there straight away. With `workspace: worktree`, each run works in a git worktree of its own instead, and you decide afterwards whether to keep what it changed. In the Studio, turn on **Run in a worktree** in the workflow's **Workspace** settings.
+
+```rattish
+Workflow:
+  name: Test and fix
+  workspace: worktree
+```
+
+| Value | Where each run works |
+| --- | --- |
+| `project` | The project folder. This is the default. |
+| `worktree` | A new git worktree of the project's repository, one per run |
+
+What a run does:
+
+1. Raticode adds a worktree at the project's current commit, on a new branch named `raticode/run/<workflow>-<run>`. Worktrees live in Raticode's data folder, under `rattish-worktrees`.
+2. It runs the project's approved [worktree setup](../studio/worktree-setup.md) there, to install packages or link folders. If setup fails, the run fails before any step starts. A setup file you haven't approved doesn't run, and the run goes on without it.
+3. Every step works inside the worktree: relative paths, each step's working folder (`working-dir`), and an absolute `working-dir` inside the repository all point at the same place in the worktree, so a shell step and an agent step see the same files. A project in a subfolder of its repository works in the same subfolder of the worktree.
+4. When the run ends, whether it passed, failed or was stopped, Raticode commits everything the steps changed on the run's branch.
+5. A run that changed nothing removes its worktree and branch. Otherwise both stay until you **Land** or **Discard** the changes from the run's [Changes tab](../studio/runs.md#review-a-worktree-run-s-changes), or with `Raticode rattish runs land RUN_ID` or `Raticode rattish runs discard RUN_ID`.
+
+Land moves the changes into the branch the project was on when the run started. It fast-forwards that branch, or records a merge commit after checking that the two merge without conflicts. It refuses while that branch's folder has uncommitted changes to tracked files, never pushes, and then removes the worktree and branch. A conflict changes nothing and names the files.
+
+Things to know:
+
+- A worktree has only what git tracks. Uncommitted edits in the project folder, including files a step reads such as a `prompt-path` file or a workflow it calls, aren't in it. Commit them first. The workflow file itself is read from the project folder.
+- Installed packages, virtual environments and `.env` files aren't tracked either. Add a [worktree setup file](../studio/worktree-setup.md) that links or installs them. Preflight warns with `RATTISH_PREFLIGHT_WORKTREE_SETUP_MISSING` when the project has none.
+- The project must be in a git repository with at least one commit. Otherwise preflight fails with `RATTISH_PREFLIGHT_WORKTREE_UNAVAILABLE`.
+- A workflow keeps at most 10 run worktrees waiting to be landed or discarded. Past that, triggered runs are skipped, and the trigger's history says why. A run you start yourself fails with `RATTISH_WORKTREE_LIMIT`. Land or discard some runs to make room.
+- Runs whose changes wait are never removed by the [clean-up of old runs](../studio/runs.md#old-runs).
+- Deleting the workflow removes its waiting run worktrees and their `raticode/run/` branches, and their changes are lost. The Studio confirmation and `Raticode workflow rm` say how many first, and deleting refuses while a worktree run is still running. When Raticode starts, it also removes the worktree folders of workflows that are no longer registered, such as one whose folder you deleted yourself, once nothing in them has changed for a day.
+- A [triggered run](./triggers.md) checks the worktree's copies of the scripts, prompts and child workflows its approval covers. The worktree has the committed text, so a file you edited and approved but didn't commit fails its step there. Commit approved edits.
+- A sandboxed Claude Code agent step can commit on the run's branch, but it can't move any other branch or tag. Of the repository's shared `.git` folder its shell may write only new objects, the run's own worktree folder and the `raticode/run/` branches, and git's automatic clean-up (`gc.auto`) is off for the step. Moving another branch, for example `git update-ref refs/heads/main HEAD`, fails. A commit also prints a harmless error about `packed-refs.lock`. See [Sandbox and network](../nodes/agent.md#sandbox-and-network).
+- A [test set](./tests.md) always runs in the project folder, where its `prepare-command` sets things up.
+- **Resume**, **Run again** and **Run from here** start a new run, with a new worktree at the project's current commit. Files the earlier run changed are only there if you landed them first.
+- If the project wasn't on a branch when the run started (a detached HEAD), Land can't know where to go. Merge the run's branch yourself, then discard the run.
+
 ## Find the exact contract
 
 ```bash
@@ -120,6 +163,6 @@ Raticode rattish check WORKFLOW_PATH --format json
 Raticode rattish preflight WORKFLOW_PATH --format json
 ```
 
-The installed docs and contracts match the CLI that compiles your workflow. When an example written for another version disagrees, trust the CLI's diagnostics. The [node reference](../nodes/index.md) lists all 25 built-in types.
+The installed docs and contracts match the CLI that compiles your workflow. When an example written for another version disagrees, trust the CLI's diagnostics. The [node reference](../nodes/index.md) lists all 27 built-in types.
 
 Write new workflows in Rattish. The older TOML workflow commands remain only for compatibility.

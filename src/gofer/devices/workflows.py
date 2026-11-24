@@ -5,7 +5,8 @@ scope as swarms. Run, stop and resume call the functions the desktop window
 calls, so every desktop check still applies: the run must use the saved source
 revision the phone was shown, active-run limits and approval gates hold, and a
 resume follows the desktop's resume rules (``resume_rattish_run``) and starts a
-new run. The phone can't edit a workflow.
+new run. The phone edits a workflow only through Use this model after Try another
+model (``workflow_tests``), which goes through the desktop's editor.
 
 A run can take typed inputs. ``workflows.read`` lists the workflow's inputs as form
 fields built from the same input schema the desktop's Run dialog reads, and
@@ -15,6 +16,15 @@ screened them like any other request text. A phone that can show the form says s
 with ``input_form`` on its read; older phones are still told to start such a
 workflow on the desktop. Inputs whose schema says ``format: password`` are masked
 on the phone and their defaults stay here, as do workflow secrets.
+
+Each entry on ``workflows.list`` names its plain text inputs in ``text_inputs``, so the
+phone's Run a workflow share target can offer only workflows that can take shared
+text. The shared text still goes through ``workflows.run`` and the phone guard like
+anything typed into the Run form. ``file_inputs`` names the file inputs, with the kinds
+and size each takes, for a shared file. The phone uploads that file on its Rem file
+channel the way Share to Rem does, then names it in ``workflows.run``'s ``file_ids``;
+the request passes the phone guard like any other, and the desktop copies the file into
+the run (``_uploaded_files``).
 
 Resume and ``workflows.rerun`` (Run again) use the inputs and trigger events the run
 saved on the computer. The phone sends no values with them, so a run whose password
@@ -29,9 +39,43 @@ or resuming them all, starts work with nobody watching, so the phone asks first 
 sends ``confirmed``; the desktop refuses it without. Like every phone request, both
 pass the phone guard (``phone_guard.py``) first, so a locked phone can't. The phone
 can't add, edit or delete triggers, and never sees a webhook's address or token.
+Each trigger's daily limit and the computer-wide one show as ``daily_limit`` text
+with today's use, and ``limit_reached`` says starts are being skipped until midnight.
+Each trigger's Time limit shows read-only as ``time_limit`` text ("Time limit: 6 h" or
+"No time limit"); it is set on the computer.
+A triggered run that failed at its provider's usage limit and waits for the reset keeps
+its failed status, with "Waiting for usage limit" as its summary, and its trigger's last
+result is ``waiting`` until the scheduler resumes it.
+When a limit is reached the phone also gets one Workflow message that day
+(``trigger_service``).
 
-Results carry no source, run input values, node outputs or provider configuration.
-Free text such as errors has the project and data folders replaced by names.
+A trigger runs only the workflow version the user approved (``trigger_approval``). Each
+listed trigger says whether its workflow changed since then. ``workflows.trigger.changes``
+reads the change as a diff, with paths inside the project shown relative to it, and
+``workflows.trigger.approve`` approves exactly the version the phone was shown: the phone
+sends its fingerprint, and a workflow that changed again in between is refused as a
+conflict. The phone has the user's trust, so this is the user's approval; like every phone
+request it passes the phone guard first. Turning a trigger on from the phone approves
+nothing, as on the desktop: its answer says when a change is waiting, and the phone opens
+Review changes. Each changed file says whether the phone was shown all of its change
+(``unseen``: its diff was cut at ``DIFF_LIMIT`` or isn't available), with the path to
+open it through ``files.text`` under ``project_id``. When any was, approving also needs
+``unseen_confirmed``, sent after the phone asked a second time.
+
+``workflows.failure`` reads what Ask Rem about this failure attaches for one run
+(``gofer.ui.run_failure``): the end of the failing node's output, its error, preflight
+problems and the run's input values, with password inputs masked, all marked as
+untrusted run output. The phone puts it in Rem's message box as a file and sends
+nothing until the user does. The phone has the desktop's trust, and the text goes
+back to this computer's Rem anyway.
+
+``workflows.tests``, ``workflows.tests.estimate``, ``workflows.tests.try`` and
+``workflows.tests.use_model`` are Try another model on the workflow's test set
+(``workflow_tests``).
+
+Other results carry no source, run input values, node outputs or provider
+configuration. Free text such as errors has the project and data folders replaced
+by names.
 """
 
 from __future__ import annotations
@@ -41,7 +85,7 @@ import json
 import logging
 import os
 import threading
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -50,14 +94,27 @@ from gofer.devices.desktop_control import Refused
 
 logger = logging.getLogger(__name__)
 
-READS = frozenset({"workflows.list", "workflows.read", "workflows.runs"})
+READS = frozenset(
+    {
+        "workflows.failure",
+        "workflows.list",
+        "workflows.read",
+        "workflows.runs",
+        "workflows.trigger.changes",
+        "workflows.tests",
+        "workflows.tests.estimate",
+    }
+)
 ACTIONS = frozenset(
     {
+        "workflows.tests.try",
+        "workflows.tests.use_model",
         "workflows.run",
         "workflows.stop",
         "workflows.resume",
         "workflows.rerun",
         "workflows.trigger",
+        "workflows.trigger.approve",
         "workflows.triggers.pause",
     }
 )
@@ -89,14 +146,29 @@ NOT_RUNNING = "No run is going right now."
 NO_RUN = "There is no run to resume."
 NO_RESUME = "Your computer can't resume this run."
 NO_RERUN = "There is no run to run again."
+NO_FAILURE = "This run or step is no longer on your computer."
 STILL_STARTING = "Your computer is still starting this run. It will appear in the run list."
 BAD_INPUTS = "Send the run's inputs as named values."
 TOO_LARGE = "These inputs are too large to send from the phone. Start this run on your computer."
+UPLOAD_GONE = "The shared file is no longer on your computer. Share it again."
 # Triggers shown on one workflow's page.
 TRIGGER_LIMIT = 50
 CONFIRM_TRIGGER = "Confirm on your phone before turning this trigger on."
 CONFIRM_RESUME = "Confirm on your phone before resuming all triggers."
 NO_TRIGGER = "This trigger no longer exists on your computer."
+CHANGED_AGAIN = "The workflow changed again since you opened its changes. Review them again."
+REVIEW_FIRST = "Open the changes before approving them."
+UNSEEN_FIRST = (
+    "Some changes weren't shown on your phone: {files}. Update Raticode Mobile to confirm "
+    "them, or review and approve them on your computer."
+)
+# The diff the phone shows for a trigger's changes.
+DIFF_LIMIT = 60_000
+APPROVAL_LINES = {
+    "changed": "Workflow changed since you approved it.",
+    "unapproved": "Waiting for you to approve this workflow version.",
+}
+CHANGED_DURING_RUN = "changed during a triggered run, so the step that uses it wasn't run."
 TRIGGER_KINDS = {"cron": "Schedule", "file": "File change", "webhook": "Webhook"}
 RUN_STATUS = {
     "running": "running",
@@ -154,6 +226,24 @@ def _compile(registered: Any, base: Path) -> dict[str, Any] | None:
     return dict(artifact.ir)
 
 
+def _compile_error(registered: Any, base: Path) -> str:
+    """The desktop workflow list's one-line reason a workflow doesn't compile."""
+    from gofer.rattish.artifacts import RattishArtifactError, compile_rattish_file
+    from gofer.rattish.diagnostics import RattishError
+    from gofer.ui.api import _rattish_validation_summary
+
+    try:
+        compile_rattish_file(
+            registered.entrypoint,
+            data_dir=base,
+            workflow_id=registered.workflow_id,
+            project_root=registered.project_root,
+        )
+    except (RattishArtifactError, RattishError, OSError) as exc:
+        return _rattish_validation_summary(exc)
+    return ""
+
+
 def _missing_inputs(ir: dict[str, Any]) -> list[str]:
     """Inputs a run needs that have no default. The phone can't supply them."""
     return [
@@ -165,6 +255,10 @@ def _missing_inputs(ir: dict[str, Any]) -> list[str]:
 
 def _input_kind(schema: dict[str, Any]) -> str:
     """The phone field for an input: the same split the desktop's Run dialog makes."""
+    from gofer.rattish.file_inputs import is_file_schema
+
+    if is_file_schema(schema):
+        return "file"
     choices = schema.get("enum")
     if isinstance(choices, list) and 0 < len(choices) <= CHOICE_LIMIT:
         return "choice"
@@ -207,6 +301,11 @@ def _input_fields(ir: Any) -> list[dict[str, Any]]:
         }
         if kind == "choice":
             field["choices"] = list(schema["enum"])
+        if kind == "file":
+            spec = _file_specs(ir).get(str(item["name"]))
+            if spec is not None:
+                field["accept"] = list(spec.accept)
+                field["max_size"] = spec.max_size
         for key in ("minimum", "maximum"):
             bound = schema.get(key)
             if isinstance(bound, int | float) and not isinstance(bound, bool):
@@ -222,6 +321,35 @@ def _input_fields(ir: Any) -> list[dict[str, Any]]:
                 field["default"] = value
         fields.append(field)
     return fields
+
+
+def _file_specs(ir: Any) -> dict[str, Any]:
+    from gofer.rattish.file_inputs import file_input_specs
+
+    return file_input_specs(ir) if isinstance(ir, dict) else {}
+
+
+def _file_inputs(ir: Any) -> list[dict[str, Any]]:
+    """The inputs a shared file can fill, with the kinds and size each takes."""
+    return [
+        {
+            "name": field["name"],
+            "label": field["label"],
+            "accept": field.get("accept", []),
+            "max_size": field.get("max_size", 0),
+        }
+        for field in _input_fields(ir)
+        if field["kind"] == "file"
+    ]
+
+
+def _text_inputs(ir: Any) -> list[dict[str, str]]:
+    """The inputs shared text can fill: plain text, not a choice and not a password."""
+    return [
+        {"name": field["name"], "label": field["label"]}
+        for field in _input_fields(ir)
+        if field["kind"] == "text" and not field["secret"]
+    ]
 
 
 def _unfilled_reason(names: Any, action: str) -> str:
@@ -316,6 +444,18 @@ def gather(
     if op == "workflows.runs":
         return _gather_runs(params, base, projects or {})
     registered = list_registered_workflows(registry_dir=base)
+    if op in {"workflows.tests", "workflows.tests.estimate"}:
+        from gofer.devices import workflow_tests
+
+        identifier = _text(params.get("workflow_id"), 200)
+        workflow = next((w for w in registered if w.workflow_id == identifier), None)
+        if workflow is None:
+            raise KeyError(identifier)
+        return workflow_tests.gather(op, params, workflow, base)
+    if op == "workflows.trigger.changes":
+        return _gather_changes(params, registered, base)
+    if op == "workflows.failure":
+        return _gather_failure(params, registered, base)
     if op == "workflows.list":
         items = []
         for entry in registered:
@@ -361,6 +501,7 @@ def gather(
     return {
         "registered": workflow,
         "ir": ir,
+        "compileError": _compile_error(workflow, base) if ir is None else "",
         "runs": runs,
         "plan": plan,
         "detail": detail,
@@ -370,8 +511,49 @@ def gather(
     }
 
 
+def _gather_failure(params: dict[str, Any], registered: Any, base: Path) -> dict[str, Any]:
+    from gofer.ui.run_failure import RunFailureError, run_failure_payload
+
+    identifier = _text(params.get("workflow_id"), 200)
+    workflow = next((w for w in registered if w.workflow_id == identifier), None)
+    if workflow is None:
+        raise KeyError(identifier)
+    run_id = _text(params.get("run_id"), 128)
+    try:
+        failure = run_failure_payload(
+            run_id,
+            base,
+            workflow_id=identifier,
+            node_id=_text(params.get("node_id"), 200) or None,
+        )
+    except RunFailureError:
+        raise Refused("not_found", NO_FAILURE) from None
+    return {"registered": workflow, "failure": failure}
+
+
+def _gather_changes(
+    params: dict[str, Any], registered: Sequence[Any], base: Path
+) -> dict[str, Any]:
+    """A trigger's changes since its approved version. Compiles, so it runs unlocked."""
+    from gofer.rattish.triggers import TriggerNotFound, TriggerStore, trigger_changes
+
+    identifier = _text(params.get("workflow_id"), 200)
+    workflow = next((w for w in registered if w.workflow_id == identifier), None)
+    if workflow is None:
+        raise KeyError(identifier)
+    store = TriggerStore(base)
+    trigger_id = _text(params.get("trigger_id"), 64)
+    try:
+        record = store.get(trigger_id)
+    except TriggerNotFound:
+        raise Refused("not_found", NO_TRIGGER) from None
+    if _same(record.source_path) != _same(workflow.entrypoint):
+        raise Refused("not_found", NO_TRIGGER)
+    return {"registered": workflow, "changes": trigger_changes(store, trigger_id)}
+
+
 def _gather_pause(base: Path) -> dict[str, Any]:
-    from gofer.rattish.triggers import TriggerStore
+    from gofer.rattish.triggers import TriggerStore, computer_limit_state
 
     store = TriggerStore(base)
     triggers = store.list_triggers()
@@ -379,24 +561,50 @@ def _gather_pause(base: Path) -> dict[str, Any]:
         "pause": store.pause_state(),
         "count": len(triggers),
         "enabled": sum(1 for item in triggers if item.enabled),
+        "daily": computer_limit_state(store),
     }
 
 
 def _gather_triggers(entrypoint: Path, base: Path) -> dict[str, Any]:
     """One workflow's triggers with their last results, and whether all are paused."""
-    from gofer.rattish.triggers import TriggerStore, next_run_at
+    from gofer.rattish.triggers import (
+        TriggerStore,
+        approval_status,
+        next_run_at,
+        trigger_limit_state,
+    )
 
     store = TriggerStore(base)
     items = []
+    snapshots: dict[str, Any] = {}
     for record in store.list_triggers(entrypoint)[:TRIGGER_LIMIT]:
         items.append(
             {
                 "record": record,
                 "next_run_at": next_run_at(record),
                 "latest": store.latest_event(record.id),
+                "daily": trigger_limit_state(store, record),
+                "approval": approval_status(store, record, snapshots=snapshots).state,
             }
         )
     return {"items": items, "pause": store.pause_state()}
+
+
+def _time_limit_text(seconds: int | None) -> str:
+    """A trigger's Time limit as the phone shows it."""
+    from gofer.rattish.trigger_defaults import format_run_time
+
+    return f"Time limit: {format_run_time(seconds)}" if seconds else "No time limit"
+
+
+def _daily_fields(state: Any) -> dict[str, Any]:
+    """A daily limit as the phone shows it: today's use, and whether starts are skipped."""
+    if state is None:
+        return {"daily_limit": "", "limit_reached": False}
+    text = f"Daily limit: {state.used_text()}"
+    if state.reached:
+        text += f". Triggered starts are skipped until midnight ({state.timezone})"
+    return {"daily_limit": _text(text + ".", 300), "limit_reached": bool(state.reached)}
 
 
 def _gather_runs(
@@ -468,8 +676,27 @@ class PhoneWorkflows:
     # Reads -------------------------------------------------------------------
 
     def read(self, peer: str, op: str, params: dict[str, Any], data: dict[str, Any]) -> Any:
+        if op == "workflows.tests":
+            return self._tests_view(peer, data["registered"], data["tests"])
+        if op == "workflows.tests.estimate":
+            from gofer.devices import workflow_tests
+
+            self._scoped(peer, data["registered"])
+            return workflow_tests.estimate_view(data["registered"].workflow_id, data["estimate"])
         if op == "workflows.runs":
             return self._all_runs(peer, data)
+        if op == "workflows.trigger.changes":
+            return self._changes(peer, data)
+        if op == "workflows.failure":
+            failed_workflow = data["registered"]
+            failed_project = self._scoped(peer, failed_workflow)
+            failure = data["failure"]
+            return {
+                "run_id": _text(failure["runId"], 128),
+                "node_id": _text(failure["nodeId"], 200),
+                "name": _text(failure["name"], 200),
+                "text": self._clean_long(failure["text"], failed_workflow, failed_project),
+            }
         if op == "workflows.list":
             projects = self._open_projects(peer)
             items = []
@@ -497,7 +724,9 @@ class PhoneWorkflows:
         plan = data["plan"]
         shown = None
         if detail is not None:
-            shown = self._detail(detail, waiting, registered, project, nodes)
+            listed = {str(run.get("id")): run for run in data["runs"]["runs"]}
+            usage_wait = (listed.get(str(detail.get("runId") or "")) or {}).get("usageLimitWait")
+            shown = self._detail(detail, waiting, registered, project, nodes, usage_wait)
             # The detail was read last. A run that ended in between must not
             # show as both running and finished in one answer.
             fresh = {key: value for key, value in shown.items() if key not in {"error", "nodes"}}
@@ -527,11 +756,20 @@ class PhoneWorkflows:
                 data.get("resume"),
                 form=params.get("input_form") is True,
                 rerun=data.get("rerun"),
+                problem=self._clean(
+                    data.get("compileError")
+                    or ((plan or {}).get("blockingDiagnostics") or [""])[0],
+                    registered,
+                    project,
+                    300,
+                ),
             ),
         }
 
     def _all_runs(self, peer: str, data: dict[str, Any]) -> dict[str, Any]:
         """Every open project's workflow runs, newest first, with totals for the filter."""
+        from gofer.rattish.provider_fallback import switched
+
         projects = self._open_projects(peer)
         runs = []
         for run in data["runs"]:
@@ -540,7 +778,7 @@ class PhoneWorkflows:
                 continue  # Closed on the desktop after the read.
             usage = run.get("usage") or {}
             shown = self._run(run)
-            if run.get("fallbacks"):
+            if switched(run.get("fallbacks")):
                 # The phone shows this line under each run; the run detail names the providers.
                 shown["summary"] = f"{shown['summary']} · switched provider"
             runs.append(
@@ -572,6 +810,7 @@ class PhoneWorkflows:
             "paused_at": _text(pause.since if pause.paused else "", 80),
             "count": int(data["count"]),
             "enabled": int(data["enabled"]),
+            **_daily_fields(data.get("daily")),
         }
 
     def _trigger(self, item: dict[str, Any], registered: Any, project: str) -> dict[str, Any]:
@@ -593,7 +832,15 @@ class PhoneWorkflows:
             "label": _text(record.label, 120),
             "description": self._clean(description, registered, project, 300),
             "enabled": record.enabled,
+            # approved, changed, unapproved or missing; the message says what to do.
+            "approval": _text(item.get("approval") or "approved", 20),
+            "approval_message": ""
+            if record.run_unapproved
+            else APPROVAL_LINES.get(str(item.get("approval")), ""),
+            "run_edits_without_approval": record.run_unapproved,
             "next_run_at": _text(item["next_run_at"], 80),
+            **_daily_fields(item.get("daily")),
+            "time_limit": _time_limit_text(record.max_run_seconds),
             "last_result": None
             if latest is None
             else {
@@ -602,6 +849,120 @@ class PhoneWorkflows:
                 "message": self._clean(latest.message, registered, project, 300),
             },
         }
+
+    def _changes(self, peer: str, data: dict[str, Any]) -> dict[str, Any]:
+        """Review changes for one trigger: what differs from the version the user approved.
+
+        Each file carries its own unified diff, cut so all of them together stay under
+        ``DIFF_LIMIT`` characters.
+        """
+        registered = data["registered"]
+        project = self._scoped(peer, registered)
+        changes = data["changes"]
+        files, truncated = self._phone_files(changes, registered, project)
+        project_id = next(
+            (
+                key
+                for key, value in self.control.projects(peer).items()
+                if _same(value["root"]) == _same(registered.project_root)
+            ),
+            "",
+        )
+        message = APPROVAL_LINES.get(changes["state"], "")
+        marked = changes.get("changedDuringRun")
+        if marked and marked.get("path"):
+            # The file may have changed back since, so the list can be empty.
+            shown = self._clean(str(marked["path"]), registered, project, 300)
+            message = f"{message} {shown} {CHANGED_DURING_RUN}".strip()
+        return {
+            "workflow_id": registered.workflow_id,
+            "trigger_id": _text(changes["triggerId"], 64),
+            "approval": _text(changes["state"], 20),
+            "message": message,
+            "fingerprint": _text(changes["fingerprint"], 80),
+            "approved_at": _text(changes.get("approvedAt") or "", 80),
+            "project_id": _text(project_id, 128),
+            # Files past NODE_LIMIT aren't listed; their changes count as unseen.
+            "files": [
+                {key: value for key, value in item.items() if key != "hidden"}
+                for item in files
+                if not item["hidden"]
+            ],
+            "unseen_hidden": sum(1 for item in files if item["hidden"] and item["unseen"]),
+            "truncated": truncated,
+        }
+
+    def _phone_files(
+        self, changes: dict[str, Any], registered: Any, project: str
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Each changed file as the phone shows it, and whether any diff was cut.
+
+        Each diff is cut so all of them together stay under ``DIFF_LIMIT`` characters.
+        ``unseen`` is ``cut`` or ``unreadable`` when the phone can't show the whole change,
+        or ``unpinned`` for an MCP server whose package can change between runs (see
+        ``trigger_approval.unseen_reason``), else empty. ``warning`` is the line the phone
+        shows on such an entry. ``open_path`` is the file's
+        path inside the project for ``files.text``, empty for one outside it. Files past
+        ``NODE_LIMIT`` are marked ``hidden``.
+        """
+        from gofer.rattish.trigger_approval import unseen_reason
+
+        root = Path(registered.project_root).resolve()
+        budget = DIFF_LIMIT
+        truncated = bool(changes.get("truncated"))
+        files = []
+        for index, item in enumerate(changes["files"]):
+            hidden = index >= NODE_LIMIT
+            diff = "" if hidden else self._clean_long(item["diff"], registered, project)
+            cut = len(diff) > budget
+            diff = diff[: max(budget, 0)]
+            budget -= len(diff)
+            truncated = truncated or cut
+            shown = {
+                "path": self._clean(item["path"], registered, project, 300),
+                "kind": _text(item["roleLabel"], 40),
+                "change": _text(item["change"], 20),
+                "diff": diff,
+                "diff_available": bool(item["diffAvailable"]),
+                "truncated": bool(item["truncated"]) or cut or hidden,
+                # An MCP server whose package has no exact version: the warning to show.
+                "warning": _text(item.get("warning") or "", 200),
+            }
+            # An MCP server's definition has no file, so no absolute path to open.
+            absolute = str(item.get("absolutePath") or "")
+            try:
+                inside = Path(absolute).resolve().relative_to(root) if absolute else Path()
+                open_path = inside.as_posix() if inside.parts else ""
+            except (OSError, ValueError):
+                open_path = ""
+            files.append(
+                {
+                    **shown,
+                    "unseen": unseen_reason(
+                        {
+                            **shown,
+                            "diffAvailable": shown["diff_available"],
+                            "unpinned": item.get("unpinned"),
+                        }
+                    )
+                    or "",
+                    "open_path": _text(open_path, 1000),
+                    "hidden": hidden,
+                }
+            )
+        return files, truncated
+
+    def _clean_long(self, value: str, registered: Any, project: str) -> str:
+        """Like ``_clean`` for text longer than its 4000-character cut."""
+        text = value[: DIFF_LIMIT + 1]
+        base = self.base
+        for folder, label in (
+            (str(registered.project_root), project),
+            (str(base) if base else "", "Raticode data"),
+        ):
+            if folder:
+                text = text.replace(folder, label)
+        return text
 
     @staticmethod
     def _recency(item: dict[str, Any]) -> str:
@@ -631,6 +992,8 @@ class PhoneWorkflows:
             "status": status,
             "updated_at": _modified(registered.entrypoint),
             "latest_run": latest,
+            "text_inputs": _text_inputs(ir),
+            "file_inputs": _file_inputs(ir),
         }
 
     @staticmethod
@@ -645,6 +1008,11 @@ class PhoneWorkflows:
             summary = "Stop requested"
         elif status == "waiting":
             summary = "Waiting for approval"
+        elif status == "failed" and run.get("usageLimitWait"):
+            # A triggered run the scheduler resumes once the provider's limit resets.
+            from gofer.rattish.triggers import USAGE_WAIT_LABEL
+
+            summary = USAGE_WAIT_LABEL
         elif status == "running":
             summary = "Running"
         else:
@@ -699,6 +1067,7 @@ class PhoneWorkflows:
         registered: Any,
         project: str,
         graph: list[dict[str, Any]],
+        usage_wait: Any = None,
     ) -> dict[str, Any]:
         run_id = str(detail.get("runId") or "")
         document = detail.get("rattishRun") or {}
@@ -717,6 +1086,7 @@ class PhoneWorkflows:
                 "startedBy": document.get("started_by")
                 or ("trigger" if document.get("trigger_event_count") else "manual"),
                 "resumedFrom": detail.get("resumedFrom"),
+                "usageLimitWait": usage_wait,
             }
         )
         active = run["status"] in {"running", "waiting", "stopping"}
@@ -735,6 +1105,9 @@ class PhoneWorkflows:
                     " ".join(
                         part
                         for part in (
+                            f"Provider: {record['providerApp']}."
+                            if record.get("providerApp")
+                            else "",
                             *_provider_lines(record),
                             record.get("message")
                             or ("Reused from the earlier run" if record.get("reused") else "")
@@ -795,24 +1168,35 @@ class PhoneWorkflows:
         *,
         form: bool = False,
         rerun: dict[str, Any] | None = None,
+        problem: str = "",
     ) -> dict[str, Any]:
         """``form`` is True for a phone that shows the Run form and can supply inputs.
 
         The phone never sends inputs with Resume or Run again, so a run whose password
         inputs weren't saved names them and says to use the computer instead.
+        ``problem`` is the first compile error or preflight error, which the Run reason
+        names so the phone says what to fix, as the desktop does.
         """
 
         def control(reason: str) -> dict[str, Any]:
             return {"allowed": not reason, "reason": reason}
 
         if ir is None:
-            run = INVALID
+            run = (
+                f"This workflow has an error. {problem} Fix it on your computer."
+                if problem
+                else INVALID
+            )
         elif plan is None:
             run = "Your computer couldn't prepare this workflow. Open it there to check it."
         elif plan.get("requiredSecrets"):
             run = _missing_secrets_reason(plan["requiredSecrets"])
         elif plan.get("blockingDiagnostics"):
-            run = "This workflow can't run yet. Open it on your computer to see why."
+            run = (
+                f"This workflow can't run yet: {problem}"
+                if problem
+                else "This workflow can't run yet. Open it on your computer to see why."
+            )
         elif not plan.get("runnable"):
             run = "This workflow has no nodes to run."
         elif _missing_inputs(ir) and not form:
@@ -851,6 +1235,52 @@ class PhoneWorkflows:
             "rerun": control(again),
         }
 
+    def _tests_view(
+        self, peer: str, registered: Any, payload: dict[str, Any], message: str = ""
+    ) -> dict[str, Any]:
+        from gofer.devices import workflow_tests
+
+        project = self._scoped(peer, registered)
+        workspace = self.control.app.workspace
+        workspace.refresh_providers()
+        view = workflow_tests.tests_view(
+            registered,
+            payload,
+            list(workspace.providers or []),
+            lambda value, limit: self._clean(value, registered, project, limit),
+        )
+        if message:
+            view["message"] = message
+        return view
+
+    def _test_action(
+        self, peer: str, registered: Any, op: str, params: dict[str, Any], request: str, base: Path
+    ) -> dict[str, Any]:
+        """Try another model, or use the tried one; answers with the refreshed tests view."""
+        from gofer.devices import workflow_tests
+        from gofer.ui.workflow_tests import workflow_tests_payload
+
+        if op == "workflows.tests.use_model":
+            message = workflow_tests.use_tried_model(registered, base, params)
+            logger.info("Phone wrote a tried model into workflow %s", registered.workflow_id)
+        else:
+            prior = self.db.execute(
+                "SELECT run FROM device_workflow_requests WHERE peer=? AND request=?",
+                (peer, request),
+            ).fetchone()
+            if prior is not None:
+                message = "This try was already started."
+            else:
+                result_id = workflow_tests.start_try(registered, base, params)
+                self.db.execute(
+                    "INSERT INTO device_workflow_requests VALUES (?,?,?,?)",
+                    (peer, request, registered.workflow_id, result_id),
+                )
+                message = "Trying the model. Each case runs with both models."
+        return self._tests_view(
+            peer, registered, workflow_tests_payload(registered.workflow_id, base), message
+        )
+
     # Actions -----------------------------------------------------------------
 
     def act(self, peer: str, op: str, params: dict[str, Any], request: str) -> dict[str, Any]:
@@ -875,6 +1305,8 @@ class PhoneWorkflows:
             raise Refused("not_found", "This workflow no longer exists on desktop.")
         project = self._scoped(peer, registered)
         try:
+            if op in {"workflows.tests.try", "workflows.tests.use_model"}:
+                return self._test_action(peer, registered, op, params, request, base)
             if op == "workflows.run":
                 return self._start(peer, registered, project, params, request, base)
             if op == "workflows.stop":
@@ -883,6 +1315,8 @@ class PhoneWorkflows:
                 return self._rerun(peer, registered, params, request, base)
             if op == "workflows.trigger":
                 return self._set_trigger(registered, params, base)
+            if op == "workflows.trigger.approve":
+                return self._approve_trigger(registered, project, params, base)
             return self._resume(peer, registered, params, request, base)
         except WorkflowRunError as exc:
             message = str(exc)
@@ -892,7 +1326,12 @@ class PhoneWorkflows:
 
     def _set_trigger(self, registered: Any, params: dict[str, Any], base: Path) -> dict[str, Any]:
         """Turn one of this workflow's triggers on or off. On needs the phone's confirmation."""
-        from gofer.rattish.triggers import TriggerError, TriggerNotFound, TriggerStore
+        from gofer.rattish.triggers import (
+            TriggerError,
+            TriggerNotFound,
+            TriggerStore,
+            approval_status,
+        )
 
         enabled = params.get("enabled")
         if not isinstance(enabled, bool):
@@ -908,13 +1347,21 @@ class PhoneWorkflows:
         if _same(record.source_path) != _same(registered.entrypoint):
             raise Refused("not_found", NO_TRIGGER)
         try:
-            record = store.update(trigger_id, enabled=enabled)
+            record = store.update(trigger_id, enabled=enabled, actor="user")
         except TriggerNotFound:
             raise Refused("not_found", NO_TRIGGER) from None
         except TriggerError as exc:
             raise Refused("invalid", _text(exc, 600)) from None
+        # Turning a trigger on approves nothing: a change waiting for review stays waiting.
+        approval = approval_status(store, record).state if enabled else "approved"
+        waiting = enabled and approval in APPROVAL_LINES and not record.run_unapproved
         if not enabled:
             message = "Turned off. Its settings and history are kept."
+        elif waiting:
+            message = (
+                f"Turned on. {APPROVAL_LINES[approval]} Review the changes: "
+                "triggered starts are skipped until you approve them."
+            )
         elif store.pause_state().paused:
             message = "Turned on. All triggers are paused, so it starts when you resume them."
         else:
@@ -924,7 +1371,70 @@ class PhoneWorkflows:
             "workflow_id": registered.workflow_id,
             "trigger_id": record.id,
             "enabled": record.enabled,
+            "approval": approval if waiting else "approved",
             "message": message,
+        }
+
+    def _approve_trigger(
+        self, registered: Any, project: str, params: dict[str, Any], base: Path
+    ) -> dict[str, Any]:
+        """Approve this version: the exact one the phone showed, by its fingerprint.
+
+        When the phone couldn't show a file's whole change, it asks a second time and
+        sends ``unseen_confirmed``; without that nothing is approved.
+        """
+        from gofer.rattish.trigger_approval import unseen_list_text
+        from gofer.rattish.triggers import (
+            ApprovalConflict,
+            TriggerError,
+            TriggerNotFound,
+            TriggerStore,
+            UnseenChanges,
+            approve_trigger,
+        )
+
+        def unseen_on_phone(changes: dict[str, Any]) -> list[dict[str, Any]]:
+            files, _ = self._phone_files(changes, registered, project)
+            return [
+                {"path": item["path"], "reason": item["unseen"]} for item in files if item["unseen"]
+            ]
+
+        fingerprint = _text(params.get("fingerprint"), 80)
+        if not fingerprint:
+            raise Refused("invalid", REVIEW_FIRST)
+        store = TriggerStore(base)
+        trigger_id = _text(params.get("trigger_id"), 64)
+        try:
+            record = store.get(trigger_id)
+        except TriggerNotFound:
+            raise Refused("not_found", NO_TRIGGER) from None
+        if _same(record.source_path) != _same(registered.entrypoint):
+            raise Refused("not_found", NO_TRIGGER)
+        try:
+            approve_trigger(
+                store,
+                trigger_id,
+                actor="user",
+                by="phone",
+                expected_fingerprint=fingerprint,
+                accept_unseen=params.get("unseen_confirmed") is True,
+                unseen_in=unseen_on_phone,
+            )
+        except ApprovalConflict:
+            raise Refused("conflict", CHANGED_AGAIN) from None
+        except UnseenChanges as exc:
+            shown = _text(unseen_list_text(exc.files), 1200)
+            raise Refused("invalid", UNSEEN_FIRST.format(files=shown)) from None
+        except TriggerNotFound:
+            raise Refused("not_found", NO_TRIGGER) from None
+        except TriggerError as exc:
+            raise Refused("invalid", _text(exc, 600)) from None
+        logger.info("Phone approved the workflow version for trigger %s", trigger_id)
+        return {
+            "workflow_id": registered.workflow_id,
+            "trigger_id": trigger_id,
+            "approval": "approved",
+            "message": "Approved. The trigger runs this version from now on.",
         }
 
     def _pause_triggers(self, params: dict[str, Any], base: Path) -> dict[str, Any]:
@@ -995,6 +1505,8 @@ class PhoneWorkflows:
         if ir["source"]["source_fingerprint"] != revision:
             raise Refused("conflict", CHANGED)
         inputs = self._inputs(ir, params, registered, project)
+        if "file_ids" in params:
+            inputs.update(self._uploaded_files(peer, ir, params["file_ids"], base))
         # The same background start the desktop's Run button uses, with its
         # saved-revision check, active-run limit and preflight.
         started = settle(
@@ -1046,7 +1558,7 @@ class PhoneWorkflows:
         )
 
         if "inputs" not in params:
-            if _missing_inputs(ir):
+            if [name for name in _missing_inputs(ir) if name not in params.get("file_ids", {})]:
                 raise Refused("invalid", NEEDS_INPUTS)
             return {}
         inputs = params["inputs"]
@@ -1059,18 +1571,75 @@ class PhoneWorkflows:
         if size > INPUTS_LIMIT or _depth(inputs) > INPUT_DEPTH:
             raise Refused("invalid", TOO_LARGE)
         declared = {item["name"]: item for item in ir["workflow"]["inputs"]}
-        missing = [name for name in _missing_inputs(ir) if name not in inputs]
+        given = params.get("file_ids")
+        files: dict[str, Any] = given if isinstance(given, dict) else {}
+        missing = [name for name in _missing_inputs(ir) if name not in inputs and name not in files]
         if missing:
             labels = [
                 _text((declared[name].get("schema") or {}).get("title") or name, 200)
                 for name in missing[:5]
             ]
             raise Refused("invalid", f"Fill in {', '.join(labels)}.")
+        if set(inputs) & set(_file_specs(ir)):
+            raise Refused("invalid", "Send a file input's file with file_ids, not as a value.")
         try:
-            _prepare_workflow_inputs(ir, inputs)
+            # A file input's value is the path the desktop gives its upload later.
+            _prepare_workflow_inputs(ir, {**inputs, **{name: "upload" for name in files}})
         except InvalidRattishWorkflowInputError as exc:
             raise Refused("invalid", self._clean(str(exc), registered, project, 600)) from None
         return dict(inputs)
+
+    def _uploaded_files(
+        self, peer: str, ir: dict[str, Any], file_ids: Any, base: Path
+    ) -> dict[str, str]:
+        """Save the files the phone uploaded for file inputs; the input values are paths.
+
+        The phone uploads on its Rem file channel, as Share to Rem does. Each file is
+        checked against its input's accept list and size, then written owner-only under
+        the data folder's ``workflow-uploads``. The run copies it into its own folder and
+        removes the upload; one nobody ran is swept after an hour (``file_inputs``).
+        """
+        from uuid import uuid4
+
+        from gofer.devices.registry import PairingError
+        from gofer.rattish.file_inputs import (
+            FileInputError,
+            _check_kind,
+            _check_size,
+            new_upload_path,
+            remove_upload,
+        )
+
+        if not isinstance(file_ids, dict) or len(file_ids) > 1:
+            raise Refused("invalid", "Send one file for the run.")
+        specs = _file_specs(ir)
+        files = self.control.app.files
+        thread = self.control.files_thread(peer)
+        saved: dict[str, str] = {}
+        for name, identifier in file_ids.items():
+            spec = specs.get(name)
+            if spec is None:
+                raise Refused("invalid", f"This workflow has no file input {_text(name, 200)}.")
+            try:
+                offer = files.metadata(peer, thread, _text(identifier, 64))
+            except PairingError:
+                raise Refused("invalid", UPLOAD_GONE) from None
+            label = _text(offer.get("name"), 160) or "file"
+            try:
+                _check_size(spec, label, int(offer.get("size") or 0))
+                _check_kind(spec, label, _text(offer.get("mime"), 200) or None)
+            except FileInputError as exc:
+                raise Refused("invalid", str(exc)) from None
+            path = new_upload_path(base, uuid4().hex, label)
+            try:
+                files.save(peer, thread, _text(identifier, 64), path, limit=spec.max_size)
+            except (PairingError, OSError):
+                remove_upload(path, base)
+                raise Refused("invalid", UPLOAD_GONE) from None
+            # The desktop keeps its own copy now; the phone's upload isn't needed.
+            files.cancel(peer, thread, _text(identifier, 64))
+            saved[name] = str(path)
+        return saved
 
     def _stop(
         self, registered: Any, project: str, params: dict[str, Any], base: Path

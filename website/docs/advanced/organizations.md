@@ -52,7 +52,7 @@ New workers added from the **Workers** tab or **Add worker** use Rem's provider 
 Each employee has:
 
 - a persona, responsibilities, a manager and instructions
-- provider, model and effort
+- provider, model, effort and [account](#worker-accounts)
 - a permission mode, workspace allowlists and resources
 - budgets and run limits
 
@@ -62,7 +62,18 @@ Give each employee a narrow role and review these settings before starting work.
 | --- | --- |
 | **Limit ticket actions by project** | Per project, whether the worker may create, edit, move or cancel tickets |
 | **Check-ins** | How often an idle worker checks in (hourly by default) |
-| **Hold this worker** | Stops one worker without pausing the organization |
+| **Hold this worker** | Stops one worker without pausing the organization. A run under way stops like a pause: it isn't charged, and its ticket goes back to To do, first in line for when you lift the hold. Changing the worker's permissions at the same time stops the ticket for review instead |
+
+### Worker accounts
+
+When you've added accounts for a provider in **Settings > Providers**, a worker's editor has an **Account** choice: the provider's default sign-in, or one of that provider's accounts. A provider without added accounts shows no choice.
+
+- The worker's runs sign in as that account, and their usage counts toward it in **Settings > Usage** and in the account's limits.
+- The worker keeps the account when you rename it.
+- Switching the worker to another provider clears its account, because accounts belong to one provider.
+- If the account is removed or signed out, the worker's runs use the default sign-in instead. The run's record says which account it used, or why it fell back.
+
+You can also choose it on the phone, from the worker's page, or with `Raticode org employees account ORG_ID WORKER_ID work` (`default` for the default sign-in).
 
 **Working hours**, set from the header pill, are **Around the clock (24/7)** or weekly windows in one time zone. Workers start and keep working only inside them. **At closing time** chooses what happens to running work:
 
@@ -118,7 +129,7 @@ A worker pulls a ticket only when all of these hold:
 
 - the organization is running, inside working hours, and under its run, token and dollar limits
 - the worker isn't held or running another ticket, has no To do ticket it can start, and has no Blocked tickets waiting for its look
-- the organization has a free run slot under **Maximum concurrent employees**; each worker gets one ticket per pass
+- the organization has a free run slot under **Workers at once**, and a computer has room for another worker (see [Which computer runs a worker](#which-computer-runs-a-worker)); each worker gets one ticket per pass
 - the ticket is assigned to that worker, or has no assignee and is in one of the worker's projects (a worker needs projects, and its ticket permissions must let it move and edit tickets there)
 - every ticket it depends on is **Done**, and its epic or milestone isn't cancelled
 - the ticket is under its run limit and not waiting for a start date
@@ -232,12 +243,22 @@ By default each task runs in its own Git worktree on an `org/<task>` branch, mad
 
 `git push` fails inside employee runs unless you clear **Block git push in employee runs**. This guards against mistakes; an employee with unrestricted shell access could get around it.
 
+### Which computer runs a worker
+
+From 0.6.0, each worker start is placed on a computer by the organization's placement, the same way as Rem's (see [Where work runs](../rem/home.md#where-work-runs)). **Workers at once** (1 to 16) is still the organization's own cap on how many of its workers run together, with no fixed ceiling below it. On top of it, no start takes a computer past its **Worker limit** (Settings › Computers), which Rem tasks, phone turns and every organization's workers share.
+
+- Workers run only on this computer for now. Each ticket checks every paired desktop for itself, and skips it with the first check it fails: pairing, status, the projects and providers that desktop shares, a project there that is the same repository, and a fleet execution target the owner made there for the ticket's worker, for example *No execution target on Desktop B is granted to Worker 0*. See [Whether a start could run on a paired desktop](../rem/home.md#whether-a-start-could-run-on-a-paired-desktop). While this computer is full, a ticket that a paired desktop has room for shows *Desktop B has room: Run there* in its details. **Run there** only points it at a fleet execution target you already made there for its worker; without one, the suggestion says what to grant. See [Run waiting work on a paired desktop](../rem/home.md#run-waiting-work-on-a-paired-desktop).
+- When no computer has room, the organization starts no ticket and its page shows why in a banner, for example *Waiting for a free worker: Workstation is full (4 of 4 running: 2 organization workers, 1 Rem task, 1 swarm turn)*. The phone shows the same line on the organization's page, and `Raticode org show` prints it as `Waiting:`.
+- A ticket delegated to a paired desktop through a `fleet` execution target is the exception: that desktop runs its worker and counts it under its own worker limit, so the ticket needs no room here, takes no worker here and can start while other tickets wait for one. It still counts toward **Workers at once**.
+- Your own Rem tasks go first, then self-work and organizations. While a Rem task you started waits for a worker on a computer, the organization starts no new worker there and claims no ticket, even below **Workers at once**. Its banner, its page on the phone and `Raticode org show` say *Waiting so your own Rem task can start first: “…”*, naming the task. Workers already running aren't stopped, and the next free worker goes to your task.
+- Each run records the computer, strategy and reason it was placed with, except a run delegated to a paired desktop, which isn't placed here.
+
 ## Tasks and independent review
 
 **Operations** holds the work queue, task filters, activity, routines, execution destinations and recovery controls. A task has an assignee, priority, dependencies, plan, evidence and review state.
 
 - Approving a plan and accepting a result are separate decisions. Accepting a ticket with a branch lands it, and only you can do that; **Accept without landing** marks it done and leaves the branch.
-- An independent reviewer can accept, reject or request revision.
+- An independent reviewer can accept, reject or request revision. A worker reviewer, or Rem in [Auto mode](#auto-mode), can send one result back (revise or reject) at most three times in a row. The next result then waits for your own review, and the ticket says why. Accepting it, or your own review or reopen, starts the count again.
 - A finished dependency can wake waiting work.
 - A cancelled task stays cancelled until someone reopens it.
 - The queue says why a task is waiting: employee holds, unmet dependencies, review, workspace contention or budget limits. Blocked tasks say why and what to do next.
@@ -272,7 +293,7 @@ Other failures stop the ticket in **Blocked** for a look right away: a signed-ou
 Under **Runs and artifacts** on a task, open a run to read what the employee did, or choose **Show input** to see exactly what it was given: instructions, task and conversation, tools and working folder.
 
 - Inputs are stored compressed, readable only by you, and checked against the run's fingerprint.
-- Each run records the provider, model, effort and permission mode, whether it ran in its own worktree, and a fingerprint of everything it was given.
+- Each run records the provider, model, effort, account and permission mode, whether it ran in its own worktree, and a fingerprint of everything it was given.
 - Worktree runs also record the commit they ended at and whether they left uncommitted changes.
 
 ## Audit trail
@@ -316,7 +337,7 @@ Monthly limits can be set for the organization, each employee and each initiativ
 - Each task also has its own run limit.
 - Codex and several other providers don't report dollar cost, so a dollar budget pauses their work after the first run. Use a token or run limit for them.
 - A run already in progress can go past what's left.
-- Operations shows how many employees can actually work at once, and why.
+- Operations shows how many workers can actually run at once, and why, for example *Up to 3 at once: each worker runs one task at a time; 3 workers are available. Each start also needs a free worker under its computer's Worker limit (Settings › Computers).* The number is the smallest of **Workers at once**, the workers that aren't held and, when tasks share a project folder instead of having their own worktrees, the number of project folders. Rehearsal uses the same cap.
 - Native provider sub-agents and unrestricted shell processes aren't covered by the organization's accounting.
 
 **Managed destinations** can be local workflows, swarms, paired desktops, or an HTTPS job gateway you explicitly trust. Workflow validation previews inputs, resources, source and IR hashes, and completion checks. Launch authorization binds that reviewed contract. Editing a task plan clears its authorization; previewing doesn't run it.
@@ -405,6 +426,8 @@ With Auto mode on, what would wait for you goes to a Rem review step instead:
 - finished tickets waiting for your review: when no worker is their reviewer, or their worker reviewer is held, isn't assigned to the ticket's project, or had its check-in and didn't review
 - tickets Raticode stopped in **Blocked** after a run failed, was interrupted (including by a crash or restart), ended without an answer, or was rejected by a worker reviewer. See [Stuck tickets](#stuck-tickets).
 
+Workers are told about Auto mode too. Their instructions and check-ins say not to block a ticket waiting for your approval, review or a hand check, and not to add checks asking for it; they keep **Blocked** for credentials, an account, a payment or an action only you can take, and note what they couldn't verify. New in 0.6.0. Rem's own board has the same rule; see [Auto mode on Rem's board](../rem/board.md#auto-mode-no-review-at-the-ticket-level).
+
 Rem reads each one with the organization's mission and instructions, what it changes, and the revision it expects, then decides:
 
 | Decision | What happens |
@@ -431,7 +454,9 @@ In Auto mode, a ticket Raticode stopped in **Blocked** goes to Rem before it goe
 - **Reopens it** into To do when its worker can likely finish it now, such as after a passing error, an interrupted run or review feedback it can act on. A comment says why. The run counts against the ticket's limits as usual.
 - **Leaves it for you** when trying again would fail the same way or needs something only you can give, such as a sign-in, a credential, a missing tool or a decision outside the charter. The comment says exactly what you need to do. Only then does the ticket count in **Needs you** and alert your phone.
 
-Rem doesn't look at tickets that you or Rem blocked or rejected, delegated work, tickets at their run limit (only you grant more runs) or check-ins. Rem reopens one ticket at most twice between good runs; after that it waits for you. Each blocked spell is looked at once.
+Rem doesn't look at tickets that you or Rem blocked or rejected, delegated work, tickets at their run limit (only you grant more runs), check-ins, or results reviewers already sent back three times in a row. Rem reopens one ticket at most twice between good runs; after that it waits for you. Each blocked spell is looked at once.
+
+A plan, result or blocked ticket that waits for Rem appears only on the ticket. If you decide that ticket yourself, or turn Auto mode off, Rem's review of it is withdrawn, so **Needs you** doesn't show it twice. If the ticket changed before Rem got to it, Rem looks at it again as it is now.
 
 ### What stays yours
 

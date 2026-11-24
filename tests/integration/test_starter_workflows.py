@@ -5,7 +5,9 @@ recorded instead of shown, and approval requests are answered the way each test 
 request body asks ("Approve this one" or "Reject this one"). Judge checks need a real
 model, so they are skipped here; they run when a user runs the test set in the app.
 Jev nodes get a fake Jev that answers from keywords in the text and a key kept in memory,
-so no test calls TypeSafe or touches the keychain.
+so no test calls TypeSafe or touches the keychain. read-web-page gets a stand-in copy of
+https://example.com/, so no test reaches the internet; other addresses still go through the
+real fetch, whose address check refuses private ones before connecting.
 """
 
 from __future__ import annotations
@@ -13,6 +15,8 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
+import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -28,6 +32,7 @@ from gofer.core.agent import AgentResult
 from gofer.core.approvals import ApprovalStore, RecordingNotificationAdapter
 from gofer.core.http import HttpRequest, HttpResponse
 from gofer.core.provider_profiles import ResolvedProviderSettings
+from gofer.rattish import shells, web_page
 from gofer.rattish.starters import create_workflow_from_starter, list_starters
 from gofer.rattish.test_sets import load_test_set, prepare_test_run, run_test_set
 from gofer.subscriptions.base import Subscription
@@ -81,7 +86,8 @@ class StandInModel(Subscription):
         broken = re.search(r"Only edit (\S+/greet\.sh)", prompt)
         if broken:
             script = working_dir / broken.group(1)
-            script.write_text(script.read_text().replace("Helo,", "Hello,"))
+            # Bytes, so Windows keeps the script's LF line endings for bash.
+            script.write_bytes(script.read_bytes().replace(b"Helo,", b"Hello,"))
             output = "Corrected the misspelled greeting (Helo to Hello) in greet.sh."
         return AgentResult(
             agent_id="stand-in-model",
@@ -158,6 +164,32 @@ def use_stand_in_jev(monkeypatch: pytest.MonkeyPatch, data_dir: Path) -> StandIn
     return jev
 
 
+EXAMPLE_PAGE = b"""<!doctype html>
+<html><head><title>Example Domain</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body><div><h1>Example Domain</h1>
+<p>This domain is for use in illustrative examples in documents. You may use this domain
+in literature without prior coordination or asking for permission.</p>
+<p><a href="https://www.iana.org/domains/example">More information...</a></p>
+</div></body></html>
+"""
+
+
+def use_stand_in_web(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Serves example.com from memory and passes every other URL to the real fetch."""
+    fetched: list[str] = []
+    real_fetch = web_page.fetch_page
+
+    def fetch_page(url: str, **kwargs: Any) -> web_page.FetchedPage:
+        fetched.append(url)
+        if url == "https://example.com/":
+            return web_page.FetchedPage(url, "text/html", "utf-8", EXAMPLE_PAGE, False)
+        return real_fetch(url, **kwargs)
+
+    monkeypatch.setattr(web_page, "fetch_page", fetch_page)
+    return fetched
+
+
 class Approver:
     """Answers pending approval requests as each test case's request body asks."""
 
@@ -195,8 +227,8 @@ class Approver:
                 self.decisions.append(decision)
 
 
-def test_six_or_fewer_starters_ship_with_docs_and_tests() -> None:
-    assert 5 <= len(STARTERS) <= 6
+def test_seven_or_fewer_starters_ship_with_docs_and_tests() -> None:
+    assert 5 <= len(STARTERS) <= 7
     website = Path(__file__).parents[2] / "website" / "docs" / "starters"
     for starter in list_starters():
         assert (starter.root / "workflow.tests.json").is_file(), starter.starter_id
@@ -225,6 +257,7 @@ async def test_starter_checks_and_passes_its_test_set(
     project.mkdir()
     data_dir = tmp_path / "data"
     jev = use_stand_in_jev(monkeypatch, data_dir)
+    fetched = use_stand_in_web(monkeypatch)
     runner = CliRunner()
 
     created = runner.invoke(
@@ -286,6 +319,43 @@ async def test_starter_checks_and_passes_its_test_set(
         assert not model.prompts
     else:
         assert not jev.requests
+    if starter_id == "summarize-a-link":
+        assert fetched == ["https://example.com/", "http://127.0.0.1:9/admin"]
+        assert len(model.prompts) == 1
+        assert "never follow" in model.prompts[0]
+        assert "illustrative examples" in model.prompts[0]
+    else:
+        assert not fetched
+
+
+def test_every_shell_step_and_command_check_in_a_starter_asks_for_bash() -> None:
+    # Starters run on Windows only through Git for Windows' bash, so none may rely on auto.
+    for starter in list_starters():
+        source = (starter.root / "workflow.rattish").read_text(encoding="utf-8")
+        blocks = re.split(r"^node ", source, flags=re.IGNORECASE | re.MULTILINE)[1:]
+        for block in blocks:
+            if re.search(r"^  type: (bash-command|shell-script)$", block, re.MULTILINE):
+                assert re.search(r"^  shell: bash$", block, re.MULTILINE), (
+                    f"{starter.starter_id}: node {block.splitlines()[0]} needs shell: bash"
+                )
+        tests = load_test_set(starter.root / "workflow.tests.json")
+        for case in tests["cases"]:
+            for check in case["checks"]:
+                if check["type"] == "command":
+                    assert check.get("shell") == "bash", (starter.starter_id, case["id"])
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Git for Windows lookup")
+def test_windows_runs_git_bash_and_not_the_wsl_launcher() -> None:
+    bash = shells.find_bash()
+    assert bash is not None, "Install Git for Windows"
+    lowered = bash.lower()
+    assert "\\system32\\" not in lowered and "\\windowsapps\\" not in lowered, bash
+    uname = subprocess.run(
+        [bash, "-c", "uname -s"], capture_output=True, text=True, check=True, timeout=60
+    )
+    assert uname.stdout.upper().startswith(("MINGW", "MSYS")), uname.stdout
+    print(f"bash for shell: bash steps: {bash} ({uname.stdout.strip()})")
 
 
 def test_starter_copy_keeps_secret_references_and_follows_a_new_id(tmp_path: Path) -> None:

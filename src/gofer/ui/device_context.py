@@ -7,6 +7,7 @@ from uuid import NAMESPACE_URL, uuid5
 from gofer.core.provider_permissions import provider_permission_args
 from gofer.devices.registry import device_id
 from gofer.ui.device_chat import validate_context
+from gofer.ui.rem_provider_accounts import clean_thread_accounts
 
 
 def project_id(root: str) -> str:
@@ -55,6 +56,8 @@ def shared_context(
         ),
         "resource_ids": [],
         "effort": metadata.get("effort"),
+        # The thread's own account per provider (the model picker's Account menu).
+        "provider_accounts": clean_thread_accounts(metadata.get("accountsByProvider")),
         "scope_mode": "global" if global_scope else "project",
         "desktop_parity": True,
         "projects": projects,

@@ -2,11 +2,14 @@
 # Runs one instrumented test against the real desktop code in this checkout.
 # Needs a running headless emulator and the repository's .venv. Usage:
 #   ./scripts/run-desktop-fixture-test.sh [test class] [fixture flags...]
+# Set INVITATION_ARG to the runner argument the test reads, such as taskProgressInvitationFile (default deviceInvitationFile).
 # The fixture uses temporary keys and a canned provider. The test resets the app's data.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 test_class="${1:-dev.raticode.mobile.LiveDeviceTest}"
+invitation_arg="${INVITATION_ARG:-deviceInvitationFile}"
+[[ "$invitation_arg" =~ ^[A-Za-z]+$ ]] || { echo "INVITATION_ARG must be a runner argument name, such as taskProgressInvitationFile." >&2; exit 2; }
 [[ $# -eq 0 ]] || shift
 python="$PWD/../../.venv/bin/python"
 [[ -x "$python" ]] || { echo "Create the repository's .venv first (uv sync at the repository root)." >&2; exit 2; }
@@ -45,4 +48,4 @@ done
 "$adb" -s "$ANDROID_SERIAL" push "$work/raticode-test-invitation.txt" "$remote" >/dev/null
 ./gradlew connectedDebugAndroidTest --console=plain \
   -Pandroid.testInstrumentationRunnerArguments.class="$test_class" \
-  -Pandroid.testInstrumentationRunnerArguments.deviceInvitationFile="$remote"
+  -Pandroid.testInstrumentationRunnerArguments."$invitation_arg"="$remote"

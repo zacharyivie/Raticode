@@ -152,6 +152,26 @@ class RemNoticesTest {
         assertEquals("[\"finished\"]", params.getJSONArray("include").toString())
     }
 
+    @Test fun theProtocolFixturesQuestionParsesUnderNeedsYou() {
+        val file = java.io.File("../../../src/gofer/devices/protocol/v2/fixtures/desktop.result.rem-notices-decision.json")
+        val body = JSONObject(JSONObject(file.readText()).getJSONObject("payload").getString("body"))
+        val notice = RemNoticeText.parse(body).notices.single()
+        assertEquals(RemAlertRules.DECISION, notice.kind)
+        assertEquals(RemAlertRules.NEEDS_YOU, notice.reason)
+        assertTrue(notice.needsUser)
+        assertEquals("D-12", notice.decisionId)
+        assertEquals("Which branch does finished work in Raticode land on?", notice.question)
+        assertEquals("Raticode", notice.projectName)
+        assertEquals("dev", notice.recommended)
+        // Whatever reason the answer gives, a question counts under Needs you; one without a usable ID is a plain update.
+        val odd = RemNoticeText.parse(JSONObject("""{"cursor": 1, "notices": [
+            {"id": "a", "kind": "decision", "reason": "finished", "decision": {"id": "D-3", "question": "Q"}},
+            {"id": "b", "kind": "decision", "reason": "needs_you", "decision": {"id": "../x", "question": "Q"}}]}""")).notices
+        assertEquals(listOf(RemAlertRules.NEEDS_YOU, RemAlertRules.NEEDS_YOU), odd.map { it.reason })
+        assertEquals(listOf(RemAlertRules.DECISION, "task_update"), odd.map { it.kind })
+        assertEquals(listOf("D-3", ""), odd.map { it.decisionId })
+    }
+
     @Test fun theProtocolFixturesFoldedNoticeAndDroppedCountParse() {
         // Unit tests run from mobile/android/app; the desktop shares this one copy of the protocol.
         val file = java.io.File("../../../src/gofer/devices/protocol/v2/fixtures/desktop.result.rem-notices-workflow.json")

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
@@ -253,6 +254,40 @@ def test_run_waiting_on_an_approval_exits_7_until_approved(backend) -> None:
     assert ok("rattish", "approvals", workflow_id, "--pending")["approvals"] == []
 
 
+def test_run_from_dry_run_lists_the_approval_steps_that_ask_again(backend) -> None:
+    workflow_id = backend.workflow(
+        GATE.replace("Ship it?\n", "Ship it?\n  to: ship\n")
+        + "Node ship:\n  type: bash-command\n  command: printf shipped\n  needs: approve\n",
+        "Gated",
+    )
+    code, payload, _ = run("rattish", "start", workflow_id, "--wait", "--timeout", "60")
+    assert code == 7, payload
+    run_id = payload["data"]["id"]
+    assert ok("rattish", "approve", workflow_id, run_id, "approve")
+    finished = ok("rattish", "wait", workflow_id, run_id, "--timeout", "60", "--interval", "0.2")
+    assert finished["status"] == "success"
+
+    plan = ok("rattish", "start", workflow_id, "--from", "ship", "--dry-run")["plan"]
+    assert plan["reuseRunId"] == run_id
+    # The gate is never reused, so nothing is, and the gate asks again.
+    assert plan["reusedNodes"] == []
+    assert plan["askAgainNodes"] == ["approve"]
+    code, text, _ = run(
+        "rattish",
+        "start",
+        workflow_id,
+        "--from",
+        "ship",
+        "--dry-run",
+        "--output",
+        "text",
+        json_output=False,
+    )
+    assert code == 0, text
+    assert f"Run from ship would reuse run {run_id}: no steps" in text
+    assert "Approval steps that ask again: approve" in text
+
+
 def test_runs_all_lists_every_workflow_with_how_each_run_started(backend, monkeypatch) -> None:
     nightly = backend.workflow(ECHO)
     other = backend.workflow(ECHO.replace("Nightly", "Weekly"), "Weekly")
@@ -338,6 +373,77 @@ def test_workflow_export_and_import_round_trip(backend) -> None:
     assert code in {2, 5} and payload["ok"] is False
 
 
+def test_export_moves_only_the_bundle_it_asked_for(tmp_path: Path) -> None:
+    # Whatever answers on the backend's port names bundlePath; before the fix the CLI
+    # moved that file, whichever of the user's files it was.
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from gofer.cli.client import write_api_files
+
+    victim = tmp_path / "notes" / "important.txt"
+    victim.parent.mkdir()
+    victim.write_text("precious", encoding="utf-8")
+
+    class Hostile(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            body = json.dumps({"bundlePath": str(victim)}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: Any) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Hostile)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        data = tmp_path / "data"
+        write_api_files(data, url=f"http://127.0.0.1:{server.server_address[1]}", token="t")
+        out = tmp_path / "out.raticode"
+        run("rattish", "export", "wf", "-f", str(out), "--data-dir", str(data))
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert victim.read_text(encoding="utf-8") == "precious"
+    assert not out.exists()
+
+
+def test_social_list_state_cant_add_query_parameters(tmp_path: Path) -> None:
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from gofer.cli.client import write_api_files
+
+    paths: list[str] = []
+
+    class Recorder(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            paths.append(self.path)
+            body = b'{"posts": []}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: Any) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Recorder)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        data = tmp_path / "data"
+        write_api_files(data, url=f"http://127.0.0.1:{server.server_address[1]}", token="t")
+        code, _, _ = run("social", "list", "--state", "draft&limit=1", "--data-dir", str(data))
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert code == 0
+    assert paths == ["/api/social/posts?state=draft%26limit%3D1"]
+
+
 def test_triggers_export_and_apply_are_idempotent(backend) -> None:
     workflow_id = backend.workflow(ECHO)
     spec = backend.tmp / "triggers.json"
@@ -363,8 +469,11 @@ def test_triggers_export_and_apply_are_idempotent(backend) -> None:
     trigger = exported["triggers"][0]
     assert trigger["config"] == {"expression": "0 3 * * *", "timezone": "UTC"}
     assert "id" not in trigger and "token" not in trigger
+    # A file without a Time limit gets the 6-hour default, and export carries it.
+    assert trigger["maxRunSeconds"] == 6 * 3600
     # Editing the exported file and applying it updates the same trigger.
     trigger["enabled"] = True
+    trigger["maxRunSeconds"] = 1800
     edited = backend.tmp / "edited.json"
     ok("rattish", "triggers", "export", workflow_id, "-f", str(edited))
     edited.write_text(json.dumps(exported))
@@ -372,6 +481,7 @@ def test_triggers_export_and_apply_are_idempotent(backend) -> None:
     assert changed["updated"] == [first["created"][0]["id"]]
     state = ok("api", "GET", "/rattish/triggers", "-f", f"workflowId={workflow_id}")
     assert state["triggers"][0]["enabled"] is True
+    assert state["triggers"][0]["maxRunSeconds"] == 1800
     empty = backend.tmp / "empty.json"
     empty.write_text(json.dumps({"triggers": []}))
     kept = ok("rattish", "triggers", "apply", workflow_id, "-f", str(empty))
@@ -462,6 +572,39 @@ def test_org_config_apply_employees_schedule_and_conflicts(backend) -> None:
     )
     # Configuration never starts an organization.
     assert ok("org", "list")[0]["state"] == "paused"
+
+
+def test_org_employees_account_chooses_one_of_the_providers_accounts(backend, monkeypatch) -> None:
+    import gofer.core.provider_capabilities as capabilities
+    from gofer.core import provider_accounts as accounts
+
+    monkeypatch.setattr(
+        capabilities, "provider_capabilities_payload", lambda refresh=False: {"providers": []}
+    )
+    work = accounts.create_account("work", provider="codex", data_dir=backend.data)
+    accounts.create_account("personal", provider="claude_code", data_dir=backend.data)
+    document = {"config": {"name": "Studio", "employees": [{"id": "lead", "name": "Avery"}]}}
+    org_id = ok("org", "apply", "-f", str(_org_file(backend, document)))["id"]
+
+    chosen = ok("org", "employees", "account", org_id, "lead", "work")
+    assert chosen == {
+        "id": "lead",
+        "account": work.account_id,
+        "accountName": "work",
+        "changed": True,
+    }
+    assert ok("org", "show", org_id)["config"]["employees"][0]["account"] == work.account_id
+    # The ID works too, and choosing the same account changes nothing.
+    assert ok("org", "employees", "account", org_id, "lead", work.account_id)["changed"] is False
+    # Another provider's account isn't offered.
+    code, payload, _ = run("org", "employees", "account", org_id, "lead", "personal")
+    assert code == 3 and "work" in payload["error"]["message"]
+    back = ok("org", "employees", "account", org_id, "lead", "default")
+    assert back["account"] is None and back["changed"] is True
+    assert ok("org", "show", org_id)["config"]["employees"][0].get("account") is None
+    assert ok("org", "history", org_id)[0]["reason"] == (
+        "Avery uses the default sign-in, set from the CLI"
+    )
 
 
 def test_org_tickets_projects_knowledge_and_packages(backend) -> None:
@@ -695,15 +838,17 @@ def test_providers_models_status_and_settings(backend, monkeypatch) -> None:
 
 
 def test_usage_show_and_refresh_use_no_real_provider(backend, monkeypatch) -> None:
+    from gofer.core.usage_ledger import record_invocation
     from gofer.ui import server as ui
 
-    calls: list[int] = []
+    calls: list[dict[str, Any]] = []
 
-    async def fake_refresh(data_dir: Path, *, days: int, explicit: bool) -> dict[str, Any]:
-        calls.append(days)
+    async def fake_refresh(
+        data_dir: Path, *, query: dict[str, Any], explicit: bool
+    ) -> dict[str, Any]:
+        calls.append(query)
         return {
             "scope": "device",
-            "days": days,
             "accounts": [{"provider": "codex", "status": "available", "windows": []}],
         }
 
@@ -711,8 +856,195 @@ def test_usage_show_and_refresh_use_no_real_provider(backend, monkeypatch) -> No
     shown = ok("usage", "show", "--days", "7")
     assert shown["days"] == 7 and isinstance(shown["accounts"], list)
     assert ok("usage", "refresh", "--days", "7")["accounts"][0]["provider"] == "codex"
-    assert calls == [7]
+    assert calls[-1]["days"] == "7"
     assert run("usage", "show", "--days", "5")[0] == 2
+    # The older 90 days is 3mo; the new periods and custom ranges go through --range/--from/--to.
+    assert ok("usage", "show", "--days", "90")["range"]["key"] == "3mo"
+    for period in ("3mo", "6mo", "1y", "5y", "all"):
+        assert ok("usage", "show", "--range", period)["range"]["key"] == period
+    custom = ok("usage", "show", "--from", "2026-01-01", "--to", "2026-01-31")
+    assert custom["range"]["key"] == "custom" and custom["range"]["end_date"] == "2026-01-31"
+    ok("usage", "refresh", "--range", "6mo")
+    assert calls[-1]["period"] == "6mo"
+    assert run("usage", "show", "--range", "2y")[0] == 2
+    assert run("usage", "show", "--from", "2026-02-01", "--to", "2026-01-01")[0] == 2
+    assert run("usage", "show", "--from", "2026-02-01")[0] == 2
+    assert run("usage", "show", "--range", "7d", "--days", "7")[0] == 2
+    # Text output lists tokens per bucket and provider.
+    record_invocation(
+        invocation_id="cli-usage",
+        provider="codex",
+        data_dir=backend.data,
+        metadata={"input_tokens": 1200, "output_tokens": 34},
+    )
+    code, stdout, _ = run("usage", "show", "--range", "7d", "--output", "text", json_output=False)
+    assert code == 0
+    assert "Tokens in Raticode, Last 7 days, per day: 1,234 reported" in stdout
+    assert "codex 1,234 (100%)" in stdout
+    # The codex call names no model, so its API cost is unknown, never $0.
+    assert "Estimated API cost (Last 7 days): unknown" in stdout
+    assert "Saved vs API" not in stdout
+    # --by account splits each provider by account, named as the chart's legend names them.
+    record_invocation(
+        invocation_id="cli-usage-work",
+        provider="codex",
+        profile="work",
+        data_dir=backend.data,
+        metadata={"input_tokens": 3000, "output_tokens": 0},
+    )
+    code, stdout, _ = run(
+        "usage", "show", "--range", "7d", "--by", "account", "--output", "text", json_output=False
+    )
+    assert code == 0, stdout
+    assert "BY ACCOUNT" in stdout
+    assert "codex (work) 3,000 (71%)" in stdout
+    assert "codex (Default account) 1,234 (29%)" in stdout
+    code, stdout, _ = run("usage", "show", "--range", "7d", "--output", "text", json_output=False)
+    assert "BY PROVIDER" in stdout and "codex 4,234 (100%)" in stdout
+    # JSON carries both groupings whichever way text output splits them.
+    shown = ok("usage", "show", "--range", "7d", "--by", "account")
+    assert [a["key"] for a in shown["series"]["accounts"]] == ["codex:work", "codex:"]
+    assert [p["provider"] for p in shown["series"]["providers"]] == ["codex"]
+    assert run("usage", "show", "--by", "model")[0] == 2
+
+
+def test_usage_alerts_show_and_change_the_limit_alerts(backend) -> None:
+    shown = ok("usage", "alerts")
+    assert shown["enabled"] is True and shown["thresholds"] == [80, 95]
+    assert ok("usage", "alerts", "--off")["enabled"] is False
+    # One level changes; the other keeps its saved value.
+    changed = ok("usage", "alerts", "--on", "--first", "70")
+    assert changed["enabled"] is True and changed["thresholds"] == [70, 95]
+    assert ok("usage", "alerts", "--second", "90")["thresholds"] == [70, 90]
+    code, _, _ = run("usage", "alerts", "--first", "95")
+    assert code != 0
+    assert ok("usage", "alerts")["thresholds"] == [70, 90]
+    code, stdout, _ = run("usage", "alerts", "--output", "text", json_output=False)
+    assert code == 0
+    assert "Limit alerts are on, at 70% and 90% of each 5-hour and weekly window." in stdout
+
+
+def test_api_cost_from_the_cli(backend) -> None:
+    from gofer.core.api_prices import price_for
+    from gofer.core.usage_ledger import record_invocation
+
+    # The plan-price commands were removed along with Saved vs API.
+    assert run("usage", "plan", "list")[0] == 2
+    record_invocation(
+        invocation_id="cli-cost",
+        provider="claude_code",
+        model="claude-opus-5-5",
+        data_dir=backend.data,
+        metadata={"input_tokens": 3_000_000, "cache_read_tokens": 2_000_000, "output_tokens": 0},
+    )
+    cost = ok("usage", "show", "--range", "24h")["api_cost"]
+    price = price_for("claude_code", "claude-opus-5-5")
+    assert price is not None
+    expected = (1_000_000 * price.input + 2_000_000 * price.cache_read_price) / 1_000_000
+    assert cost["total"]["cost_usd"] == pytest.approx(expected)
+    assert not {"savings", "plans", "plan_providers"} & cost.keys()
+    code, stdout, _ = run("usage", "show", "--range", "24h", "--output", "text", json_output=False)
+    assert code == 0
+    assert f"Estimated API cost (Last 24 hours): ${expected:,.2f}" in stdout
+    assert "Saved vs API" not in stdout
+
+
+def test_computers_list_and_set_this_computers_worker_limit(backend) -> None:
+    [this] = ok("computers", "list")["computers"]
+    assert this["this_computer"] is True and this["state"] == "online"
+    assert this["max_threads_setting"] == 0 and this["max_threads"] >= 1
+    assert set(this["running_by_kind"]) == {"rem", "phone", "organizations", "swarms"}
+    assert this["running_work"] == []
+    changed = ok("computers", "set", "3")["computers"][0]
+    assert changed["max_threads"] == 3 and changed["max_threads_setting"] == 3
+    code, payload, _ = run("computers", "set", "40")
+    assert code != 0 and payload["ok"] is False
+    code, payload, _ = run("computers", "set", "2", "--computer", "missing")
+    assert code != 0 and "No computer" in payload["error"]["message"]
+    code, stdout, stderr = run("computers", "list", "--output", "text", json_output=False)
+    assert code == 0 and not stderr
+    assert "this computer" in stdout and "LIMIT" in stdout
+
+
+def test_computers_list_text_shows_each_computers_running_workers_by_kind() -> None:
+    from gofer.cli.commands.system import _computers_text
+
+    fixture = Path(__file__).parents[2] / (
+        "src/gofer/devices/protocol/v2/fixtures/desktop.result.computers-list.json"
+    )
+    body = json.loads(json.loads(fixture.read_text())["payload"]["body"])
+    text = _computers_text(body)
+    lines = text[text.index("Running workers") :].splitlines()
+    assert lines == [
+        "Running workers",
+        "  Studio desktop: 1 Rem task, 1 organization worker",
+        "    - Rem task: Fix the login page",
+        "    - organization worker: Acme · Ada",
+        # A paired desktop shares counts only; an offline one shows nothing.
+        "  Workstation: 2 organization workers, 1 Rem task",
+    ]
+    # An older desktop without counts shows only its total, in the table.
+    body["computers"][1]["running_by_kind"] = None
+    assert "Workstation:" not in _computers_text(body)
+
+
+def test_computers_placement_saves_validates_and_reads_back(backend) -> None:
+    view = ok("computers", "placement")
+    rem = view["consumers"][0]
+    assert rem["consumer"] == "rem" and rem["strategy"] == "overflow" and rem["saved"] is False
+    [this] = view["computers"]
+    saved = ok("computers", "place", "rem", "manual", "--computer", this["id"])
+    assert saved["consumers"][0]["computers"] == [this["id"]]
+    assert ok("computers", "placement")["consumers"][0]["strategy"] == "manual"
+    code, payload, _ = run("computers", "place", "rem", "manual")
+    assert code != 0 and "at least one computer" in payload["error"]["message"]
+    code, payload, _ = run("computers", "place", "rem", "manual", "--computer", "missing")
+    assert code != 0 and "No computer" in payload["error"]["message"]
+    code, payload, _ = run("computers", "place", "org:missing", "balanced")
+    assert code != 0 and "No consumer" in payload["error"]["message"]
+    code, stdout, stderr = run("computers", "placement", "--output", "text", json_output=False)
+    assert code == 0 and not stderr
+    assert "Rem" in stdout and "manual" in stdout and "STRATEGY" in stdout
+
+
+def test_computers_placement_text_shows_the_notice_for_a_paired_only_placement(backend) -> None:
+    paired = "00000000-0000-4000-8000-0000000000aa"
+    backend.server.computers.fleet = lambda: [
+        {
+            "device_id": paired,
+            "name": "Desktop B",
+            "role": "desktop",
+            "state": "active",
+            "reachability": "reachable",
+            "last_seen": time.time(),
+            "running_jobs": [],
+        }
+    ]
+    ok("computers", "place", "rem", "manual", "--computer", paired)
+    code, stdout, stderr = run("computers", "placement", "--output", "text", json_output=False)
+    assert code == 0 and not stderr
+    assert (
+        "Rem: Rem's work starts only on this computer for now, so with only Desktop B picked, "
+        "every task waits. A waiting research or conversation task can still go to Desktop B "
+        "when you pick Run there."
+    ) in stdout.splitlines()
+    # With this computer picked too, nothing is printed under the table.
+    this = next(c["id"] for c in ok("computers", "placement")["computers"] if c["this_computer"])
+    ok("computers", "place", "rem", "manual", "--computer", paired, "--computer", this)
+    _, stdout, _ = run("computers", "placement", "--output", "text", json_output=False)
+    assert "starts only on this computer" not in stdout
+
+
+def test_computers_order_saves_the_order_and_refuses_an_unknown_computer(backend) -> None:
+    [this] = ok("computers", "placement")["computers"]
+    assert ok("computers", "order", this["id"])["order"] == [this["id"]]
+    code, payload, _ = run("computers", "order", this["id"], "missing")
+    assert code != 0 and "No computer with the ID missing" in payload["error"]["message"]
+    code, stdout, stderr = run(
+        "computers", "order", this["id"], "--output", "text", json_output=False
+    )
+    assert code == 0 and not stderr
+    assert stdout.startswith(f"Order: {this['name']}")
 
 
 def test_devices_and_threads(backend) -> None:

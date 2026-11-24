@@ -5,12 +5,20 @@ from __future__ import annotations
 import hashlib
 import logging
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from gofer.ui.report_outputs import ReportTools
+from gofer.ui.brain_summaries import SUMMARY_RULE
+from gofer.ui.report_outputs import (
+    CITATION_RULES,
+    RULES_TOOL,
+    ReportTools,
+    evidence_schema,
+    save_report_description,
+    summary_schema,
+)
 from gofer.ui.swarm_tools import TOOL_FAILURE_HINT, SwarmToolServer
 from gofer.utils.atomic_output import mkdir_without_links, open_binary_input
 
@@ -51,14 +59,90 @@ def validate_artifacts(run: dict[str, Any]) -> None:
             raise ValueError("The research artifact changed after saving")
 
 
-def record_artifact(home: RemHome, run: dict[str, Any], path: Path, sha256: str) -> None:
-    """Show a report saved into a Second Brain in its Reports and project pages."""
-    from gofer.ui.brain_library import BrainLibrary
+REPORT_FIELDS = ("evidence", "title", "question")
+PROJECT_FOLDER_NOTE = (
+    "This report was saved in a project folder, not a Second Brain, so its {fields} "
+    "{verb} ignored. Citations are only recorded for reports saved into a brain."
+)
+UNREGISTERED_NOTE = (
+    "This report's folder isn't a brain in Second Brain's Library, so its {fields} "
+    "{verb} not recorded."
+)
 
+
+def ignored_note(template: str, arguments: dict[str, Any]) -> str:
+    fields = [name for name in REPORT_FIELDS if arguments.get(name)]
+    if not fields:
+        return ""
+    names = fields[0] if len(fields) == 1 else ", ".join(fields[:-1]) + " and " + fields[-1]
+    return template.format(fields=names, verb="was" if len(fields) == 1 else "were")
+
+
+def readable_brains(library: Any, brain_config: dict[str, Any]) -> Callable[[str], None]:
+    """A check that raises ValueError for a brain this task may not read.
+
+    The task reads the brains chosen for Rem (brainIds). An older single-folder setup
+    reads the registered brain at that folder. Like the task's second_brain tools, a
+    brain whose cloud access was revoked or whose folder is gone is not readable.
+    """
+    selected = brain_config.get("brainIds")
+    if isinstance(selected, list) and selected:
+        allowed = {str(item) for item in selected}
+    else:
+        root = Path(str(brain_config.get("root") or "")).expanduser()
+        allowed = {
+            brain["id"]
+            for brain in library.brains()
+            if root.is_absolute() and Path(brain["root"]).resolve() == root.resolve()
+        }
+
+    def check(brain_id: str) -> None:
+        if brain_id not in allowed:
+            raise ValueError("This brain is not selected for the task")
+        brain = library.brain(brain_id)
+        if not brain["settings"].get("allowCloud") or not Path(brain["root"]).is_dir():
+            raise ValueError("This brain is unavailable to the task")
+
+    return check
+
+
+def record_artifact(
+    home: RemHome,
+    run: dict[str, Any],
+    path: Path,
+    sha256: str,
+    arguments: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Show a report saved into a Second Brain in its Reports and project pages.
+
+    The save call's evidence is checked against the brains the task may read, and the
+    citations, title and question go on the report record. Returns what to add to the
+    tool reply: one mark per evidence entry, and a note when fields went unrecorded.
+    """
+    from gofer.ui.brain_library import BrainLibrary, evidence_reply
+
+    brain_config = run["config"].get("brain") or {}
+    in_brain = bool(brain_config.get("enabled"))
+    reply: dict[str, Any] = {}
+    if not in_brain:
+        # A project folder: the fields are ignored. The record is still made when
+        # that folder happens to sit inside a registered brain.
+        note = ignored_note(PROJECT_FOLDER_NOTE, arguments or {})
+        if note:
+            reply["note"] = note
+        arguments = {}
+    arguments = arguments or {}
     shared: BrainLibrary | None = home.brain_library
     library = shared or BrainLibrary(home.data_dir, start=False, recover=False)
     try:
-        library.record_artifact(
+        citations, marks = (
+            library.resolve_evidence(
+                arguments.get("evidence"), readable_brains(library, brain_config)
+            )
+            if in_brain
+            else ([], [])
+        )
+        record = library.record_artifact(
             path,
             {
                 "savedVia": "rem_task",
@@ -72,12 +156,27 @@ def record_artifact(home: RemHome, run: dict[str, Any], path: Path, sha256: str)
                 "model": run["config"].get("model", ""),
                 "sha256": sha256,
             },
+            title=str(arguments.get("title") or ""),
+            question=str(arguments.get("question") or ""),
+            citations=citations,
         )
+        if record is None:
+            note = ignored_note(UNREGISTERED_NOTE, arguments)
+            if note:
+                reply["note"] = note
+        else:
+            reply.update(evidence_reply(citations, marks))
     except Exception:  # noqa: BLE001 - the report itself is saved; its record can be backfilled
         log.exception("Could not register a saved report in the Second Brain")
+        if arguments.get("evidence"):
+            reply["note"] = (
+                "The report was saved, but Raticode couldn't record its citations in the "
+                "Second Brain."
+            )
     finally:
         if shared is None:
             library.close()
+    return reply
 
 
 @contextmanager
@@ -94,6 +193,19 @@ def artifact_tools(
     reports = ReportTools(root, theme.get("format", "html"), theme=theme)
 
     def call(name: str, arguments: dict[str, Any]) -> Any:
+        if name == "rules":
+            # The only full copy of the report rules this turn gets; the prompt and
+            # save_report point here.
+            return (
+                reports.call("rules", {})
+                + " "
+                + CITATION_RULES
+                + " Evidence, title and question are recorded when the report is saved "
+                "into a Second Brain; in a project folder they are ignored and the reply "
+                "says so."
+            )
+        if name != "save_report":
+            raise ValueError("Unknown report tool.")
         with home.store.connect() as db:
             current = home.store.get(db, "runs", run["id"])
             if current["epoch"] != run["epoch"] or current["state"] == "cancelling":
@@ -105,7 +217,14 @@ def artifact_tools(
         home.authorize(refreshed, run["recipe"])
         if artifact_root({**run, "config": refreshed}) != root:
             raise ValueError("The report destination changed; update the task before saving")
-        result = reports.call(name, arguments)
+        result = reports.call(
+            name,
+            {
+                key: arguments[key]
+                for key in ("path", "content", "format", "summary")
+                if key in arguments
+            },
+        )
         try:
             with open_binary_input(Path(result["path"])) as handle:
                 data = handle.read(2 * 1024 * 1024 + 1)
@@ -122,7 +241,13 @@ def artifact_tools(
                 home.store.event(
                     db, "artifact.saved", {"run_id": run["id"], "path": result["path"]}
                 )
-            record_artifact(home, run, Path(result["path"]), receipt["sha256"])
+            described = record_artifact(
+                home,
+                {**run, "config": refreshed},
+                Path(result["path"]),
+                receipt["sha256"],
+                arguments,
+            )
         except (OSError, sqlite3.Error) as exc:
             # The file exists now, so an identical retry would only report a
             # name clash. Say what happened and how to recover.
@@ -132,7 +257,7 @@ def artifact_tools(
                 f"The report was written to {shown}, but its receipt couldn't be recorded "
                 f"({type(exc).__name__}). Save it again under a new name."
             ) from exc
-        return result
+        return {**result, **described}
 
     server = SwarmToolServer()
     url = server.register(
@@ -140,21 +265,32 @@ def artifact_tools(
         [
             {
                 "name": "save_report",
-                "description": reports.call("rules", {}),
+                # rules returns the full report format, theme and citation rules; the
+                # prompt and this description point to it.
+                "description": save_report_description(
+                    "into this task's granted output folder", reports.report_format
+                )
+                + " To cite Second Brain sources, also pass evidence, title and question; "
+                "rules explains them. " + SUMMARY_RULE,
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "path": {"type": "string"},
                         "content": {"type": "string"},
                         "format": {"type": "string", "enum": ["html", "md", "pdf", "slides"]},
+                        "title": {"type": "string"},
+                        "question": {"type": "string"},
+                        "summary": summary_schema(),
+                        "evidence": evidence_schema(),
                     },
                     "required": ["path", "content"],
                     "additionalProperties": False,
                 },
                 "annotations": {"readOnlyHint": False},
-            }
+            },
+            RULES_TOOL,
         ],
-        "Save reports only through this granted output service.",
+        "Save reports only through this granted output service. Call rules before writing one.",
         label="Report",
         failure_hint=TOOL_FAILURE_HINT,
     )

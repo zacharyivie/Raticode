@@ -171,7 +171,8 @@ def test_runs_the_trigger_scheduler_started_stop_from_the_app_and_the_cli(
     assert document["status"] == "stopped"
     assert time.monotonic() - started < 10
     assert document["events"][-1]["status"] == "stopped"
-    assert not run_stop_marker(record).exists()
+    # The run writes its stopped record before it removes the marker on the way out.
+    assert _wait(lambda: not run_stop_marker(record).exists(), timeout=10)
     row = next(
         run
         for run in api.list_workflow_run_logs_payload(workflow_id, base)["runs"]
@@ -193,7 +194,8 @@ def test_runs_the_trigger_scheduler_started_stop_from_the_app_and_the_cli(
         "message": "Stop requested",
     }
     assert _wait(lambda: _ended(record), timeout=10)["status"] == "stopped"
-    assert not run_stop_marker(record).exists()
+    # The run writes its stopped record before it removes the marker on the way out.
+    assert _wait(lambda: not run_stop_marker(record).exists(), timeout=10)
 
     # Without --run it stops every run of the workflow; a finished run is left alone.
     third, fourth = fire("third.txt"), fire("fourth.txt")

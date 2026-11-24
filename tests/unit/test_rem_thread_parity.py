@@ -174,6 +174,10 @@ def test_a_worktree_skill_replaces_rems_temporary_worktree(
         monkeypatch.setenv(f"{key}_NAME", "Rem")
         monkeypatch.setenv(f"{key}_EMAIL", "rem@example.com")
     rem.configure({"provider": "claude_code", "resources": thread_defaults(tmp_path)})
+    # The project's landing branch is its own decision; here the checkout's branch.
+    rem.change_decisions(
+        {"action": "add", "topic": "branch.integration", "answer": "main", "project": str(project)}
+    )
     workers: list[dict[str, Any]] = []
     release = threading.Event()
     original = rem.source
@@ -208,9 +212,10 @@ def test_a_worktree_skill_replaces_rems_temporary_worktree(
         assert "temporary git worktree" not in instructions
         assert "The enabled worktree-dev-flow skill" in instructions
         assert "keep working in the worktree by absolute path" in instructions
-        # Landing on dev is part of finishing, even where dev is the checkout's branch.
+        # Landing is part of finishing, even where the branch is the checkout's own.
         assert "with one exception: landing" in instructions
         assert "isn't finished until its branch has landed" in instructions
+        assert "local main, the project's recorded decision" in instructions
     assert "rem/" not in git(project, "branch")
     assert git(project, "worktree", "list").count("\n") == 0
 
@@ -289,3 +294,33 @@ def test_unattended_rem_tasks_get_no_fleet_or_organizations_tools(monkeypatch):
     assert asyncio.run(run())[-1]["type"] == "final"
     assert seen[0]["workflow"]["remResources"]["mcpServers"] == []
     assert "trusted_organization_url" not in seen[0]
+
+
+def test_unattended_rem_tasks_get_only_the_propose_only_social_tools(monkeypatch, tmp_path):
+    import gofer.ui.server as server_module
+    from gofer.social.service import SocialService
+    from gofer.ui.server import GoferUiServer
+
+    seen: list[dict[str, Any]] = []
+
+    async def chat_source(**kwargs: Any):
+        seen.append(kwargs)
+        yield {"type": "final", "text": "done"}
+
+    monkeypatch.setattr(server_module, "stream_workflow_chat", chat_source)
+    server = SimpleNamespace(
+        devices=SimpleNamespace(action=lambda body: {}), social=SocialService(tmp_path)
+    )
+
+    async def run() -> list[dict[str, Any]]:
+        return [
+            event
+            async for event in GoferUiServer._rem_task_source(
+                server,  # type: ignore[arg-type]
+                workflow={"remUnattended": True, "remResources": {"mcpServers": []}},
+            )
+        ]
+
+    assert asyncio.run(run())[-1]["type"] == "final"
+    servers = seen[0]["workflow"]["remResources"]["mcpServers"]
+    assert [item["name"] for item in servers] == ["social"]

@@ -424,6 +424,9 @@ SECRET_OPTION_EXCEPTIONS = {
     # Caps on how many AI tokens self-work may use, not sign-in tokens.
     ("selfwork set", "--session-token-limit"),
     ("selfwork set", "--daily-token-limit"),
+    # Daily caps on the AI tokens triggered runs may use.
+    ("rattish triggers update", "--daily-max-tokens"),
+    ("rattish triggers budget", "--max-tokens"),
     # A folder of owner-only secret files; the values never go on the command line.
     ("serve", "--secrets-dir"),
     ("ui serve", "--secrets-dir"),
@@ -704,6 +707,12 @@ def test_api_not_found_and_invalid_input(backend: dict[str, Any]) -> None:
     assert method.exit_code == ExitCode.USAGE
 
 
+def test_import_preview_without_a_bundle_is_a_bad_request(backend: dict[str, Any]) -> None:
+    result = _invoke("api", "POST", "/workflows/import/preview", "--data", "{}")
+    assert result.exit_code == ExitCode.USAGE, result.stdout
+    assert _envelope(result)["error"]["http"] == 400
+
+
 def test_api_refuses_remote_endpoints_before_connecting(backend: dict[str, Any]) -> None:
     result = _invoke("api", "GET", "/health", "--endpoint", "http://192.0.2.10:8765")
     assert result.exit_code == ExitCode.USAGE
@@ -716,6 +725,88 @@ def test_unreachable_backend_exits_6(tmp_path: Path) -> None:
     result = _invoke("api", "GET", "/health", "--data-dir", str(tmp_path))
     assert result.exit_code == ExitCode.UNREACHABLE
     assert _envelope(result)["error"]["code"] == "unreachable"
+
+
+def test_a_stale_endpoint_file_never_sends_the_token_to_whatever_holds_the_port(
+    tmp_path: Path,
+) -> None:
+    # A backend killed without cleanup leaves endpoint.json and its token behind;
+    # another program (or account) may now listen on the recorded port.
+    seen: list[str | None] = []
+
+    class Squatter(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            seen.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *args: Any) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Squatter)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        exited = 2**22 + 11
+        write_api_files(tmp_path, url=f"http://127.0.0.1:{port}", token="owner-secret", pid=exited)
+        result = _invoke("api", "GET", "/health", "--data-dir", str(tmp_path))
+        assert result.exit_code == ExitCode.UNREACHABLE, result.stdout
+        assert "no longer running" in _envelope(result)["error"]["message"]
+        assert seen == []
+        # The same file with a live backend's pid still connects.
+        write_api_files(tmp_path, url=f"http://127.0.0.1:{port}", token="owner-secret")
+        assert _invoke("api", "GET", "/health", "--data-dir", str(tmp_path)).exit_code == 0
+        assert seen == ["Bearer owner-secret"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_an_agent_turn_reaches_a_live_backend_whose_pid_it_cant_see(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Worker turns run in their own PID namespace (bwrap --unshare-pid), so the PID in
+    # endpoint.json of a running backend looks gone from inside one. Only the owner
+    # token is held back for a stale endpoint, and agent turns never carry it.
+    seen: list[str | None] = []
+
+    class Backend(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            seen.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *args: Any) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Backend)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        port = server.server_address[1]
+        invisible = 2**22 + 13
+        write_api_files(
+            tmp_path, url=f"http://127.0.0.1:{port}", token="owner-secret", pid=invisible
+        )
+        agent = tmp_path / "agent.token"
+        agent.write_text("rtk_agent_" + "a" * 40 + "\n", encoding="utf-8")
+        agent.chmod(0o600)
+        args = ("api", "GET", "/health", "--data-dir", str(tmp_path), "--token-file", str(agent))
+
+        monkeypatch.setenv("RATICODE_AGENT_SESSION", "1")
+        in_turn = _invoke(*args)
+        assert in_turn.exit_code == 0, in_turn.stdout + in_turn.stderr
+        # An agent token from the user's own terminal isn't held back either.
+        monkeypatch.delenv("RATICODE_AGENT_SESSION")
+        assert _invoke(*args).exit_code == 0
+        assert seen == ["Bearer rtk_agent_" + "a" * 40] * 2
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_request_id_retries_do_not_duplicate_tickets(backend: dict[str, Any]) -> None:

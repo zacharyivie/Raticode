@@ -54,7 +54,7 @@ These pages cover Raticode desktop and mobile as they are in the source. A recen
 | Status | Features |
 | --- | --- |
 | **Available** in the desktop app | The studio (editors, Source control, terminal, the Browser plugin), Rem's home and tasks, threads, the global Kanban board and self-work, workflows and triggers, reports, and the `Raticode` CLI |
-| **Experimental**, off until you turn it on in **Settings > Developer > Feature Preview** | Phone and desktop pairing (and with it the desktop fleet), [Organizations](./advanced/organizations.md), [Swarms](./advanced/swarms.md), [Second Brain](./knowledge/second-brain.md) |
+| **Experimental**, off until you turn it on in **Settings > Developer > Feature Preview** | Phone and desktop pairing (and with it the desktop fleet), [Organizations](./advanced/organizations.md), [Swarms](./advanced/swarms.md), [Second Brain](./knowledge/second-brain.md), [Social posts](./advanced/posts.md) |
 | **Platform limits** | Desktop builds: Apple Silicon Macs, x64 Windows, x64 Linux. Mac builds are signed and notarized from 0.5.3 on ([installation](./installation.md#macos)); Windows builds are not code-signed. Raticode (gecko) and waking a computer from the phone need Linux. |
 | **Not released yet** | Signed Windows builds are planned. The AUR packages `raticode-bin` and `raticode-cli-bin` are ready but unpublished ([Arch Linux](./installation.md#arch-linux-aur)). |
 

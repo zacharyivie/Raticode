@@ -120,6 +120,8 @@ internal class GeckoBrowser private constructor(private val app: Application) {
     /** Sessions of private tabs whose page process ended, kept to reopen (see [sessionLost]). */
     private val lostPrivate = HashMap<String, GeckoSession>()
     private val recovery = TabRecovery()
+    /** Addresses waiting for a reopened tab's restore to land first (see [RestoreQueue]). */
+    private val restores = RestoreQueue()
     private var inFront = true
 
     val tabs get() = saved.tabs.filter { it.profile == saved.currentProfile }
@@ -241,6 +243,7 @@ internal class GeckoBrowser private constructor(private val app: Application) {
     }
 
     private fun closeSession(id: String) {
+        restores.forget(id)
         sessions.remove(id)?.let { if (it === extensionTab) extensionTab = null; it.close() }
         mediaGone(id)
     }
@@ -288,7 +291,11 @@ internal class GeckoBrowser private constructor(private val app: Application) {
         val state = states.remove(id)
         when {
             // A list whose current page isn't a web page (a page process that ended may leave an empty one) opens the address instead.
-            state != null && (url == BrowserRules.HOME || GeckoRules.restorable(state.getOrNull(state.currentIndex)?.uri)) -> session.restoreState(state)
+            state != null && (url == BrowserRules.HOME || GeckoRules.restorable(state.getOrNull(state.currentIndex)?.uri)) -> {
+                // GeckoView restores later; an address loaded meanwhile waits for it (see [load] and [RestoreQueue]).
+                restores.started(id)
+                session.restoreState(state)
+            }
             url != BrowserRules.HOME -> session.loadUri(url)
         }
         return session
@@ -333,7 +340,10 @@ internal class GeckoBrowser private constructor(private val app: Application) {
         crashed.remove(id); reviveAt.remove(id); recovery.forget(id)
         setPage(id) { it.copy(url = url, loading = true, progress = 5, stopped = false) }
         (sessions[id] ?: sessionFor(id))?.let { session ->
-            session.loadUri(url)
+            // A tab just reopened from its saved list loads the address once the restore has landed, so the restored
+            // page can't replace it. It keeps its back history either way.
+            if (restores.defer(id, url)) main.postDelayed({ restores.expired(id)?.let { sessions[id]?.loadUri(it) } }, RestoreQueue.WAIT_MS)
+            else session.loadUri(url)
             if (id == active) { session.setActive(inFront); session.setFocused(inFront); showExtensionsTab() }
         }
     }
@@ -386,6 +396,8 @@ internal class GeckoBrowser private constructor(private val app: Application) {
             val address = url ?: return
             if (id.isEmpty()) return // An extension's popup, which has no tab.
             if (documents.addressChanged(id)) newDocument(id)
+            // The restored page landed with an address waiting: load that now, keeping the address bar on it.
+            restores.locationChanged(id, address)?.let { waiting -> session.loadUri(waiting); return }
             if (address == "about:blank" && pages[id]?.url != BrowserRules.HOME) return
             setPage(id) { it.copy(url = address) }
             val saveAs = if (BrowserAddress.isWeb(address)) BrowserRules.storable(address) else BrowserRules.HOME
@@ -515,6 +527,7 @@ internal class GeckoBrowser private constructor(private val app: Application) {
         if (session === extensionTab) extensionTab = null
         if (sessions[id] !== session) return
         sessions.remove(id)
+        restores.forget(id)
         // A new private session opened after the last one closed stays blank, so a private tab keeps its session and
         // reopens it, as GeckoView allows after onKill and onCrash. Its private data stays private to it.
         if (isPrivate(id)) lostPrivate[id] = session else session.close()

@@ -1,6 +1,7 @@
 """The global Kanban board and Rem's self-work mode, with fake providers and isolated data."""
 
 import json
+import re
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -25,6 +26,14 @@ from tests.unit.test_device_desktop_control import phone as phone
 BASE = datetime(2026, 11, 9, 12, tzinfo=UTC)
 PROPOSAL = '```json\n{"proposals":[{"title":"Voice shortcuts","description":"Hands-free",\
 "why":"Asked for twice"}],"duplicates":[]}\n```'
+# A phrase of the proposal format only self-work research and ideas prompts carry.
+RESEARCH_FORMAT = "evidence for the value"
+NOTHING_FOUND = 'Found nothing new.\n```json\n{"proposals":[],"duplicates":[]}\n```'
+# Phrases only the backlog ranking and guardrail retro formats carry, and their empty answers.
+RANKING_FORMAT = '"impact":3,"relevance":3'
+RETRO_FORMAT = '"fix":"test|lint|agents_pointer|raticode_bug"'
+NOTHING_RANKED = 'Nothing to judge.\n```json\n{"tickets":[]}\n```'
+NOTHING_TO_FIX = 'No fix would last.\n```json\n{"proposals":[]}\n```'
 
 
 class Fake:
@@ -112,16 +121,28 @@ class Fake:
                 "input": "pytest",
             },
         }
-        yield {
-            "type": "final",
-            "message": {"body": self.answers.get(title, "Finished the ticket.")},
-        }
+        # Self-work research, ranking and retro runs end with their JSON block, as their
+        # prompts ask; with no answer set, they found nothing.
+        asked = str(kwargs.get("agent_instructions"))
+        empty = next(
+            (
+                answer
+                for phrase, answer in (
+                    (RESEARCH_FORMAT, NOTHING_FOUND),
+                    (RANKING_FORMAT, NOTHING_RANKED),
+                    (RETRO_FORMAT, NOTHING_TO_FIX),
+                )
+                if phrase in asked
+            ),
+            "Finished the ticket.",
+        )
+        yield {"type": "final", "message": {"body": self.answers.get(title, empty)}}
 
 
 @pytest.fixture
 def board(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(rem_home_module, "memory_available_bytes", lambda: 8 * 1024**3)
-    monkeypatch.setattr(rem_home_module, "swap_blocked", lambda: None)
+    # New workers wait while this computer is short of memory; keep tests host-independent.
+    monkeypatch.setattr("gofer.core.command_slots.memory_hold", lambda: None)
     monkeypatch.setattr(rem_home_module, "validate_artifacts", lambda run: None)
     fake = Fake()
     # Inside tmp_path, so it is removed with it and a later test can't inherit it.
@@ -223,9 +244,19 @@ def at(home: RemHome, minutes: float) -> None:
 
 
 def tick(home: RemHome) -> bool:
-    """One pass of Rem's loop. Returns False so conditions can tick while they wait."""
+    """One pass of Rem's loop. Returns False so conditions can tick while they wait.
+
+    Self-work starts nothing while Rem writes a session's first objectives, so a pass that
+    started that planning waits for it and passes again, as the loop would a moment later.
+    """
+    before = home.self_work._planner
     home.next_self_work = 0
     home.tick()
+    planner = home.self_work._planner
+    if home.self_work._planner_mode == "empty" and planner is not None and planner is not before:
+        planner.join(timeout=5)
+        home.next_self_work = 0
+        home.tick()
     return False
 
 
@@ -570,9 +601,11 @@ def test_a_ticket_finishes_only_through_independent_review_and_is_reported(board
     assert done["status"] == "done" and done["summary"]
     assert any("independent read-only reviewer" in c["agent_instructions"] for c in fake.calls)
     report = home.self_work.view()["report"]
-    assert [w["title"] for w in report["work_done"]] == ["Proof"]
-    assert report["work_done"][0]["state"] == "done"
-    assert report["work_done"][0]["thread_id"] == done["thread_id"]
+    # A research pass runs beside the ticket; on a busy machine it may finish first.
+    assert [w["title"] for w in report["work_done"] if w.get("state") != "researched"] == ["Proof"]
+    proof = next(w for w in report["work_done"] if w.get("state") != "researched")
+    assert proof["state"] == "done"
+    assert proof["thread_id"] == done["thread_id"]
 
     # The ticket's run shows in chat like a requested task: a card when it starts, naming
     # the ticket, then its update, both listing the ticket on the card.
@@ -629,7 +662,11 @@ def test_a_failed_ticket_is_blocked_and_followed_up_once_not_in_a_loop(board):
     assert titles.count("Still blocked") == 1
     assert "Moved to In progress: task resumed" in titles
     summary = home.self_work.view()["report"]["summary"]
-    assert summary == "Picked 1 blocked ticket back up, 1 needs you."
+    # The research beside it found nothing, which it says in its proposal block. How many
+    # research passes start during these ticks depends on timing, so their count may vary.
+    assert re.fullmatch(
+        r"Researched \d+ projects?, picked 1 blocked ticket back up, 1 needs you\.", summary
+    ), summary
 
 
 @pytest.mark.parametrize("provider", ["codex", "claude_code"])
@@ -662,7 +699,22 @@ def test_unattended_runs_lose_outside_reach(board, provider):
     assert "git push is blocked" in worker["agent_instructions"]
     # The desktop's task source leaves out fleet and Organizations tools for these.
     assert workflow["remUnattended"] is True
+    assert workflow["remManagedTask"]["unattended"] is True
     calls = [c for c in fake.calls if "Careful" in c["workflow"]["chatThreadTitle"]]
+    # Browser is forced off and nobody is at the thread to turn it on, so every
+    # turn of the run names the missing Browser as a blocker instead.
+    from gofer.ui.chat import measured_chat_prompt
+
+    for call in calls:
+        prompt, _ = measured_chat_prompt(
+            provider,
+            "m",
+            call["messages"],
+            call["workflow"],
+            agent_instructions=call["agent_instructions"],
+        )
+        assert "turn on Browser" not in prompt
+        assert "Name the missing Browser as a blocker in your result" in prompt
     if provider == "codex":
         # Codex runs in its own sandbox.
         assert all("claudeSandbox" not in c["workflow"]["remManagedTask"] for c in calls)
@@ -1122,7 +1174,10 @@ def test_closed_duplicates_do_not_use_up_the_waiting_proposals(board):
     assert ticket(home, "Voice shortcuts")["proposed"] is True
     wait_for(lambda: not tick(home) and not home.self_work.view()["state"]["active_threads"], 8)
     work = home.self_work.view()["report"]["work_done"]
-    assert [w["summary"] for w in work] == ["Added 1 ticket for your approval."]
+    # The other angles found nothing; only this one adds a ticket.
+    assert [w["summary"] for w in work if w["title"] == "Research new features for project"] == [
+        "Added 1 ticket for your approval."
+    ]
 
 
 def test_a_merged_proposal_can_be_restored_but_still_needs_approval(board):
@@ -1445,7 +1500,7 @@ def test_research_is_bounded_and_uses_one_thread_per_project(board, tmp_path):
         for c in fake.calls
         if c.get("finished") and "Research" in c["workflow"]["chatThreadTitle"]
     ]
-    assert len(finished) == 6  # MAX_RESEARCH_PROJECTS
+    assert len(finished) == 8  # MAX_RESEARCH_PASSES
 
 
 def test_research_stops_once_enough_ideas_wait_for_approval(board):
@@ -1471,19 +1526,84 @@ def test_research_stops_once_enough_ideas_wait_for_approval(board):
     assert "waiting for your approval" in home.self_work.view()["state"]["detail"]
 
 
-def test_unreadable_research_is_reported_not_guessed(board):
+def research_run(home: RemHome, title: str) -> dict[str, Any] | None:
+    with home.store.read() as db:
+        runs = [json.loads(r[0]) for r in db.execute("SELECT body FROM runs")]
+    return next(
+        (
+            r
+            for r in runs
+            if (r.get("self_work") or {}).get("kind") == "research"
+            and r["recipe"]["title"] == title
+        ),
+        None,
+    )
+
+
+def worker_turns(fake: Fake, title: str) -> list[dict[str, Any]]:
+    return [
+        c
+        for c in fake.calls
+        if "independent read-only reviewer" not in c["agent_instructions"]
+        and c["workflow"]["chatThreadTitle"].endswith(title)
+    ]
+
+
+def test_unreadable_research_is_sent_back_before_review_not_guessed(board, monkeypatch):
     home, fake, _ = board
-    fake.answers["Research new features for project"] = "No JSON here at all."
+    title = "Research new features for project"
+    fake.answers[title] = "No JSON here at all."
+    repairs: list[tuple[str, str]] = []
+    original = home._update
+
+    def update(identity: str, **fields: Any) -> Any:
+        if fields.get("state") == "repairing":
+            repairs.append((identity, fields.get("review_feedback") or ""))
+        return original(identity, **fields)
+
+    monkeypatch.setattr(home, "_update", update)
     at(home, 15)
     tick(home)
     wait_for(
         lambda: (
             not tick(home)
-            and any("couldn't read" in n["text"] for n in home.self_work.view()["report"]["notes"])
+            and (research_run(home, title) or {}).get("state") in {"blocked", "succeeded"}
         ),
         8,
     )
+    run = research_run(home, title)
+    assert run is not None
+    # Sent back once with the parser's error and never reviewed; the same answer again
+    # stops it rather than spending the rest of the repair budget.
+    feedback = [text for identity, text in repairs if identity == run["id"] and text]
+    assert len(feedback) == 1
+    assert "has no fenced ```json block" in feedback[0]
+    workers = worker_turns(fake, title)
+    assert len(workers) == 2
+    assert "has no fenced ```json block" in workers[1]["messages"][-1]["body"]
+    assert run.get("verification_thread_id") is None
+    assert run["state"] == "blocked" and run["repair_count"] == 1
+    assert "no readable proposal block" in run["summary_short"]
     assert home.kanban.board()["tickets"] == []
+
+
+def test_research_repaired_after_an_unreadable_block_files_its_proposals(board):
+    home, fake, _ = board
+    title = "Research new features for project"
+    answers = iter(['Findings.\n```json\n{"proposals":[{"title":"Voice",}]}\n```', PROPOSAL])
+
+    class Answers(dict[str, str]):
+        def get(self, key: Any, default: Any = None) -> Any:
+            return next(answers) if key == title else default
+
+    fake.answers = Answers()
+    at(home, 15)
+    tick(home)
+    wait_for(lambda: not tick(home) and ticket_or_none(home, "Voice shortcuts") is not None, 8)
+    run = research_run(home, title)
+    assert run is not None and run["repair_count"] == 1
+    workers = worker_turns(fake, title)
+    assert "isn't valid JSON" in workers[1]["messages"][-1]["body"]
 
 
 def test_read_research_takes_the_last_block():
@@ -1518,7 +1638,12 @@ def test_settings_validate_and_detect_conflicts(board):
         "session_token_limit": 0,
         "daily_token_limit": 0,
         "rate_limit_percent": 0,
+        "daily_allowance_percent": 0,
+        "allowance_mode": "off",
+        "pace_aim_percent": 97,
+        "pace_lead_hours": 3,
         "auto_approve_proposals": False,
+        "provider_accounts": {},
         "idle_minutes": 15,
         "revision": 0,
     }
@@ -1559,7 +1684,8 @@ def test_the_report_persists_and_each_device_clears_it_once(board):
     home.self_work.mark_seen(report["updated_at"])
     after = home.self_work.view()["report"]
     assert after["unseen"] is False
-    assert [w["title"] for w in after["work_done"]] == ["Report"]
+    # A research pass runs beside the ticket; on a busy machine it may finish first.
+    assert [w["title"] for w in after["work_done"] if w.get("state") != "researched"] == ["Report"]
     other = RemHome(
         home.data_dir,
         source=home.source,
@@ -1569,7 +1695,8 @@ def test_the_report_persists_and_each_device_clears_it_once(board):
         generate=home.generate,
         start=False,
     )
-    assert other.self_work.view()["report"]["work_done"][0]["title"] == "Report"
+    kept = other.self_work.view()["report"]["work_done"]
+    assert [w["title"] for w in kept if w.get("state") != "researched"] == ["Report"]
     assert IDLE_AFTER == timedelta(minutes=15)
     with other.store.read() as db:
         assert saved_settings(db, other.store)["enabled"] is True
@@ -1745,6 +1872,10 @@ def test_phone_reads_and_changes_self_work_and_clears_the_report(linked):
         "max_threads_max": 16,
         "token_limit_max": 1_000_000_000_000,
         "rate_limit_percent_max": 100,
+        "daily_allowance_percent_max": 100,
+        "pace_aim_percent_min": 1,
+        "pace_aim_percent_max": 100,
+        "pace_lead_hours_max": 24,
     }
     changed = send(
         "desktop.action",

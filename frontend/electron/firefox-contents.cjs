@@ -151,10 +151,13 @@ function createHistoryTracker() {
 }
 
 class FirefoxContents extends EventEmitter {
-  constructor({ engine, kind = "user", nativeImage = null, clipboard = null, log = () => {} }) {
+  constructor({ engine, kind = "user", nativeImage = null, clipboard = null, log = () => {}, adopt = "" }) {
     super();
     this.engine = "firefox";
     this.kind = kind;
+    // A tab the user shared from Gecko's own window: Rem drives it, but its
+    // size, page scripts and life stay the user's.
+    this.adopted = typeof adopt === "string" ? adopt : "";
     this.firefox = engine;
     this.nativeImage = nativeImage;
     this.clipboard = clipboard;
@@ -165,6 +168,9 @@ class FirefoxContents extends EventEmitter {
     this.url = "about:blank";
     this.title = "";
     this.loading = true;
+    // True from the start of a navigation until the new document fires
+    // DOMContentLoaded. See isLoadingMainFrame().
+    this.documentLoading = true;
     this.focused = false;
     this.muted = false;
     this.pageZoom = 1;
@@ -196,6 +202,24 @@ class FirefoxContents extends EventEmitter {
   }
 
   async start() {
+    if (this.adopted) {
+      const { context, generation } = await this.firefox.adoptContext(this.adopted);
+      if (this.destroyed) {
+        this.firefox.release(context);
+        throw new Error("The tab closed.");
+      }
+      this.context = context;
+      this.generation = generation;
+      this.firefox.register(context, this);
+      this.loading = false;
+      this.documentLoading = false;
+      const tree = await this.command("browsingContext.getTree", { root: context, maxDepth: 0 }).catch(() => null);
+      this.url = String(tree?.contexts?.[0]?.url || this.url);
+      this.emit("firefox-ready");
+      // Its title is read once the tab is ready (refreshState waits for that).
+      setTimeout(() => void this.refreshState(), 0);
+      return;
+    }
     const { context, generation } = await this.firefox.createContext(this.kind);
     if (this.destroyed) {
       void this.firefox.send("browsingContext.close", { context, promptUnload: false }).catch(() => {});
@@ -229,6 +253,10 @@ class FirefoxContents extends EventEmitter {
   getURL() { return this.url; }
   getTitle() { return this.title; }
   isLoading() { return this.loading; }
+  // As Electron's method of the same name, but true only until the page's
+  // DOM is ready (browsingContext.domContentLoaded), so a frame or image that
+  // never finishes doesn't keep it true.
+  isLoadingMainFrame() { return this.loading && this.documentLoading; }
   isFocused() { return this.focused; }
   getType() { return "firefox"; }
   // The studio focuses its own view of the tab.
@@ -263,6 +291,7 @@ class FirefoxContents extends EventEmitter {
     // Report loading at once, as Chromium does, so callers that wait for the
     // page to settle do not return before Firefox announces the navigation.
     this.loading = true;
+    this.documentLoading = true;
     try {
       await this.command("browsingContext.navigate", { context: this.context, url: target, wait: "none" });
     } catch (error) {
@@ -270,7 +299,7 @@ class FirefoxContents extends EventEmitter {
       this.loading = false;
       this.emit("did-fail-load", {}, -2, error.message, target, true);
       this.emit("did-stop-loading");
-      throw new Error(`Firefox could not open ${target}: ${error.message}`);
+      throw new Error(`Firefox could not open ${target}: ${error.message}`, { cause: error });
     }
     return waiter.promise;
   }
@@ -287,6 +316,7 @@ class FirefoxContents extends EventEmitter {
     }
     await this.alive();
     this.loading = true;
+    this.documentLoading = true;
     // Firefox (158 and earlier) refuses the whole reload when it is given
     // ignoreCache, even false. A hard reload asks for it and falls back to a
     // plain reload where Firefox doesn't support it yet.
@@ -312,6 +342,7 @@ class FirefoxContents extends EventEmitter {
       if (!delta) return;
       history.traverse(delta);
       this.loading = true;
+      this.documentLoading = true;
       const before = this.navigation;
       void this.alive().then(() => this.command("browsingContext.traverseHistory", { context: this.context, delta })).then(async () => {
         // Same-page entries and pages from the back-forward cache may finish
@@ -447,9 +478,12 @@ class FirefoxContents extends EventEmitter {
 
   async revive() {
     if (this.destroyed) return;
+    // A shared tab can't come back once Gecko stopped; the user shares it again.
+    if (this.adopted) { this.close(); return; }
     this.dead = false;
     this.lastError = "";
     this.loading = true;
+    this.documentLoading = true;
     this.emit("did-start-loading");
     this.ready = this.start();
     await this.ready;
@@ -482,7 +516,9 @@ class FirefoxContents extends EventEmitter {
     if (this.context) {
       const context = this.context;
       this.firefox.unregister(context);
-      void this.firefox.send("browsingContext.close", { context, promptUnload: false }).catch(() => {});
+      // A shared tab stays open for the user; Rem only lets go of it.
+      if (this.adopted) this.firefox.release(context);
+      else void this.firefox.send("browsingContext.close", { context, promptUnload: false }).catch(() => {});
     }
     this.emit("destroyed");
     this.removeAllListeners();
@@ -529,6 +565,7 @@ class FirefoxContents extends EventEmitter {
       case "browsingContext.navigationStarted": {
         this.navigation = params.navigation || "";
         this.loading = true;
+        this.documentLoading = true;
         this.lastError = "";
         this.markActive();
         this.emit("did-start-navigation", { isMainFrame: true, isSameDocument: false, url: params.url }, params.url);
@@ -540,12 +577,15 @@ class FirefoxContents extends EventEmitter {
         break;
       case "browsingContext.fragmentNavigated":
       case "browsingContext.historyUpdated":
+        // The same document stays, with its DOM.
+        this.documentLoading = false;
         if (params.url) this.url = params.url;
         void this.refreshState({ sameDocument: true });
         this.emit("did-navigate-in-page", {}, this.url, true);
         this.markActive();
         break;
       case "browsingContext.domContentLoaded":
+        this.documentLoading = false;
         if (params.url && params.url !== this.url) this.commitUrl(params.url);
         void this.refreshState();
         this.markActive();
@@ -553,6 +593,7 @@ class FirefoxContents extends EventEmitter {
       case "browsingContext.load":
         if (params.url && params.url !== this.url) this.commitUrl(params.url);
         this.loading = false;
+        this.documentLoading = false;
         void this.refreshState().finally(() => {
           this.emit("did-stop-loading");
           this.settleWaiters();
@@ -600,7 +641,9 @@ class FirefoxContents extends EventEmitter {
         this.markActive();
         break;
       case "browsingContext.contextDestroyed":
-        if (params.context === this.context && !this.destroyed) this.markDead("The Firefox tab closed");
+        // The user closed a tab they had shared: Rem's use of it ends.
+        if (params.context === this.context && !this.destroyed && this.adopted) this.close();
+        else if (params.context === this.context && !this.destroyed) this.markDead("The Firefox tab closed");
         break;
       // A link with a download attribute, including blob: and data: links a
       // page builds itself, is no navigation: Firefox sends navigation null
@@ -697,12 +740,16 @@ class FirefoxContents extends EventEmitter {
     await this.command("network.addIntercept", { phases: ["beforeRequestSent"], contexts: [this.context] });
   }
 
+  // The intercept holds every request of the tab, its frames' included. Site
+  // rules apply to the tab's own page loads, as in Chrome tabs; everything
+  // else, frames and their pages included, goes on at once.
   async checkRequest(params) {
     if (!params.isBlocked) return;
     const request = params.request?.request;
     const url = params.request?.url || "";
     let allowed = true;
-    if (params.navigation && params.context === this.context) {
+    const topLevelNavigation = Boolean(params.navigation) && params.context === this.context;
+    if (topLevelNavigation) {
       const event = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, url };
       this.emit(params.redirectCount ? "will-redirect" : "will-navigate", event, url);
       allowed = !event.defaultPrevented;
@@ -750,7 +797,8 @@ class FirefoxContents extends EventEmitter {
   // Layout happens at the view's CSS size divided by the page zoom; the
   // device pixel ratio keeps the image sharp on the studio's display.
   async applyViewport() {
-    if (!this.context || this.dead) return;
+    // A shared tab keeps the size of Gecko's window.
+    if (!this.context || this.dead || this.adopted) return;
     const view = this.view || FALLBACK_VIEW;
     const width = Math.max(100, Math.round(view.width / this.pageZoom));
     const height = Math.max(100, Math.round(view.height / this.pageZoom));

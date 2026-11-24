@@ -11,7 +11,7 @@
       "checks": [
         {"type": "text", "label": "Records the exit code", "target": "nodes.collect.stdout", "contains": "exit-code: 0"},
         {"type": "text", "label": "Passes the output on", "target": "nodes.collect.stdout", "contains": "42 passed"},
-        {"type": "command", "label": "Saves today's report file", "target": "nodes.save-report.stdout", "command": "read -r report && test -s \"$report\" && case \"$report\" in *test-reports/*.md) exit 0;; *) exit 1;; esac"},
+        {"type": "command", "shell": "bash", "label": "Saves today's report file", "target": "nodes.save-report.stdout", "command": "read -r report && test -s \"$report\" && case \"$report\" in *test-reports/*.md) exit 0;; *) exit 1;; esac"},
         {"type": "judge", "label": "Accurate report", "target": "nodes.write-report", "criteria": "Says the build and deploy succeeded and that 42 tests passed. Reports no failures. Under 250 words."}
       ]
     },

@@ -167,6 +167,28 @@ Workflow:
       }
 ```
 
+### File inputs
+
+An input whose schema is exactly `{"type": "string", "format": "file"}` at its top level is a
+file input. Its definition may also set:
+
+- `accept`: one String or a List of Strings, each a file name extension (`.pdf`: a dot, then
+  1 to 32 of `a-z 0-9 . _ + -`) or a MIME pattern (`type/subtype` or `type/*`). Patterns compare
+  case-insensitively and lower to lowercase without duplicates. At most 32.
+- `max-size`: an Integer number of bytes, or a String such as `"500 KB"`, `"5 MB"` or
+  `"1.5 GB"` (units `B`, `KB`, `MB`, `GB` and their `iB` forms, powers of 1024). Greater than
+  0 and at most 1 GiB. Default 20 MiB.
+
+A file input has no `default`. `format: "file"` anywhere else in an input's schema, or `accept`
+or `max-size` on any other input, is `RATTISH_INVALID_FIELD_VALUE`. The value is a path. At run
+start the runtime checks that it names an existing regular file within `max-size` that matches
+`accept` (by extension, or by the MIME type guessed from the name), resolving a relative path
+from the project root, copies it to `<run_id>.files/<input>/<file name>` beside the run
+artifact (folders 0700, file 0600), and binds the input to the copy's absolute path. A file
+that doesn't fit ends the run as `invalid_inputs` with `RATTISH_WORKFLOW_INPUT_INVALID`.
+Triggers cannot fill a file input; see `RATTISH_PREFLIGHT_FILE_INPUT_UNFILLED`. A `workflow`
+node passes its value to a child as a plain path, and the child makes no copy.
+
 Input and output names are Rattish identifiers and compare case-insensitively. An output's
 `from` reference is required. Its schema is also required because the public interface is
 a versioned boundary, even when the compiler could infer the same schema internally.

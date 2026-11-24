@@ -482,6 +482,194 @@ def test_task_report_hook_registers_records_without_failing_the_save(library, tm
     record_artifact(SimpleNamespace(brain_library=Broken(), data_dir=tmp_path), run, path, "x")
 
 
+def cited_brain(library: BrainLibrary, tmp_path: Path, name: str = "brain") -> dict[str, Any]:
+    """A brain readable by Rem, with one note whose passages share a sentence."""
+    root = tmp_path / name
+    write(
+        root,
+        "Notes/findings.md",
+        "# Findings\n\n## Search\n\nVector search ranks by cosine. Shared closing line.\n\n"
+        "## Signing\n\nRelease builds are notarized. Shared closing line.\n",
+    )
+    brain = library.open({"root": str(root)})
+    wait_tasks(library)
+    current = library.brain(brain["id"])
+    current["settings"].update(allowCloud=True)
+    library.put_brain(current)
+    return library.brain(brain["id"])
+
+
+def note_doc(library: BrainLibrary, brain: dict[str, Any]) -> dict[str, Any]:
+    return next(
+        doc
+        for doc in library.entities("documents", brain["id"])
+        if doc["path"] == "Notes/findings.md"
+    )
+
+
+def block_with(doc: dict[str, Any], text: str) -> str:
+    return str(next(block["id"] for block in doc["blocks"] if text in block["text"]))
+
+
+def test_evidence_without_a_passage_uses_the_one_that_contains_the_quote(library, tmp_path):
+    brain = cited_brain(library, tmp_path)
+    doc = note_doc(library, brain)
+    entry = {"docId": doc["id"], "quote": "ranks by cosine"}
+    library.validate_evidence(entry)
+    assert entry["blockId"] == block_with(doc, "ranks by cosine")
+    assert entry["version"] == doc["version"] and entry["snapshot"]
+    # Several passages contain it: the error names each candidate.
+    search, signing = block_with(doc, "cosine"), block_with(doc, "notarized")
+    with pytest.raises(ValueError, match="appears in 2 passages") as several:
+        library.validate_evidence({"docId": doc["id"], "quote": "Shared closing line."})
+    assert search in str(several.value) and signing in str(several.value)
+    # Giving the passage settles it.
+    chosen = {"docId": doc["id"], "blockId": signing, "quote": "Shared closing line."}
+    library.validate_evidence(chosen)
+    assert chosen["version"] == doc["version"]
+    # No passage contains it: the closest passages are named instead.
+    with pytest.raises(ValueError, match="contains the quote exactly") as none:
+        library.validate_evidence({"docId": doc["id"], "quote": "builds are signed"})
+    assert f"Closest passages: {signing}" in str(none.value)
+    with pytest.raises(ValueError, match="version is unavailable"):
+        library.validate_evidence({"docId": doc["id"], "version": "old", "quote": "cosine"})
+
+
+def test_task_report_in_a_brain_keeps_checked_citations_and_its_title(library, tmp_path):
+    from types import SimpleNamespace
+
+    from gofer.ui.rem_home_artifacts import record_artifact
+
+    brain = cited_brain(library, tmp_path)
+    other = cited_brain(library, tmp_path, "unselected")
+    doc, foreign = note_doc(library, brain), note_doc(library, other)
+    path = write(
+        Path(brain["root"]), "reports/rem/Reports/Raticode/cited.html", html("Guess", "Body")
+    )
+    run = {
+        "id": "run-9",
+        "task_id": "task-9",
+        "recipe": {"title": "Research search", "project_dir": REPO},
+        "config": {
+            "provider": "claude_code",
+            "model": "claude-opus-5-5",
+            "brain": {"enabled": True, "root": brain["root"], "brainIds": [brain["id"]]},
+        },
+    }
+    reply = record_artifact(
+        SimpleNamespace(brain_library=library, data_dir=tmp_path / "app"),
+        run,
+        path,
+        "x",
+        {
+            "title": "How search ranks",
+            "question": "How does search rank results?",
+            "evidence": [
+                {"docId": doc["id"], "quote": "ranks by cosine"},
+                {"docId": doc["id"], "quote": "Shared closing line."},
+                {"docId": foreign["id"], "quote": "ranks by cosine"},
+                {"docId": doc["id"], "quote": "notarized", "extra": "x"},
+                {
+                    "docId": doc["id"],
+                    "blockId": block_with(doc, "notarized"),
+                    "version": doc["version"],
+                    "quote": "Release builds are notarized.",
+                },
+            ],
+        },
+    )
+    marks = reply["evidence"]
+    assert [mark["status"] for mark in marks] == [
+        "cited",
+        "rejected",
+        "rejected",
+        "rejected",
+        "cited",
+    ]
+    assert marks[0]["found"] == ["blockId", "version"] and "found" not in marks[4]
+    assert "appears in 2 passages" in marks[1]["error"]
+    # A brain the task can't read is refused without naming its passages.
+    assert "brains you can read" in marks[2]["error"]
+    assert block_with(foreign, "cosine") not in marks[2]["error"]
+    assert "Unknown evidence field: extra" in marks[3]["error"]
+    assert "Saved with 2 of 5 citations" in reply["note"]
+
+    record = next(
+        r for r in library.entities("reports") if r["artifactPath"].endswith("cited.html")
+    )
+    assert record["title"] == "How search ranks"
+    assert record["question"] == "How does search rank results?"
+    # Numbers follow the entries as given, so the report's [5] still points at entry 5.
+    assert [(c["n"], c["blockId"], c["state"]) for c in record["citations"]] == [
+        (1, block_with(doc, "cosine"), "unreviewed"),
+        (5, block_with(doc, "notarized"), "unreviewed"),
+    ]
+    assert record["sourceVersions"] == [{"docId": doc["id"], "version": doc["version"]}]
+    # The cited note shows the report in Connections and in Library health.
+    used = library.connections(doc["id"])["usedBy"]
+    assert {"kind": "report", "basis": "cited", "count": 2}.items() <= used[0].items()
+    assert used[0]["title"] == "How search ranks"
+    shown = next(d for d in library.snapshot()["documents"] if d["id"] == doc["id"])
+    assert shown["citationReview"] is True
+
+    # A Library refresh that registered the receipt first still gets the citations.
+    late = write(Path(brain["root"]), "reports/rem/late.html", html("Late", "Body"))
+    receipt = library._artifact_record(
+        brain, "reports/rem/late.html", "Late", {"savedVia": "rem_task", "source": "receipt"}
+    )
+    library.put("reports", receipt)
+    record_artifact(
+        SimpleNamespace(brain_library=library, data_dir=tmp_path / "app"),
+        run,
+        late,
+        "x",
+        {"evidence": [{"docId": doc["id"], "quote": "ranks by cosine"}]},
+    )
+    assert len(library.entity("reports", receipt["id"])["citations"]) == 1
+
+
+def test_thread_save_note_finds_passages_and_marks_bad_entries(library, tmp_path, monkeypatch):
+    from gofer.ui import second_brain
+    from gofer.ui.report_outputs import CITATION_RULES
+
+    brain = cited_brain(library, tmp_path)
+    doc = note_doc(library, brain)
+    seen: dict[str, Any] = {}
+
+    def serve(call, definitions, rules, name):
+        save_note = next(item for item in definitions if item["name"] == "save_note")
+        seen["description"] = save_note["description"]
+        seen["required"] = save_note["inputSchema"]["properties"]["evidence"]["items"]["required"]
+        seen["rules"] = call("rules", {})
+        seen["saved"] = call(
+            "save_note",
+            {
+                "path": "Reports/cited.md",
+                "content": "# Cited\n\nSearch ranks by cosine [1].",
+                "title": "Cited thread note",
+                "evidence": [
+                    {"docId": doc["id"], "quote": "ranks by cosine"},
+                    {"docId": doc["id"], "quote": "never written down"},
+                ],
+            },
+        )
+
+    monkeypatch.setattr(second_brain, "serve_stdio", serve)
+    second_brain.serve_registered_brains(tmp_path / "app", [brain["id"]], "md", "auto")
+    # The citation rules are in the turn prompt and the rules tool, not the description.
+    assert CITATION_RULES in seen["rules"] and CITATION_RULES not in seen["description"]
+    assert "evidence, title and question" in seen["description"]
+    assert "rem_artifacts.save_report take the same evidence" in seen["rules"]
+    assert seen["required"] == ["docId", "quote"]
+    saved = seen["saved"]
+    assert Path(saved["path"]).is_file()
+    assert [mark["status"] for mark in saved["evidence"]] == ["cited", "rejected"]
+    assert "Saved with 1 of 2 citations" in saved["note"]
+    record = next(r for r in library.entities("reports") if r["artifactPath"] == "Reports/cited.md")
+    assert record["title"] == "Cited thread note"
+    assert [(c["n"], c["blockId"]) for c in record["citations"]] == [(1, block_with(doc, "cosine"))]
+
+
 def test_linked_worktrees_resolve_to_their_repository(tmp_path):
     repo = tmp_path / "Raticode"
     worktree = tmp_path / "browser-update"

@@ -5,8 +5,13 @@ which calls :func:`apply_run_retention` once the final record is saved. The
 Studio's Prune button, ``Raticode rattish prune`` and ``Raticode workflow logs
 prune`` pick runs with the same :func:`prune_run_records`.
 
-A run is never picked while it is running, waiting on an approval, being
-resumed, or recorded as the run a still-running run resumed.
+A run is never picked while it is running, waiting on an approval, holding
+worktree changes that wait to be landed or discarded, being resumed, or
+recorded as the run a still-running run resumed.
+
+Runs are picked from the cached run summaries the run lists use (see
+``gofer.ui.workflow_runs``), which are read again only for records that changed.
+A clean-up that deletes nothing reads no run record in full.
 """
 
 from __future__ import annotations
@@ -119,6 +124,19 @@ def run_record_paths(directory: Path) -> list[Path]:
     return [path for _, _, path in sorted(stamped, reverse=True)]
 
 
+def run_record_count(directory: Path) -> int:
+    """How many run records a workflow has, at most, counted by name without a stat."""
+    try:
+        with os.scandir(directory) as entries:
+            return sum(
+                1
+                for entry in entries
+                if entry.name.endswith(".json") and not entry.name.startswith(".")
+            )
+    except FileNotFoundError:
+        return 0
+
+
 def load_run_records(directory: Path) -> tuple[list[RunRecord], int]:
     """Readable run records, newest first, and how many were unreadable."""
     records: list[RunRecord] = []
@@ -131,6 +149,31 @@ def load_run_records(directory: Path) -> tuple[list[RunRecord], int]:
     return records, skipped
 
 
+def summary_run_records(
+    data_dir: Path, workflow_id: str, directory: Path
+) -> tuple[list[RunRecord], int]:
+    """Readable run records, newest first, from their cached summaries.
+
+    Each record's document holds only what picking runs needs: ``run_id``,
+    ``status`` (with a run whose runner is gone reported as interrupted),
+    ``started_at`` and ``resumed_from``. Also returns how many were unreadable.
+    """
+    from gofer.ui.workflow_runs import workflow_run_summaries
+
+    entries, skipped = workflow_run_summaries(data_dir, workflow_id, directory)
+    records = []
+    for entry in entries:
+        document: dict[str, Any] = {
+            "run_id": entry.run_id,
+            "status": entry.status,
+            "started_at": entry.summary.get("started_at"),
+        }
+        if entry.summary.get("resumed_from"):
+            document["resumed_from"] = {"run_id": entry.summary["resumed_from"]}
+        records.append(RunRecord(document, entry.path))
+    return records, skipped
+
+
 def protected_run_ids(records: Collection[RunRecord], data_dir: Path, workflow_id: str) -> set[str]:
     """Runs that must survive any prune.
 
@@ -138,8 +181,21 @@ def protected_run_ids(records: Collection[RunRecord], data_dir: Path, workflow_i
     resuming, and the run each running run resumed. Raises OSError when pending
     approvals can't be read, so a caller prunes nothing rather than guess.
     """
-    from gofer.core.approvals import ApprovalStore
     from gofer.rattish.run_service import is_rattish_run_being_resumed
+
+    protected = _protected_by_status_and_approvals(records, data_dir, workflow_id)
+    protected.update(
+        record.run_id
+        for record in records
+        if is_rattish_run_being_resumed(data_dir, workflow_id, record.run_id)
+    )
+    return protected
+
+
+def _protected_by_status_and_approvals(
+    records: Collection[RunRecord], data_dir: Path, workflow_id: str
+) -> set[str]:
+    from gofer.core.approvals import ApprovalStore
 
     protected: set[str] = set()
     for record in records:
@@ -152,11 +208,11 @@ def protected_run_ids(records: Collection[RunRecord], data_dir: Path, workflow_i
     protected.update(
         request.run_id for request in ApprovalStore(data_dir).list_pending(workflow_id)
     )
-    protected.update(
-        record.run_id
-        for record in records
-        if is_rattish_run_being_resumed(data_dir, workflow_id, record.run_id)
-    )
+    # A run whose worktree changes still wait to be landed or discarded keeps its record,
+    # which is how its Changes tab and `rattish runs land|discard` find them.
+    from gofer.rattish.run_worktrees import unlanded_run_ids
+
+    protected.update(unlanded_run_ids(data_dir, workflow_id))
     return protected
 
 
@@ -218,29 +274,52 @@ def prune_run_records(
     use_saved_settings: bool = False,
     dry_run: bool = True,
     keep_run_ids: Collection[str] = (),
+    full_candidates: bool = True,
 ) -> PruneResult:
     """Pick, and unless ``dry_run`` delete, run records the settings no longer keep.
 
     With ``use_saved_settings`` the workflow's saved retention settings replace
     the three limits. Unreadable records are counted in ``skipped`` and kept.
+    Runs are picked from cached summaries. With ``full_candidates`` each
+    candidate's full record is read before anything is deleted, for callers that
+    show the candidates; otherwise their documents hold only the summary fields.
     """
+    from gofer.rattish.run_service import is_rattish_run_being_resumed
+
     if use_saved_settings:
         settings = saved_retention_settings(data_dir, workflow_id)
         keep_last = settings["keepLast"]
         keep_days = settings["keepDays"]
         keep_failed_days = settings["keepFailedDays"]
-    records, skipped = load_run_records(directory)
-    protected = protected_run_ids(records, data_dir, workflow_id) | set(keep_run_ids)
-    result = PruneResult(
-        candidates=select_prune_candidates(
+    records, skipped = summary_run_records(data_dir, workflow_id, directory)
+    protected = _protected_by_status_and_approvals(records, data_dir, workflow_id) | set(
+        keep_run_ids
+    )
+    candidates = [
+        record
+        for record in select_prune_candidates(
             records,
             protected=protected,
             keep_last=keep_last,
             keep_days=keep_days,
             keep_failed_days=keep_failed_days,
-        ),
-        skipped=skipped,
-    )
+        )
+        # Only a candidate can lose its run, so only candidates check for a resume claim.
+        if not is_rattish_run_being_resumed(data_dir, workflow_id, record.run_id)
+    ]
+    if full_candidates:
+        full = []
+        for record in candidates:
+            try:
+                fresh = read_run_record(record.path)
+            except RunRecordError:
+                # Removed or damaged since its summary was checked; leave it alone.
+                skipped += 1
+                continue
+            if fresh.document.get("status") != "running":
+                full.append(fresh)
+        candidates = full
+    result = PruneResult(candidates=candidates, skipped=skipped)
     if not dry_run:
         for record in result.candidates:
             # The record, its stop marker and its saved inputs go together.
@@ -264,7 +343,7 @@ def apply_run_retention(
     try:
         settings = saved_retention_settings(data_dir, workflow_id)
         # Most workflows keep fewer runs than keepLast, so skip reading them.
-        if len(run_record_paths(directory)) <= settings["keepLast"]:
+        if run_record_count(directory) <= settings["keepLast"]:
             return []
         result = prune_run_records(
             data_dir,
@@ -275,6 +354,7 @@ def apply_run_retention(
             keep_failed_days=settings["keepFailedDays"],
             dry_run=False,
             keep_run_ids=keep_run_ids,
+            full_candidates=False,
         )
     except Exception:
         logger.warning("Rattish run retention failed for %s", workflow_id, exc_info=True)

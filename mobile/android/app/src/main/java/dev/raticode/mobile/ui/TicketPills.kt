@@ -48,6 +48,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.raticode.mobile.live.RemTicket
@@ -135,26 +136,66 @@ private val PILL_TITLE = TextStyle(fontWeight = FontWeight.Medium, fontSize = 12
 /** The inline id of a ticket pill in Markdown text. */
 internal fun ticketInlineId(key: String) = "ticket:$key"
 
+/** The inline id of a ticket shown by its key alone, as a link, in a table cell. */
+internal fun ticketKeyInlineId(key: String) = "ticketKey:$key"
+
 /**
- * Inline pills for the tickets [keys] names, sized to their text so the pill sits in the line like a word.
- * Text holds a placeholder of this size and draws the pill in it.
+ * A ticket in a table cell: only its key, drawn like a link, so a narrow column stays narrow. TalkBack still reads it as
+ * a button with the ticket's key, title and status, and tapping it opens the ticket like a pill does.
  */
 @Composable
-internal fun ticketInlineContent(keys: List<String>, tickets: Map<String, RemTicket>): Map<String, InlineTextContent> {
+internal fun TicketKeyLink(ticket: RemTicket, style: TextStyle, modifier: Modifier = Modifier) {
+    val open = LocalTicketOpener.current
+    val label = TicketMentions.label(ticket)
+    Text(ticket.key, modifier.testTag("ticketKey-${ticket.key}")
+        .clearAndSetSemantics {
+            contentDescription = label
+            this.role = Role.Button
+            if (open != null) onClick("Open on the board") { open(ticket); true }
+        }
+        .then(if (open != null) Modifier.clickable(onClickLabel = "Open on the board") { open(ticket) } else Modifier),
+        style = style.merge(keyLinkStyle(MaterialTheme.colorScheme.primary)), maxLines = 1, softWrap = false)
+}
+
+private fun keyLinkStyle(color: Color) = TextStyle(color = color, fontWeight = FontWeight.Medium, textDecoration = TextDecoration.Underline)
+
+/** Inline ticket content for Markdown: [content] by inline id, and how wide each key-only link is, for table columns. */
+internal class TicketInline(val content: Map<String, InlineTextContent>, val keyWidths: Map<String, Dp>)
+
+/**
+ * Inline pills for the tickets [keys] names, sized to their text so the pill sits in the line like a word.
+ * Text holds a placeholder of this size and draws the pill in it. Each ticket also gets a key-only link in [keyStyle]
+ * for table cells, where a title-wide pill would be wider than its column and draw over the next one.
+ */
+@Composable
+internal fun ticketInlineContent(keys: List<String>, tickets: Map<String, RemTicket>,
+                                 keyStyle: TextStyle = MaterialTheme.typography.bodyMedium): TicketInline {
     val measurer = rememberTextMeasurer()
     val density = LocalDensity.current
-    return remember(keys, tickets, density) {
-        keys.mapNotNull { tickets[it] }.associate { ticket ->
+    return remember(keys, tickets, density, keyStyle) {
+        val content = LinkedHashMap<String, InlineTextContent>()
+        val keyWidths = LinkedHashMap<String, Dp>()
+        keys.mapNotNull { tickets[it] }.forEach { ticket ->
             val keyWidth = measurer.measure(AnnotatedString(ticket.key), PILL_KEY).size.width
             val title = shortTitle(ticket.title)
             val titleWidth = if (title.isBlank()) 0 else measurer.measure(AnnotatedString(title), PILL_TITLE).size.width
             // Icon 12, gaps 4 each, padding 6 on each side, border 1 on each side, and a little room for rounding.
             val width = with(density) { (keyWidth + titleWidth).toDp() + 12.dp + (if (title.isBlank()) 4.dp else 8.dp) + 14.dp + 6.dp }
-            ticketInlineId(ticket.key) to InlineTextContent(
+            content[ticketInlineId(ticket.key)] = InlineTextContent(
                 Placeholder(with(density) { width.toSp() }, 20.sp, PlaceholderVerticalAlign.TextCenter)) {
                 TicketChip(ticket, Modifier.fillMaxSize(), inline = true)
             }
+            // The key alone, measured in the cell's own text style (font scale included), with room for rounding.
+            val linkStyle = keyStyle.merge(keyLinkStyle(Color.Unspecified))
+            val linkSize = measurer.measure(AnnotatedString(ticket.key), linkStyle, softWrap = false, maxLines = 1).size
+            val linkWidth = with(density) { linkSize.width.toDp() + 2.dp }
+            keyWidths[ticket.key] = linkWidth
+            content[ticketKeyInlineId(ticket.key)] = InlineTextContent(
+                Placeholder(with(density) { linkWidth.toSp() }, with(density) { linkSize.height.toSp() }, PlaceholderVerticalAlign.TextCenter)) {
+                TicketKeyLink(ticket, keyStyle, Modifier.fillMaxSize())
+            }
         }
+        TicketInline(content, keyWidths)
     }
 }
 

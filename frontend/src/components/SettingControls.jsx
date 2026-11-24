@@ -31,7 +31,7 @@ export function SwitchControl({ checked, disabled = false, label, onChange }) {
 
 // Keeps what is typed until it is committed on blur or Enter, so clearing the field
 // doesn't snap back to the saved value.
-export function NumberControl({ max, min, onCommit, step = 1, suffix = "", value }) {
+export function NumberControl({ label, max, min, onCommit, step = 1, suffix = "", value }) {
   const [draft, setDraft] = useState(String(value));
   const focusedRef = useRef(false);
   useEffect(() => {
@@ -51,6 +51,7 @@ export function NumberControl({ max, min, onCommit, step = 1, suffix = "", value
   return (
     <div className="relative">
       <input
+        aria-label={label}
         className="h-8 w-full rounded-md border border-line bg-white px-2 pr-10 text-right text-xs text-ink outline-none transition focus:border-brand"
         inputMode="decimal"
         value={draft}

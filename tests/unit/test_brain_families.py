@@ -211,8 +211,8 @@ def test_confirmed_replacement_is_portable_ranks_lower_and_leaves_files_alone(
     library.update_brain({"id": brain["id"], "patch": {"settings": {"allowCloud": True}}})
 
     def serve(call, definitions, rules, name):
-        assert "replacedBy names the newer report" in rules
-        results = call("search", {"query": "plan0word1"})
+        assert "replacedBy names the newer report" in call("rules", {})
+        results = call("search", {"format": "json", "query": "plan0word1"})["results"]
         paths = [item["path"] for item in results]
         assert paths.index(new["path"]) < paths.index(old["path"])
         replaced = next(item for item in results if item["documentId"] == old["id"])
@@ -221,7 +221,7 @@ def test_confirmed_replacement_is_portable_ranks_lower_and_leaves_files_alone(
         assert replaced["replacedBy"]["title"] == "Plan review final"
         current = next(item for item in results if item["documentId"] == new["id"])
         assert current["status"] == "current"
-        listing = call("search", {"query": ""})
+        listing = call("search", {"format": "json", "query": ""})["results"]
         assert listing[-1]["documentId"] == old["id"] and listing[-1]["status"] == "replaced"
         note = call("read_note", {"documentId": old["id"]})
         assert note["status"] == "replaced" and note["replacedBy"]["path"] == new["path"]

@@ -13,7 +13,8 @@ An agent token may read most state but makes only a short list of writes
 (:func:`agent_request_refusal`): it cannot edit, run or delete workflows, change
 triggers, start or control swarms, approve organization consent requests or Kanban
 proposals, change Rem's settings, pair devices, sign in to providers, read the owner
-token, or manage path grants.
+token, or manage path grants. It reads only Second Brains with Allow cloud processing
+on, unless the owner created it with ``--private-brains`` (gofer.ui.brain_privacy).
 
 The backend never hands either kind of token to Rem workers, and the client helpers
 here refuse to read the owner token inside a Rem worker session. Files readable by
@@ -33,6 +34,7 @@ import re
 import secrets
 import sys
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -98,6 +100,40 @@ def ensure_private_dir(path: Path) -> Path:
         if info.st_mode & 0o077:
             path.chmod(0o700)
     return path
+
+
+def hold_backend_lock(data_dir: Path) -> int:
+    """Claim the data folder for this headless backend until it stops.
+
+    A second backend on the same folder would overwrite the owner token and endpoint
+    file, run a second scheduler on the same stores, and leave the first one running
+    with no published way in. Returns the descriptor that holds the lock.
+    """
+    path = ensure_private_dir(headless_dir(data_dir)) / ".backend.lock"
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(descriptor)
+        raise HeadlessError(
+            f"Another Raticode backend is already running with the data folder {data_dir}. "
+            "Stop it first, or give this one its own --data-dir."
+        ) from exc
+    return descriptor
+
+
+def release_backend_lock(descriptor: int | None) -> None:
+    if descriptor is not None:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
 
 
 def write_private_file(path: Path, text: str) -> None:
@@ -260,6 +296,9 @@ class AgentToken:
     name: str
     created_at: str
     expires_at: str | None
+    # Whether the token may read brains with Allow cloud processing off. Off unless
+    # the owner passed `--private-brains` when creating it.
+    private_brains: bool = False
 
     def expired(self, now: datetime | None = None) -> bool:
         if not self.expires_at:
@@ -273,7 +312,16 @@ class AgentToken:
             "createdAt": self.created_at,
             "expiresAt": self.expires_at,
             "expired": self.expired(),
+            "privateBrains": self.private_brains,
         }
+
+
+@dataclass(frozen=True)
+class AgentGrant:
+    """What a live agent token carries into a request."""
+
+    name: str
+    private_brains: bool = False
 
 
 class AgentTokenStore:
@@ -282,14 +330,48 @@ class AgentTokenStore:
     def __init__(self, data_dir: Path) -> None:
         self.path = agent_tokens_path(data_dir)
         self._lock = threading.Lock()
-        self._cache: tuple[tuple[int, int] | None, dict[str, dict[str, Any]]] = (None, {})
+        self._cache: tuple[tuple[int, ...] | None, dict[str, dict[str, Any]]] = (None, {})
+
+    @contextlib.contextmanager
+    def _changing(self) -> Iterator[None]:
+        """Hold the store for a read-change-write, across processes as well as threads.
+
+        Without it, a `tokens revoke` racing a `tokens create` in another process could
+        write back the revoked token, which then kept working.
+        """
+        with self._lock:
+            ensure_private_dir(self.path.parent)
+            lock_path = self.path.with_name(f".{self.path.name}.lock")
+            flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(lock_path, flags, 0o600)
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+
+                    msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(descriptor, fcntl.LOCK_EX)
+                try:
+                    # Read what's on disk now, never a copy cached before the lock.
+                    self._cache = (None, {})
+                    yield
+                finally:
+                    if sys.platform == "win32":
+                        os.lseek(descriptor, 0, os.SEEK_SET)
+                        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            finally:
+                os.close(descriptor)
 
     def _read(self) -> dict[str, dict[str, Any]]:
         try:
             info = self.path.stat()
         except FileNotFoundError:
             return {}
-        signature = (info.st_mtime_ns, info.st_size)
+        # Every write replaces the file, so a new inode or change time marks it even
+        # when a same-size rewrite lands within the file system's timestamp tick.
+        signature = (info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size)
         if self._cache[0] == signature:
             return self._cache[1]
         check_private_file(self.path, secret=True)
@@ -314,11 +396,18 @@ class AgentTokenStore:
         with self._lock:
             entries = self._read()
         return [
-            AgentToken(name, str(item.get("created_at", "")), item.get("expires_at"))
+            AgentToken(
+                name,
+                str(item.get("created_at", "")),
+                item.get("expires_at"),
+                private_brains=item.get("private_brains") is True,
+            )
             for name, item in sorted(entries.items())
         ]
 
-    def create(self, name: str, *, expires_days: int | None = None) -> str:
+    def create(
+        self, name: str, *, expires_days: int | None = None, private_brains: bool = False
+    ) -> str:
         if not _TOKEN_NAME.fullmatch(name):
             raise HeadlessError(
                 "Token names use lowercase letters, digits, '.', '_' or '-' (64 at most)"
@@ -327,7 +416,7 @@ class AgentTokenStore:
             raise HeadlessError("--expires-days must be 1 or more")
         token = AGENT_TOKEN_PREFIX + secrets.token_urlsafe(32)
         now = datetime.now(UTC)
-        with self._lock:
+        with self._changing():
             entries = dict(self._read())
             if name in entries:
                 raise HeadlessError(f"An agent token named {name!r} exists; revoke it first")
@@ -339,11 +428,14 @@ class AgentTokenStore:
                 if expires_days
                 else None,
             }
+            if private_brains:
+                # Stored beside the hash, so only the owner's `tokens create` sets it.
+                entries[name]["private_brains"] = True
             self._write(entries)
         return token
 
     def revoke(self, name: str) -> bool:
-        with self._lock:
+        with self._changing():
             entries = dict(self._read())
             if entries.pop(name, None) is None:
                 return False
@@ -352,6 +444,11 @@ class AgentTokenStore:
 
     def match(self, supplied: str) -> str | None:
         """The name of the live agent token [supplied] matches, if any."""
+        grant = self.grant(supplied)
+        return grant.name if grant else None
+
+    def grant(self, supplied: str) -> AgentGrant | None:
+        """The live agent token [supplied] matches, with what it may read, if any."""
         if not supplied.startswith(AGENT_TOKEN_PREFIX):
             return None
         digest = _hash(supplied)
@@ -367,7 +464,7 @@ class AgentTokenStore:
                 expires = item.get("expires_at")
                 if expires and datetime.fromisoformat(str(expires)) <= now:
                     return None
-                return name
+                return AgentGrant(name, private_brains=item.get("private_brains") is True)
         return None
 
 
@@ -377,6 +474,10 @@ _AGENT_DENIED_PREFIXES: tuple[str, ...] = (
     "/api/desktop/",  # path grants and trusted roots
     "/api/devices",  # pairing and paired-device control
     "/api/provider/auth",  # provider sign-in
+    # Accounts, their emails and plans, and a phone sign-in's one-time code and link,
+    # which an agent could hand to someone else to sign the account in to theirs.
+    "/api/provider/accounts",
+    "/api/provider/claude-accounts",  # the first version's route to the same list
     "/api/usage/credentials",
     "/api/rem/context",  # Rem's projects, permissions and resources
     "/api/rem-resources",  # MCP server URLs and arguments, which can carry keys
@@ -410,6 +511,11 @@ _AGENT_ALLOWED_WRITES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
         # Second Brain reads; the handler refuses the other actions
         # (AGENT_SECOND_BRAIN_ACTIONS).
         ("POST", r"/api/second-brains"),
+        # Social posts: an agent token acts as Rem, which may propose a post and revise
+        # its own proposals before the user decides. Approving, publishing, accounts and
+        # settings are the user's (gofer.social.api).
+        ("POST", r"/api/social/posts"),
+        ("POST", rf"/api/social/posts/{_SEGMENT}/edit"),
     )
 )
 

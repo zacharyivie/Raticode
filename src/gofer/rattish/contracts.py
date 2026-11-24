@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -78,6 +78,18 @@ def json_fingerprint(value: Any) -> str:
     return f"sha256:{hashlib.sha256(canonical_json_bytes(value)).hexdigest()}"
 
 
+# Keys that only change how editors present a node type. They never reach compiled IR,
+# so they stay out of the fingerprint and editing them can't invalidate saved workflows.
+PRESENTATION_KEYS = frozenset({"catalog"})
+
+
+def contract_fingerprint(document: Mapping[str, Any]) -> str:
+    """Fingerprint the parts of a contract that affect compilation and runtime."""
+    return json_fingerprint(
+        {key: value for key, value in document.items() if key not in PRESENTATION_KEYS}
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class LoadedNodeContract:
     node_type: str
@@ -107,7 +119,7 @@ class NodeContractRegistry:
                 node_type=document["node_type"],
                 version=document["contract_version"],
                 document=document,
-                fingerprint=overrides.get(document["node_type"], json_fingerprint(document)),
+                fingerprint=overrides.get(document["node_type"], contract_fingerprint(document)),
             )
             for document in documents
         }

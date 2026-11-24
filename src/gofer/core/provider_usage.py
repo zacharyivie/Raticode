@@ -413,7 +413,11 @@ def normalize_grok_billing(payload: dict[str, Any]) -> list[dict[str, Any]]:
     used = _percentage(config.get("creditUsagePercent"))
     if used is not None:
         label = f"{kind.title()} credits" if kind else "Credits"
-        windows.append(_percent_window("credits", label, used, reset))
+        window = _percent_window("credits", label, used, reset)
+        if starts := _reset(period.get("start")):
+            # The period's length scales self-work's daily cap (rem_self_work_daily).
+            window["starts_at"] = starts
+        windows.append(window)
     cap, spent = amount("onDemandCap"), amount("onDemandUsed")
     if cap and spent is not None:
         window = _window("on_demand", "On-demand spend", "USD")
@@ -928,24 +932,97 @@ async def _rpc_allowance(
     )
 
 
+async def codex_account_allowance(
+    executable: str, env: dict[str, str]
+) -> list[dict[str, Any]] | None:
+    """A Codex account folder's allowance from its own app-server, or None.
+
+    ``env`` is the account's environment (CODEX_HOME set, other sign-ins dropped).
+    None means Codex couldn't tell: not signed in, or no answer. A ChatGPT sign-in
+    that isn't a subscription gives no windows. Windows Codex reports as null are
+    left out, so they stay unknown instead of reading as empty. When Codex says
+    ordinary usage isn't allowed, every window is marked rejected (full); when it
+    says null, nothing is inferred from it.
+    """
+    try:
+        with tempfile.TemporaryDirectory(prefix="raticode-usage-") as directory:
+            async with open_acp_transport(
+                [executable, "app-server"],
+                cwd=Path(directory),
+                env=env,
+                timeout=REFRESH_TIMEOUT_SECONDS,
+                max_output_bytes=MAX_OUTPUT_BYTES,
+                allow_missing_jsonrpc=True,
+            ) as rpc:
+                await rpc.request(
+                    "initialize",
+                    {"clientInfo": {"name": "raticode_usage", "version": "1"}},
+                    timeout=REFRESH_TIMEOUT_SECONDS,
+                )
+                await rpc.notify("initialized", {})
+                account = (
+                    await rpc.request(
+                        "account/read", {"refreshToken": False}, timeout=REFRESH_TIMEOUT_SECONDS
+                    )
+                ).get("account")
+                if not isinstance(account, dict):
+                    return None
+                if account.get("type") != "chatgpt":
+                    return []
+                payload = await rpc.request(
+                    "account/rateLimits/read", {}, timeout=REFRESH_TIMEOUT_SECONDS
+                )
+    except (OSError, RuntimeError, TimeoutError, ValueError, AcpTransportError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    windows = normalize_codex_limits(payload)
+    if payload.get("ordinaryUsageAllowed") is False:
+        for window in windows:
+            window["status"] = "rejected"
+    return windows
+
+
+async def grok_account_allowance(
+    executable: str, env: dict[str, str]
+) -> list[dict[str, Any]] | None:
+    """A Grok account folder's credits from its own ``_x.ai/billing``, or None.
+
+    ``env`` is the account's environment (GROK_HOME set, XAI_API_KEY and the other
+    sign-ins dropped). None means Grok couldn't tell: not signed in, or no answer.
+    """
+    try:
+        with tempfile.TemporaryDirectory(prefix="raticode-usage-") as directory:
+            payload = await _grok_billing(executable, env, Path(directory))
+    except (OSError, RuntimeError, TimeoutError, ValueError, AcpTransportError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return normalize_grok_billing(payload)
+
+
+async def _grok_billing(executable: str, env: dict[str, str], cwd: Path) -> Any:
+    async with open_acp_transport(
+        [executable, "agent", "--no-leader", "stdio"],
+        cwd=cwd,
+        env=env,
+        timeout=REFRESH_TIMEOUT_SECONDS,
+        max_output_bytes=MAX_OUTPUT_BYTES,
+    ) as rpc:
+        await rpc.request(
+            "initialize",
+            {"protocolVersion": 1, "clientCapabilities": {}},
+            timeout=REFRESH_TIMEOUT_SECONDS,
+        )
+        return await rpc.request("_x.ai/billing", {}, timeout=REFRESH_TIMEOUT_SECONDS)
+
+
 async def _grok_allowance(
     executable: str, env: dict[str, str]
 ) -> tuple[str, str | None, list[dict[str, Any]]]:
     """Grok's ACP billing extension reads the signed-in account without a session."""
     with tempfile.TemporaryDirectory(prefix="raticode-usage-") as directory:
-        async with open_acp_transport(
-            [executable, "agent", "--no-leader", "stdio"],
-            cwd=Path(directory),
-            env=env,
-            timeout=REFRESH_TIMEOUT_SECONDS,
-            max_output_bytes=MAX_OUTPUT_BYTES,
-        ) as rpc:
-            await rpc.request(
-                "initialize",
-                {"protocolVersion": 1, "clientCapabilities": {}},
-                timeout=REFRESH_TIMEOUT_SECONDS,
-            )
-            payload = await rpc.request("_x.ai/billing", {}, timeout=REFRESH_TIMEOUT_SECONDS)
+        payload = await _grok_billing(executable, env, Path(directory))
     windows = normalize_grok_billing(payload)
     if windows:
         return "available", None, windows
@@ -1052,12 +1129,67 @@ async def refresh_provider_usage(
                 "service; the standard provider's account allowance does not apply."
             ),
         }
-    command_line = provider in {"claude_code", "antigravity"}
+    from gofer.core.provider_accounts import account_adapter
+
+    adapter = account_adapter(provider) if settings.account_id else None
+    command_line = provider in {"claude_code", "antigravity"} or adapter is not None
     try:
         async with asyncio.timeout(
             CLI_REFRESH_TIMEOUT_SECONDS if command_line else REFRESH_TIMEOUT_SECONDS
         ):
-            if provider == "cursor":
+            if adapter is not None:
+                # An account: only its CLI's own status and usage commands. Raticode
+                # never reads, stores or sends this account's sign-in.
+                from gofer.core.provider_accounts import (
+                    NEEDS_SIGN_IN,
+                    account_config_dir,
+                    account_status,
+                    get_account,
+                )
+
+                account = get_account(str(profile), data_dir, provider)
+                account_state = await asyncio.to_thread(account_status, account, data_dir=data_dir)
+                if account_state.get("state") == NEEDS_SIGN_IN:
+                    return {
+                        **row,
+                        "status": "auth_required",
+                        "needs_sign_in": True,
+                        "reason": "Needs sign-in. Use Sign in in Settings > Providers "
+                        f"> {adapter.label} accounts.",
+                    }
+                executable = adapter.find_executable()
+                account_windows = (
+                    await adapter.read_usage(
+                        executable,
+                        adapter.environment(account_config_dir(account, data_dir)),
+                        data_dir,
+                    )
+                    if executable and adapter.read_usage is not None
+                    else None
+                )
+                if account_windows is None:
+                    if adapter.read_usage is None:
+                        return {
+                            **row,
+                            "status": "unavailable",
+                            "reason": f"{adapter.label} can't report an account's usage yet.",
+                        }
+                    return {
+                        **row,
+                        "status": "auth_required" if executable else "unavailable",
+                        "reason": f"{adapter.label} could not report this account's usage. "
+                        "Refresh again, or sign in again if it keeps failing.",
+                        "retry_after_seconds": CLAUDE_FAILURE_BACKOFF_SECONDS,
+                    }
+                row.update(
+                    source=adapter.usage_source or f"{adapter.label} usage",
+                    windows=account_windows,
+                    status="available" if account_windows else "unavailable",
+                    reason=None
+                    if account_windows
+                    else f"{adapter.label} returned no subscription usage windows.",
+                )
+            elif provider == "cursor":
                 # Profile values override the environment, including explicit empty values.
                 key = config.get("admin_api_key") or _account_env(
                     env, "RATICODE_CURSOR_ADMIN_API_KEY", profile

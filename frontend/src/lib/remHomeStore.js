@@ -6,6 +6,8 @@ import { startPolling } from "./refresh.js";
 import { conversationRepository } from "./conversationRepository.js";
 import { mergeInServerOrder } from "./conversationCache.js";
 import { mergeTaskThreadMetadata, threadIndexEntry } from "./threadActivity.js";
+import { NO_OBJECTIVES, applyObjectiveChange, sameObjectives } from "./remObjectives.js";
+import { CONFLICT_MESSAGE, GONE_MESSAGE, NO_DECISIONS, applyDecisionChange, sameDecisions, scanSummary, settleEditLocally } from "./remDecisions.js";
 
 // Shared state for the Rem sidebar and conversation. The backend control service
 // (GET/POST /api/rem/...) is authoritative: the renderer submits commands and
@@ -26,7 +28,7 @@ function initialState() {
   // messages: what the chat shows, oldest first: `older` (pages read with Show earlier
   // messages), then the server's newest window, then unsent messages. `earlier` counts
   // the stored messages before the first one shown; olderTickets are the pages' tickets.
-  return { status: "loading", error: "", contextIssue: "", conversation: null, messages: [], older: [], earlier: 0, loadingEarlier: false, tasks: [], chatTickets: NO_TICKETS, taskTickets: NO_TICKETS, olderTickets: NO_TICKETS, fixture: false, resetting: false, notice: "", sheet: null, composerRequest: null, messageRequest: null };
+  return { status: "loading", error: "", contextIssue: "", conversation: null, messages: [], older: [], earlier: 0, loadingEarlier: false, tasks: [], objectives: NO_OBJECTIVES, decisions: NO_DECISIONS, decisionsLoaded: false, chatTickets: NO_TICKETS, taskTickets: NO_TICKETS, olderTickets: NO_TICKETS, fixture: false, resetting: false, notice: "", sheet: null, composerRequest: null, messageRequest: null };
 }
 
 // Files attached in Rem's chat upload to this chat attachment thread.
@@ -50,7 +52,7 @@ const threadSyncFailures = new Map();
 // Content versions of what this window last applied. The backend answers
 // "unchanged" for a matching version, so a poll while nothing happens downloads,
 // parses and re-renders nothing. Older backends send no version.
-let versions = { conversation: "", tasks: "" };
+let versions = { conversation: "", tasks: "", decisions: "" };
 // The newest messages the server last sent (GET /api/rem/conversation sends only these).
 // When the window moves on while earlier pages are loaded, the messages it let go of
 // join `older`, so no gap opens between the pages and the window.
@@ -90,7 +92,14 @@ export async function request(path, { method = "GET", body, known = "" } = {}) {
     throw new RemServiceError("Raticode's backend isn't reachable.", 0);
   }
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new RemServiceError(payload.detail || payload.error || `Rem request failed (${response.status}).`, response.status);
+  if (!response.ok) {
+    const error = new RemServiceError(payload.detail || payload.error || `Rem request failed (${response.status}).`, response.status);
+    // Switch over names the files it couldn't show in full when it refuses, as triggers do.
+    if (Array.isArray(payload.unseen)) error.unseen = payload.unseen;
+    // Decisions name why they refused (conflict, not_found, invalid), apart from a missing route.
+    if (typeof payload.code === "string") error.code = payload.code;
+    throw error;
+  }
   return payload;
 }
 // The service is absent (older backend) or unreachable; nothing can run.
@@ -224,16 +233,23 @@ export async function refreshRemHome() {
     // Context is sent when it changes, once a minute, and before each command,
     // not on every poll.
     if (!configuredContext) await syncContext();
-    const [conversation, tasks] = await Promise.all([
+    // Decisions are read on their own: an older backend without them (or a failed read)
+    // leaves the chat and tasks working.
+    const [conversation, tasks, decisions] = await Promise.all([
       request("/conversation", { known: versions.conversation }),
       request("/tasks", { known: versions.tasks }),
+      request("/decisions", { known: versions.decisions }).catch(() => null),
     ]);
     if (state.fixture || state.resetting || generation !== historyGeneration) return;
-    versions = { conversation: conversation.version || "", tasks: tasks.version || "" };
+    versions = { conversation: conversation.version || "", tasks: tasks.version || "", decisions: decisions?.version || "" };
     // A restarted backend lost the context; queued tasks wait until it's sent again.
     if (conversation.context_ready === false && configuredContext) { configuredContext = ""; void syncContext(); }
     if (conversation.opened_projects?.length) openedProjectsListener?.(conversation.opened_projects);
     const previousTasks = state.status === "ready" ? state.tasks : null;
+    // Once read, the list stays loaded through a failed poll, so chat cards don't flicker.
+    const decisionsLoaded = state.decisionsLoaded || Boolean(decisions && (decisions.unchanged || Array.isArray(decisions.items)));
+    const nextDecisions = decisions && !decisions.unchanged ? sameDecisions(decisions, state.decisions) : state.decisions;
+    if (nextDecisions !== state.decisions || decisionsLoaded !== state.decisionsLoaded) set({ decisions: nextDecisions, decisionsLoaded });
     if (conversation.unchanged && tasks.unchanged) {
       // Nothing re-renders unless an earlier failed poll needs clearing.
       if (state.status !== "ready" || state.error) set({ status: "ready", error: "" });
@@ -247,7 +263,7 @@ export async function refreshRemHome() {
           ...windowedMessages(conversation, current),
           chatTickets: sameTickets(conversation.tickets, current.chatTickets),
         }),
-        ...(tasks.unchanged ? {} : { tasks: mergeTasks(tasks.tasks ?? [], current.tasks), taskTickets: sameTickets(tasks.tickets, current.taskTickets) }),
+        ...(tasks.unchanged ? {} : { tasks: mergeTasks(tasks.tasks ?? [], current.tasks), taskTickets: sameTickets(tasks.tickets, current.taskTickets), objectives: sameObjectives(tasks.objectives, current.objectives) }),
       }));
       if (!tasks.unchanged) notifyFinishedRuns(previousTasks, tasks.tasks ?? []);
     }
@@ -540,9 +556,115 @@ export function createRemTask(recipe) {
   return command(async () => (await request("/tasks", { method: "POST", body: { request_id: requestId("task-create"), ...recipe } })).task, "Couldn't save the task.");
 }
 
+// One task with its prompt, which the polled task list leaves out (GET /api/rem/tasks/{id}).
+// Null when it can't be read; the sheet then offers to try again.
+export async function loadRemTask(taskId) {
+  if (state.fixture) return state.tasks.find(task => task.id === taskId) ?? null;
+  try {
+    return (await request(`/tasks/${encodeURIComponent(taskId)}`)).task ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function updateRemTask(task, patch, { applyTo = "current_and_future" } = {}) {
   if (state.fixture) { localTask(task.id, { ...patch, ...(patch.acceptance_criteria ? { acceptance_criteria: patch.acceptance_criteria.map(item => ({ id: item.id || requestId("criterion"), ...item })) } : {}) }); return Promise.resolve(true); }
   return command(() => request(`/tasks/${encodeURIComponent(task.id)}`, { method: "PATCH", body: { request_id: requestId("task-edit"), expected_revision: task.revision, apply_to: applyTo, ...patch } }), "Couldn't save your changes.", "Someone changed this first. Your edits are still here.");
+}
+
+// The user's change to the self-work objectives: add, edit, remove, move, check, uncheck.
+// It carries the revision this window shows, so it never overwrites a change made meanwhile.
+export function changeRemObjectives(change) {
+  if (state.fixture) { set(current => ({ ...current, objectives: applyObjectiveChange(current.objectives, change) })); return Promise.resolve(true); }
+  return command(async () => {
+    const view = await request("/objectives", { method: "POST", body: { ...change, expected_revision: state.objectives.revision } });
+    set({ objectives: sameObjectives(view, state.objectives) });
+    return view;
+  }, "Couldn't change the objectives.", "The objectives changed meanwhile, so nothing was saved. Check them and try again.");
+}
+
+// The user's answer or change to Rem's decisions: use, change, edit, reject, reopen, forget,
+// add. It carries the revision this window shows, so a change made meanwhile (on the phone,
+// the CLI or in chat) is never overwritten: the list reloads and the user tries again.
+// Resolves to {ok: true} or {ok: false, message} so the row that acted can say what happened.
+export async function changeRemDecisions(change) {
+  if (state.fixture) { set(current => ({ ...current, decisions: applyDecisionChange(current.decisions, change) })); return { ok: true }; }
+  if (state.resetting) return { ok: false, message: "Rem is being cleared, so nothing changed." };
+  if (state.status !== "ready") return { ok: false, message: "Rem's task service isn't connected, so nothing changed." };
+  try {
+    const view = await request("/decisions", { method: "POST", body: { ...change, expected_revision: state.decisions.revision } });
+    set({ decisions: sameDecisions(view, state.decisions), decisionsLoaded: true });
+    // A task that waited on this answer may move on; its card catches up now.
+    void refreshRemHome();
+    return { ok: true };
+  } catch (error) {
+    const stale = error.code === "conflict" || error.code === "not_found" || (error.status === 409 && !error.code);
+    if (stale) await reloadRemDecisions();
+    return { ok: false, message: stale ? (error.code === "not_found" ? GONE_MESSAGE : CONFLICT_MESSAGE) : `Couldn't save that. ${error.message}` };
+  }
+}
+
+// OK or Cancel on a change the user asked Rem for in chat. No revision goes with it: the
+// desktop applies the change only while the decision is as the card showed it, and says
+// why when it isn't. Resolves to {ok: true} or {ok: false, message}.
+export async function settleRemDecisionEdit(id, ok) {
+  if (state.fixture) { set(current => settleEditLocally(current, id, ok ? "applied" : "cancelled")); return { ok: true }; }
+  if (state.resetting) return { ok: false, message: "Rem is being cleared, so nothing changed." };
+  if (state.status !== "ready") return { ok: false, message: "Rem's task service isn't connected, so nothing changed." };
+  try {
+    const view = await request("/decisions", { method: "POST", body: { action: ok ? "confirm_edit" : "cancel_edit", id } });
+    set({ decisions: sameDecisions(view, state.decisions), decisionsLoaded: true });
+    // The card under Rem's reply now says what happened.
+    void refreshRemHome();
+    return { ok: true };
+  } catch (error) {
+    if (error.code === "conflict" || error.code === "not_found") void reloadRemDecisions();
+    return { ok: false, message: error.message || "Couldn't save that." };
+  }
+}
+
+// Look for a project's check command, landing branch and decision folder in its own files.
+// No model is asked and nothing runs; what is found goes through the decisions like any
+// request, so a decision in force never changes. Resolves to {ok, message}.
+export async function scanRemDecisions(project) {
+  if (state.fixture) return { ok: true, message: scanSummary([]) };
+  if (state.status !== "ready") return { ok: false, message: "Rem's task service isn't connected, so nothing was scanned." };
+  try {
+    const result = await request("/decisions/scan", { method: "POST", body: { project } });
+    const view = { ...(result || {}) };
+    const outcomes = view.outcomes || [];
+    delete view.scan;
+    delete view.outcomes;
+    set({ decisions: sameDecisions(view, state.decisions), decisionsLoaded: true });
+    return { ok: true, message: scanSummary(outcomes) };
+  } catch (error) {
+    return { ok: false, message: `Couldn't look through this project. ${error.message}` };
+  }
+}
+
+// How many tracked files typed record paths match on the project's landing branch, before
+// the user saves them. `target` is {project} for a new record or {id} for an edit or
+// replacement. Resolves to the path_counts object, or null when they can't be counted.
+export async function countRemDecisionPaths(target, appliesTo, forbids) {
+  if (state.fixture || state.status !== "ready") return null;
+  try {
+    const result = await request("/decisions/paths", { method: "POST", body: { ...target, applies_to: appliesTo, forbids } });
+    return result?.path_counts || null;
+  } catch {
+    return null;
+  }
+}
+
+// Reads the whole list again, whatever version this window holds.
+export async function reloadRemDecisions() {
+  if (state.fixture) return;
+  try {
+    const view = await request("/decisions");
+    versions.decisions = view.version || "";
+    set({ decisions: sameDecisions(view, state.decisions), decisionsLoaded: true });
+  } catch {
+    // The next poll tries again.
+  }
 }
 
 export function runRemTaskNow(task) {
@@ -568,6 +690,25 @@ export function pauseRemTask(task) {
 export function resumeRemTask(task) {
   if (state.fixture) { localTask(task.id, { state: "enabled" }); return Promise.resolve(true); }
   return command(() => request(`/tasks/${encodeURIComponent(task.id)}`, { method: "PATCH", body: { request_id: requestId("task-resume"), expected_revision: task.revision, enabled: true } }), "Couldn't resume the task.", "This task changed just now. Try resuming it again.");
+}
+
+// Make it a workflow: a new Rem task drafts a workflow from this repeating task's runs.
+export function draftRemWorkflow(task) {
+  if (state.fixture) return Promise.resolve(true);
+  return command(() => request(`/tasks/${encodeURIComponent(task.id)}/workflow`, { method: "POST", body: { request_id: requestId("task-workflow"), action: "draft" } }), "Couldn't start the workflow draft.", "A draft for this task is already going.");
+}
+
+// Switch over, step one: the cron trigger it would add and the workflow's files to review.
+export function previewRemWorkflowSwitch(task) {
+  return request(`/tasks/${encodeURIComponent(task.id)}/workflow`, { method: "POST", body: { action: "preview" } });
+}
+
+// Switch over, step two: approves exactly the version reviewed (its fingerprint), adds the
+// trigger and pauses the task's schedule. Errors reach the review, which shows them.
+export async function switchRemWorkflow(task, fingerprint, { acceptUnseen = false } = {}) {
+  const result = await request(`/tasks/${encodeURIComponent(task.id)}/workflow`, { method: "POST", body: { action: "switch", fingerprint, accept_unseen: acceptUnseen } });
+  await refreshRemHome();
+  return result;
 }
 
 export function cancelRemRun(task) {
@@ -602,10 +743,33 @@ export function wakeRemRun(task) {
   return command(() => request(`/runs/${encodeURIComponent(run.id)}/wake`, { method: "POST", body: { request_id: requestId("run-wake") } }), "Couldn't wake the task.");
 }
 
+// Run there: the user's pick of the paired desktop a waiting run suggests. Nothing goes
+// to another computer without it; the desktop checks the suggestion is still current.
+export function runRemRunThere(task) {
+  const run = task.active_run;
+  const suggestion = run?.suggestion;
+  if (run?.state !== "queued" || !suggestion?.pick) return Promise.resolve(false);
+  if (state.fixture) { localTask(task.id, { active_run: { ...run, suggestion: null, waiting_reason: `Starting on ${suggestion.computer_name}` } }); return Promise.resolve(true); }
+  return command(() => request(`/runs/${encodeURIComponent(run.id)}/run_there`, { method: "POST", body: { request_id: requestId("run-there"), computer_id: suggestion.computer_id } }), "Couldn't send the task to that computer.");
+}
+
 export function acknowledgeRemRun(task) {
   if (!task.last_run) return Promise.resolve(false);
   if (state.fixture) { localTask(task.id, { last_run: { ...task.last_run, acknowledged: true } }); return Promise.resolve(true); }
   return command(() => request(`/runs/${encodeURIComponent(task.last_run.id)}/acknowledge`, { method: "POST", body: { request_id: requestId("run-ack") } }), "Couldn't dismiss that.");
+}
+
+// Dismiss all: one request for every task update in `tasks` (see dismissibleUpdates).
+// Only the runs shown are sent, so an update that arrives meanwhile stays.
+export function acknowledgeAllRemRuns(tasks) {
+  const runs = tasks.map(task => task.last_run?.id).filter(Boolean);
+  if (!runs.length) return Promise.resolve(false);
+  if (state.fixture) {
+    const ids = new Set(runs);
+    set(current => ({ ...current, tasks: current.tasks.map(task => (ids.has(task.last_run?.id) ? { ...task, last_run: { ...task.last_run, acknowledged: true } } : task)) }));
+    return Promise.resolve(true);
+  }
+  return command(() => request("/runs/acknowledge", { method: "POST", body: { request_id: requestId("run-ack-all"), run_ids: runs } }), "Couldn't dismiss the updates.");
 }
 
 export function deleteRemTask(task) {
@@ -650,7 +814,7 @@ export async function clearRemHistory() {
     }
     storage.setItem("gofer-flow-chat-threads", JSON.stringify(index.filter(entry => !removed.has(entry.id))));
     configuredContext = "";
-    versions = { conversation: "", tasks: "" };
+    versions = { conversation: "", tasks: "", decisions: "" };
     serverWindow = [];
     contextPending = Promise.resolve();
     pendingClear = null;
@@ -681,14 +845,14 @@ export async function openRemThread(threadId) {
   window.dispatchEvent(new CustomEvent("gofer:rem-open-thread", { detail: { threadId } }));
 }
 
-export function resetRemHomeStore() { ++historyGeneration; stopPolling?.(); stopPolling = null; state = initialState(); configuredContext = ""; versions = { conversation: "", tasks: "" }; serverWindow = []; threadVersions.clear(); mirroredThreads.clear(); finishedThreadVersions.clear(); runningThreads.clear(); clearedThreads.clear(); pendingClear = null; emit(); }
+export function resetRemHomeStore() { ++historyGeneration; stopPolling?.(); stopPolling = null; state = initialState(); configuredContext = ""; versions = { conversation: "", tasks: "", decisions: "" }; serverWindow = []; threadVersions.clear(); mirroredThreads.clear(); finishedThreadVersions.clear(); runningThreads.clear(); clearedThreads.clear(); pendingClear = null; emit(); }
 // Explicit fixtures for tests, the visual harness and development previews.
 // Production never seeds sample tasks or messages.
 export async function loadRemHomeFixture(scene = "busy") {
   stopPolling?.();
   stopPolling = null;
-  versions = { conversation: "", tasks: "" };
+  versions = { conversation: "", tasks: "", decisions: "" };
   serverWindow = [];
   const sample = await import("./remHomeSample.js");
-  set({ ...initialState(), status: "ready", fixture: true, ...sample.remHomeScene(scene) });
+  set({ ...initialState(), status: "ready", fixture: true, decisionsLoaded: true, ...sample.remHomeScene(scene) });
 }

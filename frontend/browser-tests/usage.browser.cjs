@@ -21,6 +21,8 @@ let failSave = false;
 let storageAvailable = true;
 let pendingRefreshes = 0;
 const credentialRequests = [];
+const alertRequests = [];
+let alertSettings = { enabled: true, thresholds: [80, 95], defaults: { enabled: true, thresholds: [80, 95] } };
 const configuredCredentials = new Map();
 function credentialConfig(provider, profile) {
   const config = configuredCredentials.get(`${provider}:${profile || ""}`);
@@ -56,6 +58,32 @@ const overview = {
     { provider: "codex", calls: 2, reported_calls: 2, unknown_calls: 0, input_tokens: 1000, output_tokens: 100, total_tokens: 1100 },
     { provider: "cursor", calls: 1, reported_calls: 0, unknown_calls: 1, input_tokens: null, output_tokens: null, total_tokens: null },
   ] },
+  range: { key: "3mo", label: "Last 3 months", days: 90 },
+  api_cost: {
+    method: "Estimate at public API list prices.", prices_checked: "2026-11-17",
+    total: { cost_usd: 12.5, lower_bound: true, calls: 3, priced_calls: 2, unpriced_calls: 0, no_token_calls: 1, estimated_calls: 1, partial_calls: 1, unsplit_calls: 1,
+      breakdown: { input: 2, cache_read: 0.5, cache_write: 4, output: 6 } },
+    providers: [
+      { provider: "codex", profile: null, cost_usd: 12.5, lower_bound: false, calls: 2, unsplit_calls: 1, unpriced_calls: 0, unpriced_models: [], breakdown: { input: 2, cache_read: 0.5, cache_write: 4, output: 6 } },
+      { provider: "cursor", profile: null, cost_usd: null, lower_bound: false, calls: 1, unsplit_calls: 0, unpriced_calls: 1, unpriced_models: ["auto"], breakdown: null },
+    ],
+    prices: [{ vendor: "openai", model: "gpt-6.1-terra", aliases: [], input: 1, output: 5, cache_read: 0.05, cache_write: 1.25, cache_write_long: 2.5, source: "https://developers.openai.com/api/docs/pricing", checked: "2026-11-17", note: "" }],
+  },
+  series: { bucket: "week", timezone: "UTC", providers: [
+    { provider: "claude_code", total_tokens: 900, calls: 3, style: { dark: "#D97757", light: "#C6613F", pattern: "solid" } },
+    { provider: "codex", total_tokens: 300, calls: 2, style: { dark: "#10A37F", light: "#0D8A6B", pattern: "stripes" } },
+    { provider: "cursor", total_tokens: null, calls: 1, style: { dark: "#F7F7F4", light: "#26251E", pattern: "dots" } },
+  ], accounts: [
+    { key: "claude_code:work", provider: "claude_code", profile: "work", name: "work", total_tokens: 700, calls: 2, style: { dark: "#F0C9BC", light: "#4F2719", pattern: "dots" } },
+    { key: "claude_code:", provider: "claude_code", profile: null, name: "Default sign-in", total_tokens: 200, calls: 1, style: { dark: "#D97757", light: "#C6613F", pattern: "solid" } },
+    { key: "codex:", provider: "codex", profile: null, name: "Default account", total_tokens: 300, calls: 2, style: { dark: "#10A37F", light: "#0D8A6B", pattern: "stripes" } },
+    { key: "cursor:", provider: "cursor", profile: null, name: "Default account", total_tokens: null, calls: 1, style: { dark: "#F7F7F4", light: "#26251E", pattern: "dots" } },
+  ], buckets: [
+    { key: "2026-08-31", start: "2026-08-31T00:00:00+00:00", end: "2026-09-07T00:00:00+00:00", calls: 2, unknown_calls: 0, total_tokens: 400, providers: { claude_code: 300, codex: 100 }, accounts: { "claude_code:work": 100, "claude_code:": 200, "codex:": 100 } },
+    { key: "2026-09-07", start: "2026-09-07T00:00:00+00:00", end: "2026-09-14T00:00:00+00:00", calls: 0, unknown_calls: 0, total_tokens: 0, providers: {}, accounts: {} },
+    { key: "2026-09-14", start: "2026-09-14T00:00:00+00:00", end: "2026-09-21T00:00:00+00:00", calls: 2, unknown_calls: 1, total_tokens: 200, providers: { codex: 200 }, accounts: { "codex:": 200 } },
+    { key: "2026-09-21", start: "2026-09-21T00:00:00+00:00", end: "2026-09-28T00:00:00+00:00", calls: 2, unknown_calls: 0, total_tokens: 600, providers: { claude_code: 600 }, accounts: { "claude_code:work": 600 } },
+  ] },
 };
 
 async function main() {
@@ -83,6 +111,17 @@ async function main() {
         requests.push({ url: request.url, method: request.method });
         response.setHeader("Content-Type", "application/json");
         response.setHeader("Cache-Control", "no-store");
+        if (request.url.startsWith("/api/usage/alerts")) {
+          if (request.method === "GET") return response.end(JSON.stringify(alertSettings));
+          let body = "";
+          for await (const chunk of request) body += chunk;
+          const data = JSON.parse(body);
+          alertRequests.push(data);
+          const next = { ...alertSettings, ...data };
+          if (next.thresholds[0] >= next.thresholds[1]) { response.statusCode = 400; return response.end('{"error":"The second alert level must be higher than the first."}'); }
+          alertSettings = next;
+          return response.end(JSON.stringify(alertSettings));
+        }
         if (request.url.startsWith("/api/usage/credentials")) {
           if (request.method === "GET") {
             const query = new URL(request.url, "http://localhost").searchParams;
@@ -111,8 +150,12 @@ async function main() {
   await vite.listen();
   win = new BrowserWindow({ width: 1000, height: 800, show: true, webPreferences: { partition: "usage-test", nodeIntegration: false, contextIsolation: true } });
   const errors = [];
-  win.webContents.on("console-message", details => { if (details.level === "error" && !details.message.includes("503")) errors.push(details.message); });
-  await win.loadURL(`http://127.0.0.1:${vite.httpServer.address().port}/usage-test`);
+  win.webContents.on("console-message", details => { if (details.level === "error" && !details.message.includes("503") && !details.message.includes("status of 400")) errors.push(details.message); });
+  const pageUrl = `http://127.0.0.1:${vite.httpServer.address().port}/usage-test`;
+  await win.loadURL(pageUrl);
+  // A period saved as 90 days, the old "Last 90 days", opens as 3mo.
+  await win.webContents.executeJavaScript("localStorage.setItem('raticode.usage.tokenRange', '90')", true);
+  await win.loadURL(pageUrl);
   async function evaluate(source) { return win.webContents.executeJavaScript(source, true); }
   async function wait(source) {
     const deadline = Date.now() + 5000;
@@ -173,6 +216,39 @@ async function main() {
   assert.equal(await evaluate("document.querySelector('.usage-account .usage-account-details').checkVisibility()"), true);
   assert.equal(await evaluate("document.querySelector('.usage-account').querySelectorAll('.usage-window').length"), 2);
   await screenshot("allowances-desktop");
+  // Limit alerts: on by default at 80 and 95; levels keep a draft until blur and a rejected save shows why.
+  await wait("document.querySelector('.usage-alerts [role=switch]') !== null");
+  assert.equal(await evaluate("document.querySelector('.usage-alerts [role=switch]').getAttribute('aria-checked')"), "true");
+  assert.deepEqual(await evaluate("[...document.querySelectorAll('.usage-alert-level input')].map(input => input.value)"), ["80", "95"]);
+  const levelInput = index => `document.querySelectorAll('.usage-alert-level input')[${index}]`;
+  async function typeLevel(index, value) {
+    await evaluate(`(() => { const input = ${levelInput(index)}; input.focus(); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(value)}); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  }
+  await typeLevel(0, "");
+  assert.equal(await evaluate(`${levelInput(0)}.value`), "", "A cleared level stays empty while focused");
+  await typeLevel(0, "7");
+  await typeLevel(0, "75");
+  assert.equal(alertRequests.length, 0, "Nothing is saved while typing");
+  await evaluate(`${levelInput(0)}.blur()`);
+  await wait("document.querySelectorAll('.usage-alert-level input')[0].value === '75' && !document.querySelector('.usage-alerts [role=switch]').disabled");
+  assert.deepEqual(alertRequests.at(-1), { thresholds: [75, 95] });
+  await typeLevel(0, "");
+  await evaluate(`${levelInput(0)}.blur()`);
+  assert.equal(await evaluate(`${levelInput(0)}.value`), "75", "A cleared level goes back to the saved value");
+  assert.equal(alertRequests.length, 1);
+  await typeLevel(1, "60");
+  await evaluate(`${levelInput(1)}.blur()`);
+  await wait("document.querySelector('.usage-alerts [role=alert]')?.textContent.includes('must be higher')");
+  assert.deepEqual(alertSettings.thresholds, [75, 95]);
+  await evaluate("document.querySelector('.usage-alerts [role=switch]').click()");
+  await wait("document.querySelector('.usage-alerts [role=switch]').getAttribute('aria-checked') === 'false'");
+  assert.deepEqual(alertRequests.at(-1), { enabled: false });
+  assert.equal(await evaluate(`${levelInput(0)}.disabled`), true);
+  assert.equal(await evaluate("document.querySelector('.usage-alerts [role=alert]')"), null);
+  await evaluate("document.querySelector('.usage-alerts').scrollIntoView({ block: 'center' })");
+  await screenshot("limit-alerts-desktop");
+  await evaluate("document.querySelector('.usage-alerts [role=switch]').click()");
+  await wait("document.querySelector('.usage-alerts [role=switch]').getAttribute('aria-checked') === 'true'");
   assert.equal(requests.some(request => request.url.includes("/credentials")), false, "Credentials are fetched only when configuration is opened");
   await accountAction("Claude Code", "configure");
   await wait("document.querySelector('input[name=oauth_token]') !== null");
@@ -184,7 +260,8 @@ async function main() {
   await wait("document.querySelector('.usage-credential-saved') !== null");
   assert.deepEqual(credentialRequests.at(-1), { provider: "claude_code", profile: "personal", values: {}, remove: [] });
   await wait("Array.from(document.querySelectorAll('button')).some(b => b.textContent === 'Refresh usage')");
-  assert.deepEqual(requests.at(-1), { url: "/api/usage/refresh?days=30", method: "POST" });
+  assert.equal(requests.at(-1).method, "POST");
+  assert.ok(requests.at(-1).url.startsWith("/api/usage/refresh?range=3mo&tz="), requests.at(-1).url);
   await fieldValue("oauth_token", "temporary-draft");
   await fieldValue("oauth_token", "");
   assert.equal(await evaluate("document.querySelector('input[name=oauth_token]').value"), "");
@@ -269,18 +346,154 @@ async function main() {
   await wait("document.querySelectorAll('.usage-account').length === 2");
   assert.equal(await evaluate("document.querySelector('.usage-account').textContent.includes('OpenAI API')"), true);
   await select("Usage account type", "all");
+  // The account cards and their weekly pace charts belong to Remaining allowance only.
+  assert.equal(await evaluate("document.querySelectorAll('.usage-glance').length"), 1);
+  assert.equal(await evaluate("document.querySelector('.usage-glance').checkVisibility()"), true);
+  assert.equal(await evaluate("document.querySelector('[role=tabpanel]:not([hidden]) .usage-glance') !== null"), true);
   await click("Tokens in Raticode");
   await wait("document.querySelector('.usage-token-table').checkVisibility()");
+  assert.equal(await evaluate("document.querySelector('[role=tabpanel]:not([hidden]) .usage-glance')"), null);
+  assert.equal(await evaluate("[...document.querySelectorAll('.usage-glance')].some(card => card.checkVisibility())"), false);
   assert.equal(await evaluate("document.querySelector('.usage-total').textContent.includes('2 of 3 calls reported tokens')"), true);
   assert.equal(await evaluate("document.body.textContent.includes('30 estimated tokens. Estimates are excluded')"), true);
   assert.equal(await evaluate("document.body.textContent.includes('1 call reported only part')"), true);
   assert.equal(await evaluate("document.querySelectorAll('.usage-token-table tbody tr')[1].textContent.includes('Not reported')"), true);
-  await select("Usage period", "7");
+  assert.ok(requests.some(request => request.method === "GET" && request.url.startsWith("/api/usage/overview?range=3mo&tz=")));
+  assert.equal(await evaluate("localStorage.getItem('raticode.usage.tokenRange')"), JSON.stringify({ key: "3mo", start: "", end: "" }));
+  assert.equal(await evaluate("document.querySelector('[aria-label=\"Usage period\"] [role=radio][aria-checked=true]').textContent"), "3mo");
+  assert.deepEqual(await evaluate("[...document.querySelectorAll('[aria-label=\"Usage period\"] [role=radio]')].map(b => b.textContent)"),["24h", "7d", "30d", "3mo", "6mo", "1Y", "5Y", "All", "Custom"]);
+  // Cost at API prices: an estimate per provider, unknown never shown as $0, and no plan-price form.
+  await wait("document.querySelector('.usage-cost') !== null");
+  assert.equal(await evaluate("document.querySelector('.usage-cost h3').textContent"), "Cost at API prices Estimate");
+  assert.equal(await evaluate("document.querySelector('.usage-cost-card strong').textContent"), "at least $12.50");
+  const costRows = await evaluate("[...document.querySelectorAll('.usage-cost-table tbody tr')].map(row => row.textContent)");
+  assert.ok(costRows[0].includes("$2.00") && costRows[0].includes("$0.50") && costRows[0].includes("$4.00") && costRows[0].includes("$12.50"), costRows[0]);
+  assert.ok(costRows[0].includes("1 call without a cache breakdown"), costRows[0]);
+  assert.ok(costRows[1].includes("No list price: auto") && costRows[1].includes("Unknown") && !costRows[1].includes("$0.00"), costRows[1]);
+  assert.equal(await evaluate("document.body.textContent.includes('priced as uncached input. That overstates a call that used the cache')"), true);
+  assert.equal(await evaluate("document.querySelectorAll('.usage-cost-card').length"), 1);
+  assert.equal(await evaluate("document.querySelector('.usage-cost').textContent.includes('Saved vs API')"), false);
+  assert.equal(await evaluate("document.querySelector('.usage-cost').textContent.includes('What you pay each month')"), false);
+  assert.equal(await evaluate("document.querySelector('.usage-cost input, .usage-cost form')"), null);
+  assert.equal(await evaluate("[...document.querySelectorAll('.usage-cost button')].some(b => b.textContent.includes('Save prices'))"), false);
+  assert.equal(await evaluate("document.querySelector('.usage-cost-details > summary').textContent"), "Price list (1 models, US$ per million tokens)");
+  assert.equal(await evaluate("document.querySelector('.usage-price-table a').href"), "https://developers.openai.com/api/docs/pricing");
+  await evaluate("document.querySelector('.usage-cost').scrollIntoView({ block: 'start' })");
+  await new Promise(resolve => setTimeout(resolve, 150));
+  await screenshot("api-cost-desktop");
+  // The stacked chart: one column per week, a segment per provider sized by its tokens.
+  await wait("document.querySelector('.usage-chart') !== null");
+  assert.equal(await evaluate("document.querySelectorAll('.usage-chart-column').length"), 4);
+  assert.equal(await evaluate("document.querySelectorAll('.usage-chart-column')[1].querySelectorAll('.usage-chart-segment').length"), 0);
+  const heights = await evaluate("[...document.querySelectorAll('.usage-chart-column')[0].querySelectorAll('.usage-chart-segment')].map(s => s.getBoundingClientRect().height)");
+  assert.equal(heights.length, 2);
+  assert.ok(Math.abs(heights[0] / heights[1] - 3) < 0.25, `Claude Code should be 3x Codex: ${heights}`);
+  const columns = await evaluate("[...document.querySelectorAll('.usage-chart-stack')].map(s => s.getBoundingClientRect().height)");
+  assert.ok(Math.abs(columns[3] / columns[0] - 1.5) < 0.1, `600 vs 400 tokens: ${columns}`);
+  assert.equal(await evaluate("new Set([...document.querySelectorAll('.usage-chart-legend .usage-chart-swatch')].map(s => s.dataset.pattern)).size"), 3);
+  // Brand colors from the series: each theme reads its own shade, and Cursor's cream gets dark dots.
+  const swatches = "[...document.querySelectorAll('.usage-chart-legend .usage-chart-swatch')].map(s => { const c = getComputedStyle(s); return [c.backgroundColor, c.getPropertyValue('--series-ink').trim()]; })";
+  const themed = async dark => evaluate(`(() => { document.documentElement.classList.toggle('dark', ${dark}); return ${swatches}; })()`);
+  const wasDark = await evaluate("document.documentElement.classList.contains('dark')");
+  assert.deepEqual((await themed(true)).map(([color]) => color), ["rgb(217, 119, 87)", "rgb(16, 163, 127)", "rgb(247, 247, 244)"]);
+  assert.equal((await themed(true))[2][1], "rgb(0 0 0 / .35)");
+  assert.deepEqual((await themed(false)).map(([color]) => color), ["rgb(198, 97, 63)", "rgb(13, 138, 107)", "rgb(38, 37, 30)"]);
+  assert.equal((await themed(false))[2][1], "rgb(255 255 255 / .45)");
+  assert.equal(await evaluate("getComputedStyle(document.querySelector('.usage-chart-segment')).backgroundColor"), "rgb(198, 97, 63)");
+  await themed(wasDark);
+  assert.equal(await evaluate("document.querySelector('.usage-chart-legend').textContent.includes('Cursor') && document.querySelector('.usage-chart-legend').textContent.includes('Tokens not reported')"), true);
+  assert.equal(await evaluate("document.querySelector('.usage-chart-legend').textContent.includes('75%')"), true);
+  // Hovering a segment shows the week, its total and each provider's tokens and share.
+  // The cost section above may have scrolled the chart away; bring it back first.
+  await evaluate("document.querySelector('.usage-chart').scrollIntoView({ block: 'center' })");
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const point = await evaluate("(() => { const r = document.querySelectorAll('.usage-chart-column')[0].querySelector('.usage-chart-segment').getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()");
+  win.webContents.sendInputEvent({ type: "mouseMove", x: point.x, y: point.y });
+  await wait("document.querySelector('.usage-chart-tooltip') !== null");
+  const tip = await evaluate("document.querySelector('.usage-chart-tooltip').textContent");
+  assert.match(tip, /Week of Aug 31, 2026/);
+  assert.match(tip, /400 tokens/);
+  assert.match(tip, /Claude Code300/);
+  assert.match(tip, /75%/);
+  assert.match(tip, /25%/);
+  // The column's tooltip and the hovered segment's row come from two mouse-enter
+  // handlers, so the hovered row can show a moment after the tooltip.
+  await wait("document.querySelector('.usage-chart-tooltip li[data-hovered]') !== null");
+  assert.equal(await evaluate("document.querySelector('.usage-chart-tooltip li[data-hovered]')?.textContent.startsWith('Claude Code')"), true);
+  await screenshot("tokens-chart-tooltip");
+  win.webContents.sendInputEvent({ type: "mouseMove", x: 5, y: 5 });
+  // The keyboard reads each bar aloud through a live region.
+  win.webContents.focus();
+  await evaluate("document.querySelector('.usage-chart-bars').focus()");
+  // A hidden test window may not own focus, so its focus events can be held back.
+  await evaluate("document.querySelector('.usage-chart-bars').dispatchEvent(new FocusEvent('focusin', { bubbles: true }))");
+  await wait("document.querySelector('.usage-chart [aria-live]').textContent.includes('600 tokens')");
+  await evaluate("document.querySelector('.usage-chart-bars').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }))");
+  await wait("document.querySelector('.usage-chart [aria-live]').textContent.includes('1 call without token data')");
+  await evaluate("document.querySelector('.usage-chart-bars').blur()");
+  assert.equal(await evaluate("document.querySelector('.usage-chart-table summary').textContent"), "Show as a table");
+  // By account: each Claude Code account gets its own shade and pattern, named in every view.
+  assert.equal(await evaluate("document.querySelector('.usage-chart-split [aria-checked=true]').textContent"), "By provider");
+  await click("By account");
+  await wait("document.querySelector('.usage-chart-legend').getAttribute('aria-label') === 'Accounts'");
+  assert.equal(await evaluate("localStorage.getItem('raticode.usage.chartSplit')"), "account");
+  const legend = await evaluate("[...document.querySelectorAll('.usage-chart-legend strong')].map(s => s.textContent)");
+  assert.deepEqual(legend, ["Claude Code · work", "Claude Code · Default sign-in", "Codex · Default account", "Cursor · Default account"]);
+  const accountPatterns = await evaluate("[...document.querySelectorAll('.usage-chart-legend .usage-chart-swatch')].slice(0, 2).map(s => s.dataset.pattern)");
+  assert.deepEqual(accountPatterns, ["dots", "solid"]);
+  assert.equal(await evaluate("document.querySelectorAll('.usage-chart-column')[0].querySelectorAll('.usage-chart-segment').length"), 3);
+  const accountFills = await evaluate("[...document.querySelectorAll('.usage-chart-legend .usage-chart-swatch')].slice(0, 2).map(s => getComputedStyle(s).backgroundColor)");
+  assert.notEqual(accountFills[0], accountFills[1]);
+  assert.match(await evaluate("document.querySelector('.usage-chart-bars').getAttribute('aria-label')"), /by account/);
+  await evaluate("document.querySelector('.usage-chart-bars').dispatchEvent(new FocusEvent('focusin', { bubbles: true }))");
+  await wait("document.querySelector('.usage-chart [aria-live]').textContent.includes('Claude Code · work 600 (100%)')");
+  await evaluate("document.querySelector('.usage-chart-bars').dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }))");
+  await wait("document.querySelector('.usage-chart [aria-live]').textContent.includes('Claude Code · Default sign-in 200 (50%)')");
+  await evaluate("document.querySelector('.usage-chart-bars').blur()");
+  await evaluate("document.querySelector('.usage-chart').scrollIntoView({ block: 'center' })");
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const accountPoint = await evaluate("(() => { const r = document.querySelectorAll('.usage-chart-column')[3].querySelector('.usage-chart-segment').getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()");
+  win.webContents.sendInputEvent({ type: "mouseMove", x: accountPoint.x, y: accountPoint.y });
+  await wait("document.querySelector('.usage-chart-tooltip li[data-hovered]')?.textContent.startsWith('Claude Code · work')");
+  await screenshot("tokens-chart-by-account");
+  win.webContents.sendInputEvent({ type: "mouseMove", x: 5, y: 5 });
+  await evaluate("document.querySelector('.usage-chart-table').open = true");
+  const heads = await evaluate("[...document.querySelectorAll('.usage-bucket-table thead th')].map(th => th.textContent)");
+  assert.deepEqual(heads, ["Week", "Claude Code · work", "Claude Code · Default sign-in", "Codex · Default account", "Cursor · Default account", "Total"]);
+  assert.match(await evaluate("document.querySelector('.usage-bucket-table caption').textContent"), /by account/);
+  await evaluate("document.querySelector('.usage-chart-table').open = false");
+  // Arrow keys move between the two choices, like the period picker.
+  await evaluate("document.querySelector('.usage-chart-split [aria-checked=true]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }))");
+  await wait("document.querySelector('.usage-chart-split [aria-checked=true]').textContent === 'By provider'");
+  assert.equal(await evaluate("localStorage.getItem('raticode.usage.chartSplit')"), "provider");
+  await click("By account");
+  await click("7d");
   await wait("document.querySelector('.usage-token-table') !== null");
-  assert.equal(requests.some(request => request.url === "/api/usage/overview?days=7" && request.method === "GET"), true);
+  // The split is kept when the chart reloads for another period.
+  await wait("document.querySelector('.usage-chart-split [aria-checked=true]')?.textContent === 'By account'");
+  await click("By provider");
+  assert.ok(requests.some(request => request.method === "GET" && request.url.startsWith("/api/usage/overview?range=7d&tz=")));
   await click("Refresh usage");
   await wait("Array.from(document.querySelectorAll('button')).some(b => b.textContent === 'Refresh usage')");
-  assert.deepEqual(requests.at(-1), { url: "/api/usage/refresh?days=7", method: "POST" });
+  assert.equal(requests.at(-1).method, "POST");
+  assert.ok(requests.at(-1).url.startsWith("/api/usage/refresh?range=7d&tz="));
+  // A custom range is checked before it is asked for.
+  await click("Custom");
+  await wait("document.querySelector('.usage-range-custom') !== null");
+  const setDate = async (index, value) => evaluate(`(() => { const input = document.querySelectorAll('.usage-range-custom input')[${index}]; Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(value)}); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await setDate(0, "2026-03-10");
+  await setDate(1, "2026-03-01");
+  const before = requests.length;
+  await click("Show range");
+  await wait("document.querySelector('.usage-range-error')?.textContent === 'The start date must be on or before the end date.'");
+  assert.equal(requests.length, before);
+  await setDate(1, "2026-04-10");
+  await click("Show range");
+  await wait("document.querySelector('.usage-range-error') === null");
+  await wait("document.querySelector('.usage-token-table') !== null");
+  assert.ok(requests.some(request => request.url.startsWith("/api/usage/overview?range=custom&start=2026-03-10&end=2026-04-10&tz=")));
+  assert.equal(await evaluate("localStorage.getItem('raticode.usage.tokenRange')"), JSON.stringify({ key: "custom", start: "2026-03-10", end: "2026-04-10" }));
+  assert.equal(await evaluate("document.querySelector('[role=tabpanel]:not([hidden]) .usage-filters').textContent.includes('Mar 10, 2026 to Apr 10, 2026')"), true);
   failRefresh = true;
   await click("Refresh usage");
   await wait("document.querySelector('[role=alert]')?.textContent.includes('Showing the last loaded results')");
@@ -313,8 +526,14 @@ async function main() {
   await screenshot("tokens-mobile");
   await evaluate("document.documentElement.classList.add('dark')");
   await screenshot("tokens-mobile-dark");
+  // The custom range survives reopening Settings.
+  const reloads = requests.length;
+  await win.loadURL(pageUrl);
+  await wait(`document.querySelector('.usage-dashboard') !== null`);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.ok(requests.slice(reloads).some(request => request.url.startsWith("/api/usage/overview?range=custom&start=2026-03-10&end=2026-04-10")));
   assert.deepEqual(errors, []);
-  console.log("Usage UI passed: settings integration, allowance and token views, credential preserve/replace/remove, draft clear/type/blur, profile isolation, credential store errors, saved usage refresh, mobile and dark rendering.");
+  console.log("Usage UI passed: settings integration, limit alert switch and levels, allowance and token views, stacked token chart with tooltips and keyboard reading, 3mo to All and custom periods with validation, saved period and 90-day migration, credential preserve/replace/remove, draft clear/type/blur, profile isolation, credential store errors, saved usage refresh, mobile and dark rendering.");
   clearTimeout(timer);
   win.destroy();
   await vite.close();

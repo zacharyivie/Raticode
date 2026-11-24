@@ -309,7 +309,9 @@ def test_skip_overlap_records_the_skipped_run(data_dir: Path, source: Path) -> N
 
     assert len(runs.started) == 1
     assert _statuses(engine.store, trigger_id) == ["skipped", "running"]
-    assert "already running" in engine.store.events(trigger_id=trigger_id)[0].message
+    assert engine.store.events(trigger_id=trigger_id)[0].message == (
+        f"Skipped because run {runs.started[0].run_id} has been running for 1 min."
+    )
     runs.release.set()
     _settled(engine, runs, 1)
 

@@ -405,17 +405,10 @@ def _read_endpoint_file(path: Path) -> dict[str, Any] | None:
 
 
 def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return True
-    return True
+    from gofer.utils.pids import pid_alive
+
+    # Never os.kill(pid, 0): on Windows that ends the process it asks about.
+    return pid_alive(pid)
 
 
 def in_agent_session(env: Mapping[str, str] | None = None) -> bool:
@@ -668,6 +661,7 @@ _DEDUPING_ROUTES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("POST", re.compile(r"/api/rem/threads/[^/]+/messages")),
 )
 _DEDUPING_KANBAN_ACTIONS = frozenset({"create", "comment"})
+_TASK_WORKFLOW = re.compile(r"/api/rem/tasks/[^/]+/workflow")
 
 
 def dedupes_request_id(method: str, path: str, body: Any = None) -> bool:
@@ -681,6 +675,9 @@ def dedupes_request_id(method: str, path: str, body: Any = None) -> bool:
     route = api_path(path).split("?", 1)[0]
     if verb == "POST" and route == "/api/rem/kanban/ticket":
         return isinstance(body, dict) and body.get("action") in _DEDUPING_KANBAN_ACTIONS
+    if verb == "POST" and _TASK_WORKFLOW.fullmatch(route):
+        # Make it a workflow stores a receipt; previewing and switching over don't.
+        return isinstance(body, dict) and body.get("action") == "draft"
     return any(verb == m and pattern.fullmatch(route) for m, pattern in _DEDUPING_ROUTES)
 
 
@@ -854,6 +851,13 @@ class ApiClient:
     ) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
         attempt = 0
         while True:
+            if self._guards_owner_token() and self.endpoint.pid is not None:
+                # A backend that exited without cleaning up leaves its endpoint file
+                # behind. Whatever listens on that port now must not get the owner token.
+                if not _pid_alive(self.endpoint.pid):
+                    raise self._unreachable(
+                        ConnectionRefusedError("the recorded backend process has exited")
+                    )
             connection = self._connection(timeout)
             sent = False
             try:
@@ -906,6 +910,16 @@ class ApiClient:
                 time.sleep(self.retry_delay * attempt)
                 continue
             return connection, response
+
+    def _guards_owner_token(self) -> bool:
+        """Whether a stale endpoint file must stop this request before it is sent.
+
+        Only the owner token is held back. Agent turns run in their own PID namespace
+        (bwrap --unshare-pid), where a live backend's PID always looks gone, and they
+        only ever carry a limited agent token: the owner token is refused there.
+        """
+        token = self.endpoint.token
+        return bool(token) and not token.startswith(AGENT_TOKEN_PREFIX) and not in_agent_session()
 
     def _unreachable(self, exc: BaseException) -> CliError:
         where = self.endpoint.socket_path or self.endpoint.url

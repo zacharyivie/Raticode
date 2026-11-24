@@ -15,15 +15,21 @@ from typing import Any, Literal
 import anyio
 
 from gofer.core.approvals import NotificationAdapter
+from gofer.core.provider_capabilities import provider_app_version
+from gofer.core.provider_profiles import ProviderProfile, load_provider_profiles
 from gofer.core.usage_context import observe_usage
+from gofer.rattish import agent_sandbox
 from gofer.rattish.ir_validation import validate_ir_invariants
 from gofer.rattish.provider_fallback import (
     choice_summary,
     fallback_reason,
     provider_choices,
+    sign_in,
+    skip_record,
+    skips_account,
     switch_message,
 )
-from gofer.rattish.provider_runtime import default_provider_subscriptions
+from gofer.rattish.provider_runtime import default_provider_subscriptions, runtime_subscription_id
 from gofer.rattish.result_cache import ResultCache
 from gofer.rattish.run_usage import RunUsageMeter
 from gofer.rattish.runtime import (
@@ -432,19 +438,30 @@ class _WorkflowScheduler:
 
         Each provider gets the node's full retry-count. The next fallback entry is used
         only when the current one's last attempt failed with a provider availability
-        error and the run's usage limits still allow more calls.
+        error and the run's usage limits still allow more calls. After a sign-in hits a
+        rate limit, later entries that are another plan sign-in of the same provider
+        are skipped and recorded as skipped.
         """
         choices = provider_choices(node)
         if len(choices) < 2:
+            version = await _app_version(choices[0]) if choices else None
             result, _ = await self._run_retries(
                 node, activation, run_number, node_outputs, node_statuses, node_errors, None, 0
             )
-            return replace(result, provider=choice_summary(choices[0])) if choices else result
+            return (
+                replace(result, provider=_used_provider(choices[0], version, result))
+                if choices
+                else result
+            )
         fallbacks: list[dict[str, Any]] = []
+        # Each provider's sign-ins that hit a usage limit in this step.
+        limited: dict[str, set[str]] = {}
+        profiles: dict[str, ProviderProfile] | None = None
         attempts_made = 0
         index = 0
         while True:
             choice = choices[index]
+            version = await _app_version(choice)
             result, used = await self._run_retries(
                 node,
                 activation,
@@ -458,7 +475,29 @@ class _WorkflowScheduler:
             attempts_made += used
             reason = fallback_reason(result.error) if result.outcome != "success" else None
             if reason is None or index + 1 == len(choices) or self.usage.stop_requested():
-                return replace(result, provider=choice_summary(choice), fallbacks=tuple(fallbacks))
+                return replace(
+                    result,
+                    provider=_used_provider(choice, version, result),
+                    fallbacks=tuple(fallbacks),
+                )
+            if reason == "rate_limit" or limited:
+                if profiles is None:
+                    profiles = self._provider_profiles()
+                if reason == "rate_limit":
+                    limited.setdefault(choice["provider_id"], set()).add(
+                        sign_in(choice, profiles)[0]
+                    )
+                while index + 1 < len(choices) and skips_account(
+                    choices[index + 1], profiles, limited
+                ):
+                    index += 1
+                    fallbacks.append(skip_record(choice, choices[index]))
+                if index + 1 == len(choices):
+                    return replace(
+                        result,
+                        provider=_used_provider(choice, version, result),
+                        fallbacks=tuple(fallbacks),
+                    )
             index += 1
             switch = {
                 "from": choice_summary(choice),
@@ -478,6 +517,17 @@ class _WorkflowScheduler:
                 from_provider=switch["from"],
                 fallback_reason=reason,
             )
+
+    def _provider_profiles(self) -> dict[str, ProviderProfile]:
+        """The saved provider profiles, or none when the store can't be read.
+
+        With none, every named profile counts as a sign-in of its own, so a step still
+        never moves to another account at a usage limit.
+        """
+        try:
+            return load_provider_profiles(self.data_dir)
+        except (OSError, ValueError):
+            return {}
 
     async def _run_retries(
         self,
@@ -1014,7 +1064,16 @@ async def execute_workflow(
     )
     if run_id is not None:
         scheduler.run_id = run_id
-    timeout_ms = ir["workflow"]["timeout_ms"]
+    try:
+        return await _run_scheduler(scheduler, ir["workflow"]["timeout_ms"])
+    finally:
+        # Sandboxed agent steps keep temp files and caches here for the run.
+        agent_sandbox.remove_run_scratch(scheduler.data_dir, scheduler.run_id)
+
+
+async def _run_scheduler(
+    scheduler: _WorkflowScheduler, timeout_ms: int | None
+) -> WorkflowExecutionResult:
     if timeout_ms is None:
         return await scheduler.run()
     try:
@@ -1033,3 +1092,28 @@ async def execute_workflow(
                 {"scope": "workflow", "timeout_ms": timeout_ms},
             ),
         )
+
+
+async def _app_version(choice: Mapping[str, Any]) -> str | None:
+    """The installed version of the provider app a step is about to start, if it has one.
+
+    Plain API providers have no app, so they have no version.
+    """
+    try:
+        subscription = runtime_subscription_id(str(choice["provider_id"]))
+    except ValueError:
+        return None
+    return await anyio.to_thread.run_sync(provider_app_version, subscription)
+
+
+def _used_provider(
+    choice: Mapping[str, Any], version: str | None, result: NodeExecutionResult
+) -> dict[str, Any]:
+    """The provider a step used for its record, with the app version when one started.
+
+    A cached answer started no provider app, so it records no version.
+    """
+    summary = choice_summary(choice)
+    if version and result.cached_at is None:
+        summary["provider_version"] = version
+    return summary

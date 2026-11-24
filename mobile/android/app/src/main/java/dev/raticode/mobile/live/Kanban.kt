@@ -14,16 +14,20 @@ object Kanban {
     const val SELF_WORK = "selfwork.read"
     const val SETTINGS = "selfwork.settings"
     const val SEEN = "selfwork.report.seen"
+    /** When the self-work running now stops: the user's condition and latest time; desktops whose view has `stop` take it. */
+    const val STOP = "selfwork.stop"
     const val PARTICIPANT = "kanban.participant"
     /** One ticket and its history: status changes with their reasons, and comments. */
     const val TIMELINE = "kanban.timeline"
     val READS = setOf(BOARD, SELF_WORK, TIMELINE)
-    val ACTIONS = setOf(TICKET, SETTINGS, SEEN, PARTICIPANT)
+    val ACTIONS = setOf(TICKET, SETTINGS, SEEN, PARTICIPANT, STOP)
     const val UPDATE_DESKTOP = "Update Raticode on your computer to use the global board and Rem's self-work here."
     const val UPDATE_PARTICIPANTS = "Update Raticode on your computer to see the board's people and their projects here."
     const val UPDATE_COMMENTS = "Update Raticode on your computer to see each ticket's history and comments here."
 
     const val SCOPE_REM = "rem"
+    /** The tag a guardrail retro puts on the tickets it proposes. */
+    const val GUARDRAIL = "Guardrail"
     const val SCOPE_ORG = "organization"
     /** The assignee ID that means Rem itself. */
     const val REM = "rem"
@@ -168,6 +172,21 @@ object Kanban {
         return "Waits for: " + left.first().title.ifBlank { left.first().key } + if (left.size > 1) " and ${left.size - 1} more" else ""
     }
 
+    /** Tickets on the same board that wait for [ticket], open ones first, by number. Cancelled tickets are left out. */
+    fun waitedOnBy(board: KanbanBoard, ticket: KanbanTicket): List<KanbanTicket> = board.tickets.filter { t ->
+        t.id != ticket.id && t.scope == ticket.scope && t.organizationId == ticket.organizationId && t.status != "cancelled" &&
+            t.waitsFor.any { it.id == ticket.id }
+    }.sortedWith(compareBy<KanbanTicket> { it.status == "done" }.thenBy { it.key.substringAfterLast('-').toIntOrNull() ?: Int.MAX_VALUE }.thenBy { it.id })
+
+    /** The waits a card or fact can sum up: how many are done of how many. */
+    fun waitsDone(ticket: KanbanTicket) = ticket.waitsFor.count { it.status == "done" } to ticket.waitsFor.size
+
+    /** A Rem ticket's kind of work in the new-ticket form's words. */
+    val KINDS = listOf("develop" to "Build", "research" to "Research", "maintain" to "Maintain", "errand" to "Errand")
+    fun kindLabel(kind: String) = KINDS.firstOrNull { it.first == kind }?.second ?: kind.replaceFirstChar { it.uppercase() }
+
+    fun priorityLabel(priority: String) = PRIORITIES.firstOrNull { it.first == priority }?.second ?: priority.replaceFirstChar { it.uppercase() }
+
     /** Whether the user can change what a ticket waits for. An organization changes a ticket's plan only while it isn't running. */
     fun canEditWaits(ticket: KanbanTicket) = !ticket.proposed && ticket.status in OPEN &&
         (ticket.isRem || (!ticket.running && ticket.paused.isBlank()))
@@ -181,6 +200,11 @@ object Kanban {
 
     /** The edit that replaces the whole list; the desktop refuses loops and tickets from another board. */
     fun waitsParams(ticket: KanbanTicket, ids: List<String>) = address(ticket, "edit").put("waits_for", JSONArray(ids.distinct().take(MAX_WAITS)))
+
+    /** The card's pill for a ticket that contradicts decisions, e.g. "Violates D-4, D-7"; "" for any other. */
+    fun violatesLine(ticket: KanbanTicket) =
+        if (ticket.violatesDecisions.isEmpty()) "" else "Violates ${ticket.violatesDecisions.take(3).joinToString(", ")}" +
+            (if (ticket.violatesDecisions.size > 3) " +${ticket.violatesDecisions.size - 3}" else "")
 
     fun blockText(ticket: KanbanTicket) = when {
         ticket.status != "blocked" -> ""
@@ -335,13 +359,53 @@ object Kanban {
         .apply { if (!approve && reason.isNotBlank()) put("reason", reason.trim().take(1000)) }
 
     /** [autoApprove] true is sent only after the user confirmed what it allows, so it carries that confirmation. */
-    fun settingsParams(settings: SelfWorkSettings, enabled: Boolean? = null, maxThreads: Int? = null, autoPull: Boolean? = null, autoApprove: Boolean? = null) =
+    fun settingsParams(settings: SelfWorkSettings, enabled: Boolean? = null, maxThreads: Int? = null, autoPull: Boolean? = null, autoApprove: Boolean? = null,
+                       dailyCap: Int? = null, allowanceMode: String? = null, paceAim: Int? = null, paceLead: Int? = null) =
         JSONObject().put("expected_revision", settings.revision).apply {
             enabled?.let { put("enabled", it) }
+            dailyCap?.let { put("daily_allowance_percent", it.coerceIn(0, 100)) }
+            allowanceMode?.takeIf { it in ALLOWANCE_MODES.map { (value, _) -> value } }?.let { put("allowance_mode", it) }
+            paceAim?.let { put("pace_aim_percent", it.coerceIn(1, 100)) }
+            paceLead?.let { put("pace_lead_hours", it.coerceIn(0, 24)) }
             maxThreads?.let { put("max_threads", it) }
             autoPull?.let { put("auto_pull_backlog", it) }
             autoApprove?.let { put("auto_approve_proposals", it); if (it) put("confirm_auto_approve", true) }
         }
+
+    /** What the daily cap row says under its title. */
+    fun dailyCapDetail(view: SelfWorkView): String = if ((view.settings.dailyCap ?: 0) > 0)
+        "Self-work starts nothing new once it used this much of a weekly allowance today, counted for each account it runs on. Your own use of that account while it runs counts too. Resets at midnight."
+    else "Off. Set how much of a weekly allowance self-work may use each day."
+
+    fun dailyCapLabel(cap: Int) = if (cap <= 0) "Off" else "$cap%"
+
+    /** How self-work uses a weekly allowance: one choice of three, in the desktop's order. */
+    val ALLOWANCE_MODES = listOf("off" to "Off", "daily" to "Daily cap", "pace" to "Pace to reset")
+
+    /** What the Allowance use row says under its title for the choice in effect. */
+    fun allowanceDetail(mode: String): String = when (mode) {
+        "pace" -> "Starts new work only while the account is under a line that reaches the aim shortly before its weekly reset. Running work and your own work are never held."
+        "daily" -> "Caps how much of a weekly allowance self-work may use each day."
+        else -> "Self-work uses the allowance whenever threads are free."
+    }
+
+    /** A note when the rate-limit stop would halt self-work before Pace to reset reaches its aim; null when it wouldn't. */
+    fun paceRateWarning(settings: SelfWorkSettings, rateLimitPercent: Int): String? =
+        if (settings.allowanceMode == "pace" && rateLimitPercent in 1 until settings.paceAim)
+            "Rate limit use stops self-work at $rateLimitPercent%, before the pace aim of ${settings.paceAim}%." else null
+
+    /** One provider's self-work account change; "" goes back to Rem's setting. */
+    fun accountParams(settings: SelfWorkSettings, provider: String, choice: String) = JSONObject().put("expected_revision", settings.revision)
+        .put("provider_accounts", JSONObject().put(provider, choice))
+
+    /** The choices for [row], value to label, with a removed account kept so the row still shows it. */
+    fun accountChoices(row: SelfWorkAccount): List<Pair<String, String>> {
+        val choices = listOf("" to "Rem’s setting (${row.remSettingLabel})", "@default" to "Default sign-in", "auto" to "Choose by usage") +
+            row.accounts.map { it to it }
+        return if (choices.any { it.first == row.choice }) choices else choices + (row.choice to "${row.choice} (removed)")
+    }
+
+    fun accountLabel(row: SelfWorkAccount) = accountChoices(row).firstOrNull { it.first == row.choice }?.second ?: row.choice
 
     fun seenParams(report: SelfWorkReport) = JSONObject().put("updated_at", report.updatedAt)
 
@@ -432,7 +496,11 @@ object Kanban {
         // An older desktop sends none of these, and the ticket waits for nothing.
         t.objects("waits_for").take(MAX_WAITS).map { w -> TicketWait(w.optString("ticket_id").take(128), w.optString("key").takeIf { TicketMentions.KEY.matches(it) }.orEmpty(),
             w.optString("title").take(200), w.optString("status").take(20)) }.filter { it.id.isNotBlank() },
-        t.optBoolean("waiting"), t.optString("wait_notice").take(1200))
+        t.optBoolean("waiting"), t.optString("wait_notice").take(1200),
+        // An older desktop sends neither; the ticket then breaks no decision as far as the phone knows.
+        t.strings("violates_decisions").take(MAX_WAITS), t.optString("violation_reason").take(1200),
+        // An older desktop sends no tags.
+        t.strings("tags").take(5).map { it.take(40) })
 
     fun parseSelfWork(json: JSONObject): SelfWorkView {
         val s = json.optJSONObject("settings"); val l = json.optJSONObject("limits"); val st = json.optJSONObject("state"); val r = json.optJSONObject("report")
@@ -444,15 +512,27 @@ object Kanban {
                 // An older desktop has no windows, so the saved switch is the one in effect.
                 (s?.opt("saved_enabled") as? Boolean) ?: (s?.optBoolean("enabled") == true),
                 // An older desktop can't approve self-work's tickets, so the phone shows no switch.
-                s?.opt("auto_approve_proposals") as? Boolean),
-            SelfWorkLimits(low, high),
+                s?.opt("auto_approve_proposals") as? Boolean,
+                // An older desktop has no daily cap, so the phone shows no row for it.
+                s?.takeIf { it.has("daily_allowance_percent") }?.optInt("daily_allowance_percent")?.coerceIn(0, 100),
+                // An older desktop has only the daily cap, so the phone shows no Allowance use choice.
+                s?.optString("allowance_mode")?.takeIf { mode -> ALLOWANCE_MODES.any { it.first == mode } },
+                (s?.optInt("pace_aim_percent", 97) ?: 97).coerceIn(1, 100), (s?.optInt("pace_lead_hours", 3) ?: 3).coerceIn(0, 24),
+                s?.optInt("rate_limit_percent", 0)?.coerceIn(0, 100) ?: 0),
+            SelfWorkLimits(low, high, (l?.optInt("daily_allowance_percent_max", 100) ?: 100).coerceIn(1, 100),
+                (l?.optInt("pace_aim_percent_min", 1) ?: 1).coerceIn(1, 100), (l?.optInt("pace_aim_percent_max", 100) ?: 100).coerceIn(1, 100),
+                (l?.optInt("pace_lead_hours_max", 24) ?: 24).coerceIn(0, 168)),
             SelfWorkState(st?.optString("mode", "off") ?: "off", st?.optInt("active_threads") ?: 0, st?.optInt("todo_remaining") ?: 0,
                 st?.optString("last_prompt_at").orEmpty(), st?.optString("starts_at").orEmpty(), st?.optString("detail").orEmpty(),
                 st?.optInt("thread_limit", 0)?.takeIf { it > 0 } ?: (s?.optInt("max_threads", low) ?: low), st?.optInt("proposals_waiting") ?: 0,
                 st?.takeIf { it.has("assigned_projects") }?.optInt("assigned_projects"), st?.optInt("outside_projects") ?: 0,
                 // An older desktop doesn't say, and always worked with the board.
                 st?.optBoolean("board_enabled", true) ?: true,
-                st?.optInt("paused_threads") ?: 0, st?.optInt("paused_for_you") ?: 0, st?.optInt("auto_approved_session") ?: 0),
+                st?.optInt("paused_threads") ?: 0, st?.optInt("paused_for_you") ?: 0, st?.optInt("auto_approved_session") ?: 0,
+                st?.optJSONObject("daily_allowance")?.optString("message").orEmpty().take(400),
+                st?.optJSONObject("daily_allowance")?.let { it.optInt("cap_percent") > 0 && !it.optBoolean("available", true) } ?: false,
+                st?.optJSONObject("allowance_pace")?.optString("message").orEmpty().take(400),
+                st?.optJSONObject("allowance_pace")?.let { it.optString("mode") == "pace" && !it.isNull("starts") && it.optInt("starts", 1) == 0 } ?: false),
             r?.let { report -> SelfWorkReport(report.optString("since"), report.optString("updated_at"), report.optBoolean("unseen"), report.optString("summary"),
                 report.objects("tickets_added").map { ReportTicket(it.optString("ticket_id"), it.optString("title"), it.optString("scope"),
                     it.optString("organization_id"), it.optString("organization_name"), it.optBoolean("proposed"), it.optString("at"), it.optBoolean("auto_approved")) },
@@ -460,7 +540,61 @@ object Kanban {
                     it.optString("thread_id"), it.optString("at")) },
                 report.objects("duplicates_merged").map { ReportMerged(it.optString("ticket_id"), it.optString("title"), it.optString("kept_title"), it.optString("reason"), it.optString("at")) },
                 report.objects("notes").map { ReportNote(it.optString("text"), it.optString("at")) }) },
-            json.optJSONObject("schedule")?.let(::schedule))
+            json.optJSONObject("schedule")?.let(::schedule),
+            json.objects("accounts").take(40).map { a -> SelfWorkAccount(a.optString("provider").take(40), a.optString("label").take(80).ifBlank { a.optString("provider").take(40) },
+                a.optString("choice").take(128), a.optString("rem_setting_label").take(140).ifBlank { "Default sign-in" }, a.strings("accounts").take(100).map { it.take(128) }) }
+                .filter { it.provider.isNotBlank() },
+            json.optJSONObject("stop")?.let(::stop))
+    }
+
+    /** When self-work stops. An older desktop sends none, and the page offers no stop condition. */
+    private fun stop(s: JSONObject) = SelfWorkStop(s.optBoolean("active"), s.optLong("revision"), s.optString("condition").take(MAX_STOP_CONDITION),
+        s.optString("no_later_than").takeUnless { s.isNull("no_later_than") }.orEmpty().take(80), s.optString("no_later_than_label").take(160),
+        s.optString("label").take(700), s.optJSONObject("judgment")?.let(::judgment), s.optBoolean("judging"), s.optBoolean("judge_failed"),
+        s.optJSONObject("last")?.let { l -> SelfWorkLastStop(l.optString("condition").take(MAX_STOP_CONDITION), l.optString("no_later_than_label").take(160),
+            l.optJSONObject("judgment")?.let(::judgment), l.optString("stopped_by").take(20), l.optString("ended_at").takeUnless { l.isNull("ended_at") }.orEmpty().take(80)) }
+            ?.takeIf { it.condition.isNotBlank() || it.noLaterThanLabel.isNotBlank() })
+
+    private fun judgment(j: JSONObject) = StopJudgment(j.optBoolean("met"), j.optString("evidence").take(400), j.optString("at_label").take(160))
+
+    // When self-work stops ----------------------------------------------------------------------------------------------
+
+    const val MAX_STOP_CONDITION = 500
+    private val CLOCK = Regex("^([01]?\\d|2[0-3]):[0-5]\\d$")
+
+    /** Whether [text] is a 24-hour HH:MM time the desktop takes. */
+    fun validClock(text: String) = CLOCK.matches(text.trim())
+
+    /**
+     * `selfwork.stop` params from the editor: [condition] (blank clears it) and [time] HH:MM with [day] today, tonight,
+     * tomorrow or "" for the next time it comes round (blank time clears it). [revision] is the stop the edit began from.
+     */
+    fun stopParams(stop: SelfWorkStop?, condition: String, time: String, day: String) = JSONObject().apply {
+        stop?.let { put("expected_revision", it.revision) }
+        put("condition", condition.trim().take(MAX_STOP_CONDITION))
+        val clock = time.trim()
+        if (clock.isBlank()) put("no_later_than", JSONObject.NULL)
+        else put("no_later_than", JSONObject().put("time", clock).apply { if (day in setOf("today", "tonight", "tomorrow")) put("day", day) })
+    }
+
+    /** `selfwork.stop` params that clear the condition and the latest time. */
+    fun clearStopParams(stop: SelfWorkStop) = JSONObject().put("clear", "both").put("expected_revision", stop.revision)
+
+    /** The last judgment as one line: "Last check 8:15 PM today: not met. REM-206 is still in review." */
+    fun stopJudgmentLine(stop: SelfWorkStop): String? = when {
+        stop.judging -> "Checking the condition now…"
+        stop.judgment != null -> "Last check ${stop.judgment.atLabel}: ${if (stop.judgment.met) "met" else "not met"}." +
+            stop.judgment.evidence.takeIf { it.isNotBlank() }?.let { " $it" }.orEmpty()
+        stop.condition.isNotBlank() -> "Not checked yet: Rem checks it after each self-work task finishes."
+        else -> null
+    }?.let { if (stop.judgeFailed) "$it The last check failed; Rem tries again in 10 minutes." else it }
+
+    /** How the last stop went, after its self-work ended. */
+    fun lastStopLine(last: SelfWorkLastStop): String = when {
+        last.stoppedBy == "done_when" -> "Stopped: “${last.condition}” was met." + last.judgment?.evidence?.takeIf { it.isNotBlank() }?.let { " $it" }.orEmpty()
+        last.stoppedBy == "no_later_than" -> "Stopped at its latest time${last.noLaterThanLabel.takeIf { it.isNotBlank() }?.let { ", $it" }.orEmpty()}."
+        last.condition.isNotBlank() -> "Self-work ended before “${last.condition}” was met."
+        else -> "Self-work ended before its latest time."
     }
 
     /** Timed self-work windows. An older desktop sends none, and the page shows nothing new. */
@@ -494,6 +628,8 @@ object Kanban {
         "window" -> "Its window ended"
         "user" -> "Turned off"
         "condition" -> "Its running tasks finished"
+        "done_when" -> "Its stop condition was met"
+        "no_later_than" -> "Reached its latest stop time"
         else -> "Ended"
     }
 
@@ -536,7 +672,14 @@ data class KanbanTicket(val id: String, val scope: String, val organizationId: S
                         /** True while any of [waitsFor] isn't Done. */
                         val waiting: Boolean = false,
                         /** Set when one of [waitsFor] was cancelled or removed; the ticket stays put until the user decides. */
-                        val waitNotice: String = "") {
+                        val waitNotice: String = "",
+                        /** IDs of decisions in force it contradicts; self-work won't start it until the ticket or a decision changes. */
+                        val violatesDecisions: List<String> = emptyList(),
+                        /** Why it contradicts them, as the desktop recorded it. */
+                        val violationReason: String = "",
+                        /** Labels such as `Guardrail`, for a ticket a guardrail retro proposed. */
+                        val tags: List<String> = emptyList()) {
+    val guardrail get() = Kanban.GUARDRAIL in tags
     val isRem get() = scope == Kanban.SCOPE_REM
     /** Ticket IDs are unique only within their organization; this one is unique on the board. */
     val uid get() = "$organizationId/$id"
@@ -566,7 +709,15 @@ data class KanbanParticipant(val id: String, val kind: String, val name: String,
 data class SelfWorkSettings(val enabled: Boolean, val maxThreads: Int, val autoPull: Boolean, val idleMinutes: Int, val revision: Long,
                             val savedEnabled: Boolean = enabled,
                             /** Whether self-work approves its own backlog tickets; null from a desktop that can't. Only the user turns it on. */
-                            val autoApprove: Boolean? = null)
+                            val autoApprove: Boolean? = null,
+                            /** Percent of a weekly allowance (of each account self-work runs on) self-work may use a day, 0 for no cap; null from a desktop without it. */
+                            val dailyCap: Int? = null,
+                            /** `off`, `daily` (Daily cap) or `pace` (Pace to reset); null from a desktop that has only the daily cap. */
+                            val allowanceMode: String? = null,
+                            /** Pace to reset: the percent to have used by the reset, and how many hours before it to get there. */
+                            val paceAim: Int = 97, val paceLead: Int = 3,
+                            /** The rate-limit stop's percent, 0 for none; set on the computer or with the CLI. */
+                            val rateLimitPercent: Int = 0)
 /**
  * A timed self-work window. [endAt] is empty when it ends on a condition: [until] `running_done` waits for the tasks that ran
  * when it was set. [afterEnd] is `restore`, `on` or `off`. The labels come formatted from the desktop and show as they are.
@@ -579,7 +730,7 @@ data class SelfWorkPeriod(val id: String, val startedAt: String, val endedAt: St
 data class SelfWorkSchedule(val timezone: String, val active: SelfWorkWindow?, val upcoming: List<SelfWorkWindow>, val lastPeriod: SelfWorkPeriod?) {
     val isEmpty get() = active == null && upcoming.isEmpty() && lastPeriod == null
 }
-data class SelfWorkLimits(val min: Int, val max: Int)
+data class SelfWorkLimits(val min: Int, val max: Int, val dailyCapMax: Int = 100, val paceAimMin: Int = 1, val paceAimMax: Int = 100, val paceLeadMax: Int = 24)
 /** [mode] is `off`, `waiting`, `working` or `paused`. */
 data class SelfWorkState(val mode: String, val activeThreads: Int, val todoRemaining: Int, val lastPromptAt: String, val startsAt: String, val detail: String,
                          /** How many threads Rem may use now, which available slots can hold below the maximum. */
@@ -595,7 +746,15 @@ data class SelfWorkState(val mode: String, val activeThreads: Int, val todoRemai
                          /** Of those, the ones that made way for the user's own work and resume on their own. */
                          val pausedForYou: Int = 0,
                          /** Tickets self-work approved on its own this session. */
-                         val autoApprovedSession: Int = 0)
+                         val autoApprovedSession: Int = 0,
+                         /** Today's use of the weekly allowance of the account self-work runs on, in the desktop's words; empty when there's nothing to say. */
+                         val dailyAllowance: String = "",
+                         /** The daily cap is on but the desktop has no current usage reading, so self-work starts nothing new. */
+                         val dailyAllowanceUnknown: Boolean = false,
+                         /** Pace to reset's line in the desktop's words: the percent used against the pace line and how many tasks may start. */
+                         val allowancePace: String = "",
+                         /** Pace to reset is holding new starts now. */
+                         val paceHolding: Boolean = false)
 data class ReportTicket(val id: String, val title: String, val scope: String, val organizationId: String, val organizationName: String, val proposed: Boolean, val at: String,
                         val autoApproved: Boolean = false)
 data class ReportWork(val ticketId: String, val title: String, val state: String, val summary: String, val threadId: String, val at: String)
@@ -608,4 +767,23 @@ data class SelfWorkReport(val since: String, val updatedAt: String, val unseen: 
 }
 /** [schedule] is null from a desktop without timed windows. */
 data class SelfWorkView(val settings: SelfWorkSettings, val limits: SelfWorkLimits, val state: SelfWorkState, val report: SelfWorkReport?,
-                        val schedule: SelfWorkSchedule? = null)
+                        val schedule: SelfWorkSchedule? = null,
+                        /** One row per provider with accounts; empty from a desktop without self-work accounts. */
+                        val accounts: List<SelfWorkAccount> = emptyList(),
+                        /** When self-work stops; null from a desktop without stop conditions. */
+                        val stop: SelfWorkStop? = null)
+/**
+ * When the self-work running now stops: at [condition] (the user's words, judged by Rem on the desktop) or [noLaterThan]
+ * at the latest, whichever comes first. [active] is false when neither is set; [last] is the stop of the last session.
+ */
+data class SelfWorkStop(val active: Boolean, val revision: Long, val condition: String, val noLaterThan: String, val noLaterThanLabel: String,
+                        val label: String, val judgment: StopJudgment?, val judging: Boolean, val judgeFailed: Boolean, val last: SelfWorkLastStop?)
+/** Rem's last answer about the condition, with its evidence from the records. */
+data class StopJudgment(val met: Boolean, val evidence: String, val atLabel: String)
+/** [stoppedBy] is `done_when`, `no_later_than`, or "" when self-work ended some other way first. */
+data class SelfWorkLastStop(val condition: String, val noLaterThanLabel: String, val judgment: StopJudgment?, val stoppedBy: String, val endedAt: String)
+/**
+ * Which account self-work's runs use with [provider]. [choice] is "" for Rem's setting, "@default" for the default
+ * sign-in, "auto" to choose by usage, or an account name. [remSettingLabel] says what Rem's setting is.
+ */
+data class SelfWorkAccount(val provider: String, val label: String, val choice: String, val remSettingLabel: String, val accounts: List<String>)

@@ -29,6 +29,7 @@ Name the subject, audience and destination together, for example: "Review the so
 | `second_brain.save_note` | The configured knowledge folder, with the same document writer |
 
 - Neither tool replaces an existing file.
+- Both take an optional `summary`: two or three plain sentences, at most 600 characters, on what the document finds. It's written into the file, as a `summary:` front-matter field in Markdown or a `<meta name="description">` in HTML, Slides and a PDF's HTML source, so it goes wherever the file goes. In a Second Brain, Rem reads it first in search; see [Document summaries](./second-brain.md#document-summaries). A longer summary is refused and nothing is saved. New in 0.6.0.
 - A successful save returns a local link. Open it to check the real file rather than trusting the chat's description.
 - With no project selected, use Second Brain with a configured folder, or select a project first.
 - A failed save means no document was saved.

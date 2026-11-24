@@ -13,15 +13,15 @@ The phone talks directly to Raticode on your computer, over your Wi-Fi or, if yo
 1. Open **Settings > Developer > Feature Preview** and turn on **Phone and desktop pairing**. Raticode restarts its backend to apply it. (A backend started without the desktop app reads `RATICODE_DEVICE_EXPERIMENTAL_NETWORK=1` instead.)
 2. Open **Settings > Devices** and choose **Set up device pairing**.
 
-The computer needs a private network address on your Wi-Fi to create invitations.
+The computer needs a private network address on your Wi-Fi to create invitations. If it isn't on a network yet when Raticode starts, as just after boot, Raticode starts listening there within about half a minute of joining one. You don't need to restart it.
 
 - Router client isolation, guest Wi-Fi or a firewall can keep the phone from reaching it. Allow Raticode's device port through the computer's firewall.
-- `RATICODE_DEVICE_HOST` overrides the address Raticode picks.
+- `RATICODE_DEVICE_HOST` overrides the address Raticode picks and fixes it: Raticode then stays on that address when the computer changes networks.
 
 ## Pair the phone
 
 1. On the computer, in **Settings > Devices**, choose **Pair a device**, pick **Phone** and choose **Create QR code**. The code works once and expires after five minutes. **Can't scan? Use the link** shows a link you can copy to the phone instead.
-2. On the phone, open Raticode Mobile and, under **Connect to your desktop**, tap **Scan desktop QR**, or paste the link into **Paste invitation** and review it.
+2. On the phone, open Raticode Mobile and, under **Connect to your desktop**, tap **Scan desktop QR**, or paste the link into **Paste invitation** and review it. The scanner asks for the camera the first time; if you refuse, it closes and you can paste the link instead. The **X** in its corner closes it without scanning.
 3. The phone shows **Pair with …?** with the computer's fingerprint, which the computer calls its security code. Check they match, then tap **Pair**.
 4. On the computer, check the phone's code under your devices and choose **Identity matches, confirm pairing**.
 
@@ -76,6 +76,7 @@ Turning the switch off stops the checks but leaves a locked phone locked. An old
 ## Staying connected
 
 - The app connects to its saved computer when you open it and reconnects when Wi-Fi returns. If the computer's address changes or is blocked, use **More › Connection › Set desktop address**.
+- When the computer joins another network or gets a new address, Raticode moves its phone connection to the new address within about half a minute, on the same port, without a restart. It only moves once the new address has held for two checks in a row, and it never listens on more than one Wi-Fi address. **Settings > Devices** then shows a notice with the new address, which you can dismiss. Phones connected through Tailscale stay connected and save the new address on their next sync, a few seconds later, for the next time they use Wi-Fi. Other phones need it entered under **Set desktop address**. A pairing QR code that was showing is withdrawn, because it names the old address. Losing the network altogether changes nothing: Raticode keeps the old address and works again when it comes back. It also stays put while the computer still has the old address, for example when you plug in Ethernet beside Wi-Fi or turn on a VPN that carries all traffic: it moves only once that address is gone.
 - **Enable background sync** (under **Background & notifications** in the connection settings) keeps the connection open while the app is in the background, with a visible Android notification. Without it, leaving the app disconnects and opening it reconnects. Alerts and replies only arrive while connected; there is no push service.
 - Each phone's synced history on the computer is capped at 64 MB, and a single thread at 8 MB or 10,000 messages. Threads past those limits stay off the phone.
 
@@ -111,7 +112,8 @@ It needs a Linux computer whose firmware allows Wake-on-LAN, and the phone on th
 ## Troubleshooting
 
 - **Pairing waits at authentication:** check that **Phone and desktop pairing** is on and the computer's firewall allows the device port, before reinstalling anything.
-- **Can't connect:** make sure both devices are on the same Wi-Fi (not a guest network), then try **Set desktop address**.
+- **Can't connect:** make sure both devices are on the same Wi-Fi (not a guest network), then try **Set desktop address** with the address shown under **Connection and troubleshooting** in **Settings > Devices**. If the computer just changed networks, give it half a minute to move.
+- **"Raticode could not listen for phones there" in the log:** another program holds the device port on the computer's new address. Raticode keeps the old address and tries again every 15 seconds; close the other program or restart Raticode.
 - **New threads don't appear:** the phone's 64 MB history share may be full; archive or delete old threads on the computer.
 - **A feature says to update the computer:** update Raticode on the computer; the phone and desktop are released separately.
 

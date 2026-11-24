@@ -228,7 +228,7 @@ def test_todos_outside_rems_projects_wait_and_hold_nothing_back(board):
     # With the assigned project's to-dos done, research goes on there and only there.
     wait_for(lambda: not tick(home) and not home.self_work.view()["state"]["active_threads"], 8)
     research = [t for t in worker_titles(fake) if "Research" in t]
-    assert len(research) == 3 and all(
+    assert len(research) == 4 and all(
         t.endswith(" in project") or " for project" in t for t in research
     )
     assert "Elsewhere" not in worker_titles(fake) and "No folder" not in worker_titles(fake)
@@ -264,7 +264,8 @@ def test_research_and_its_board_stay_inside_the_assigned_project(board):
     ]
     assert research and all(c["workflow"]["projectName"] == "project" for c in research)
     for call in research:
-        prompt = " ".join(str(m["body"]) for m in call["messages"])
+        # The task's prompt reaches the worker in its instructions.
+        prompt = call["agent_instructions"] + " ".join(str(m["body"]) for m in call["messages"])
         assert "Visible plan" in prompt and "Secret plan" not in prompt
 
 

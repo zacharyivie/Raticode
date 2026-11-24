@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import os
 import re
 import stat
 import subprocess
 import tempfile
+import threading
 import zipfile
 from html import escape
 from html.parser import HTMLParser
@@ -19,6 +19,10 @@ from urllib.parse import urljoin
 
 import yaml
 
+from gofer.ui.brain_folders import checked_rules
+from gofer.ui.brain_pdf import read_pdf
+from gofer.ui.brain_summaries import SUMMARY_READER, extracted_summary
+from gofer.ui.case_twins import fold_name
 from gofer.utils.atomic_output import open_binary_input
 
 MAX_FILE = 32 * 1024 * 1024
@@ -48,6 +52,7 @@ SETTINGS = {
     "embeddingModel",
     "researchProfile",
     "researchProvider",
+    "folderRules",
 }
 
 
@@ -86,6 +91,8 @@ def validate_settings(settings: Any) -> None:
         )
     ):
         raise ValueError("Invalid research provider settings")
+    if "folderRules" in settings:
+        checked_rules(settings["folderRules"])
 
 
 def validate_portable(payload: Any) -> None:
@@ -327,58 +334,169 @@ def preview_html(content: str) -> str:
     return "".join(parser.parts)
 
 
+# Bump when HTML passages come out differently, so stored HTML documents are read again
+# once (brain_library re-extracts documents whose "reader" is older and re-finds citations
+# on their current version by quote). 2: h1-h4 headings and joined short fragments.
+# 3: the title skips svg and math <title> captions (brain_library also retitles report
+# records whose title came from the file).
+HTML_READER = 3
+# Passages shorter than this that are not headings join the next passage in their section,
+# so KPI numbers, section numbers and status words don't become search hits on their own.
+FRAGMENT_CHARS = 25
+_HEADING_TAGS = frozenset({"h1", "h2", "h3", "h4"})
+_BREAKS_HEADING = frozenset({"p", "div", "section", "article", "li", "tr", "table", "ul", "ol"})
+# Marks the start of a heading paragraph in ReadableHTML's text. It is a private-use
+# character, and any copy of it in the page's own text is dropped.
+HEADING_MARK = ""
+
+
+def _one_line(text: str) -> str:
+    return re.sub(r"\s+", " ", text.replace(HEADING_MARK, "")).strip()
+
+
 class ReadableHTML(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self.hidden = 0
+        # The page's own <title>: the first one outside svg and math, where <title> is a
+        # diagram's caption. Later ones are ignored.
         self.title_parts: list[str] = []
         self.in_title = False
+        self.title_seen = False
+        self.foreign = 0  # How many svg or math elements are open.
         self.meta: dict[str, str] = {}
         self.links: list[str] = []
+        # The h1-h4 currently open (outside hidden content), or "".
+        self.heading = ""
+        # Where the first h1's text starts in parts while it is open, and its text after.
+        self.h1_start: int | None = None
+        self.first_h1 = ""
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         values = dict(attrs)
         if tag in {"script", "style", "noscript", "template", "svg"}:
             self.hidden += 1
-        if tag == "title":
-            self.in_title = True
+        if tag in {"svg", "math"}:
+            self.foreign += 1
+        if tag == "title" and not self.foreign and not self.title_seen:
+            self.in_title = self.title_seen = True
         if tag == "meta":
             self.meta[str(values.get("name") or values.get("property") or "").lower()] = str(
                 values.get("content") or ""
             )
         if tag == "a" and values.get("href"):
             self.links.append(str(values["href"]))
-        if (
-            tag in {"p", "div", "section", "article", "li", "br", "h1", "h2", "h3", "h4", "tr"}
-            and not self.hidden
-        ):
+        if self.hidden:
+            return
+        if tag in _HEADING_TAGS:
+            # A new heading ends an open one, as it does in a browser.
+            self._end_h1()
+            self.heading = tag
+            if tag == "h1" and not self.first_h1:
+                self.h1_start = len(self.parts)
+            self.parts.append("\n\n" + HEADING_MARK)
+        elif self.heading and tag not in _BREAKS_HEADING:
+            # "<span>01</span>Short answer" reads as "01 Short answer" in a heading.
+            self.parts.append(" ")
+        elif self.heading:
+            # A block inside a heading most likely means its end tag is missing: end it
+            # here rather than run the rest of the page into one heading.
+            self._end_h1()
+            self.heading = ""
+            self.parts.append("\n\n")
+        elif tag in {"p", "div", "section", "article", "li", "br", "tr", "h5", "h6"}:
+            # h5 and h6 start a paragraph but not a section.
             self.parts.append("\n\n")
 
     def handle_endtag(self, tag: str) -> None:
         if tag in {"script", "style", "noscript", "template", "svg"}:
             self.hidden = max(0, self.hidden - 1)
+        if tag in {"svg", "math"}:
+            self.foreign = max(0, self.foreign - 1)
         if tag == "title":
             self.in_title = False
+        if self.hidden or not self.heading:
+            return
+        if tag in _HEADING_TAGS:
+            self._end_h1()
+            self.heading = ""
+            self.parts.append("\n\n")
+        else:
+            self.parts.append(" ")
+
+    def _end_h1(self) -> None:
+        """Keep the first h1's text when the open heading is that h1 and it ends."""
+        if self.heading == "h1" and self.h1_start is not None:
+            self.first_h1 = _one_line("".join(self.parts[self.h1_start :]))
+            # An h1 with no text (an image, say) leaves the title to the next one.
+            self.h1_start = None
+
+    def title(self) -> str:
+        """The page's title, else its og:title, else its first h1, else ""."""
+        self._end_h1()
+        return (
+            "".join(self.title_parts).strip()
+            or self.meta.get("og:title", "").strip()
+            or self.first_h1
+        )
 
     def handle_data(self, data: str) -> None:
         if self.in_title:
             self.title_parts.append(data)
         elif not self.hidden:
-            self.parts.append(data)
+            data = data.replace(HEADING_MARK, "")
+            # A heading is one paragraph, however its source lines wrap.
+            self.parts.append(re.sub(r"\s+", " ", data) if self.heading else data)
 
 
-def blocks_for(text: str) -> list[dict[str, Any]]:
-    """Bounded passages, with offsets into normalized text and content-stable IDs."""
+def _paragraphs(text: str) -> list[tuple[int, str]]:
+    """(offset, paragraph) pairs: runs of lines separated by blank lines, stripped."""
+    found = []
+    for match in re.finditer(r"[^\n]+(?:\n(?!\n)[^\n]+)*", text):
+        raw = match.group()
+        paragraph = raw.strip()
+        if paragraph:
+            found.append((match.start() + len(raw) - len(raw.lstrip()), paragraph))
+    return found
+
+
+def blocks_for(text: str, headings: dict[int, str] | None = None) -> list[dict[str, Any]]:
+    """Bounded passages, with offsets into normalized text and content-stable IDs.
+
+    Without ``headings``, a Markdown ``#`` line starts a section. With it (HTML), the
+    paragraph starting at each offset in ``headings`` starts a section named by its value,
+    and a short passage that isn't a heading joins the next one in the same section.
+    """
     blocks: list[dict[str, Any]] = []
     heading = "Document"
     counts: dict[str, int] = {}
-    for match in re.finditer(r"[^\n]+(?:\n(?!\n)[^\n]+)*", text):
-        paragraph = match.group().strip()
-        if not paragraph:
+    paragraphs = _paragraphs(text)
+    merged: list[tuple[int, str]] = []
+    pending: tuple[int, str] | None = None
+    for start, paragraph in paragraphs:
+        if headings is not None and start in headings:
+            if pending:
+                merged.append(pending)
+                pending = None
+            merged.append((start, paragraph))
             continue
-        if re.match(r"^#{1,6}\s", paragraph):
-            heading = re.sub(r"^#+\s*", "", paragraph.splitlines()[0])
+        if pending:
+            # The passage keeps the text between the two, so offsets still slice it out.
+            start, paragraph = pending[0], text[pending[0] : start + len(paragraph)]
+            pending = None
+        if headings is not None and len(paragraph) < FRAGMENT_CHARS:
+            pending = (start, paragraph)
+        else:
+            merged.append((start, paragraph))
+    if pending:
+        merged.append(pending)
+    for start, paragraph in merged:
+        if headings is None:
+            if re.match(r"^#{1,6}\s", paragraph):
+                heading = re.sub(r"^#+\s*", "", paragraph.splitlines()[0])
+        elif start in headings:
+            heading = headings[start]
         for offset in range(0, len(paragraph), 1600):
             passage = paragraph[offset : offset + 1600]
             digest = hashlib.sha256(passage.encode()).hexdigest()[:20]
@@ -388,11 +506,141 @@ def blocks_for(text: str) -> list[dict[str, Any]]:
                     "id": f"b-{digest}-{counts[digest]}",
                     "heading": heading,
                     "text": passage,
-                    "start": match.start() + offset,
-                    "end": match.start() + offset + len(passage),
+                    "start": start + offset,
+                    "end": start + offset + len(passage),
                 }
             )
     return blocks
+
+
+def passages_text(
+    blocks: list[dict[str, Any]], start: str | None = None, limit: int | None = None
+) -> str:
+    """Readable text of a document's passages, from the passage ``start`` names (or the first).
+
+    Each section opens with its heading: a Markdown ``#`` line stays as written, and any
+    other heading (an HTML h1-h4, a PDF page) becomes a ``## `` line. Text that starts
+    inside a section opens with that section's heading. Passages cut from one long
+    paragraph join back without a break, so Markdown reads as the note did, without
+    front matter.
+    """
+    index = next((n for n, block in enumerate(blocks) if block["id"] == start), 0)
+    chosen = blocks[index:]
+    if chosen and _heading_passage(chosen[0]) is None:
+        # Starting inside a section: its heading comes first.
+        for prior in reversed(blocks[:index]):
+            if prior.get("heading") != chosen[0].get("heading"):
+                break
+            if _heading_passage(prior) is not None:
+                chosen = [prior, *chosen]
+                break
+    pieces: list[str] = []
+    heading = "Document"
+    end: int | None = None
+    for block in chosen:
+        text = str(block["text"])
+        label = str(block.get("heading") or heading)
+        rendered = _heading_passage(block)
+        if rendered is not None:
+            heading, text = label, rendered
+        elif label != heading:
+            heading = label
+            pieces.append(("\n\n" if pieces else "") + "## " + heading)
+            end = None
+        joined = end is not None and block.get("start") == end
+        pieces.append(("" if joined or not pieces else "\n\n") + text)
+        end = block.get("end")
+        if limit is not None and sum(map(len, pieces)) >= limit:
+            break
+    text = "".join(pieces)
+    return text if limit is None else text[:limit]
+
+
+def _heading_passage(block: dict[str, Any]) -> str | None:
+    """A passage that is its section's heading, as text; None for any other passage."""
+    text, label = str(block["text"]), str(block.get("heading") or "")
+    if re.match(r"#{1,6}\s", text):
+        return text  # A Markdown heading line, kept as written.
+    if text == label and label != "Document":
+        return "## " + text  # An HTML heading.
+    return None
+
+
+def html_reader_stale(doc: dict[str, Any]) -> bool:
+    """An HTML document whose passages an older reader made (re-extracted once)."""
+    return (
+        PurePosixPath(str(doc.get("path", ""))).suffix.lower() in {".html", ".htm"}
+        and doc.get("extraction") == "ready"
+        and not doc.get("missing")
+        and int(doc.get("reader") or 0) < HTML_READER
+    )
+
+
+def quote_selector(text: str, quote: str) -> dict[str, Any]:
+    """Where a quote sits in its passage, with the text around it."""
+    start = text.index(quote)
+    return {
+        "exact": quote,
+        "prefix": text[max(0, start - 80) : start],
+        "suffix": text[start + len(quote) : start + len(quote) + 80],
+        "start": start,
+        "end": start + len(quote),
+    }
+
+
+def reanchor(
+    evidence: dict[str, Any], old_blocks: dict[str, str], new_blocks: list[dict[str, Any]]
+) -> bool:
+    """Point evidence on a re-extracted version at the passage that now holds its quote.
+
+    Passage IDs hash passage text, so reading the same file differently changes them.
+    The quote is found again by exact text; when the same quote appears in several
+    passages, the one that contains the whole old passage wins. Evidence whose quote is
+    gone keeps its old passage text as a snapshot and is marked for relocation.
+    Returns whether the evidence changed.
+    """
+    block_id = str(evidence.get("blockId") or "")
+    if not block_id or any(block["id"] == block_id for block in new_blocks):
+        return False
+    old_text = old_blocks.get(block_id) or str(evidence.get("snapshot") or "")
+    quote = str(evidence.get("quote") or old_text)
+    matches = [block for block in new_blocks if quote and quote in block["text"]]
+    if not matches:
+        evidence["state"] = "relocate"
+        evidence["snapshot"] = evidence.get("snapshot") or old_text
+        return True
+    best = next((block for block in matches if old_text and old_text in block["text"]), matches[0])
+    evidence["blockId"] = best["id"]
+    if "selector" in evidence or "snapshot" in evidence:
+        evidence["selector"] = quote_selector(best["text"], quote)
+        evidence["snapshot"] = best["text"]
+    return True
+
+
+def html_text(parts: list[str]) -> tuple[str, dict[int, str]]:
+    """ReadableHTML's text, normalized, and the heading that starts at each offset."""
+    text = "".join(parts)
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    headings: dict[int, str] = {}
+    pieces: list[str] = []
+    length = 0
+    for index, piece in enumerate(text.split(HEADING_MARK)):
+        if index:
+            # The mark sits right after a paragraph break; the heading starts at its
+            # first visible character.
+            stripped = piece.lstrip(" ")
+            if stripped and not stripped.startswith("\n"):
+                label = stripped.split("\n", 1)[0].strip()[:200]
+                if label:
+                    headings[length] = label
+            piece = stripped
+        pieces.append(piece)
+        length += len(piece)
+    text = "".join(pieces).strip()
+    # Stripping the start moves every offset; the heading map moves with it.
+    shift = len("".join(pieces)) - len("".join(pieces).lstrip())
+    return text, {offset - shift: label for offset, label in headings.items()}
 
 
 MAX_FRONT_MATTER_CHARS = 64 * 1024
@@ -418,24 +666,23 @@ def _front_matter(header: str) -> Any:
 
 
 def extract(
-    data: bytes, suffix: str, *, encoding: str = "utf-8", obsidian: bool = True
+    data: bytes,
+    suffix: str,
+    *,
+    encoding: str = "utf-8",
+    obsidian: bool = True,
+    cancel: threading.Event | None = None,
 ) -> dict[str, Any]:
+    """A file's passages and metadata.
+
+    PDFs are read in a child process with time and memory limits (gofer.ui.brain_pdf);
+    one that can't finish raises PdfReadStopped, a ValueError. ``cancel`` stops it.
+    """
     meta: dict[str, Any] = {}
     if suffix == ".pdf":
-        from pypdf import PdfReader
-
-        reader = PdfReader(io.BytesIO(data))
-        if reader.is_encrypted:
-            raise ValueError("Unlock the encrypted PDF before indexing it")
-        if len(reader.pages) > 500:
-            raise ValueError("PDF exceeds the 500 page extraction limit")
+        read = read_pdf(data, max_text=MAX_TEXT, cancel=cancel)
         blocks = []
-        total = 0
-        for index, page in enumerate(reader.pages):
-            text = page.extract_text() or ""
-            total += len(text.encode("utf-8"))
-            if total > MAX_TEXT:
-                raise ValueError("Extracted PDF text exceeds 2 MB")
+        for index, text in enumerate(read["pages"]):
             for block in blocks_for(text):
                 blocks.append(
                     {
@@ -445,27 +692,25 @@ def extract(
                         "heading": f"Page {index + 1}",
                     }
                 )
-        metadata: Any = reader.metadata
         return {
             "blocks": blocks,
             "extraction": "ready" if blocks else "ocr",
-            "title": str((metadata or {}).get("/Title") or ""),
-            "author": str((metadata or {}).get("/Author") or ""),
-            "pageCount": len(reader.pages),
+            "title": str(read.get("title") or ""),
+            "author": str(read.get("author") or ""),
+            "pageCount": len(read["pages"]),
             "links": [],
         }
     text = data.decode(encoding, errors="strict")
     if len(text.encode("utf-8")) > MAX_TEXT:
         raise ValueError("Extracted text exceeds 2 MB")
     links: list[str] = []
+    headings: dict[int, str] | None = None
     if suffix in {".html", ".htm"}:
         parser = ReadableHTML()
         parser.feed(text)
-        text = "".join(parser.parts)
-        text = re.sub(r"[ \t\r\f\v]+", " ", text)
-        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        text, headings = html_text(parser.parts)
         meta = {
-            "title": "".join(parser.title_parts).strip(),
+            "title": parser.title(),
             "author": parser.meta.get("author", ""),
             "published": parser.meta.get("article:published_time", ""),
             "url": parser.meta.get("og:url", ""),
@@ -477,6 +722,7 @@ def extract(
                 for word in parser.meta.get("keywords", "").split(",")
                 if word.strip()
             ][:30],
+            "description": parser.meta.get("description", ""),
         }
         links = parser.links
         if meta["url"]:
@@ -497,8 +743,12 @@ def extract(
         if not meta.get("title"):
             title = re.search(r"^#\s+(.+)$", text, re.M)
             meta["title"] = title.group(1) if title else ""
+    blocks = blocks_for(text, headings)
     return {
-        "blocks": blocks_for(text),
+        "blocks": blocks,
+        **({"reader": HTML_READER} if headings is not None else {}),
+        **extracted_summary(meta, blocks),
+        "summaryReader": SUMMARY_READER,
         "extraction": "ready",
         "tags": _tags(meta.get("tags")),
         "title": str(meta.get("title") or ""),
@@ -574,9 +824,9 @@ def checked_archive(path: Path) -> tuple[dict[str, Any], list[zipfile.ZipInfo]]:
         seen: set[str] = set()
         for entry in entries:
             name = safe_relative(entry.filename.rstrip("/"))
-            if name.casefold() in seen:
+            if fold_name(name) in seen:
                 raise ValueError("Package contains duplicate or ambiguous paths")
-            seen.add(name.casefold())
+            seen.add(fold_name(name))
             mode = entry.external_attr >> 16
             if stat.S_ISLNK(mode) or (stat.S_IFMT(mode) not in {0, stat.S_IFREG, stat.S_IFDIR}):
                 raise ValueError("Package contains links or special files")

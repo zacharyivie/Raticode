@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, ArchiveRestore, FolderOpen, ShieldCheck } from "lucide-react";
 import { formatBytes, formatDay, formatTime } from "../lib/secondBrain.js";
-import { WEEKDAYS, archiveLabel, backupSettings, packageFit, scheduleLabel } from "../lib/secondBrainBackups.js";
+import { WEEKDAYS, archiveLabel, backupCounts, backupSettings, packageFit, scheduleLabel } from "../lib/secondBrainBackups.js";
 import { isSampleLibrary, startTask, updateBrain, useSecondBrain } from "../lib/secondBrainStore.js";
 import { brainRequest } from "../lib/secondBrainApi.js";
 import { DraftInput } from "./SecondBrainParts.jsx";
@@ -45,11 +45,16 @@ export function BackupSettings({ brain }) {
       {brain.backupWarning ? <AlertTriangle size={16} aria-hidden="true" /> : <ShieldCheck size={16} aria-hidden="true" />}
       <div>
         <strong>Last verified backup: {verified ? formatDay(verified.at, { relative: true }) : "none yet"}</strong>
-        {verified ? <small>{formatTime(verified.at)} · {formatBytes(verified.size)} · {verified.files.toLocaleString()} files{verified.conversations ? "" : " · without the conversation archive"}</small> : null}
-        {brain.backupWarning ? <small role="status">{brain.backupWarning} Check the backup folder, or back up now.</small> : null}
+        {verified ? <small>{formatTime(verified.at)} · {backupCounts(verified)}{verified.conversations ? "" : " · without the conversation archive"}</small> : null}
+        {brain.backupWarning && attempt?.state !== "kept" ? <small role="status">{brain.backupWarning} Check the backup folder, or back up now.</small> : null}
         {attempt?.state === "failed" ? <small role="alert">Last attempt {formatTime(attempt.at)} failed: {attempt.error}</small> : null}
       </div>
     </div>
+    {attempt?.state === "kept" ? <div className="sb-inline-note sb-callout" data-tone="warning" role="status"><AlertTriangle size={15} aria-hidden="true" /><div>
+      <strong>Backup of {formatTime(attempt.at)} {attempt.detail || "kept, much smaller than the last backup"}</strong>
+      <dl className="sb-facts"><div><dt>This backup</dt><dd>{backupCounts(attempt)}</dd></div><div><dt>Last full backup</dt><dd>{backupCounts(verified)}</dd></div></dl>
+      <p>No older copies were removed. Check the brain folder: if files went missing, restore them from the last full backup. If you removed them on purpose, accept the smaller size so older copies rotate out again.</p>
+    </div><button type="button" className="sb-button" disabled={running} onClick={() => startTask({ kind: "backup", label: `Backing up ${brain.name}`, brainId: brain.id, acceptSmaller: true })}>Accept smaller size</button></div> : null}
     <label className="sb-check"><input type="checkbox" checked={settings.enabled} disabled={!settings.folder} onChange={event => set({ enabled: event.target.checked })} />Back up on a schedule</label>
     <div className="sb-field"><span>Backup folder</span>
       <div className="sb-path-input"><DraftInput label="Backup folder" className="sb-mono" placeholder="/media/backup-drive/Raticode brains" value={settings.folder} onCommit={folder => set({ folder: folder.trim(), enabled: folder.trim() ? settings.enabled : false })} /><button type="button" className="sb-button" onClick={chooseFolder}><FolderOpen size={14} />Browse…</button></div>
@@ -67,6 +72,6 @@ export function BackupSettings({ brain }) {
       <button type="button" className="sb-button" disabled={!settings.folder || running} onClick={() => startTask({ kind: "backup", label: `Backing up ${brain.name}`, brainId: brain.id })}><ArchiveRestore size={14} />{running ? "Backing up…" : "Back up now"}</button>
       {settings.folder ? <button type="button" className="sb-button" onClick={() => window.goferDesktop?.workspace?.revealPath?.(verified?.path || settings.folder)}><FolderOpen size={14} />Show backups</button> : null}
     </div>
-    <p className="sb-hint">{scheduleLabel(settings)}. Each backup is the complete-brain package, checked by the package verifier after it is saved. Only then are older copies past the last {settings.keep} removed. A copy that fails the check is deleted and never counts. Restore one with Import brain › Restore this brain.</p>
+    <p className="sb-hint">{scheduleLabel(settings)}. Each backup is the complete-brain package, checked by the package verifier after it is saved. Only then are older copies removed, keeping the last {settings.keep} plus the newest copy of each of the last 4 weeks and 3 months. A copy with less than half the files, documents or size of the last one is kept and removes nothing. A copy that fails the check is deleted and never counts. Restore one with Import brain › Restore this brain.</p>
   </section>;
 }

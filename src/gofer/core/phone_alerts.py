@@ -14,6 +14,9 @@ whose position is older than the ones removed is told how many it missed (``drop
 One run keeps at most ``RUN_CAP`` notices. Past that, the run has a single "And N more
 from this run" notice. Each further notice deletes it and adds it again with a larger
 N at the newest position, so a phone that already showed it hears the new count.
+
+Rem's questions that wait for the user while no task is stopped for them (auto mode)
+leave one notice each here too (``add_decision``), counted under the Needs you switch.
 """
 
 from __future__ import annotations
@@ -37,6 +40,11 @@ TITLE_LIMIT = 160
 BODY_LIMIT = 1500
 # The alert switch these notices count under, on the phone and in ``rem notices``.
 WORKFLOW_REASON = "workflow"
+# A question of Rem's waiting for the user counts under the Needs you switch.
+DECISION_REASON = "needs_you"
+DECISION_SOURCE = "decision"
+QUESTION_LIMIT = 500
+RECOMMENDED_LIMIT = 300
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS alerts (
@@ -54,7 +62,12 @@ CREATE TABLE IF NOT EXISTS alerts (
 """
 # The highest position removed to keep the newest ``KEEP``; readers behind it missed some.
 _META = "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)"
-_COLUMNS = "seq, reason, source, title, body, workflow_id, workflow_name, run_id, created_at, more"
+# Every decision that already left a notice, kept after its notice is trimmed: one each.
+_DECIDED = "CREATE TABLE IF NOT EXISTS decision_notices (decision_id TEXT PRIMARY KEY)"
+_COLUMNS = (
+    "seq, reason, source, title, body, workflow_id, workflow_name, run_id, created_at, more, "
+    "decision_id, recommended"
+)
 
 
 def _clip(value: object, limit: int) -> str:
@@ -81,10 +94,15 @@ class PhoneAlertStore:
             db.execute("PRAGMA journal_mode=WAL")
             db.execute(_SCHEMA)
             db.execute(_META)
+            db.execute(_DECIDED)
             columns = {row[1] for row in db.execute("PRAGMA table_info(alerts)")}
             if "more" not in columns:
                 # A file from before the per-run cap.
                 db.execute("ALTER TABLE alerts ADD COLUMN more INTEGER NOT NULL DEFAULT 0")
+            for name in ("decision_id", "recommended"):
+                if name not in columns:
+                    # A file from before decision notices.
+                    db.execute(f"ALTER TABLE alerts ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
             yield db
         finally:
             db.close()
@@ -123,13 +141,49 @@ class PhoneAlertStore:
             db.execute("BEGIN IMMEDIATE")
             try:
                 row = _fold(db, row)
-                cursor = db.execute(
-                    "INSERT INTO alerts (reason, source, title, body, workflow_id, "
-                    "workflow_name, run_id, created_at, more) VALUES (?,?,?,?,?,?,?,?,?)",
-                    row,
-                )
-                seq = int(cursor.lastrowid or 0)
-                _trim(db)
+                seq = _insert(db, row)
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+        return _alert((seq, *row, "", ""))
+
+    def add_decision(
+        self, *, decision_id: str, question: str, project_name: str, recommended: str
+    ) -> dict[str, Any] | None:
+        """Store one notice for a question of Rem's that waits for the user.
+
+        One per decision ID, ever: a decision that already left a notice returns None
+        and stores nothing, even after its notice was trimmed. ``project_name`` is the
+        project folder's name (empty for a question about the user), never its path.
+        """
+        identity = _clip(decision_id, 64)
+        if not identity:
+            return None
+        created = datetime.now(UTC).isoformat(timespec="seconds")
+        row: tuple[Any, ...] = (
+            DECISION_REASON,
+            DECISION_SOURCE,
+            _clip(project_name, TITLE_LIMIT),
+            _clip(question, QUESTION_LIMIT),
+            "",
+            "",
+            "",
+            created,
+            0,
+            identity,
+            _clip(recommended, RECOMMENDED_LIMIT),
+        )
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                fresh = db.execute(
+                    "INSERT OR IGNORE INTO decision_notices (decision_id) VALUES (?)", (identity,)
+                ).rowcount
+                if not fresh:
+                    db.execute("ROLLBACK")
+                    return None
+                seq = _insert(db, row)
                 db.execute("COMMIT")
             except BaseException:
                 db.execute("ROLLBACK")
@@ -162,6 +216,19 @@ class PhoneAlertStore:
             "dropped": max(0, int(trimmed[0]) - after) if trimmed else 0,
             "alerts": [_alert(row) for row in rows],
         }
+
+
+def _insert(db: sqlite3.Connection, row: tuple[Any, ...]) -> int:
+    """Insert one notice (decision fields optional) and keep the newest ``KEEP``."""
+    full = row if len(row) == 11 else (*row, "", "")
+    cursor = db.execute(
+        "INSERT INTO alerts (reason, source, title, body, workflow_id, workflow_name, "
+        "run_id, created_at, more, decision_id, recommended) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        full,
+    )
+    seq = int(cursor.lastrowid or 0)
+    _trim(db)
+    return seq
 
 
 def _fold(db: sqlite3.Connection, row: tuple[Any, ...]) -> tuple[Any, ...]:
@@ -199,7 +266,31 @@ def _trim(db: sqlite3.Connection) -> None:
 
 
 def _alert(row: tuple[Any, ...]) -> dict[str, Any]:
-    seq, reason, source, title, body, workflow_id, workflow_name, run_id, created, more = row
+    (
+        seq,
+        reason,
+        source,
+        title,
+        body,
+        workflow_id,
+        workflow_name,
+        run_id,
+        created,
+        more,
+        decision_id,
+        recommended,
+    ) = row
+    if source == DECISION_SOURCE and decision_id:
+        return {
+            "id": f"decision-{decision_id}",
+            "reason": reason,
+            "source": source,
+            "decision_id": decision_id,
+            "question": body,
+            "project_name": title,
+            "recommended": recommended,
+            "at": created,
+        }
     return {
         "id": f"workflow-{seq}",
         "reason": reason,

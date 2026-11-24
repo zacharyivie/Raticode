@@ -451,6 +451,8 @@ internal class BrowserRuntime private constructor(private val app: Application) 
 
     fun setKeepHistory(on: Boolean) = update(saved.copy(keepHistory = on, history = if (on) saved.history else emptyList()))
     fun setLinksInApp(on: Boolean) = update(saved.copy(linksInApp = on))
+    /** Which built-in browser opens links from other apps: Raticode (chromium) or Raticode (gecko). */
+    fun setExternalEngine(engine: String) = update(saved.copy(externalEngine = dev.raticode.mobile.open.OpenTypes.linkEngine(engine)))
     fun setSearch(template: String) = update(saved.copy(search = template))
     /** [engine] becomes the default browser (for new tabs and chat links), and the Browser page shows it. */
     fun setEngine(engine: String) = update(BrowserRules.withEngine(saved, engine))

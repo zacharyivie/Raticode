@@ -178,18 +178,27 @@ object AppUpdateRules {
      * asked to wait; while the app stays open, [nextCheckAt] spaces them out.
      */
     fun checkDue(now: Long, lastCheckAt: Long, nextCheckAt: Long, retryAt: Long, appStart: Boolean): Boolean = when {
-        now < retryAt -> false
+        // A wait saved by an older version could reach days ahead; past the cap it no longer holds checks back.
+        now < retryAt && retryAt - now <= MAX_RETRY_WAIT_MS -> false
         appStart -> now - lastCheckAt >= STARTUP_REUSE_MS || lastCheckAt > now
         else -> now >= nextCheckAt
     }
 
-    /** When GitHub will take another request after refusing one, from its rate-limit headers. */
+    /** The longest an automatic check waits for GitHub's rate limit, however far off its reset time looks. */
+    const val MAX_RETRY_WAIT_MS = 6 * MAX_BACKOFF_MS
+
+    /**
+     * When GitHub will take another request after refusing one, from its rate-limit headers. GitHub's reset is a clock
+     * time, so a phone clock that runs hours or days behind would otherwise stop automatic checks for that long; the
+     * wait is capped at [MAX_RETRY_WAIT_MS], as [nextCheckDelay] already caps it.
+     */
     fun retryAt(status: Int, remaining: String?, reset: String?, retryAfter: String?, now: Long): Long {
         if (status != 403 && status != 429) return 0
         val resetSeconds = reset?.toLongOrNull() ?: 0
-        if (remaining == "0" && resetSeconds > 0) return resetSeconds * 1000
+        val latest = now + MAX_RETRY_WAIT_MS
+        if (remaining == "0" && resetSeconds > 0) return minOf(resetSeconds.coerceAtMost(Long.MAX_VALUE / 1000) * 1000, latest)
         val after = retryAfter?.toLongOrNull() ?: 0
-        return if (after > 0) now + after * 1000 else 0
+        return if (after > 0) now + minOf(after, MAX_RETRY_WAIT_MS / 1000) * 1000 else 0
     }
 
     /** What to tell the user when GitHub answers a check with [status]. */

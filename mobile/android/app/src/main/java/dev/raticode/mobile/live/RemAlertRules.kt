@@ -26,6 +26,12 @@ object RemAlertRules {
     /** Notification groups for workflow messages, one per workflow, and the key prefix of a run's "And N more" alert. */
     private const val WORKFLOW_GROUP = "rem-workflow:"
     private const val WORKFLOW_MORE = "more:"
+    /** A question of Rem's that waits for the user while no task stops for it; it counts under [NEEDS_YOU]. */
+    const val DECISION = "decision"
+    const val QUESTION_GENERIC = "Rem has a question"
+    /** Where a tapped question opens, as the notification's destination: `decision/<decision ID>`. */
+    private const val DECISION_TARGET = "decision/"
+    private val DECISION_ID = Regex("D-[0-9]{1,9}")
     /** Self-work rounds remembered, so one round alerts once however many answers name it. */
     const val ROUNDS_KEPT = 16
 
@@ -206,6 +212,34 @@ object RemAlertRules {
     /** Workflow messages get an alert each, grouped by workflow, which opens their run; everything else joins Rem's conversation. */
     fun split(notices: List<RemNotice>): Pair<List<RemNotice>, List<RemNotice>> = notices.partition { it.kind != WORKFLOW }
 
+    /** Rem's questions get an alert each, which opens Decisions on them; the rest goes on to [split]. */
+    fun questions(notices: List<RemNotice>): Pair<List<RemNotice>, List<RemNotice>> = notices.partition { it.kind == DECISION }
+
+    /** A question's line: "Rem has a question: <question>" with the words opt-in, else only "Rem has a question". */
+    fun decisionText(notice: RemNotice, showText: Boolean): String {
+        val question = if (showText) RemNoticeText.plain(notice.question.ifBlank { notice.title }) else ""
+        return if (question.isBlank()) QUESTION_GENERIC else "$QUESTION_GENERIC: $question"
+    }
+
+    /** One question's alert. [key] is one per decision, so the same question never shows twice; [target] opens it in Decisions. */
+    data class DecisionAlert(val key: String, val title: String, val text: String, val target: String, val at: Long)
+
+    /** With the words opt-in, the question, its project and Rem's recommended answer; without it, only that Rem has a question. */
+    fun decisionAlert(notice: RemNotice, showText: Boolean, now: Long): DecisionAlert {
+        val details = listOf(notice.projectName, notice.recommended.takeIf { it.isNotBlank() }?.let { "Rem recommends: $it" }.orEmpty())
+            .map { RemNoticeText.plain(it) }.filter { it.isNotBlank() }.joinToString(" · ")
+        val text = if (showText && details.isNotBlank()) details else "Tap to answer it in Decisions."
+        return DecisionAlert(DECISION + ":" + notice.decisionId, decisionText(notice, showText), text, decisionTarget(notice.decisionId),
+            RemNoticeText.millis(notice.createdAt) ?: now)
+    }
+
+    /** The destination for one decision on the Decisions screen. */
+    fun decisionTarget(decisionId: String): String = DECISION_TARGET + decisionId
+
+    /** The decision ID in a [decisionTarget], or null for any other destination. */
+    fun parseDecisionTarget(target: String?): String? =
+        target?.takeIf { it.startsWith(DECISION_TARGET) }?.removePrefix(DECISION_TARGET)?.takeIf { DECISION_ID.matches(it) }
+
     /**
      * One workflow message's alert. [target] is where a tap opens; [key] tells one message's alert from another's. A run's
      * "And N more" notice ([more] = N) keeps one key per run, so a later count replaces the earlier one.
@@ -219,6 +253,8 @@ object RemAlertRules {
         val text = when {
             showText && !folded -> RemNoticeText.plain(notice.body)
             folded -> "And ${notice.moreFromRun} more from this run. Tap to open it."
+            // Raticode's own notices about a workflow, such as a trigger waiting for approval, name no run.
+            notice.runId.isBlank() -> "Tap to open the workflow."
             else -> "Tap to open the run."
         }
         val key = if (folded) WORKFLOW_MORE + notice.workflowId + "/" + notice.runId else notice.id

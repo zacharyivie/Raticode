@@ -45,6 +45,7 @@ test('cold startup creates the shell while backend and terminal readiness are pe
     createWindow: url => windows.push(url),
     showMainWindow() {}, isSmokeTest: false,
     createBackendErrorWindow: error => { throw error; },
+    workflowShortcuts: { sync: async () => { context.shortcutSyncs += 1; } }, shortcutSyncs: 0,
   };
   vm.runInNewContext(source.slice(start, end), context);
   const startup = readyCallback();
@@ -56,6 +57,8 @@ test('cold startup creates the shell while backend and terminal readiness are pe
   await startup;
   assert.equal(context.activeUiApiToken, 'test-token');
   assert.equal(windows.length, 1, 'backend readiness must not reload the UI');
+  // Workflow shortcuts are registered once the backend that keeps them is ready.
+  assert.equal(context.shortcutSyncs, 1);
 });
 
 test('reopening shows the retained window, and closing all windows does not stop services', () => {

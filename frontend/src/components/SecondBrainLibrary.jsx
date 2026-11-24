@@ -1,12 +1,13 @@
 import SecondBrainProvider, { ResearchProviderContext, useResearchSelection } from "./SecondBrainProvider.jsx";
 import { useContext, useEffect, useMemo, useRef, useState } from "react";
-import { CircleCheck, ClipboardPaste, CopyCheck, FileWarning, FolderOpen, Globe, Inbox, Library, Link2, Pencil, Play, Plus, Quote, RefreshCw, ScanText, Tags, Trash2, Unlink, FilePlus2, Repeat, CalendarClock, HardDrive, LockKeyhole, Layers, Wrench } from "lucide-react";
+import { CircleCheck, ClipboardPaste, CopyCheck, FileWarning, FolderOpen, Globe, Inbox, Library, Link2, Pencil, Play, Plus, Quote, RefreshCw, ScanText, Tags, Trash2, Unlink, FilePlus2, Repeat, CalendarClock, HardDrive, LockKeyhole, Layers, CaseSensitive, Wrench, ArchiveRestore } from "lucide-react";
 import { formatDay, formatTime, extractionLabel } from "../lib/secondBrain.js";
 import { HEALTH_KINDS, RECIPES, deadLinkSummary, linkReason } from "../lib/secondBrain.js";
-import { useSecondBrain, openDocument, openDialog, updateDocument, addToCollection, evidenceItem, resolveHealth, startTask, saveJob, removeJob, removeDocument, updateBrain, notify, navigate, uid, backfillProvenance, restrictBrainAccess, refreshLibrary } from "../lib/secondBrainStore.js";
+import { useSecondBrain, openDocument, openDialog, updateDocument, addToCollection, evidenceItem, resolveHealth, startTask, saveJob, removeJob, removeDocument, updateBrain, markSeries, notify, navigate, uid, backfillProvenance, restrictBrainAccess, refreshLibrary } from "../lib/secondBrainStore.js";
 import { DraftInput, Empty, Menu, Pill, ProgressBar, TypeIcon } from "./SecondBrainParts.jsx";
 import JobSourceRules from "./SecondBrainJobSources.jsx";
 import { BackupSettings } from "./SecondBrainBackups.jsx";
+import { FolderRules } from "./SecondBrainFolders.jsx";
 import { defaultJobSourceRules, describeJobSources, jobScopeLabel, jobSourceRules, jobSourceRulesError } from "../lib/secondBrainJobSources.js";
 
 export function InboxView({ brain }) {
@@ -38,7 +39,7 @@ export function InboxView({ brain }) {
   </div>;
 }
 
-const FIX_ICONS = { link: Unlink, metadata: Pencil, extraction: ScanText, duplicate: CopyCheck, citation: Quote, family: Layers, review: CalendarClock, permissions: LockKeyhole };
+const FIX_ICONS = { link: Unlink, metadata: Pencil, extraction: ScanText, duplicate: CopyCheck, citation: Quote, family: Layers, review: CalendarClock, permissions: LockKeyhole, twins: CaseSensitive, backup: ArchiveRestore };
 const HEALTH_PAGE_SIZE = 15;
 
 function HealthProblemList({ issues, documents, selected, onSelect, onFix }) {
@@ -61,7 +62,7 @@ function HealthProblemList({ issues, documents, selected, onSelect, onFix }) {
     return () => { active = false; observer.disconnect(); };
   }, [hasMore, limit, issues.length]);
   return <>
-    <ul ref={list} className="sb-rows sb-health-rows">{issues.slice(0, limit).map(issue => { const doc = documents.get(issue.docId); const Icon = FIX_ICONS[issue.kind]; const title = doc ? doc.title : "Brain folder"; return <li key={issue.id} className="sb-row">
+    <ul ref={list} className="sb-rows sb-health-rows">{issues.slice(0, limit).map(issue => { const doc = documents.get(issue.docId); const Icon = FIX_ICONS[issue.kind]; const title = doc ? doc.title : issue.kind === "backup" ? "Backups" : "Brain folder"; return <li key={issue.id} className="sb-row">
       <input type="checkbox" aria-label={`Select problem in ${title}`} checked={selected.has(issue.id)} onChange={() => onSelect(issue.id)} />
       <Icon size={16} aria-hidden="true" className="sb-row-icon" />
       <div className="sb-row-main">{doc ? <button type="button" className="sb-row-title" onClick={() => openDocument(issue.docId)}>{doc.title}</button> : <strong className="sb-row-title">{title}</strong>}<p><span className="sb-mono">{doc ? doc.path : issue.path}</span></p><p>{issue.detail}</p></div>
@@ -97,6 +98,22 @@ function DeadLinkList({ issues, documents, selected, onSelect, onFix }) {
   </>;
 }
 
+// Dated report series found from file names. Search lists their matching editions together,
+// newest first; marking a group "Not a series" stops that and travels with the brain folder.
+function SeriesPanel({ series, documents }) {
+  if (!series.length) return null;
+  const titleOf = docId => documents.get(docId)?.title || "";
+  return <section className="sb-index-panel" aria-labelledby="sb-series-heading"><h4 id="sb-series-heading">Dated report series</h4>
+    <p className="sb-hint">Files saved under one name with different dates. Search lists the matching editions together, newest first, unless the query names a date. Older editions stay current; they are dated records, not replaced versions.</p>
+    <ul className="sb-series-list">{series.map(group => { const dates = group.editions.map(edition => edition.date); return <li key={group.id} data-marked={group.notSeries || undefined}>
+      <Layers size={16} aria-hidden="true" className="sb-row-icon" />
+      <div><strong>{group.stem}</strong><small>{group.editions.length} editions · {dates[dates.length - 1]} to {dates[0]}{titleOf(group.newestId) ? ` · newest “${titleOf(group.newestId)}”` : ""}{group.notSeries ? " · marked not a series" : ""}</small></div>
+      {group.notSeries ? <button type="button" className="sb-button" onClick={() => { markSeries(group.id, false); notify(`“${group.stem}” is a series again.`); }}>Treat as a series</button>
+        : <button type="button" className="sb-button" onClick={() => { markSeries(group.id, true); notify(`“${group.stem}” is no longer treated as a series.`); }}>Not a series</button>}
+    </li>; })}</ul>
+  </section>;
+}
+
 export function HealthView({ brain }) {
   const store = useSecondBrain();
   // Links and folder permissions are rechecked at most once a minute; opening this page checks them now.
@@ -116,6 +133,8 @@ export function HealthView({ brain }) {
     else if (issue.kind === "link" && issue.reason === "absolute") openDialog("absolute-links");
     else if (issue.kind === "link") openDialog("locate-link", { issue });
     else if (issue.kind === "permissions") void restrictBrainAccess(brain.id);
+    else if (issue.kind === "backup") navigate("settings");
+    else if (issue.kind === "twins") window.goferDesktop?.workspace?.openPath?.(issue.path);
     else if (issue.kind === "family") openDialog("replace-suggestion", { issue });
     else if (issue.kind === "review") openDialog("check-by", { docId: issue.docId });
     else if (issue.kind === "citation") { const report = store.reports.find(item => item.citations.some(citation => citation.state === "relocate" && citation.docId === issue.docId)); const citation = report?.citations.find(item => item.state === "relocate" && item.docId === issue.docId); if (report && citation) { navigate("reports", { reportId: report.id }); openDialog("relocate", { citation, reportId: report.id, issueId: issue.id }); } }
@@ -124,7 +143,7 @@ export function HealthView({ brain }) {
   const ocrBatch = selectedIssues.filter(issue => issue.kind === "extraction" && documents.get(issue.docId)?.extraction === "ocr");
   const absoluteNotes = new Set(issues.filter(issue => issue.kind === "link" && (issue.reason === "absolute" || issue.absolute)).map(issue => issue.docId)).size;
   return <div className="sb-page">
-    <div className="sb-page-head"><div><h3>Library health</h3><p>Problems that keep documents out of search, make citations hard to trust or let other accounts on this computer read the brain, plus older report versions to retire and reports due for a check. Fix them in batches; your folder structure stays as it is.</p></div>
+    <div className="sb-page-head"><div><h3>Library health</h3><p>Problems that keep documents out of search, make citations hard to trust, let other accounts on this computer read the brain, name two files that differ only by letter case or leave a backup much smaller than the last, plus older report versions to retire and reports due for a check. Fix them in batches; your folder structure stays as it is.</p></div>
       <button type="button" className="sb-button" onClick={() => startTask({ kind: "index", label: "Checking library health", steps: ["Scanning links", "Checking metadata", "Comparing content hashes", "Resolving citations"],  })}><RefreshCw size={14} />Check again</button></div>
     <div className="sb-kpis" role="group" aria-label="Problem counts">
       <button type="button" aria-pressed={!kind} onClick={() => setKind("")}><strong>{issues.length}</strong><span>All problems</span></button>
@@ -133,6 +152,7 @@ export function HealthView({ brain }) {
     {selected.length ? <div className="sb-bulk"><strong>{selected.length} selected</strong>{ocrBatch.length ? <button type="button" className="sb-mini-button" onClick={() => openDialog("ocr", { docIds: ocrBatch.map(issue => issue.docId), issueIds: ocrBatch.map(issue => issue.id) })}><ScanText size={13} />Run OCR on {ocrBatch.length}</button> : null}<button type="button" className="sb-mini-button" onClick={() => { resolveHealth(selected); setSelected([]); notify("Ignored. These problems stay hidden until the documents change."); }}>Ignore</button></div> : null}
     {absoluteNotes ? <div className="sb-inline-note sb-callout" role="status"><Wrench size={15} aria-hidden="true" /><div><strong>{absoluteNotes} note{absoluteNotes === 1 ? " links" : "s link"} to files in this brain by absolute path.</strong><p>Those links break when the brain moves or syncs to another computer. The repair rewrites them as relative paths. Links to /tmp or outside the brain stay as they are.</p></div><button type="button" className="sb-button" onClick={() => openDialog("absolute-links")}>Preview repair</button></div> : null}
     {kind === "link" && visible.length ? <DeadLinkList key={brain.id} issues={visible} documents={documents} selected={selectedIds} onSelect={id => setSelected(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id])} onFix={fix} /> : visible.length ? <HealthProblemList key={`${brain.id}:${kind}`} issues={visible} documents={documents} selected={selectedIds} onSelect={id => setSelected(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id])} onFix={fix} /> : <Empty icon={CircleCheck} title={kind ? "Nothing to fix here" : "Your library looks healthy"}>Links resolve, documents are searchable and citations point to one passage.</Empty>}
+    <SeriesPanel series={(store.series || []).filter(group => group.brainId === brain.id)} documents={documents} />
     <section className="sb-index-panel"><h4>Search index</h4><dl className="sb-facts">
       {[["State", brain.index.state === "updating" ? `Updating · ${brain.index.progress}%` : "Up to date"], ["Documents", brain.index.documents.toLocaleString()], ["Passages", brain.index.passages.toLocaleString()], ["Waiting for extraction", brain.index.pending], ["Extraction failed", brain.index.failed], ["Generation", `#${brain.index.generation} · as of ${new Date(brain.index.asOf).toLocaleTimeString()}`]].map(([term, value]) => <div key={term}><dt>{term}</dt><dd>{value}</dd></div>)}
     </dl>{brain.index.state === "updating" ? <ProgressBar value={brain.index.progress} label="Index progress" /> : null}<p className="sb-hint">Search keeps answering from the last published generation while new documents are processed.</p></section>
@@ -226,6 +246,7 @@ export function BrainSettingsView({ brain }) {
       </fieldset> : null}
       <p className="sb-hint">Exact search always works offline, without a model. Changing Rem’s chat model never rebuilds this index.</p>
     </section>
+    <FolderRules brain={brain} />
     <section><h4>Projects and connections</h4>
       <p className="sb-hint">Projects come from a Rem run that saved a file, a project named in the file, its Reports/&lt;Project&gt;/ folder, or your choice. Similar documents and topics are suggestions computed on this computer: from the local embedding model when related-meaning search is on, otherwise from the words documents share. No text is sent anywhere to group or link documents, and inferred groups are never written into your files.</p>
       <div className="sb-actions"><button type="button" className="sb-button" onClick={() => backfillProvenance(brain.id)}>Find report history</button></div>

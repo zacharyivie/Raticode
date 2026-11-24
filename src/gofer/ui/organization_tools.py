@@ -34,8 +34,9 @@ ACTION_HELP = {
     "list": "No parameters. Lists global organizations, including paused organizations.",
     "providers": (
         "Optional refresh (boolean). Discover installed providers, enabled state, models and "
-        "effort options using the same catalog as the employee settings picker. No organizationId "
-        "is required. Read this before changing provider/model/effort."
+        "effort options using the same catalog as the employee settings picker, and accounts "
+        "(each provider's accounts as provider, id, name). No organizationId is required. Read "
+        "this before changing provider/model/effort/account."
     ),
     "read": "Optional sinceVersion. Returns configuration, runtime and dispatch diagnostics.",
     "history": "Optional offset, limit (1..100, default 50). Configuration revisions and diffs.",
@@ -48,6 +49,8 @@ ACTION_HELP = {
         "config, expectedRevision, reason. Replace the full configuration from read. "
         "Manage employees, reporting lines, teams, initiatives (projects), projectRoots, goals "
         "(goalRecords), executionTargets, budgets, concurrency, provider/model/effort, "
+        "employees[].account (an account id of the worker's provider from providers, or null "
+        "for the default sign-in; a removed or signed-out account falls back to it), "
         "permissions, "
         "resources, skills, workspace/secret grants, persona memory, Second Brain and theme. "
         "Preserve unrelated fields. Remove collection members by ID, retaining "
@@ -91,6 +94,12 @@ ACTION_HELP = {
     "request_approve_all": (
         "User-only requestIds: the exact list the user confirmed in Approve all. Approves them "
         "in a safe order and reports each; Rem and employees are refused."
+    ),
+    "run_there": (
+        "User-only taskId, computerId, optional expectedRevision. Run there: sets a waiting "
+        "ticket's execution to the fleet target the owner already made for its worker on the "
+        "paired desktop its suggestion names (runtime.placementSuggestions). Refused without "
+        "such a target, and for Rem, employees and agent tokens."
     ),
     "run_events": "taskId, turnId (an attempt ID). Stored transcript events of one employee run.",
     "run_input": "taskId, turnId. The stored input of one employee run and whether it matches.",

@@ -11,7 +11,10 @@ import {
   formatUsd,
   newCheckDraft,
   nextCaseId,
+  rattishProviderId,
   shortRevision,
+  useModelMutations,
+  variantLabel,
 } from "./workflowTests.js";
 
 const sample = {
@@ -34,6 +37,16 @@ test("a case survives a round trip through the editor draft", () => {
   assert.deepEqual(draft.checks.map((check) => check.operator), ["contains", "oneOf", "missing", "", ""]);
   assert.equal(draft.checks[1].value, "[1,2]");
   assert.deepEqual(caseFromDraft(draft).case, sample);
+});
+
+test("a command check keeps its shell through the editor, and auto is left out", () => {
+  const withShell = { id: "shell", inputs: {}, checks: [{ type: "command", command: "cmp -s a b", shell: "bash" }] };
+  const draft = draftFromCase(withShell);
+  assert.equal(draft.checks[0].shell, "bash");
+  assert.deepEqual(caseFromDraft(draft).case, withShell);
+  draft.checks[0].shell = "auto";
+  assert.equal("shell" in caseFromDraft(draft).case.checks[0], false);
+  assert.equal(draftFromCase({ id: "x", checks: [{ type: "command", command: "ls", shell: "zsh" }] }).checks[0].shell, "auto");
 });
 
 test("editing a case keeps its trigger events", () => {
@@ -109,4 +122,16 @@ test("costs, revisions and comparisons read as short sentences", () => {
   assert.equal(checkSummary(sample.checks[0]), 'outputs.summary contains "Cats"');
   assert.equal(checkSummary(sample.checks[2]), "outputs.extra is missing");
   assert.equal(checkSummary(sample.checks[4]), "On topic");
+});
+
+test("Try another model labels the variant and writes it the way the graph editor does", () => {
+  assert.equal(rattishProviderId("claude_code"), "claude-code");
+  assert.equal(rattishProviderId("openai_api"), "openai-api");
+  const models = [{ node: "write", provider: "claude-code", model: "claude-sonnet-5-5" }];
+  assert.equal(variantLabel({ models }), "write: claude-code claude-sonnet-5-5");
+  assert.equal(variantLabel(null), "");
+  assert.deepEqual(useModelMutations(models), [
+    { kind: "set_field", target: { node: "write" }, field: "provider", valueSource: "claude-code" },
+    { kind: "set_field", target: { node: "write" }, field: "model", value: "claude-sonnet-5-5" },
+  ]);
 });

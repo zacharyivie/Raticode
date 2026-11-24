@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping, Set
 from datetime import date
 from typing import Any
+
+from gofer.ui.brain_origin import ORIGIN_IMPORTED
 
 # A passage counts as long at this many words. Headings, labels and table cells
 # are shorter and repeat across unrelated reports.
@@ -24,6 +27,8 @@ MIN_SHARED = 2
 # template text), not evidence that two reports are versions of each other.
 BOILERPLATE_DOCUMENTS = 6
 CHECK_BY = re.compile(r"\d{4}-\d{2}-\d{2}")
+# Search hits from Rem's conversation archive that nothing cites carry this source.
+ARCHIVE_SOURCE = "conversation archive"
 
 
 def _normalize(text: str) -> str:
@@ -160,7 +165,7 @@ def report_families(
     return families
 
 
-def newest_replacement(doc: dict[str, Any], by_id: dict[str, dict[str, Any]]) -> list[str]:
+def newest_replacement(doc: dict[str, Any], by_id: Mapping[str, dict[str, Any]]) -> list[str]:
     """The chain of newer reports after doc, ending at the one still current."""
     chain: list[str] = []
     seen = {doc["id"]}
@@ -172,7 +177,16 @@ def newest_replacement(doc: dict[str, Any], by_id: dict[str, dict[str, Any]]) ->
     return chain
 
 
-def replacement_status(doc: dict[str, Any], by_id: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def shown_name(doc: dict[str, Any]) -> str:
+    """A linked document's title as Rem sees it: its path when the document is imported.
+
+    replacedBy and latest sit outside the attachment wrapper, so an imported document's
+    title, which came from outside, isn't shown there.
+    """
+    return str(doc["path"] if doc.get("origin") == ORIGIN_IMPORTED else doc["title"])
+
+
+def replacement_status(doc: dict[str, Any], by_id: Mapping[str, dict[str, Any]]) -> dict[str, Any]:
     """Status fields shared by Rem's search and read_note results."""
     status: dict[str, Any] = {"status": "current"}
     chain = newest_replacement(doc, by_id)
@@ -182,14 +196,14 @@ def replacement_status(doc: dict[str, Any], by_id: dict[str, dict[str, Any]]) ->
             newer = by_id[chain[0]]
             status["replacedBy"] = {
                 "documentId": newer["id"],
-                "title": newer["title"],
+                "title": shown_name(newer),
                 "path": newer["path"],
             }
             if len(chain) > 1:
                 latest = by_id[chain[-1]]
                 status["latest"] = {
                     "documentId": latest["id"],
-                    "title": latest["title"],
+                    "title": shown_name(latest),
                     "path": latest["path"],
                 }
         else:
@@ -204,9 +218,26 @@ def replacement_status(doc: dict[str, Any], by_id: dict[str, dict[str, Any]]) ->
     return status
 
 
-def demote_replaced(hits: list[dict[str, Any]], replaced: set[str]) -> list[dict[str, Any]]:
-    """Keep the order of current reports and move replaced ones after them."""
-    return sorted(hits, key=lambda hit: hit["docId"] in replaced)
+def demote_replaced(
+    hits: list[dict[str, Any]],
+    replaced: Set[str],
+    archived: Set[str] = frozenset(),
+    lowered: Set[str] | Mapping[str, str] = frozenset(),
+) -> list[dict[str, Any]]:
+    """Keep the order of current reports and move replaced ones after them.
+
+    Documents in a folder listed after other results (``lowered``) go after current
+    ones and before replaced reports. Unused conversation archive files go after
+    every other hit.
+    """
+    return sorted(
+        hits,
+        key=lambda hit: (
+            hit["docId"] in archived,
+            hit["docId"] in replaced,
+            hit["docId"] in lowered,
+        ),
+    )
 
 
 def check_by(value: Any) -> str:

@@ -1,0 +1,104 @@
+{
+  "computers": [
+    {
+      "id": "00000000-0000-4000-8000-000000000004",
+      "name": "Studio desktop",
+      "this_computer": true,
+      "state": "online",
+      "max_threads": 4,
+      "running_threads": 2,
+      "cpu_pressure": 35.0,
+      "memory_pressure": 0.0,
+      "effective_threads": 3,
+      "capacity": 1,
+      "memory_hold": null,
+      "rejoining": false,
+      "checked_at": 1900000000,
+      "last_seen": 1900000000,
+      "max_threads_setting": 0,
+      "default_max_threads": 4,
+      "running_by_kind": {
+        "rem": 1,
+        "phone": 0,
+        "organizations": 1,
+        "swarms": 0
+      },
+      "running_work": [
+        {
+          "kind": "rem",
+          "label": "Fix the login page"
+        },
+        {
+          "kind": "organizations",
+          "label": "Acme · Ada"
+        }
+      ],
+      "catalog": null,
+      "work_reason": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000006",
+      "name": "Workstation",
+      "this_computer": false,
+      "state": "online",
+      "max_threads": 8,
+      "running_threads": 3,
+      "cpu_pressure": 12.5,
+      "memory_pressure": null,
+      "effective_threads": 8,
+      "capacity": 5,
+      "memory_hold": null,
+      "rejoining": false,
+      "checked_at": 1900000000,
+      "last_seen": 1899999990,
+      "max_threads_setting": null,
+      "default_max_threads": null,
+      "running_by_kind": {
+        "rem": 1,
+        "phone": 0,
+        "organizations": 2,
+        "swarms": 0
+      },
+      "running_work": null,
+      "catalog": {
+        "state": "shared",
+        "projects": [
+          {
+            "id": "00000000-0000-4000-8000-000000000010",
+            "name": "Raticode",
+            "fingerprint": "8f2c3b0e6b1d4a7e9c5f0a2d4b6e8c1f3a5d7b9e0c2f4a6d8b1e3c5f7a9d0b2e"
+          }
+        ],
+        "providers": [
+          "claude_code",
+          "codex"
+        ]
+      },
+      "work_reason": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000005",
+      "name": "Laptop",
+      "this_computer": false,
+      "state": "offline",
+      "max_threads": null,
+      "running_threads": 0,
+      "cpu_pressure": null,
+      "memory_pressure": null,
+      "effective_threads": 0,
+      "capacity": 0,
+      "memory_hold": null,
+      "rejoining": false,
+      "checked_at": 1900000000,
+      "last_seen": 1899990000,
+      "max_threads_setting": null,
+      "default_max_threads": null,
+      "running_by_kind": null,
+      "running_work": null,
+      "catalog": null,
+      "work_reason": "Laptop is offline"
+    }
+  ],
+  "checked_at": 1900000000,
+  "rejoin_seconds": 60
+}

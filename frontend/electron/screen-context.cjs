@@ -219,7 +219,7 @@ function createScreenContext({ desktopCapturer, screen, systemPreferences = null
   function capture(target = {}) {
     return guarded(async () => {
       const size = captureSize(screen);
-      let source = null;
+      let source;
       if (support.kind === "portal") {
         const sources = await desktopCapturer.getSources({ types: ["screen", "window"], thumbnailSize: size, fetchWindowIcons: false });
         source = sources[0] ?? null;
@@ -260,12 +260,29 @@ function createScreenContext({ desktopCapturer, screen, systemPreferences = null
  * Show Rem your screen and Dictate to Rem from any app are on.
  *   onPress()   takes the screenshot and starts dictation
  */
-function createScreenShortcut({ globalShortcut, onPress, now = Date.now }) {
+// The id this shortcut has in a Wayland desktop's shortcut list (see linux-shortcuts.cjs).
+const SCREEN_SHORTCUT_ID = "ask-rem-about-screen";
+
+// Why the desktop route didn't give a working shortcut, for Settings.
+const DESKTOP_PROBLEMS = {
+  approval: "Waiting for you to allow it in your desktop's prompt.",
+  declined: "Your desktop's request to add this shortcut was declined.",
+  unassigned: "Your desktop added this shortcut without a key. Choose one in your desktop's shortcut settings.",
+  manual: "Your desktop doesn't let apps add shortcuts, so this one can't work from other apps here.",
+};
+
+/**
+ * The "Ask Rem about your screen" shortcut. On a Wayland desktop (desktopShortcuts given)
+ * the desktop is asked for it, with the dictation shortcut; configure then returns a
+ * promise. Press it through press().
+ */
+function createScreenShortcut({ globalShortcut, onPress, now = Date.now, desktopShortcuts = null }) {
   let registered = "";
   let accelerator = "";
   let error = "";
   let enabled = false;
   let lastPressedAt = 0;
+  let desktop = { state: "", trigger: "" };
 
   function unregister() {
     if (registered) {
@@ -275,7 +292,20 @@ function createScreenShortcut({ globalShortcut, onPress, now = Date.now }) {
   }
 
   function status() {
+    if (desktopShortcuts) {
+      return { enabled, accelerator, registered: enabled && desktop.state === "registered", error, lastPressedAt, state: desktop.state, trigger: desktop.trigger };
+    }
     return { enabled, accelerator, registered: Boolean(registered), error, lastPressedAt };
+  }
+
+  function press() {
+    lastPressedAt = now();
+    onPress();
+  }
+
+  function noteDesktop(result = {}) {
+    desktop = { state: String(result.state || ""), trigger: String(result.trigger || "") };
+    error = DESKTOP_PROBLEMS[desktop.state] || (desktop.state === "failed" ? String(result.message || "Your desktop didn't add this shortcut.") : "");
   }
 
   function configure({ enabled: on = false, binding = "" } = {}) {
@@ -284,9 +314,18 @@ function createScreenShortcut({ globalShortcut, onPress, now = Date.now }) {
     const wanted = enabled ? toAccelerator(binding) : { accelerator: "" };
     if (wanted.error) {
       unregister();
+      if (desktopShortcuts) void desktopShortcuts.update(SCREEN_SHORTCUT_ID, null).catch(() => {});
       accelerator = "";
       error = wanted.error;
       return status();
+    }
+    if (desktopShortcuts) {
+      accelerator = enabled ? wanted.accelerator : "";
+      const entry = accelerator ? { description: "Ask Rem about your screen", accelerator } : null;
+      return desktopShortcuts.update(SCREEN_SHORTCUT_ID, entry).then((result) => {
+        noteDesktop(entry ? result : {});
+        return status();
+      }, () => status());
     }
     if (registered && wanted.accelerator === registered) return status();
     unregister();
@@ -306,7 +345,14 @@ function createScreenShortcut({ globalShortcut, onPress, now = Date.now }) {
     return status();
   }
 
-  return { configure, status, dispose: unregister };
+  /** The desktop answered later. Returns status(). */
+  function desktopChanged(linux = {}) {
+    const shortcut = linux.shortcuts?.[SCREEN_SHORTCUT_ID];
+    if (desktopShortcuts && shortcut && enabled) noteDesktop(shortcut);
+    return status();
+  }
+
+  return { configure, status, press, desktopChanged, dispose: unregister };
 }
 
-module.exports = { MAC_PRIVACY_URL, MAX_BYTES, captureSize, captureSupport, cleanName, createScreenContext, createScreenShortcut, encode };
+module.exports = { MAC_PRIVACY_URL, MAX_BYTES, SCREEN_SHORTCUT_ID, captureSize, captureSupport, cleanName, createScreenContext, createScreenShortcut, encode };

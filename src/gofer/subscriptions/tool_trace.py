@@ -56,6 +56,70 @@ def normalize_tool_trace(trace: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+# What a result trace knows better than the start and update traces before it.
+OUTCOME_FIELDS = frozenset({"phase", "status", "output", "exitCode", "error"})
+
+
+def per_call_receipts(traces: list[dict[str, Any]], window: int = 80) -> list[dict[str, Any]]:
+    """One entry per tool call seen in the last ``window`` traces, in order of start.
+
+    A call's start, update and result traces share its ID, and the result already
+    repeats the start's input, so sending the traces as they are spends most of the
+    window on copies. Each entry keeps the call's input, output, exit code and status.
+    Later start and update traces refine what the call was (streamed input arrives in
+    the update); the result only adds its outcome and anything still missing. Traces
+    without an ID stay as they are. An entry drops only exact copies: JSON input loses
+    its indentation, and a detail or command already inside the input goes. Checks
+    that judge the work read the full traces.
+    """
+    if window <= 0:
+        return []
+    recent = traces[-window:]
+    seen = {str(t["id"]) for t in recent if t.get("id")}
+    calls: dict[str, dict[str, Any]] = {}
+    entries: list[dict[str, Any]] = []
+    for position, trace in enumerate(traces):
+        key = trace.get("id")
+        if not key:
+            if position >= len(traces) - len(recent):
+                entries.append(dict(trace))
+            continue
+        if str(key) not in seen:
+            continue
+        merged = calls.get(str(key))
+        if merged is None:
+            merged = calls[str(key)] = {}
+            entries.append(merged)
+        result = trace.get("phase") == "result"
+        for field, value in trace.items():
+            if value is None or value == "":
+                continue
+            if result and field not in OUTCOME_FIELDS and field in merged:
+                continue
+            merged[field] = value
+    return [_without_copies(entry) for entry in entries]
+
+
+def _without_copies(entry: dict[str, Any]) -> dict[str, Any]:
+    text = entry.get("input")
+    if not isinstance(text, str):
+        return entry
+    try:
+        # Input cut to its retained length isn't valid JSON and stays as it is.
+        text = entry["input"] = json.dumps(
+            json.loads(text), ensure_ascii=False, separators=(",", ":")
+        )
+    except ValueError:
+        pass
+    for field in ("detail", "command"):
+        value = entry.get(field)
+        if isinstance(value, str) and (
+            value in text or json.dumps(value, ensure_ascii=False)[1:-1] in text
+        ):
+            del entry[field]
+    return entry
+
+
 def successful_receipt(trace: dict[str, Any]) -> bool:
     if (
         trace.get("phase") != "result"

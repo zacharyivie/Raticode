@@ -129,10 +129,23 @@ contextBridge.exposeInMainWorld("goferDesktop", {
     configure: (options) => invokeDesktop("gofer:global-dictation-configure", options),
     report: (state) => invokeDesktop("gofer:global-dictation-report", state),
     suspend: (suspended) => invokeDesktop("gofer:global-dictation-suspend", { suspended }),
+    // Asks a Wayland desktop again after its shortcut prompt was declined.
+    retry: () => invokeDesktop("gofer:global-dictation-retry"),
     onTrigger: (callback) => {
       const listener = (_event, message) => callback(message);
       ipcRenderer.on("gofer:global-dictation", listener);
       return () => ipcRenderer.removeListener("gofer:global-dictation", listener);
+    },
+  },
+  // Workflow shortcuts: system-wide keys that run a workflow. The backend keeps the list;
+  // sync registers it again after a change and returns each key's status.
+  workflowShortcuts: {
+    sync: () => invokeDesktop("gofer:workflow-shortcuts-sync"),
+    suspend: (suspended) => invokeDesktop("gofer:workflow-shortcuts-suspend", { suspended }),
+    onEvent: (callback) => {
+      const listener = (_event, message) => callback(message);
+      ipcRenderer.on("gofer:workflow-shortcuts", listener);
+      return () => ipcRenderer.removeListener("gofer:workflow-shortcuts", listener);
     },
   },
   // Show Rem your screen: one screenshot for one Rem message, only when asked.
@@ -184,7 +197,7 @@ contextBridge.exposeInMainWorld("goferDesktop", {
   },
   dataDirectory: {
     choose: async (options = {}) => {
-      let selectedPath = null;
+      let selectedPath;
       try {
         selectedPath = await selectPath({
           currentPath:
@@ -204,6 +217,7 @@ contextBridge.exposeInMainWorld("goferDesktop", {
   },
   workspace: {
     replaceProject: (projectRoot, options = {}) => invokeDesktop("gofer:replace-project", { ...options, projectRoot, grantId: grantForPath(projectRoot) }),
+    listProjectFiles: (projectRoot) => invokeDesktop("gofer:list-project-files", { projectRoot, grantId: grantForPath(projectRoot) }),
     searchProject: (projectRoot, options = {}) => invokeDesktop("gofer:search-project", { ...options, projectRoot, grantId: grantForPath(projectRoot) }),
     listDirectory: (options = {}) =>
       listDirectory(options),
@@ -326,6 +340,8 @@ contextBridge.exposeInMainWorld("goferBrowser", {
   openBlockedPopup: (id, index) => browserAction(id, "open-blocked-popup", { index: Number.isInteger(index) ? index : -1 }),
   allowPopups: (id) => browserAction(id, "allow-popups"),
   dismissBlockedPopups: (id) => browserAction(id, "dismiss-blocked-popups"),
+  // "Load remote content" for the local HTML file a preview shows (false blocks it again).
+  setPreviewRemote: (id, allowed) => browserAction(id, "preview-remote", { allowed: allowed !== false }),
   siteInfo: (id) => browserAction(id, "site-info"),
   sitePermission: (id, key, value) => browserAction(id, "site-permission", {
     key: typeof key === "string" ? key.slice(0, 80) : "",
@@ -367,6 +383,8 @@ contextBridge.exposeInMainWorld("goferBrowser", {
     action: typeof action === "string" ? action : "",
   }),
   onGecko: (callback) => subscribeToBrowserEvent("gofer:gecko-state", callback),
+  // The user's Gecko tabs shared with Rem, with their pending approvals.
+  onGeckoShared: (callback) => subscribeToBrowserEvent("gofer:gecko-shared", callback),
   // The Browser in its own window: "status", "focus", or "close" once the studio has taken the tabs back.
   browserWindow: (action) => ipcRenderer.invoke("gofer:browser-window", { action: typeof action === "string" ? action : "" }),
   onBrowserWindow: (callback) => subscribeToBrowserEvent("gofer:browser-window", callback),
@@ -392,6 +410,13 @@ contextBridge.exposeInMainWorld("goferBrowser", {
   onLibraryChanged: (callback) => subscribeToBrowserEvent("gofer:browser-library-changed", callback),
   onOpenFile: (callback) => subscribeToBrowserEvent("gofer:browser-open-file", callback),
   onOpenTab: (callback) => subscribeToBrowserEvent("gofer:browser-open-tab", callback),
+  // Raticode as the computer's web browser: links and web pages other apps open
+  // with it, and the system's default-browser setting. The user makes the change
+  // in the system's own settings; on Linux after a dialog from the main process.
+  defaultBrowser: (action) => ipcRenderer.invoke("gofer:default-browser", {
+    action: ["take-opens", "status", "open-settings", "make-default"].includes(action) ? action : "",
+  }),
+  onExternalOpen: (callback) => subscribeToBrowserEvent("gofer:external-open", callback),
   onPrompt: (callback) => subscribeToBrowserEvent("gofer:browser-prompt", callback),
   onState: (callback) => subscribeToBrowserEvent("gofer:browser-state", callback),
 });
@@ -479,6 +504,8 @@ async function createBrowser(options = {}) {
       ? { history: { index: Number(options.history.index) || 0, entries: options.history.entries.slice(-25) } }
       : {}),
     path: targetPath,
+    // A file another app opened with Raticode: no scripts, never online.
+    ...(targetPath && options.external === true ? { external: true } : {}),
     ...(options.private === true ? { private: true } : {}),
     // The browser this tab runs in; without it the default in Settings > Browser.
     ...(typeof options.engine === "string" && options.engine ? { engine: options.engine.slice(0, 20) } : {}),

@@ -4,3 +4,4 @@ Workflow:
 Node example:
   type: bash-command
   command: printf ready
+  shell: bash

@@ -132,6 +132,13 @@ def _account(provider: str, profile: str | None, data_dir: Path | None) -> str:
     return hashlib.sha256(root.encode()).hexdigest() + ":" + _scope(provider, profile)
 
 
+class _NoProfile:
+    account_id = None
+
+
+_NO = _NoProfile()
+
+
 def _validate_account(provider: Any, profile: Any, data_dir: Path | None) -> None:
     if not isinstance(provider, str) or provider not in _FIELDS:
         raise UsageCredentialError("This provider has no configurable reporting credentials.")
@@ -274,6 +281,15 @@ def save_usage_credentials(
     data_dir: Path | None = None,
 ) -> dict[str, Any]:
     _validate_account(provider, profile, data_dir)
+    if profile is not None and (load_provider_profiles(data_dir).get(profile) or _NO).account_id:
+        # An account reports through its own CLI; Raticode keeps no token for it.
+        from gofer.core.provider_accounts import account_adapter
+
+        adapter = account_adapter(provider)
+        label = adapter.label if adapter else "its provider's CLI"
+        raise UsageCredentialError(
+            f"{label} accounts report usage through {label}. No token is needed."
+        )
     fields = {field["name"]: field for field in _FIELDS[provider]}
     remove = [] if remove is None else remove
     if (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import threading
@@ -16,14 +17,19 @@ import pytest
 from gofer.ui import brain_library as library_module
 from gofer.ui.brain_backups import (
     PARTIAL,
+    backup_health,
+    backup_path,
     backup_warning,
     due_key,
     existing_backups,
     file_prefix,
+    retained,
+    smaller_counts,
     validate_backup,
     verify_package,
 )
 from gofer.ui.brain_library import BrainLibrary
+from gofer.utils import drive_format as drive_format_module
 
 
 def wait_task(library: BrainLibrary, task: dict[str, Any]) -> dict[str, Any]:
@@ -429,3 +435,314 @@ def test_unfinished_files_from_a_killed_backup_are_cleaned_up(library, tmp_path,
     # The exporter's own staging file has the name the cleanup recognizes.
     assert staged and PARTIAL.fullmatch(staged[0])
     assert not [name for name in os.listdir(folder) if name.startswith(".raticode-export-k")]
+
+
+# ---------------------------------------------------------------- the last good copy
+
+
+def backup_now(library: BrainLibrary, brain: dict[str, Any], **params: Any) -> dict[str, Any]:
+    receipt = wait_task(library, library.start_task("backup", {"brainId": brain["id"], **params}))
+    assert receipt["state"] == "done", receipt.get("error")
+    result: dict[str, Any] = receipt["result"]
+    return result
+
+
+def empty_brain_folder(library: BrainLibrary, brain: dict[str, Any]) -> None:
+    """Delete every note and file, as a bad sync or a mistaken delete would, then rescan."""
+    root = Path(brain["root"])
+    for path in sorted(root.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        if ".raticode" in path.relative_to(root).parts:
+            continue
+        if path.is_dir():
+            path.rmdir()
+        else:
+            path.unlink()
+    wait_task(library, library.start_task("index", {"brainId": brain["id"], "force": True}))
+    settle(library)
+
+
+def package_paths(path: Path) -> set[str]:
+    with zipfile.ZipFile(path) as archive:
+        return {name for name in archive.namelist() if name.startswith("files/")}
+
+
+def test_emptied_brain_folder_never_rotates_out_the_last_full_copy(library, tmp_path):
+    brain = archived_brain(library, tmp_path)
+    folder = tmp_path / "backups"
+    configure(library, brain, folder=str(folder), keep=1, conversations=True)
+    full = backup_now(library, brain)
+    full_path = Path(full["path"])
+    assert "files/notes.md" in package_paths(full_path)
+
+    empty_brain_folder(library, brain)
+    assert not [p for p in Path(brain["root"]).iterdir() if p.name != ".raticode"]
+    empties = [backup_now(library, brain) for _ in range(3)]
+
+    # With keep=1 each of these would have deleted the copy before it.
+    assert full_path.exists()
+    assert "files/notes.md" in package_paths(full_path)
+    assert verify_package(full_path)["files"] == full["files"]
+    for result in empties:
+        assert result["kept"] is True and result["removed"] == []
+        assert Path(result["path"]).exists()
+        assert {"files", "documents", "bytes"} >= set(result["smaller"]) and result["smaller"]
+    kept = existing_backups(folder, library.brain(brain["id"]))
+    assert len(kept) == 4 and kept[-1] == full_path
+
+    status = library.brain(brain["id"])["backupStatus"]
+    # Later backups keep comparing with the full copy, not with the empty ones.
+    assert status["lastVerified"]["path"] == str(full_path)
+    assert status["lastAttempt"]["state"] == "kept"
+    assert status["lastAttempt"]["detail"] == "kept, much smaller than the last backup"
+    assert status["lastAttempt"]["path"] == empties[-1]["path"]
+    assert status["lastAttempt"]["files"] < full["files"]
+
+    snapshot = library.snapshot()
+    shown = snapshot["brains"][0]
+    assert "much smaller than the last full backup" in shown["backupWarning"]
+    issues = [issue for issue in snapshot["health"] if issue["kind"] == "backup"]
+    assert len(issues) == 1
+    assert issues[0]["brainId"] == brain["id"]
+    assert issues[0]["lastVerified"]["files"] == full["files"]
+    assert issues[0]["newest"]["files"] == empties[-1]["files"]
+    assert f"{full['files']:,} files" in issues[0]["detail"]
+
+
+def test_accepting_the_smaller_size_prunes_again(library, tmp_path):
+    brain = archived_brain(library, tmp_path)
+    folder = tmp_path / "backups"
+    configure(library, brain, folder=str(folder), keep=1)
+    full = Path(backup_now(library, brain)["path"])
+    empty_brain_folder(library, brain)
+    assert backup_now(library, brain)["kept"] is True
+
+    accepted = backup_now(library, brain, acceptSmaller=True)
+    assert "kept" not in accepted
+    status = library.brain(brain["id"])["backupStatus"]
+    assert status["lastVerified"]["path"] == accepted["path"]
+    assert status["lastAttempt"]["state"] == "verified"
+    assert not [issue for issue in library.snapshot()["health"] if issue["kind"] == "backup"]
+    # keep=1, and the accepted copy is the newest of this week and month, so the
+    # older copies from the same week go.
+    assert existing_backups(folder, library.brain(brain["id"])) == [Path(accepted["path"])]
+    assert not full.exists()
+    # The next backup of the same small brain compares with the accepted one.
+    assert "kept" not in backup_now(library, brain)
+
+
+def test_a_copy_is_much_smaller_when_any_count_falls_below_half():
+    last = {"files": 100, "documents": 40, "size": 10_000}
+    assert smaller_counts({"files": 50, "documents": 20, "size": 5_000}, last) == []
+    assert smaller_counts({"files": 49, "documents": 40, "size": 10_000}, last) == ["files"]
+    assert smaller_counts({"files": 100, "documents": 19, "size": 4_999}, last) == [
+        "documents",
+        "bytes",
+    ]
+    assert smaller_counts({"files": 0, "documents": 0, "size": 0}, None) == []
+    # A record from before documents were counted never blocks pruning on that count.
+    assert smaller_counts({"files": 100, "documents": 0, "size": 10_000}, {"files": 100}) == []
+
+
+def test_tiers_keep_the_newest_copy_of_recent_weeks_and_months(tmp_path):
+    brain = {"id": "brain-1", "name": "Notes"}
+    # Midday UTC, so no local time zone moves a copy into another week or month.
+    days = [datetime(2026, 11, 23, 12, tzinfo=UTC) - timedelta(days=n) for n in range(0, 120, 3)]
+    paths = [backup_path(tmp_path, brain, day) for day in days]
+    for path in paths:
+        path.write_bytes(b"x")
+    found = existing_backups(tmp_path, brain)
+    assert found == paths
+    claimed = retained(found, 2, found[0])
+
+    def newest_per(key) -> list[Path]:
+        seen: dict[Any, Path] = {}
+        for path, day in zip(paths, days, strict=True):
+            seen.setdefault(key(day.astimezone()), path)
+        return list(seen.values())
+
+    weeks = newest_per(lambda day: day.isocalendar()[:2])[:4]
+    months = newest_per(lambda day: (day.year, day.month))[:3]
+    assert claimed == {paths[0], paths[1], *weeks, *months}
+    assert len(claimed) < len(paths)
+    # A copy no tier claims goes; one the monthly tier claims stays, however old.
+    assert paths[-1] not in claimed
+    assert months[-1] in claimed and months[-1] not in paths[:2] + weeks
+
+
+def test_pruning_follows_the_tiers(library, tmp_path):
+    brain = archived_brain(library, tmp_path)
+    folder = tmp_path / "backups"
+    folder.mkdir()
+    configure(library, brain, folder=str(folder), keep=1)
+    record = library.brain(brain["id"])
+    start = datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
+    old = [backup_path(folder, record, start - timedelta(days=n)) for n in (40, 75, 400)]
+    for path in old:
+        path.write_bytes(b"old copy")
+    newest = Path(backup_now(library, brain)["path"])
+    claimed = retained([newest, *old], 1, newest)
+    survivors = set(existing_backups(folder, library.brain(brain["id"])))
+    assert survivors == claimed
+    # 40 days back is always in one of the last 3 calendar months; a year back never is.
+    assert old[0] in survivors and newest in survivors
+    assert old[2] not in survivors
+
+
+def test_kept_backup_health_names_both_counts():
+    brain = {
+        "id": "brain-1",
+        "backupStatus": {
+            "lastVerified": {"files": 1240, "documents": 900, "size": 3 * 1024 * 1024},
+            "lastAttempt": {
+                "at": "2026-11-23T03:00:00+00:00",
+                "state": "kept",
+                "path": "/backups/notes-backup.zip",
+                "files": 2,
+                "documents": 0,
+                "size": 900,
+            },
+        },
+    }
+    issue = backup_health(brain)
+    assert issue is not None and issue["kind"] == "backup"
+    assert "2 files, 0 documents, 900 bytes" in issue["detail"]
+    assert "1,240 files, 900 documents, 3.0 MB" in issue["detail"]
+    assert (
+        backup_health({"id": "b", "backupStatus": {"lastAttempt": {"state": "verified"}}}) is None
+    )
+    assert "much smaller" in backup_warning(brain, datetime(2026, 12, 30, tzinfo=UTC))
+
+
+# ---------------------------------------------------------------- FAT and exFAT drives
+
+
+def no_hard_links(monkeypatch) -> None:
+    """os.link as a FAT or exFAT drive answers it on Linux."""
+
+    def refuse(*args: Any, **kwargs: Any) -> None:
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "link", refuse)
+
+
+def test_backups_and_exports_work_on_drives_without_hard_links(library, tmp_path, monkeypatch):
+    brain = archived_brain(library, tmp_path)
+    folder = tmp_path / "usb"
+    folder.mkdir()
+    no_hard_links(monkeypatch)
+    # Choosing the folder runs the probe through the same publication path.
+    configure(library, brain, folder=str(folder))
+    assert list(folder.iterdir()) == []
+
+    result = backup_now(library, brain)
+    assert result["verified"] is True
+    saved = Path(result["path"])
+    assert verify_package(saved)["files"] > 0
+    assert [path.name for path in folder.iterdir()] == [saved.name]
+
+    export = tmp_path / "usb" / "export.zip"
+    library.export_package(
+        {"brainId": brain["id"], "destination": str(export)}, threading.Event(), lambda _: None
+    )
+    assert verify_package(export)["files"] > 0
+
+
+def test_choosing_an_unwritable_backup_folder_names_the_drive_format(
+    library, tmp_path, monkeypatch
+):
+    brain = archived_brain(library, tmp_path)
+    folder = tmp_path / "usb"
+    folder.mkdir()
+    real_open = os.open
+
+    def mounted_for_someone_else(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if flags & os.O_CREAT and "raticode-backup-probe" in str(path):
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", mounted_for_someone_else)
+    monkeypatch.setattr(drive_format_module, "drive_format", lambda _: "exFAT")
+    with pytest.raises(ValueError) as raised:
+        configure(library, brain, folder=str(folder))
+    message = str(raised.value)
+    assert message.startswith(f"Couldn't write to {folder} on this exFAT drive: permission denied.")
+    assert "Errno" not in message
+    assert "mounted for another user" in message
+    assert library.brain(brain["id"]).get("backup", {}).get("folder", "") == ""
+    assert list(folder.iterdir()) == []
+
+    # Saving other settings doesn't probe again, and a folder not plugged in yet is kept.
+    missing = tmp_path / "unplugged" / "Backups"
+    configure(library, brain, folder=str(missing))
+    assert not missing.exists()
+    assert library.brain(brain["id"])["backup"]["folder"] == str(missing)
+
+
+def test_a_failed_backup_write_explains_the_drive_limit(library, tmp_path, monkeypatch):
+    brain = archived_brain(library, tmp_path)
+    folder = tmp_path / "usb"
+    configure(library, brain, folder=str(folder))
+
+    def too_large(*args: Any, **kwargs: Any) -> None:
+        raise OSError(errno.EFBIG, "File too large")
+
+    monkeypatch.setattr(library_module.shutil, "copyfileobj", too_large)
+    monkeypatch.setattr(drive_format_module, "drive_format", lambda _: "FAT32")
+    receipt = wait_task(library, library.start_task("backup", {"brainId": brain["id"]}))
+    assert receipt["state"] == "failed"
+    error = library.brain(brain["id"])["backupStatus"]["lastAttempt"]["error"]
+    assert error == receipt["error"]
+    assert f"{folder} on this FAT32 drive: file too large." in error
+    assert "can't hold a file over 4 GB" in error
+    assert "Errno" not in error
+    assert not [path for path in folder.iterdir() if not PARTIAL.fullmatch(path.name)]
+
+
+# ---------------------------------------------------------------- files that move
+
+
+def test_backup_skips_a_save_in_progress_and_a_file_removed_after_the_walk(
+    library, tmp_path, monkeypatch
+):
+    """Rem saving a note renames its temporary file while the backup reads the folder."""
+    brain = archived_brain(library, tmp_path)
+    root = Path(brain["root"])
+    temporary = root / f".rem-note.md.{'0123456789abcdef' * 2}.tmp"
+    temporary.write_text("# Half written\n")
+    (root / "attachment.bin").write_bytes(b"stray file, not a document")
+    real_read = library_module.read_source
+
+    def racing(base: Path, relative: str, *args: Any) -> bytes:
+        if relative == temporary.name and temporary.exists():
+            temporary.rename(root / "rem-note.md")
+        if relative == "attachment.bin":
+            (root / relative).unlink(missing_ok=True)
+        return real_read(base, relative, *args)
+
+    monkeypatch.setattr(library_module, "read_source", racing)
+    folder = tmp_path / "backups"
+    configure(library, brain, folder=str(folder))
+    receipt = wait_task(library, library.start_task("backup", {"brainId": brain["id"]}))
+    assert receipt["state"] == "done", receipt.get("error")
+    [copy] = existing_backups(folder, library.brain(brain["id"]))
+    with zipfile.ZipFile(copy) as archive:
+        names = archive.namelist()
+    assert "files/notes.md" in names
+    assert not [name for name in names if name.endswith(".tmp") or "attachment.bin" in name]
+
+
+def test_backup_still_fails_when_a_library_document_disappears(library, tmp_path, monkeypatch):
+    brain = archived_brain(library, tmp_path)
+    real_read = library_module.read_source
+
+    def vanished(base: Path, relative: str, *args: Any) -> bytes:
+        if relative == "notes.md":
+            raise FileNotFoundError(2, "No such file or directory", relative)
+        return real_read(base, relative, *args)
+
+    monkeypatch.setattr(library_module, "read_source", vanished)
+    folder = tmp_path / "backups"
+    configure(library, brain, folder=str(folder))
+    receipt = wait_task(library, library.start_task("backup", {"brainId": brain["id"]}))
+    assert receipt["state"] == "failed"
+    assert existing_backups(folder, library.brain(brain["id"])) == []

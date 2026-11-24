@@ -19,6 +19,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -92,7 +94,7 @@ internal fun KanbanPage(client: LiveClient, tab: String, onTab: (String) -> Unit
             open == NEW -> KanbanNewTicket(client, board, busy) { top = null }
             open.orEmpty().startsWith(PERSON) -> KanbanPersonPage(client, board, open!!.removePrefix(PERSON), busy, onTicket = { top = TICKET + it },
                 onBoard = { p -> val (s, a) = Kanban.boardFilterFor(p); setFilters(filters.copy(scope = s, assignee = a, project = Kanban.ALL, column = "todo")); onTab(KanbanTabs.BOARD); top = null }) { top = null }
-            open != null -> KanbanTicketPage(client, board, open.removePrefix(TICKET), busy, onOrganization, onPerson = { top = PERSON + it }) { top = null }
+            open != null -> KanbanTicketPage(client, board, open.removePrefix(TICKET), busy, onOrganization, onPerson = { top = PERSON + it }, onOpenTicket = { top = TICKET + it }) { top = null }
             else -> {
                 val status = when { !client.connected -> "Offline"; board == null -> "On your computer"
                     else -> "${board.tickets.count(Kanban::onBoard)} tickets, every organization and Rem" }
@@ -209,7 +211,7 @@ private fun BoardTab(client: LiveClient, board: KanbanBoard, busy: Boolean, filt
         Text("Long-press a ticket to move it.", Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
-    moving?.let { KanbanMoveSheet(client, it, busy) { moving = null } }
+    moving?.let { KanbanMoveSheet(it, busy, { p -> client.desktopAction(Kanban.TICKET, p) }) { moving = null } }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -236,6 +238,8 @@ private fun KanbanCard(ticket: KanbanTicket, onOpen: () -> Unit, onMove: (() -> 
                 // Paused isn't stuck: a calm pill in words, and its reason without the red.
                 if (paused) Pill(RunPause.label(ticket.paused), OrgTone.WAIT, Modifier.testTag("kanbanPaused"))
                 if (ticket.autoApproved) Pill("Auto-approved", OrgTone.IDLE, Modifier.testTag("kanbanCardAutoApproved"))
+                if (ticket.guardrail) Pill(Kanban.GUARDRAIL, OrgTone.IDLE, Modifier.testTag("kanbanCardGuardrail"))
+                Kanban.violatesLine(ticket).takeIf { it.isNotBlank() }?.let { Pill(it, OrgTone.BAD, Modifier.testTag("kanbanCardViolates")) }
                 if (block.isNotBlank()) Text(block, style = MaterialTheme.typography.bodySmall, color = if (paused) MaterialTheme.colorScheme.onSurfaceVariant else orgColors(OrgTone.BAD).first, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 // A cancelled ticket it waits for needs the user; otherwise a quiet line says what comes first.
                 if (ticket.waitNotice.isNotBlank()) Text(ticket.waitNotice, Modifier.testTag("kanbanCardWaitNotice"), style = MaterialTheme.typography.bodySmall, color = orgColors(OrgTone.WAIT).first, maxLines = 3, overflow = TextOverflow.Ellipsis)
@@ -265,7 +269,7 @@ private fun AssigneeLine(ticket: KanbanTicket) {
 @OptIn(ExperimentalMaterial3Api::class)
 @RequiresApi(29)
 @Composable
-private fun KanbanMoveSheet(client: LiveClient, ticket: KanbanTicket, busy: Boolean, onDone: () -> Unit) {
+private fun KanbanMoveSheet(ticket: KanbanTicket, busy: Boolean, onAction: (org.json.JSONObject) -> Unit, onDone: () -> Unit) {
     ModalBottomSheet(onDismissRequest = onDone) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("Move ${ticket.key.ifBlank { "ticket" }}", style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
@@ -275,7 +279,7 @@ private fun KanbanMoveSheet(client: LiveClient, ticket: KanbanTicket, busy: Bool
                 val rule = Kanban.move(ticket, column)
                 val label = Kanban.COLUMN_LABELS[column].orEmpty()
                 val enabled = !busy && rule is OrganizationModel.Move.Allowed
-                Surface(onClick = { client.desktopAction(Kanban.TICKET, Kanban.moveParams(ticket, column)); onDone() }, enabled = enabled,
+                Surface(onClick = { onAction(Kanban.moveParams(ticket, column)); onDone() }, enabled = enabled,
                     color = Color.Transparent, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("kanbanMove-$column")) {
                     Row(Modifier.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         Box(Modifier.size(10.dp).clip(CircleShape).background(orgColors(columnTone(column)).first))
@@ -315,7 +319,7 @@ private fun ProposedTab(client: LiveClient, board: KanbanBoard, busy: Boolean, o
         if (proposals.isEmpty()) item { Note("Nothing to review right now.") }
         items(proposals, key = { it.uid }) { t -> ProposalCard(t, busy, onOpen = { onOpen(t.uid) }, onApprove = { client.desktopAction(Kanban.TICKET, Kanban.decideParams(t, true)) }) { declining = t } }
     }
-    declining?.let { t -> DeclineDialog(client, t) { declining = null } }
+    declining?.let { t -> DeclineDialog(client.connected, t, { p -> client.desktopAction(Kanban.TICKET, p) }) { declining = null } }
 }
 
 @Composable
@@ -341,150 +345,245 @@ private fun ProposalCard(ticket: KanbanTicket, busy: Boolean, onOpen: (() -> Uni
 
 @RequiresApi(29)
 @Composable
-private fun DeclineDialog(client: LiveClient, ticket: KanbanTicket, onDone: () -> Unit) {
+private fun DeclineDialog(connected: Boolean, ticket: KanbanTicket, onAction: (org.json.JSONObject) -> Unit, onDone: () -> Unit) {
     var reason by rememberSaveable { mutableStateOf("") }
     AlertDialog(onDismissRequest = onDone, title = { Text("Decline this proposal?") },
         text = { OutlinedTextField(reason, { reason = it.take(1000) }, Modifier.fillMaxWidth().testTag("kanbanDeclineReason"), label = { Text("Why, for Rem (optional)") }, minLines = 2, maxLines = 4) },
-        confirmButton = { TextButton(modifier = Modifier.testTag("kanbanDeclineConfirm"), enabled = client.connected, onClick = { client.desktopAction(Kanban.TICKET, Kanban.decideParams(ticket, false, reason)); onDone() }) { Text("Decline") } },
+        confirmButton = { TextButton(modifier = Modifier.testTag("kanbanDeclineConfirm"), enabled = connected, onClick = { onAction(Kanban.decideParams(ticket, false, reason)); onDone() }) { Text("Decline") } },
         dismissButton = { TextButton(onClick = onDone) { Text("Cancel") } })
 }
 
 // One ticket ---------------------------------------------------------------------------------------------------------
 
 @RequiresApi(29)
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ColumnScope.KanbanTicketPage(client: LiveClient, board: KanbanBoard?, uid: String, busy: Boolean, onOrganization: (String) -> Unit, onPerson: (String) -> Unit, onBack: () -> Unit) {
+private fun ColumnScope.KanbanTicketPage(client: LiveClient, board: KanbanBoard?, uid: String, busy: Boolean, onOrganization: (String) -> Unit,
+                                         onPerson: (String) -> Unit, onOpenTicket: (String) -> Unit, onBack: () -> Unit) {
     val timelineKey = Kanban.timelineKey(Kanban.timelineParams(uid))
     val timeline = client.desktopViews[timelineKey] as? TicketTimeline
     // The history read has the newest copy of the ticket; the board may be a few seconds older.
     val ticket = timeline?.ticket?.takeIf { it.uid == uid } ?: board?.tickets?.firstOrNull { it.uid == uid }
     // A change made here answers with the board; read the history again so it shows at once.
     LaunchedEffect(board) { if (client.kanbanComments == true) client.refreshDesktop() }
-    var moving by remember { mutableStateOf(false) }
-    var declining by remember { mutableStateOf(false) }
-    var handOver by remember { mutableStateOf<Pair<String, String>?>(null) }
-    Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 8.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 12.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
-        Column(Modifier.weight(1f)) {
-            ticket?.key?.takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace), color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1) }
-            Text(ticket?.title ?: "Ticket", style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.semantics { heading() })
-        }
+        Text(ticket?.key?.ifBlank { null } ?: "Ticket", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge.copy(fontFamily = FontFamily.Monospace),
+            color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+        if (ticket != null) Pill(ticket.owner, if (ticket.isRem) OrgTone.ACCENT else OrgTone.IDLE)
     }
     val gate = if (client.kanbanComments == true) timelineKey else Kanban.BOARD
     KanbanStateStrip(client, gate, client.desktopViews.containsKey(gate))
     Box(Modifier.weight(1f)) {
         DesktopGate(client, if (board != null) Kanban.BOARD else gate, "Loading this ticket…") {
             if (ticket == null) Note("This ticket is no longer on the board.", Modifier.padding(20.dp))
-            else Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp).testTag("kanbanTicketPage"), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Pill(ticket.owner, if (ticket.isRem) OrgTone.ACCENT else OrgTone.IDLE)
-                    when { ticket.proposed -> Pill("Proposed", OrgTone.WAIT)
-                        else -> Kanban.column(ticket)?.let { Pill(Kanban.COLUMN_LABELS[it].orEmpty(), columnTone(it)) } }
-                    if (ticket.autoApproved) Pill("Auto-approved", OrgTone.IDLE, Modifier.testTag("kanbanAutoApproved"))
-                    if (ticket.running) Pill("Running", OrgTone.RUN)
-                    if (ticket.paused.isNotBlank()) Pill(RunPause.label(ticket.paused), OrgTone.WAIT)
-                    if (ticket.priority in setOf("critical", "high")) Pill(ticket.priority.replaceFirstChar { it.uppercase() }, if (ticket.priority == "critical") OrgTone.BAD else OrgTone.WAIT)
-                    if (ticket.project.isNotBlank()) Pill(ticket.project, OrgTone.IDLE)
+            else TicketDetailView(ticket, board, timeline, client.kanbanComments, client.connected, busy,
+                onAction = { client.desktopAction(Kanban.TICKET, it) }, onOrganization = onOrganization, onPerson = onPerson, onOpenTicket = onOpenTicket)
+        }
+    }
+}
+
+/**
+ * One ticket, laid out to be read in seconds: its title and status chips, where it is on the board, what needs attention,
+ * who has it, its facts as tiles, the long texts folded to a first line, what it waits for and what waits for it, and its
+ * history. The main actions stay pinned at the bottom. [onAction] sends a ticket action's params to the desktop.
+ */
+@RequiresApi(29)
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun TicketDetailView(ticket: KanbanTicket, board: KanbanBoard?, timeline: TicketTimeline?, historySupported: Boolean?, connected: Boolean, busy: Boolean,
+                              onAction: (org.json.JSONObject) -> Unit, onOrganization: (String) -> Unit = {}, onPerson: (String) -> Unit = {},
+                              onOpenTicket: (String) -> Unit = {}) {
+    var moving by remember { mutableStateOf(false) }
+    var declining by remember { mutableStateOf(false) }
+    var handOver by remember { mutableStateOf<Pair<String, String>?>(null) }
+    val column = Kanban.column(ticket)
+    Column(Modifier.fillMaxSize()) {
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp).testTag("kanbanTicketPage"),
+            verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            // Title and the states that matter most, in color.
+            Text(ticket.title, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.semantics { heading() }.testTag("kanbanTicketTitle"))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                when {
+                    ticket.proposed -> StatusChip("Proposed", OrgTone.WAIT, Modifier.testTag("kanbanStatusChip"), icon = ThreadIcons.Lightbulb)
+                    column != null -> StatusChip(Kanban.COLUMN_LABELS[column].orEmpty(), columnTone(column), Modifier.testTag("kanbanStatusChip"))
+                    else -> StatusChip(Kanban.STATUS_LABELS[ticket.status] ?: ticket.status, OrgTone.IDLE, Modifier.testTag("kanbanStatusChip"))
                 }
-                Kanban.outsideProject(ticket).takeIf { it.isNotBlank() }?.let { Text(it, Modifier.testTag("kanbanOutsideProject"), style = MaterialTheme.typography.bodySmall, color = orgColors(OrgTone.WAIT).first) }
-                Kanban.blockText(ticket).takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodyMedium,
-                    color = if (ticket.paused.isNotBlank()) MaterialTheme.colorScheme.onSurface else orgColors(OrgTone.BAD).first) }
-                if (ticket.autoApproved) {
-                    Note("Approved by self-work, not by you, because auto-approval is on in Settings › Rem self-work. Edit, move or cancel it like any ticket.")
-                    if (ticket.proposalReason.isNotBlank()) { SectionTitle("Why Rem suggests it"); ChatMarkdown(ticket.proposalReason, compact = true) }
+                if (ticket.running) StatusChip("Running", OrgTone.RUN, icon = ThreadIcons.Running)
+                if (ticket.paused.isNotBlank()) StatusChip(RunPause.label(ticket.paused), OrgTone.WAIT, icon = ThreadIcons.Stopped)
+                if (ticket.priority in setOf("critical", "high")) StatusChip(Kanban.priorityLabel(ticket.priority),
+                    if (ticket.priority == "critical") OrgTone.BAD else OrgTone.WAIT, icon = ThreadIcons.Flag)
+                if (ticket.autoApproved) InfoChip("Auto-approved", AUTO_APPROVED_NOTE, icon = ThreadIcons.Sparkles, tag = "kanbanAutoApproved")
+                if (ticket.violatesDecisions.isNotEmpty()) StatusChip("Violates decisions", OrgTone.BAD, Modifier.testTag("kanbanViolatesChip"), icon = ThreadIcons.Failed)
+            }
+            if (!ticket.proposed && column != null) StageStrip(column, Kanban.COLUMN_LABELS)
+            if (ticket.running) LinearProgressIndicator(Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).semantics { contentDescription = "Running" },
+                color = orgColors(OrgTone.RUN).first)
+            // What needs attention, short and tinted.
+            Kanban.blockText(ticket).takeIf { it.isNotBlank() }?.let {
+                val paused = ticket.paused.isNotBlank()
+                Callout(it, if (paused) OrgTone.WAIT else OrgTone.BAD, Modifier.testTag("kanbanBlock"), icon = if (paused) ThreadIcons.Stopped else ThreadIcons.Failed,
+                    title = if (paused) "Paused" else if (ticket.violatesDecisions.isNotEmpty()) "Violates decisions" else "Blocked")
+            }
+            Kanban.outsideProject(ticket).takeIf { it.isNotBlank() }?.let {
+                Callout(it, OrgTone.WAIT, Modifier.testTag("kanbanOutsideProject"), icon = ThreadIcons.Folder, title = "Self-work won't pick this up")
+            }
+            // Who has it.
+            AssigneeCard(ticket, board, busy, onPerson) { choice, label -> if (Kanban.isHandOver(choice)) handOver = choice to label else onAction(Kanban.assignParams(ticket, choice)) }
+            // The facts, as tiles.
+            FactGrid(ticketFacts(ticket, column, onColumn = if (ticket.proposed) null else ({ moving = true })))
+            // Why Rem wrote it, folded to its first sentence.
+            if ((ticket.autoApproved || ticket.proposed) && ticket.proposalReason.isNotBlank()) {
+                DetailCard(if (ticket.proposed) "Why Rem proposes it" else "Why Rem suggests it", Modifier.testTag("kanbanWhy"), icon = ThreadIcons.Lightbulb, tone = OrgTone.ACCENT) {
+                    SummaryText(ticket.proposalReason, tag = "kanbanWhyText") { ChatMarkdown(ticket.proposalReason, compact = true) }
                 }
-                if (ticket.proposed) {
-                    if (ticket.proposalReason.isNotBlank()) { SectionTitle("Why Rem proposes it"); ChatMarkdown(ticket.proposalReason, compact = true) }
-                    if (ticket.duplicateOf.isNotBlank()) Pill("Might duplicate ${ticket.duplicateOf}", OrgTone.WAIT)
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { declining = true }, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("Decline") }
-                        Button(onClick = { client.desktopAction(Kanban.TICKET, Kanban.decideParams(ticket, true)) }, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("Approve") }
-                    }
+            }
+            if (ticket.proposed && ticket.duplicateOf.isNotBlank()) Callout("Might duplicate ${ticket.duplicateOf}", OrgTone.WAIT, icon = ThreadIcons.Copy)
+            // Both can run long; they fold so everything below stays close.
+            if (ticket.summary.isNotBlank()) DetailCard("Last result", Modifier.testTag("kanbanResult"), icon = ThreadIcons.Succeeded, tone = OrgTone.DONE) {
+                SummaryText(ticket.summary, tag = "kanbanResultText") { ChatMarkdown(ticket.summary, compact = true) }
+            }
+            if (ticket.description.isNotBlank()) DetailCard("Details", Modifier.testTag("kanbanDetails"), icon = ThreadIcons.FileText) {
+                FoldableText(toggleColor = MaterialTheme.colorScheme.primary) { ChatMarkdown(ticket.description, compact = true) }
+            }
+            WaitsSection(board, ticket, busy, onAction, onOpenTicket)
+            WaitedOnBySection(board, ticket, onOpenTicket)
+            DetailCard("History and comments", icon = ThreadIcons.History) {
+                TicketHistoryView(ticket.uid, timeline, historySupported, connected, busy, title = false) { onAction(Kanban.commentParams(ticket, it)) }
+            }
+        }
+        // The main actions, always in reach.
+        ActionBar {
+            if (ticket.proposed) {
+                OutlinedButton(onClick = { declining = true }, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("kanbanTicketDecline")) { Text("Decline") }
+                Button(onClick = { onAction(Kanban.decideParams(ticket, true)) }, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("kanbanTicketApprove")) { Text("Approve") }
+            } else {
+                Button(onClick = { moving = true }, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("kanbanMoveOpen")
+                    .semantics { contentDescription = "Move to another column" }) {
+                    Icon(ThreadIcons.Columns, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("Move", maxLines = 1)
                 }
-                SectionTitle("Assigned to") {
-                    board?.let { Kanban.assignedPerson(it, ticket) }?.let { person -> TextButton(onClick = { onPerson(person.id) }, modifier = Modifier.heightIn(min = 48.dp).testTag("kanbanOpenPerson")) { Text("Their projects") } }
+                if (!ticket.isRem) OutlinedButton(onClick = { onOrganization(ticket.organizationId) }, modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("kanbanOpenOrg")) {
+                    Icon(ThreadIcons.Organizations, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp))
+                    Text("Open ${ticket.organizationName.ifBlank { "organization" }}", maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                if (ticket.proposed) AssigneeLine(ticket)
-                else {
-                    val choices = board?.let { Kanban.assignChoices(it, ticket) }.orEmpty()
-                    ChoiceMenu(choices.firstOrNull { it.first == ticket.assigneeId }?.second ?: ticket.assignee.ifBlank { "Unassigned" }, "Assigned to", choices, ticket.assigneeId,
-                        Modifier.heightIn(min = 48.dp).testTag("kanbanAssign"), enabled = !busy && (!ticket.isRem || Kanban.canHandOver(ticket))) { choice ->
-                        if (choice == ticket.assigneeId) Unit
-                        else if (Kanban.isHandOver(choice)) handOver = choice to (choices.firstOrNull { it.first == choice }?.second ?: "that organization")
-                        else client.desktopAction(Kanban.TICKET, Kanban.assignParams(ticket, choice))
-                    }
-                    if (ticket.isRem && !Kanban.canHandOver(ticket)) Note("Rem's ticket can go to an organization while it isn't running or finished.")
-                    OutlinedButton(onClick = { moving = true }, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp).testTag("kanbanMoveOpen")) { Text("Move to another column") }
-                    if (!ticket.isRem) TextButton(onClick = { onOrganization(ticket.organizationId) }, modifier = Modifier.heightIn(min = 48.dp).testTag("kanbanOpenOrg")) { Text("Open ${ticket.organizationName.ifBlank { "this organization" }}") }
-                }
-                WaitsSection(client, board, ticket, busy)
-                // Both can run long; they fold like long messages so the actions above stay close.
-                if (ticket.summary.isNotBlank()) { SectionTitle("Last result"); FoldableText(toggleColor = MaterialTheme.colorScheme.primary) { ChatMarkdown(ticket.summary, compact = true) } }
-                if (ticket.description.isNotBlank()) { SectionTitle("Details"); FoldableText(toggleColor = MaterialTheme.colorScheme.primary) { ChatMarkdown(ticket.description, compact = true) } }
-                listOfNotNull(ticket.createdBy.takeIf { it.isNotBlank() }?.let { "Added by $it" }, ticket.createdAt.takeIf { it.isNotBlank() }?.let { whenText(it, past = true) }).joinToString(" · ").takeIf { it.isNotBlank() }
-                    ?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                TicketHistory(client, ticket, timeline, busy)
             }
         }
     }
-    if (ticket != null && moving) KanbanMoveSheet(client, ticket, busy) { moving = false }
-    if (ticket != null && declining) DeclineDialog(client, ticket) { declining = false }
-    if (ticket != null) handOver?.let { (choice, label) ->
+    if (moving) KanbanMoveSheet(ticket, busy, onAction) { moving = false }
+    if (declining) DeclineDialog(connected, ticket, onAction) { declining = false }
+    handOver?.let { (choice, label) ->
         AlertDialog(onDismissRequest = { handOver = null }, title = { Text("Hand this to $label?") },
             text = { Text("The ticket is created there and Rem's copy closes.") },
-            confirmButton = { TextButton(modifier = Modifier.testTag("kanbanHandOverConfirm"), enabled = client.connected, onClick = { client.desktopAction(Kanban.TICKET, Kanban.assignParams(ticket, choice)); handOver = null }) { Text("Hand over") } },
+            confirmButton = { TextButton(modifier = Modifier.testTag("kanbanHandOverConfirm"), enabled = connected, onClick = { onAction(Kanban.assignParams(ticket, choice)); handOver = null }) { Text("Hand over") } },
             dismissButton = { TextButton(onClick = { handOver = null }) { Text("Cancel") } })
     }
 }
 
-/** What a ticket waits for, its notice when one of them was cancelled, and the controls to change the list. */
+internal const val AUTO_APPROVED_NOTE = "Approved by self-work, not by you, because auto-approval is on in Settings › Rem self-work. Edit, move or cancel it like any ticket."
+internal const val HAND_OVER_LATER = "Rem's ticket can go to an organization while it isn't running or finished."
+
+/** The ticket's facts for [FactGrid]. Tapping the column opens the move sheet through [onColumn]. */
+private fun ticketFacts(ticket: KanbanTicket, column: String?, onColumn: (() -> Unit)?): List<Fact> = buildList {
+    val label = if (ticket.proposed) "Proposed" else column?.let { Kanban.COLUMN_LABELS[it] } ?: (Kanban.STATUS_LABELS[ticket.status] ?: ticket.status)
+    add(Fact(ThreadIcons.Columns, "Column", label, if (ticket.proposed) OrgTone.WAIT else column?.let(::columnTone), "kanbanFactColumn", "Move to another column", onColumn))
+    add(Fact(ThreadIcons.Flag, "Priority", Kanban.priorityLabel(ticket.priority.ifBlank { "medium" }),
+        when (ticket.priority) { "critical" -> OrgTone.BAD; "high" -> OrgTone.WAIT; else -> null }, "kanbanFactPriority"))
+    if (ticket.project.isNotBlank()) add(Fact(ThreadIcons.Folder, "Project", ticket.project, tag = "kanbanFactProject"))
+    if (ticket.isRem && ticket.kind.isNotBlank()) add(Fact(ThreadIcons.Tag, "Kind", Kanban.kindLabel(ticket.kind), tag = "kanbanFactKind"))
+    if (!ticket.isRem) add(Fact(ThreadIcons.Organizations, "Organization", ticket.organizationName.ifBlank { "Organization" }, tag = "kanbanFactOrg"))
+    if (ticket.waitsFor.isNotEmpty()) {
+        val (done, all) = Kanban.waitsDone(ticket)
+        add(Fact(ThreadIcons.Hourglass, "Waits for", if (done == all) "All $all done" else "$done of $all done", if (done == all) OrgTone.DONE else OrgTone.WAIT, "kanbanFactWaits"))
+    }
+    val added = listOfNotNull(ticket.createdBy.takeIf { it.isNotBlank() }, ticket.createdAt.takeIf { it.isNotBlank() }?.let { whenText(it, past = true) }).joinToString(" · ")
+    if (added.isNotBlank()) add(Fact(ThreadIcons.Recent, "Added", added, tag = "kanbanFactAdded"))
+}
+
+/** Who has the ticket, with a way to their projects and, unless it's a proposal, a menu to give it to someone else. */
+@Composable
+private fun AssigneeCard(ticket: KanbanTicket, board: KanbanBoard?, busy: Boolean, onPerson: (String) -> Unit, onChoose: (String, String) -> Unit) {
+    val person = board?.let { Kanban.assignedPerson(it, ticket) }
+    DetailCard("Assigned to", Modifier.testTag("kanbanAssignee"), icon = ThreadIcons.User, trailing = {
+        if (person != null) TextButton(onClick = { onPerson(person.id) }, modifier = Modifier.heightIn(min = 48.dp).testTag("kanbanOpenPerson")) { Text("Their projects") }
+    }) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            val name = ticket.assignee.ifBlank { ticket.assigneeId }
+            if (ticket.assigneeId.isBlank()) IconBadge(ThreadIcons.User, OrgTone.IDLE, 36.dp) else Avatar(name, ticket.assigneeId, 36.dp)
+            Column(Modifier.weight(1f)) {
+                Text(if (ticket.assigneeId.isBlank()) "Unassigned" else name, style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                person?.title?.takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+            }
+            if (!ticket.proposed) {
+                val choices = board?.let { Kanban.assignChoices(it, ticket) }.orEmpty()
+                ChoiceMenu("Change", "Assigned to: ${choices.firstOrNull { it.first == ticket.assigneeId }?.second ?: ticket.assignee.ifBlank { "Unassigned" }}", choices, ticket.assigneeId,
+                    MENU.heightIn(min = 48.dp).testTag("kanbanAssign"), enabled = !busy && (!ticket.isRem || Kanban.canHandOver(ticket))) { choice ->
+                    if (choice != ticket.assigneeId) onChoose(choice, choices.firstOrNull { it.first == choice }?.second ?: "that organization")
+                }
+            }
+        }
+        if (!ticket.proposed && ticket.isRem && !Kanban.canHandOver(ticket)) InfoChip("Why can't I change this?", HAND_OVER_LATER, tag = "kanbanHandOverLater")
+    }
+}
+
+/** What a ticket waits for as tappable rows with status dots, its notice when one of them was cancelled, and the controls to change the list. */
 @RequiresApi(29)
 @Composable
-private fun WaitsSection(client: LiveClient, board: KanbanBoard?, ticket: KanbanTicket, busy: Boolean) {
+private fun WaitsSection(board: KanbanBoard?, ticket: KanbanTicket, busy: Boolean, onAction: (org.json.JSONObject) -> Unit, onOpenTicket: (String) -> Unit) {
     val editable = Kanban.canEditWaits(ticket)
     val choices = if (editable && board != null) Kanban.waitChoices(board, ticket) else emptyList()
     if (ticket.waitsFor.isEmpty() && choices.isEmpty()) return
     val ids = ticket.waitsFor.map { it.id }
-    Column(Modifier.fillMaxWidth().testTag("kanbanWaits"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        SectionTitle("Waits for")
-        if (ticket.waitNotice.isNotBlank()) Text(ticket.waitNotice, Modifier.testTag("kanbanWaitNotice"), style = MaterialTheme.typography.bodyMedium, color = orgColors(OrgTone.WAIT).first)
-        if (ticket.waitsFor.isEmpty()) Note("Nothing. Choose a ticket that has to be Done first.")
+    val (done, all) = Kanban.waitsDone(ticket)
+    DetailCard("Waits for", Modifier.testTag("kanbanWaits"), icon = ThreadIcons.Hourglass, tone = if (all > 0 && done < all) OrgTone.WAIT else null, trailing = {
+        if (all > 0) Pill("$done/$all done", if (done == all) OrgTone.DONE else OrgTone.WAIT)
+    }) {
+        if (ticket.waitNotice.isNotBlank()) Callout(ticket.waitNotice, OrgTone.WAIT, Modifier.testTag("kanbanWaitNotice"))
+        if (ticket.waitsFor.isEmpty()) Note("Nothing yet. Choose a ticket that has to be Done first.")
         ticket.waitsFor.forEach { wait ->
-            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (wait.key.isNotBlank()) Text(wait.key, style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(wait.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                    color = if (wait.status == "done") MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface)
-                Pill(Kanban.STATUS_LABELS[wait.status] ?: if (wait.status == "removed") "Removed" else wait.status,
-                    when (wait.status) { "done" -> OrgTone.IDLE; "cancelled", "removed" -> OrgTone.WAIT; else -> OrgTone.ACCENT })
-                if (editable) IconButton(onClick = { client.desktopAction(Kanban.TICKET, Kanban.waitsParams(ticket, ids - wait.id)) }, enabled = !busy,
-                    modifier = Modifier.testTag("kanbanWaitRemove")) { Icon(Icons.Filled.Close, "Stop waiting for ${wait.key.ifBlank { wait.title }}") }
+            val open = board?.tickets?.any { it.id == wait.id && it.organizationId == ticket.organizationId } == true
+            LinkRow(wait.title, Kanban.STATUS_LABELS[wait.status] ?: if (wait.status == "removed") "Removed" else wait.status, waitTone(wait.status),
+                Modifier.testTag("kanbanWait"), key = wait.key, muted = wait.status == "done",
+                onClick = if (open) ({ onOpenTicket("${ticket.organizationId}/${wait.id}") }) else null) {
+                if (editable) IconButton(onClick = { onAction(Kanban.waitsParams(ticket, ids - wait.id)) }, enabled = !busy,
+                    modifier = Modifier.testTag("kanbanWaitRemove")) { Icon(Icons.Filled.Close, "Stop waiting for ${wait.key.ifBlank { wait.title }}", Modifier.size(18.dp)) }
             }
         }
         if (choices.isNotEmpty()) ChoiceMenu(if (ticket.waitsFor.isEmpty()) "Wait for a ticket…" else "Also wait for…", "Wait for another ticket",
             choices.map { it.id to "${it.key} ${it.title}" }, "", Modifier.heightIn(min = 48.dp).testTag("kanbanWaitAdd"), enabled = !busy) { id ->
-            client.desktopAction(Kanban.TICKET, Kanban.waitsParams(ticket, ids + id))
+            onAction(Kanban.waitsParams(ticket, ids + id))
         }
-        if (ticket.waitsFor.isNotEmpty() && ticket.isRem) Note("Self-work starts this only after every ticket here is Done. You can still start it yourself.")
+        if (ticket.waitsFor.isNotEmpty() && ticket.isRem) InfoChip("How waiting works", "Self-work starts this only after every ticket here is Done. You can still start it yourself.",
+            tag = "kanbanWaitsInfo")
     }
 }
 
-/** The ticket's history under its details: status changes with their reasons, then comments, oldest first, and a box to add one. */
-@RequiresApi(29)
+/** Tickets on the board that wait for this one, so the user sees what finishing it unblocks. */
 @Composable
-private fun TicketHistory(client: LiveClient, ticket: KanbanTicket, timeline: TicketTimeline?, busy: Boolean) =
-    TicketHistoryView(ticket.uid, timeline, client.kanbanComments, client.connected, busy) {
-        client.desktopAction(Kanban.TICKET, Kanban.commentParams(ticket, it))
+private fun WaitedOnBySection(board: KanbanBoard?, ticket: KanbanTicket, onOpenTicket: (String) -> Unit) {
+    val waiting = board?.let { Kanban.waitedOnBy(it, ticket) }.orEmpty()
+    if (waiting.isEmpty()) return
+    DetailCard("Waited on by", Modifier.testTag("kanbanWaitedOnBy"), icon = ThreadIcons.Link, trailing = { Pill("${waiting.size}", OrgTone.IDLE) }) {
+        waiting.forEach { t ->
+            val col = Kanban.column(t)
+            LinkRow(t.title, col?.let { Kanban.COLUMN_LABELS[it] } ?: (Kanban.STATUS_LABELS[t.status] ?: t.status), columnTone(col), Modifier.testTag("kanbanWaitedOn"),
+                key = t.key, muted = t.status == "done", onClick = { onOpenTicket(t.uid) })
+        }
     }
+}
 
-/** [supported] is null until the desktop says whether it keeps ticket history, and false on an older desktop. */
+private fun waitTone(status: String) = when (status) { "done" -> OrgTone.DONE; "cancelled", "removed" -> OrgTone.WAIT; "blocked" -> OrgTone.BAD
+    "in_progress" -> OrgTone.RUN; "in_review" -> OrgTone.WAIT; else -> OrgTone.ACCENT }
+
+/**
+ * The ticket's history under its details: status changes with their reasons, then comments, oldest first, and a box to add one.
+ * [supported] is null until the desktop says whether it keeps ticket history, and false on an older desktop. */
 @RequiresApi(29)
 @Composable
-internal fun TicketHistoryView(uid: String, timeline: TicketTimeline?, supported: Boolean?, connected: Boolean, busy: Boolean, onComment: (String) -> Unit) {
+internal fun TicketHistoryView(uid: String, timeline: TicketTimeline?, supported: Boolean?, connected: Boolean, busy: Boolean, title: Boolean = true, onComment: (String) -> Unit) {
     var draft by rememberSaveable(uid) { mutableStateOf("") }
     var showAll by rememberSaveable(uid) { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth().testTag("kanbanHistory"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        SectionTitle("History and comments")
+        if (title) SectionTitle("History and comments")
         when {
             supported == false -> Note(Kanban.UPDATE_COMMENTS, Modifier.testTag("kanbanHistoryUnsupported"))
             timeline == null -> Text(if (connected) "Loading its history…" else "Connect to your computer to see its history.",
@@ -579,7 +678,7 @@ private fun ColumnScope.KanbanNewTicket(client: LiveClient, board: KanbanBoard?,
         if (place == Kanban.SCOPE_REM) {
             Text("Kind of work", style = MaterialTheme.typography.titleSmall)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf("develop" to "Build", "research" to "Research", "maintain" to "Maintain", "errand" to "Errand").forEach { (value, label) ->
+                Kanban.KINDS.forEach { (value, label) ->
                     FilterChip(kind == value, { kind = value }, label = { Text(label) }, modifier = Modifier.testTag("kanbanKind-$value"))
                 }
             }
@@ -640,7 +739,35 @@ private fun SelfWorkContent(client: LiveClient, busy: Boolean, showSettings: Boo
     val view = client.desktopViews[Kanban.SELF_WORK] as? SelfWorkView ?: return
     SelfWorkBody(view, client.desktopViews[Kanban.BOARD] as? KanbanBoard, busy, client.connected, client.desktopErrors[Kanban.SELF_WORK],
         showSettings, onSettings, projectsEnabled, onProjects, onTicket,
+        onStop = { client.desktopAction(Kanban.STOP, it) },
         onSeen = { client.desktopAction(Kanban.SEEN, Kanban.seenParams(it)) }) { client.desktopAction(Kanban.SETTINGS, it) }
+}
+
+/** One provider's self-work account: its name and the chosen account, which opens the list of choices. */
+@Composable
+private fun SelfWorkAccountRow(row: SelfWorkAccount, enabled: Boolean, onChoose: (String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    val shown = Kanban.accountLabel(row)
+    Box(Modifier.fillMaxWidth()) {
+        Surface(onClick = { expanded = true }, enabled = enabled, color = MaterialTheme.colorScheme.surface,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).testTag("selfWorkAccount:${row.provider}")
+                .semantics { contentDescription = "${row.label} account for self-work: $shown" }) {
+            Row(Modifier.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(row.label, style = MaterialTheme.typography.bodyLarge)
+                    Text(shown, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Icon(Icons.Default.ArrowDropDown, null)
+            }
+        }
+        DropdownMenu(expanded, { expanded = false }) {
+            Kanban.accountChoices(row).forEach { (value, text) ->
+                DropdownMenuItem(text = { Text(text) }, modifier = Modifier.testTag("selfWorkAccountChoice:${row.provider}:$value"),
+                    onClick = { expanded = false; if (value != row.choice) onChoose(value) },
+                    trailingIcon = { if (value == row.choice) Icon(Icons.Default.Check, "Selected") })
+            }
+        }
+    }
 }
 
 /** What [SelfWorkContent] shows, from the desktop's answer alone; [onChange] sends `selfwork.settings` params. */
@@ -649,6 +776,7 @@ private fun SelfWorkContent(client: LiveClient, busy: Boolean, showSettings: Boo
 @Composable
 internal fun SelfWorkBody(view: SelfWorkView, board: KanbanBoard?, busy: Boolean, connected: Boolean, error: String?, showSettings: Boolean,
                           onSettings: () -> Unit, projectsEnabled: Boolean, onProjects: () -> Unit, onTicket: (String) -> Unit,
+                          onStop: (org.json.JSONObject) -> Unit = {},
                           onSeen: (SelfWorkReport) -> Unit, onChange: (org.json.JSONObject) -> Unit) {
     val settings = view.settings
     // Opening this page reads the report, on every device.
@@ -665,6 +793,28 @@ internal fun SelfWorkBody(view: SelfWorkView, board: KanbanBoard?, busy: Boolean
         if (chosen != settings.maxThreads) onChange(Kanban.settingsParams(settings, maxThreads = chosen))
     }
     val shownMax = pendingMax ?: settings.maxThreads
+    // The daily cap steps the same way: taps move the number, and it saves when they stop.
+    var pendingCap by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(settings.revision, error) { pendingCap = null }
+    LaunchedEffect(pendingCap) {
+        val chosen = pendingCap ?: return@LaunchedEffect
+        delay(600)
+        if (chosen != settings.dailyCap) onChange(Kanban.settingsParams(settings, dailyCap = chosen))
+    }
+    // Pace to reset's aim and finish step the same way.
+    var pendingAim by remember { mutableStateOf<Int?>(null) }
+    var pendingLead by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(settings.revision, error) { pendingAim = null; pendingLead = null }
+    LaunchedEffect(pendingAim) {
+        val chosen = pendingAim ?: return@LaunchedEffect
+        delay(600)
+        if (chosen != settings.paceAim) onChange(Kanban.settingsParams(settings, paceAim = chosen))
+    }
+    LaunchedEffect(pendingLead) {
+        val chosen = pendingLead ?: return@LaunchedEffect
+        delay(600)
+        if (chosen != settings.paceLead) onChange(Kanban.settingsParams(settings, paceLead = chosen))
+    }
     var confirmingAutoApprove by remember { mutableStateOf(false) }
     if (confirmingAutoApprove) AlertDialog(onDismissRequest = { confirmingAutoApprove = false }, modifier = Modifier.testTag("selfWorkAutoApproveConfirm"),
         title = { Text("Let Rem approve tickets it proposes?") },
@@ -678,12 +828,24 @@ internal fun SelfWorkBody(view: SelfWorkView, board: KanbanBoard?, busy: Boolean
             val working = state.mode == "working"
             val (ink, fill) = orgColors(if (working) OrgTone.RUN else if (state.mode == "paused") OrgTone.WAIT else OrgTone.ACCENT)
             Surface(color = fill, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth().testTag("selfWorkState")) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(Kanban.status(view), Modifier.semantics { liveRegion = LiveRegionMode.Polite }, style = MaterialTheme.typography.titleMedium, color = ink)
-                    val facts = listOfNotNull(state.proposalsWaiting.takeIf { it > 0 }?.let { "$it to approve" },
-                        state.startsAt.takeIf { it.isNotBlank() && state.mode == "waiting" }?.let { "Starts ${whenText(it)}" },
-                        state.lastPromptAt.takeIf { it.isNotBlank() }?.let { "Last message ${whenText(it, past = true)}" })
-                    if (facts.isNotEmpty()) Text(facts.joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = ink)
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Icon(if (working) ThreadIcons.Running else if (state.mode == "paused") ThreadIcons.Stopped else ThreadIcons.Rem, null, Modifier.size(22.dp), tint = ink)
+                        Text(Kanban.status(view), Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite }, style = MaterialTheme.typography.titleMedium, color = ink)
+                    }
+                    // Each fact a small chip of its own, rather than one line joined with dots.
+                    val facts = listOfNotNull(state.proposalsWaiting.takeIf { it > 0 }?.let { ThreadIcons.Approvals to "$it to approve" },
+                        state.startsAt.takeIf { it.isNotBlank() && state.mode == "waiting" }?.let { ThreadIcons.Recent to "Starts ${whenText(it)}" },
+                        state.lastPromptAt.takeIf { it.isNotBlank() }?.let { ThreadIcons.Threads to "Last message ${whenText(it, past = true)}" })
+                    if (facts.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        facts.forEach { (icon, text) ->
+                            Row(Modifier.clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.55f)).padding(horizontal = 10.dp, vertical = 4.dp)
+                                .testTag("selfWorkFact"), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Icon(icon, null, Modifier.size(14.dp), tint = ink)
+                                Text(text, style = MaterialTheme.typography.labelMedium, color = ink, maxLines = 1)
+                            }
+                        }
+                    }
                     Kanban.windowNote(view)?.let { Text(it, Modifier.testTag("selfWorkWindowNote"), style = MaterialTheme.typography.bodySmall, color = ink) }
                 }
             }
@@ -711,6 +873,10 @@ internal fun SelfWorkBody(view: SelfWorkView, board: KanbanBoard?, busy: Boolean
                 }
             }
         }
+        // When self-work stops, from a desktop that has stop conditions; set or change it here, in chat or on the computer.
+        view.stop?.let { stop ->
+            item { StopGroup(stop, selfWorkOn = settings.enabled, enabled = connected && !busy, onStop = onStop) }
+        }
         Kanban.boardOffNote(view)?.let { note ->
             item {
                 Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth().testTag("selfWorkBoardOff")) {
@@ -734,7 +900,7 @@ internal fun SelfWorkBody(view: SelfWorkView, board: KanbanBoard?, busy: Boolean
                 modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).testTag("selfWorkSettingsLink")) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text("Self-work settings", style = MaterialTheme.typography.bodyLarge)
-                    Text("On or off, threads and backlog pulling are in Settings › Rem self-work.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("On or off, threads, backlog pulling, allowance use and accounts are in Settings › Rem self-work.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -767,13 +933,91 @@ internal fun SelfWorkBody(view: SelfWorkView, board: KanbanBoard?, busy: Boolean
                         if (it) confirmingAutoApprove = true else onChange(Kanban.settingsParams(settings, autoApprove = false))
                     }
                 }
+                // Off, Daily cap or Pace to reset, from a desktop that has the choice.
+                settings.allowanceMode?.let { mode ->
+                    HorizontalDivider()
+                    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp).testTag("selfWorkAllowanceUse"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Allowance use", style = MaterialTheme.typography.bodyLarge)
+                        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                            Kanban.ALLOWANCE_MODES.forEachIndexed { index, (choice, label) ->
+                                SegmentedButton(mode == choice, { if (choice != mode) onChange(Kanban.settingsParams(settings, allowanceMode = choice)) },
+                                    SegmentedButtonDefaults.itemShape(index, Kanban.ALLOWANCE_MODES.size), Modifier.testTag("selfWorkAllowance-$choice"),
+                                    enabled = !busy) { Text(label, maxLines = 1) }
+                            }
+                        }
+                        Text(Kanban.allowanceDetail(mode), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (mode == "pace") {
+                        val aim = pendingAim ?: settings.paceAim
+                        val lead = pendingLead ?: settings.paceLead
+                        HorizontalDivider()
+                        StepRow("Aim by reset", "How much of the allowance to have used when it resets. The rest is left for you.", "$aim%", "selfWorkPaceAim",
+                            "Lower the aim", "Raise the aim", !busy && aim > view.limits.paceAimMin, !busy && aim < view.limits.paceAimMax,
+                            { pendingAim = (aim - 1).coerceAtLeast(view.limits.paceAimMin) }, { pendingAim = (aim + 1).coerceAtMost(view.limits.paceAimMax) })
+                        HorizontalDivider()
+                        StepRow("Finish before reset", "Reach the aim this many hours before the reset, so work started late spends the new week.", "$lead h", "selfWorkPaceLead",
+                            "Finish closer to the reset", "Finish earlier", !busy && lead > 0, !busy && lead < view.limits.paceLeadMax,
+                            { pendingLead = (lead - 1).coerceAtLeast(0) }, { pendingLead = (lead + 1).coerceAtMost(view.limits.paceLeadMax) })
+                        view.state.allowancePace.takeIf { it.isNotBlank() }?.let { line ->
+                            Text(line, Modifier.padding(bottom = 4.dp).testTag("selfWorkAllowancePace").semantics { liveRegion = LiveRegionMode.Polite },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (view.state.paceHolding) orgColors(OrgTone.WAIT).first else MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Kanban.paceRateWarning(settings, settings.rateLimitPercent)?.let {
+                            Text(it, Modifier.padding(bottom = 8.dp).testTag("selfWorkPaceRateWarning"), style = MaterialTheme.typography.bodySmall,
+                                color = orgColors(OrgTone.WAIT).first)
+                        }
+                    }
+                }
+                // Only from a desktop that has it, and with Daily cap chosen where there is a choice.
+                settings.dailyCap?.takeIf { settings.allowanceMode == null || settings.allowanceMode == "daily" }?.let { saved ->
+                    val shownCap = pendingCap ?: saved
+                    HorizontalDivider()
+                    Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).testTag("selfWorkDailyCap"), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Weekly allowance per day", style = MaterialTheme.typography.bodyLarge)
+                            Text(Kanban.dailyCapDetail(view), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        FilledTonalIconButton(onClick = { pendingCap = (shownCap - 1).coerceAtLeast(0) }, enabled = !busy && shownCap > 0,
+                            modifier = Modifier.size(48.dp).testTag("selfWorkDailyCapLess").semantics { contentDescription = "Lower the daily cap" }) { Text("−", style = MaterialTheme.typography.titleLarge) }
+                        Text(Kanban.dailyCapLabel(shownCap), Modifier.widthIn(min = 48.dp).testTag("selfWorkDailyCapValue").semantics { contentDescription = "Daily cap ${Kanban.dailyCapLabel(shownCap)}" },
+                            style = MaterialTheme.typography.titleLarge.copy(fontFamily = FontFamily.Monospace), textAlign = TextAlign.Center)
+                        FilledTonalIconButton(onClick = { pendingCap = (shownCap + 1).coerceAtMost(view.limits.dailyCapMax) }, enabled = !busy && shownCap < view.limits.dailyCapMax,
+                            modifier = Modifier.size(48.dp).testTag("selfWorkDailyCapMore").semantics { contentDescription = "Raise the daily cap" }) { Text("+", style = MaterialTheme.typography.titleLarge) }
+                    }
+                    view.state.dailyAllowance.takeIf { it.isNotBlank() }?.let { line ->
+                        Text(line, Modifier.padding(bottom = 8.dp).testTag("selfWorkDailyAllowance").semantics { liveRegion = LiveRegionMode.Polite },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (view.state.dailyAllowanceUnknown) orgColors(OrgTone.WAIT).first else MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        }
+        // Only from a desktop that has it, and only for providers with accounts.
+        if (showSettings && view.accounts.isNotEmpty()) item {
+            SettingsGroup("Accounts") {
+                Text("The account self-work runs on. A task with its own account keeps it. Chat, threads and tasks you create use Rem’s setting.",
+                    Modifier.padding(vertical = 6.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                view.accounts.forEach { row ->
+                    HorizontalDivider()
+                    SelfWorkAccountRow(row, !busy) { onChange(Kanban.accountParams(settings, row.provider, it)) }
+                }
             }
         }
         item { SectionTitle("Running report") }
         if (report == null || report.isEmpty) item { Note("Nothing yet. When Rem works on its own, what it did shows here, on your computer and on this phone.") }
         else {
             report.updatedAt.takeIf { it.isNotBlank() }?.let { at -> item { Text("Updated ${whenText(at, past = true)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
-            if (report.summary.isNotBlank()) item { ChatMarkdown(report.summary, compact = true) }
+            // The counts first, as tiles, then the summary folded to its first sentence.
+            val counts = listOfNotNull(
+                report.ticketsAdded.size.takeIf { it > 0 }?.let { Fact(ThreadIcons.Plus, "Tickets added", "$it", OrgTone.ACCENT) },
+                report.workDone.size.takeIf { it > 0 }?.let { Fact(ThreadIcons.Succeeded, "Work done", "$it", OrgTone.DONE) },
+                report.duplicatesMerged.size.takeIf { it > 0 }?.let { Fact(ThreadIcons.Copy, "Merged", "$it", OrgTone.IDLE) },
+                report.notes.size.takeIf { it > 0 }?.let { Fact(ThreadIcons.FileText, "Notes", "$it", OrgTone.IDLE) })
+            if (counts.isNotEmpty()) item { FactGrid(counts, Modifier.testTag("selfWorkReportCounts")) }
+            if (report.summary.isNotBlank()) item {
+                DetailCard("Summary", icon = ThreadIcons.Log) { SummaryText(report.summary, tag = "selfWorkSummary") { ChatMarkdown(report.summary, compact = true) } }
+            }
             if (report.ticketsAdded.isNotEmpty()) {
                 item { SectionTitle("Tickets added · ${report.ticketsAdded.size}") }
                 items(report.ticketsAdded, key = { "added:${it.organizationId}/${it.id}" }) { t ->
@@ -815,6 +1059,80 @@ private fun selfWorkBoundary(view: SelfWorkView, board: KanbanBoard?): Pair<Stri
     val where = if (names.size == count) names.joinToString(", ") else "$count ${if (count == 1) "project" else "projects"}"
     val outside = view.state.outsideProjects.takeIf { it > 0 }?.let { " $it ${if (it == 1) "ticket waits" else "tickets wait"} outside them." }.orEmpty()
     return where + outside to false
+}
+
+/** When self-work stops: the condition and latest time, Rem's last check, and Edit or Clear; or how the last stop went. */
+@Composable
+private fun StopGroup(stop: SelfWorkStop, selfWorkOn: Boolean, enabled: Boolean, onStop: (org.json.JSONObject) -> Unit) {
+    var editing by remember { mutableStateOf(false) }
+    if (editing) StopEditor(stop, onDismiss = { editing = false }) { editing = false; onStop(it) }
+    if (!stop.active && !selfWorkOn && stop.last == null) return
+    SettingsGroup("When to stop") {
+        if (stop.active) {
+            Column(Modifier.fillMaxWidth().testTag("selfWorkStop"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(stop.label, style = MaterialTheme.typography.bodyMedium)
+                Kanban.stopJudgmentLine(stop)?.let {
+                    Text(it, Modifier.testTag("selfWorkStopJudgment").semantics { liveRegion = LiveRegionMode.Polite },
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { editing = true }, enabled = enabled, modifier = Modifier.testTag("selfWorkStopEdit")) { Text("Edit") }
+                TextButton(onClick = { onStop(Kanban.clearStopParams(stop)) }, enabled = enabled, modifier = Modifier.testTag("selfWorkStopClear")) { Text("Clear") }
+            }
+        } else {
+            stop.last?.let {
+                Text(Kanban.lastStopLine(it), Modifier.testTag("selfWorkLastStop"), style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (selfWorkOn) {
+                Text("Stop self-work when something is done, or by a time at the latest.", style = MaterialTheme.typography.bodySmall)
+                OutlinedButton(onClick = { editing = true }, enabled = enabled, modifier = Modifier.testTag("selfWorkStopAdd")) { Text("Set when to stop") }
+            }
+        }
+    }
+}
+
+/** Edits the stop condition and the latest time; Save sends `selfwork.stop` params. */
+@Composable
+private fun StopEditor(stop: SelfWorkStop, onDismiss: () -> Unit, onSave: (org.json.JSONObject) -> Unit) {
+    var condition by remember { mutableStateOf(if (stop.active) stop.condition else "") }
+    var time by remember { mutableStateOf("") }
+    var day by remember { mutableStateOf("") }
+    val badTime = time.isNotBlank() && !Kanban.validClock(time)
+    // An unchanged latest time is kept as it is: the field holds a new time only.
+    val keepsTime = stop.active && stop.noLaterThan.isNotBlank() && time.isBlank()
+    AlertDialog(onDismissRequest = onDismiss, modifier = Modifier.testTag("selfWorkStopEditor"),
+        title = { Text("When to stop self-work") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(condition, { condition = it.take(Kanban.MAX_STOP_CONDITION) }, Modifier.fillMaxWidth().testTag("selfWorkStopCondition"),
+                    label = { Text("Stop when") }, placeholder = { Text("REM-205 to REM-212 are done") }, minLines = 2,
+                    supportingText = { Text("In your words. Rem checks it after each self-work task finishes.") })
+                OutlinedTextField(time, { time = it.take(5) }, Modifier.fillMaxWidth().testTag("selfWorkStopTime"),
+                    label = { Text("No later than (24-hour HH:MM)") }, singleLine = true, isError = badTime,
+                    placeholder = { Text("00:00") },
+                    supportingText = { Text(when {
+                        badTime -> "Use a 24-hour time such as 23:30."
+                        keepsTime -> "Now ${stop.noLaterThanLabel}. Leave empty to keep it."
+                        else -> "Optional. In your computer's time zone."
+                    }) })
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf("" to "Next", "today" to "Today", "tomorrow" to "Tomorrow").forEach { (value, text) ->
+                        FilterChip(selected = day == value, onClick = { day = value }, label = { Text(text) },
+                            modifier = Modifier.testTag("selfWorkStopDay:${value.ifBlank { "next" }}"))
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val params = Kanban.stopParams(stop.takeIf { it.revision > 0 }, condition, time, day)
+                if (keepsTime) params.remove("no_later_than")
+                onSave(params)
+            }, enabled = !badTime && (condition.isNotBlank() || time.isNotBlank() || keepsTime), modifier = Modifier.testTag("selfWorkStopSave")) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 /** One timed window: its label as the desktop formats it, then when it ends and what the switch does after. */
@@ -984,9 +1302,14 @@ private fun ColumnScope.KanbanPersonPage(client: LiveClient, board: KanbanBoard?
                     }
                     if (person.paused) Pill("Held", OrgTone.WAIT)
                 }
+                val openCount = Kanban.openTicketsOf(board, person).size
+                FactGrid(listOf(
+                    Fact(ThreadIcons.Folder, "Projects", "${person.projects.size + person.hiddenProjects}", if (person.projects.isEmpty() && person.hiddenProjects == 0) OrgTone.WAIT else OrgTone.ACCENT),
+                    Fact(ThreadIcons.Kanban, "Open tickets", "$openCount", if (openCount > 0) OrgTone.RUN else null),
+                ), Modifier.testTag("kanbanPersonFacts"))
                 SectionTitle("Projects")
-                Note(if (person.isRem) "During self-work, Rem takes tickets and researches only in these projects. Tickets you start yourself still run."
-                    else "On its own check-ins, ${person.name} works only in these projects. Tickets you assign still run.")
+                InfoChip("How projects limit work", if (person.isRem) "During self-work, Rem takes tickets and researches only in these projects. Tickets you start yourself still run."
+                    else "On its own check-ins, ${person.name} works only in these projects. Tickets you assign still run.", tag = "kanbanPersonProjectsInfo")
                 if (base != null && base != person.revision) Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth().testTag("kanbanPersonStale")) {
                     Column(Modifier.padding(12.dp)) {
                         Text("These projects changed on your computer while you were editing.", style = MaterialTheme.typography.bodySmall)
@@ -1014,7 +1337,7 @@ private fun ColumnScope.KanbanPersonPage(client: LiveClient, board: KanbanBoard?
                         }
                     }
                 }
-                if (person.hiddenProjects > 0) Note("Also assigned to ${person.hiddenProjects} ${if (person.hiddenProjects == 1) "project" else "projects"} this phone can't see. Saving here leaves ${if (person.hiddenProjects == 1) "it" else "them"} as they are.")
+                if (person.hiddenProjects > 0) Callout("Also assigned to ${person.hiddenProjects} ${if (person.hiddenProjects == 1) "project" else "projects"} this phone can't see. Saving here leaves ${if (person.hiddenProjects == 1) "it" else "them"} as they are.", OrgTone.IDLE, icon = ThreadIcons.Eye)
                 if (edit != null) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(onClick = { edit = null; base = null }, modifier = Modifier.heightIn(min = 48.dp).testTag("kanbanPersonDiscard")) { Text("Discard changes") }
                     if (selected.isEmpty() && person.hiddenProjects == 0) Text("With no projects, this person does no self-work.", Modifier.weight(1f).align(Alignment.CenterVertically), style = MaterialTheme.typography.bodySmall, color = orgColors(OrgTone.WAIT).first)
@@ -1028,5 +1351,23 @@ private fun ColumnScope.KanbanPersonPage(client: LiveClient, board: KanbanBoard?
                 if (tickets.size > 20) Note("And ${tickets.size - 20} more on the board.")
             }
         }
+    }
+}
+
+/** A setting stepped with − and + buttons, its value between them, as the thread limit and daily cap rows are. */
+@Composable
+private fun StepRow(title: String, detail: String, value: String, tag: String, lessLabel: String, moreLabel: String,
+                    canLess: Boolean, canMore: Boolean, onLess: () -> Unit, onMore: () -> Unit) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).testTag(tag), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        FilledTonalIconButton(onClick = onLess, enabled = canLess,
+            modifier = Modifier.size(48.dp).testTag("${tag}Less").semantics { contentDescription = lessLabel }) { Text("−", style = MaterialTheme.typography.titleLarge) }
+        Text(value, Modifier.widthIn(min = 56.dp).testTag("${tag}Value").semantics { contentDescription = "$title $value" },
+            style = MaterialTheme.typography.titleLarge.copy(fontFamily = FontFamily.Monospace), textAlign = TextAlign.Center)
+        FilledTonalIconButton(onClick = onMore, enabled = canMore,
+            modifier = Modifier.size(48.dp).testTag("${tag}More").semantics { contentDescription = moreLabel }) { Text("+", style = MaterialTheme.typography.titleLarge) }
     }
 }

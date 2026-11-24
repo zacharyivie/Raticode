@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from gofer.core.commit_attribution import clean_commit_message
 from gofer.utils.process import (
     NO_REPOSITORY_PROGRAMS,
     build_subprocess_env,
@@ -113,7 +114,7 @@ def release_worktree(worktree: dict[str, str], title: str, *, label: str = "Rem"
                     "commit",
                     "--no-verify",
                     "-m",
-                    f"{label}: {title}"[:200],
+                    clean_commit_message(f"{label}: {title}"[:200]),
                 )
         except WorktreeError as exc:
             # Never discard work that could not be committed.

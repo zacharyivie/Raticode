@@ -3,6 +3,7 @@
   "contract_version": 1,
   "node_type": "http-request",
   "runtime_handler": "raticode.http_request",
+  "catalog": {"category": "web", "summary": "Call a web service and pass on its response", "docs_path": "/docs/nodes/http-request"},
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",

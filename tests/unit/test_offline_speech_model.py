@@ -6,13 +6,14 @@ from __future__ import annotations
 import datetime
 import hashlib
 import io
+import random
 import socket
 import ssl
 import subprocess
 import sys
+import tarfile
 import threading
 import time
-import zipfile
 from pathlib import Path
 
 import pytest
@@ -264,23 +265,37 @@ class FakeResponse(io.BytesIO):
 @pytest.fixture
 def small_model(monkeypatch):
     """A one-file model whose archive the fake server returns in 1 MiB reads."""
-    content = b"m" * (3 * 1024 * 1024)
-    name = chat_media.VOSK_MODEL_NAME
+    content = random.Random(20261115).randbytes(3 * 1024 * 1024)
     buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
-        archive.writestr(f"{name}/am/final.mdl", content)
+    with tarfile.open(fileobj=buffer, mode="w:bz2") as archive:
+        for name, body in (("README.md", b"readme"), ("tokens.txt", content)):
+            member = tarfile.TarInfo(f"{chat_media.OFFLINE_MODEL_ARCHIVE_DIR}/{name}")
+            member.size = len(body)
+            archive.addfile(member, io.BytesIO(body))
     raw = buffer.getvalue()
-    monkeypatch.setattr(chat_media, "VOSK_MODEL_SHA256", hashlib.sha256(raw).hexdigest())
+    monkeypatch.setattr(chat_media, "OFFLINE_MODEL_SHA256", hashlib.sha256(raw).hexdigest())
     monkeypatch.setattr(
-        chat_media, "VOSK_MODEL_FILES", {"am/final.mdl": hashlib.sha256(content).hexdigest()}
+        chat_media, "OFFLINE_MODEL_FILES", {"tokens.txt": hashlib.sha256(content).hexdigest()}
     )
+    monkeypatch.setattr(chat_media, "OFFLINE_MODEL_FREE_BYTES", 0)
     monkeypatch.setattr(chat_media, "_model_download", None)
-    monkeypatch.setattr(chat_media, "_vosk_model", None)
-    monkeypatch.setattr(chat_media, "_vosk_model_path", None)
+    monkeypatch.setattr(chat_media, "_offline_engine", None)
+    monkeypatch.setattr(chat_media, "_offline_engine_path", None)
+    monkeypatch.setattr(chat_media, "_legacy_cleaned", set())
     monkeypatch.setattr(
         chat_media, "_download_tls_context", lambda: (ssl.create_default_context(), "test")
     )
     return raw
+
+
+OFFLINE_STATUS = {
+    "name": "Raticode's offline speech model",
+    "installed": False,
+    "downloadMb": 475,
+    "model": "NVIDIA Nemotron 3.5 ASR Streaming 0.6B",
+    "license": "OpenMDW License 1.1",
+    "licenseUrl": "https://openmdw.ai/license/1-1/",
+}
 
 
 def test_settings_downloads_the_model_in_the_background_with_progress(
@@ -296,11 +311,7 @@ def test_settings_downloads_the_model_in_the_background_with_progress(
 
     monkeypatch.setattr(chat_media, "urlopen", serve)
     before = chat_media.offline_model_status(data_dir=tmp_path)
-    assert before == {
-        "name": "Raticode's offline speech model",
-        "installed": False,
-        "downloadMb": 130,
-    }
+    assert before == OFFLINE_STATUS
     started = chat_media.start_offline_model_download(data_dir=tmp_path)
     assert started["download"]["state"] in {"starting", "installing", "downloading"}
 
@@ -316,7 +327,7 @@ def test_settings_downloads_the_model_in_the_background_with_progress(
     chat_media.start_offline_model_download(data_dir=tmp_path)
     # Dictation meanwhile says it's on its way instead of downloading it too.
     with pytest.raises(ChatMediaError, match=r"still downloading, \d+% done"):
-        chat_media._load_vosk_model(tmp_path)
+        chat_media._load_offline_model(tmp_path)
     gate.set()
     wait_for(lambda: chat_media.offline_model_status(data_dir=tmp_path)["installed"])
     wait_for(lambda: "download" not in chat_media.offline_model_status(data_dir=tmp_path))
@@ -358,15 +369,15 @@ def test_dictation_never_downloads_the_model_itself(monkeypatch, tmp_path, small
     monkeypatch.setattr(
         chat_media, "urlopen", lambda *a, **kw: pytest.fail("dictation started a download")
     )
-    monkeypatch.setitem(
-        sys.modules,
-        "vosk",
-        type("vosk", (), {"KaldiRecognizer": object, "SetLogLevel": staticmethod(print)}),
+    monkeypatch.setattr(
+        chat_media.offline_speech,
+        "import_sherpa_onnx",
+        lambda: pytest.fail("sherpa-onnx loaded without a model"),
     )
     with pytest.raises(ChatMediaError) as raised:
         chat_media.start_chat_transcription(data_dir=tmp_path, engine="offline")
     assert str(raised.value) == (
-        "Raticode's offline speech model isn't downloaded yet. Download it (about 130 MB) "
+        "Raticode's offline speech model isn't downloaded yet. Download it (about 475 MB) "
         "in Settings > Devices > Speech recognition."
     )
     # On a Mac without its helper, both reasons are given.
@@ -379,11 +390,121 @@ def test_dictation_never_downloads_the_model_itself(monkeypatch, tmp_path, small
         "Raticode's offline speech model isn't downloaded yet."
     )
     # A damaged copy asks for a fresh download instead of fetching one.
-    model = tmp_path / "speech-models" / chat_media.VOSK_MODEL_NAME
-    (model / "am").mkdir(parents=True)
-    (model / "am" / "final.mdl").write_bytes(b"tampered")
+    model = tmp_path / "speech-models" / chat_media.OFFLINE_MODEL_NAME
+    model.mkdir(parents=True)
+    (model / "tokens.txt").write_bytes(b"tampered")
     with pytest.raises(ChatMediaError, match="damaged or out of date. Download it again"):
-        chat_media._load_vosk_model(tmp_path)
+        chat_media._load_offline_model(tmp_path)
+
+
+def test_an_old_vosk_model_is_deleted_and_the_user_is_asked_to_download_the_new_one(
+    monkeypatch, tmp_path, small_model, caplog
+) -> None:
+    caplog.set_level("INFO", logger="gofer.ui.chat_media")
+    models = tmp_path / "speech-models"
+    old = models / chat_media.LEGACY_VOSK_MODEL_NAME
+    (old / "am").mkdir(parents=True)
+    (old / "am" / "final.mdl").write_bytes(b"vosk")
+    leftover = models / ".vosk-abc123"
+    leftover.mkdir()
+    (leftover / "model.zip").write_bytes(b"partial")
+    # Something of the user's that a link inside the old model points to survives.
+    keep = tmp_path / "keep.txt"
+    keep.write_text("mine")
+    (old / "link").symlink_to(keep)
+    monkeypatch.setattr(
+        chat_media, "urlopen", lambda *a, **kw: pytest.fail("nothing downloads by itself")
+    )
+
+    chat_media.clean_legacy_speech_models(tmp_path)
+
+    assert not old.exists()
+    assert not leftover.exists()
+    assert keep.read_text() == "mine"
+    assert "Removed the old speech model vosk-model-en-us-0.22-lgraph" in caplog.text
+    # Settings says the model was replaced, and dictation says the same.
+    assert chat_media.offline_model_status(data_dir=tmp_path) == {
+        **OFFLINE_STATUS,
+        "replaced": True,
+    }
+    with pytest.raises(ChatMediaError) as raised:
+        chat_media.start_chat_transcription(data_dir=tmp_path, engine="offline")
+    assert str(raised.value) == (
+        "Raticode's offline speech model was replaced by a newer one, so the old "
+        "model was removed. Download the new one (about 475 MB) in Settings > Devices > "
+        "Speech recognition."
+    )
+    # Downloading the new model clears the message.
+    monkeypatch.setattr(chat_media, "urlopen", lambda request, **kw: FakeResponse(small_model))
+    chat_media.start_offline_model_download(data_dir=tmp_path)
+    wait_for(
+        lambda: (
+            (status := chat_media.offline_model_status(data_dir=tmp_path))["installed"]
+            and "download" not in status
+        )
+    )
+    assert "replaced" not in chat_media.offline_model_status(data_dir=tmp_path)
+
+
+def test_the_english_only_nemotron_model_is_removed_and_replaced(tmp_path, small_model) -> None:
+    models = tmp_path / "speech-models"
+    old = models / "nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25"
+    old.mkdir(parents=True)
+    (old / "encoder.int8.onnx").write_bytes(b"old")
+    chat_media.clean_legacy_speech_models(tmp_path)
+    assert not old.exists()
+    assert chat_media.offline_model_status(data_dir=tmp_path)["replaced"] is True
+    with pytest.raises(ChatMediaError, match="was replaced by a newer one"):
+        chat_media.start_chat_transcription(data_dir=tmp_path, engine="offline")
+
+
+def test_cleaning_up_the_old_model_never_follows_a_link(tmp_path, small_model) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "precious").write_text("keep")
+    models = tmp_path / "speech-models"
+    models.mkdir()
+    (models / chat_media.LEGACY_VOSK_MODEL_NAME).symlink_to(elsewhere, target_is_directory=True)
+    chat_media.clean_legacy_speech_models(tmp_path)
+    assert (elsewhere / "precious").read_text() == "keep"
+    assert not (models / chat_media.LEGACY_VOSK_MODEL_NAME).exists()
+    # A speech-models folder that is itself a link is left alone.
+    other = tmp_path / "other"
+    (other / "speech-models" / chat_media.LEGACY_VOSK_MODEL_NAME).mkdir(parents=True)
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    (linked / "speech-models").symlink_to(other / "speech-models", target_is_directory=True)
+    chat_media.clean_legacy_speech_models(linked)
+    assert (other / "speech-models" / chat_media.LEGACY_VOSK_MODEL_NAME).is_dir()
+
+
+def test_an_interrupted_downloads_staging_folder_is_removed_but_not_a_fresh_one(
+    tmp_path, small_model
+) -> None:
+    import os
+
+    models = tmp_path / "speech-models"
+    old_style = models / ".offline-abc123"
+    stale = models / f"{chat_media.OFFLINE_STAGING_PREFIX}def456"
+    fresh = models / f"{chat_media.OFFLINE_STAGING_PREFIX}running"
+    for folder in (old_style, stale, fresh):
+        folder.mkdir(parents=True)
+        (folder / "model.tar.bz2").write_bytes(b"part")
+    (models / chat_media.OFFLINE_MODEL_REPLACED_MARKER).write_text("vosk")
+    long_ago = 1_000_000_000
+    for folder in (old_style, stale):
+        os.utime(folder, (long_ago, long_ago))
+    chat_media.clean_legacy_speech_models(tmp_path)
+    assert not old_style.exists() and not stale.exists()
+    # A download may be unpacking into a young folder right now.
+    assert fresh.is_dir()
+    assert (models / chat_media.OFFLINE_MODEL_REPLACED_MARKER).is_file()
+
+
+def test_without_an_old_model_nothing_says_replaced(tmp_path, small_model) -> None:
+    chat_media.clean_legacy_speech_models(tmp_path)
+    assert "replaced" not in chat_media.offline_model_status(data_dir=tmp_path)
+    assert not (tmp_path / "speech-models").exists()
 
 
 def test_the_download_reports_unknown_size_without_inventing_one() -> None:
@@ -392,7 +513,8 @@ def test_the_download_reports_unknown_size_without_inventing_one() -> None:
 
     assert chat_media._content_length(io.BytesIO(b"")) == 0
     assert chat_media._content_length(sized("x")) == 0
-    assert chat_media._content_length(sized(str(chat_media.VOSK_MODEL_DOWNLOAD_MAX_BYTES + 1))) == 0
+    too_large = chat_media.OFFLINE_MODEL_DOWNLOAD_MAX_BYTES + 1
+    assert chat_media._content_length(sized(str(too_large))) == 0
     assert chat_media._content_length(sized("42")) == 42
 
 

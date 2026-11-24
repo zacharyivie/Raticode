@@ -3,6 +3,7 @@
   "contract_version": 1,
   "node_type": "copy-file",
   "runtime_handler": "raticode.copy_file",
+  "catalog": {"category": "files", "summary": "Copy a file, folder or symlink", "docs_path": "/docs/nodes/copy-file"},
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",

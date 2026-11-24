@@ -377,6 +377,37 @@ class DeviceFiles:
             raise PairingError("file_integrity")
         return offer, data
 
+    def save(
+        self, peer: str, thread: str, identifier: str, destination: Path, *, limit: int
+    ) -> dict[str, Any]:
+        """Write a complete file to a new owner-only ``destination``, one record at a time.
+
+        Refused above ``limit``. The bytes are checked against the offer's SHA-256 as they
+        are written; a mismatch removes the file.
+        """
+        row = self._available(peer, thread, identifier)
+        if row["size"] > limit:
+            raise PairingError("file_too_large")
+        offer: dict[str, Any] = json.loads(self._open(peer, identifier, row["offer"]))
+        digest = hashlib.sha256()
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(destination, flags, 0o600)
+        try:
+            for record in self._records(peer, identifier, row["size"]):
+                digest.update(record)
+                view = memoryview(record)
+                while view:
+                    view = view[os.write(fd, view) :]
+            if digest.hexdigest() != offer["sha256"]:
+                raise PairingError("file_integrity")
+            os.fsync(fd)
+        except BaseException:
+            os.close(fd)
+            destination.unlink(missing_ok=True)
+            raise
+        os.close(fd)
+        return offer
+
     def cancel(self, peer: str, thread: str, identifier: str) -> None:
         deleted = self.registry.db.execute(
             "DELETE FROM device_files WHERE peer=? AND id=? AND thread=?",

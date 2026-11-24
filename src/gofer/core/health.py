@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import os
 import shutil
 import sqlite3
@@ -48,6 +47,7 @@ from gofer.core.provider_profiles import (
 )
 from gofer.core.workflow import AgenticWorkflow
 from gofer.utils.paths import get_data_dir
+from gofer.utils.xlsx import xlsx_reader_available
 
 HealthSeverity = Literal["ok", "warning", "error"]
 
@@ -148,7 +148,7 @@ def global_health_diagnostics(data_dir: Path) -> list[HealthDiagnostic]:
         _data_dir_diagnostic(data_dir),
         _scheduler_db_diagnostic(data_dir / "schedules.db"),
         _shell_diagnostic(),
-        _openpyxl_diagnostic(),
+        _xlsx_diagnostic(),
         _desktop_notification_diagnostic(),
         _workflow_assistant_cli_diagnostic(data_dir),
         _organizations_preview_diagnostic(),
@@ -385,17 +385,17 @@ def _command_shell_binary() -> str:
     return "powershell.exe" if sys.platform == "win32" else "bash"
 
 
-def _openpyxl_diagnostic() -> HealthDiagnostic:
-    if importlib.util.find_spec("openpyxl") is None:
+def _xlsx_diagnostic() -> HealthDiagnostic:
+    if not xlsx_reader_available():
         return HealthDiagnostic(
-            id="optional.openpyxl",
+            id="optional.python_calamine",
             severity="warning",
-            message="openpyxl is not installed; .xlsx inputs require raticode[xlsx].",
+            message="python-calamine is not installed; .xlsx inputs require raticode[xlsx].",
         )
     return HealthDiagnostic(
-        id="optional.openpyxl",
+        id="optional.python_calamine",
         severity="ok",
-        message="openpyxl is available for .xlsx support.",
+        message="python-calamine is available for .xlsx support.",
     )
 
 
@@ -1121,13 +1121,13 @@ def _fan_source_diagnostics(
                 label="Tabular fan-out path",
             )
         )
-        if source.path.suffix.lower() == ".xlsx" and importlib.util.find_spec("openpyxl") is None:
+        if source.path.suffix.lower() == ".xlsx" and not xlsx_reader_available():
             diagnostics.append(
                 HealthDiagnostic(
-                    id="workflow.openpyxl_required",
+                    id="workflow.python_calamine_required",
                     severity="error",
                     subject=subject,
-                    message="Tabular .xlsx fan-out requires openpyxl.",
+                    message="Tabular .xlsx fan-out requires python-calamine.",
                 )
             )
     elif isinstance(source, DirectoryFanSource):

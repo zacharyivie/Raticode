@@ -17,6 +17,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from gofer.core.commit_attribution import clean_commit_message
 from gofer.utils.process import (
     NO_REPOSITORY_PROGRAMS,
     build_subprocess_env,
@@ -131,7 +132,7 @@ def commit_all(path: Path, message: str) -> str | None:
     git(path, "add", "-A")
     if git(path, "diff", "--cached", "--quiet", check=False).returncode == 0:
         return None
-    git(path, "commit", "-q", "-m", message[:200])
+    git(path, "commit", "-q", "-m", clean_commit_message(message[:200]))
     return git(path, "rev-parse", "HEAD").stdout.strip()
 
 
@@ -281,7 +282,13 @@ def finish(worktree: dict[str, str], oid: str, title: str, merge: bool) -> str:
         if checkout.exists():
             if git(checkout, "status", "--porcelain", check=False).stdout.strip():
                 git(checkout, "add", "-A")
-                git(checkout, "commit", "-q", "-m", f"Shared changes from {title}"[:200])
+                git(
+                    checkout,
+                    "commit",
+                    "-q",
+                    "-m",
+                    clean_commit_message(f"Shared changes from {title}"[:200]),
+                )
             git(repository, "worktree", "remove", "--force", str(checkout), check=False)
             if checkout.exists():
                 shutil.rmtree(checkout, ignore_errors=True)
@@ -312,7 +319,7 @@ def finish(worktree: dict[str, str], oid: str, title: str, merge: bool) -> str:
             "--no-ff",
             "-q",
             "-m",
-            f"Merge shared changes from {title}"[:200],
+            clean_commit_message(f"Merge shared changes from {title}"[:200]),
             branch,
             check=False,
         )

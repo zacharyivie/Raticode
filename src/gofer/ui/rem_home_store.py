@@ -24,7 +24,36 @@ from gofer.ui.rem_home_models import (
     now,
     worker_config,
 )
+from gofer.ui.rem_self_work_windows import SCHEDULE_KEY as WINDOW_SCHEDULE_KEY
 from gofer.ui.rem_ticket_activity import SCHEMA as TICKET_TIMELINE_SCHEMA
+
+
+def _change_triggers() -> str:
+    """Triggers that count every write task lists read, so a poll can skip rebuilding them.
+
+    ``tasks`` counts writes to tasks and runs, and to the self-work window schedule that
+    "after self-work ends" waits read. ``tickets`` counts writes to Rem's board tickets.
+    SQLite runs these inside the writer's own transaction, so no write path can miss one,
+    and a reader sees the count that matches the rows in its snapshot.
+    """
+    sql = [
+        "CREATE TABLE IF NOT EXISTS changes(name TEXT PRIMARY KEY, counter INTEGER NOT NULL);",
+        "INSERT OR IGNORE INTO changes VALUES('tasks', 0), ('tickets', 0);",
+    ]
+    for table, name in (("tasks", "tasks"), ("runs", "tasks"), ("kanban_tickets", "tickets")):
+        for operation in ("INSERT", "UPDATE", "DELETE"):
+            sql.append(
+                f"CREATE TRIGGER IF NOT EXISTS {table}_{operation.lower()}_counted "
+                f"AFTER {operation} ON {table} BEGIN "
+                f"UPDATE changes SET counter=counter+1 WHERE name='{name}'; END;"
+            )
+    for operation, row in (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")):
+        sql.append(
+            f"CREATE TRIGGER IF NOT EXISTS window_schedule_{operation.lower()}_counted "
+            f"AFTER {operation} ON settings WHEN {row}.key='{WINDOW_SCHEDULE_KEY}' BEGIN "
+            "UPDATE changes SET counter=counter+1 WHERE name='tasks'; END;"
+        )
+    return "\n".join(sql)
 
 
 def encode(value: Any) -> str:
@@ -47,6 +76,8 @@ def with_author(message: dict[str, Any]) -> dict[str, Any]:
 # worktree and holds no worker until someone resumes it (see ``request_pause``).
 PAUSED = "paused"
 RUN_STATES = ACTIVE | {"succeeded", "blocked", "cancelled", "failed", "outcome_unknown", PAUSED}
+# Finished runs that didn't pass, whose provider app may have changed since the last that did.
+FAILED_RUN_STATES = frozenset({"failed", "blocked", "outcome_unknown"})
 # What a paused run's worker is told when it picks up again in the same thread.
 RESUME_TEXT = (
     "This task was paused and is resuming now in this same thread. The pause stopped your "
@@ -106,6 +137,29 @@ def retention(task: dict[str, Any]) -> dict[str, Any]:
         "finished_at": finished_at,
         "cleanup_at": (finished + RETENTION).isoformat() if done and finished else "",
     }
+
+
+def attention(task: dict[str, Any]) -> Literal["update", "needs_you"] | None:
+    """How a task view sits in the apps' Needs you / Updates group, or None when it doesn't.
+
+    Mirrors ``taskActivity`` in the desktop's lib/remHome.js and the phone's
+    RemTaskStatus. ``update`` is a finished run that stopped, failed or ended unclear
+    and that the user hasn't dismissed yet; Dismiss all clears these. ``needs_you`` is a
+    run still waiting for the user's answer (``needs_user``), or a task held because a
+    task it waits for didn't succeed; those keep showing until the user acts on them.
+    """
+    if task.get("deleted_at"):
+        return None
+    active = task.get("active_run")
+    if active and active.get("state") in ACTIVE:
+        return None
+    dependency = task.get("dependency")
+    if dependency and task.get("state") != "paused":
+        return "needs_you" if dependency.get("state") == "held" else None
+    run = task.get("last_run") or {}
+    if run.get("state") not in NEEDS_ATTENTION or run.get("acknowledged") is True:
+        return None
+    return "needs_you" if run.get("needs_user") is True else "update"
 
 
 def labelled_criteria(criteria: Any, *sources: Any) -> list[dict[str, Any]]:
@@ -357,10 +411,15 @@ def begin_cycle(
         review_receipt_retry=False,
         review_format_retry=False,
         transient_retries=0,
+        usage_limit_waits=0,
         not_before=None,
         waiting_reason=None,
+        # A paired desktop offered while the run waited for room; placed again from scratch.
+        suggestion=None,
         waiting_for=None,
         proof_waits=0,
+        # The last review's notes belong to the result it reviewed; the next one sets them.
+        review_notes=[],
         # A worker's sleep (rem_home_sleep) belongs to one stretch of work; a follow-up,
         # edit, retry or recovery starts with no sleep pending and a fresh wait budget.
         pending_sleep=None,
@@ -438,6 +497,7 @@ class RemHomeStore:
             """)
             # Each board ticket's timeline of status changes and comments.
             db.executescript(TICKET_TIMELINE_SCHEMA)
+            db.executescript(_change_triggers())
             if not self.setting(db, "conversation"):
                 self.set_setting(db, "conversation", {"id": str(uuid4()), "turn_state": "idle"})
             self.restore_completed_threads(db)
@@ -692,6 +752,31 @@ class RemHomeStore:
             ],
         }
 
+    @classmethod
+    def provider_version_changes(
+        cls, db: sqlite3.Connection, run: dict[str, Any]
+    ) -> list[dict[str, str]]:
+        """Provider apps whose version differs from the task's last passing run's.
+
+        Only a run that failed needs it. The last passing run is the one recorded
+        when this run started, so a later success never counts. Runs saved before
+        turns were recorded have no versions and give no changes.
+        """
+        from gofer.core.provider_versions import version_changes, versions_used
+
+        if run.get("state") not in FAILED_RUN_STATES or not run.get("turns"):
+            return []
+        passing_id = (run.get("previous_success") or {}).get("run_id")
+        if not passing_id:
+            return []
+        try:
+            passing = cls.get(db, "runs", str(passing_id))
+        except KeyError:
+            return []
+        return version_changes(
+            versions_used(run.get("turns") or []), versions_used(passing.get("turns") or [])
+        )
+
     @staticmethod
     def work(run: dict[str, Any]) -> dict[str, Any]:
         """A message's task card. It keeps the run's tickets so history outlives the task."""
@@ -707,6 +792,10 @@ class RemHomeStore:
         }
         if run.get("tickets"):
             card["tickets"] = run["tickets"]
+        # The question this run brings the user, with Rem's recommendation (rem_decisions);
+        # the chat card shows Use this and Change while it waits.
+        if run.get("decision_request"):
+            card["decision"] = run["decision_request"]
         if run["state"] == PAUSED:
             card["paused_by"] = paused_by(run)
         # Work Rem started on its own (or for a ticket moved to In progress). Its phone
@@ -803,6 +892,11 @@ class RemHomeStore:
         if after_tasks.pending(task) and not task.get("deleted_at"):
             # Waiting for other tasks: why, and where each of them stands.
             view["dependency"] = after_tasks.evaluate(db, task)
+        # Make it a workflow: the menu offer on a repeating task, and the drafting task's
+        # verdict, cost comparison and switch (rem_task_workflow).
+        from gofer.ui import rem_task_workflow
+
+        view.update(rem_task_workflow.views(db, task, self.path.parent))
         return view
 
     def conversation(self, limit: int = CHAT_WINDOW) -> dict[str, Any]:
@@ -1014,11 +1108,47 @@ class RemHomeStore:
     def tasks(self, *, summary: bool = False) -> list[dict[str, Any]]:
         """Tasks with their recent runs; ``summary`` leaves out ``RUN_INTERNALS``."""
         with self.read() as db:
-            return [
-                self.task_view(db, task, summary=summary)
-                for row in db.execute("SELECT body FROM tasks")
-                if not (task := json.loads(row[0])).get("deleted_at")
-            ]
+            return self._task_views(db, summary=summary)
+
+    def _task_views(self, db: sqlite3.Connection, *, summary: bool) -> list[dict[str, Any]]:
+        return [
+            self.task_view(db, task, summary=summary)
+            for row in db.execute("SELECT body FROM tasks")
+            if not (task := json.loads(row[0])).get("deleted_at")
+        ]
+
+    @staticmethod
+    def _counts(db: sqlite3.Connection) -> dict[str, int]:
+        return {name: int(counter) for name, counter in db.execute("SELECT * FROM changes")}
+
+    def change_counts(self) -> dict[str, int]:
+        """How many writes task lists (``tasks``) and board tickets (``tickets``) have seen.
+
+        SQLite triggers count them (``_change_triggers``). Equal counts mean nothing a
+        task list shows was written since, apart from what depends on the time.
+        """
+        with self.read() as db:
+            return self._counts(db)
+
+    def task_list(self) -> tuple[int, list[dict[str, Any]]]:
+        """Every task's summary view for lists, without its prompt, and the ``tasks`` count.
+
+        Both come from one snapshot, so the count names exactly the rows that were read.
+        """
+        with self.read() as db:
+            counter = self._counts(db)["tasks"]
+            views = self._task_views(db, summary=True)
+        for view in views:
+            view.pop("prompt", None)
+        return counter, views
+
+    def task_detail(self, identity: str, *, summary: bool = False) -> dict[str, Any]:
+        """One task's view with its prompt; KeyError when it doesn't exist or was deleted."""
+        with self.read() as db:
+            task = self.get(db, "tasks", identity)
+            if task.get("deleted_at"):
+                raise KeyError(identity)
+            return self.task_view(db, task, summary=summary)
 
     def cleanup(
         self,
@@ -1304,6 +1434,51 @@ class RemHomeStore:
 
         return self.command(f"run.{action}:{identity}", payload, operation, db=db)
 
+    def dismiss_updates(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Dismiss every task update at once, as Dismiss on each would.
+
+        Each update's run is marked ``acknowledged`` and nothing else changes: no task or
+        run is stopped, deleted or edited. A one-time task whose update is dismissed then
+        leaves task lists like it does after a single Dismiss (``retention``). Runs still
+        waiting for the user's answer and held tasks are left as they are and counted in
+        ``needs_you``. ``run_ids``, when given, limits this to the updates the caller
+        showed, so one that arrives after the user pressed the button stays.
+        """
+        shown = payload.get("run_ids")
+        if shown is not None and (
+            not isinstance(shown, list)
+            or len(shown) > 1000
+            or not all(isinstance(item, str) and 0 < len(item) <= 128 for item in shown)
+        ):
+            raise ValueError("run_ids must be a list of run IDs")
+        only = set(shown) if shown is not None else None
+
+        def operation(db: sqlite3.Connection) -> dict[str, Any]:
+            dismissed: list[dict[str, Any]] = []
+            needs_you = 0
+            for row in db.execute("SELECT body FROM tasks").fetchall():
+                task = json.loads(row[0])
+                if task.get("deleted_at"):
+                    continue
+                view = self.task_view(db, task, summary=True)
+                kind = attention(view)
+                if kind == "needs_you":
+                    needs_you += 1
+                if kind != "update":
+                    continue
+                run_id = view["last_run"]["id"]
+                if only is not None and run_id not in only:
+                    continue
+                run = self.get(db, "runs", run_id)
+                run["acknowledged"] = True
+                self.put(db, "runs", run)
+                dismissed.append(
+                    {"task_id": task["id"], "run_id": run_id, "title": task.get("title", "")}
+                )
+            return {"dismissed": dismissed, "count": len(dismissed), "needs_you": needs_you}
+
+        return self.command("runs.dismiss_updates", payload, operation)
+
     @staticmethod
     def request_pause(run: dict[str, Any], *, by: str, reason: str = "") -> bool:
         """Ask a running run to pause; returns whether this changed anything.
@@ -1314,6 +1489,10 @@ class RemHomeStore:
         """
         if run["state"] == PAUSED or run.get("pausing"):
             return False
+        if run.get("remote"):
+            raise RemConflict(
+                "A task running on another computer can be stopped, not paused: its work is there"
+            )
         if run["state"] not in ACTIVE or run["state"] == "cancelling":
             raise RemConflict("Only a task that is running or waiting to start can be paused")
         run["pausing"] = {
@@ -1348,6 +1527,7 @@ class RemHomeStore:
             active_turn_id=None,
             active_thread_id=None,
             waiting_reason=None,
+            suggestion=None,
             phase_label=None,
         )
         self.put(db, "runs", run)

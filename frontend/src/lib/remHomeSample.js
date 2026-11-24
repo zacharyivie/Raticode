@@ -112,7 +112,7 @@ function messages() {
         ],
       },
     },
-    { id: "m-4", role: "rem", created_at: ago(95), body: "Morning! Dependencies look clean. The CSV export is stuck: it needs a test database. Want me to set one up?", work: { task_id: "task-csv-export", run_id: "run-csv-1", thread_id: "thread-csv-worker" } },
+    { id: "m-4", role: "rem", created_at: ago(95), body: "Morning! Dependencies look clean. The CSV export is stuck: it needs a test database. Want me to set one up?", work: { task_id: "task-csv-export", run_id: "run-csv-1", thread_id: "thread-csv-worker", decision: decisionCard(sampleDecisions().items[0]) } },
     { id: "m-5", role: "user", created_at: ago(15), body: "Not yet. Can you research local-first sync engines for the mobile app?" },
     { id: "m-6", role: "rem", created_at: ago(14), body: "Started a research thread. I'll check its sources before calling it done.", work: { task_id: "task-sync-research", run_id: "run-sync-1", thread_id: "thread-sync-worker" } },
     { id: "m-7", role: "user", created_at: ago(8), body: "Also the scheduler test keeps flaking, fix it?" },
@@ -174,7 +174,59 @@ export function remHomeScene(scene = "busy") {
   if (scene === "empty") return { conversation, messages: [], tasks: [] };
   if (scene === "waiting") return { conversation, messages: waitingMessages(), tasks: waitingTasks() };
   if (scene === "replying") return { conversation, messages: [...messages(), { id: "m-11", role: "user", created_at: ago(0), body: "Remind me Friday to send the release notes." }], tasks: tasks() };
-  return { conversation, messages: messages(), tasks: tasks() };
+  return { conversation, messages: messages(), tasks: servingObjectives(tasks()), objectives: sampleObjectives(), decisions: sampleDecisions() };
+}
+
+// Rem's decisions for the busy scene: one request waiting on the user, with its evidence,
+// and one answer the user confirmed earlier that Rem keeps using.
+export function sampleDecisions() {
+  const items = [
+    {
+      id: "D-7", project: PROJECT, project_name: "rembot", topic: "tests.csv-export-db", status: "pending", decided_by: null, decided_at: null,
+      question: "Which database should the CSV export tests use?", answer: "A throwaway SQLite file per test run", recommended: "A throwaway SQLite file per test run",
+      why: "The other export tests already do this, and it needs no server.",
+      evidence: [
+        { kind: "file", ref: "tests/conftest.py", excerpt: "def export_db(tmp_path): return sqlite3.connect(tmp_path / \"export.db\")" },
+        { kind: "command", ref: "pytest tests/unit/test_export.py", excerpt: "14 passed in 0.8s" },
+      ],
+      alternatives: [{ answer: "The shared Postgres dev server", why_not: "Tests would depend on a running server." }],
+      tried: "", history: [{ at: ago(95), actor: "rem", action: "requested" }],
+    },
+    {
+      id: "D-3", project: PROJECT, project_name: "rembot", topic: "checks.fast", status: "confirmed", decided_by: "user", decided_at: ago(60 * 26),
+      question: "Which quick check runs before each commit?", answer: "ruff check src tests, then the changed area's tests", recommended: "ruff check src tests",
+      why: "Ruff is under 2 seconds; the full suite takes 6 minutes.",
+      evidence: [{ kind: "doc", ref: "AGENTS.md", excerpt: "After code changes, run ruff check src tests --fix." }],
+      alternatives: [], tried: "", history: [{ at: ago(60 * 26), actor: "user", action: "changed" }],
+    },
+  ];
+  return { revision: 9, updated_at: ago(95), items, waiting: 1, provisional: 0, confirmed: 1 };
+}
+
+// The snapshot a task update carries, as rem_decisions.card() writes it.
+function decisionCard(item) {
+  const { id, topic, question, recommended, why, evidence, alternatives, status, tried } = item;
+  return { id, topic, question, recommended, why, evidence, alternatives, status, tried };
+}
+
+// Self-work objectives for the busy scene: two open goals, one open-ended, one done.
+export function sampleObjectives() {
+  const items = [
+    { id: "obj-ux", text: "Raise UX quality of the workflow studio", done_when: "", done: false, created_by: "user", created_at: ago(300) },
+    { id: "obj-sb", text: "Improve reliability of the Second Brain tools", done_when: "No open reliability tickets for Second Brain and the nightly suite passes 3 nights running", done: false, created_by: "rem", created_at: ago(240) },
+    { id: "obj-perf", text: "Optimize performance of file handling", done_when: "Opening a 10,000-file project takes under 2 s", done: true, done_by: "rem", done_evidence: "Measured 1.4 s on the benchmark project after the index change.", created_by: "rem", created_at: ago(600), done_at: ago(30) },
+  ];
+  return { revision: 4, items, open: 2, done: 1 };
+}
+
+// The first running task serves the first objective, as a self-work run records it.
+function servingObjectives(list) {
+  let marked = false;
+  return list.map(task => {
+    if (marked || !task.active_run) return task;
+    marked = true;
+    return { ...task, active_run: { ...task.active_run, objective: { id: "obj-ux", text: "Raise UX quality of the workflow studio" } } };
+  });
 }
 
 export const SAMPLE_PROJECTS = [PROJECT, MOBILE, "/home/rem/Projects/second-brain"];

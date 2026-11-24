@@ -77,7 +77,9 @@ Registered workflows store compiled artifacts and versioned run logs in their
 folder use the application data directory. None of these commands writes IR beside the
 source file.
 
-`run --input NAME=JSON` accepts one declared workflow input per option. The run artifact
+`run --input NAME=JSON` accepts one declared workflow input per option. A file input takes a
+JSON string path, relative to the current folder; `run` checks that the file exists and fits
+the input before it starts, and exits `2` when it doesn't. The run artifact
 records input names, not supplied values. Exit status `0` means the workflow passed. A
 preflight or workflow failure returns `1`. Invalid CLI input or invalid declared workflow
 input returns `2`.
@@ -124,10 +126,12 @@ A run that takes inputs or trigger events saves them beside its artifact as
 `<run_id>.inputs`, created owner-only (0600). The artifact's `saved_values` names the saved
 inputs, the `withheld_inputs` and the number of `trigger_events`. An input whose schema
 contains `format: password` is never saved and is listed as withheld; workflow secrets are read
-from the secret store at run time and are never inputs. Up to 256 trigger events are saved, and
-a webhook body up to 1 MiB. A run whose values don't fit saves none of them: `saved` is `false`
+from the secret store at run time and are never inputs. A file input saves the path of the
+run's own copy in `<run_id>.files`; Resume, Run again and run-from link or copy that copy into
+the new run's folder and refuse, naming the input, when it is gone. Up to 256 trigger events
+are saved, and a webhook body up to 1 MiB. A run whose values don't fit saves none of them: `saved` is `false`
 with a `reason`. Runs with `invalid_inputs` keep nothing. Deleting a run deletes its
-`.inputs` file.
+`.inputs` file and its `.files` folder.
 
 Resume uses the saved values. Whoever resumes gives each withheld input again; nothing else may
 be supplied. **Run again** (`rattish runs rerun RUN_ID`) starts a new run of the current source
@@ -137,6 +141,49 @@ status except `invalid_inputs`.
 Resume runs preflight and honours the active-run limit, approvals and `expected_revision` like
 a new run. The legacy `--from-node`, `--only-node`, `--skip-cache` and `--force` options are
 refused for Rattish runs.
+
+### Run from a node
+
+`rattish run PATH --from NODE [--reuse RUN_ID]` (the Studio's **Run from here**, and
+`rattish start WORKFLOW_ID --from NODE` through a backend) starts a new run of the current
+source that reuses an earlier run's results for the nodes upstream of `NODE`:
+
+- Upstream means every node `NODE` depends on, directly or through others: a `needs` entry, an
+  incoming route, or a binding or route condition that reads that node. Upstream nodes that
+  `NODE` also leads back to, through a cycle, are not reused.
+- Each node's fingerprint covers its compiled definition without its `source_span`, the
+  definitions of every node it depends on, and the workflow inputs any of them read. The
+  earlier run's fingerprints come from its `compiled_snapshot`. Files read at run time, such
+  as a `prompt-path` file, are not covered.
+- Without `--reuse`, the newest run that reached `NODE` (it has a record or a `node_started`
+  event for it), isn't running, has a `compiled_snapshot` and usable saved values, and in
+  which every reused node's fingerprint is unchanged is chosen. With `--reuse`, only that run
+  is considered.
+- An approval gate (`runtime_handler` `raticode.approval_gate`) is never reused, and neither
+  is any node that depends on one. The gate runs live with the same message and asks
+  again, and the run continues from the new answer. The preview's `askAgainNodes` lists every
+  gate the reused run reached, since each asks again when the run gets to it.
+- When a reused node changed, the run is refused and the message names the node. A `NODE`
+  inside a loop body (any activation context below a loop) is refused, as is a reused agent
+  with `memory: run`.
+- The reused nodes' records are replayed through the resume replay path in their saved order.
+  `NODE`, every node after it and every other node run live. Reused records carry
+  `reused_from_run_id`, make no provider call, and add no usage to the run or its limits.
+- The run uses the reused run's saved inputs and trigger events. Its withheld inputs are given
+  again (`--input` on the CLI); nothing else may be supplied.
+- The artifact records `replayed_from` with `run_id`, `node_id`, `reused_nodes`,
+  `reused_runs` and `not_reused_runs`. It doesn't count as resuming the earlier run.
+
+`Raticode rattish test PATH --model NODE=PROVIDER:MODEL` (repeatable) runs each test case
+with another provider and model on `NODE`. The override sets `provider:` and `model:` on a
+copy of the source held in memory, with the graph editor's `set_field` edits, and compiles
+that copy at the same path; the file, its triggers and their approvals are not changed. A
+copy that doesn't compile refuses the run. The run artifact records `model_overrides`, each
+with `node`, `provider`, `model`, `fromProvider` and `fromModel`, and its
+`compiled_snapshot` and fingerprints are the copy's. Such a run can't resume, rerun, start
+from a node or run from a trigger. Test results record the tried models as `variant` (a
+sorted `key` and the `models`); estimates and the revision comparison only use results with
+the same `variant`. Judge checks keep their own provider and model.
 
 JSON output is one object with these required fields:
 

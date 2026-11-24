@@ -40,6 +40,6 @@ pkgbase = raticode-bin
 	source = raticode.desktop
 	sha256sums = db5b8480b07d0fe98783426c9df680aab39476c4d64ac0d286801eda2f33e7b5
 	sha256sums = c8be08d2c098b6cbcbca695c9bf1e5bf3ac26872933430090c0ae7cb4a0fb0c6
-	sha256sums = 6e036e7c7910af93b2071de6069b49c4a3b72a683a976a94a18b8ce0b4ee6263
+	sha256sums = 689b0ab573fbfd7eb6acc028f709c84e4b5c18cdbe4ce299132869baa1cbfed0
 
 pkgname = raticode-bin

@@ -17,6 +17,7 @@ from typing import Any
 
 from gofer.core.agent import AgentResult
 from gofer.core.antigravity_models import split_antigravity_model
+from gofer.core.credential_mask import masked_command
 from gofer.core.prompt_envelope import AgentResources
 from gofer.core.provider_capabilities import resolve_provider_executable
 from gofer.core.provider_profiles import ResolvedProviderSettings, validate_provider_settings
@@ -29,6 +30,7 @@ from gofer.subscriptions.usage import track_invocation
 from gofer.utils.atomic_output import mkdir_without_links
 from gofer.utils.process import env_with_executable_on_path, stream_subprocess
 from gofer.utils.protocol import ProtocolLines, ProtocolRecordLimitError, retained_text
+from gofer.utils.terminal_text import plain_terminal_text
 
 
 def antigravity_command(
@@ -175,7 +177,8 @@ async def stream_antigravity(
         # stdin avoids argv size limits and preserves quotes/newlines literally.
         stdin = (json.dumps({"event": "user", "message": {"content": prompt}}) + "\n").encode()
         source = stream_subprocess(
-            command,
+            # No sandbox of its own: Raticode's credential folders are hidden from it.
+            masked_command(command),
             cwd=process_cwd,
             env=env_with_executable_on_path(command[0], env),
             stdin=stdin,
@@ -260,6 +263,8 @@ async def stream_antigravity(
                 parse_error = "Antigravity emitted an incomplete stream record"
             if final and final.get("status") != "SUCCESS":
                 error = str(final.get("error") or f"Antigravity ended with {final.get('status')}")
+            # The CLI writes its errors for a terminal; people read them as plain text.
+            stderr = plain_terminal_text(stderr)
             if code:
                 error = error or stderr.strip() or f"Antigravity exited with code {code}"
             error_kind = "provider" if error else "protocol" if parse_error else None

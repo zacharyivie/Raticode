@@ -18,7 +18,7 @@ function migrateSource(source, authorize = (value) => value) {
     if (!fs.existsSync(source)) return target;
     const destination = fs.lstatSync(target);
     if (destination.isSymbolicLink() || stat.ino !== destination.ino || stat.dev !== destination.dev) {
-      throw new Error(`Cannot migrate ${source}: ${target} already exists. Keep or rename one of the files.`);
+      throw new Error(`Cannot migrate ${source}: ${target} already exists. Keep or rename one of the files.`, { cause: error });
     }
   }
   try { fs.unlinkSync(source); } catch (error) { if (error.code !== "ENOENT") throw error; }

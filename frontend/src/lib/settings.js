@@ -76,6 +76,8 @@ export const SETTINGS_STORAGE_KEY = "raticode.settings.v1";
 export const RATICODE_BROWSER_HOME = "raticode://home";
 
 export const KEYBINDING_COMMANDS = [
+  { id: "palette.commands", label: "Show all commands", group: "Application", scope: "global", defaultBinding: "Mod+Shift+KeyP" },
+  { id: "palette.quickOpen", label: "Quick open", group: "Application", scope: "global", defaultBinding: "Mod+KeyP" },
   { id: "settings.open", label: "Open settings", group: "Application", scope: "global", defaultBinding: "Mod+Comma" },
   { id: "file.open", label: "Open file", group: "Application", scope: "global", defaultBinding: "Mod+KeyO" },
   { id: "project.open", label: "Open project folder", group: "Application", scope: "global", defaultBinding: "Mod+KeyK Mod+KeyO" },
@@ -100,6 +102,7 @@ export const KEYBINDING_COMMANDS = [
   { id: "panel.toggle", label: "Toggle bottom panel", group: "Panel", scope: "global", defaultBinding: "Mod+Backquote" },
   { id: "terminal.new", label: "New terminal", group: "Terminal", scope: "global", defaultBinding: "Ctrl+KeyT" },
   { id: "terminal.close", label: "Close terminal", group: "Terminal", scope: "terminal", defaultBinding: "Ctrl+KeyW" },
+  { id: "graph.addNode", label: "Add node", group: "Graph editor", scope: "graph", defaultBinding: "Tab" },
   { id: "graph.selectAll", label: "Select all nodes", group: "Graph editor", scope: "graph", defaultBinding: "Mod+KeyA" },
   { id: "graph.deleteSelection", label: "Delete selection", group: "Graph editor", scope: "graph", defaultBinding: "Delete" },
   { id: "graph.zoomIn", label: "Zoom in", group: "Graph editor", scope: "graph", defaultBinding: "Equal" },
@@ -150,6 +153,9 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
     // The web browser for web tabs and Rem's tabs: Raticode's own engine, or
     // a Firefox or Chrome that Raticode runs without a window and streams into tabs.
     engine: "raticode",
+    // Which of Raticode's own browsers opens links and web pages that other
+    // apps hand over when Raticode is the computer's default browser.
+    externalEngine: "raticode",
     homepage: RATICODE_BROWSER_HOME,
     searchUrl: "https://www.google.com/search?q={query}",
     // Where Rem's Browser tool opens pages. Keep in sync with BROWSER_TARGETS
@@ -195,6 +201,10 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
     chatProvider: "",
     chatModel: "",
     chatEffort: "",
+    // The account each provider's threads, tasks and replies use, by provider ID
+    // (claude_code, ...): "" is the default sign-in, a name is one account, "auto"
+    // lets Rem pick by usage headroom. Replaces the Claude-only claudeAccount.
+    providerAccounts: {},
   },
   memory: { reportFormat: "md", reportThemes: DEFAULT_REPORT_THEMES, archiveFolder: "", archivePurgeDays: "never", secondBrainEnabled: false, secondBrainRoot: "", secondBrainFormat: "md", secondBrainTheme: "auto" },
   layout: {
@@ -221,7 +231,7 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
 });
 
 export function loadAppSettings(storage = globalThis.window?.localStorage) {
-  let stored = null;
+  let stored;
   try {
     stored = brandCompat.readBrandedStorage(storage, SETTINGS_STORAGE_KEY);
   } catch {
@@ -261,7 +271,7 @@ export function normalizeAppSettings(value = {}) {
     settings.assistant[key] = Math.round(boundedNumber(settings.assistant[key], 0, 16, 0));
   }
   settings.general.autosave = settings.general.autosave !== false;
-  settings.general.initialActivity = enumValue(value?.general?.initialActivity, ["rem", "workflows", "files", "search", "source-control", "kanban", "organizations", "second-brain"], value?.general?.defaultView === "code" ? "files" : "workflows");
+  settings.general.initialActivity = enumValue(value?.general?.initialActivity, ["rem", "workflows", "files", "search", "source-control", "kanban", "posts", "organizations", "second-brain"], value?.general?.defaultView === "code" ? "files" : "workflows");
   // Retain the old field for older installations reading these settings.
   settings.general.defaultView = settings.general.initialActivity === "workflows" ? "graph" : "code";
   settings.general.executionMode = enumValue(settings.general.executionMode, ["local", "remote"], "local");
@@ -291,6 +301,7 @@ export function normalizeAppSettings(value = {}) {
   );
   settings.browser.searchUrl = searchUrlValue(settings.browser.searchUrl);
   settings.browser.engine = webBrowserEngine(settings.browser.engine);
+  settings.browser.externalEngine = enumValue(settings.browser.externalEngine, ["raticode", "gecko"], "raticode");
   settings.browser.agentBrowser = enumValue(settings.browser.agentBrowser, ["raticode", "external", "external-headless"], "raticode");
   settings.browser.remSignInSites = siteListValue(settings.browser.remSignInSites);
   settings.browser.remAllowedSites = siteListValue(settings.browser.remAllowedSites);
@@ -319,6 +330,8 @@ export function normalizeAppSettings(value = {}) {
   settings.assistant.chatProvider = safeString(settings.assistant.chatProvider, "", 80);
   settings.assistant.chatModel = safeString(settings.assistant.chatModel, "", 160);
   settings.assistant.chatEffort = safeString(settings.assistant.chatEffort, "", 80);
+  settings.assistant.providerAccounts = providerAccountsValue(settings.assistant.providerAccounts, settings.assistant.claudeAccount);
+  delete settings.assistant.claudeAccount;
   settings.layout.workflowPaneWidth = boundedNumber(settings.layout.workflowPaneWidth, 240, 420, 272);
   settings.layout.assistantPaneWidth = boundedNumber(settings.layout.assistantPaneWidth, 300, 520, 380);
   settings.layout.bottomPanelHeight = boundedNumber(settings.layout.bottomPanelHeight, 140, 480, 300);
@@ -373,7 +386,7 @@ export function settingBinding(settings, commandId) {
 // Chords are supported only by the application dispatcher. Other scopes record
 // one gesture and migrate previously accepted, unusable chords to their defaults.
 export const CHORD_COMMAND_IDS = new Set([
-  "settings.open", "file.open", "project.open", "browser.open", "browser.reopenClosedTab", "view.graph", "view.code",
+  "palette.commands", "palette.quickOpen", "settings.open", "file.open", "project.open", "browser.open", "browser.reopenClosedTab", "view.graph", "view.code",
   "view.toggleProjectPane", "view.toggleAssistantPane", "workflow.run", "voice.dictate",
 ]);
 
@@ -541,6 +554,32 @@ function boundedNumber(value, minimum, maximum, fallback) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.min(maximum, Math.max(minimum, number));
+}
+
+const PROVIDER_ID = /^[a-z][a-z0-9_]{0,39}$/;
+
+// One account choice per provider. An older claudeAccount value (the first,
+// Claude-only setting, or a phone change made with its key) becomes claude_code's.
+export function providerAccountsValue(value, legacyClaudeAccount) {
+  const accounts = {};
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    for (const [provider, name] of Object.entries(value).slice(0, 20)) {
+      if (PROVIDER_ID.test(provider) && typeof name === "string") accounts[provider] = name.slice(0, 128);
+    }
+  }
+  if (typeof legacyClaudeAccount === "string") accounts.claude_code = legacyClaudeAccount.slice(0, 128);
+  return accounts;
+}
+
+/**
+ * Rem's account setting after an account is renamed or removed in Settings > Providers:
+ * a setting that named it follows the new name, or goes back to the default sign-in.
+ * Returns the same settings when nothing names the account.
+ */
+export function followRenamedAccount(settings, { provider, from, to }) {
+  const accounts = settings?.assistant?.providerAccounts;
+  if (!accounts || !provider || !from || accounts[provider] !== from) return settings;
+  return updateSetting(settings, "assistant.providerAccounts", { ...accounts, [provider]: to || "" });
 }
 
 function safeString(value, fallback, maxLength) {

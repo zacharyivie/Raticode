@@ -76,6 +76,9 @@
     },
     "runtime_environment": {
       "$ref": "#/$defs/runtime_environment"
+    },
+    "catalog": {
+      "$ref": "#/$defs/catalog"
     }
   },
   "required": [
@@ -98,6 +101,30 @@
     "identifier": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+    },
+    "catalog": {
+      "type": "object",
+      "description": "How editors list this node type. Presentation only: it is left out of the contract fingerprint, so editing it never changes compiled IR.",
+      "properties": {
+        "category": {
+          "enum": ["code", "files", "ai", "web", "approvals", "flow", "workflows"],
+          "description": "Picker group: run code, files, AI, web, approvals and notices, flow control, or other workflows."
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 90,
+          "pattern": "^[^\\n]*$",
+          "description": "One line that says what the node does."
+        },
+        "docs_path": {
+          "type": "string",
+          "pattern": "^/docs/[a-z0-9/-]+$",
+          "description": "Path of the node's page on raticode.dev."
+        }
+      },
+      "required": ["category", "summary", "docs_path"],
+      "additionalProperties": false
     },
     "schema_document": {
       "type": "object",
@@ -303,6 +330,7 @@
           "enum": [
             "blank_prompt",
             "mutually_exclusive_fields",
+            "sandbox_off",
             "suspected_plaintext_secret"
           ]
         },

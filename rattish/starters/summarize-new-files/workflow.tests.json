@@ -13,7 +13,7 @@
       "checks": [
         {"type": "text", "label": "Finds both files", "target": "nodes.collect.stdout", "contains": "new-files: 2"},
         {"type": "text", "label": "Saves a dated digest", "target": "nodes.save-digest.stdout", "matches": "test-summaries/[0-9-]+\\.md"},
-        {"type": "command", "label": "The digest lists the files it covers", "target": "nodes.save-digest.stdout", "command": "read -r digest && grep -q 'meeting-notes.md' \"$digest\" && grep -q 'invoice-question.md' \"$digest\""},
+        {"type": "command", "shell": "bash", "label": "The digest lists the files it covers", "target": "nodes.save-digest.stdout", "command": "read -r digest && grep -q 'meeting-notes.md' \"$digest\" && grep -q 'invoice-question.md' \"$digest\""},
         {"type": "judge", "label": "Useful summary", "target": "nodes.summarize", "criteria": "Has a section for each of the two files: planning meeting notes and an overdue invoice question. Mentions that the invoice needs a reply and that the release moved to 21 March. Invents no facts."}
       ]
     },

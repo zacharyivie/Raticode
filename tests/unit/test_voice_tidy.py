@@ -356,6 +356,11 @@ def test_generate_text_gives_claude_code_the_instructions_as_its_system_prompt(
             pass
 
         async def run(self, **kwargs):
+            args = kwargs["provider_settings"].extra_args
+            if "--system-prompt-file" in args:
+                # A private rules file, named by its text and reused by later calls.
+                kwargs["system_file"] = Path(args[args.index("--system-prompt-file") + 1])
+                kwargs["system_text"] = kwargs["system_file"].read_text(encoding="utf-8")
             observed.append(kwargs)
             return AgentResult(
                 agent_id="Rem",
@@ -379,10 +384,14 @@ def test_generate_text_gives_claude_code_the_instructions_as_its_system_prompt(
     )
     assert text == "Tidied."
     args = observed[0]["provider_settings"].extra_args
-    assert args[args.index("--system-prompt") + 1] == "Tidy only."
+    assert observed[0]["system_text"] == "Tidy only."
+    assert "--system-prompt" not in args and not any("Tidy only." in a for a in args)
+    assert observed[0]["system_file"].parent == tmp_path / "rem-work" / "conversation-rules"
+    assert observed[0]["system_file"].stat().st_mode & 0o777 == 0o600
     assert observed[0]["prompt_override"] == "the message" and observed[0]["timeout"] == 15
     rem_home_provider.generate_text(
         "the message", {"provider": "codex"}, cancel, tmp_path, system_prompt="Tidy only."
     )
     assert observed[1]["prompt_override"] == "Tidy only.\n\nthe message"
     assert "--system-prompt" not in observed[1]["provider_settings"].extra_args
+    assert "--system-prompt-file" not in observed[1]["provider_settings"].extra_args

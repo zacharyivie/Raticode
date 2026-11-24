@@ -3,6 +3,7 @@
   "contract_version": 1,
   "node_type": "bash-command",
   "runtime_handler": "raticode.bash_command",
+  "catalog": {"category": "code", "summary": "Run one command and capture its output", "docs_path": "/docs/nodes/bash-command"},
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
@@ -12,14 +13,16 @@
       "env": {
         "type": "object",
         "additionalProperties": {"type": "string"}
-      }
+      },
+      "shell": {"enum": ["auto", "bash", "powershell"], "x-rattish-case-insensitive": true}
     },
     "required": ["command"],
     "additionalProperties": false
   },
   "defaults": {
     "working_dir": null,
-    "env": {}
+    "env": {},
+    "shell": "auto"
   },
   "computed_defaults": {},
   "input_ports": {
@@ -72,7 +75,7 @@
     {
       "id": "shell-available",
       "severity": "error",
-      "description": "The configured Bash runtime must be available."
+      "description": "The selected shell must be available: PowerShell on Windows and bash elsewhere for auto, Git for Windows' bash on Windows for bash, PowerShell for powershell."
     },
     {
       "id": "working-dir-available",

@@ -445,9 +445,11 @@ def test_rem_can_discover_employee_provider_choices_without_an_organization(mana
         return catalog
 
     monkeypatch.setattr(provider_capabilities, "provider_capabilities_payload", discover)
+    # Each provider's accounts come along, by ID, for employees[].account.
+    listed = {**catalog, "accounts": []}
     with manager.session("", "Rem:test", read_only=True) as url:
-        assert action(url, "providers") == catalog
-        assert action(url, "providers", refresh=True) == catalog
+        assert action(url, "providers") == listed
+        assert action(url, "providers", refresh=True) == listed
         with pytest.raises(ValueError, match="boolean"):
             action(url, "providers", refresh="false")
     assert calls == [False, True]

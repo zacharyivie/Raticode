@@ -1,6 +1,6 @@
 ---
 title: Node reference
-description: Pick one of the 25 built-in Rattish node types, and see the fields every node shares.
+description: Pick one of the 27 built-in Rattish node types, and see the fields every node shares.
 pageClass: docs-layout
 ---
 
@@ -44,6 +44,8 @@ Pick a node by what it does. Each node's page has a complete example, its fields
 | [rem-prompt](./rem-prompt.md) | Ask Rem and use its reply |
 | [rem-task](./rem-task.md) | Run one of Rem's tasks and wait for its result |
 | [http-request](./http-request.md) | Call a service and expose its response |
+| [read-web-page](./read-web-page.md) | Read a web page as Markdown or plain text, with its title and links |
+| [mcp-tool](./mcp-tool.md) | Call one tool on an MCP server from Rem's list, without a model |
 
 ## Classification
 

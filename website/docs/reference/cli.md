@@ -40,15 +40,18 @@ Raticode rattish docs --format json
 | `Raticode rattish compile PATH --format json` | Compile validated source to JSON IR | No |
 | `Raticode rattish inspect-ir PATH --pretty` | Print the compiled representation | No |
 | `Raticode rattish preflight PATH --format json` | Check required runtime resources | No |
-| `Raticode rattish run PATH --format json` | Execute the workflow | **Yes** |
-| `Raticode rattish test PATH` | Run the workflow's [test set](../workflows/tests.md) and check each case. `--estimate` prints the expected cost only | **Yes**, once per case |
+| `Raticode rattish run PATH --format json` | Execute the workflow. `--from NODE` runs it again from one step, reusing an earlier run's results for the unchanged steps before it | **Yes** |
+| `Raticode rattish test PATH` | Run the workflow's [test set](../workflows/tests.md) and check each case. `--estimate` prints the expected cost only. `--model NODE=PROVIDER:MODEL` [tries another model](../workflows/tests.md#try-another-model) beside the current one; `--use-model NODE=PROVIDER:MODEL` writes that model into the workflow and runs nothing | **Yes**, once per case |
 | `Raticode rattish prune PATH` | Preview old runs that the workflow's [retention settings](../studio/runs.md#old-runs) no longer keep. `--apply` deletes them | No |
 | `Raticode rattish cache show\|clear PATH` | Show or clear the saved answers of nodes with [`cache:`](../nodes/common-llm-task.md#result-cache). `--workflow-id ID` names the workflow by ID; `clear --all` clears every workflow | No |
 | `Raticode rattish triggers add cron\|file\|webhook PATH ...` | Start the workflow on a schedule, file change, or local webhook. See [Triggers](../workflows/triggers.md) | Later, when it fires |
+| `Raticode rattish triggers budget` | Show or set the [daily limit](../workflows/triggers.md#daily-limit) for all triggered runs on this computer | No |
+| `Raticode rattish shortcuts list\|approve\|remove` | Manage [workflow shortcuts](./shortcuts.md#run-a-workflow-from-any-app) that run a workflow from any app | Later, when you press the key |
+| `Raticode rattish triggers approve ID` | Print what changed in the workflow since the trigger's version was approved, then approve this version. Refused inside an agent turn. See [Approved versions](../workflows/triggers.md#approved-versions) | Later, when the trigger fires |
 
 - `PATH` is the source file. For a registered workflow, use the exact path `create` returned.
 - Run `--help` on a command for its current options. Most take `--data-dir`.
-- Only `format` edits its target, `prune --apply` deletes run records and `cache clear` deletes saved answers. Only `run` and `test` execute nodes. A run can write files, call providers and contact services, as the source says.
+- Only `format` and `test --use-model` edit their target, `prune --apply` deletes run records and `cache clear` deletes saved answers. Only `run` and `test` execute nodes. A run can write files, call providers and contact services, as the source says.
 
 ## Inputs and limits
 
@@ -257,7 +260,7 @@ Existing `rattish` commands keep their own codes, where 2 also means a source fi
 
 These endpoints deduplicate on `request_id`:
 
-- Rem: `POST /rem/messages`, `POST /rem/tasks`, `PATCH` and `DELETE /rem/tasks/ID`, `POST /rem/tasks/ID/run` and `/pause`, `POST /rem/runs/ID/cancel`, `/acknowledge` and `/retry_review`, and `POST /rem/threads/ID/messages`
+- Rem: `POST /rem/messages`, `POST /rem/tasks`, `PATCH` and `DELETE /rem/tasks/ID`, `POST /rem/tasks/ID/run` and `/pause`, `POST /rem/runs/ID/cancel`, `/acknowledge` and `/retry_review`, `POST /rem/runs/acknowledge` (Dismiss all), and `POST /rem/threads/ID/messages`
 - The board: `POST /rem/kanban/ticket` with `action` `create` or `comment`
 
 Retries:

@@ -1,0 +1,12 @@
+{
+  "pairs": 30,
+  "metrics": {
+    "exact": {
+      "top1": 1.0,
+      "top5": 1.0,
+      "top10": 1.0,
+      "mrr": 1.0
+    }
+  },
+  "toolTop50Passages": 1.0
+}

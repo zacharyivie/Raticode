@@ -108,7 +108,11 @@
         "target": {"$ref": "#/$defs/target"},
         "command": {"type": "string", "minLength": 1, "maxLength": 4000},
         "exitCode": {"type": "integer", "minimum": 0, "maximum": 255},
-        "timeoutSeconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600}
+        "timeoutSeconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600},
+        "shell": {
+          "description": "auto (PowerShell on Windows, bash elsewhere), bash (Git for Windows' bash on Windows) or powershell.",
+          "enum": ["auto", "bash", "powershell"]
+        }
       }
     },
     "judgeCheck": {

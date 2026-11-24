@@ -1665,17 +1665,10 @@ def _preview_tabular(
                     break
         return count, sample, warnings, partial
     if suffix == ".xlsx":
-        try:
-            import openpyxl
-        except ImportError as exc:
-            raise ImportError(
-                "openpyxl is required for .xlsx support: pip install 'raticode[xlsx]'"
-            ) from exc
-        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-        try:
-            ws = wb.active
-            rows_iter = ws.iter_rows(values_only=True)
-            headers = [str(h) for h in next(rows_iter)]
+        from gofer.utils.xlsx import open_xlsx_rows
+
+        with open_xlsx_rows(path, max_file_bytes=limits.max_file_read_bytes) as rows_iter:
+            headers = [str(h) for h in next(rows_iter, ())]
             for row in rows_iter:
                 item = dict(zip(headers, row))
                 count += 1
@@ -1684,8 +1677,6 @@ def _preview_tabular(
                 if count >= scan_limit and _should_stop(count):
                     break
             return count, sample, warnings, partial
-        finally:
-            wb.close()
     raise ValueError(f"Unsupported tabular format: {suffix!r}. Use .jsonl, .csv, or .xlsx")
 
 

@@ -101,6 +101,8 @@ Node approve:
                 "notes": "",
                 "message": node["configuration"]["message"],
                 "subject": None,
+                "choice": None,
+                "reply": "",
             },
         )
 
@@ -155,6 +157,8 @@ Node approve:
                 "notes": "",
                 "message": message,
                 "subject": None,
+                "choice": None,
+                "reply": "",
             },
         )
 

@@ -18,6 +18,8 @@ from uuid import uuid4
 
 from gofer.core.usage_ledger import empty_usage, merge_usage, run_usage
 from gofer.core.usage_ledger import organization_ticket_usage as organization_ticket_usage
+from gofer.ui import rem_objective_fit as objective_fit
+from gofer.ui import rem_objectives as objectives_store
 from gofer.ui import rem_ticket_activity as activity
 from gofer.ui import rem_ticket_review as review
 from gofer.ui.organization_store import (
@@ -44,6 +46,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "session_token_limit": 0,
     "daily_token_limit": 0,
     "rate_limit_percent": 0,
+    # A share of the weekly allowance of the account self-work runs on, per local day.
+    "daily_allowance_percent": 0,
     # The user's choice alone: new self-work ideas become accepted Backlog tickets instead of
     # waiting for approval, for as long as self-work runs.
     "auto_approve_proposals": False,
@@ -583,9 +587,11 @@ def ticket_view(
     usable: set[str] | None = None,
     usage: dict[str, Any] | None = None,
     nodes: dict[str, dict[str, Any]] | None = None,
+    objectives: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     root = ticket.get("project_dir")
     waits, waiting, wait_notice = waits_view(wait_ids(ticket), nodes or {})
+    fit = objective_fit.view(ticket, objectives or {"revision": 0, "items": []})
     return {
         "ticket_id": ticket["id"],
         "scope": "rem",
@@ -611,6 +617,12 @@ def ticket_view(
         "running": bool(ticket.get("claim")) and not ticket.get("paused"),
         "paused": str((ticket.get("paused") or {}).get("by") or ""),
         "block_reason": ticket.get("block_reason", ""),
+        # Decisions in force it contradicts: self-work won't start it until the user changes
+        # the ticket or a decision (rem_decision_guard).
+        "violates_decisions": list((ticket.get("violates_decisions") or {}).get("ids") or []),
+        "violation_reason": str((ticket.get("violates_decisions") or {}).get("reason") or ""),
+        # Labels such as Guardrail, for a ticket a guardrail retro proposed.
+        "tags": [str(tag) for tag in ticket.get("tags") or [] if isinstance(tag, str)][:5],
         "summary": ticket.get("summary", ""),
         "type": ticket.get("type", "develop"),
         "project_dir": root,
@@ -631,6 +643,10 @@ def ticket_view(
         "waits_for": waits,
         "waiting": waiting,
         "wait_notice": wait_notice,
+        # The self-work objective it advances, or why self-work leaves it while objectives
+        # are open.
+        "objective": fit["objective"],
+        "objective_left": fit["objective_left"],
     }
 
 
@@ -670,6 +686,9 @@ def organization_ticket_view(
         "revision": task["revision"],
         "running": bool(task.get("claim")),
         "block_reason": task.get("blockReason", ""),
+        "violates_decisions": [],
+        "violation_reason": "",
+        "tags": [],
         "summary": "",
         "type": "",
         "project_dir": root or None,
@@ -687,6 +706,8 @@ def organization_ticket_view(
         "waits_for": waits,
         "waiting": waiting,
         "wait_notice": wait_notice,
+        "objective": None,
+        "objective_left": "",
     }
 
 
@@ -716,6 +737,8 @@ class RemKanban:
         self.follow_up = follow_up
         # Organization ticket keys, re-read at most every ORG_KEYS_FOR seconds.
         self._org_keys: tuple[float, dict[str, dict[str, Any]]] = (-ORG_KEYS_FOR, {})
+        # Goes up each time a fresh read of organization tickets differs from the last.
+        self._org_generation = 0
 
     # Organizations ------------------------------------------------------------
 
@@ -840,12 +863,28 @@ class RemKanban:
                         "proposed": False,
                     },
                 )
+        if known != self._org_keys[1]:
+            self._org_generation += 1
         self._org_keys = (time.monotonic(), known)
         return known
 
+    def ticket_revision(self, *, organizations: bool) -> tuple[int, int]:
+        """Changes when a ticket ``resolve`` could return changes.
+
+        Rem's own tickets are counted by SQLite triggers; organization tickets by how
+        often their keys, titles or statuses differed between reads. ``organizations``
+        False skips reading them, for callers whose keys are all REM-n.
+        """
+        counted = self.store.change_counts()["tickets"]
+        if not organizations:
+            return counted, 0
+        self._organization_keys()
+        return counted, self._org_generation
+
     def forget_organization_keys(self) -> None:
         """Read organizations' tickets again on the next lookup."""
-        self._org_keys = (-ORG_KEYS_FOR, {})
+        # The old keys stay for the comparison that decides whether they changed.
+        self._org_keys = (-ORG_KEYS_FOR, self._org_keys[1])
 
     # Views ---------------------------------------------------------------------
 
@@ -864,8 +903,10 @@ class RemKanban:
                 db, (i for t in stored for i in wait_ids(t) if i not in shown_ids)
             )
             nodes = rem_nodes([*stored, *extra.values()])
+            objectives = objectives_store.read(db, self.store)
             tickets = [
-                ticket_view(t, assignment, usable, spent.get(t["id"]), nodes) for t in stored
+                ticket_view(t, assignment, usable, spent.get(t["id"]), nodes, objectives)
+                for t in stored
             ]
         open_roots = open_project_roots(config)
         configured = self.configured_organizations()
@@ -1308,6 +1349,8 @@ class RemKanban:
                         run_id=None,
                         pulled_from_backlog=False,
                         triage=None,
+                        # Checked against the decisions again before self-work starts it.
+                        violates_decisions=None,
                         revision=ticket["revision"] + 1,
                         summary="Marked done by you."
                         if target == "done"
@@ -1660,9 +1703,10 @@ class RemKanban:
             entries, earlier = activity.read_comments(db, identity)
             used = rem_ticket_usage(db, [ticket], self.data_dir).get(identity)
             waited = rem_nodes(tickets_by_id(db, wait_ids(ticket)).values())
+            objectives = objectives_store.read(db, self.store)
         return {
             "ticket": ticket_view(
-                ticket, assignment, usable_projects(config, assignment), used, waited
+                ticket, assignment, usable_projects(config, assignment), used, waited, objectives
             ),
             "comments": [activity.rem_comment(e) for e in entries],
             "earlier": earlier,
@@ -1681,10 +1725,21 @@ class RemKanban:
         Each one succeeds or fails alone and is keyed by the chat request, so answering
         the same message again after a crash can't add a ticket twice. The reply names
         each ticket by its key, which chat shows as a pill with the ticket's title.
+        A ``waits_for`` entry ``#N`` names the Nth ticket of this same list, so a slice can
+        wait for one filed just before it; it becomes that ticket's key once it is added.
         """
         lines = []
         refs: list[dict[str, Any]] = []
+        keys: dict[int, str] = {}
         for index, ticket in enumerate(tickets):
+            if ticket.waits_for:
+                try:
+                    ticket = ticket.model_copy(
+                        update={"waits_for": _batch_waits(ticket.waits_for, keys, index + 1)}
+                    )
+                except ValueError as exc:
+                    lines.append(f"Couldn't update the board for “{ticket.label()}”: {exc}")
+                    continue
             payload = ticket.model_dump(exclude_none=True)
             try:
                 result = self.act("rem", payload, f"rem-ticket-{request}-{index}")
@@ -1695,6 +1750,8 @@ class RemKanban:
             lines.append(ticket.done_text(self._destination(ticket), (ref or {}).get("key", "")))
             if ref:
                 refs.append(ref)
+                if ref.get("key"):
+                    keys[index + 1] = str(ref["key"])
         return "\n".join(lines), refs
 
     def _changed(
@@ -1735,6 +1792,29 @@ class RemKanban:
             return f"{self._organization(ticket.organization_id)['config']['name']}’s"
         except ValueError:
             return "the organization’s"
+
+
+_BATCH_REF = re.compile(r"^#(\d{1,2})$")
+
+
+def _batch_waits(waits: list[str], keys: dict[int, str], position: int) -> list[str]:
+    """``waits_for`` with each ``#N`` replaced by the key of the Nth ticket added just now.
+
+    Raises ValueError when ``#N`` names this ticket, a later one, or one that wasn't added.
+    """
+    resolved: list[str] = []
+    for entry in waits:
+        match = _BATCH_REF.match(entry.strip())
+        if match is None:
+            resolved.append(entry)
+            continue
+        number = int(match.group(1))
+        if number >= position:
+            raise ValueError(f"It waits for {entry}, which comes after it in the same list.")
+        if number not in keys:
+            raise ValueError(f"It waits for {entry}, which wasn't added.")
+        resolved.append(keys[number])
+    return resolved
 
 
 def move_organization_ticket(

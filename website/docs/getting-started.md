@@ -26,8 +26,8 @@ The [installation guide](./installation.md) covers platform commands, the CLI on
 
 Install one supported coding CLI and sign in with its own instructions. Raticode finds providers on your machine; it doesn't create accounts.
 
-1. Open **Settings > Providers**, turn on your provider, and check its executable and model list.
-2. If it isn't found, set **Executable override** and choose **Refresh providers**.
+1. Open **Settings > Providers** and turn on your provider's **Enabled** switch. Its row says whether it's **Ready** or **Needs sign-in**; open its details to check the executable and model list.
+2. If it isn't found, open **Not installed** at the end of the list, choose its executable, and choose **Refresh providers**.
 3. In **Settings > Rem**, pick the **Default provider** for new tasks and threads. You can also set a separate **Rem chat provider** for Rem's own replies.
 
 Start with the provider you already use. [Provider setup](./setup.md) lists the CLI names and how to check sign-in. You can skip this step while you learn command and file nodes.

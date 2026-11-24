@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { RefreshCw, X } from "lucide-react";
 import { RunStatus } from "./RunSummary.jsx";
+import AskRemButton from "./AskRemButton.jsx";
+import { runCanAskRem } from "../lib/askRemAboutFailure.js";
 import { STATUS_FILTERS, TIME_RANGES, fetchAllWorkflowRuns, formatDuration, sinceLabel, startedByLabel, usageCells } from "../lib/allWorkflowRuns.js";
-import { formatRunAge } from "../lib/workflowRuns.js";
+import { formatRunAge, usageLimitWaitText } from "../lib/workflowRuns.js";
+import { switchedProvider } from "../lib/providerFallback.js";
 import { startPolling } from "../lib/refresh.js";
-import { pauseSummary, triggersApi } from "../lib/rattishTriggers.js";
+import { budgetSummary, parseDailyLimit, pauseSummary, triggersApi } from "../lib/rattishTriggers.js";
 
 const PAGE = 200;
 // The most runs the backend returns in one list.
@@ -28,7 +31,8 @@ export function TriggerPauseSwitch({ api = triggersApi, poll = startPolling }) {
     try { setState(await api.setPaused(next)); } catch (saveError) { setError(saveError instanceof Error ? saveError.message : "Unable to change triggers"); }
     finally { setSaving(false); }
   };
-  return <div className="flex min-w-0 max-w-sm items-start gap-2" data-testid="trigger-pause">
+  return <div className="flex min-w-0 max-w-md flex-col gap-1">
+    <div className="flex min-w-0 items-start gap-2" data-testid="trigger-pause">
     <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-ink">
       <input type="checkbox" role="switch" aria-label="Pause all triggers" aria-describedby="trigger-pause-summary" className="peer sr-only" checked={paused} disabled={!state || saving} onChange={event => void toggle(event.target.checked)} />
       <span aria-hidden="true" className={`relative h-[18px] w-8 shrink-0 rounded-full border transition-[background-color,border-color] duration-150 peer-focus-visible:ring-2 peer-focus-visible:ring-brand/40 peer-disabled:opacity-50 ${paused ? "border-amber-500 bg-amber-500" : "border-line bg-slate-100"}`}>
@@ -37,13 +41,68 @@ export function TriggerPauseSwitch({ api = triggersApi, poll = startPolling }) {
       Pause all triggers
     </label>
     <span id="trigger-pause-summary" role={error ? "alert" : "status"} className={`min-w-0 text-[11px] leading-4 ${error ? "text-red-700 dark:text-red-300" : paused ? "text-amber-700 dark:text-amber-300" : "text-muted"}`}>{error || pauseSummary(state)}</span>
+    </div>
+    {state && api.setBudget ? <TriggerDailyLimit dailyBudget={state.dailyBudget} save={async (budget) => {
+      const saved = await api.setBudget(budget);
+      setState(await api.pauseState());
+      return saved;
+    }} /> : null}
   </div>;
+}
+
+const LIMIT_INPUT = "h-7 w-24 rounded-md border border-line bg-surface px-2 text-xs text-ink";
+
+// The optional limit over every triggered run on this computer, next to Pause all
+// triggers. Typed values stay as typed until Save.
+export function TriggerDailyLimit({ dailyBudget, save }) {
+  const [editing, setEditing] = useState(null);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [warnings, setWarnings] = useState([]);
+  const budget = dailyBudget?.budget ?? {};
+  const reached = Boolean(dailyBudget?.today?.reached);
+  const open = () => {
+    setError("");
+    setEditing({ cost: budget.maxCostUsd == null ? "" : String(budget.maxCostUsd), tokens: budget.maxTokens == null ? "" : String(budget.maxTokens) });
+  };
+  const submit = async (next) => {
+    setSaving(true); setError("");
+    try {
+      const saved = await save(next ?? { maxCostUsd: parseDailyLimit(editing.cost, "cost"), maxTokens: parseDailyLimit(editing.tokens, "token", { whole: true }) });
+      setWarnings(saved?.warnings ?? []);
+      setEditing(null);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Unable to save the daily limit");
+    } finally { setSaving(false); }
+  };
+  if (!editing) {
+    return <div className="min-w-0 space-y-1 text-[11px] leading-4" data-testid="trigger-daily-limit-all">
+      <div className="flex min-w-0 items-start gap-2">
+        <span className={`min-w-0 ${reached ? "text-amber-700 dark:text-amber-300" : "text-muted"}`} role="status">{budgetSummary(dailyBudget)}</span>
+        <button type="button" className="shrink-0 font-medium text-brand hover:underline focus-visible:outline" onClick={open}>{dailyBudget?.today ? "Change" : "Set daily limit"}</button>
+      </div>
+      {warnings.map(warning => <p key={warning} className="text-amber-700 dark:text-amber-300">{warning}</p>)}
+    </div>;
+  }
+  return <form className="flex flex-wrap items-center gap-2 text-[11px]" data-testid="trigger-daily-limit-all" onSubmit={event => { event.preventDefault(); void submit(); }}>
+    <label className="flex items-center gap-1 text-muted">Daily cost (USD)
+      <input aria-label="Daily cost limit for all triggers" className={LIMIT_INPUT} inputMode="decimal" placeholder="No limit" value={editing.cost} onChange={event => setEditing(current => ({ ...current, cost: event.target.value }))} />
+    </label>
+    <label className="flex items-center gap-1 text-muted">Tokens
+      <input aria-label="Daily token limit for all triggers" className={LIMIT_INPUT} inputMode="numeric" placeholder="No limit" value={editing.tokens} onChange={event => setEditing(current => ({ ...current, tokens: event.target.value }))} />
+    </label>
+    <button type="button" disabled={saving} className="rounded-md bg-brand px-2 py-1 font-semibold text-white disabled:opacity-50" onClick={() => void submit()}>Save</button>
+    {dailyBudget?.today ? <button type="button" disabled={saving} className="rounded-md px-2 py-1 text-muted hover:text-ink" onClick={() => void submit({ maxCostUsd: null, maxTokens: null })}>Remove limit</button> : null}
+    <button type="button" className="rounded-md px-2 py-1 text-muted hover:text-ink" onClick={() => setEditing(null)}>Cancel</button>
+    <p className="w-full text-muted">Covers every triggered run until midnight here. Runs you start yourself, from the phone or by Rem don&apos;t count.</p>
+    {error ? <p role="alert" className="w-full text-red-700 dark:text-red-300">{error}</p> : null}
+  </form>;
 }
 
 // Every registered workflow's runs in one list, newest first. Selecting a run opens it
 // in the Studio. `request` carries filters from whoever opened the view, such as Rem's
 // "While you were away" card with the moment the user left.
-export default function WorkflowRunsView({ request = null, onOpenRun, onClose, poll = startPolling, load = fetchAllWorkflowRuns, triggers = triggersApi }) {
+export default function WorkflowRunsView({ request = null, onAskRem, onOpenRun, onClose, poll = startPolling, load = fetchAllWorkflowRuns, triggers = triggersApi }) {
   const [filters, setFilters] = useState(() => ({ status: "", workflow: "", since: "24h", ...(request || {}) }));
   const [limit, setLimit] = useState(PAGE);
   const [state, setState] = useState({ loading: true, error: "", data: null });
@@ -124,7 +183,9 @@ export default function WorkflowRunsView({ request = null, onOpenRun, onClose, p
               <td className="px-3 py-2" title={run.error || undefined}>
                 <RunStatus status={run.status} />
                 {run.awaitingApproval ? <span className="ml-1.5 text-amber-700 dark:text-amber-300">· needs approval</span> : null}
-                {run.fallbacks?.length ? <span className="ml-1.5 text-muted" data-testid="run-provider-switch" title={run.fallbacks.map(item => item.line).join("\n")}>· switched provider</span> : null}
+                {run.usageLimitWait ? <span className="ml-1.5 text-amber-700 dark:text-amber-300" data-testid="run-usage-limit-wait">· {usageLimitWaitText(run)}</span> : null}
+                {switchedProvider(run.fallbacks) ? <span className="ml-1.5 text-muted" data-testid="run-provider-switch" title={run.fallbacks.map(item => item.line).join("\n")}>· switched provider</span> : null}
+                {onAskRem && runCanAskRem(run.status) ? <AskRemButton className="ml-2 align-middle" label={`Ask Rem about this failure in run ${run.id} of ${run.workflowName}`} onAsk={() => onAskRem(run)} /> : null}
               </td>
               <td className="whitespace-nowrap px-3 py-2 text-muted" title={run.startedAt ? new Date(run.startedAt).toLocaleString() : undefined}>{formatRunAge(run.startedAt)}</td>
               <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">{formatDuration(run.durationSeconds, running)}</td>

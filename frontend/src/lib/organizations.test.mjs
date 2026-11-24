@@ -195,6 +195,10 @@ test("requests older than a day no longer show as waiting", () => {
 test("run records show what ran and where the work ended", () => {
   assert.deepEqual(runProvenance({ provider: "codex", model: "cli-default", permissionMode: "workspace-write", isolation: "worktree", headCommit: "0123456789abcdef", uncommittedChanges: true, inputSha256: "f".repeat(64) }), ["codex · provider default", "workspace-write", "own worktree", "ended at 0123456789 + uncommitted changes", "input ffffffffffff"]);
   assert.deepEqual(runProvenance({}), []);
+  // The account a run used, or why it fell back to the default sign-in; nothing for a worker without one.
+  assert.deepEqual(runProvenance({ account: { accountId: "0123456789abcdef", name: "work", source: "worker" } }), ["account work"]);
+  assert.deepEqual(runProvenance({ account: { accountId: "0123456789abcdef", name: "", source: "default", why: "This worker's Codex account was removed; using the default sign-in." } }), ["This worker's Codex account was removed; using the default sign-in."]);
+  assert.deepEqual(runProvenance({ account: { accountId: null, name: "", source: "default", why: "This worker uses the default sign-in." } }), []);
 });
 test("automatic updates name the tasks that changed", () => {
   const [entry] = activityEntries([{ sequence: 1, kind: "state_updated", actor: "system", at: "2026-11-02T00:00:00Z", payload: { source: "dispatch", taskChanges: [{ taskId: "t", title: "Build", from: "todo", to: "blocked" }] } }]);

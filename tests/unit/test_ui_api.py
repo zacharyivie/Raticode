@@ -1668,7 +1668,12 @@ def test_delete_workflow_payload_removes_registered_rattish_workspace(tmp_path: 
         source_format="rattish",
     )
 
-    assert result == {"workflowId": "delete-rattish", "deleted": True}
+    assert result == {
+        "workflowId": "delete-rattish",
+        "deleted": True,
+        "runWorktreesRemoved": 0,
+        "runWorktreeErrors": [],
+    }
     assert not workflow_root.exists()
     assert list_workflow_payloads(app_data)["workflows"] == []
 

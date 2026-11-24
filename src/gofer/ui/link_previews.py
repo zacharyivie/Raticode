@@ -17,10 +17,12 @@ import ssl
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Iterable
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import parse_qs, quote, urljoin, urlparse
 
+from gofer.core.network_policy import allowlist_match, is_global_address
 from gofer.utils.http_read import read_before
 
 PAGE_LIMIT = 512 * 1024
@@ -57,15 +59,37 @@ def youtube_id(url: str) -> str | None:
     return candidate if YOUTUBE_ID.fullmatch(candidate) else None
 
 
-def _public_address(host: str, port: int, resolver: Resolver) -> str:
+class PrivateAddressError(PreviewError):
+    """The host resolved to an address on this computer or a private network."""
+
+    def __init__(self, address: str) -> None:
+        super().__init__("Previews only reach public web addresses")
+        self.address = address
+
+
+def public_address(
+    host: str, port: int, resolver: Resolver, *, allowlist: Iterable[str] = ()
+) -> str:
+    """One address to connect to, after checking every address the host resolves to.
+
+    Every address must be public unless ``allowlist`` (network-allowlist entries: host
+    names, ``*.domain`` patterns, addresses or networks) admits the host or that address.
+    """
     try:
         records = resolver(host, port, type=socket.SOCK_STREAM)
     except OSError as exc:
         raise PreviewError("The site could not be found") from exc
-    addresses = [record[4][0] for record in records if record[4]]
-    if not addresses or any(not ipaddress.ip_address(a).is_global for a in addresses):
-        raise PreviewError("Previews only reach public web addresses")
-    return str(addresses[0])
+    addresses = [str(record[4][0]) for record in records if record[4]]
+    if not addresses:
+        raise PreviewError("The site could not be found")
+    entries = tuple(allowlist)
+    for address in addresses:
+        if is_global_address(ipaddress.ip_address(address)):
+            continue
+        if entries and allowlist_match(host, address, entries) is not None:
+            continue
+        raise PrivateAddressError(address)
+    return addresses[0]
 
 
 def fetch(
@@ -96,7 +120,7 @@ def fetch(
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     if port not in {80, 443}:
         raise PreviewError("Previews only use standard web ports")
-    address = _public_address(parsed.hostname, port, resolver)
+    address = public_address(parsed.hostname, port, resolver)
     connection = http.client.HTTPConnection(parsed.hostname, port=port, timeout=TIMEOUT_SECONDS)
     sock = socket.create_connection((address, port), timeout=TIMEOUT_SECONDS)
     if parsed.scheme == "https":

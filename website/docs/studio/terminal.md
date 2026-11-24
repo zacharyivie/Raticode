@@ -26,6 +26,16 @@ In **Settings > Terminal**:
 - Pick the shell for new sessions: the account's login shell, Bash or Zsh. Windows uses PowerShell. A change applies to new terminals only.
 - Set font size, line height, blinking cursor and scrollback size. Scrollback is display history, not a permanent record of every command's output.
 
+## Ask Rem about selected output
+
+*New in Raticode 0.6.0.*
+
+Right-click in a terminal for **Copy**, **Select all** and **Ask Rem about selection**. Select some output first, such as an error and the lines before it, then choose **Ask Rem about selection**. The selected text goes to Rem's message box as a file, with the shell and folder named. Nothing is sent until you write your question and send it.
+
+- Up to the last 200 lines, cut to 8 KB, are kept.
+- The text is marked as untrusted terminal output, so Rem treats anything in it as data, not instructions.
+- Selected text can include secrets a command printed. Check it before you send.
+
 ## Use the CLI
 
 If `Raticode` is on your PATH, you can check a workflow without running it:

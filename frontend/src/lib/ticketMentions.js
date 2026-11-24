@@ -60,24 +60,28 @@ export function taskTickets(task) {
 const SKIPPED = new Set(["link", "linkReference", "definition", "code", "inlineCode", "html", "image", "imageReference"]);
 
 // A remark plugin: each key of a ticket in [index] becomes a <ticket-pill> element that
-// MarkdownContent renders as a TicketPill.
+// MarkdownContent renders as a TicketPill. In a table cell the element is marked compact:
+// a title-wide pill can't fit a narrow column, so there it shows only the key, as a link.
 export function remarkTicketMentions(index) {
   return () => tree => {
-    if (index && Object.keys(index).length) pillChildren(tree, index);
+    if (index && Object.keys(index).length) pillChildren(tree, index, false);
   };
 }
 
-function pillChildren(node, index) {
+function pillChildren(node, index, inTable) {
   if (!Array.isArray(node.children)) return;
   const children = [];
   for (const child of node.children) {
     if (child.type === "text") {
       for (const part of splitTicketText(child.value, index)) {
         if (typeof part === "string") { if (part) children.push({ type: "text", value: part }); }
-        else children.push({ type: "ticketMention", data: { hName: "ticket-pill", hProperties: { dataTicketKey: part.key }, hChildren: [{ type: "text", value: part.key }] } });
+        else {
+          const hProperties = inTable ? { dataTicketKey: part.key, dataTicketCompact: "true" } : { dataTicketKey: part.key };
+          children.push({ type: "ticketMention", data: { hName: "ticket-pill", hProperties, hChildren: [{ type: "text", value: part.key }] } });
+        }
       }
     } else {
-      if (!SKIPPED.has(child.type)) pillChildren(child, index);
+      if (!SKIPPED.has(child.type)) pillChildren(child, index, inTable || child.type === "tableCell");
       children.push(child);
     }
   }

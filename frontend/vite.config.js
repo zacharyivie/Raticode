@@ -2,6 +2,7 @@ import { createLogger, defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { developmentApiProxy } from "./dev/api-proxy.js";
 import { bundleBudget } from "./benchmarks/bundle-budget.js";
+import { monacoPatches } from "./dev/monaco-patches.js";
 
 const apiBaseUrl = process.env.VITE_API_BASE_URL || "http://127.0.0.1:8765";
 
@@ -29,7 +30,7 @@ export default defineConfig({
       },
     },
   },
-  plugins: [react(), bundleBudget(), {
+  plugins: [react(), monacoPatches(), bundleBudget(), {
     name: "development-studio-csp",
     apply: "serve",
     transformIndexHtml(html) {
@@ -37,6 +38,9 @@ export default defineConfig({
         .replace("connect-src 'self'", "connect-src 'self' ws://127.0.0.1:* ws://localhost:*");
     },
   }],
+  optimizeDeps: {
+    rolldownOptions: { plugins: [monacoPatches()] },
+  },
   server: {
     proxy: {
       "/api": apiProxy.proxy,

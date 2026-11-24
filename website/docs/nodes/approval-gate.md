@@ -35,6 +35,52 @@ Node step:
 - `notify` is off by default.
 - If the gate is stopped, or its run ends while the decision is pending, the request closes as cancelled. A cancelled request no longer times out and refuses late decisions.
 
+## Choices and typed replies
+
+*New in Raticode 0.6.0 and Raticode Mobile 0.36.0.*
+
+Give the gate `options` to ask a question with named answers instead of Approve and Reject. Add `reply` when you want the person to type something back.
+
+```rattish
+Rattish: 1
+
+Workflow:
+  name: Pick a release channel
+
+Node channel:
+  type: approval-gate
+  message: Where should this build go?
+  options:
+    - Stable
+    - Beta
+    - Cancel
+  reject-options:
+    - Cancel
+  reply: optional
+  to:
+    - publish-stable when node.channel.output.choice == "Stable"
+    - publish-beta when node.channel.output.choice == "Beta"
+
+Node publish-stable:
+  type: bash-command
+  command: echo "Publishing to stable"
+  needs: channel
+
+Node publish-beta:
+  type: bash-command
+  command: echo "Publishing to beta"
+  needs: channel
+```
+
+- `options` lists 2 to 8 answer labels, each up to 60 characters. The app, the phone's **Approvals** page and `Raticode rattish approve WORKFLOW RUN_ID NODE_ID --choice LABEL` show or take one answer per label instead of Approve and Reject. Labels must differ by more than capital letters. The CLI matches a label whatever its capitals.
+- The output's `choice` is the label picked. `approved` is `true` for every option except those in `reject-options`, and `decision` is `approved` or `rejected` to match, so routes on `approved` keep working.
+- `reject-options` may only name labels from `options`.
+- `reply` is `none` (the default), `optional` or `required`. With `optional` or `required` a reply box appears next to the answers, and the text comes back as the output's `reply`. A required reply has to be filled in before an answer is accepted. On the CLI, pass it with `--reply TEXT`. A gate whose `reply` is `none` refuses a reply; use `--notes` for a note on the decision instead.
+- `reply` also works without `options`, next to Approve and Reject.
+- Timeouts work the same: the deadline records `timeout` or `rejected`, `choice` is null and `reply` is empty. Route on `node.channel.output.approved` or `decision` to catch them.
+- The compiler checks routes that compare `node.<id>.output.choice` with `==` or `!=`. A label that isn't in `options`, or a gate without options, fails with `RATTISH_APPROVAL_CHOICE_UNKNOWN`. A label that differs only in capitals gets a suggestion, because routes compare labels exactly.
+- A phone running an older Raticode Mobile doesn't list gates that have options or a required reply. Answer those on the computer, or update the app.
+
 ## Configuration
 
 Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
@@ -48,6 +94,9 @@ Fields for this node only. The [shared node fields](./index.md#shared-node-field
 | `notify` | boolean | `false` | Request an approval notification. |
 | `notification-title` | string | `"Raticode approval needed"` | Approval notification title. |
 | `subject` | string or null | Not set | Optional approval subject. |
+| `options` | list of 2 to 8 strings, or null | Not set | Answer labels shown instead of Approve and Reject. |
+| `reject-options` | list of string | `[]` | Options that record a rejection (`approved: false`). |
+| `reply` | `none`, `optional`, `required` | `"none"` | Ask for a typed reply with the answer. |
 
 ## Inputs and output
 
@@ -68,6 +117,8 @@ Output fields, with their exact selector names:
 | `notes` | string |
 | `message` | string |
 | `subject` | string or null |
+| `choice` | string or null: the option picked, null without options or on a timeout |
+| `reply` | string: the typed reply, empty when none was given |
 
 Downstream, select a field as `node.step.output.decision`.
 

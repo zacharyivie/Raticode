@@ -28,6 +28,8 @@ function megabytes(bytes) {
 
 // Which speech-to-text dictation uses. macOS and Windows have their own recognizers;
 // Linux has none, so it always uses Raticode's offline model, which is downloaded here.
+// On Windows the downloaded model is used unless the Windows recognizer was chosen: the
+// backend sends the recognizer dictation will use as `engine`.
 export default function SpeechEngineSettings() {
   const [state, setState] = useState(null);
   const [error, setError] = useState("");
@@ -111,6 +113,11 @@ export default function SpeechEngineSettings() {
       ) : null}
       {!state && !error ? <p className="text-xs text-muted">Checking speech recognition…</p> : null}
       {system && !system.id ? <p className="text-xs text-muted">{system.reason}</p> : null}
+      {system?.id === "windows" && offline && !offline.installed && state.engine === "system" ? (
+        <p className="text-xs text-muted" data-speech-windows-hint="">
+          Raticode&apos;s offline model is more accurate than the Windows recognizer. Once it&apos;s downloaded, dictation uses it.
+        </p>
+      ) : null}
       {system?.id && state.engine === "system" ? (
         system.available ? (
           <p className="text-xs text-muted">
@@ -142,8 +149,18 @@ export default function SpeechEngineSettings() {
 function OfflineModel({ offline, onDownload, controlClass }) {
   const name = offline.name ?? "Raticode's offline speech model";
   const download = offline.download;
+  const size = offline.downloadMb ?? 475;
+  // The model and its license, shown wherever the model is offered or installed.
+  const license = offline.model && offline.license
+    ? <p className="text-xs text-muted" data-offline-model-license="">The model is {offline.model}, under the {offline.license}. It recognizes English and other languages on its own.</p>
+    : null;
   if (offline.installed && !ACTIVE_DOWNLOAD.has(download?.state)) {
-    return <p className="text-xs text-muted" data-offline-model="installed">{name} is installed. Speech is recognized on this computer.</p>;
+    return (
+      <div className="space-y-1">
+        <p className="text-xs text-muted" data-offline-model="installed">{name} is installed. Speech is recognized on this computer.</p>
+        {license}
+      </div>
+    );
   }
   if (ACTIVE_DOWNLOAD.has(download?.state)) {
     const total = download.totalBytes || 0;
@@ -172,15 +189,21 @@ function OfflineModel({ offline, onDownload, controlClass }) {
     );
   }
   const failed = download?.state === "failed";
+  const replaced = !failed && offline.replaced === true;
   return (
-    <div className="space-y-1" data-offline-model={failed ? "failed" : "missing"}>
+    <div className="space-y-1" data-offline-model={failed ? "failed" : replaced ? "replaced" : "missing"}>
       {failed ? (
         <p role="alert" className="text-xs text-amber-700 dark:text-amber-300">{download.error || `${name} couldn't be downloaded.`}</p>
+      ) : replaced ? (
+        <p role="status" className="text-xs text-amber-700 dark:text-amber-300">
+          {name} was replaced by a newer one, so the old model was removed. Download the new one (about {size} MB) to dictate offline again.
+        </p>
       ) : (
         <p className="text-xs text-muted">
-          {name} isn&apos;t downloaded yet. It&apos;s about {offline.downloadMb ?? 130} MB, downloaded once, and then works without a connection.
+          {name} isn&apos;t downloaded yet. It&apos;s about {size} MB, downloaded once, and then works without a connection.
         </p>
       )}
+      {license}
       <button className={controlClass} type="button" onClick={onDownload}>
         {failed ? "Try the download again" : "Download offline model"}
       </button>

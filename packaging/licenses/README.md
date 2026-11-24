@@ -17,9 +17,16 @@ Desktop installers also carry it in their resources/third-party-licenses folder.
 
 ## Reviewed metadata gaps
 
-* Vosk 0.3.45: COPYING is copied verbatim from
-  https://raw.githubusercontent.com/alphacep/vosk-api/v0.3.45/COPYING.
-  Its wheel omits this Apache-2.0 license.
+* sherpa-onnx-core 2.0.1 declares `License: Apache-2.0` but its wheel has no license
+  file. The supplied notice is the project's LICENSE, copied verbatim from
+  https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v2.0.1/LICENSE (identical to
+  the LICENSE in the sherpa-onnx 2.0.1 wheel).
+* sherpa-onnx 2.0.1 ships its Apache-2.0 LICENSE. Its Linux wheel also bundles
+  alsa-lib 1.2.12 (`sherpa_onnx.libs/libasound-*.so.2.0.0`, LGPL-2.1-or-later), which
+  the native module links dynamically. The supplied sherpa-onnx-2.0.1-LICENSE holds
+  alsa-lib's COPYING, copied verbatim from its v1.2.12 tag. It stays a separate shared
+  library inside the backend, and Raticode's source and build instructions are public,
+  so it can be replaced.
 * lazy-val 1.0.5: npm metadata pins source commit
   b69ad4119f1b19bdab13c61ee2fcc88d46b89071 in develar/lazy-val.
   That commit and the npm package declare MIT but contain no license file.
@@ -39,8 +46,11 @@ Desktop installers also carry it in their resources/third-party-licenses folder.
   copies it alongside the onnxruntime license.
 * The local lodash.isequal adapter is application code and uses the application
   license. Lodash itself has its own MIT notice in the bundle.
-* openpyxl and et-xmlfile supply their complete licenses in wheel metadata;
-  the collector preserves those texts.
+* python-calamine 0.9.1 (the .xlsx reader) ships its MIT license in wheel metadata.
+  Its native module statically links Rust crates under permissive licenses (MIT,
+  Apache-2.0, BSD-3-Clause, Zlib, Unicode-3.0, Unlicense), listed in the CycloneDX
+  SBOM in the wheel's dist-info `sboms/` folder. The collector copies wheel SBOMs
+  next to each package's license as `sbom-<name>`.
 
 ## Source and native release review
 
@@ -63,15 +73,25 @@ Using the cache does not skip source inclusion or license review checks.
 The generated package inventory does not prove the provenance of every native
 library. Before publishing a candidate, inspect the PyInstaller native inventory
 and record the actual platform libraries, licenses and source locations. In
-particular, libvosk embeds Kaldi, OpenFST, OpenBLAS and CLAPACK; platform Python
+particular, sherpa-onnx-core bundles its own prebuilt ONNX Runtime 1.28.2 (MIT,
+Microsoft; the same notices as the onnxruntime package) and sherpa-onnx's Linux wheel
+bundles alsa-lib (above); platform Python
 builds may carry OpenSSL, libffi, zlib and GCC runtime libraries. Preserve the
 licenses and required source for those exact builds. Electron's bundled Chromium
 notice file must remain in the desktop distribution.
 
-The speech model is downloaded separately, not shipped in this bundle.
-vosk-model-en-us-0.22-lgraph is listed as Apache-2.0 by the upstream model catalog.
+## Offline speech model
 
-Mac builds use Vosk 0.3.44, the last published universal2 wheel. Its metadata
-classifies the project as Apache Software License but declares License: UNKNOWN,
-as does 0.3.45. The supplied vosk-0.3.44-COPYING duplicates the Apache-2.0
-text from the v0.3.45 source referenced above; upstream has no v0.3.44 Git tag.
+The speech model is downloaded separately, only when the user clicks Download offline
+model, and is not shipped in this bundle or any installer. It is NVIDIA's Nemotron 3.5
+ASR Streaming 0.6B (nvidia/nemotron-3.5-asr-streaming-0.6b, int8 ONNX export by
+sherpa-onnx), from https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models,
+under the OpenMDW License Agreement, version 1.1. openmdw-1.1.txt is a copy of that
+license taken from https://openmdw.ai/license/1-1/ on 2026-11-16, for the record of what
+was reviewed. It grants use, modification and distribution without restriction; anyone
+who distributes the model must keep a copy of the license and its notices of origin, and
+rights end for anyone who sues claiming the model infringes a patent or copyright. The
+upstream archive carries neither the license nor a notice, so when the model is
+installed Raticode writes NOTICE.txt beside it naming the model, NVIDIA, the sherpa-onnx
+export and the license with its URL. If Raticode ever bundles or re-hosts the model,
+ship openmdw-1.1.txt and that notice with each copy.

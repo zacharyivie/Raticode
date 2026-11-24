@@ -66,7 +66,7 @@ async function main() {
   win.webContents.on("console-message", details => { if(details.level === "error") errors.push(details.message); });
   await win.loadURL(`http://127.0.0.1:${vite.httpServer.address().port}/rem-actions-test`);
   const evaluate = source => win.webContents.executeJavaScript(source,true);
-  const wait = async source => { const deadline = Date.now()+8000; while(!await evaluate(`Boolean(${source})`)) { if(Date.now()>deadline) throw new Error(`Missing condition: ${source}\n${await evaluate('document.body.innerText')}`); await new Promise(resolve=>setTimeout(resolve,30)); } };
+  const wait = async source => { const deadline = Date.now()+20000; while(!await evaluate(`Boolean(${source})`)) { if(Date.now()>deadline) throw new Error(`Missing condition: ${source}\n${await evaluate('document.body.innerText')}`); await new Promise(resolve=>setTimeout(resolve,30)); } };
   const draft = async value => evaluate(`(() => { const input=document.querySelector('textarea'); input.focus(); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input,${JSON.stringify(value)}); input.dispatchEvent(new Event('input',{bubbles:true})); })()`);
   const enter = modifiers => { win.webContents.sendInputEvent({type:"keyDown",keyCode:"Return",modifiers}); win.webContents.sendInputEvent({type:"keyUp",keyCode:"Return",modifiers}); };
   await wait("document.querySelector('[data-assistant-home]')");
@@ -106,11 +106,16 @@ async function main() {
     await evaluate("document.querySelector('[data-picker-trigger=\"model\"]').click()");
     await wait("document.querySelector('[data-picker-menu=\"model\"]')");
     await evaluate(`[...document.querySelectorAll('[role="option"]')].find(option=>option.textContent.startsWith(${JSON.stringify(model)})).click()`);
+    // The menu hands focus back as it closes; on a slow machine a quick Enter lands there.
+    await wait("!document.querySelector('[data-picker-menu=\"model\"]')");
   };
+  // The message box can be drawn again (empty) or lose focus while the thread settles,
+  // so each check puts the text and focus back until the box holds both.
+  const typed = value => wait(`(() => { const input = document.querySelector('textarea'); if (input.value !== ${JSON.stringify(value)}) { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input, ${JSON.stringify(value)}); input.dispatchEvent(new Event('input', { bubbles: true })); } if (document.activeElement !== input) input.focus(); return document.activeElement === input && input.value === ${JSON.stringify(value)}; })()`);
   assert.equal(await evaluate("document.querySelectorAll('.rem-model-switch').length"), 0);
   await chooseModel("sol");
   assert.equal(await evaluate("document.querySelectorAll('.rem-model-switch').length"), 0);
-  await draft("Use Sol"); enter([]);
+  await draft("Use Sol"); await typed("Use Sol"); enter([]);
   await wait("window.requests.length === 4 && document.querySelector('.rem-model-switch')");
   assert.equal(await evaluate("document.querySelector('.rem-model-switch').textContent"), "switched to Codex - sol - high");
   await wait("!document.querySelector('[aria-label=\"Stop Rem\"]')");
@@ -121,7 +126,7 @@ async function main() {
   await wait("document.body.innerText.includes('Tool note 19') && !document.querySelector('[aria-busy=\"true\"]')");
   assert.equal(await evaluate("document.querySelectorAll('.rem-model-switch').length"), 0);
   await chooseModel("astra");
-  await draft("Use Astra after a long tool trace"); enter([]);
+  await draft("Use Astra after a long tool trace"); await typed("Use Astra after a long tool trace"); enter([]);
   await wait("window.requests.length === 5 && document.querySelector('.rem-model-switch')");
   assert.equal(await evaluate("document.querySelector('.rem-model-switch').textContent"), "switched to Codex - astra - high");
   assert.equal(await evaluate("getComputedStyle(document.querySelector('.rem-model-switch'),'::before').borderTopWidth"), "1px");

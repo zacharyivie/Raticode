@@ -76,6 +76,19 @@
 .rem-result-actions button:hover:not(:disabled) { background: var(--rem-accent-soft); }
 .rem-result-actions button:disabled { opacity: .6; }
 
+/* Make it a workflow: the drafting task's verdict, costs and Switch over. */
+.rem-workflow-draft { margin-top: 8px; padding: 10px 12px; border: 1px solid var(--rem-line); border-radius: 10px; background: var(--rem-raised); font-size: 12.5px; line-height: 1.45; }
+.rem-workflow-draft[data-tone="attention"] { border-color: color-mix(in srgb, #d97706 45%, var(--rem-line)); }
+.rem-workflow-draft-title { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--rem-accent); }
+.rem-workflow-draft-title strong { font-weight: 600; }
+.rem-workflow-draft-note { margin: 6px 0 0; }
+.rem-workflow-draft-path { margin: 4px 0 0; overflow: hidden; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; opacity: .75; text-overflow: ellipsis; white-space: nowrap; }
+.rem-workflow-costs { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 8px 0 0; }
+.rem-workflow-costs > div { display: contents; }
+.rem-workflow-costs dt { font-weight: 600; }
+.rem-workflow-costs dd { margin: 0; font-variant-numeric: tabular-nums; }
+.rem-workflow-draft [aria-label="Workflow changes"] { margin-top: 8px; }
+
 /* The message a reply refers to, in its bubble and above the message box. */
 .rem-quote { display: flex; align-items: stretch; gap: 4px; max-width: 100%; margin-bottom: 6px; white-space: normal; }
 .rem-quote-main { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 1px; padding: 4px 10px; border-left: 3px solid var(--rem-accent); border-radius: 4px 8px 8px 4px; background: var(--rem-accent-soft); color: inherit; text-align: left; font-size: 12px; line-height: 1.4; }

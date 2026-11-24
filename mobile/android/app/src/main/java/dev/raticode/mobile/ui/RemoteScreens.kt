@@ -26,11 +26,15 @@ private fun PageHeader(title: String, onBack: (() -> Unit)?, action: @Composable
     }
 }
 
+/** One answer being confirmed: Approve or Reject, or one of a workflow gate's options. */
+private data class ApprovalAnswer(val approval: LiveClient.Approval, val approve: Boolean, val choice: String? = null)
+
 @androidx.annotation.RequiresApi(29)
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun ApprovalsPage(client: LiveClient, onBack: (() -> Unit)?) {
     LaunchedEffect(client.connected) { if (client.connected) client.refreshApprovals() }
-    var answering by remember { mutableStateOf<Pair<LiveClient.Approval, Boolean>?>(null) }
+    var answering by remember { mutableStateOf<ApprovalAnswer?>(null) }
     var instruction by rememberSaveable { mutableStateOf("") }
     Column(Modifier.fillMaxSize()) {
         PageHeader("Approvals", onBack) {
@@ -51,26 +55,45 @@ internal fun ApprovalsPage(client: LiveClient, onBack: (() -> Unit)?) {
                     // Waiting on you, in the desktop's attention color, with the kind of request in words.
                     StatusPill(if (approval.source == "swarm") "Swarm request" else "Workflow approval", RemTaskStatus.Tone.ATTENTION, icon = ThreadIcons.Waiting)
                     ClampedText(approval.summary, 6, style = MaterialTheme.typography.bodyMedium)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { instruction = ""; answering = approval to true }, enabled = client.connected) { Text(if (approval.source == "swarm") "Proceed" else "Approve") }
-                        OutlinedButton(onClick = { instruction = ""; answering = approval to false }, enabled = client.connected) { Text(if (approval.source == "swarm") "Redirect" else "Reject") }
+                    if (approval.options.isNotEmpty()) {
+                        // The workflow named its answers: one button each, instead of Approve and Reject.
+                        FlowRow(Modifier.testTag("approvalOptions"), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            approval.options.forEach { option ->
+                                OutlinedButton(onClick = { instruction = ""; answering = ApprovalAnswer(approval, true, option) }, enabled = client.connected) { Text(option) }
+                            }
+                        }
+                    } else Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { instruction = ""; answering = ApprovalAnswer(approval, true) }, enabled = client.connected) { Text(if (approval.source == "swarm") "Proceed" else "Approve") }
+                        OutlinedButton(onClick = { instruction = ""; answering = ApprovalAnswer(approval, false) }, enabled = client.connected) { Text(if (approval.source == "swarm") "Redirect" else "Reject") }
                     }
                 }
             }
         }
     }
-    answering?.let { (approval, approve) ->
-        val needsText = !approve && approval.instructionRequired
+    answering?.let { (approval, approve, choice) ->
+        val replyWanted = approval.reply != "none"
+        val needsText = (!approve && approval.instructionRequired) || approval.reply == "required"
+        val label = when {
+            !approve && approval.instructionRequired -> "What should it do instead?"
+            approval.reply == "required" -> "Reply"
+            replyWanted -> "Reply (optional)"
+            else -> "Note (optional)"
+        }
         AlertDialog(onDismissRequest = { answering = null },
-            title = { Text(if (approve) "Approve on desktop?" else if (approval.source == "swarm") "Redirect the swarm?" else "Reject on desktop?") },
+            title = { Text(when {
+                choice != null -> "Answer “$choice” on desktop?"
+                approve -> "Approve on desktop?"
+                approval.source == "swarm" -> "Redirect the swarm?"
+                else -> "Reject on desktop?"
+            }) },
             text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(approval.summary, style = MaterialTheme.typography.bodySmall)
-                OutlinedTextField(instruction, { instruction = it.take(2000) }, modifier = Modifier.fillMaxWidth(),
-                    label = { Text(if (needsText) "What should it do instead?" else "Note (optional)") }, maxLines = 4)
+                OutlinedTextField(instruction, { instruction = it.take(2000) }, modifier = Modifier.fillMaxWidth().testTag("approvalReply"),
+                    label = { Text(label) }, maxLines = 4)
             } },
             confirmButton = { TextButton(enabled = !needsText || instruction.isNotBlank(), onClick = {
-                client.resolveApproval(approval, approve, instruction); answering = null
-            }) { Text(if (approve) "Approve" else "Send") } },
+                client.resolveApproval(approval, approve, instruction, choice); answering = null
+            }) { Text(when { choice != null -> "Send"; approve -> "Approve"; else -> "Send" }) } },
             dismissButton = { TextButton(onClick = { answering = null }) { Text("Cancel") } })
     }
 }

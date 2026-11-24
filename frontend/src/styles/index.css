@@ -297,6 +297,14 @@ select:not([multiple], [size]) {
   outline: none !important;
 }
 
+/* The node picker shows search focus as a brand underline on its search row. */
+.node-picker-search:focus-visible {
+  outline: none !important;
+}
+.node-picker-search-row:focus-within {
+  box-shadow: inset 0 -2px 0 rgb(var(--color-brand));
+}
+
 @media (pointer: coarse) {
   button,
   [role="button"],

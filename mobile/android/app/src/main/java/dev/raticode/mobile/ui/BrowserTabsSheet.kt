@@ -154,7 +154,7 @@ internal fun AllTabsSheet(chromium: BrowserRuntime, gecko: GeckoBrowser, client:
                 }
             }
             if (client.paired) {
-                item { SectionTitle(computerTitle(computer)) }
+                item { BrowserSectionTitle(computerTitle(computer)) }
                 item { ComputerTabs(chromium, client, computer, onOpened = onDismiss, open = { url -> openNew(private = false, url = url) }) }
             }
         }

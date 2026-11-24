@@ -21,3 +21,10 @@ export function packageFit(estimate, conversations) {
   const size = conversations ? estimate.total : estimate.total - estimate.conversations;
   return { size, fits: size <= estimate.limit, limit: estimate.limit };
 }
+
+/** A backup's files, documents and size, as one line people read. */
+export function backupCounts(record) {
+  if (!record) return "";
+  const count = (value, word) => `${Number(value || 0).toLocaleString()} ${word}${Number(value) === 1 ? "" : "s"}`;
+  return [count(record.files, "file"), count(record.documents, "document"), formatBytes(record.size || 0)].join(" · ");
+}

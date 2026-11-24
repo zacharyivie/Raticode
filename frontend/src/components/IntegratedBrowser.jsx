@@ -30,6 +30,7 @@ import {
   Undo2,
   Volume2,
   VolumeX,
+  WifiOff,
   X,
   EyeOff,
 } from "lucide-react";
@@ -37,6 +38,7 @@ import {
   AddressSuggestions,
   BlockedPopupsBar,
   LibraryPanel,
+  RemoteContentBar,
   PageOverlay,
   PromptBar,
   RemChip,
@@ -50,7 +52,7 @@ import { createTabRecovery, hangAction, HANG_GRACE_MS } from "../lib/browserReco
 import { browserChromeShortcutAction } from "../lib/browserShortcuts.js";
 import { attachFirefoxView } from "../lib/firefoxStreamView.js";
 import { attachBrowserView } from "../lib/browserViewSlot.js";
-import { engineLabel, isStreamedEngine, withArticle } from "../lib/browserEngines.js";
+import { engineLabel, streamsIntoView, withArticle } from "../lib/browserEngines.js";
 import {
   addressWithCompletion,
   formatZoom,
@@ -74,6 +76,8 @@ export default function IntegratedBrowser({
   dragActive = false,
   editing = false,
   engine = "",
+  // A file another app opened with Raticode: no scripts, never online.
+  external = false,
   focusLocationOnCreate = false,
   initialUrl = "about:blank",
   localPath = "",
@@ -218,7 +222,7 @@ export default function IntegratedBrowser({
         onStateChangeRef.current?.(partialState);
       };
       attachViewRef.current = () => {
-        if (isStreamedEngine(agentEngine)) {
+        if (streamsIntoView(agentEngine)) {
           attachFirefoxView(bridge, agentSessionId, containerRef.current, webviewRef, { clientId, onUpdate: onAgentUpdate, engine: agentEngine, label: engineLabel(agentEngine) });
         } else {
           attachBrowserView(bridge, agentSessionId, containerRef.current, webviewRef, viewOptions(clientId, onAgentUpdate));
@@ -242,6 +246,7 @@ export default function IntegratedBrowser({
       clientId,
       openBrowserBinding: initialOpenBrowserBindingRef.current,
       path: localPath,
+      ...(localPath && external ? { external: true } : {}),
       ...(privateTab ? { private: true } : {}),
       ...(!localPath && engineRef.current ? { engine: engineRef.current } : {}),
       url: localPath ? "" : initialUrlRef.current,
@@ -263,7 +268,7 @@ export default function IntegratedBrowser({
         // Raticode (chromium) tab's page is a view the main process lays over
         // this tab's slot, in whichever window the Browser is in.
         attachViewRef.current = () => {
-          if (isStreamedEngine(nextState?.engine)) attachFirefoxView(bridge, createdId, containerRef.current, webviewRef, { onUpdate, engine: nextState.engine, label: engineLabel(nextState.engine) });
+          if (streamsIntoView(nextState?.engine)) attachFirefoxView(bridge, createdId, containerRef.current, webviewRef, { onUpdate, engine: nextState.engine, label: engineLabel(nextState.engine) });
           else attachBrowserView(bridge, createdId, containerRef.current, webviewRef, viewOptions("", onUpdate));
         };
         attachViewRef.current();
@@ -294,7 +299,7 @@ export default function IntegratedBrowser({
     };
     // runCommand reads refs only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentEngine, agentPartition, agentSessionId, bridge, clientId, localPath, discarded]);
+  }, [agentEngine, agentPartition, agentSessionId, bridge, clientId, localPath, discarded, external]);
 
   // Moving to another window. A Raticode (chromium) page is a view that just
   // follows its slot there, still running. A Firefox, Chrome or Edge tab draws
@@ -303,7 +308,7 @@ export default function IntegratedBrowser({
   useEffect(() => register({
     detach: () => {
       const view = webviewRef.current;
-      if (!view || !isStreamedEngine(view.dataset?.engine)) return;
+      if (!view || !streamsIntoView(view.dataset?.engine)) return;
       webviewRef.current = null;
       view.remove?.();
     },
@@ -419,7 +424,7 @@ export default function IntegratedBrowser({
   // Rem's tabs are left to Rem. A Firefox, Chrome or Edge tab keeps its own
   // message, which can mean the browser is open in a window for signing in.
   const onScreen = active && windowVisible;
-  const streamed = isStreamedEngine(state.engine || engineRef.current || agentEngine);
+  const streamed = streamsIntoView(state.engine || engineRef.current || agentEngine);
   const recovers = !isRemTab && !streamed;
   useEffect(() => {
     if (!state.crashed || !onScreen || discarded || !recovers || keepsStopping) return undefined;
@@ -534,7 +539,7 @@ export default function IntegratedBrowser({
       }
       if (!state.ready) return;
       // A Firefox or Chrome view takes keyboard focus itself; there is no guest to focus.
-      if (isStreamedEngine(webview?.dataset?.engine)) {
+      if (streamsIntoView(webview?.dataset?.engine)) {
         webview.focus();
         return;
       }
@@ -729,7 +734,7 @@ export default function IntegratedBrowser({
   const prompt = state.prompts?.[0] || null;
   const isFirefox = state.engine === "firefox";
   // Firefox and Chrome tabs stream from a browser Raticode runs without a window.
-  const isStreamed = isStreamedEngine(state.engine);
+  const isStreamed = streamsIntoView(state.engine);
   const engineName = engineLabel(state.engine);
   const agent = state.agent || (agentSessionId ? { label: agentLabel || "Rem", shared: false, log: [] } : null);
   const canUseWebFeatures = state.ready && !isPreview && /^https?:/i.test(String(state.url || ""));
@@ -757,6 +762,7 @@ export default function IntegratedBrowser({
     { label: "Developer tools", icon: Code, run: () => run("toggleDevTools"), disabled: !state.ready || isStreamed },
     { separator: true },
     { label: state.muted ? "Unmute tab" : "Mute tab", icon: state.muted ? Volume2 : VolumeX, run: () => run("mute", !state.muted), disabled: !state.ready },
+    ...(isPreview && state.remoteContent?.allowed ? [{ label: "Block remote content for this file", icon: WifiOff, run: () => run("setPreviewRemote", false), disabled: !state.ready }] : []),
     ...(onAskRem && (!isPreview || /^file:/i.test(String(state.url || ""))) ? [{ label: "Ask Rem about this page", icon: MessageSquare, run: () => void askRem(""), disabled: !state.ready }] : []),
     ...(canShareWithRem && !isRemTab && !isPreview && !agent ? [{ label: "Share this tab with Rem…", icon: Share2, run: () => onShareWithRem?.({ id: sessionIdRef.current, url: state.url, title: state.title }), disabled: !canUseWebFeatures }] : []),
   ];
@@ -895,6 +901,13 @@ export default function IntegratedBrowser({
       {!fullscreen ? <PromptBar prompt={prompt} onRespond={(response) => respondToPrompt(prompt, response)} /> : null}
       {!fullscreen && isFirefox && state.firefoxAddon ? <FirefoxAddonBar bridge={bridge} slug={state.firefoxAddon} /> : null}
       {!fullscreen && isStreamed && (state.signInBlocked || state.firefoxSignInBlocked) ? <FirefoxSignInBar name={engineName} onSignIn={() => bridge.firefoxSignIn(sessionIdRef.current)} /> : null}
+      {!fullscreen && isPreview ? (
+        <RemoteContentBar
+          external={state.external === true}
+          remoteContent={state.remoteContent}
+          onAllow={() => run("setPreviewRemote", true)}
+        />
+      ) : null}
       {!fullscreen ? (
         <BlockedPopupsBar
           popups={state.blockedPopups}

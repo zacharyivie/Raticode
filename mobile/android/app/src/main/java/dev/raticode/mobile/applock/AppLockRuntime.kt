@@ -57,8 +57,13 @@ internal object AppLockRuntime {
         })
     }
 
-    /** Voice mode keeps its own unlock rule. The notification screen has no window and closes at once. */
-    private fun counted(activity: Activity) = activity !is VoiceActivity && activity !is NotificationOpenActivity
+    /**
+     * Voice mode keeps its own unlock rule. The notification and link screens have no window and close at once. The viewer
+     * for files other apps open with Raticode runs in that app's task and shows only the file it was given, nothing of
+     * Raticode's.
+     */
+    private fun counted(activity: Activity) = activity !is VoiceActivity && activity !is NotificationOpenActivity &&
+        activity !is dev.raticode.mobile.open.OpenLinkActivity && activity !is dev.raticode.mobile.open.OpenFileActivity
 
     private class PhoneClock(private val context: Context) : AppLockClock {
         override fun now() = SystemClock.elapsedRealtime()

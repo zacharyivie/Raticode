@@ -21,7 +21,7 @@ export const docsSidebar: DefaultTheme.SidebarItem[] = [
   },
   {
     text: 'Starter workflows', collapsed: true,
-    items: [page('Overview', 'starters/'), page('Summarize new files', 'starters/summarize-new-files'), page('Daily report', 'starters/daily-report'), page('Webhook approval', 'starters/webhook-approval'), page('Test and fix', 'starters/test-and-fix'), page('Notify on condition', 'starters/notify-on-condition'), page('Jev demo', 'starters/jev-demo')],
+    items: [page('Overview', 'starters/'), page('Summarize new files', 'starters/summarize-new-files'), page('Daily report', 'starters/daily-report'), page('Webhook approval', 'starters/webhook-approval'), page('Test and fix', 'starters/test-and-fix'), page('Notify on condition', 'starters/notify-on-condition'), page('Jev demo', 'starters/jev-demo'), page('Summarize a link', 'starters/summarize-a-link')],
   },
   {
     text: 'Node reference', collapsed: true,
@@ -29,7 +29,7 @@ export const docsSidebar: DefaultTheme.SidebarItem[] = [
       ['Commands & scripts', ['bash-command', 'shell-script', 'python-script']],
       ['Agents', ['agent', 'common-llm-task']],
       ['Files & resources', ['read-file', 'write-file', 'copy-file', 'move-file', 'delete-file', 'file', 'folder', 'open-resource', 'prompt-file']],
-      ['Control & interaction', ['loop', 'break', 'workflow', 'approval-gate', 'notification', 'rem-prompt', 'rem-task', 'http-request']],
+      ['Control & interaction', ['loop', 'break', 'workflow', 'approval-gate', 'notification', 'rem-prompt', 'rem-task', 'http-request', 'read-web-page', 'mcp-tool']],
       ['Classification', ['jev']],
       ['Local retrieval', ['local-vectorize', 'local-search']],
     ].map(([text, names]) => ({ text: text as string, collapsed: true, items: (names as string[]).map(name => page(name, `nodes/${name}`)) }))],
@@ -40,7 +40,7 @@ export const docsSidebar: DefaultTheme.SidebarItem[] = [
   },
   {
     text: 'Teams & devices', collapsed: false,
-    items: [page('Swarms', 'advanced/swarms'), page('Organizations', 'advanced/organizations'), page('Desktop fleet', 'advanced/fleet'), page('Permissions & local data', 'advanced/security')],
+    items: [page('Swarms', 'advanced/swarms'), page('Organizations', 'advanced/organizations'), page('Social posts (experimental)', 'advanced/posts'), page('Desktop fleet', 'advanced/fleet'), page('Permissions & local data', 'advanced/security')],
   },
   {
     text: 'Raticode Mobile', collapsed: false,

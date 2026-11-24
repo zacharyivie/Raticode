@@ -1,0 +1,135 @@
+{
+ "paused": false,
+ "accounts": [
+  {
+   "name": "Test channel",
+   "platform": "discord",
+   "needs_reconnect": false
+  },
+  {
+   "name": "Me",
+   "platform": "linkedin",
+   "needs_reconnect": false
+  }
+ ],
+ "posts": [
+  {
+   "id": "post-15c3d7864c3d",
+   "title": "Raticode 0.6 is out",
+   "state": "proposed",
+   "lane": "review",
+   "created_by": "rem",
+   "filled_in": true,
+   "scheduled_at": "2026-11-20T16:00:00Z",
+   "timezone": "America/New_York",
+   "content_hash": "d3e995609e928d9a4a42ee86c70b2cd1626b48f30b5bdab08a5ce29fea8abe11",
+   "rationale": "The release landed today.",
+   "sources": [
+    {
+     "title": "Changelog",
+     "url": "https://raticode.dev/changelog"
+    }
+   ],
+   "flags": [
+    "New hashtags: #release",
+    "Drafted from outside pages; check it says what you mean."
+   ],
+   "timing": [],
+   "notes": [],
+   "unseen": false,
+   "variants": [
+    {
+     "id": "v-a7b803cd52",
+     "platform": "linkedin",
+     "platform_label": "LinkedIn",
+     "account_name": "Me",
+     "state": "pending",
+     "delivery": "tap_to_publish",
+     "text": "Raticode 0.6 is out.\n\nPosts now has templates, best-time hints and previews.\n\nWhat's new:\n- Templates\n- Best times\n\nhttps://raticode.dev/",
+     "text_cut": false,
+     "link": "",
+     "media_count": 0,
+     "chars": 137,
+     "limit": 3000,
+     "fold_at": 76,
+     "cost_usd": null,
+     "message": "",
+     "url": "",
+     "open_url": "",
+     "actions": []
+    },
+    {
+     "id": "v-c6207e6ffc",
+     "platform": "discord",
+     "platform_label": "Discord",
+     "account_name": "Test channel",
+     "state": "pending",
+     "delivery": "api",
+     "text": "**Raticode 0.6 is out** #release",
+     "text_cut": false,
+     "link": "",
+     "media_count": 0,
+     "chars": 32,
+     "limit": 2000,
+     "fold_at": null,
+     "cost_usd": null,
+     "message": "",
+     "url": "",
+     "open_url": "",
+     "actions": []
+    }
+   ],
+   "actions": [
+    "approve",
+    "approve_now",
+    "request_changes",
+    "decline"
+   ]
+  },
+  {
+   "id": "post-837415f3d458",
+   "title": "Weekly update",
+   "state": "scheduled",
+   "lane": "scheduled",
+   "created_by": "user",
+   "filled_in": false,
+   "scheduled_at": "2026-11-20T17:00:00Z",
+   "timezone": "UTC",
+   "content_hash": "d5287bc8bd0eb06fd33ff4f2306aeb4e3af4109a4e3a0b865a67dcda9230f592",
+   "rationale": "",
+   "sources": [],
+   "flags": [],
+   "timing": [],
+   "notes": [],
+   "unseen": false,
+   "variants": [
+    {
+     "id": "v-7f18a30170",
+     "platform": "patreon",
+     "platform_label": "Patreon",
+     "account_name": "Patreon",
+     "state": "ready_to_post",
+     "delivery": "manual",
+     "text": "This week: templates.",
+     "text_cut": false,
+     "link": "",
+     "media_count": 0,
+     "chars": 21,
+     "limit": 70000,
+     "fold_at": null,
+     "cost_usd": null,
+     "message": "",
+     "url": "",
+     "open_url": "https://www.patreon.com/posts/new",
+     "actions": [
+      "mark_posted"
+     ]
+    }
+   ],
+   "actions": [
+    "cancel"
+   ]
+  }
+ ],
+ "more": 0
+}

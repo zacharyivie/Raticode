@@ -1,0 +1,5 @@
+Rattish: 1
+Workflow:
+  name: Invalid read web page contract
+Node example:
+  type: read-web-page

@@ -107,6 +107,8 @@ if (scene === "attachments") {
   const messages = [
     { id: "ask", role: "user", body: "What happened with REM-5 and ENG-18?", created_at: at },
     { id: "answer", role: "rem", created_at: at, body: "REM-5 is in progress and ENG-18 is done. REM-404 isn't a ticket, UTF-8 is an encoding, and \x60REM-5\x60 in code stays as written." },
+    // A table names tickets too: there only the key shows, as a link, so the Ticket column stays narrow.
+    { id: "landed", role: "rem", created_at: at, body: "### Landed\\n\\n| Ticket | Win |\\n| --- | --- |\\n| REM-5 | Reconnecting after a dropped connection now retries the sync with backoff instead of failing |\\n| ENG-18 | The agent evaluation harness runs every night |\\n| REM-404 | Not a ticket, so it stays text |" },
     { id: "queued-a", role: "rem", created_at: at, body: "Started REM-5 from my To do while you were away.", self_work: { kind: "ticket", batch: "pass-1" }, work: card("a", "Fix the sync conflict on reconnect", "develop", "ticket", [ref("t5", "REM-5", "Fix the sync conflict on reconnect", "worked")]) },
     { id: "queued-b", role: "rem", created_at: at, body: "Ranking the project backlog while you were away.", self_work: { kind: "triage", batch: "pass-1" }, work: card("b", "Rank the backlog for project", "research", "triage", []) },
     { id: "queued-c", role: "rem", created_at: at, body: "Started research while you were away.", self_work: { kind: "research", batch: "pass-1" }, work: card("c", "Research new features for project", "research", "research", []) },
@@ -218,6 +220,15 @@ async function main() {
     assert.ok(overflow === false || (Array.isArray(overflow) && overflow.length === 0), `Overflow in ${name}: ${JSON.stringify(overflow)}`);
     fs.writeFileSync(path.join(out, `${name}.png`), (await win.webContents.capturePage()).toPNG());
   }
+  // Ticket keys in a table: only the key, as a button, inside its own cell and clear of the next column.
+  const tableKeys = `[...document.querySelectorAll('[data-message-id=landed] td .ticket-key-link')].map(el => {
+    const cell = el.closest('td').getBoundingClientRect(), next = el.closest('td').nextElementSibling?.getBoundingClientRect(), box = el.getBoundingClientRect();
+    return [el.tagName, el.textContent, el.getAttribute('aria-label'), box.left >= cell.left - .5 && box.right <= cell.right + .5, !next || box.right <= next.left + .5];
+  })`;
+  const tableKeysExpected = [
+    ["BUTTON", "REM-5", "Open ticket REM-5: Fix the sync conflict on reconnect (In progress)", true, true],
+    ["BUTTON", "ENG-18", "Open ticket ENG-18: Agent evaluation harness (Done), Eng", true, true],
+  ];
   const scenes = (process.env.CAPTURE_SCENES || "busy,running,blocked,new,menu,empty,offline,replying,history,reply,tickets,waiting").split(",");
   for (const theme of (process.env.CAPTURE_THEMES || "light,dark").split(",")) {
     for (const width of (process.env.CAPTURE_WIDTHS || "1440,980").split(",").map(Number)) {
@@ -255,6 +266,11 @@ async function main() {
           assert.equal(await evaluate("document.querySelector('.rem-checks')?.getAttribute('aria-label')"), "What the review found");
           assert.match(await evaluate("document.querySelector('[data-outcome=failed] .rem-check-reason').textContent"), /Run 14 of 20 timed out/);
           await click("Back to all tasks");
+          // Self-work objectives sit above the tasks as a checklist; a task names the one it serves.
+          assert.equal(await evaluate("(() => { const goals = document.querySelector('.rem-side-objectives'); const group = document.querySelector('.rem-side-group:not(.rem-side-objectives)'); return Boolean(goals && group && (goals.compareDocumentPosition(group) & Node.DOCUMENT_POSITION_FOLLOWING)); })()"), true, `Objectives above the tasks in ${tag}`);
+          assert.equal(await evaluate("document.querySelectorAll('.rem-objective input[type=checkbox]').length"), 3, `Objective checkboxes in ${tag}`);
+          assert.equal(await evaluate("document.querySelectorAll('.rem-objective input[type=checkbox]:checked').length"), 1, `Done objectives in ${tag}`);
+          assert.match(await evaluate("document.querySelector('.rem-task-objective')?.textContent || ''"), /Raise UX quality of the workflow studio/, `Task objective line in ${tag}`);
           // Running tasks spin in the sidebar; every work card links to its thread.
           assert.equal(await evaluate("document.querySelectorAll('.rem-side [data-kind=running] .rem-spin').length"), 2, `Running spinners in ${tag}`);
           assert.equal(await evaluate("[...document.querySelectorAll('.rem-work')].every(card => card.querySelector('.rem-work-links button'))"), true, `Thread link missing in ${tag}`);
@@ -284,6 +300,15 @@ async function main() {
           assert.equal(await evaluate(`${card}.querySelector('.rem-work-pending')`), null);
           assert.match(await evaluate("document.querySelector('[data-message-id=after-run-plan-1] .rem-msg-source').textContent"), /Queued until “Audit the API” finished/);
           await shot(tag);
+          // Dismiss all clears the blocked update in one click; the task on hold stays.
+          const attentionRows = "[...document.querySelectorAll('.rem-side [data-kind=attention] strong')].map(e => e.textContent).sort()";
+          assert.deepEqual(await evaluate(attentionRows), ["CSV export for Runs", "Write release notes for the export"]);
+          assert.equal(await evaluate("document.querySelector('.rem-side-dismiss-all small').textContent"), "1");
+          assert.match(await evaluate("document.querySelector('.rem-side-dismiss-all').title"), /1 that needs your answer or is on hold stays/);
+          await click("Dismiss all: 1 task update");
+          assert.deepEqual(await evaluate(attentionRows), ["Write release notes for the export"]);
+          assert.equal(await evaluate("document.querySelector('.rem-side-dismiss-all')"), null, "Nothing left to dismiss");
+          assert.equal(await evaluate("__rem.getState().tasks.find(t => t.id === 'task-csv-export').last_run.acknowledged"), true);
           await openTask("Write release notes for the export");
           assert.equal(await evaluate("[...document.querySelectorAll('.rem-status-actions button')].map(e => e.textContent).join('|')"), "Retry “CSV export for Runs”|Start now");
           assert.equal(await evaluate("document.querySelector('.rem-waits-for li').innerText.replace(/\\s+/g, ' ')"), "CSV export for Runs Needs you");
@@ -464,12 +489,21 @@ async function main() {
             ["BUTTON", "", "Open ticket REM-12: Voice shortcuts (Backlog, waiting for your approval). Created by this task"],
             ["SPAN", "true", "REM-13: Offline mode, no longer on the board"],
           ]);
+          assert.deepEqual(await evaluate(tableKeys), tableKeysExpected, `Table ticket keys in ${tag}`);
+          assert.equal(await evaluate("document.querySelectorAll('[data-message-id=landed] .ticket-pill').length"), 0, "A table shows keys, not pills");
+          assert.match(await evaluate("document.querySelector('[data-message-id=landed] tbody tr:last-child td').textContent"), /^REM-404$/);
           await shot(tag);
           // Keyboard: Tab reaches a pill and Enter opens the ticket on the board.
           await evaluate("document.querySelector('[data-message-id=answer] .ticket-pill').focus()");
           assert.equal(await evaluate("document.activeElement.classList.contains('ticket-pill')"), true);
           await win.webContents.sendInputEvent({ type: "keyDown", keyCode: "Enter" }); await win.webContents.sendInputEvent({ type: "char", keyCode: "\r" }); await win.webContents.sendInputEvent({ type: "keyUp", keyCode: "Enter" }); await sleep(200);
           assert.deepEqual(await evaluate("window.__kanbanOpened"), ["t5"]);
+          // A key in a table opens its ticket the same way, by click or by keyboard.
+          await evaluate("document.querySelector('[data-message-id=landed] .ticket-key-link').focus()");
+          assert.equal(await evaluate("document.activeElement.textContent"), "REM-5");
+          await win.webContents.sendInputEvent({ type: "keyDown", keyCode: "Enter" }); await win.webContents.sendInputEvent({ type: "char", keyCode: "\r" }); await win.webContents.sendInputEvent({ type: "keyUp", keyCode: "Enter" }); await sleep(200);
+          await evaluate("[...document.querySelectorAll('[data-message-id=landed] .ticket-key-link')].at(-1).click()"); await sleep(200);
+          assert.deepEqual(await evaluate("window.__kanbanOpened"), ["t5", "t5", "o18"]);
           // A renamed ticket shows its new title on the next poll; a deleted one turns back into text.
           await evaluate("window.__tickets['REM-5'].title = 'Fix sync after reconnect'; delete window.__tickets['ENG-18']; __rem.refreshRemHome()"); await sleep(400);
           assert.deepEqual((await evaluate(pills)).map(item => item[1]), ["REM-5Fix sync after reconnect"]);
@@ -592,6 +626,10 @@ async function main() {
           await evaluate(`document.querySelector('.rem-stream').scrollTop = ${top}`); await sleep(150);
           const found = await evaluate(paneOverflow);
           assert.deepEqual(found, { scrollers: [], outside: [] }, `Rem side pane ${theme} ${width}px ${scene} scrolls sideways: ${JSON.stringify(found)}`);
+        }
+        if (scene === "tickets") {
+          await evaluate("document.querySelector('[data-message-id=landed]').scrollIntoView()"); await sleep(150);
+          assert.deepEqual(await evaluate(tableKeys), tableKeysExpected, `Table ticket keys in the ${width}px side pane`);
         }
         fs.writeFileSync(path.join(out, `pane-${theme}-${width}-${scene}.png`), (await win.webContents.capturePage()).toPNG());
       }

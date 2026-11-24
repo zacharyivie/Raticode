@@ -12,11 +12,77 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 from gofer.core.http import read_response_bytes
 from gofer.core.prompt_envelope import AgentResources, McpReference
+from gofer.ui.brain_summaries import SUMMARY_MAX_CHARS, SUMMARY_RULE, checked_summary, with_summary
+from gofer.ui.case_twins import refuse_twin
 from gofer.ui.report_links import link_warning, rewrite_links
 from gofer.utils.atomic_output import atomic_binary_output
 
 REPORT_FORMATS = {"md", "html", "slides", "pdf"}
 MAX_REPORT_BYTES = 2 * 1024 * 1024
+
+# One instruction for citing Second Brain sources, shared by second_brain.save_note,
+# rem_artifacts.save_report and the Second Brain rules, so every saver hears the same.
+CITATION_RULES = (
+    "To cite Second Brain sources, pass evidence with one entry per citation, in the "
+    "order the report numbers them [1], [2], and so on. Each entry needs docId (the "
+    "documentId that search or read_note returned) and quote, copied exactly from one "
+    "passage. blockId and version are optional: without them Raticode finds the quote "
+    "in the source's current version and uses the one passage that contains it. Add "
+    "blockId when the quote appears in more than one passage. Raticode checks every "
+    "entry; a bad entry is left out and marked with the reason in the reply while the "
+    "report and the other citations are saved. Pass title (the report's name) and "
+    "question (what it answers) too. This registers checkable citations in Reports."
+)
+
+
+def evidence_schema() -> dict[str, Any]:
+    """JSON schema for the evidence argument of a report-saving tool."""
+    return {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "docId": {"type": "string"},
+                "blockId": {"type": "string"},
+                "version": {"type": "string"},
+                "quote": {"type": "string"},
+            },
+            "required": ["docId", "quote"],
+            "additionalProperties": False,
+        },
+    }
+
+
+FORMAT_NAMES = {"md": "Markdown", "html": "standalone HTML", "slides": "Slides", "pdf": "PDF"}
+
+# The rules tool of the reports and rem_artifacts servers. Its reply is the only place a
+# turn gets the full report format and design rules; the prompt and the save tool only
+# point to it.
+RULES_TOOL: dict[str, Any] = {
+    "name": "rules",
+    "description": "Read the report format and design rules and where reports are saved. "
+    "Call before writing a report.",
+    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
+}
+
+
+def save_report_description(where: str, report_format: str) -> str:
+    """A save_report description: what it does, its arguments and the format rule."""
+    return (
+        f"Save a report {where} and return its local link. Existing files are kept. "
+        "Arguments: path (relative to that folder), content (Markdown or HTML; PDF takes "
+        "HTML source and Slides take section.slide elements) and optional format. "
+        f"Default format: {FORMAT_NAMES[report_format]}, for every informational file "
+        "unless the user asks for another. Call rules for the full format and design rules."
+    )
+
+
+def theme_file_args(data_dir: Path, config: dict[str, Any]) -> list[str]:
+    """Command-line arguments that hand a tool server the turn's report theme."""
+    from gofer.ui.report_themes import write_theme_file
+
+    return ["--report-theme-file", str(write_theme_file(data_dir, config))]
 
 
 # Both stay OS errors for existing callers and are ValueErrors so tool servers
@@ -244,12 +310,40 @@ def _free_name(target: Path, root: Path) -> str:
     return target.with_name(f"{stem}-new{target.suffix}").relative_to(root).as_posix()
 
 
-def save_report(root: Path, relative: str, content: Any, report_format: str) -> dict[str, Any]:
+def summary_schema() -> dict[str, Any]:
+    """JSON schema for the optional summary argument of a report-saving tool.
+
+    The length is checked by the saver, whose error says how long the summary was,
+    rather than by a schema maxLength, which would echo the whole text back.
+    """
+    return {
+        "type": "string",
+        "description": f"Plain text, at most {SUMMARY_MAX_CHARS} characters.",
+    }
+
+
+def save_report(
+    root: Path, relative: str, content: Any, report_format: str, summary: Any = None
+) -> dict[str, Any]:
     """Save a new report under ``root`` and return its path and link.
+
+    ``summary`` (plain text, at most 600 characters) is written into the file: a
+    ``summary:`` front-matter field in Markdown, a ``<meta name="description">`` in
+    HTML, Slides and the HTML source kept beside a PDF.
 
     Absolute links to files inside ``root`` are rewritten relative to the report.
     Links to temporary folders or outside ``root`` are kept as written and listed
     in ``warnings`` so the caller can tell the author.
+    """
+    return write_report(root, relative, content, report_format, summary)[0]
+
+
+def write_report(
+    root: Path, relative: str, content: Any, report_format: str, summary: Any = None
+) -> tuple[dict[str, Any], bytes]:
+    """save_report, also returning the bytes written at the report's path.
+
+    Every check that can refuse the report runs before anything is written.
     """
     if report_format not in REPORT_FORMATS:
         raise ValueError("Choose Markdown, HTML, Slides, or PDF.")
@@ -273,7 +367,13 @@ def save_report(root: Path, relative: str, content: Any, report_format: str) -> 
         raise ValueError(f"Save reports with the configured .{extension} extension.")
     if not isinstance(content, str) or len(content.encode()) > MAX_REPORT_BYTES:
         raise ValueError("Provide report text of at most 2 MB.")
+    content = with_summary(content, checked_summary(summary), markdown=report_format == "md")
+    # Before the exists check: on macOS a twin "exists" under the new spelling.
+    shown_target = target.relative_to(root).as_posix()
+    refuse_twin(root, shown_target)
     companion = root / (relative + ".html") if report_format == "pdf" else None
+    if companion:
+        refuse_twin(root, shown_target + ".html")
     if target.exists() or (root / relative).is_symlink() or (companion and companion.exists()):
         shown = target.relative_to(root).as_posix()
         raise ReportExistsError(
@@ -305,12 +405,16 @@ def save_report(root: Path, relative: str, content: Any, report_format: str) -> 
             with atomic_binary_output(source, exclusive=True) as source_output:
                 source_output.write(prepared.encode("utf-8"))
             result["sourcePath"] = str(source)
-    return result
+    return result, data
 
 
 def with_report_outputs(
-    workflow: dict[str, Any] | None, cli_path: Path | None, root: Path
+    workflow: dict[str, Any] | None,
+    cli_path: Path | None,
+    root: Path,
+    data_dir: Path | None = None,
 ) -> dict[str, Any] | None:
+    """Add the reports tool server. With data_dir, its rules tool carries the report theme."""
     config = (workflow or {}).get("remReportTheme") or {}
     # Managed read-only workers use the supervisor's narrow artifact grant;
     # reviewers receive guidance without gaining an output write capability.
@@ -331,7 +435,15 @@ def with_report_outputs(
             name="reports",
             type="stdio",
             command=str(cli_path),
-            args=["ui", "reports", "--root", str(root), "--report-format", config["format"]],
+            args=[
+                "ui",
+                "reports",
+                "--root",
+                str(root),
+                "--report-format",
+                config["format"],
+                *(theme_file_args(data_dir, config) if data_dir is not None else []),
+            ],
         )
     )
     return {**(workflow or {}), "remResources": resources.model_dump()}
@@ -366,27 +478,28 @@ class ReportTools:
                 str(arguments.get("path", "")),
                 arguments.get("content"),
                 arguments.get("format", self.report_format),
+                arguments.get("summary"),
             )
         raise ValueError("Unknown report tool.")
 
 
-def serve_reports(root: Path, report_format: str) -> None:
+def serve_reports(root: Path, report_format: str, theme: dict[str, Any] | None = None) -> None:
     from gofer.ui.second_brain import serve_stdio
 
-    reports = ReportTools(root, report_format)
+    reports = ReportTools(root, report_format, theme=theme)
     definitions = [
         {
             "name": "save_report",
-            "description": reports.call("rules", {})
-            + " Supply Markdown or HTML content. PDF accepts HTML source; "
-            "Slides accepts section.slide. Links to files in the folder are saved as "
-            "relative paths; links to /tmp or outside it are kept and returned as warnings.",
+            "description": save_report_description(f"relative to {reports.root}", report_format)
+            + " Links to files in the folder are saved as relative paths; links to /tmp or "
+            "outside it are kept and returned as warnings. " + SUMMARY_RULE,
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
                     "content": {"type": "string"},
                     "format": {"type": "string", "enum": sorted(REPORT_FORMATS)},
+                    "summary": summary_schema(),
                 },
                 "required": ["path", "content"],
                 "additionalProperties": False,
@@ -396,6 +509,13 @@ def serve_reports(root: Path, report_format: str) -> None:
                 "destructiveHint": False,
                 "openWorldHint": False,
             },
-        }
+        },
+        RULES_TOOL,
     ]
-    serve_stdio(reports.call, definitions, reports.call("rules", {}), "raticode-reports")
+    serve_stdio(
+        reports.call,
+        definitions,
+        f"Reports save to {reports.root}. Call rules before writing a report and include the "
+        "link save_report returns in your response.",
+        "raticode-reports",
+    )

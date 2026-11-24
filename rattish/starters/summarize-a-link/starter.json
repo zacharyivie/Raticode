@@ -1,0 +1,12 @@
+{
+  "starterVersion": 1,
+  "id": "summarize-a-link",
+  "name": "Summarize a link",
+  "summary": "Reads the web page behind a link you share from your phone or copy on the desktop, and sends a short summary to your phone.",
+  "order": 7,
+  "docsPath": "/docs/starters/summarize-a-link",
+  "providers": [
+    "claude-code"
+  ],
+  "secrets": []
+}

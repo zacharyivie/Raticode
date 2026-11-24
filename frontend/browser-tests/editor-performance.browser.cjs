@@ -17,7 +17,9 @@ let server;
 app.whenReady().then(async () => {
   const { createServer } = await import("vite");
   const baseline = process.env.GOFER_PERF_BASELINE;
-  server = await createServer({ cacheDir: testViteCacheDir(), root, configFile: false, server: { host: "127.0.0.1", port: 0 }, plugins: [
+  // Same Monaco bundling fixes as vite.config.js (DOMPurify, language workers).
+  const { monacoPatches } = await import("../dev/monaco-patches.js");
+  server = await createServer({ cacheDir: testViteCacheDir(), root, configFile: false, optimizeDeps: { rolldownOptions: { plugins: [monacoPatches()] } }, server: { host: "127.0.0.1", port: 0 }, plugins: [monacoPatches(),
     {
       name: "editor-measurement",
       enforce: "pre",

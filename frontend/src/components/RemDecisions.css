@@ -1,0 +1,219 @@
+/* Rem's decisions: the side pane section under Objectives and the chat card.
+   Both use the same pieces; each place maps them onto its own palette. */
+
+.rem-side-decisions {
+  --dec-ink: rgb(var(--color-ink));
+  --dec-muted: rgb(var(--color-muted));
+  --dec-line: rgb(var(--color-line));
+  --dec-accent: rgb(var(--color-brand));
+  --dec-accent-soft: rgb(var(--color-brand) / .12);
+  --dec-attention: rgb(var(--color-warning));
+  --dec-attention-soft: rgb(var(--color-warning-soft));
+  --dec-danger: rgb(var(--color-danger, 185 28 28));
+  margin: 2px 0 4px; padding-bottom: 4px; border-bottom: 1px solid rgb(var(--color-line) / .7);
+}
+.rem-decision-card {
+  --dec-ink: var(--rem-ink);
+  --dec-muted: var(--rem-muted);
+  --dec-line: var(--rem-line);
+  --dec-accent: var(--rem-accent);
+  --dec-accent-soft: var(--rem-accent-soft);
+  --dec-attention: var(--rem-attention);
+  --dec-attention-soft: var(--rem-attention-soft);
+  --dec-danger: var(--rem-danger);
+}
+
+/* Heading: the count shows only when something waits, in the attention colour. */
+.rem-side-decisions .rem-side-group-heading small[data-waiting] { color: var(--dec-attention); font-weight: 600; }
+.rem-decisions-scope { flex: none; height: 22px; padding: 0 7px; border: 1px solid rgb(var(--color-line)); border-radius: 6px; color: var(--dec-muted); font-size: 11px; white-space: nowrap; }
+.rem-decisions-scope:hover { color: var(--dec-ink); background: rgb(var(--color-ink) / .06); }
+.rem-decisions { padding: 0 2px 2px 4px; }
+.rem-decisions ul { margin: 0; padding: 0; list-style: none; }
+.rem-decisions-sub { margin: 6px 0 3px; padding: 0 5px; color: var(--dec-muted); font-size: 10.5px; font-weight: 600; }
+.rem-decisions-sub, .rem-decisions-sub button { display: flex; align-items: center; gap: 4px; }
+.rem-decisions-sub button { width: 100%; padding: 0; color: inherit; font: inherit; }
+.rem-decisions-sub button:hover { color: var(--dec-ink); }
+.rem-decisions-sub small { margin-left: auto; font-size: 10px; font-variant-numeric: tabular-nums; }
+.rem-decisions-empty { margin: 0; padding: 2px 10px 6px 23px; font-size: 11.5px; line-height: 1.45; color: var(--dec-muted); }
+.rem-decisions-elsewhere, .rem-decisions-more { display: block; margin: 2px 0 4px; padding: 2px 5px; border-radius: 5px; color: var(--dec-accent); font-size: 11.5px; text-align: left; }
+.rem-decisions-elsewhere:hover, .rem-decisions-more:hover { text-decoration: underline; text-underline-offset: 2px; }
+/* Questions past the three waiting cards: a quiet count, not a card. */
+.rem-decisions-queued { margin: 0 0 6px; padding: 0 5px; color: var(--dec-muted); font-size: 11.5px; }
+
+/* Plan with me: a plan's questions under its title, with a thin bar for how many are answered. */
+.rem-decision-plan { margin: 2px 0 8px; padding: 6px 0 0 8px; border-left: 2px solid var(--dec-accent-soft); }
+.rem-decision-plan-head { display: flex; align-items: center; gap: 5px; padding-right: 4px; color: var(--dec-ink); font-size: 12px; }
+.rem-decision-plan-head svg { flex: none; color: var(--dec-accent); }
+.rem-decision-plan-head strong { min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rem-decision-plan-head small { flex: none; margin-left: auto; color: var(--dec-muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.rem-decision-plan-bar { display: block; height: 3px; margin: 4px 4px 6px 18px; border-radius: 2px; background: rgb(var(--color-line) / .7); overflow: hidden; }
+.rem-decision-plan-bar > span { display: block; height: 100%; background: var(--dec-accent); }
+.rem-decision-plan .rem-decisions-queued { padding-left: 0; }
+
+/* A request waiting for the user: question, the recommended answer, evidence, actions. */
+.rem-decision { margin: 0 0 6px; padding: 8px 9px; border: 1px solid rgb(var(--color-line) / .8); border-radius: 8px; font-size: 12px; line-height: 1.45; }
+.rem-decision[data-status=pending] { border-left: 3px solid var(--dec-attention); }
+.rem-decision-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 4px; }
+.rem-decision-place { color: var(--dec-muted); font-size: 10.5px; }
+.rem-decision-pill { display: inline-flex; align-items: center; height: 17px; padding: 0 6px; border-radius: 999px; background: var(--dec-accent-soft); color: var(--dec-accent); font-size: 10.5px; font-weight: 600; white-space: nowrap; }
+.rem-decision-question { margin: 0; color: var(--dec-ink); font-weight: 500; overflow-wrap: anywhere; }
+.rem-decision-reopened { margin: 3px 0 0; color: var(--dec-attention); font-size: 11px; }
+/* Who asked a waiting question, when, and what waits on it; opens the task when it has one. */
+.rem-decision-asked { display: block; margin: 2px 0 0; padding: 0; border: 0; background: none; color: var(--dec-muted); font: inherit; font-size: 11px; text-align: left; overflow-wrap: anywhere; }
+button.rem-decision-asked { cursor: pointer; }
+button.rem-decision-asked:hover { color: var(--dec-ink); text-decoration: underline; }
+.rem-decision-asked[data-waits] { color: var(--dec-attention); }
+/* The answer in force while an Ask again card waits for the user. */
+.rem-decision-current { margin: 5px 0 0; color: var(--dec-ink); font-size: 11.5px; overflow-wrap: anywhere; }
+.rem-decision-current small { margin-right: 4px; color: var(--dec-muted); font-size: 10.5px; }
+.rem-decision-answer { display: grid; gap: 1px; margin: 6px 0 0; padding: 5px 8px; border-radius: 6px; background: var(--dec-accent-soft); }
+.rem-decision-answer small, .rem-decision-recommends small { color: var(--dec-muted); font-size: 10.5px; }
+.rem-decision-answer strong { color: var(--dec-ink); font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
+.rem-decision-why { color: var(--dec-muted); font-size: 11px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.rem-decision-tried { margin: 5px 0 0; color: var(--dec-muted); font-size: 11.5px; overflow-wrap: anywhere; }
+.rem-decision-tried b { font-weight: 600; }
+.rem-decision-evidence { display: flex; flex-wrap: wrap; gap: 2px 9px; margin: 5px 0 0; color: var(--dec-muted); font-size: 10.5px; line-height: 15px; }
+.rem-decision-evidence > span { display: inline-flex; gap: 3px; min-width: 0; max-width: 100%; }
+.rem-decision-evidence b { flex: none; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; font-size: 9.5px; }
+.rem-decision-evidence span span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.rem-decision-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 7px; }
+.rem-decision-actions button, .rem-decision-form-actions button { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 9px; border: 1px solid var(--dec-line); border-radius: 6px; color: var(--dec-ink); font-size: 11.5px; }
+.rem-decision-actions button:hover:not(:disabled) { border-color: var(--dec-accent); color: var(--dec-accent); }
+.rem-decision-actions button[data-primary], .rem-decision-form-actions button[type=submit] { border-color: transparent; background: var(--dec-accent); color: #fff; }
+.rem-decision-actions button[data-primary]:hover:not(:disabled) { color: #fff; filter: brightness(1.08); }
+.rem-decision-actions .rem-decision-quiet { margin-left: auto; border-color: transparent; color: var(--dec-muted); }
+.rem-decision-actions button:disabled, .rem-decision-form-actions button:disabled { opacity: .55; }
+.rem-decision-error { margin: 5px 0 0; color: var(--dec-danger); font-size: 11px; }
+.rem-decision-form { display: grid; gap: 5px; margin-top: 7px; }
+.rem-decision-form textarea { width: 100%; min-width: 0; resize: vertical; padding: 5px 7px; border: 1px solid var(--dec-line); border-radius: 6px; background: transparent; color: var(--dec-ink); font: inherit; font-size: 12px; }
+.rem-decision-form textarea:focus { outline: 2px solid color-mix(in srgb, var(--dec-accent) 50%, transparent); outline-offset: 0; }
+.rem-decision-form-actions { display: flex; gap: 6px; }
+
+/* Decided and closed: one line each that opens into its facts, actions in the menu. */
+.rem-decision-row { position: relative; display: flex; align-items: flex-start; gap: 6px; padding: 3px 4px 3px 5px; border-radius: 6px; font-size: 12px; line-height: 17px; }
+.rem-decision-row:hover, .rem-decision-row:focus-within { background: rgb(var(--color-ink) / .06); }
+.rem-decision-line { flex: 1; min-width: 0; }
+.rem-decision-line-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; color: var(--dec-muted); }
+.rem-decision-line-text strong { color: var(--dec-ink); font-weight: 600; }
+.rem-decision-line small { display: block; font-size: 10.5px; line-height: 14px; color: var(--dec-muted); }
+.rem-decision-row[data-closed] .rem-decision-line-text { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--dec-muted) 60%, transparent); }
+.rem-decision-row[data-editing], .rem-decision-row[data-confirming] { display: block; padding: 7px 8px; background: rgb(var(--color-ink) / .06); }
+.rem-decision-row[data-confirming] p { margin: 0 0 7px; overflow-wrap: anywhere; }
+/* A decided or closed row opens like a record: chevron, line, then its facts below. */
+.rem-decision-rule { border-radius: 6px; }
+.rem-decision-rule[data-open] { margin: 2px 0 4px; background: rgb(var(--color-ink) / .04); }
+.rem-decision-rule > .rem-decision-error { margin: 0 0 3px 20px; }
+.rem-decision-row-toggle { display: flex; flex: 1; min-width: 0; align-items: flex-start; gap: 4px; padding: 0; color: inherit; font: inherit; text-align: left; }
+.rem-decision-row-toggle > svg { flex: none; margin-top: 3px; color: var(--dec-muted); }
+button.rem-decision-row { width: 100%; padding: 3px 4px 3px 5px; }
+.rem-decision-record-detail > .rem-decision-place { margin: 0; }
+.rem-decision-decided { margin: 4px 0 0; color: var(--dec-ink); font-size: 11px; }
+.rem-decision-record-detail .rem-decision-check { margin: 4px 0 0; font-size: 11px; }
+.rem-decisions ul.rem-decision-evidence-list { display: grid; gap: 3px; margin: 5px 0 0; }
+.rem-decision-evidence-list li { min-width: 0; color: var(--dec-muted); font-size: 10.5px; line-height: 15px; overflow-wrap: anywhere; }
+.rem-decision-evidence-list b { font-weight: 600; text-transform: uppercase; letter-spacing: .04em; font-size: 9.5px; }
+.rem-decision-evidence-ref { color: var(--dec-ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.rem-decision-evidence-list small { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-left: 2px; padding-left: 6px; border-left: 2px solid var(--dec-line); font-size: 10.5px; white-space: pre-wrap; }
+.rem-decision-history summary small { margin-left: 3px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.rem-decision-history ol { display: grid; gap: 3px; margin: 3px 0 0 12px; padding: 0; list-style: none; }
+.rem-decision-history li { display: grid; grid-template-columns: 70px 1fr; gap: 6px; font-size: 11px; line-height: 15px; }
+.rem-decision-history time { color: var(--dec-muted); font-variant-numeric: tabular-nums; }
+.rem-decision-history li > span { min-width: 0; color: var(--dec-ink); overflow-wrap: anywhere; }
+.rem-decision-history li b { font-weight: 600; }
+.rem-decision-history li small { display: block; color: var(--dec-muted); font-size: 10.5px; }
+
+.rem-decision-menu { opacity: 0; }
+.rem-decision-row:hover .rem-decision-menu, .rem-decision-row:focus-within .rem-decision-menu, .rem-decision-menu[data-open] { opacity: 1; }
+@media (hover: none) { .rem-decision-menu { opacity: 1; } }
+
+/* The chat card under a task update. */
+.rem-decision-card { margin-top: 8px; max-width: 520px; padding: 10px 12px; border: 1px solid var(--dec-line); border-radius: 12px; background: var(--rem-raised); font-size: 12.5px; line-height: 1.45; }
+.rem-decision-card[data-status=pending] { border-left: 3px solid var(--dec-attention); }
+.rem-decision-card .rem-decision-question { font-size: 13px; }
+.rem-decision-card-title { display: flex; align-items: center; gap: 6px; margin: 0 0 4px; color: var(--dec-accent); font-size: 12px; }
+.rem-decision-card[data-fallback] .rem-decision-card-title { color: var(--dec-attention); }
+.rem-decision-card-title strong { font-weight: 600; }
+.rem-decision-id { margin-left: auto; color: var(--dec-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.rem-decision-recommends { margin: 6px 0 0; padding: 5px 9px; border-radius: 7px; background: var(--dec-accent-soft); overflow-wrap: anywhere; }
+.rem-decision-recommends strong { font-weight: 600; }
+.rem-decision-card .rem-decision-why { margin: 4px 0 0; }
+.rem-decision-found { margin: 6px 0 0; }
+.rem-decision-found small, .rem-decision-candidate small { color: var(--dec-muted); font-size: 11px; }
+.rem-decision-found p { margin: 1px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.rem-decision-candidate { margin: 6px 0 0; overflow-wrap: anywhere; }
+.rem-decision-settled { display: flex; align-items: center; gap: 5px; margin: 4px 0 0; color: var(--dec-muted); }
+.rem-decision-card[data-settled=decided] .rem-decision-settled { color: var(--rem-success); }
+.rem-decision-card[data-settled] { padding: 8px 12px; }
+.rem-decision-card[data-settled] .rem-decision-question { color: var(--dec-muted); font-weight: 400; font-size: 12.5px; }
+
+/* Conflict fixes and record pills. */
+.rem-decision-pill[data-tone=conflict] { background: var(--dec-attention-soft); color: var(--dec-attention); }
+.rem-decision-pill[data-tone=record] { background: transparent; border: 1px solid var(--dec-line); color: var(--dec-muted); }
+.rem-decision-pill[data-tone=confirmed] { background: rgb(var(--color-success-soft)); color: rgb(var(--color-success)); }
+.rem-decision-conflict { margin: 4px 0 0; color: var(--dec-attention); font-size: 11.5px; overflow-wrap: anywhere; }
+.rem-decision-conflict b { font-weight: 600; }
+
+/* A record's scope chips and folded parts. */
+.rem-decisions ul.rem-decision-scope, .rem-decision-card ul.rem-decision-scope { display: flex; flex-wrap: wrap; gap: 3px; margin: 6px 0 0; padding: 0; list-style: none; }
+.rem-decision-scope li { max-width: 100%; padding: 0 6px; border-radius: 4px; background: rgb(var(--color-ink) / .06); color: var(--dec-ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; line-height: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rem-decision-scope li[data-kind=forbids] { background: color-mix(in srgb, var(--dec-danger) 10%, transparent); color: var(--dec-danger); }
+.rem-decision-scope-count { margin-left: 5px; color: var(--dec-muted); font-family: inherit; font-size: 10px; }
+.rem-decision-scope li[data-warn] { outline: 1px dashed var(--dec-attention); outline-offset: -1px; }
+.rem-decision-scope li[data-warn] .rem-decision-scope-count { color: var(--dec-attention); font-weight: 600; }
+.rem-decision-path-warnings { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; color: var(--dec-attention); font-size: 11px; overflow-wrap: anywhere; }
+.rem-decision-fold { margin: 4px 0 0; font-size: 11.5px; }
+.rem-decision-fold summary { cursor: pointer; color: var(--dec-muted); font-size: 11px; font-weight: 600; }
+.rem-decision-fold summary:hover { color: var(--dec-ink); }
+.rem-decision-fold p { margin: 2px 0 0 12px; color: var(--dec-ink); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* A design decision in force: one line that unfolds into its record. */
+.rem-decision-record { border-radius: 6px; font-size: 12px; line-height: 17px; }
+.rem-decision-record[data-open] { margin: 2px 0 4px; background: rgb(var(--color-ink) / .04); }
+.rem-decision-record-toggle { display: flex; align-items: flex-start; gap: 4px; width: 100%; padding: 3px 4px 3px 5px; border-radius: 6px; color: inherit; font: inherit; text-align: left; }
+.rem-decision-record-toggle > svg { flex: none; margin-top: 3px; color: var(--dec-muted); }
+.rem-decision-record-toggle:hover { background: rgb(var(--color-ink) / .06); }
+.rem-decision-record-detail { padding: 2px 8px 8px 20px; }
+.rem-decision-about { margin: 0; color: var(--dec-muted); font-size: 11.5px; overflow-wrap: anywhere; }
+.rem-decision-sentence { margin: 2px 0 0; color: var(--dec-ink); font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
+.rem-decision-record-detail .rem-decision-why { margin: 3px 0 0; }
+.rem-decision-file { display: flex; align-items: center; gap: 4px; margin: 6px 0 0; color: var(--dec-muted); font-size: 10.5px; }
+.rem-decision-file span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.rem-decision-note { margin: 4px 0 0; color: var(--dec-muted); font-size: 11px; overflow-wrap: anywhere; }
+.rem-decision-note[data-tone=attention] { color: var(--dec-attention); }
+.rem-decision-record-detail p.rem-decision-check { margin: 4px 0 0; font-size: 11px; }
+.rem-decision-confirm { margin-top: 7px; }
+.rem-decision-confirm p { margin: 0 0 6px; }
+.rem-decision-actions .rem-decision-quiet[data-tight] { margin-left: 0; }
+
+/* The record form: one labelled field per part. */
+.rem-decision-record-form { gap: 6px; }
+.rem-decision-form-title { margin: 0; color: var(--dec-ink); font-size: 11.5px; font-weight: 600; }
+.rem-decision-form-title small { color: var(--dec-muted); font-weight: 400; }
+.rem-decision-field { display: grid; gap: 2px; }
+.rem-decision-field > span { color: var(--dec-muted); font-size: 10.5px; font-weight: 600; }
+.rem-decision-field > span small { font-weight: 400; }
+.rem-decision-form input { width: 100%; min-width: 0; height: 24px; padding: 0 7px; border: 1px solid var(--dec-line); border-radius: 6px; background: transparent; color: var(--dec-ink); font: inherit; font-size: 12px; }
+.rem-decision-form input:focus { outline: 2px solid color-mix(in srgb, var(--dec-accent) 50%, transparent); outline-offset: 0; }
+.rem-decisions-tools { display: flex; flex-wrap: wrap; gap: 4px; }
+
+.rem-decision-check { color: var(--dec-muted); }
+.rem-decision-check[data-passed="false"] { color: var(--dec-danger); }
+.rem-decisions-scan { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 6px; }
+.rem-decisions-scan button { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; padding: 3px 7px; border-radius: 6px; background: transparent; color: var(--dec-muted); border: 1px dashed var(--dec-line); }
+.rem-decisions-scan button:hover:not(:disabled) { color: var(--dec-ink); border-color: var(--dec-accent); border-style: solid; }
+.rem-decisions-scan button:disabled { opacity: .6; }
+.rem-decisions-scan small { font-size: 11px; color: var(--dec-muted); }
+.rem-decisions-scan small[data-failed="true"] { color: var(--dec-danger); }
+
+/* A change the user asked Rem for in chat: each part's old text above the new, then OK. */
+.rem-decision-edit[data-waiting] { border-left: 3px solid var(--dec-accent); }
+.rem-decision-edit[data-settled] { opacity: .85; }
+.rem-decision-edit-place { color: var(--dec-muted); font-size: 11px; }
+.rem-decision-edit-changes { display: grid; gap: 8px; margin: 8px 0 0; }
+.rem-decision-edit-change dt { margin: 0 0 3px; color: var(--dec-muted); font-size: 11px; font-weight: 600; letter-spacing: .02em; }
+.rem-decision-edit-change dd { display: grid; grid-template-columns: 46px 1fr; gap: 6px; margin: 0; padding: 4px 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.rem-decision-edit-before { border-radius: 7px 7px 0 0; background: rgb(127 127 127 / .08); color: var(--dec-muted); }
+.rem-decision-edit-before span:last-child { text-decoration: line-through; text-decoration-color: rgb(127 127 127 / .55); }
+.rem-decision-edit-after { border-radius: 0 0 7px 7px; background: var(--dec-accent-soft); color: var(--dec-ink); }
+.rem-decision-edit-side { color: var(--dec-muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; padding-top: 1px; }
+.rem-decisions-waiting > li > .rem-decision-edit { margin-top: 0; max-width: none; }

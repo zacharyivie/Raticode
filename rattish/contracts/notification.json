@@ -3,6 +3,7 @@
   "contract_version": 1,
   "node_type": "notification",
   "runtime_handler": "raticode.notification",
+  "catalog": {"category": "approvals", "summary": "Send a desktop, webhook or email notice", "docs_path": "/docs/nodes/notification"},
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",

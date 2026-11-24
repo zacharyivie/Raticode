@@ -248,7 +248,7 @@ async function movePath(source, destination, { authorizeSource, authorizeDestina
         await copyPath(sourceRoot, destinationRoot, { authorizeSource, authorizeDestination });
         await verifySource();
         await verifyDestination();
-        if (!sameFile(stat, await fsp.lstat(entry)) || beforeCopy !== await treeVersion(sourceRoot, authorizeSource)) throw new Error("Source changed while moving. The original and copied destination were kept.");
+        if (!sameFile(stat, await fsp.lstat(entry)) || beforeCopy !== await treeVersion(sourceRoot, authorizeSource)) throw new Error("Source changed while moving. The original and copied destination were kept.", { cause: error });
         await fsp.rm(entry, { recursive: stat.isDirectory() });
       }
     });

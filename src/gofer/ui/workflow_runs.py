@@ -11,6 +11,10 @@ reads one summary file per workflow and stats each run record. Only a run whose
 record changed since the last listing (a new or running one) is read in full. Run
 IDs start with their start time, so a time range skips older runs before any stat.
 The summary files are a cache: deleting them only makes the next listing slower.
+
+A workflow's own Runs list and the clean-up of old runs read the same summaries
+through :func:`workflow_run_summaries`; the Runs list then reads in full only the
+page of runs it returns.
 """
 
 from __future__ import annotations
@@ -19,7 +23,9 @@ import json
 import logging
 import os
 import re
+import stat as stat_kind
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -29,8 +35,9 @@ from gofer.utils.atomic_output import atomic_binary_output
 log = logging.getLogger(__name__)
 
 SUMMARY_DIRECTORY = "rattish-run-summaries"
-# 2 added each run's provider fallbacks.
-SUMMARY_VERSION = 2
+# 2 added each run's provider fallbacks. 3 keys each file by the run folder's real
+# path, so the run lists and the clean-up after each run share one file.
+SUMMARY_VERSION = 3
 # The most provider switches a run summary keeps.
 MAX_FALLBACKS = 10
 DEFAULT_LIMIT = 100
@@ -113,8 +120,8 @@ def _id_time(run_id: str) -> datetime | None:
 
 
 def _summary_of(document: Mapping[str, Any]) -> dict[str, Any]:
-    """What the list needs from one run record, and nothing else."""
-    from gofer.ui.api import rattish_run_started_by
+    """What the lists and clean-up need from one run record, and nothing else."""
+    from gofer.rattish.run_service import run_started_by
 
     usage = document.get("usage")
     error = document.get("error")
@@ -126,7 +133,7 @@ def _summary_of(document: Mapping[str, Any]) -> dict[str, Any]:
         "started_at": document.get("started_at"),
         "finished_at": document.get("finished_at"),
         "duration_ms": document.get("duration_ms") or 0,
-        "started_by": rattish_run_started_by(document),
+        "started_by": run_started_by(document),
         "resumed_from": (document.get("resumed_from") or {}).get("run_id"),
         "error": str(message)[:300] if message else "",
         "usage": (
@@ -141,6 +148,8 @@ def _summary_of(document: Mapping[str, Any]) -> dict[str, Any]:
             "from": switch.get("from") or {},
             "to": switch.get("to") or {},
             "reason": str(switch.get("reason") or ""),
+            # An account passed over at a usage limit: listed, but not a switch.
+            **({"skipped": True} if switch.get("skipped") else {}),
         }
         for record in document.get("runs") or []
         if isinstance(record, Mapping)
@@ -171,6 +180,7 @@ def fallback_rows(summary: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "from": item["from"],
                 "to": item["to"],
                 "reason": item["reason"],
+                **({"skipped": True} if item.get("skipped") else {}),
                 "line": f"{item['node']}: {line}",
             }
         )
@@ -182,7 +192,8 @@ class _WorkflowSummaries:
 
     def __init__(self, base: Path, workflow_id: str, directory: Path) -> None:
         self.path = base / SUMMARY_DIRECTORY / f"{workflow_id}.json"
-        self.directory = str(directory)
+        # Callers name the same run folder with and without symlinks resolved.
+        self.directory = os.path.realpath(directory)
         self.entries: dict[str, dict[str, Any]] = {}
         self.changed = False
         try:
@@ -197,8 +208,10 @@ class _WorkflowSummaries:
         ):
             self.entries = document["runs"]
 
-    def get(self, record: Path, *, stat: os.stat_result) -> dict[str, Any] | None:
-        run_id = record.stem
+    def get(
+        self, record: Path, *, stat: os.stat_result, run_id: str | None = None
+    ) -> dict[str, Any] | None:
+        run_id = record.stem if run_id is None else run_id
         key = [stat.st_size, stat.st_mtime_ns]
         cached = self.entries.get(run_id)
         if isinstance(cached, dict) and cached.get("key") == key:
@@ -232,6 +245,120 @@ class _WorkflowSummaries:
             log.debug("Could not save run summaries for %s: %s", self.path.stem, exc)
 
 
+@dataclass(frozen=True, slots=True)
+class RunSummary:
+    """One readable run record of a workflow: its path and cached summary.
+
+    ``summary["status"]`` is the effective status: a running run whose runner is
+    gone reads as ``interrupted``, as when the full record is read.
+    """
+
+    path: Path
+    summary: dict[str, Any]
+
+    @property
+    def run_id(self) -> str:
+        return str(self.summary["run_id"])
+
+    @property
+    def status(self) -> str:
+        return str(self.summary["status"])
+
+
+def missed_records(
+    base: Path, workflow_id: str, directory: Path, listed: Iterable[str]
+) -> list[tuple[str, os.stat_result]]:
+    """Run records a folder listing left out that the summary file knows: ``(path, stat)``.
+
+    A running run replaces its record on every step, and a listing taken during a replace
+    can miss the name (btrfs does; the approvals list had the same race). Looking a known
+    run up by name always finds it, so a running run doesn't vanish from the Runs list for
+    a moment, and retention still protects what it resumed from. ``listed`` is the
+    listing's file names.
+    """
+    names = set(listed)
+    found = []
+    for run_id in _WorkflowSummaries(base, workflow_id, directory).entries:
+        name = f"{run_id}.json"
+        if name in names or run_id.startswith(".") or os.sep in run_id or "/" in run_id:
+            continue
+        location = os.path.join(directory, name)
+        try:
+            stat = os.stat(location, follow_symlinks=False)
+        except (OSError, ValueError):
+            # ValueError: a name with a NUL byte, which a damaged summary file can hold.
+            continue
+        if stat_kind.S_ISREG(stat.st_mode):
+            found.append((location, stat))
+    return found
+
+
+def workflow_run_summaries(
+    base: Path, workflow_id: str, directory: Path
+) -> tuple[list[RunSummary], int]:
+    """A workflow's run records as summaries, newest first, and how many were unreadable.
+
+    Newest first means by modification time, then file name, as the workflow's Runs
+    list has always ordered them. Only records that changed since the summary file
+    last saw them are read; the rest cost one stat each. Returns ``([], 0)`` when
+    the folder holds no run records at all.
+    """
+    from gofer.rattish.run_service import effective_run_status
+
+    try:
+        listing = list(os.scandir(directory))
+    except OSError:
+        return [], 0
+    stamped: list[tuple[int, str, str, os.stat_result]] = []
+    for entry in listing:
+        # glob("*.json") skips hidden names, such as a summary being written.
+        if not entry.name.endswith(".json") or entry.name.startswith("."):
+            continue
+        try:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            stat = entry.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        stamped.append((stat.st_mtime_ns, entry.name, entry.path, stat))
+    for location, stat in missed_records(
+        base, workflow_id, directory, [entry.name for entry in listing]
+    ):
+        stamped.append((stat.st_mtime_ns, os.path.basename(location), location, stat))
+    stamped.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    summaries = _WorkflowSummaries(base, workflow_id, directory)
+    readable: list[RunSummary] = []
+    unreadable = 0
+    seen: list[str] = []
+    for _, name, location, stat in stamped:
+        stem = name[: -len(".json")]
+        path = Path(location)
+        summary = summaries.get(path, stat=stat, run_id=stem)
+        if summary is not None and summary.get("status") == "running":
+            status = effective_run_status(summary)
+            if status == "interrupted" and summary.get("runner_pid") == os.getpid():
+                # This process saves a run's final record before the run stops counting
+                # as active, so the record may have changed since the stat above.
+                try:
+                    summary = summaries.get(
+                        path, stat=path.stat(follow_symlinks=False), run_id=stem
+                    )
+                except OSError:
+                    summary = None
+                if summary is not None and summary.get("status") == "running":
+                    summary["status"] = effective_run_status(summary)
+            else:
+                summary["status"] = status
+        if summary is not None:
+            seen.append(stem)
+        if summary is None or not summary.get("run_id"):
+            unreadable += 1
+            continue
+        readable.append(RunSummary(path, summary))
+    summaries.save(seen)
+    return readable, unreadable
+
+
 def _effective(summary: dict[str, Any]) -> str:
     from gofer.rattish.run_service import effective_run_status
 
@@ -251,9 +378,11 @@ def _workflow_runs(
     registered: Any,
     since: datetime | None,
     until: datetime | None,
+    usage_waits: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     from gofer.core.approvals import ApprovalStore
     from gofer.rattish.run_usage import usage_payload
+    from gofer.rattish.triggers import usage_wait_payload
     from gofer.ui.api import _rattish_run_directory
 
     workflow_id = registered.workflow_id
@@ -308,6 +437,7 @@ def _workflow_runs(
             continue
         running = summary["status"] == "running"
         usage = usage_payload(summary.get("usage"))
+        wait = (usage_waits or {}).get(summary["run_id"])
         listed.append(
             {
                 "workflowId": workflow_id,
@@ -326,6 +456,7 @@ def _workflow_runs(
                 "error": summary.get("error") or "",
                 "usage": usage,
                 "fallbacks": fallback_rows(summary),
+                "usageLimitWait": usage_wait_payload(wait) if wait is not None else None,
             }
         )
     return listed
@@ -435,12 +566,15 @@ def all_workflow_runs_payload(
         names.add(key)
         workflows.append(registered)
 
+    from gofer.rattish.triggers import usage_waits_by_run
+
+    usage_waits = usage_waits_by_run(base)
     runs: list[dict[str, Any]] = []
     for registered in workflows:
         if chosen and registered.workflow_id.lower() not in chosen:
             continue
         try:
-            runs.extend(_workflow_runs(base, registered, start, end))
+            runs.extend(_workflow_runs(base, registered, start, end, usage_waits))
         except Exception:  # noqa: BLE001 - one broken workflow folder must not hide the rest.
             log.warning("Could not list runs of %s", registered.workflow_id, exc_info=True)
     if wanted_status:

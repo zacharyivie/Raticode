@@ -3,6 +3,7 @@ package dev.raticode.mobile.live
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -295,5 +296,15 @@ class RemRichTest {
             .put("kind", "self_work_report").put("body", "").put("self_work_report", JSONObject().put("items", items))))) as RemHome
         assertEquals(30, home.messages.single().selfWorkReport!!.items.size)
         assertTrue(home.messages.single().selfWorkReport!!.counts.isEmpty())
+    }
+
+    @Test fun dismissAllIsOfferedOnlyByADesktopThatTakesIt() {
+        val newer = DesktopViews.parse("rem.home", JSONObject().put("messages", JSONArray()).put("tasks", JSONArray()).put("dismiss_all", true)) as RemHome
+        assertTrue(newer.dismissAll)
+        val older = DesktopViews.parse("rem.home", JSONObject().put("messages", JSONArray()).put("tasks", JSONArray())) as RemHome
+        assertFalse(older.dismissAll)
+        assertTrue(RemHome.DISMISS_ALL in DesktopViews.ACTIONS)
+        // Its answer refreshes the task list, like every Rem action.
+        assertEquals("rem.home", DesktopViews.key(RemHome.DISMISS_ALL, JSONObject()))
     }
 }

@@ -23,6 +23,30 @@ Use the paperclip, paste a file, or drop it into the composer. Check the attachm
 - Deleting a thread removes its attachment files. A configured [archive](../knowledge/archive.md) keeps its own copies.
 - Attachments are reference material. A document with instructions in it isn't a request to follow them; say what you want in your own message.
 
+### Ask Rem about something in the app
+
+Several places put a text file in Rem's message box for you to ask about. Nothing is sent until you send the message, and anything you already typed stays.
+
+| Where | What it attaches |
+| --- | --- |
+| **Settings > Developer**, an entry's right-click menu | **Ask Rem about this entry**: the selected log entries |
+| A failed run, a failed **Run Timeline** row, or a **Problems** entry | **Ask Rem about this failure**: a short summary of the run and node (new in 0.6.0; see [Ask Rem about a failure](../studio/runs.md#ask-rem-about-a-failure)) |
+| The terminal's right-click menu | **Ask Rem about selection**: the selected output (new in 0.6.0; see [Terminal](../studio/terminal.md#ask-rem-about-selected-output)) |
+
+Text from a run, the workflow source or a terminal is marked as untrusted inside the file, between BEGIN and END lines with a random tag, so Rem reads it as data rather than instructions. A run's output and a terminal selection keep at most their last 200 lines, cut to 8 KB, and password inputs show as a mask.
+
+## Text files in Rem's chat
+
+*Changed in Raticode 0.6.0. Earlier versions sent only the first 20,000 characters of a file as stored, HTML markup included, and Rem had no way to read further.*
+
+Rem's own chat replies run without tools, so Raticode reads an attached text file for it. This covers text, Markdown, CSV, JSON, logs, code and HTML, and any other file that turns out to be plain text.
+
+- **HTML is read as text.** Styles, scripts and drawings are left out, headings stay headings, list items stay on their own lines, and tables arrive row by row. A themed 33 KB report comes to about 14,000 characters of text.
+- **The message carries up to 24,000 characters of each file**, and up to 48,000 for all its files together. A shorter file arrives whole.
+- **A longer file is marked as cut**, with its full length and where the part Rem has ends. Rem is told to read the rest before it answers, says the file is cut off, or starts a task about it. It asks Raticode for the next 24,000 characters, or for the part where some words first appear, such as a table's heading. The header shows "Reading the attached file" while it does. See [Quick answers](./home.md#quick-answers).
+- **Files from earlier messages** can be read the same way, as long as they're still stored.
+- Rem reads only files attached in its own chat this way, at most 48,000 characters per round of reads. Only the first 4 MB of a file can be read in chat; for more, Rem starts a task, and the worker opens the file itself.
+
 ## Images in threads
 
 Codex, Claude Code, Cursor, Copilot, OpenCode and Grok can receive images in threads.
@@ -136,10 +160,31 @@ How each system handles it:
 | --- | --- |
 | Windows, macOS | Raticode registers the key itself. No permission is needed. |
 | Linux on X11 | Raticode registers the key itself. |
-| Linux on Wayland | Apps can't watch keys, so Raticode asks the desktop's shortcut service (the GlobalShortcuts portal). KDE Plasma and recent GNOME may ask you to confirm the key the first time, and let you change it in their own shortcut settings. Desktops without the portal ignore the request. |
-| Linux on Wayland, with Raticode running as an X11 app | The Raticode (gecko) browser needs this mode. Most Wayland desktops pass the key to X11 apps only while one of them is focused. Settings warns about this. |
+| Linux on Wayland | Apps can't watch keys there, so Raticode asks your desktop to add the shortcut, as described below. This also works when Raticode runs as an X11 app, which the Raticode (gecko) browser needs. |
 
-If pressing the key does nothing, Settings shows when it was last pressed and, on Linux, a command to run from a custom shortcut in your desktop's settings, such as **System Settings > Keyboard > Shortcuts > Add New > Command** on KDE Plasma. The command reaches the running Raticode and only starts or stops dictation. It does nothing while **Dictate to Rem from any app** is off.
+#### Linux on Wayland
+
+::: info Changed in 0.6.0
+Adding the shortcut to Wayland desktops by itself is new in Raticode 0.6.0. Raticode 0.5.5 asks only through the Global Shortcuts portal, and when Raticode runs as an X11 app it shows a command to bind by hand.
+:::
+
+When you turn on **Dictate to Rem from any app**, Raticode adds the shortcut to your desktop's own shortcut list. When you turn it off, Raticode removes it again. **Settings > Devices** says which way it was added, or why it couldn't be:
+
+| Desktop | What Raticode does |
+| --- | --- |
+| KDE Plasma | Adds **Raticode > Dictate to Rem** to KDE's shortcuts, with no prompt. You can change the key in **System Settings > Keyboard > Shortcuts > Raticode**, and Settings shows the key KDE uses. If another shortcut already has the key, Raticode leaves it there, adds its entry without a key and names the shortcut that has it. |
+| GNOME 48 or later, and other desktops with the Global Shortcuts portal | Asks through the portal. The desktop shows a prompt the first time, and Settings waits for your answer. If you decline, **Ask my desktop again** shows the prompt again. You change the key in the desktop's own settings. |
+| Hyprland | Hyprland adds the shortcut without a key. Settings shows the line to add to `hyprland.conf` to choose one. |
+| GNOME before 48 | Adds a custom shortcut named **Raticode: Dictate to Rem** to **Settings > Keyboard > Keyboard Shortcuts > Custom Shortcuts**, which runs Raticode's dictation command. Your other custom shortcuts aren't touched. |
+| Sway and other desktops without a way for apps to add shortcuts | Settings shows a command to bind to a key in the desktop's own settings. |
+
+A development copy of Raticode adds its own entry, **Raticode (development)**, on KDE Plasma, so it never answers the installed app's key. The **Ask Rem about your screen** shortcut is added the same way, except on GNOME before 48 and desktops without a way for apps to add shortcuts, where Settings says it can't work from other apps.
+
+The portal only accepts an installed app: one whose `gofer-flow.desktop` file is in your applications folder, which the packages and an integrated AppImage add. Without it the portal refuses Raticode, and on GNOME Raticode adds a custom shortcut instead.
+
+Only the KDE route has been tried on a real desktop (Plasma 6.8 on Wayland). The portal, GNOME and Hyprland routes are tested against simulated desktops.
+
+If pressing the key does nothing, Settings shows when it was last pressed. The dictation command it shows when needed reaches the running Raticode and only starts or stops dictation. It does nothing while **Dictate to Rem from any app** is off.
 
 ### Speech recognition
 
@@ -147,15 +192,20 @@ Speech is recognized on this computer.
 
 | System | Recognizer |
 | --- | --- |
-| macOS, Windows | The one built into the system (default), or **Raticode offline model**. Pick in **Settings > Devices > Speech recognition**. |
+| macOS | The one built into macOS (default), or **Raticode offline model**. Pick in **Settings > Devices > Speech recognition**. |
+| Windows | **Raticode offline model** once it's downloaded, otherwise the one built into Windows. Choosing **Built into Windows** in **Settings > Devices > Speech recognition** keeps the Windows one. |
 | Linux | Always the offline model |
 
-The offline model is Vosk English, about 130 MB.
+The offline model is NVIDIA's Nemotron 3.5 ASR Streaming 0.6B, run by sherpa-onnx. It's a download of about 475 MB and takes about 680 MB on disk. It adds capitals and most commas itself. It works out which language you're speaking, so besides English it handles languages such as Spanish, French, German, Italian, Portuguese, Dutch, Russian, Japanese and Korean, with no setting to change.
 
-- Download it once with **Download offline model** in **Settings > Devices > Speech recognition**. It shows progress and, if it fails, why.
-- Raticode checks the download against a fixed checksum before installing it.
+- Download it once with **Download offline model** in **Settings > Devices > Speech recognition**. It shows progress and, if it fails, why. It needs about 1.2 GB of free space while it installs.
+- The model comes from the sherpa-onnx project's releases on GitHub. Raticode checks it against fixed checksums before installing it.
 - Dictation never starts the download. Until the model is installed, dictation that needs it says so and points to the button.
-- On macOS and Windows the offline model takes over when the built-in recognizer stops partway, so it's worth downloading even if you use the built-in one.
+- On macOS and Windows the offline model takes over when the built-in recognizer stops partway, so it's worth downloading even if you use the built-in one. Without it, the words heard so far are kept.
+- While you dictate with it, the model uses about 1 GB of memory. Raticode unloads it after 10 minutes without dictation.
+- The model is NVIDIA's, under the [OpenMDW License 1.1](https://openmdw.ai/license/1-1/). Raticode itself doesn't include it, and writes a notice naming the model and its license next to the downloaded files.
+
+Raticode 0.5.5 and earlier used a different offline model (Vosk). It no longer works, so Raticode deletes its folder (about 215 MB) on the first start after the update. Settings and dictation then say the model was replaced and ask you to download the new one. Nothing downloads on its own.
 
 On macOS:
 
@@ -165,7 +215,7 @@ On macOS:
 ## Troubleshoot input
 
 - **Recording won't start.** Check the system's microphone permission and the selected device.
-- **"Offline model isn't downloaded".** Use **Download offline model** in **Settings > Devices**. If the download fails, the message names the cause: certificate, connection, timeout, server or disk.
+- **"Offline model isn't downloaded" or "was replaced".** Use **Download offline model** in **Settings > Devices**. If the download fails, the message names the cause: certificate, connection, timeout, server or disk space.
 - **macOS: dictation fails although Raticode is allowed** in **System Settings > Privacy & Security > Microphone** and **Speech Recognition**. Use **Test speech recognition**, then look in **Settings > Developer** for lines starting "macOS speech helper", "Dictation: macOS microphone access" and "macOS speech recognition". These lines never include audio or your words.
 - **An attachment is rejected.** Check its size and the selected provider and model.
 - **Rem needs exact text from an image.** Include the text in your message too.

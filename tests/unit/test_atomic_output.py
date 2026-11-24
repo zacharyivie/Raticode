@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -274,3 +275,108 @@ def test_atomic_output_rejects_non_directory_created_during_mkdir(tmp_path, monk
     assert not list(outside.iterdir())
     if kind == "file":
         assert (tmp_path / "shared").read_bytes() == b"concurrent file"
+
+
+def drive(tmp_path: Path) -> Path:
+    """An empty folder standing in for the drive; tmp_path also holds the test's env folder."""
+    folder = tmp_path / "drive"
+    folder.mkdir()
+    return folder
+
+
+# Windows publishes an exclusive file with os.rename, which never replaces a name, even
+# on FAT; the hard link and its placeholder fallback are POSIX only.
+POSIX_LINKS = pytest.mark.skipif(
+    os.name == "nt", reason="Windows publishes with a no-replace rename, not a hard link"
+)
+
+
+def _without_hard_links(monkeypatch, code: int) -> list[str]:
+    """Make os.link fail the way FAT and exFAT drives do; return the names it was asked for."""
+    asked: list[str] = []
+
+    def no_link(source, target, *args, **kwargs):
+        asked.append(str(target))
+        raise OSError(code, os.strerror(code))
+
+    monkeypatch.setattr(os, "link", no_link)
+    return asked
+
+
+@POSIX_LINKS
+@pytest.mark.parametrize(
+    "code",
+    sorted({errno.EPERM, getattr(errno, "ENOTSUP", errno.EOPNOTSUPP), errno.EOPNOTSUPP}),
+    ids=errno.errorcode.get,
+)
+def test_exclusive_output_publishes_on_drives_without_hard_links(tmp_path, monkeypatch, code):
+    tmp_path = drive(tmp_path)
+    asked = _without_hard_links(monkeypatch, code)
+    destination = tmp_path / "backup.zip"
+    with atomic_binary_output(destination, exclusive=True) as output:
+        output.write(b"complete package")
+    assert asked, "the hard link must be tried first"
+    assert destination.read_bytes() == b"complete package"
+    assert oct(destination.stat().st_mode & 0o777) == "0o600"
+    assert [path.name for path in tmp_path.iterdir()] == ["backup.zip"]
+
+
+@pytest.mark.parametrize("kind", ["plain", "symlink", "dangling"])
+def test_exclusive_output_without_hard_links_never_replaces_a_name(tmp_path, monkeypatch, kind):
+    tmp_path = drive(tmp_path)
+    _without_hard_links(monkeypatch, errno.EPERM)
+    existing = tmp_path / "existing"
+    existing.write_bytes(b"original")
+    destination = tmp_path / "note"
+    if kind == "plain":
+        destination.write_bytes(b"original")
+    else:
+        destination.symlink_to(existing if kind == "symlink" else tmp_path / "absent")
+    before = destination.lstat()
+    with pytest.raises(FileExistsError):
+        with atomic_binary_output(destination, exclusive=True) as output:
+            output.write(b"replacement")
+    assert destination.lstat().st_ino == before.st_ino
+    assert existing.read_bytes() == b"original"
+    assert not list(tmp_path.glob(".note.*.tmp"))
+
+
+def test_exclusive_output_without_hard_links_loses_to_a_concurrent_creator(tmp_path, monkeypatch):
+    tmp_path = drive(tmp_path)
+    _without_hard_links(monkeypatch, errno.EPERM)
+    destination = tmp_path / "note"
+    with pytest.raises(FileExistsError):
+        with atomic_binary_output(destination, exclusive=True) as output:
+            output.write(b"our note")
+            destination.write_bytes(b"concurrent note")
+    assert destination.read_bytes() == b"concurrent note"
+    assert not list(tmp_path.glob(".note.*.tmp"))
+
+
+@POSIX_LINKS
+def test_failed_rename_removes_only_its_own_placeholder(tmp_path, monkeypatch):
+    tmp_path = drive(tmp_path)
+    _without_hard_links(monkeypatch, errno.EPERM)
+
+    def no_rename(*args, **kwargs):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(os, "replace", no_rename)
+    destination = tmp_path / "note"
+    with pytest.raises(OSError) as raised:
+        with atomic_binary_output(destination, exclusive=True) as output:
+            output.write(b"our note")
+    assert raised.value.errno == errno.EIO
+    assert not list(tmp_path.iterdir())
+
+
+@POSIX_LINKS
+def test_other_link_failures_are_not_retried_as_a_rename(tmp_path, monkeypatch):
+    tmp_path = drive(tmp_path)
+    _without_hard_links(monkeypatch, errno.EIO)
+    destination = tmp_path / "note"
+    with pytest.raises(OSError) as raised:
+        with atomic_binary_output(destination, exclusive=True) as output:
+            output.write(b"our note")
+    assert raised.value.errno == errno.EIO
+    assert not list(tmp_path.iterdir())

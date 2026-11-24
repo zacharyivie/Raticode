@@ -5,13 +5,17 @@ from __future__ import annotations
 import asyncio
 import base64
 import functools
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,13 +27,15 @@ from gofer.core.provider_capabilities import (
     NO_IMAGE_ATTACHMENTS,
     resolve_provider_executable,
 )
-from gofer.core.provider_profiles import resolve_provider_settings
+from gofer.core.provider_profiles import ResolvedProviderSettings, resolve_provider_settings
 from gofer.subscriptions.antigravity import AntigravitySubscription
 from gofer.subscriptions.base import Subscription
 from gofer.subscriptions.claude_code import ClaudeCodeSubscription
 from gofer.subscriptions.cli_providers import CliSubscription
 from gofer.subscriptions.codex import CodexSubscription
 from gofer.subscriptions.grok_headless import GrokConversationSubscription
+from gofer.utils.atomic_output import mkdir_without_links
+from gofer.utils.terminal_text import one_line
 
 REPLY_KEY = re.compile(r'"reply"\s*:\s*"')
 
@@ -59,6 +65,116 @@ NO_CHAT_IMAGES = {
 }
 
 
+# Claude Code and Codex calls run in this one empty folder, under the data folder. Both
+# CLIs open the conversation with the working folder, so a new folder per call would
+# start every prompt differently and nothing could be read back from cache.
+CONVERSATION_FOLDER = ("rem-work", "conversation")
+# The fixed rules Claude Code reads with --system-prompt-file, one file per text.
+RULES_FOLDER = ("rem-work", "conversation-rules")
+# Rules files kept past a day; Rem has a handful of fixed rule texts.
+RULES_KEPT = 32
+RULES_KEEP_SECONDS = 24 * 60 * 60
+
+
+class PromptBlocks(str):
+    """A prompt made of consecutive blocks that read as one text.
+
+    The text is the blocks joined with nothing between them, so a provider that takes
+    one string gets exactly these bytes. Claude Code gets each block as its own text
+    block. The API looks for an earlier cache write only where a block ends, so a
+    lookup or repair round, which adds blocks after the same ones, reads the earlier
+    prompt from cache instead of writing it again. Adding text adds a block.
+
+    images_at is how many blocks come before the images: by default all of the first
+    call's, so images don't move the prompt's start and stay put as rounds add blocks.
+    """
+
+    blocks: tuple[str, ...]
+    images_at: int
+
+    def __new__(cls, blocks: Sequence[str], images_at: int | None = None) -> PromptBlocks:
+        parts = tuple(block for block in blocks if block)
+        made = super().__new__(cls, "".join(parts))
+        made.blocks = parts
+        made.images_at = len(parts) if images_at is None else min(images_at, len(parts))
+        return made
+
+    def __add__(self, more: str) -> PromptBlocks:
+        return PromptBlocks((*self.blocks, str(more)), self.images_at)
+
+
+def _private_folder(data_dir: Path, parts: tuple[str, ...]) -> Path:
+    folder = data_dir.joinpath(*parts)
+    mkdir_without_links(folder)
+    folder.chmod(0o700)
+    return folder
+
+
+def conversation_folder(data_dir: Path) -> Path:
+    """The private, empty folder Rem's Claude Code and Codex calls run in.
+
+    Anything found in it is removed first. The data folder is writable by some agents,
+    and both CLIs read instructions and settings from their working folder (CLAUDE.md,
+    AGENTS.md, .claude/settings.json with its hooks), so a planted file would steer Rem's
+    next reply or run a hook outside every sandbox.
+    """
+    folder = _private_folder(data_dir, CONVERSATION_FOLDER)
+    for entry in os.scandir(folder):
+        try:
+            if entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.path)
+            else:
+                os.unlink(entry.path)
+        except FileNotFoundError:
+            pass
+    return folder
+
+
+def rules_file(data_dir: Path, text: str) -> Path:
+    """A private file holding [text], named by its content and kept for later calls.
+
+    It sits outside the call's working folder, which stays empty, and is written once
+    per text: concurrent calls with the same rules read the same file.
+    """
+    folder = _private_folder(data_dir, RULES_FOLDER)
+    path = folder / f"{hashlib.sha256(text.encode('utf-8')).hexdigest()[:32]}.md"
+    try:
+        current = path.read_text(encoding="utf-8")
+    except OSError:
+        current = None
+    if current == text:
+        os.utime(path)
+    else:
+        handle, scratch = tempfile.mkstemp(dir=folder, prefix=".rules-", suffix=".md")
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as out:
+                out.write(text)
+            os.replace(scratch, path)
+        except BaseException:
+            Path(scratch).unlink(missing_ok=True)
+            raise
+    _prune_rules(folder, path)
+    return path
+
+
+def _prune_rules(folder: Path, keep: Path) -> None:
+    try:
+        files = sorted(
+            (entry for entry in folder.iterdir() if entry.suffix == ".md" and entry != keep),
+            key=lambda entry: entry.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return
+    cutoff = time.time() - RULES_KEEP_SECONDS
+    for entry in files[RULES_KEPT:]:
+        try:
+            if entry.stat().st_mtime < cutoff:
+                entry.unlink()
+        except OSError:
+            continue
+
+
 @dataclass(frozen=True)
 class ChatImage:
     """An image to show the chat model, read from a checked chat attachment."""
@@ -77,6 +193,13 @@ def image_kind(data: bytes) -> tuple[str, str] | None:
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp", ".webp"
     return None
+
+
+def _reply_account(provider: str, config: dict[str, Any], data_dir: Path | None) -> str | None:
+    """The account Rem's own replies use with this provider (Settings > Rem), or None."""
+    from gofer.ui.rem_provider_accounts import reply_account
+
+    return reply_account(provider, config, data_dir)
 
 
 def chat_image_refusal(provider: str) -> str | None:
@@ -168,16 +291,61 @@ def no_saved_session(provider: str) -> list[str]:
     return [option] if _lists_option(executable, modified, subcommand, option) else []
 
 
+# Claude Code gives print-mode runs on a subscription the one-hour prompt cache, and its
+# writes cost twice the input price against 1.25 times for the five-minute cache. A
+# one-shot call's prompt is never sent again an hour later, so these calls use five
+# minutes. Worker sessions resume their conversation and keep Claude Code's own choice.
+# The other CLIs have no setting for how long their cache lasts.
+ONE_SHOT_CACHE_ENV = {"claude_code": {"CLAUDE_CODE_PROMPT_CACHE_TTL": "5m"}}
+
+
+def one_shot_env(provider: str) -> dict[str, str]:
+    """Environment for a sessionless one-shot call to this provider's CLI."""
+    return dict(ONE_SHOT_CACHE_ENV.get(provider, {}))
+
+
+def blocks_within(prompt: str, blocks: PromptBlocks | None) -> str:
+    """prompt cut where blocks' text ends, as PromptBlocks, or prompt as it is.
+
+    The agent hands Claude Code the prompt inside its envelope (prompt_envelope), where
+    the blocks' text is a JSON string. JSON escapes one character at a time, so the
+    escaped blocks joined are the escaped text, and the envelope can be cut at the same
+    places. The pieces joined are exactly prompt. A prompt that doesn't hold the
+    blocks' text, raw or escaped, comes back unchanged and goes as one text block.
+    """
+    if blocks is None or len(blocks.blocks) < 2:
+        return prompt
+    if prompt == blocks:
+        return blocks
+    for pieces in (
+        list(blocks.blocks),
+        [json.dumps(block, ensure_ascii=False)[1:-1] for block in blocks.blocks],
+    ):
+        start = prompt.rfind("".join(pieces))
+        if start < 0:
+            continue
+        end = start + len("".join(pieces))
+        cut = [*pieces]
+        cut[0] = prompt[:start] + cut[0]
+        cut[-1] = cut[-1] + prompt[end:]
+        return PromptBlocks(cut, blocks.images_at)
+    return prompt
+
+
 def claude_user_message(prompt: str, images: Sequence[ChatImage]) -> bytes:
-    """One stream-json user message: each image with its label, then the prompt.
+    """One stream-json user message with the prompt's text blocks and the images.
 
     Claude Code's --input-format stream-json reads this from stdin and gives the
-    model the images as image content, the way a pasted screenshot arrives.
+    model the images as image content, the way a pasted screenshot arrives. A plain
+    prompt follows its images; PromptBlocks puts them after its first blocks
+    (images_at) and sends each block as its own text block.
     """
-    content: list[dict[str, Any]] = []
+    blocks = prompt.blocks if isinstance(prompt, PromptBlocks) else (prompt,)
+    at = prompt.images_at if isinstance(prompt, PromptBlocks) else 0
+    pictures: list[dict[str, Any]] = []
     for number, image in enumerate(images, start=1):
-        content.append({"type": "text", "text": f"Image {number}: {image.name}"})
-        content.append(
+        pictures.append({"type": "text", "text": f"Image {number}: {image.name}"})
+        pictures.append(
             {
                 "type": "image",
                 "source": {
@@ -187,27 +355,52 @@ def claude_user_message(prompt: str, images: Sequence[ChatImage]) -> bytes:
                 },
             }
         )
-    content.append({"type": "text", "text": prompt})
+    texts = [{"type": "text", "text": block} for block in blocks]
+    content = [*texts[:at], *pictures, *texts[at:]]
     message = {"type": "user", "message": {"role": "user", "content": content}}
     return (json.dumps(message) + "\n").encode("utf-8")
 
 
 class _RemClaude(ClaudeCodeSubscription):
-    """Claude Code that can report answer text as it is written and receive images."""
+    """Claude Code that can report answer text as it is written and receive images.
+
+    With images, or a prompt of several blocks, it reads stdin as stream-json. The
+    option and what goes on stdin are both decided here, from the same flag: with
+    --input-format stream-json, every line on stdin must be a JSON message, and plain
+    text fails with "Error parsing streaming input line".
+    """
 
     def __init__(
         self,
         on_text: Callable[[str], None] | None = None,
         images: Sequence[ChatImage] = (),
+        blocks: PromptBlocks | None = None,
     ) -> None:
         super().__init__()
         self._on_text = on_text
         self._images = tuple(images)
+        self._blocks = blocks
+        self.stream_input = bool(self._images) or (blocks is not None and len(blocks.blocks) > 1)
+
+    def _build_command(
+        self,
+        prompt: str,
+        tools: list[str],
+        mcp_servers: list[str],
+        extra_paths: list[Path] | None = None,
+        provider_settings: ResolvedProviderSettings | None = None,
+    ) -> list[str]:
+        command = super()._build_command(prompt, tools, mcp_servers, extra_paths, provider_settings)
+        if self.stream_input and "--input-format" not in command:
+            command[1:1] = ["--input-format", "stream-json"]
+        return command
 
     def _stdin_bytes(self, prompt: str) -> bytes:
-        if not self._images:
+        if not self.stream_input:
             return super()._stdin_bytes(prompt)
-        return claude_user_message(prompt, self._images)
+        # The agent hands over the prompt wrapped in its envelope; the blocks are
+        # found inside it, and anything else goes as one text block.
+        return claude_user_message(blocks_within(prompt, self._blocks), self._images)
 
     def _parse_provider_output(self, stdout: str, stderr: str) -> tuple[str, dict[str, object]]:
         if self._on_text is None:
@@ -235,12 +428,19 @@ def generate_decision(
     data_dir: Path,
     on_reply: Callable[[str], None] | None = None,
     images: Sequence[ChatImage] = (),
+    *,
+    system_prompt: str = "",
 ) -> dict[str, Any]:
     """Ask the chat model for a decision. on_reply sees the reply text as it grows.
 
+    system_prompt holds the rules that are the same on every call; see generate_text.
     Only Claude Code reports partial text; other providers answer all at once.
     """
-    return parse_decision(generate_text(prompt, config, cancel, data_dir, on_reply, images=images))
+    return parse_decision(
+        generate_text(
+            prompt, config, cancel, data_dir, on_reply, system_prompt=system_prompt, images=images
+        )
+    )
 
 
 def generate_text(
@@ -257,8 +457,11 @@ def generate_text(
     """Run one tool-free, sessionless turn in an empty folder and return its text.
 
     Claude Code takes system_prompt in place of its own instructions, which keeps
-    short calls short. Other providers read it at the top of the prompt. images are
-    shown to the model; callers check chat_image_refusal first.
+    short calls short and lets a provider reuse rules that never change between
+    calls. It reads them from a private rules file (rules_file). Other providers
+    read them at the top of the prompt. A PromptBlocks prompt reaches Claude Code
+    as separate text blocks; other providers read its text. images are shown to
+    the model; callers check chat_image_refusal first.
     """
     name = config.get("provider", "codex")
     if name not in CLI_PROVIDERS:
@@ -269,12 +472,20 @@ def generate_text(
         agent_subscription=name,
         agent_model=config.get("model") if config.get("model") != "cli-default" else None,
         agent_effort=config.get("effort") or None,
-        profile_name=None,
+        profile_name=_reply_account(name, config, data_dir),
         data_dir=data_dir,
     )
     if system_prompt and name != "claude_code":
         prompt = f"{system_prompt}\n\n{prompt}"
-    with tempfile.TemporaryDirectory(prefix="raticode-rem-conversation-") as directory:
+    # Claude Code and Codex run in the same empty folder every time, so consecutive
+    # prompts start with the same bytes. The other CLIs write their own settings into
+    # the call's folder, and image files go beside them, so they get a fresh one.
+    stable = name == "claude_code" or (name == "codex" and not images)
+    with (
+        nullcontext(str(conversation_folder(data_dir)))
+        if stable
+        else tempfile.TemporaryDirectory(prefix="raticode-rem-conversation-")
+    ) as directory:
         root = Path(directory)
         # The CLIs that attach image files read these private copies in the empty
         # folder, never the user's own files, so no tool or folder grant is needed.
@@ -290,7 +501,14 @@ def generate_text(
             # Image options come first: --image takes several values, so an option
             # must follow it before the prompt argument.
             extra = [f"--image={path}" for path in image_paths]
-            extra += resource_cli_args(name, AgentResources.none(), root)
+            # A Codex account's own config.toml names the MCP servers to switch off.
+            account_home = settings.env.get("CODEX_HOME")
+            extra += resource_cli_args(
+                name,
+                AgentResources.none(),
+                root,
+                codex_home=Path(account_home) if account_home else None,
+            )
             extra += [
                 "-c",
                 'approval_policy="never"',
@@ -316,12 +534,18 @@ def generate_text(
                 "--strict-mcp-config",
                 "--mcp-config",
                 '{"mcpServers":{}}',
+                # Only the user's own settings: never a project's from the working folder,
+                # whose hooks would run outside any sandbox.
+                "--setting-sources",
+                "user",
                 *no_saved_session(name),
             ]
             if system_prompt:
-                extra += ["--system-prompt", system_prompt]
-            if images:
-                extra += ["--input-format", "stream-json"]
+                # A private file keeps the rules out of argv, where other local accounts
+                # could read them and long text could hit the limit.
+                extra += ["--system-prompt-file", str(rules_file(data_dir, system_prompt))]
+            blocks = prompt if isinstance(prompt, PromptBlocks) else None
+            split = blocks is not None and len(blocks.blocks) > 1
             grow: Callable[[str], None] | None = None
             if on_reply is not None:
                 written: list[str] = []
@@ -336,7 +560,9 @@ def generate_text(
 
                 extra.append("--include-partial-messages")
             subscription = (
-                _RemClaude(grow, images) if grow is not None or images else ClaudeCodeSubscription()
+                _RemClaude(grow, images, blocks)
+                if grow is not None or images or split
+                else ClaudeCodeSubscription()
             )
             subscription.prompt_via_stdin = True
         elif name == "antigravity":
@@ -366,7 +592,10 @@ def generate_text(
         )
         result = asyncio.run(
             Agent(
-                AgentConfig(agent_id="Rem", subscription=name, working_dir=root), subscription
+                AgentConfig(
+                    agent_id="Rem", subscription=name, working_dir=root, env=one_shot_env(name)
+                ),
+                subscription,
             ).run(
                 prompt_override=prompt,
                 provider_settings=settings,
@@ -379,8 +608,26 @@ def generate_text(
     if cancel.is_set():
         raise InterruptedError("Rem stopped")
     if not result.success:
-        raise ValueError(result.message or result.output or "Rem could not reply")
+        raise ProviderFailure(name, result.message or result.output or "")
     return result.message or result.output or ""
+
+
+class ProviderFailure(ValueError):
+    """The provider's CLI ended the call without an answer.
+
+    The text is the CLI's own reason in plain words, without the colour codes a CLI
+    writes for a terminal, and names the provider.
+    """
+
+    def __init__(self, provider: str, detail: str) -> None:
+        from gofer.core.provider_usage import PROVIDER_LABELS
+
+        self.provider = provider
+        # Set when Rem tried the call again and it failed the same way.
+        self.retried = False
+        self.detail = one_line(detail)[:2000] or "it ended without saying why"
+        label = PROVIDER_LABELS.get(provider, provider)
+        super().__init__(f"{label} stopped with this error: {self.detail}")
 
 
 class MalformedDecision(ValueError):

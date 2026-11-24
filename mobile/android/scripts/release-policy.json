@@ -27,7 +27,10 @@
   "exported": {
     "androidx.profileinstaller.ProfileInstallReceiver": "android.permission.DUMP",
     "dev.raticode.mobile.MainActivity": null,
+    "dev.raticode.mobile.open.OpenFileActivity": null,
+    "dev.raticode.mobile.open.OpenLinkActivity": null,
     "dev.raticode.mobile.share.ShareActivity": null,
+    "dev.raticode.mobile.share.WorkflowShareActivity": null,
     "dev.raticode.mobile.voice.RemRecognitionService": null,
     "dev.raticode.mobile.voice.RemVoiceInteractionService": "android.permission.BIND_VOICE_INTERACTION",
     "dev.raticode.mobile.voice.RemVoiceSessionService": "android.permission.BIND_VOICE_INTERACTION",

@@ -3,6 +3,7 @@
   "contract_version": 1,
   "node_type": "workflow",
   "runtime_handler": "raticode.workflow",
+  "catalog": {"category": "workflows", "summary": "Run another workflow and use its output", "docs_path": "/docs/nodes/workflow"},
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",

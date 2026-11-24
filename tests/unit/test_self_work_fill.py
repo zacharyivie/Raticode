@@ -119,10 +119,11 @@ def test_threads_stay_full_in_one_project_with_different_research(board):
     assert len(activity(home)) == 3 and len(set(activity(home))) == 3
     fake.hold.set()
     wait_for(lambda: quiet(home), 8)
-    assert len(set(worker_titles(fake))) == 3
+    # Four angles in one project: the fourth starts once a thread is free.
+    assert len(set(worker_titles(fake))) == 4
     for _ in range(3):
         tick(home)
-    assert len(worker_titles(fake)) == 3
+    assert len(worker_titles(fake)) == 4
 
 
 def test_todos_come_first_and_research_uses_what_is_left(board):
@@ -393,8 +394,9 @@ def past_ranking(minutes_after: float = 15) -> float:
 
 
 def ranker_prompts(fake: Any) -> list[str]:
+    # The task's prompt reaches the worker in its instructions, under Private task requirements.
     return [
-        " ".join(str(m["body"]) for m in c["messages"])
+        c["agent_instructions"] + " " + " ".join(str(m["body"]) for m in c["messages"])
         for c in fake.calls
         if c["workflow"]["chatThreadTitle"] == f"Rem task: {RANK}"
         and "independent read-only reviewer" not in c["agent_instructions"]
@@ -434,7 +436,8 @@ def test_a_left_out_ticket_stays_out_if_the_next_ranking_fails(board):
     wait_for(lambda: quiet_with_no_ranking(home), 8)
     fake.answers[RANK] = "No JSON at all."
     at(home, past_ranking())
-    wait_for(lambda: quiet_with_no_ranking(home) and len(ranker_prompts(fake)) == 2, 8)
+    # The unreadable ranking is sent back once before review, then stops.
+    wait_for(lambda: quiet_with_no_ranking(home) and len(ranker_prompts(fake)) == 3, 8)
     for _ in range(3):
         tick(home)
     assert ticket(home, "Port to the old API")["status"] == "backlog"
@@ -467,14 +470,22 @@ def test_a_failed_ranking_pulls_nothing_and_is_tried_again_later(board):
     for _ in range(4):
         tick(home)
     assert ticket(home, "Unjudged")["status"] == "backlog"
-    assert "Unjudged" not in worker_titles(fake) and len(ranker_prompts(fake)) == 1
-    notes = " ".join(n["text"] for n in home.self_work.view()["report"]["notes"])
-    assert "stay in Backlog" in notes
+    # Sent back once with the parser's error before any review; the same answer again stops it.
+    prompts = ranker_prompts(fake)
+    assert "Unjudged" not in worker_titles(fake) and len(prompts) == 2
+    assert "couldn't read your ticket rankings: The answer has no fenced ```json" in prompts[1]
+    work = home.self_work.view()["report"]["work_done"]
+    assert any(
+        w["title"] == RANK
+        and w["state"] == "blocked"
+        and "no readable ranking block" in w["summary"]
+        for w in work
+    )
     fake.answers[RANK] = ranking((created, 3, 3, False, "Worth doing"))
     at(home, past_ranking())
     tick(home)
     settle(home, "Unjudged")
-    assert len(ranker_prompts(fake)) == 2
+    assert len(ranker_prompts(fake)) == 3
 
 
 def test_tickets_past_what_one_ranking_can_read_get_their_own(board):
@@ -571,7 +582,9 @@ def test_a_ranking_cannot_touch_tickets_in_another_project(board):
     untouched = ticket(home, "Outside")
     assert untouched["skip_reason"] == "" and untouched["status"] == "backlog"
     ranker = next(c for c in fake.calls if c["workflow"]["chatThreadTitle"] == f"Rem task: {RANK}")
-    assert "Outside" not in " ".join(str(m["body"]) for m in ranker["messages"])
+    assert "Outside" not in ranker["agent_instructions"] + " ".join(
+        str(m["body"]) for m in ranker["messages"]
+    )
 
 
 def test_repeated_checks_never_go_over_the_limit(board):

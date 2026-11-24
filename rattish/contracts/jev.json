@@ -3,6 +3,7 @@
   "contract_version": 1,
   "node_type": "jev",
   "runtime_handler": "raticode.jev",
+  "catalog": {"category": "ai", "summary": "Ask Jev a yes/no or multiple-choice question and route on the answer", "docs_path": "/docs/nodes/jev"},
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",

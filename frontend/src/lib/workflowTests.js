@@ -52,7 +52,31 @@ export const workflowTestsApi = {
   run: (workflowId, options = {}) => post(`${base(workflowId)}/run`, options),
   result: (workflowId, resultId) => send(`${base(workflowId)}/results/${encodeURIComponent(resultId)}`),
   stop: (workflowId, resultId) => post(`${base(workflowId)}/results/${encodeURIComponent(resultId)}/stop`),
+  estimate: (workflowId, options = {}) => post(`${base(workflowId)}/estimate`, options),
 };
+
+// Provider capabilities use runtime IDs (claude_code); Rattish sources use claude-code.
+export function rattishProviderId(capabilityId) {
+  return String(capabilityId || "").replaceAll("_", "-");
+}
+
+// "write: codex gpt-5.5" for each tried node, joined.
+export function variantLabel(variant) {
+  return (variant?.models ?? []).map((item) => `${item.node}: ${item.provider} ${item.model}`).join(", ");
+}
+
+// The graph editor's edits that put each tried model on its node, as Use this model saves them.
+export function useModelMutations(models) {
+  return (models ?? []).flatMap((item) => [
+    { kind: "set_field", target: { node: item.node }, field: "provider", valueSource: item.provider },
+    { kind: "set_field", target: { node: item.node }, field: "model", value: item.model },
+  ]);
+}
+
+export function formatSeconds(durationMs) {
+  if (durationMs == null) return "";
+  return `${(durationMs / 1000).toFixed(1)}s`;
+}
 
 export function formatUsd(value) {
   if (value == null || Number.isNaN(value)) return "unknown";
@@ -124,6 +148,13 @@ function jsonText(value) {
   return value === undefined ? "" : JSON.stringify(value);
 }
 
+// A command check's shell, like the shell field of bash-command steps.
+export const SHELL_CHOICES = [
+  ["auto", "Auto"],
+  ["bash", "Bash"],
+  ["powershell", "PowerShell"],
+];
+
 // One check as editable strings. Values that are JSON stay text until save.
 export function draftFromCheck(check = { type: "text", target: "outputs", contains: "" }) {
   const draft = {
@@ -136,6 +167,7 @@ export function draftFromCheck(check = { type: "text", target: "outputs", contai
     command: check.command ?? "",
     exitCode: String(check.exitCode ?? 0),
     timeoutSeconds: check.timeoutSeconds == null ? "" : String(check.timeoutSeconds),
+    shell: SHELL_CHOICES.some(([value]) => value === check.shell) ? check.shell : "auto",
     criteria: check.criteria ?? "",
     provider: check.provider ?? "",
     model: check.model ?? "",
@@ -203,6 +235,7 @@ function checkFromDraft(draft, index) {
       if (!(timeout > 0)) return { error: `${where}: the timeout must be a positive number of seconds.` };
       check.timeoutSeconds = timeout;
     }
+    if (draft.shell && draft.shell !== "auto") check.shell = draft.shell;
     return { check };
   }
   if (!draft.criteria.trim()) return { error: `${where}: describe what the model should check.` };

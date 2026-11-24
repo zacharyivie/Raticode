@@ -1,11 +1,16 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiUrl } from "../lib/api";
 
 // Jev is a classification provider for jev workflow nodes, not a coding provider, so it
 // gets its own card. The key goes to the backend once and lives in the system keychain;
-// no response ever returns it, so the field always starts empty.
-export default function JevProviderSettings() {
+// no response ever returns it, so the field always starts empty. Inside Settings > Providers
+// the card sits in a group that supplies its heading (labelledBy) and summarizes the status
+// it reports (onStatusChange).
+export default function JevProviderSettings({ labelledBy = "", onStatusChange } = {}) {
   const [status, setStatus] = useState(null);
+  const reportStatus = useRef(onStatusChange);
+  reportStatus.current = onStatusChange;
+  useEffect(() => { if (status) reportStatus.current?.(status); }, [status]);
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -49,8 +54,8 @@ export default function JevProviderSettings() {
   const configured = Boolean(status?.configured);
   const enabled = status?.enabled !== false;
   const models = status?.models ?? [];
-  return <section aria-labelledby="classification-models-heading" className="space-y-2 border-t border-line pt-3">
-    <h3 id="classification-models-heading" className="text-xs font-semibold">Classification models</h3>
+  return <section aria-labelledby={labelledBy || "classification-models-heading"} className={labelledBy ? "space-y-2" : "space-y-2 border-t border-line pt-3"}>
+    {labelledBy ? null : <h3 id="classification-models-heading" className="text-xs font-semibold">Classification models</h3>}
     <p className="text-xs text-muted">{"Used by jev workflow nodes to answer yes/no and multiple-choice questions. These aren't coding providers, so Rem's model picker, Organizations and agent nodes don't list them."}</p>
     <div className="flex items-center justify-between gap-3 pt-1">
       <h4 className="text-xs font-semibold">Jev (TypeSafe)</h4>

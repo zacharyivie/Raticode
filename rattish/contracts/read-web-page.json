@@ -1,0 +1,93 @@
+{
+  "$schema": "../schemas/node-contract.schema.json",
+  "contract_version": 1,
+  "node_type": "read-web-page",
+  "runtime_handler": "raticode.read_web_page",
+  "catalog": {"category": "web", "summary": "Read a web page as Markdown or plain text", "docs_path": "/docs/nodes/read-web-page"},
+  "configuration_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "url": {"type": "string", "minLength": 1},
+      "max_chars": {"type": "integer", "minimum": 1, "maximum": 1000000},
+      "format": {
+        "type": "string",
+        "enum": ["markdown", "text"],
+        "x-rattish-case-insensitive": true
+      },
+      "request_timeout": {"type": "string", "pattern": "^[1-9][0-9]*(?:ms|s|m)$"},
+      "render": {
+        "type": "string",
+        "enum": ["never", "auto", "always"],
+        "x-rattish-case-insensitive": true
+      },
+      "network_allowlist": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+    },
+    "required": ["url"],
+    "additionalProperties": false
+  },
+  "defaults": {
+    "max_chars": 20000,
+    "format": "markdown",
+    "request_timeout": "30s",
+    "render": "never",
+    "network_allowlist": []
+  },
+  "computed_defaults": {},
+  "input_ports": {
+    "mode": "closed",
+    "ports": {
+      "url": {
+        "schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string"},
+        "required": false,
+        "delivery": "local_binding",
+        "encoding": "identity",
+        "description": "The page address. Overrides the authored url."
+      }
+    }
+  },
+  "success_output": {
+    "kind": "fixed",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "title": {"type": "string"},
+        "description": {"type": "string"},
+        "text": {"type": "string"},
+        "links": {"type": "array", "items": {"type": "string"}, "maxItems": 200},
+        "final_url": {"type": "string"},
+        "truncated": {"type": "boolean"},
+        "likely_needs_javascript": {"type": "boolean"},
+        "rendered": {"type": "boolean"}
+      },
+      "required": [
+        "title",
+        "description",
+        "text",
+        "links",
+        "final_url",
+        "truncated",
+        "likely_needs_javascript",
+        "rendered"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "error_kinds": ["cancelled", "configuration", "internal", "network", "output_validation", "timeout"],
+  "effects": ["network"],
+  "preflight_checks": [
+    {"id": "network-target-valid", "severity": "error", "description": "The URL must use HTTP or HTTPS and satisfy the network policy."},
+    {"id": "render-browser-available", "severity": "error", "description": "render: always needs Chrome, Chromium or Edge installed on this computer."},
+    {"id": "render-browser-optional", "severity": "warning", "description": "render: auto reads pages without running JavaScript when no Chrome, Chromium or Edge is installed."}
+  ],
+  "static_diagnostics": [
+    {
+      "code": "RATTISH_SUSPECTED_PLAINTEXT_SECRET",
+      "severity": "warning",
+      "rule": "suspected_plaintext_secret",
+      "fields": ["url"],
+      "description": "Warn about a credential-shaped plaintext URL without rejecting the source."
+    }
+  ]
+}

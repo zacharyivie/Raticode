@@ -204,11 +204,18 @@ class RunUsageMeter:
         max_tokens: int | None = None,
         max_cost_usd: float | None = None,
         parent: UsageObserver | None = None,
+        daily_cost: bool = False,
+        daily_tokens: bool = False,
     ) -> None:
         self.run_id = run_id
         self.max_tokens = max_tokens
         self.max_cost_usd = max_cost_usd
         self.parent = parent
+        # A triggered run's cap came from what was left of a daily limit, not the workflow.
+        self.daily_cost = daily_cost
+        self.daily_tokens = daily_tokens
+        self._cost_name = "remaining daily cost" if daily_cost else "max-cost-usd"
+        self._token_name = "remaining daily token" if daily_tokens else "max-tokens"
         self._lock = threading.Lock()
         self._totals = empty_usage()
         self._nodes: dict[str, dict[str, Any]] = {}
@@ -218,13 +225,31 @@ class RunUsageMeter:
         self._inflight: dict[str, ProviderCall] = {}
 
     @classmethod
-    def for_ir(cls, ir: Mapping[str, Any], run_id: str) -> RunUsageMeter:
+    def for_ir(
+        cls,
+        ir: Mapping[str, Any],
+        run_id: str,
+        *,
+        daily_max_cost_usd: float | None = None,
+        daily_max_tokens: int | None = None,
+    ) -> RunUsageMeter:
+        """The workflow's own limits, or what is left of a daily limit when that is smaller."""
         workflow = ir["workflow"]
+        max_tokens = workflow.get("max_tokens")
+        max_cost_usd = workflow.get("max_cost_usd")
+        daily_tokens = daily_max_tokens is not None and (
+            max_tokens is None or daily_max_tokens < max_tokens
+        )
+        daily_cost = daily_max_cost_usd is not None and (
+            max_cost_usd is None or daily_max_cost_usd < max_cost_usd
+        )
         return cls(
             run_id,
-            max_tokens=workflow.get("max_tokens"),
-            max_cost_usd=workflow.get("max_cost_usd"),
+            max_tokens=daily_max_tokens if daily_tokens else max_tokens,
+            max_cost_usd=daily_max_cost_usd if daily_cost else max_cost_usd,
             parent=active_usage_observer(),
+            daily_cost=daily_cost,
+            daily_tokens=daily_tokens,
         )
 
     def observer(self, node_id: str, run_number: int) -> UsageObserver:
@@ -299,13 +324,14 @@ class RunUsageMeter:
             return {
                 "code": TOKEN_LIMIT_EXCEEDED,
                 "message": (
-                    f"The run used at least {format_tokens(used)} tokens, over its max-tokens "
-                    f"limit of {format_tokens(self.max_tokens)}, so Raticode stopped node "
-                    f"{node_id!r} while its call was running. {_LIVE_OVERSHOOT}"
+                    f"The run used at least {format_tokens(used)} tokens, over its "
+                    f"{self._token_name} limit of {format_tokens(self.max_tokens)}, so Raticode "
+                    f"stopped node {node_id!r} while its call was running. {_LIVE_OVERSHOOT}"
                 ),
                 "details": {
                     "scope": "workflow",
                     "limit": "max-tokens",
+                    **self._daily(tokens=True),
                     "max_tokens": self.max_tokens,
                     "used_tokens": used,
                     "node_id": node_id,
@@ -318,12 +344,13 @@ class RunUsageMeter:
                 "code": COST_LIMIT_EXCEEDED,
                 "message": (
                     f"The run's estimated cost reached at least {format_usd(cost)}, over its "
-                    f"max-cost-usd limit of {format_usd(self.max_cost_usd)}, so Raticode "
+                    f"{self._cost_name} limit of {format_usd(self.max_cost_usd)}, so Raticode "
                     f"stopped node {node_id!r} while its call was running. {_LIVE_OVERSHOOT}"
                 ),
                 "details": {
                     "scope": "workflow",
                     "limit": "max-cost-usd",
+                    **self._daily(tokens=False),
                     "max_cost_usd": self.max_cost_usd,
                     "cost_usd": cost,
                     "node_id": node_id,
@@ -360,12 +387,13 @@ class RunUsageMeter:
                 "message": (
                     f"{provider} stopped node {node_id!r} at its spending cap"
                     + (f" of {format_usd(cap)}" if cap is not None else "")
-                    + ", which Raticode set from what was left of the run's max-cost-usd "
+                    + f", which Raticode set from what was left of the run's {self._cost_name} "
                     f"limit of {format_usd(self.max_cost_usd)}.{spent}"
                 ),
                 "details": {
                     "scope": "workflow",
                     "limit": "max-cost-usd",
+                    **self._daily(tokens=False),
                     "max_cost_usd": self.max_cost_usd,
                     "cost_usd": cost,
                     "node_id": node_id,
@@ -379,13 +407,14 @@ class RunUsageMeter:
                 return {
                     "code": TOKEN_LIMIT_EXCEEDED,
                     "message": (
-                        f"The run used {format_tokens(used)} tokens, over its max-tokens limit "
-                        f"of {format_tokens(self.max_tokens)}, so it ended after a call from "
-                        f"node {node_id!r}. {_OVERSHOOT}"
+                        f"The run used {format_tokens(used)} tokens, over its {self._token_name} "
+                        f"limit of {format_tokens(self.max_tokens)}, so it ended after a call "
+                        f"from node {node_id!r}. {_OVERSHOOT}"
                     ),
                     "details": {
                         "scope": "workflow",
                         "limit": "max-tokens",
+                        **self._daily(tokens=True),
                         "max_tokens": self.max_tokens,
                         "used_tokens": used,
                         "node_id": node_id,
@@ -396,12 +425,14 @@ class RunUsageMeter:
                     "code": TOKENS_UNREPORTED,
                     "message": (
                         f"A call from node {node_id!r} ({call.provider}) didn't report how many "
-                        "tokens it used, so the run can't be kept under its max-tokens limit "
-                        f"of {format_tokens(self.max_tokens)}. The run ended to stay safe."
+                        "tokens it used, so the run can't be kept under its "
+                        f"{self._token_name} limit of {format_tokens(self.max_tokens)}. "
+                        "The run ended to stay safe."
                     ),
                     "details": {
                         "scope": "workflow",
                         "limit": "max-tokens",
+                        **self._daily(tokens=True),
                         "max_tokens": self.max_tokens,
                         "used_tokens": used,
                         "node_id": node_id,
@@ -415,12 +446,13 @@ class RunUsageMeter:
                     "code": COST_LIMIT_EXCEEDED,
                     "message": (
                         f"The run's estimated cost reached {format_usd(cost)}, over its "
-                        f"max-cost-usd limit of {format_usd(self.max_cost_usd)}, so it ended "
-                        f"after a call from node {node_id!r}. {_OVERSHOOT}"
+                        f"{self._cost_name} limit of {format_usd(self.max_cost_usd)}, so it "
+                        f"ended after a call from node {node_id!r}. {_OVERSHOOT}"
                     ),
                     "details": {
                         "scope": "workflow",
                         "limit": "max-cost-usd",
+                        **self._daily(tokens=False),
                         "max_cost_usd": self.max_cost_usd,
                         "cost_usd": cost,
                         "node_id": node_id,
@@ -431,13 +463,19 @@ class RunUsageMeter:
                     "code": COST_UNREPORTED,
                     "message": (
                         f"A call from node {node_id!r} ({call.provider}) didn't report what it "
-                        "cost, so the run can't be kept under its max-cost-usd limit of "
+                        f"cost, so the run can't be kept under its {self._cost_name} limit of "
                         f"{format_usd(self.max_cost_usd)}. The run ended to stay safe. "
-                        "For a provider that doesn't report cost, limit tokens with max-tokens."
+                        + (
+                            "For a provider that doesn't report cost, use a daily token limit."
+                            if self.daily_cost
+                            else "For a provider that doesn't report cost, limit tokens with "
+                            "max-tokens."
+                        )
                     ),
                     "details": {
                         "scope": "workflow",
                         "limit": "max-cost-usd",
+                        **self._daily(tokens=False),
                         "max_cost_usd": self.max_cost_usd,
                         "cost_usd": cost,
                         "node_id": node_id,
@@ -445,6 +483,10 @@ class RunUsageMeter:
                     },
                 }
         return None
+
+    def _daily(self, *, tokens: bool) -> dict[str, Any]:
+        daily = self.daily_tokens if tokens else self.daily_cost
+        return {"daily": True} if daily else {}
 
     def stop_requested(self) -> bool:
         return self._limit is not None or (self.parent is not None and self.parent.stop_requested())
@@ -472,7 +514,12 @@ class RunUsageMeter:
             return {
                 **self._totals,
                 "nodes": {node: dict(usage) for node, usage in sorted(self._nodes.items())},
-                "limits": {"max_tokens": self.max_tokens, "max_cost_usd": self.max_cost_usd},
+                "limits": {
+                    "max_tokens": self.max_tokens,
+                    "max_cost_usd": self.max_cost_usd,
+                    **({"daily_tokens": True} if self.daily_tokens else {}),
+                    **({"daily_cost": True} if self.daily_cost else {}),
+                },
             }
 
 
@@ -500,6 +547,10 @@ def usage_payload(usage: Any) -> dict[str, Any] | None:
             "maxTokens": limits.get("max_tokens"),
             "maxCostUsd": limits.get("max_cost_usd"),
         }
+        # Set when a triggered run's cap came from what was left of a daily limit.
+        for source, target in (("daily_tokens", "dailyTokens"), ("daily_cost", "dailyCost")):
+            if limits.get(source) is True:
+                payload["limits"][target] = True
     nodes = usage.get("nodes")
     if isinstance(nodes, Mapping):
         payload["nodes"] = {

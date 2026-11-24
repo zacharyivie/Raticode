@@ -14,11 +14,16 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.platform.app.InstrumentationRegistry
 import dev.raticode.mobile.live.*
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.unit.dp
+import dev.raticode.mobile.ui.ChatMarkdown
 import dev.raticode.mobile.ui.LocalRemTickets
 import dev.raticode.mobile.ui.LocalTicketOpener
 import dev.raticode.mobile.ui.RaticodeTheme
 import dev.raticode.mobile.ui.RemConversation
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import java.time.OffsetDateTime
@@ -101,5 +106,63 @@ class TicketPillsUiTest {
         compose.onNodeWithContentDescription("REM-12: Voice shortcuts, no longer on the board", useUnmergedTree = true).assertExists()
         dark = true
         screenshot("ticket-pills-dark.png")
+    }
+
+    /**
+     * In a table on a narrow phone, a ticket shows only its key, as a link that opens it, inside its own column. A pill
+     * with its title was wider than the column and drew over the next one. Checked at normal and large font sizes.
+     */
+    @Test fun ticketKeysInATableStayInTheirColumnOnANarrowPhone() {
+        val read = RemTicket("t137", "REM-137", "Read web page can render JavaScript pages", "done", "rem", "")
+        val usage = RemTicket("t139", "REM-139", "Usage history stays fast as the ledger grows", "done", "rem", "")
+        val tickets = mapOf(read.key to read, usage.key to usage)
+        val markdown = listOf(
+            "Landed REM-137 and REM-139.",
+            "",
+            "| Ticket | Win |",
+            "| --- | --- |",
+            "| REM-137 | Read web page can render JavaScript pages (render: auto or always) |",
+            "| REM-139 | Usage history uses one grouped query and a cache |",
+            "| REM-404 | Not a ticket |",
+        ).joinToString("\n")
+        val opened = mutableListOf<String>()
+        var fontScale by mutableStateOf(1f)
+        compose.setContent {
+            val density = androidx.compose.ui.platform.LocalDensity.current
+            CompositionLocalProvider(androidx.compose.ui.platform.LocalDensity provides androidx.compose.ui.unit.Density(density.density, fontScale)) {
+                RaticodeTheme(darkTheme = true) {
+                    Surface(color = MaterialTheme.colorScheme.background) {
+                        CompositionLocalProvider(LocalRemTickets provides tickets, LocalTicketOpener provides { ticket: RemTicket -> opened += ticket.key }) {
+                            androidx.compose.foundation.layout.Column(androidx.compose.ui.Modifier.width(360.dp).padding(16.dp)) {
+                                ChatMarkdown(markdown)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (scale in listOf(1f, 1.6f)) {
+            fontScale = scale
+            compose.waitForIdle()
+            // Outside the table each key is still a pill; in the table it is only the key.
+            compose.onAllNodesWithTag("ticketPill-REM-137", useUnmergedTree = true).assertCountEquals(1)
+            for ((ticket, win) in listOf(read to "Read web page can render", usage to "Usage history uses one")) {
+                val key = compose.onNodeWithTag("ticketKey-${ticket.key}", useUnmergedTree = true)
+                key.assertExists().assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button))
+                    .assert(SemanticsMatcher.expectValue(SemanticsProperties.ContentDescription, listOf("Ticket ${ticket.key}: ${ticket.title} (Done)")))
+                val box = key.getBoundsInRoot()
+                val next = compose.onNodeWithText(win, substring = true).getBoundsInRoot()
+                assertTrue("${ticket.key} at font scale $scale ends at ${box.right}, past the next column at ${next.left}", box.right <= next.left)
+                assertTrue("${ticket.key} is not drawn", box.right > box.left && box.bottom > box.top)
+            }
+            // An unknown key stays text.
+            compose.onAllNodesWithTag("ticketKey-REM-404", useUnmergedTree = true).assertCountEquals(0)
+            compose.onNodeWithText("REM-404").assertExists()
+            screenshot("ticket-table-${if (scale == 1f) "normal" else "large"}.png")
+        }
+        // Tapping a key opens its ticket.
+        compose.onNodeWithTag("ticketKey-REM-139", useUnmergedTree = true).performSemanticsAction(SemanticsActions.OnClick)
+        compose.onNodeWithTag("ticketKey-REM-137", useUnmergedTree = true).performClick()
+        assertEquals(listOf("REM-139", "REM-137"), opened)
     }
 }

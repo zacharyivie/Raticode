@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import codecs
+import json
 import os
 import shutil
 import sqlite3
@@ -10,18 +11,20 @@ import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from gofer.core.network_policy import NetworkPolicyViolation, validate_http_request_url
 from gofer.core.provider_profiles import (
+    load_provider_profiles,
     resolve_provider_settings,
     unresolved_provider_secret_refs,
     validate_provider_settings,
 )
+from gofer.rattish import agent_sandbox, shells
 from gofer.rattish.diagnostics import RattishDiagnostic, RattishError, SourcePosition, SourceSpan
 from gofer.rattish.project_paths import path_kind, project_path
 from gofer.rattish.prompt_templates import PromptTemplateError, validate_prompt_template
-from gofer.rattish.provider_fallback import provider_choices
+from gofer.rattish.provider_fallback import provider_choices, sign_in
 from gofer.rattish.provider_runtime import (
     default_provider_subscriptions,
     runtime_subscription_id,
@@ -46,6 +49,10 @@ class PreflightFailure:
     code: str
     message: str
     details: dict[str, Any]
+    # How to fix it. Without one, the check's contract description is shown.
+    suggestions: tuple[str, ...] = ()
+    # Overrides the check's declared severity, such as "info" for a check that was skipped.
+    severity: Literal["error", "warning", "info"] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +62,8 @@ class PreflightContext:
     subscriptions: Mapping[str, Subscription]
     handlers: NodeHandlerRegistry
     registry: PreflightRegistry
+    # A triggered run refuses some things a run you start yourself allows.
+    triggered: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +111,36 @@ def _secret_problem(name: str, data_dir: Path) -> tuple[str, str, str | None] | 
     return "missing", not_found_message(name), None
 
 
+def _trigger_file_input_diagnostics(ir: Mapping[str, Any]) -> list[RattishDiagnostic]:
+    """A trigger has nobody to choose a file, so a required file input stops its run."""
+    from gofer.rattish.file_inputs import file_input_specs
+
+    required = {item["name"] for item in ir["workflow"]["inputs"] if item["required"]}
+    names = [name for name in file_input_specs(ir) if name in required]
+    if not names:
+        return []
+    listed = ", ".join(repr(name) for name in names)
+    one = len(names) == 1
+    return [
+        RattishDiagnostic(
+            code="RATTISH_PREFLIGHT_FILE_INPUT_UNFILLED",
+            severity="error",
+            phase="preflight",
+            message=(
+                f"A trigger can't fill the required file {'input' if one else 'inputs'} "
+                f"{listed}: nobody is there to choose a file."
+            ),
+            file=ir["source_map"]["workflow"]["file"],
+            span=_source_span(ir["source_map"]["workflow"]),
+            details={"inputs": names},
+            suggestions=(
+                "Make the input optional (required: false), or run this workflow yourself "
+                "and choose the file.",
+            ),
+        )
+    ]
+
+
 def run_preflight(
     ir: Mapping[str, Any],
     *,
@@ -109,8 +148,15 @@ def run_preflight(
     data_dir: Path | None = None,
     subscriptions: Mapping[str, Subscription] | None = None,
     handlers: NodeHandlerRegistry | None = None,
+    triggered: bool = False,
+    worktree: bool = True,
 ) -> PreflightResult:
-    """Run every preflight check frozen into IR without executing a node."""
+    """Run every preflight check frozen into IR without executing a node.
+
+    ``triggered`` checks the workflow as a trigger would start it. ``worktree=False``
+    skips the ``workspace: worktree`` checks for a run that stays in the project folder,
+    such as a test set's.
+    """
     checks = registry or DEFAULT_PREFLIGHT_CHECKS
     runtime_handlers = handlers or DEFAULT_NODE_HANDLERS
     context = PreflightContext(
@@ -119,6 +165,7 @@ def run_preflight(
         subscriptions if subscriptions is not None else default_provider_subscriptions(),
         runtime_handlers,
         checks,
+        triggered,
     )
     diagnostics: list[RattishDiagnostic] = []
     if not ir["nodes"]:
@@ -134,6 +181,10 @@ def run_preflight(
                 suggestions=("Add at least one Node declaration.",),
             )
         )
+    if worktree:
+        diagnostics.extend(_worktree_diagnostics(ir, context))
+    if triggered:
+        diagnostics.extend(_trigger_file_input_diagnostics(ir))
     for node in ir["nodes"]:
         for binding in node["bindings"]:
             source = binding["source"]
@@ -196,16 +247,69 @@ def run_preflight(
             diagnostics.append(
                 RattishDiagnostic(
                     code=failure.code,
-                    severity=declaration["severity"],
+                    severity=failure.severity or declaration["severity"],
                     phase="preflight",
                     message=failure.message,
                     file=node["source_span"]["file"],
                     span=_source_span(node["source_span"]),
                     details={"node": node["id"], "check": declaration["id"], **failure.details},
-                    suggestions=(declaration["description"],),
+                    suggestions=failure.suggestions or (declaration["description"],),
                 )
             )
     return PreflightResult(tuple(diagnostics))
+
+
+def _worktree_diagnostics(
+    ir: Mapping[str, Any], context: PreflightContext
+) -> list[RattishDiagnostic]:
+    """``workspace: worktree`` needs a git repository, and works best with a setup file."""
+    from gofer.rattish import run_worktrees
+    from gofer.ui.worktree_setup import CONFIG_PATH
+
+    if not run_worktrees.uses_worktree(ir):
+        return []
+    project_root = context.project_root
+    where = ir["source_map"]["workflow"]
+
+    def diagnostic(
+        code: str, severity: Literal["error", "warning"], message: str, suggestion: str
+    ) -> RattishDiagnostic:
+        return RattishDiagnostic(
+            code=code,
+            severity=severity,
+            phase="preflight",
+            message=message,
+            file=where["file"],
+            span=_source_span(where),
+            details={"workflow_id": ir["workflow"]["id"], "field": "workspace"},
+            suggestions=(suggestion,),
+        )
+
+    try:
+        # Only checks the repository: nothing is created.
+        run_worktrees.plan(context.data_dir, project_root, ir["workflow"]["id"], "preflight")
+    except run_worktrees.RunWorktreeError as exc:
+        return [
+            diagnostic(
+                "RATTISH_PREFLIGHT_WORKTREE_UNAVAILABLE",
+                "error",
+                str(exc),
+                "Commit the project to git, or set workspace: project.",
+            )
+        ]
+    if (project_root / CONFIG_PATH).is_file():
+        return []
+    return [
+        diagnostic(
+            "RATTISH_PREFLIGHT_WORKTREE_SETUP_MISSING",
+            "warning",
+            f"Each run gets a fresh worktree with only the files git tracks, and this project "
+            f"has no {CONFIG_PATH} to install packages or link folders into it. Steps that "
+            "need dependencies, such as a test command, may fail there.",
+            f"Commit a {CONFIG_PATH} that prepares a worktree, then approve it. See "
+            "https://raticode.dev/docs/studio/worktree-setup",
+        )
+    ]
 
 
 def _binding_references(source: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -334,23 +438,158 @@ def _agent_fallback_provider_available(
 def _agent_profile_compatible(
     node: Mapping[str, Any], context: PreflightContext
 ) -> PreflightFailure | None:
-    """Every provider in the step's chain must have a usable profile and credentials."""
-    for index, choice in enumerate(provider_choices(node)):
-        failure = _choice_profile_problem(choice, context)
-        if failure is not None:
-            if index:
-                return PreflightFailure(
-                    failure.code,
-                    f"Fallback entry {index} ({choice['provider_id']}): {failure.message}",
-                    {**failure.details, "fallback": index - 1},
-                )
-            return failure
-    return None
+    """Every provider in the step's chain must have a usable profile and credentials.
+
+    The first error stops the check. A warning, such as a deprecated model, an account
+    that needs sign-in while the chain has another entry, or a fallback entry that is
+    another account of an earlier entry's provider, is reported only when no entry has an
+    error. When every entry is an account that needs sign-in, the first one is an error.
+    """
+    warnings: list[PreflightFailure] = []
+    choices = provider_choices(node)
+    signed_out = 0
+    for index, choice in enumerate(choices):
+        failure = _choice_profile_problem(choice, context, only_choice=len(choices) == 1)
+        if failure is None:
+            continue
+        if failure.code == "RATTISH_PREFLIGHT_ACCOUNT_NEEDS_SIGN_IN":
+            signed_out += 1
+        if index:
+            failure = PreflightFailure(
+                failure.code,
+                f"Fallback entry {index} ({choice['provider_id']}): {failure.message}",
+                {**failure.details, "fallback": index - 1},
+                failure.suggestions,
+                failure.severity,
+            )
+        if failure.severity == "warning":
+            warnings.append(failure)
+            continue
+        return failure
+    if len(choices) > 1 and signed_out == len(choices):
+        # No entry can run: every one is an account that needs sign-in.
+        return PreflightFailure(
+            warnings[0].code,
+            " ".join(item.message for item in warnings),
+            {**warnings[0].details, "profiles": [item.details["profile"] for item in warnings]},
+            tuple(dict.fromkeys(text for item in warnings for text in item.suggestions)),
+            "error",
+        )
+    account_warning = _fallback_account_warning(choices, context)
+    if account_warning is not None:
+        warnings.append(account_warning)
+    if not warnings:
+        return None
+    if len(warnings) == 1:
+        return warnings[0]
+    return PreflightFailure(
+        warnings[0].code,
+        " ".join(item.message for item in warnings),
+        {**warnings[0].details, "models": [item.details.get("model") for item in warnings]},
+        tuple(dict.fromkeys(text for item in warnings for text in item.suggestions)),
+        "warning",
+    )
+
+
+def _fallback_account_warning(
+    choices: list[dict[str, Any]], context: PreflightContext
+) -> PreflightFailure | None:
+    """Warn about fallback entries the step skips when their provider hits a usage limit.
+
+    Such an entry is another plan sign-in (an account or the default sign-in) of a provider
+    an earlier entry already uses, so only sign-in and outage errors reach it.
+    """
+    try:
+        profiles = load_provider_profiles(context.data_dir)
+    except (OSError, ValueError):
+        profiles = {}
+    entries: list[int] = []
+    for index in range(1, len(choices)):
+        identity, api_key = sign_in(choices[index], profiles)
+        if not api_key and any(
+            earlier["provider_id"] == choices[index]["provider_id"]
+            and sign_in(earlier, profiles)[0] != identity
+            for earlier in choices[:index]
+        ):
+            entries.append(index)
+    if not entries:
+        return None
+    names = [
+        f"Fallback entry {index} ({choices[index]['provider_id']}"
+        + (f" profile {choices[index]['profile']}" if choices[index].get("profile") else "")
+        + ")"
+        for index in entries
+    ]
+    return PreflightFailure(
+        "RATTISH_PREFLIGHT_FALLBACK_SAME_PROVIDER_ACCOUNT",
+        (
+            f"{' and '.join(names)} "
+            + ("is another account" if len(entries) == 1 else "are other accounts")
+            + " of a provider the step already uses. Raticode doesn't move work to another "
+            "account of the same provider at a usage limit, so "
+            + ("it" if len(entries) == 1 else "they")
+            + " will only be used for sign-in or outage errors."
+        ),
+        {
+            "fallback": [index - 1 for index in entries],
+            "providers": [choices[index]["provider_id"] for index in entries],
+            "profiles": [choices[index].get("profile") for index in entries],
+        },
+        (
+            "To keep the step running at a usage limit, add another provider or an "
+            "API-key profile to the fallback list.",
+        ),
+        "warning",
+    )
+
+
+def account_sign_in_state(name: str, data_dir: Path) -> str | None:
+    """An account profile's sign-in state: its last check if recent, else a quick check.
+
+    None when the profile isn't an account or the state isn't known in time. Tests
+    replace this so preflight never starts a real provider CLI.
+    """
+    from gofer.core.provider_accounts import is_account, quick_status
+
+    try:
+        profile = load_provider_profiles(data_dir).get(name)
+    except (OSError, ValueError):
+        return None
+    if profile is None or not is_account(profile):
+        return None
+    status = quick_status(profile, data_dir=data_dir)
+    return str(status["state"]) if status and status.get("state") else None
+
+
+def _account_sign_in_problem(
+    name: str, resolution: Mapping[str, Any], context: PreflightContext, only_choice: bool
+) -> PreflightFailure | None:
+    """An account that needs sign-in: an error for the step's only choice, else a warning."""
+    from gofer.core.provider_accounts import NEEDS_SIGN_IN, account_adapter
+
+    if account_sign_in_state(name, context.data_dir) != NEEDS_SIGN_IN:
+        # Signed in, or a state preflight can't tell (no CLI, a slow check): it passes.
+        return None
+    subscription = runtime_subscription_id(resolution["provider_id"])
+    adapter = account_adapter(subscription)
+    label = adapter.label if adapter else str(resolution["provider_id"])
+    return PreflightFailure(
+        "RATTISH_PREFLIGHT_ACCOUNT_NEEDS_SIGN_IN",
+        f"{label} account {name!r} needs sign-in, so the step can't use it.",
+        {"provider": resolution["provider_id"], "profile": name, "state": NEEDS_SIGN_IN},
+        (f"Sign in {name!r} under Settings > Providers > {label}, then run preflight again.",),
+        "error" if only_choice else "warning",
+    )
 
 
 def _choice_profile_problem(
-    resolution: Mapping[str, Any], context: PreflightContext
+    resolution: Mapping[str, Any], context: PreflightContext, *, only_choice: bool = True
 ) -> PreflightFailure | None:
+    """What stops one choice's profile from running, or None.
+
+    ``only_choice`` says the step has no other entry to move on to, which makes an
+    account that needs sign-in an error rather than a warning.
+    """
     profile = resolution["profile"]
     try:
         subscription_id = runtime_subscription_id(resolution["provider_id"])
@@ -379,6 +618,10 @@ def _choice_profile_problem(
             "Provider credentials are unavailable: " + ", ".join(missing_secrets),
             {"secrets": missing_secrets},
         )
+    if settings.account_id and profile:
+        signed_out = _account_sign_in_problem(str(profile), resolution, context, only_choice)
+        if signed_out is not None:
+            return signed_out
     if settings.local:
         from gofer.core.local_models import preflight_problem
 
@@ -393,6 +636,26 @@ def _choice_profile_problem(
                     "model": settings.model,
                     "api_base_url": settings.api_base_url,
                 },
+            )
+    elif settings.subscription in {"anthropic_api", "openai_api"}:
+        from gofer.core.model_lifecycle import check_model
+
+        model_problem = check_model(settings, context.data_dir)
+        if model_problem is not None:
+            return PreflightFailure(
+                model_problem.code,
+                model_problem.message,
+                {
+                    "provider": resolution["provider_id"],
+                    "profile": profile,
+                    **{
+                        name: value
+                        for name, value in model_problem.to_json().items()
+                        if name in {"model", "state", "replacement", "retires"}
+                    },
+                },
+                (model_problem.suggestion,),
+                model_problem.severity,
             )
     return None
 
@@ -444,6 +707,145 @@ def _agent_working_dir_available(
         "RATTISH_PREFLIGHT_RESOURCE_MISSING",
         f"Agent working directory {path} is unavailable or inaccessible.",
         {"path": str(path)},
+    )
+
+
+def _sandboxed_choices(
+    node: Mapping[str, Any], context: PreflightContext
+) -> list[tuple[Mapping[str, Any], str, Any]]:
+    """The step's provider choices that run in Raticode's sandbox: (choice, id, settings)."""
+    configuration = node["configuration"]
+    found: list[tuple[Mapping[str, Any], str, Any]] = []
+    for choice in provider_choices(node):
+        subscription_id, settings = agent_sandbox.choice_settings(choice, context.data_dir)
+        if subscription_id is None or not agent_sandbox.builtin_adapter(
+            context.subscriptions.get(subscription_id), subscription_id
+        ):
+            continue
+        if agent_sandbox.unsandboxed_reason(subscription_id, configuration, settings) is None:
+            found.append((choice, subscription_id, settings))
+    return found
+
+
+def _agent_sandbox_available(
+    node: Mapping[str, Any], context: PreflightContext
+) -> PreflightFailure | None:
+    """Each sandboxed provider in the step's chain must be able to start in its sandbox."""
+    configuration = node["configuration"]
+    for index, choice in enumerate(provider_choices(node)):
+        subscription_id, settings = agent_sandbox.choice_settings(choice, context.data_dir)
+        if subscription_id is None or not agent_sandbox.builtin_adapter(
+            context.subscriptions.get(subscription_id), subscription_id
+        ):
+            continue
+        problem = agent_sandbox.sandbox_problem(
+            subscription_id, configuration, settings, triggered=context.triggered
+        )
+        if problem is None:
+            continue
+        prefix = f"Fallback entry {index} ({choice['provider_id']}): " if index else ""
+        return PreflightFailure(
+            problem.code,
+            prefix + problem.message,
+            {
+                "provider": choice["provider_id"],
+                **({"fallback": index - 1} if index else {}),
+            },
+            (problem.suggestion,) if problem.suggestion else (),
+        )
+    return None
+
+
+def _agent_network_declared(
+    node: Mapping[str, Any], context: PreflightContext
+) -> PreflightFailure | None:
+    """A sandboxed step whose settings show it needs hosts must list them in network."""
+    configuration = node["configuration"]
+    choices = _sandboxed_choices(node, context)
+    if not choices:
+        return None
+    prompt_text: str | None = configuration["prompt"]
+    if configuration["prompt_path"] is not None and not _configuration_is_dynamic(
+        node, "prompt_path"
+    ):
+        path = project_path(context.project_root, configuration["prompt_path"])
+        try:
+            with path.open("rb") as handle:
+                prompt_text = handle.read(agent_sandbox.MAX_PROMPT_BYTES).decode("utf-8", "replace")
+        except OSError:
+            prompt_text = None
+    need = agent_sandbox.network_need(configuration, prompt_text)
+    if need is None:
+        return None
+    network = agent_sandbox.step_network(configuration)
+    message, suggestions = agent_sandbox.network_fix(
+        node["id"],
+        need,
+        network,
+        codex=any(subscription_id == "codex" for _, subscription_id, _ in choices),
+    )
+    return PreflightFailure(
+        "RATTISH_PREFLIGHT_NETWORK_UNDECLARED", message, need.to_details(), suggestions
+    )
+
+
+def _agent_runs_unsandboxed(
+    node: Mapping[str, Any], context: PreflightContext
+) -> PreflightFailure | None:
+    """Warn when any provider in the step's chain runs its shell unsandboxed."""
+    found = agent_sandbox.node_unsandboxed(node, context.data_dir)
+    if not found:
+        return None
+    return PreflightFailure(
+        "RATTISH_PREFLIGHT_RUNS_UNSANDBOXED",
+        agent_sandbox.unsandboxed_message(found),
+        {"unsandboxed": [{"provider": i["provider"], "reason": i["reason"]} for i in found]},
+        (
+            "Its shell can change any file you can, read your credentials and reach any "
+            "host. Use claude-code or codex with the sandbox on for steps triggers start.",
+        ),
+    )
+
+
+def _agent_extra_paths_allowed(
+    node: Mapping[str, Any], context: PreflightContext
+) -> PreflightFailure | None:
+    """Refuse extra paths that are, hold or sit inside a credential folder."""
+    paths: list[Path] = []
+    for authored in node["configuration"].get("extra_paths") or []:
+        if not isinstance(authored, str):
+            continue
+        try:
+            paths.append(project_path(context.project_root, authored))
+        except ValueError:
+            continue
+    refused = agent_sandbox.credential_extra_paths(paths, context.data_dir)
+    if not refused:
+        return None
+    return PreflightFailure(
+        "RATTISH_PREFLIGHT_CREDENTIAL_PATH",
+        f"Agent {node['id']!r} can't be given a credential folder: " + "; ".join(refused) + ".",
+        {"paths": refused},
+        ("Remove it from the step's extra-paths.",),
+    )
+
+
+def _agent_sandbox_widened(
+    node: Mapping[str, Any], context: PreflightContext
+) -> PreflightFailure | None:
+    """Warn when the step's own settings let its shell reach beyond its project."""
+    found = agent_sandbox.node_widened(node, context.project_root, context.data_dir)
+    if not found:
+        return None
+    return PreflightFailure(
+        "RATTISH_PREFLIGHT_SANDBOX_WIDENED",
+        f"Agent {node['id']!r}: " + agent_sandbox.widened_message(found),
+        {"widened": [{key: v for key, v in item.items() if key != "node"} for item in found]},
+        (
+            "The workflow file itself sets this, so check it before a trigger runs it with "
+            "nobody watching. Keep extra-paths inside the project and list the hosts in "
+            "`network` instead of `any` where you can.",
+        ),
     )
 
 
@@ -629,7 +1031,10 @@ def _loop_source_ready(
 def _bash_shell_available(
     node: Mapping[str, Any], context: PreflightContext
 ) -> PreflightFailure | None:
-    _ = node, context
+    _ = context
+    shell = shells.configured_shell(node["configuration"])
+    if shell != "auto":
+        return _shell_failure(shell)
     executable = "powershell.exe" if sys.platform == "win32" else "bash"
     if shutil.which(executable) is not None:
         return None
@@ -814,6 +1219,277 @@ def _http_network_target_valid(
     return None
 
 
+def _render_browser_missing(node: Mapping[str, Any], mode: str) -> PreflightFailure | None:
+    if str(node["configuration"].get("render", "never")).lower() != mode:
+        return None
+    from gofer.rattish.web_render import find_browser
+
+    if find_browser() is not None:
+        return None
+    if mode == "always":
+        message = (
+            "render: always needs Chrome, Chromium or Edge, and none is installed on this "
+            "computer. Install one, or use render: auto to read the page without it."
+        )
+    else:
+        message = (
+            "No Chrome, Chromium or Edge is installed, so render: auto reads the page "
+            "without running JavaScript."
+        )
+    return PreflightFailure("RATTISH_PREFLIGHT_NO_BROWSER", message, {"render": mode})
+
+
+def _render_browser_available(
+    node: Mapping[str, Any], context: PreflightContext
+) -> PreflightFailure | None:
+    _ = context
+    return _render_browser_missing(node, "always")
+
+
+def _render_browser_optional(
+    node: Mapping[str, Any], context: PreflightContext
+) -> PreflightFailure | None:
+    _ = context
+    return _render_browser_missing(node, "auto")
+
+
+def _mcp_server(node: Mapping[str, Any], context: PreflightContext) -> Any:
+    """The step's server from Rem's list, or the ``McpToolError`` saying why it isn't there."""
+    from gofer.rattish import mcp_tool
+
+    try:
+        return mcp_tool.library_server(context.data_dir, str(node["configuration"]["server"]))
+    except mcp_tool.McpToolError as exc:
+        return exc
+
+
+def _mcp_server_registered(
+    node: Mapping[str, Any], context: PreflightContext
+) -> PreflightFailure | None:
+    from gofer.rattish import mcp_tool
+
+    server = _mcp_server(node, context)
+    if not isinstance(server, mcp_tool.McpToolError):
+        return None
+    name = str(node["configuration"]["server"])
+    return PreflightFailure(
+        "RATTISH_PREFLIGHT_MCP_SERVER_UNKNOWN",
+        server.message,
+        server.details,
+        (
+            f"Add it with `Raticode rem mcp add {name} --url URL` or "
+            f"`Raticode rem mcp add {name} -- COMMAND ARGS`, or pick a server from the list.",
+        ),
+    )
+
+
+def _mcp_sandbox_available(
+    node: Mapping[str, Any], context: PreflightContext
+) -> PreflightFailure | None:
+    from gofer.rattish import mcp_tool
+
+    server = _mcp_server(node, context)
+    if isinstance(server, mcp_tool.McpToolError):
+        return None
+    settings = mcp_tool.step_settings(node["configuration"], context.project_root)
+    problem = mcp_tool.sandbox_problem(server, settings)
+    if problem is None:
+        return None
+    return PreflightFailure(
+        "RATTISH_PREFLIGHT_SANDBOX_UNAVAILABLE",
+        problem,
+        {"server": server["name"]},
+        ("Fix that, or add `sandbox: off` to the step to run its server unsandboxed.",),
+    )
+
+
+def _mcp_tool_arguments_valid(
+    node: Mapping[str, Any], context: PreflightContext
+) -> PreflightFailure | None:
+    """List the server's tools, then check the tool name and the arguments' shape.
+
+    This starts the server in its sandbox, so answers are kept for a few minutes per
+    server definition and sandbox. A local server that would run unsandboxed (sandbox: off,
+    or native Windows) is never started here: opening a workflow in the Studio runs
+    preflight, and that must not run a server outside the sandbox. Its run still checks
+    the tool and the arguments.
+    """
+    from gofer.rattish import mcp_tool
+
+    server = _mcp_server(node, context)
+    if isinstance(server, mcp_tool.McpToolError):
+        return None
+    configuration = node["configuration"]
+    settings = mcp_tool.step_settings(configuration, context.project_root)
+    reason = mcp_tool.unsandboxed_reason(server, settings)
+    if reason is not None:
+        return PreflightFailure(
+            "RATTISH_PREFLIGHT_MCP_TOOL_CHECK_SKIPPED",
+            "Tool check skipped: this server runs unsandboxed. Check it with "
+            f"Raticode rem mcp tools {server['name']}.",
+            {"server": server["name"], "reason": reason},
+            ("The run still checks the tool and its arguments when it starts the server.",),
+            severity="info",
+        )
+    if mcp_tool.sandbox_problem(server, settings) is not None:
+        return None
+    try:
+        tools = mcp_tool.list_tools(server, settings, data_dir=context.data_dir, use_cache=True)
+    except mcp_tool.McpToolError as exc:
+        return PreflightFailure(
+            "RATTISH_PREFLIGHT_MCP_SERVER_UNAVAILABLE",
+            f"Couldn't list the tools of MCP server {server['name']!r}: {exc.message}",
+            {"server": server["name"], "code": exc.code},
+            (
+                "Check that the server starts with `Raticode rem mcp tools "
+                f"{server['name']}`. A server started with npx or uvx needs its package "
+                "host in network (such as registry.npmjs.org or pypi.org) unless it is "
+                "installed already.",
+            ),
+        )
+    tool_name = str(configuration["tool"])
+    if _configuration_is_dynamic(node, "tool"):
+        return None
+    try:
+        tool = mcp_tool.find_tool(tools, tool_name, server["name"])
+    except mcp_tool.McpToolError as exc:
+        return PreflightFailure("RATTISH_PREFLIGHT_MCP_TOOL_UNKNOWN", exc.message, exc.details)
+    if any(binding["name"] == "arguments" for binding in node["bindings"]):
+        return None
+    arguments = configuration["arguments"]
+    if isinstance(arguments, str):
+        if "{{" in arguments or "}}" in arguments:
+            return None
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError as exc:
+            return PreflightFailure(
+                "RATTISH_PREFLIGHT_MCP_ARGUMENTS_INVALID",
+                f"The arguments aren't valid JSON: {exc.msg}.",
+                {"server": server["name"], "tool": tool_name},
+            )
+    problems = mcp_tool.argument_problems(tool["inputSchema"], arguments, templates=True)
+    if not problems:
+        return None
+    return PreflightFailure(
+        "RATTISH_PREFLIGHT_MCP_ARGUMENTS_INVALID",
+        f"The arguments don't fit tool {tool_name!r}: " + "; ".join(problems[:5]),
+        {
+            "server": server["name"],
+            "tool": tool_name,
+            "problems": problems[:20],
+            "input_schema": tool["inputSchema"],
+        },
+        (f"Run `Raticode rem mcp tools {server['name']}` to see each tool's arguments.",),
+    )
+
+
+def _mcp_runs_unsandboxed(
+    node: Mapping[str, Any], context: PreflightContext
+) -> PreflightFailure | None:
+    from gofer.rattish import mcp_tool
+
+    found = mcp_tool.node_unsandboxed(node, context.data_dir)
+    if not found:
+        return None
+    return PreflightFailure(
+        "RATTISH_PREFLIGHT_RUNS_UNSANDBOXED",
+        agent_sandbox.unsandboxed_message(found),
+        {"unsandboxed": [{"provider": i["provider"], "reason": i["reason"]} for i in found]},
+        (
+            "The server can change any file you can, read your credentials and reach any "
+            "host. Keep the sandbox on for steps triggers start.",
+        ),
+    )
+
+
+def _mcp_package_pinned(
+    node: Mapping[str, Any], context: PreflightContext
+) -> PreflightFailure | None:
+    from gofer.rattish import mcp_packages, mcp_tool
+
+    server = _mcp_server(node, context)
+    if isinstance(server, mcp_tool.McpToolError):
+        return None
+    packages = mcp_packages.unpinned_packages(server)
+    if not packages:
+        return None
+    return PreflightFailure(
+        "RATTISH_PREFLIGHT_MCP_PACKAGE_UNPINNED",
+        mcp_packages.unpinned_message(str(server["name"]), packages),
+        {"server": server["name"], "packages": packages},
+        (
+            "Pin an exact version in Rem's MCP server list, such as "
+            "`Raticode rem mcp add NAME -- npx -y pkg@1.2.3` or `uvx pkg@1.2.3`, or install "
+            f"the server and run it directly. {mcp_packages.TOP_LEVEL_ONLY}",
+        ),
+    )
+
+
+def _mcp_cache_readable(
+    node: Mapping[str, Any], context: PreflightContext
+) -> PreflightFailure | None:
+    """Note when tool calls here get an empty package cache and can't reach the package host.
+
+    Such a call has to download the server's package, and the step's network blocks that.
+    """
+    from gofer.rattish import mcp_packages, mcp_tool
+
+    server = _mcp_server(node, context)
+    if isinstance(server, mcp_tool.McpToolError) or not mcp_tool.is_local(server):
+        return None
+    settings = mcp_tool.step_settings(node["configuration"], context.project_root)
+    if mcp_tool.unsandboxed_reason(server, settings) is not None:
+        return None
+    hosts = [
+        host
+        for host in mcp_packages.package_hosts(server)
+        if not agent_sandbox.host_allowed(host, settings.network)
+    ]
+    if not hosts:
+        return None
+    problem = mcp_tool.call_cache_problem(server, context.data_dir)
+    if problem is None or mcp_tool.sandbox_problem(server, settings) is not None:
+        return None
+    listed = " and ".join(hosts)
+    return PreflightFailure(
+        "RATTISH_PREFLIGHT_MCP_CACHE_UNREADABLE",
+        f"Tool calls on this computer can't read MCP server {server['name']!r}'s package "
+        f"cache: {problem}. Each call downloads the package, and the step's network "
+        f"doesn't list {listed}.",
+        {"server": server["name"], "hosts": hosts, "reason": problem},
+        (
+            f"Add {listed} to the step's network, install bubblewrap 0.11 or later, or "
+            "install the server and run the installed program.",
+        ),
+        severity="info",
+    )
+
+
+def _mcp_env_set(node: Mapping[str, Any], context: PreflightContext) -> PreflightFailure | None:
+    """Warn when a variable the server's library entry names isn't set here."""
+    from gofer.rattish import mcp_tool
+
+    server = _mcp_server(node, context)
+    if isinstance(server, mcp_tool.McpToolError):
+        return None
+    missing = mcp_tool.missing_env(server)
+    if not missing:
+        return None
+    listed = ", ".join(missing)
+    return PreflightFailure(
+        "RATTISH_PREFLIGHT_MCP_ENV_MISSING",
+        f"MCP server {server['name']!r} names environment "
+        f"variable{'s' if len(missing) > 1 else ''} {listed}, which "
+        f"{'are' if len(missing) > 1 else 'is'} not set where Raticode runs.",
+        {"server": server["name"], "missing": missing},
+        (
+            "Set it in the environment Raticode starts from, or remove the name from the "
+            "server in Thread tools. Until then the server starts without it.",
+        ),
+    )
+
+
 def _notification_channel_configured(
     node: Mapping[str, Any], context: PreflightContext
 ) -> PreflightFailure | None:
@@ -937,7 +1613,18 @@ def _python_interpreter_available(
 def _shell_interpreter_available(
     node: Mapping[str, Any], context: PreflightContext
 ) -> PreflightFailure | None:
+    shell = shells.configured_shell(node["configuration"])
+    if shell != "auto":
+        return _shell_failure(shell)
     return _interpreter_available("bash", node, context)
+
+
+def _shell_failure(shell: str) -> PreflightFailure | None:
+    """A step that asks for bash or powershell: is it installed here?"""
+    missing = shells.shell_missing(shell)
+    if missing is None:
+        return None
+    return PreflightFailure("RATTISH_PREFLIGHT_RESOURCE_MISSING", str(missing), missing.details)
 
 
 def _interpreter_available(
@@ -1187,6 +1874,7 @@ def _child_workflow_ready(
         data_dir=context.data_dir,
         subscriptions=context.subscriptions,
         handlers=context.handlers,
+        triggered=context.triggered,
     )
     if child_result.ready:
         return None
@@ -1235,6 +1923,11 @@ DEFAULT_PREFLIGHT_CHECKS = PreflightRegistry(
         ("raticode.agent", "fallback-provider-available"): _agent_fallback_provider_available,
         ("raticode.agent", "prompt-path-readable"): _agent_prompt_path_readable,
         ("raticode.agent", "working-dir-available"): _agent_working_dir_available,
+        ("raticode.agent", "sandbox-available"): _agent_sandbox_available,
+        ("raticode.agent", "network-declared"): _agent_network_declared,
+        ("raticode.agent", "runs-unsandboxed"): _agent_runs_unsandboxed,
+        ("raticode.agent", "extra-paths-allowed"): _agent_extra_paths_allowed,
+        ("raticode.agent", "sandbox-widened"): _agent_sandbox_widened,
         ("raticode.approval_gate", "approval-store-ready"): _approval_store_ready,
         ("raticode.bash_command", "shell-available"): _bash_shell_available,
         ("raticode.bash_command", "working-dir-available"): _bash_working_dir_available,
@@ -1247,6 +1940,16 @@ DEFAULT_PREFLIGHT_CHECKS = PreflightRegistry(
         ("raticode.file", "path-readable"): _read_path_readable,
         ("raticode.folder", "path-readable"): _folder_path_readable,
         ("raticode.http_request", "network-target-valid"): _http_network_target_valid,
+        ("raticode.read_web_page", "network-target-valid"): _http_network_target_valid,
+        ("raticode.read_web_page", "render-browser-available"): _render_browser_available,
+        ("raticode.read_web_page", "render-browser-optional"): _render_browser_optional,
+        ("raticode.mcp_tool", "server-registered"): _mcp_server_registered,
+        ("raticode.mcp_tool", "sandbox-available"): _mcp_sandbox_available,
+        ("raticode.mcp_tool", "tool-arguments-valid"): _mcp_tool_arguments_valid,
+        ("raticode.mcp_tool", "runs-unsandboxed"): _mcp_runs_unsandboxed,
+        ("raticode.mcp_tool", "package-pinned"): _mcp_package_pinned,
+        ("raticode.mcp_tool", "env-set"): _mcp_env_set,
+        ("raticode.mcp_tool", "cache-readable"): _mcp_cache_readable,
         ("raticode.jev", "jev-configured"): _jev_configured,
         ("raticode.common_llm_task", "provider-available"): _agent_provider_available,
         ("raticode.common_llm_task", "profile-compatible"): _agent_profile_compatible,

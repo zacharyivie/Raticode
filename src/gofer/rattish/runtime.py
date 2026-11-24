@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import functools
 import hashlib
 import io
 import json
@@ -56,7 +57,8 @@ from gofer.core.structured_output import (
     structured_output_instruction,
 )
 from gofer.core.usage_context import active_usage_observer
-from gofer.rattish.contracts import canonical_json_bytes, json_fingerprint
+from gofer.rattish import agent_sandbox, approved_files, shells
+from gofer.rattish.contracts import canonical_json_bytes, contract_fingerprint, json_fingerprint
 from gofer.rattish.ir_validation import (
     InvalidRattishIrError as InvalidRattishIrError,
 )
@@ -249,7 +251,7 @@ def load_ir(
             )
         if (
             contract["contract_version"] != node["contract"]["version"]
-            or json_fingerprint(contract) != node["contract"]["fingerprint"]
+            or contract_fingerprint(contract) != node["contract"]["fingerprint"]
         ):
             raise InvalidRattishIrError(
                 f"Node {node['id']!r} contract identity is stale or invalid."
@@ -437,6 +439,20 @@ async def execute_node(
             else:
                 with anyio.fail_after(timeout_ms / 1000):
                     handled = await handler(effective_node, context, bindings)
+    except approved_files.ApprovedFileChanged as exc:
+        handled = HandlerResult(
+            False,
+            {},
+            RuntimeErrorInfo("configuration", approved_files.CHANGED_CODE, str(exc), exc.details()),
+        )
+    except shells.ShellUnavailableError as exc:
+        handled = HandlerResult(
+            False,
+            {},
+            RuntimeErrorInfo(
+                "configuration", "RATTISH_RUNTIME_SHELL_UNAVAILABLE", str(exc), exc.details
+            ),
+        )
     except TimeoutError as exc:
         timeout_ms = node["execution"]["timeout_ms"]
         handled = HandlerResult(
@@ -651,6 +667,38 @@ async def _agent_handler(
         if configuration["prompt_path"] is not None
         else None
     )
+    extra_paths = [
+        project_path(context.project_root, path) for path in configuration["extra_paths"]
+    ]
+    if refused := agent_sandbox.credential_extra_paths(extra_paths, context.data_dir):
+        # Never handed to any provider, sandboxed or not.
+        return HandlerResult(
+            False,
+            "",
+            _sandbox_error(
+                resolution,
+                agent_sandbox.SandboxError(
+                    "RATTISH_SANDBOX_CREDENTIAL_PATH",
+                    "A step can't be given a credential folder: " + "; ".join(refused) + ".",
+                    "Remove it from the step's extra-paths.",
+                ),
+            ),
+        )
+    sandbox = agent_sandbox.PreparedStep(settings)
+    if agent_sandbox.builtin_adapter(subscription, subscription_id):
+        try:
+            sandbox = agent_sandbox.prepare_step(
+                subscription_id,
+                configuration,
+                settings,
+                working_dir=working_dir,
+                extra_paths=extra_paths,
+                data_dir=context.data_dir,
+                run_id=context.run_id,
+            )
+        except agent_sandbox.SandboxError as exc:
+            return HandlerResult(False, "", _sandbox_error(resolution, exc))
+    settings = sandbox.settings
     agent_config = AgentConfig(
         agent_id=node["id"],
         subscription=subscription_id,
@@ -661,10 +709,8 @@ async def _agent_handler(
         prompt_path=None,
         tools=list(configuration["tools"]),
         mcp_servers=list(configuration["mcp_servers"]),
-        env=dict(configuration["env"]),
-        extra_paths=[
-            project_path(context.project_root, path) for path in configuration["extra_paths"]
-        ],
+        env={**configuration["env"], **sandbox.env},
+        extra_paths=extra_paths,
     )
     if configuration["skill"]:
         prompt_override = f"/{configuration['skill'].strip().lstrip('/')}"
@@ -672,8 +718,9 @@ async def _agent_handler(
         prompt_template = (
             configuration["prompt"]
             if prompt_path is None
-            else read_text_limited(
+            else approved_files.read_text(
                 prompt_path,
+                role="prompt",
                 encoding="utf-8",
                 errors="strict",
                 max_bytes=context.max_file_read_bytes,
@@ -687,40 +734,54 @@ async def _agent_handler(
     )
     prompt_suffix = structured_output_instruction(output_schema) if structured else None
     memory = _load_agent_memory(node["id"], configuration["memory"], context)
-    result = await Agent(agent_config, subscription).run(
-        {},
-        prompt_override=prompt_override,
-        prompt_suffix=prompt_suffix,
-        memory=memory,
-        max_output_bytes=context.max_subprocess_output_bytes,
-        timeout=settings.timeout,
-        provider_settings=settings,
-    )
-    if not result.success:
-        reached = _usage_limit_error()
-        if reached is not None:
-            # The run's usage limit stopped this call (or Claude Code's spending cap, set
-            # from the run's remaining budget, did), so the limit is why the node failed.
-            return HandlerResult(False, result.output, reached)
-        return HandlerResult(False, result.output, _provider_call_error(resolution, result))
-
-    final_result = result
-    output: Any = result.output
-    if structured:
-        output, final_result, error = await _structured_agent_output(
-            result,
-            output_schema,
-            configuration["repair_attempts"],
-            agent_config,
-            subscription,
-            settings,
-            context,
+    # The sandbox may leave empty mount points in the folder Claude Code starts in.
+    with agent_sandbox.mount_stub_cleanup(sandbox):
+        result = await Agent(agent_config, subscription).run(
+            {},
+            prompt_override=prompt_override,
+            prompt_suffix=prompt_suffix,
+            memory=memory,
+            max_output_bytes=context.max_subprocess_output_bytes,
+            timeout=settings.timeout,
+            provider_settings=settings,
         )
-        if error is not None:
-            return HandlerResult(False, result.output, error)
-    if not bindings.sensitive_values:
-        _remember_agent_result(node["id"], configuration["memory"], final_result, context)
-    return HandlerResult(True, output)
+        if not result.success:
+            reached = _usage_limit_error()
+            if reached is not None:
+                # The run's usage limit stopped this call (or Claude Code's spending cap, set
+                # from the run's remaining budget, did), so the limit is why the node failed.
+                return HandlerResult(False, result.output, reached)
+            return HandlerResult(False, result.output, _provider_call_error(resolution, result))
+
+        final_result = result
+        output: Any = result.output
+        if structured:
+            output, final_result, error = await _structured_agent_output(
+                result,
+                output_schema,
+                configuration["repair_attempts"],
+                agent_config,
+                subscription,
+                settings,
+                context,
+            )
+            if error is not None:
+                return HandlerResult(False, result.output, error)
+        if not bindings.sensitive_values:
+            _remember_agent_result(node["id"], configuration["memory"], final_result, context)
+        return HandlerResult(True, output)
+
+
+def _sandbox_error(
+    resolution: Mapping[str, Any], error: agent_sandbox.SandboxError
+) -> RuntimeErrorInfo:
+    """The error for a step whose sandbox can't start. Preflight normally finds it first."""
+    return RuntimeErrorInfo(
+        "configuration",
+        error.code,
+        error.message + (f" {error.suggestion}" if error.suggestion else ""),
+        {"provider": resolution["provider_id"], "retryable": False},
+    )
 
 
 def _provider_not_installed(resolution: Mapping[str, Any]) -> RuntimeErrorInfo:
@@ -777,6 +838,7 @@ async def _workflow_handler(
     resolution = node["resolutions"]["workflow"]
     if resolution is None:
         raise ValueError("Workflow IR has no referenced workflow resolution.")
+    child_path: Path | None = None
     try:
         if resolution["source_kind"] == "registry":
             from gofer.rattish.workspaces import find_registered_workflow
@@ -798,6 +860,9 @@ async def _workflow_handler(
             project_root=child_project_root,
         )
     except (OSError, ValueError, RattishArtifactError, RattishError) as exc:
+        if child_path is not None:
+            # A child that no longer compiles may be one that changed during the run.
+            approved_files.check_file(child_path, "child_workflow")
         diagnostics = (
             [item.to_json() for item in exc.diagnostics] if isinstance(exc, RattishError) else []
         )
@@ -815,6 +880,7 @@ async def _workflow_handler(
                 },
             ),
         )
+    approved_files.check_compiled(child_path, child.ir, "child_workflow")
     actual_fingerprint = _workflow_interface_fingerprint(child.ir)
     if actual_fingerprint != resolution["interface_fingerprint"]:
         return HandlerResult(
@@ -1182,6 +1248,156 @@ async def _http_request_handler(
     return HandlerResult(True, output)
 
 
+async def _read_web_page_handler(
+    node: Mapping[str, Any], context: RuntimeContext, bindings: ResolvedBindings
+) -> HandlerResult:
+    """GET one page and return its title, description, readable text and links.
+
+    The fetch runs in a worker thread with its own overall deadline; the extra seconds on
+    the outer limit only cover a thread that is slow to notice it. With ``render`` the
+    browser gets a second ``request-timeout`` of its own, and a stopped run stops it.
+    """
+    from gofer.rattish import web_page
+
+    configuration = node["configuration"]
+    url = str(_binding_or_configuration(bindings, configuration, "url")).strip()
+    if not url:
+        return HandlerResult(
+            False,
+            {},
+            RuntimeErrorInfo(
+                "configuration", "RATTISH_WEB_PAGE_INVALID_URL", "The URL is empty.", {}
+            ),
+        )
+    timeout_seconds = _duration_seconds(configuration["request_timeout"])
+    render = str(configuration.get("render", "never")).lower()
+    cancel = threading.Event()
+    read = functools.partial(
+        web_page.read_web_page,
+        url,
+        max_chars=int(configuration["max_chars"]),
+        markdown=configuration["format"] == "markdown",
+        allowlist=[str(entry) for entry in configuration["network_allowlist"]],
+        timeout_seconds=timeout_seconds,
+        render=render,
+        scratch_dir=agent_sandbox.run_scratch_dir(context.data_dir, context.run_id),
+        cancel=cancel,
+    )
+    limit = timeout_seconds + 5 if render == "never" else 2 * timeout_seconds + 10
+    try:
+        with anyio.fail_after(limit):
+            output = await anyio.to_thread.run_sync(read, abandon_on_cancel=True)
+    except web_page.WebPageError as exc:
+        return HandlerResult(
+            False, {}, RuntimeErrorInfo(exc.kind, exc.code, exc.message, exc.details)
+        )
+    except TimeoutError:
+        return HandlerResult(
+            False,
+            {},
+            RuntimeErrorInfo(
+                "timeout",
+                "RATTISH_WEB_PAGE_TIMEOUT",
+                "The site took too long to send the page.",
+                {},
+            ),
+        )
+    finally:
+        # Ends a browser still rendering when the step times out or the run stops.
+        cancel.set()
+    return HandlerResult(True, output)
+
+
+def _mcp_arguments(value: Any) -> Mapping[str, Any]:
+    """The rendered ``arguments``: an object, or JSON text that holds one."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"The arguments aren't valid JSON: {exc.msg}.") from exc
+    if not isinstance(value, Mapping):
+        raise ValueError("The arguments must be a JSON object.")
+    return value
+
+
+async def _mcp_tool_handler(
+    node: Mapping[str, Any], context: RuntimeContext, bindings: ResolvedBindings
+) -> HandlerResult:
+    """Call one tool on a server from Rem's MCP server list, without a model.
+
+    A local server starts in its sandbox for this call and stops after it. The call runs
+    in a worker thread with its own deadline; cancelling the step stops the server.
+    """
+    import threading
+
+    from gofer.rattish import mcp_tool
+
+    configuration = node["configuration"]
+    name = str(configuration["server"])
+
+    def failed(exc: mcp_tool.McpToolError) -> HandlerResult:
+        return HandlerResult(
+            False, {}, RuntimeErrorInfo(exc.kind, exc.code, exc.message, exc.details)
+        )
+
+    try:
+        server = mcp_tool.library_server(context.data_dir, name)
+    except mcp_tool.McpToolError as exc:
+        return failed(exc)
+    files = approved_files.active()
+    if files is not None:
+        files.require(
+            Path(mcp_tool.approval_key(name)),
+            mcp_tool.APPROVAL_ROLE,
+            mcp_tool.definition_digest(server),
+        )
+    settings = mcp_tool.step_settings(configuration, context.project_root)
+    if files is not None and settings.working_dir is not None:
+        for path in mcp_tool.project_files(server, settings.working_dir, context.project_root):
+            approved_files.check_server_file(path)
+    try:
+        arguments = _mcp_arguments(_binding_or_configuration(bindings, configuration, "arguments"))
+    except ValueError as exc:
+        return HandlerResult(
+            False,
+            {},
+            RuntimeErrorInfo("configuration", "RATTISH_MCP_ARGUMENTS_INVALID", str(exc), {}),
+        )
+    timeout_seconds = _duration_seconds(configuration["call_timeout"])
+    # An output schema asks for JSON text to be parsed, unless it asks for the text itself.
+    structured = (
+        configuration["output_schema"] is not None
+        or configuration["output_schema_path"] is not None
+    ) and node["output"]["schema"].get("type") != "string"
+    cancel = threading.Event()
+    call = functools.partial(
+        mcp_tool.call_tool,
+        server,
+        settings,
+        str(configuration["tool"]),
+        arguments,
+        data_dir=context.data_dir,
+        run_id=context.run_id,
+        timeout_seconds=timeout_seconds,
+        structured=structured,
+        cancel=cancel,
+    )
+    try:
+        with anyio.fail_after(timeout_seconds + 10):
+            output = await anyio.to_thread.run_sync(call, abandon_on_cancel=True)
+    except mcp_tool.McpToolError as exc:
+        return failed(exc)
+    except TimeoutError:
+        return HandlerResult(
+            False,
+            {},
+            RuntimeErrorInfo("timeout", "RATTISH_MCP_TIMEOUT", "The MCP server took too long.", {}),
+        )
+    finally:
+        cancel.set()
+    return HandlerResult(True, output)
+
+
 # Jev failure kinds as Rattish error kinds and codes. ``retryable`` in the details tells
 # the workflow runtime to skip retry-count for errors another attempt can't fix.
 _JEV_ERRORS = {
@@ -1402,6 +1618,9 @@ async def _approval_gate_handler(
         timeout_seconds=timeout_seconds,
         timeout_decision=configuration["timeout_decision"],
         subject_manifest_id=subject,
+        options=[str(value) for value in configuration.get("options") or []],
+        reject_options=[str(value) for value in configuration.get("reject_options") or []],
+        reply_mode=configuration.get("reply") or "none",
     )
     store.create_or_update(request)
     if configuration["notify"]:
@@ -1434,6 +1653,7 @@ async def _approval_gate_handler(
             cast(Literal["approved", "rejected", "timeout"], decision_value),
             decided_by="raticode",
             notes=f"Timed out after {timeout_seconds} seconds",
+            timed_out=True,
         ).decision
         assert decided is not None
         decision = decided
@@ -1444,6 +1664,9 @@ async def _approval_gate_handler(
         "notes": decision.notes,
         "message": message,
         "subject": subject,
+        # The option picked on a gate with options; null without options or on a timeout.
+        "choice": decision.choice,
+        "reply": decision.reply,
     }
     # A rejected or timed-out decision is a successful gate output; routes branch on approved.
     return HandlerResult(True, output)
@@ -1919,19 +2142,16 @@ def _tabular_loop_items(path: Path, context: RuntimeContext) -> list[dict[str, A
             for row in csv.DictReader(stream):
                 append_item(dict(row))
     elif path.suffix.lower() == ".xlsx":
+        from gofer.utils.xlsx import open_xlsx_rows
+
         try:
-            import openpyxl
+            rows = open_xlsx_rows(path, max_file_bytes=context.max_file_read_bytes)
         except ImportError as exc:
             raise ValueError("Loop .xlsx sources require the xlsx optional dependency.") from exc
-        workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
-        try:
-            sheet = workbook.active
-            rows = sheet.iter_rows(values_only=True)
+        with rows:
             headers = [str(value) for value in next(rows, ())]
-            for row in rows:
-                append_item(dict(zip(headers, row, strict=False)))
-        finally:
-            workbook.close()
+            for values in rows:
+                append_item(dict(zip(headers, values, strict=False)))
     else:
         raise ValueError("Loop tabular sources support .jsonl, .csv, and .xlsx files.")
     return items
@@ -2102,7 +2322,7 @@ async def _bash_handler(
     )
     timeout_ms = node["execution"]["timeout_ms"]
     returncode, stdout, stderr = await run_subprocess(
-        _shell_command_args(configuration["command"]),
+        shells.command_args(shells.configured_shell(configuration), configuration["command"]),
         cwd=cwd,
         env=environment,
         stdin=bindings.stdin,
@@ -2241,8 +2461,9 @@ async def _prompt_file_handler(
         template = configuration["template"]
     else:
         template_path = project_path(context.project_root, configuration["template_path"])
-        template = read_text_limited(
+        template = approved_files.read_text(
             template_path,
+            role="prompt",
             encoding=configuration["encoding"],
             errors="strict",
             max_bytes=context.max_file_read_bytes,
@@ -2437,7 +2658,9 @@ async def _python_script_handler(
 async def _shell_script_handler(
     node: Mapping[str, Any], context: RuntimeContext, bindings: ResolvedBindings
 ) -> HandlerResult:
-    return await _script_handler("bash", node, context, bindings)
+    return await _script_handler(
+        shells.configured_shell(node["configuration"]), node, context, bindings
+    )
 
 
 async def _script_handler(
@@ -2451,8 +2674,16 @@ async def _script_handler(
     environment = dict(configuration["env"])
     environment.update(bindings.environment)
     timeout_ms = node["execution"]["timeout_ms"]
+    # A triggered run that needs approval checks the script first (``approved_files``).
+    if interpreter == "python":
+        run_path = approved_files.script_to_run(script_path, "python")
+        argv = ["python", str(run_path), *configuration["args"]]
+    else:
+        # ``interpreter`` is the shell-script's shell choice: auto, bash or powershell.
+        run_path = approved_files.script_to_run(script_path, shells.script_reader(interpreter))
+        argv = shells.script_args(interpreter, str(run_path), configuration["args"])
     returncode, stdout, stderr = await run_subprocess(
-        [interpreter, str(script_path), *configuration["args"]],
+        argv,
         cwd=context.project_root,
         env=environment,
         stdin=bindings.stdin,
@@ -2959,17 +3190,8 @@ def _environment_value(value: Any) -> str:
 
 
 def _shell_command_args(command: str) -> list[str]:
-    if sys.platform == "win32":
-        return [
-            "powershell.exe",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            command,
-        ]
-    return ["bash", "-c", command]
+    """``shell: auto``: PowerShell on Windows, bash elsewhere."""
+    return shells.command_args("auto", command)
 
 
 def _open_resource_command(target: str, resource_type: str, args: list[str]) -> list[str]:
@@ -2989,6 +3211,8 @@ DEFAULT_NODE_HANDLERS = NodeHandlerRegistry(
         "raticode.common_llm_task": _common_llm_task_handler,
         "raticode.python_script": _python_script_handler,
         "raticode.read_file": _read_file_handler,
+        "raticode.read_web_page": _read_web_page_handler,
+        "raticode.mcp_tool": _mcp_tool_handler,
         "raticode.rem_prompt": _rem_prompt_handler,
         "raticode.rem_task": _rem_task_handler,
         "raticode.file": _file_handler,

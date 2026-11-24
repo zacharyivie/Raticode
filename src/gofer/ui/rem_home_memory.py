@@ -2,15 +2,27 @@
 
 Memories live in Rem's own store and reach every provider as plain prompt text,
 so none of this depends on a provider's memory feature.
+
+A memory may belong to a project (its ``project`` field holds the project root).
+Global memories go to every prompt; a project's memories go only to work in that
+project. Memories saved before projects existed have no field and stay global.
+
+A memory may also have an end (its ``until`` field: an ISO instant with a
+timezone). After it, the memory is no longer sent in prompts or worker
+background, but it stays saved, shown as ended, until the user keeps or forgets it.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Sequence
+from datetime import UTC, date, datetime, time
+from pathlib import PurePath
 from typing import Any
 from uuid import uuid4
 
 from gofer.ui.rem_home_models import now
+from gofer.utils.instants import aware_instant
 
 TEXT_LIMIT = 2000
 # Prompts carry every memory until there are more than this many, or they get
@@ -65,26 +77,105 @@ def _saved_at(item: dict[str, Any]) -> str:
     return str(item.get("edited_at") or item.get("created_at") or "")
 
 
-def choose(
-    saved: dict[str, Any],
-    query: str,
-    *,
-    limit: int = PROMPT_LIMIT,
-    chars: int = PROMPT_CHARS,
-) -> tuple[list[dict[str, Any]], int]:
-    """The memories for one prompt and how many were left out.
+UNTIL_LABEL = "Memory end date"
+_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 
-    Everything goes while it fits. Past the limit, memories sharing words with
-    the request come first, then the newest.
+
+def parse_until(value: Any) -> str:
+    """A memory's end as it is stored: an ISO instant with its timezone, still ahead.
+
+    A plain date (``YYYY-MM-DD``) means the end of that day in the user's timezone;
+    a date and time must name its timezone, the same check organization memories use.
+    Raises ValueError for anything else, or for an end that has already passed.
     """
-    newest = sorted(saved.items(), key=lambda pair: _saved_at(pair[1]), reverse=True)
-    entries = [
-        {"id": identity, "text": str(item.get("text") or ""), "saved": _saved_at(item)[:10]}
-        for identity, item in newest
+    text = str(value or "").strip()
+    if _DAY.fullmatch(text):
+        from gofer.ui.rem_self_work_windows import zone
+
+        try:
+            day = date.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError(f"{UNTIL_LABEL} must be a real date") from exc
+        text = datetime.combine(day, time(23, 59, 59), tzinfo=zone(None)).isoformat()
+    return aware_instant(text, UNTIL_LABEL, future=True).isoformat()
+
+
+def until_of(item: dict[str, Any]) -> datetime | None:
+    """When a memory stops applying, or None when it has no end (or an unreadable one)."""
+    value = item.get("until")
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        end = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return end if end.tzinfo is not None else None
+
+
+def ended(item: dict[str, Any], at: datetime | None = None) -> bool:
+    """Whether a memory's end date has passed. Ended memories are kept, never sent."""
+    end = until_of(item)
+    return end is not None and end <= (at or datetime.now(UTC))
+
+
+def project_of(item: dict[str, Any]) -> str | None:
+    """The project root a memory belongs to, or None for a global memory."""
+    root = item.get("project")
+    return root if isinstance(root, str) and root else None
+
+
+def in_project(root: str, place: str) -> bool:
+    """Whether work in folder [place] is in the project at [root]: the root or inside it."""
+    project, folder = PurePath(root), PurePath(place)
+    return folder == project or project in folder.parents
+
+
+def project_name(root: str, projects: Iterable[dict[str, Any]] = ()) -> str:
+    """The project's name from the window's list, else its folder name."""
+    for project in projects:
+        if project.get("root") == root and str(project.get("name") or "").strip():
+            return str(project["name"]).strip()
+    return PurePath(root).name or root
+
+
+def project_for(text: str, projects: Sequence[dict[str, Any]]) -> str | None:
+    """The one project in [projects] that [text] names, by name or root; None otherwise.
+
+    A fact naming no project, or several, stays global. When one named project's
+    name holds another's ("Raticode Mobile" and "Raticode"), the longer one counts.
+    """
+    named: dict[str, str] = {}
+    lowered = text.casefold()
+    for project in projects:
+        root = str(project.get("root") or "")
+        if not root:
+            continue
+        name = project_name(root, [project]).casefold()
+        by_name = len(name) >= 3 and re.search(rf"(?<![\w]){re.escape(name)}(?![\w])", lowered)
+        if by_name or root.casefold() in lowered:
+            named[root] = name
+    roots = [
+        root
+        for root, name in named.items()
+        if not any(name != other and name in other for other in named.values())
     ]
-    if len(entries) <= limit and sum(len(e["text"]) for e in entries) <= chars:
-        return entries, 0
-    words = set(_WORD.findall(query.lower()))
+    return roots[0] if len(roots) == 1 else None
+
+
+def _entry(identity: str, item: dict[str, Any]) -> dict[str, Any]:
+    entry = {"id": identity, "text": str(item.get("text") or ""), "saved": _saved_at(item)[:10]}
+    root = project_of(item)
+    if root:
+        entry["project"] = root
+    if until_of(item):
+        entry["until"] = item["until"]
+    return entry
+
+
+def _pick(
+    entries: list[dict[str, Any]], words: set[str], limit: int, chars: int
+) -> list[dict[str, Any]]:
+    """Today's ranking: entries sharing words with the request first, then the newest."""
     ranked = sorted(
         enumerate(entries),
         key=lambda pair: (-len(words & set(_WORD.findall(pair[1]["text"].lower()))), pair[0]),
@@ -98,26 +189,89 @@ def choose(
             continue
         picked.append(entry)
         used += len(entry["text"])
+    return picked
+
+
+def choose(
+    saved: dict[str, Any],
+    query: str,
+    *,
+    limit: int = PROMPT_LIMIT,
+    chars: int = PROMPT_CHARS,
+    places: Iterable[str] = (),
+    at: datetime | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """The memories for one prompt and how many of those that apply were left out.
+
+    A memory whose end date has passed (at [at], default now) never applies.
+    Global memories always apply; a project's memories apply only when one of
+    [places] (the folders the work is in) is in that project. Everything that
+    applies goes while it fits. Past the limit, global memories are chosen first
+    and the project's memories fill the space left, each by today's ranking:
+    memories sharing words with the request first, then the newest.
+    """
+    folders = [str(place) for place in places if place]
+    newest = sorted(saved.items(), key=lambda pair: _saved_at(pair[1]), reverse=True)
+    entries = [
+        _entry(identity, item)
+        for identity, item in newest
+        if not ended(item, at)
+        and (
+            not project_of(item)
+            or any(in_project(str(project_of(item)), folder) for folder in folders)
+        )
+    ]
+    if len(entries) <= limit and sum(len(e["text"]) for e in entries) <= chars:
+        return entries, 0
+    words = set(_WORD.findall(query.lower()))
+    picked = _pick([e for e in entries if "project" not in e], words, limit, chars)
+    used = sum(len(e["text"]) for e in picked)
+    picked += _pick(
+        [e for e in entries if "project" in e], words, limit - len(picked), chars - used
+    )
     return picked, len(entries) - len(picked)
 
 
-def for_prompt(saved: dict[str, Any], settings: dict[str, Any], query: str) -> dict[str, Any]:
-    """Prompt fields for Rem: the chosen memories and the current memory mode."""
+def for_prompt(
+    saved: dict[str, Any],
+    settings: dict[str, Any],
+    query: str,
+    places: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Prompt fields for Rem: the chosen memories and the current memory mode.
+
+    [places] are the project folders the conversation is in; their memories join
+    the global ones.
+    """
     current = mode(settings)
     if current == "off":
         return {"memory_mode": "off"}
-    shown, left_out = choose(saved, query)
+    shown, left_out = choose(saved, query, places=places)
     fields: dict[str, Any] = {"memories": shown, "memory_mode": current}
     if left_out:
         fields["memories_not_shown"] = left_out
     return fields
 
 
-def for_worker(saved: dict[str, Any], settings: dict[str, Any], query: str) -> list[str]:
-    """Plain memory texts for a worker's background; none while memory is off."""
+def for_worker(
+    saved: dict[str, Any],
+    settings: dict[str, Any],
+    query: str,
+    project_dir: str | None = None,
+) -> list[str]:
+    """Plain memory texts for a worker's background; none while memory is off.
+
+    A task in a project also gets that project's memories; other projects' never.
+    """
     if mode(settings) == "off":
         return []
-    shown, _ = choose(saved, query, limit=WORKER_LIMIT, chars=WORKER_CHARS)
+    shown, _ = choose(
+        saved,
+        query,
+        limit=WORKER_LIMIT,
+        chars=WORKER_CHARS,
+        places=[project_dir] if project_dir else (),
+    )
     return [entry["text"] for entry in shown]
 
 
@@ -125,18 +279,39 @@ def unknown_ids(changes: list[Any], saved: dict[str, Any]) -> list[str]:
     return [change.id for change in changes if change.id not in saved]
 
 
+def _proposed(memory: Any) -> tuple[str, str | None]:
+    """A new memory's words and the end Rem proposed, from a string or {text, until}.
+
+    An end that isn't usable (no timezone, already past, not a date) is dropped and
+    the fact is saved without one; the user can set an end date afterwards.
+    """
+    if isinstance(memory, str):
+        return memory.strip(), None
+    fields = memory if isinstance(memory, dict) else vars(memory)
+    text = str(fields.get("text") or "").strip()
+    try:
+        return text, parse_until(fields["until"]) if fields.get("until") else None
+    except ValueError:
+        return text, None
+
+
 def apply(
     saved: dict[str, Any],
-    added: list[str],
+    added: Sequence[Any],
     changes: list[Any],
     settings: dict[str, Any],
     source_message_id: str,
+    projects: Sequence[dict[str, Any]] = (),
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Apply one decision's memory changes and describe them for the reply.
 
     Returns the new memories and a record for the reply message, which shows
     what changed and lets the user undo it. Nothing is saved while memory is
     paused or off; an explicit correction or forget still applies while paused.
+    A new fact that names exactly one of [projects] (the projects the
+    conversation has selected) belongs to that project; any other is global.
+    [added] holds strings or {text, until}, where until is the end Rem proposes
+    for a fact tied to a date or event; the reply's note shows it with Undo.
     """
     current = mode(settings)
     result = dict(saved)
@@ -165,7 +340,7 @@ def apply(
     if current == "on":
         known = {str(item.get("text") or "").strip().casefold() for item in result.values()}
         for memory in added:
-            text = memory.strip()
+            text, until = _proposed(memory)
             if not text or len(text) > TEXT_LIMIT or text.casefold() in known:
                 continue
             if looks_secret(text):
@@ -177,8 +352,16 @@ def apply(
                 "source_message_id": source_message_id,
                 "created_at": now(),
             }
+            entry = {"id": identity, "text": text, "written": text}
+            project = project_for(text, projects)
+            if project:
+                result[identity]["project"] = project
+                entry["project"] = project
+            if until:
+                result[identity]["until"] = until
+                entry["until"] = until
             known.add(text.casefold())
-            record["saved"].append({"id": identity, "text": text, "written": text})
+            record["saved"].append(entry)
     summary: dict[str, Any] = {key: value for key, value in record.items() if value}
     if refused:
         summary["refused"] = refused
@@ -246,6 +429,7 @@ def phone_record(record: Any) -> dict[str, Any] | None:
                     "id": str(e.get("id") or "")[:64],
                     "text": str(e.get("text") or "")[:TEXT_LIMIT],
                     "removed": e.get("removed") is True,
+                    **({"until": str(e["until"])[:80]} if e.get("until") else {}),
                 }
                 for e in entries[:10]
                 if isinstance(e, dict)

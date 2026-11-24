@@ -13,7 +13,7 @@ const excluded = new Set([".git", "node_modules", ".venv", "venv", "__pycache__"
 
 function compileRegex(source, flags, field) {
   try { return new RegExp(source, flags); }
-  catch (error) { throw new Error(`${field}: ${error.message}`); }
+  catch (error) { throw new Error(`${field}: ${error.message}`, { cause: error }); }
 }
 
 function compileGlobs(value) {
@@ -113,6 +113,41 @@ async function scanProject(root, options = {}) {
   if (visited < candidates.length) result.truncated = true;
   return result;
 }
+// File names for quick open: what git tracks plus untracked files it doesn't
+// ignore, or a capped walk outside git. Names only; nothing is read.
+const LIST_LIMIT = 20000;
+async function listProjectFiles(root) {
+  let candidates;
+  let truncated = false;
+  try {
+    const { stdout } = await run("git", ["-c", "core.fsmonitor=false", "-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "."], { timeout: 4000, maxBuffer: 16 * 1024 * 1024 });
+    candidates = [...new Set(stdout.split("\0").filter(Boolean))];
+  } catch {
+    candidates = [];
+    const deadline = Date.now() + 3000;
+    async function walk(directory) {
+      let entries;
+      try { entries = await fs.readdir(directory, { withFileTypes: true }); } catch { return; }
+      for (const entry of entries) {
+        if (Date.now() > deadline || candidates.length >= LIST_LIMIT) { truncated = true; return; }
+        if (excluded.has(entry.name) || entry.isSymbolicLink()) continue;
+        const target = path.join(directory, entry.name);
+        if (entry.isDirectory()) await walk(target);
+        else if (entry.isFile()) candidates.push(path.relative(root, target));
+      }
+    }
+    await walk(root);
+  }
+  const files = candidates
+    .map((relativePath) => relativePath.replace(/\\/g, "/"))
+    .filter((relativePath) => !relativePath.split("/").some((part) => part === ".git" || excluded.has(part)))
+    .sort();
+  if (files.length > LIST_LIMIT) truncated = true;
+  return {
+    files: files.slice(0, LIST_LIMIT).map((relativePath) => ({ path: path.join(root, relativePath), relativePath })),
+    truncated,
+  };
+}
 // Regex runs off the Electron main thread so pathological expressions can be stopped.
 function searchProject(root, options = {}) {
   return new Promise((resolve, reject) => {
@@ -153,4 +188,4 @@ async function replaceProject(root, options = {}) {
   return { count, changed };
 }
 if (!isMainThread) scanProject(workerData.root, workerData.options).then((result) => parentPort.postMessage({ result }), (error) => parentPort.postMessage({ error: error.message }));
-module.exports = { searchProject, replaceProject, scanProject };
+module.exports = { listProjectFiles, searchProject, replaceProject, scanProject };

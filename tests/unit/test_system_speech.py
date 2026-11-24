@@ -108,19 +108,18 @@ def chunk(session_id: str, pcm: bytes) -> dict[str, str]:
     return {"sessionId": session_id, "data": base64.b64encode(pcm).decode()}
 
 
-class FakeVosk:
+class FakeOffline:
+    """The offline model as a dictation session sees it: phrases and a partial per chunk."""
+
     def __init__(self) -> None:
         self.audio: list[bytes] = []
 
-    def AcceptWaveform(self, pcm: bytes) -> bool:  # noqa: N802
+    def accept(self, pcm: bytes) -> tuple[list[str], str]:
         self.audio.append(pcm)
-        return False
+        return [], f"offline {sum(map(len, self.audio))}"
 
-    def PartialResult(self) -> str:  # noqa: N802
-        return json.dumps({"partial": f"offline {sum(map(len, self.audio))}"})
-
-    def FinalResult(self) -> str:  # noqa: N802
-        return json.dumps({"text": "offline end"})
+    def finish(self) -> str:
+        return "offline end"
 
 
 @pytest.fixture(autouse=True)
@@ -347,7 +346,7 @@ def test_check_reports_the_recognizers_state_and_caches_it() -> None:
 def test_dictation_uses_the_os_recognizer_when_it_works(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(system_speech, "system_engine", lambda: fake_engine("listen"))
     monkeypatch.setattr(
-        chat_media, "_new_vosk_recognizer", lambda _dir: pytest.fail("Vosk not needed")
+        chat_media, "_new_offline_recognizer", lambda _dir: pytest.fail("offline not needed")
     )
     started = chat_media.start_chat_transcription(data_dir=tmp_path)
     assert started["engine"] == "macos"
@@ -367,17 +366,17 @@ def test_dictation_uses_the_os_recognizer_when_it_works(monkeypatch, tmp_path) -
 def test_a_refused_os_recognizer_hands_over_to_the_offline_model_without_losing_audio(
     monkeypatch, tmp_path
 ) -> None:
-    vosk = FakeVosk()
+    offline = FakeOffline()
     monkeypatch.setattr(system_speech, "system_engine", lambda: fake_engine("fail"))
-    monkeypatch.setattr(chat_media, "_vosk_model_present", lambda _dir: True)
-    monkeypatch.setattr(chat_media, "_new_vosk_recognizer", lambda _dir: vosk)
+    monkeypatch.setattr(chat_media, "_offline_model_present", lambda _dir: True)
+    monkeypatch.setattr(chat_media, "_new_offline_recognizer", lambda _dir: offline)
     session_id = chat_media.start_chat_transcription(data_dir=tmp_path)["sessionId"]
     first, second = b"\x01\x00" * 2, b"\x02\x00" * 3
     assert chat_media.stream_chat_transcription(chunk(session_id, first)) == {"text": ""}
     wait_for(lambda: chat_media._transcription_sessions[session_id].speech.failure)
     result = chat_media.stream_chat_transcription(chunk(session_id, second))
     # Audio heard before the refusal is replayed into the offline model, in order.
-    assert vosk.audio == [first, second]
+    assert offline.audio == [first, second]
     assert result == {
         "text": "offline 10",
         "engine": "offline",
@@ -393,7 +392,7 @@ def test_a_refused_os_recognizer_hands_over_to_the_offline_model_without_losing_
 
 def test_without_the_offline_model_a_refusal_explains_how_to_switch(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(system_speech, "system_engine", lambda: fake_engine("fail"))
-    monkeypatch.setattr(chat_media, "_vosk_model_present", lambda _dir: False)
+    monkeypatch.setattr(chat_media, "_offline_model_present", lambda _dir: False)
     session_id = chat_media.start_chat_transcription(data_dir=tmp_path)["sessionId"]
     chat_media.stream_chat_transcription(chunk(session_id, b"\x01\x00"))
     wait_for(lambda: chat_media._transcription_sessions[session_id].speech.failure)
@@ -408,7 +407,7 @@ def test_without_the_offline_model_a_refusal_explains_how_to_switch(monkeypatch,
 def test_an_os_without_a_usable_recognizer_starts_on_the_offline_model(
     monkeypatch, tmp_path
 ) -> None:
-    monkeypatch.setattr(chat_media, "_new_vosk_recognizer", lambda _dir: FakeVosk())
+    monkeypatch.setattr(chat_media, "_new_offline_recognizer", lambda _dir: FakeOffline())
     real = system_speech.system_engine
     monkeypatch.setattr(system_speech, "system_engine", lambda: real("darwin", {}))
     started = chat_media.start_chat_transcription(data_dir=tmp_path)
@@ -424,7 +423,7 @@ def test_an_os_without_a_usable_recognizer_starts_on_the_offline_model(
 
 def test_choosing_the_offline_model_skips_the_os_recognizer(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(system_speech, "system_engine", lambda: pytest.fail("not consulted"))
-    monkeypatch.setattr(chat_media, "_new_vosk_recognizer", lambda _dir: FakeVosk())
+    monkeypatch.setattr(chat_media, "_new_offline_recognizer", lambda _dir: FakeOffline())
     started = chat_media.start_chat_transcription(data_dir=tmp_path, engine="offline")
     assert started["engine"] == "offline"
 
@@ -441,27 +440,75 @@ def test_settings_report_both_engines(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(system_speech, "system_engine", lambda: fake_engine("check"))
     engines = chat_media.transcription_engines(data_dir=tmp_path)
     assert engines["system"]["reason"] == "Turn on Dictation."
-    assert engines["offline"] == {
-        "name": "Raticode's offline speech model",
-        "installed": False,
-        "downloadMb": 130,
-    }
+    assert engines["offline"]["installed"] is False
+    assert engines["offline"]["downloadMb"] == 475
+    assert engines["offline"]["license"] == "OpenMDW License 1.1"
+    assert "engine" not in engines
+
+
+def install_fake_model(data_dir: Path) -> None:
+    model = Path(data_dir) / "speech-models" / chat_media.OFFLINE_MODEL_NAME
+    model.mkdir(parents=True, exist_ok=True)
+    for name in chat_media.OFFLINE_MODEL_FILES:
+        (model / name).write_bytes(b"")
+
+
+def test_windows_prefers_the_downloaded_offline_model(monkeypatch, tmp_path) -> None:
+    windows = fake_engine("listen", "windows")
+    monkeypatch.setattr(system_speech, "system_engine", lambda: windows)
+    monkeypatch.setattr(chat_media, "_new_offline_recognizer", lambda _dir: FakeOffline())
+    # Without the download, Windows dictates with its own recognizer, as before.
+    started = chat_media.start_chat_transcription(data_dir=tmp_path, engine_chosen=False)
+    assert started["engine"] == "windows"
+    chat_media.cancel_chat_transcription({"sessionId": started["sessionId"]})
+    install_fake_model(tmp_path)
+    started = chat_media.start_chat_transcription(data_dir=tmp_path, engine_chosen=False)
+    assert started["engine"] == "offline"
+    assert "notice" not in started
+    # Settings shows the recognizer dictation will use.
+    monkeypatch.setattr(system_speech, "system_engine", lambda: fake_engine("check", "windows"))
+    unchosen = {"engine": "system", "chosen": False}
+    assert (
+        chat_media.transcription_engines(data_dir=tmp_path, preference=unchosen)["engine"]
+        == "offline"
+    )
+    # Someone who picked the Windows recognizer in Settings keeps it.
+    monkeypatch.setattr(system_speech, "system_engine", lambda: windows)
+    started = chat_media.start_chat_transcription(data_dir=tmp_path, engine_chosen=True)
+    assert started["engine"] == "windows"
+    chat_media.cancel_chat_transcription({"sessionId": started["sessionId"]})
+    chosen = {"engine": "system", "chosen": True}
+    monkeypatch.setattr(system_speech, "system_engine", lambda: fake_engine("check", "windows"))
+    assert (
+        chat_media.transcription_engines(data_dir=tmp_path, preference=chosen)["engine"] == "system"
+    )
+
+
+def test_macos_keeps_its_own_recognizer_when_the_offline_model_is_downloaded(
+    monkeypatch, tmp_path
+) -> None:
+    install_fake_model(tmp_path)
+    monkeypatch.setattr(system_speech, "system_engine", lambda: fake_engine("listen"))
+    monkeypatch.setattr(
+        chat_media, "_new_offline_recognizer", lambda _dir: pytest.fail("offline not needed")
+    )
+    started = chat_media.start_chat_transcription(data_dir=tmp_path, engine_chosen=False)
+    assert started["engine"] == "macos"
 
 
 def test_offline_model_presence_is_a_cheap_file_check(tmp_path) -> None:
-    model = Path(tmp_path) / "speech-models" / chat_media.VOSK_MODEL_NAME
-    assert not chat_media._vosk_model_present(tmp_path)
-    for name in chat_media.VOSK_MODEL_FILES:
-        (model / name).parent.mkdir(parents=True, exist_ok=True)
-        (model / name).write_bytes(b"")
-    assert chat_media._vosk_model_present(tmp_path)
+    assert not chat_media._offline_model_present(tmp_path)
+    install_fake_model(tmp_path)
+    assert chat_media._offline_model_present(tmp_path)
 
 
 def test_speech_engine_preference_defaults_to_the_os_and_validates(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(provider_preferences, "get_data_dir", lambda: tmp_path)
-    assert provider_preferences.speech_preference() == {"engine": "system"}
+    assert provider_preferences.speech_preference() == {"engine": "system", "chosen": False}
     provider_preferences.save_speech_preference({"engine": "offline"})
-    assert provider_preferences.speech_preference() == {"engine": "offline"}
+    assert provider_preferences.speech_preference() == {"engine": "offline", "chosen": True}
+    provider_preferences.save_speech_preference({"engine": "system"})
+    assert provider_preferences.speech_preference() == {"engine": "system", "chosen": True}
     with pytest.raises(ValueError):
         provider_preferences.save_speech_preference({"engine": "cloud"})
     with pytest.raises(ValueError):
@@ -585,7 +632,7 @@ def test_a_missing_helper_and_a_failed_download_keep_both_reasons(
     def no_model(_dir):
         raise ChatMediaError("The local speech model couldn't be downloaded: the certificate.")
 
-    monkeypatch.setattr(chat_media, "_new_vosk_recognizer", no_model)
+    monkeypatch.setattr(chat_media, "_new_offline_recognizer", no_model)
     real = system_speech.system_engine
     monkeypatch.setattr(system_speech, "system_engine", lambda: real("darwin", {}))
     with pytest.raises(ChatMediaError) as raised:
@@ -605,7 +652,7 @@ def test_a_missing_helper_and_a_failed_download_keep_both_reasons(
 
 def test_a_fallback_mid_dictation_is_logged(monkeypatch, tmp_path, caplog) -> None:
     monkeypatch.setattr(system_speech, "system_engine", lambda: fake_engine("fail"))
-    monkeypatch.setattr(chat_media, "_vosk_model_present", lambda _dir: False)
+    monkeypatch.setattr(chat_media, "_offline_model_present", lambda _dir: False)
     session_id = chat_media.start_chat_transcription(data_dir=tmp_path)["sessionId"]
     chat_media.stream_chat_transcription(chunk(session_id, b"\x01\x00"))
     wait_for(lambda: chat_media._transcription_sessions[session_id].speech.failure)

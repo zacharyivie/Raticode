@@ -4,8 +4,12 @@
 // window over X11. Firefox draws it directly, without streaming, and brings its
 // own tabs, address bar, settings, bookmarks, extensions and Mozilla account.
 //
-// No remote-control port is opened. Raticode only starts Firefox, positions its
-// window and passes keyboard focus; it cannot read pages or passwords.
+// No remote-control port is opened unless the user turns on "Let Rem use
+// Raticode (gecko)". Then Firefox starts with its WebDriver BiDi port, which
+// Raticode claims at once, and Rem can open and use tabs of its own in a
+// separate container (gecko-control.cjs). Otherwise Raticode only starts
+// Firefox, positions its window and passes keyboard focus; it cannot read
+// pages or passwords.
 const { spawn: spawnProcess } = require("node:child_process");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
@@ -14,12 +18,17 @@ const { EVENT, MASK, X11Client } = require("./x11-client.cjs");
 const { setWantsX11, waylandDesktop } = require("./gecko-display.cjs");
 const { findFirefox } = require("./firefox-engine.cjs");
 const { watchGeckoMedia } = require("./gecko-media.cjs");
-const { IMPORT_ITEMS, findFirefoxProfiles, importProfile, inspectProfile, prefLine } = require("./firefox-profile.cjs");
+const { IMPORT_ITEMS, findFirefoxProfiles, importProfile, inspectProfile, prefLine, readPrefs } = require("./firefox-profile.cjs");
+const { CLOSED_FOR_SAFETY, listeningAddress, removeStaleServerFile } = require("./gecko-control.cjs");
 
 const WINDOW_CLASS = "RaticodeGecko";
 const NEW_TAB_PAGE = "about:newtab";
 const WINDOW_TIMEOUT_MS = 45000;
 const STOP_TIMEOUT_MS = 8000;
+const CONTROL_TIMEOUT_MS = 30000;
+// How long a Firefox whose control connection dropped gets to finish exiting
+// on its own (the user quit it) before Raticode closes it.
+const DROP_GRACE_MS = 1000;
 const POSIX_WATCHDOG = "while kill -0 \"$1\" 2>/dev/null && kill -0 \"$2\" 2>/dev/null; do sleep 2; done; kill -TERM \"$2\" 2>/dev/null";
 
 // Written to user.js on every launch. Only what embedding needs; everything
@@ -42,6 +51,64 @@ const PROFILE_PREFS = {
   "extensions.startupScanScopes": 1,
   "toolkit.telemetry.reportingpolicy.firstRun": false,
 };
+
+// Added while Rem may use Gecko. Rem's tabs open in the background, and
+// Firefox would otherwise hold their sound until someone shows the tab. Pages
+// still need a click or Rem's play request before they make sound. Saved
+// passwords aren't filled in as a page loads, so a sign-in form in Rem's
+// container never holds the user's login for Rem to read; the user's own tabs
+// still offer them from the field's dropdown. The rest keeps Firefox's normal
+// protections instead of the remote agent's test defaults.
+const REM_CONTROL_PREFS = {
+  "media.block-autoplay-until-in-foreground": false,
+  "remote.prefs.recommended": false,
+  "signon.autofillForms": false,
+};
+// Firefox's own values for those, put back when the setting is turned off.
+const FIREFOX_DEFAULTS = {
+  "media.block-autoplay-until-in-foreground": true,
+  "remote.prefs.recommended": true,
+  "signon.autofillForms": true,
+};
+// Records, in the profile, what the user had before Rem's prefs went in.
+const REM_PREFS_RECORD = "raticode-rem-control.json";
+
+// The lines user.js needs for Rem's prefs. Firefox copies every user.js
+// value into prefs.js, where it stays after the line is gone, so turning the
+// setting off writes back what the profile had before (or Firefox's default)
+// until prefs.js shows it again. Then the record goes and user.js says nothing.
+function remControlPrefLines(directory, enabled) {
+  const record = path.join(directory, REM_PREFS_RECORD);
+  let saved = null;
+  try { saved = JSON.parse(fs.readFileSync(record, "utf8")); } catch { /* Never turned on in this profile. */ }
+  const current = readPrefs(path.join(directory, "prefs.js"));
+  if (enabled) {
+    const kept = saved?.original && typeof saved.original === "object" ? saved.original : null;
+    // A pref added since the record was written isn't in prefs.js from Rem
+    // yet, so prefs.js still holds the user's own value for it.
+    const missing = Object.keys(REM_CONTROL_PREFS).filter((name) => !kept || !Object.hasOwn(kept, name));
+    if (missing.length) {
+      const original = { ...kept, ...Object.fromEntries(missing.map((name) => [name, current.has(name) ? current.get(name) : null])) };
+      fs.writeFileSync(record, JSON.stringify({ original }), { mode: 0o600 });
+    }
+    return Object.entries(REM_CONTROL_PREFS).map(([name, value]) => prefLine(name, value));
+  }
+  if (!saved) return [];
+  const original = saved.original && typeof saved.original === "object" ? saved.original : {};
+  const wanted = Object.fromEntries(Object.keys(REM_CONTROL_PREFS).map((name) => {
+    const value = original[name];
+    return [name, typeof value === "boolean" || typeof value === "number" || typeof value === "string" ? value : null];
+  }));
+  const restored = Object.entries(wanted).every(([name, value]) => {
+    const now = current.has(name) ? current.get(name) : null;
+    return now === value || (value === null && now === FIREFOX_DEFAULTS[name]);
+  });
+  if (restored) {
+    fs.rmSync(record, { force: true });
+    return [];
+  }
+  return Object.entries(wanted).map(([name, value]) => prefLine(name, value === null ? FIREFOX_DEFAULTS[name] : value));
+}
 
 function supportProblem({ platform, env, x11Switch }) {
   if (platform !== "linux") {
@@ -90,15 +157,19 @@ function createGeckoWindow({
   findExecutable = findFirefox,
   findProfiles = findFirefoxProfiles,
   createMediaWatch = watchGeckoMedia,
+  // gecko-control.cjs, when Rem may use Gecko's tabs.
+  control = null,
   env = process.env,
   platform = process.platform,
   x11Switch = false,
   windowTimeoutMs = WINDOW_TIMEOUT_MS,
   stopTimeoutMs = STOP_TIMEOUT_MS,
+  dropGraceMs = DROP_GRACE_MS,
 }) {
   const events = new EventEmitter();
   const root = path.join(dataDir, "gecko");
   const registry = path.join(root, "profiles.json");
+  const settingsFile = path.join(root, "settings.json");
   let client = null;
   let connecting = null;
   let child = null;
@@ -115,6 +186,8 @@ function createGeckoWindow({
   let shapeMajor = 0;
   let shaped = false;
   let pageClicks = 0;
+  // True while the running Firefox has its control port open for Rem.
+  let controlled = false;
   let resolveWindow = null;
   const considering = new Set();
   // For the media bar; reads only what this Firefox publishes to the desktop.
@@ -145,8 +218,42 @@ function createGeckoWindow({
     fs.writeFileSync(path.join(directory, "user.js"), [
       "// Written by Raticode each time Gecko starts. Everything else is yours to change in Gecko's settings.",
       ...Object.entries(PROFILE_PREFS).map(([name, value]) => prefLine(name, value)),
+      ...remControlPrefLines(directory, remControl()),
       "",
     ].join("\n"), { mode: 0o600 });
+    // A file left by an earlier run would point at a port that is now closed.
+    removeStaleServerFile(directory);
+  }
+
+  // Settings ----------------------------------------------------------------------------
+
+  function settings() {
+    try {
+      const saved = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
+      return { remControl: saved?.remControl === true };
+    } catch {
+      return { remControl: false };
+    }
+  }
+
+  function remControl() {
+    return Boolean(control) && settings().remControl;
+  }
+
+  // Firefox opens or closes its control port only when it starts, so a
+  // running Gecko restarts. Its tabs come back (browser.startup.page = 3).
+  async function setRemControl(enabled) {
+    if (!control) throw new Error("This version of Raticode can't let Rem use Raticode (gecko).");
+    const next = enabled === true;
+    fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(settingsFile, JSON.stringify({ ...settings(), remControl: next }), { mode: 0o600 });
+    const wasRunning = Boolean(child);
+    if (wasRunning && Boolean(controlled) !== next) {
+      await stop();
+      await ensure("");
+    }
+    if (!next) control.detach({ expected: true });
+    return status();
   }
 
   function createProfile(name) {
@@ -291,7 +398,7 @@ function createGeckoWindow({
   // Firefox keeps running while its window moves between Raticode's window and
   // the Browser's own window, so its pages don't reload and media keeps playing.
   function followHost() {
-    let target = 0;
+    let target;
     try { target = hostId(); } catch { return; }
     if (target === parentId) return;
     parentId = target;
@@ -387,6 +494,8 @@ function createGeckoWindow({
       media: media.snapshot(),
       profile: state.current,
       profiles: state.list,
+      remControl: remControl(),
+      remControlActive: Boolean(child) && controlled,
     };
   }
 
@@ -405,14 +514,20 @@ function createGeckoWindow({
     const windowReady = new Promise((resolve) => { resolveWindow = resolve; });
     lastError = "";
     title = "";
-    const process_ = spawn(current.executable, ["--class", WINDOW_CLASS, "--new-instance", "--profile", directory, ...(url ? [url] : [])], { env: launchEnv(), stdio: "ignore" });
+    const withControl = remControl();
+    const args = ["--class", WINDOW_CLASS, "--new-instance", "--profile", directory, ...(withControl ? ["--remote-debugging-port", "0"] : []), ...(url ? [url] : [])];
+    const process_ = spawn(current.executable, args, { env: launchEnv(), stdio: withControl ? ["ignore", "ignore", "pipe"] : "ignore" });
     child = process_;
+    controlled = withControl;
+    const controlReady = withControl ? watchControlPort(process_) : null;
+    // Read below once the window is up; a Firefox that never got that far needs no message.
+    controlReady?.catch(() => {});
     media.start();
     let failed;
     const ended = new Promise((resolve) => { failed = resolve; });
     process_.once("error", (error) => { lastError = `Firefox could not start: ${error.message}`; if (child === process_) { child = null; media.stop(); } failed(); changed(); });
     process_.once("exit", () => {
-      if (child === process_) { child = null; adopted = 0; mapped = false; title = ""; media.stop(); }
+      if (child === process_) { child = null; adopted = 0; mapped = false; title = ""; controlled = false; media.stop(); control?.detach({ stopped: true }); }
       failed();
       events.emit("exit");
       changed();
@@ -428,7 +543,18 @@ function createGeckoWindow({
     const outcome = await Promise.race([windowReady.then(() => "window"), ended.then(() => "ended"), timeout]);
     clearTimeout(timer);
     resolveWindow = null;
-    if (outcome === "window") return;
+    if (outcome === "window") {
+      // Firefox with its control port open and no Raticode session could be
+      // driven by any program on this computer, so watchControlPort closed it.
+      if (controlReady) {
+        await controlReady.catch((error) => {
+          lastError = `Rem can't use Raticode (gecko): ${error.message} ${CLOSED_FOR_SAFETY}`;
+          log("warn", lastError);
+          changed();
+        });
+      }
+      return;
+    }
     if (outcome === "timeout") {
       process_.kill("SIGTERM");
       lastError = "Firefox started, but its window never appeared.";
@@ -437,6 +563,57 @@ function createGeckoWindow({
     }
     changed();
     throw new Error(lastError);
+  }
+
+  // Firefox prints its control address on stderr; Rem's connection claims
+  // the session at once (gecko-control.cjs). Any failure closes this Firefox:
+  // no port in time, a connection that fails, or one that drops later.
+  function watchControlPort(process_) {
+    let killed = false;
+    let exited = false;
+    process_.once?.("exit", () => { exited = true; });
+    // reason: the connection dropped after Rem had it. That is most often
+    // Firefox quitting, which closes the connection first; killing it then
+    // would lose its saved tabs. One that hasn't exited after dropGraceMs is
+    // still running with its control port open.
+    function closeForSafety(reason) {
+      if (killed || exited) return;
+      if (reason) {
+        const timer = setTimeout(() => {
+          if (exited) return;
+          log("warn", reason);
+          if (child === process_) { lastError = reason; changed(); }
+          closeForSafety();
+        }, dropGraceMs);
+        timer.unref?.();
+        return;
+      }
+      killed = true;
+      try { process_.kill("SIGKILL"); } catch { /* Already gone. */ }
+    }
+    return new Promise((resolve, reject) => {
+      let text = "";
+      let done = false;
+      const timer = setTimeout(() => finish(new Error("Firefox didn't open its control port in time.")), CONTROL_TIMEOUT_MS);
+      timer.unref?.();
+      function finish(error) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (error) { closeForSafety(); reject(error); } else resolve();
+      }
+      process_.once?.("exit", () => finish(new Error("Gecko closed before Rem could connect.")));
+      process_.stderr?.on("data", (chunk) => {
+        if (done) return;
+        text = (text + chunk).slice(-8000);
+        const address = listeningAddress(text);
+        if (!address) return;
+        text = "";
+        control.attach(address, { kill: closeForSafety }).then(() => finish(), finish);
+      });
+      // Keep reading so Firefox never blocks on a full pipe.
+      process_.stderr?.on("error", () => {});
+    });
   }
 
   function ensure(url) {
@@ -473,6 +650,7 @@ function createGeckoWindow({
   async function stop() {
     const running = child;
     if (!running) return;
+    if (controlled) control?.detach({ expected: true });
     const exited = new Promise((resolve) => running.once("exit", resolve));
     running.kill("SIGTERM");
     let timer;
@@ -526,6 +704,7 @@ function createGeckoWindow({
       case "rehost": return rehost(options.host);
       case "focus-app": return focusApp();
       case "media-control": return media.control(options.command);
+      case "rem-control": return setRemControl(options.enabled === true);
       case "stop": await stop(); return status();
       case "select": setWantsX11(dataDir, options.selected === true); return status();
       case "restart-app": setWantsX11(dataDir, true); return relaunch();
@@ -540,12 +719,28 @@ function createGeckoWindow({
 
   function close() {
     media.stop();
+    if (child && controlled) control?.detach({ expected: true });
     child?.kill("SIGTERM");
     client?.close();
     client = null;
   }
 
+  if (control) {
+    control.setHost({
+      enabled: remControl,
+      // Every window is private in a profile set to always browse privately.
+      privateOnly: () => readPrefs(path.join(profileDir(), "prefs.js")).get("browser.privatebrowsing.autostart") === true,
+      available: () => { const current = status(); return { available: current.available, executable: current.executable, problem: current.problem || (current.needsRestart ? "Restart Raticode to use Gecko." : "") }; },
+      // Rem's first Gecko tab starts Gecko hidden inside Raticode. A Gecko
+      // started before the setting was on restarts with its control port.
+      start: async () => {
+        if (child && !controlled) { await stop(); }
+        await ensure("");
+      },
+    });
+  }
+
   return { close, events, handle, rehost, status, get adoptedWindow() { return adopted; }, get parentWindow() { return parentId; } };
 }
 
-module.exports = { NEW_TAB_PAGE, PROFILE_PREFS, WINDOW_CLASS, createGeckoWindow, cutoutsWithin, pageAddress, supportProblem };
+module.exports = { FIREFOX_DEFAULTS, NEW_TAB_PAGE, PROFILE_PREFS, REM_CONTROL_PREFS, REM_PREFS_RECORD, WINDOW_CLASS, remControlPrefLines, createGeckoWindow, cutoutsWithin, pageAddress, supportProblem };

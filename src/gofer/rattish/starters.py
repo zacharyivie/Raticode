@@ -25,6 +25,8 @@ STARTER_MANIFEST = "starter.json"
 STARTER_TESTS = "workflow.tests.json"
 STARTER_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 # The display name is the first `name:` field of the Workflow declaration.
+# A step that asks for bash: ``shell: bash`` on a node.
+_BASH_SHELL_LINE = re.compile(r"^[ \t]+shell:[ \t]*\"?bash\"?[ \t]*(?:#.*)?$", re.IGNORECASE | re.M)
 _WORKFLOW_NAME_LINE = re.compile(
     r"^(workflow:\n(?:#[^\n]*\n)*  name: )[^\n]*$", re.IGNORECASE | re.M
 )
@@ -41,6 +43,15 @@ class Starter:
     secrets: tuple[str, ...]
     trigger: dict[str, str] | None
     root: Path
+    uses_bash: bool = False
+
+    def needs_git_for_windows(self) -> bool:
+        """On Windows, a starter with ``shell: bash`` steps needs Git for Windows' bash."""
+        if not self.uses_bash:
+            return False
+        from gofer.rattish import shells
+
+        return shells._on_windows() and shells.find_bash() is None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -52,6 +63,7 @@ class Starter:
             "secrets": list(self.secrets),
             "trigger": dict(self.trigger) if self.trigger else None,
             "hasTests": (self.root / STARTER_TESTS).is_file(),
+            "needsGitForWindows": self.needs_git_for_windows(),
         }
 
 
@@ -168,4 +180,12 @@ def _read_starter(folder: Path) -> Starter:
         secrets=tuple(str(item) for item in document.get("secrets", [])),
         trigger={str(key): str(value) for key, value in trigger.items()} if trigger else None,
         root=folder,
+        uses_bash=_uses_bash(folder / WORKFLOW_ENTRYPOINT),
     )
+
+
+def _uses_bash(entrypoint: Path) -> bool:
+    try:
+        return bool(_BASH_SHELL_LINE.search(entrypoint.read_text(encoding="utf-8")))
+    except (OSError, UnicodeError):
+        return False

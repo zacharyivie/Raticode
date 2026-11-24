@@ -126,6 +126,14 @@ async function run() {
     await cleanup(0);
     return;
   }
+  if (process.env.GOFER_PALETTE_ONLY === "1") {
+    await require("./command-palette.browser.cjs")({ windowRef, evaluate, waitFor, pressNativeKey, wait });
+    clearTimeout(timeout);
+    assert.deepEqual(rendererErrors, [], "Renderer must not log errors");
+    console.log("Browser command palette regressions passed.");
+    await cleanup(0);
+    return;
+  }
   if (process.env.GOFER_TERMINAL_ONLY === "1") {
     await exerciseBottomPanelTerminal();
     clearTimeout(timeout);
@@ -748,6 +756,43 @@ async function exerciseBottomPanelTerminal() {
   assert.deepEqual(await creations(), Array(4).fill("/workspace/current-worktree"));
   assert.equal(await evaluate(() => document.querySelectorAll("button[title^='Close terminal']").length), 4);
   assert.deepEqual(rendererErrors, [], "Terminal creation must not log renderer errors");
+  await exerciseTerminalAskRem();
+}
+
+// Right-click in the terminal: Ask Rem about selection attaches the selected text to
+// Rem's message box as a file, and is off until something is selected.
+async function exerciseTerminalAskRem() {
+  await waitFor(() => evaluate(() => [...document.querySelectorAll(".terminal-host:not(.invisible)")]
+    .some(host => host.textContent.includes("Raticode browser terminal"))), 25, "terminal output");
+  await evaluate(() => {
+    window.__askedRem = [];
+    window.addEventListener("gofer:rem-attach-files", event => {
+      window.__askedRem.push(event.detail.files[0].text().then(text => ({ name: event.detail.files[0].name, text })));
+    });
+  });
+  const openMenu = () => evaluate(() => {
+    const host = document.querySelector(".terminal-host:not(.invisible)");
+    const box = host.getBoundingClientRect();
+    host.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: box.left + 40, clientY: box.top + 20 }));
+  });
+  const menuItem = (label) => `[...document.querySelectorAll("[aria-label='Terminal actions'] [role='menuitem']")].find(item => item.textContent.trim() === ${JSON.stringify(label)})`;
+  await openMenu();
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("[aria-label='Terminal actions']"))), 25, "terminal menu");
+  assert.equal(await windowRef.webContents.executeJavaScript(`${menuItem("Ask Rem about selection")}.disabled`), true);
+  await windowRef.webContents.executeJavaScript(`${menuItem("Select all")}.click()`);
+  await waitFor(() => evaluate(() => !document.querySelector("[aria-label='Terminal actions']")), 25, "menu closes");
+  await openMenu();
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("[aria-label='Terminal actions']"))), 25, "terminal menu again");
+  if (process.env.GOFER_TERMINAL_SCREENSHOT) fs.writeFileSync(process.env.GOFER_TERMINAL_SCREENSHOT, (await windowRef.webContents.capturePage()).toPNG());
+  assert.equal(await windowRef.webContents.executeJavaScript(`${menuItem("Ask Rem about selection")}.disabled`), false);
+  await windowRef.webContents.executeJavaScript(`${menuItem("Ask Rem about selection")}.click()`);
+  const asked = await evaluate(async () => Promise.all(window.__askedRem));
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0].name, "terminal-selection.txt");
+  assert.match(asked[0].text, /^Text selected in Raticode's terminal, attached with Ask Rem about selection\./);
+  assert.match(asked[0].text, /Terminal: bash in \/workspace\/current-worktree/);
+  assert.match(asked[0].text, /----- BEGIN UNTRUSTED TERMINAL OUTPUT [0-9a-f]{8} -----\n[\s\S]*Raticode browser terminal/);
+  assert.deepEqual(rendererErrors, [], "Ask Rem about selection must not log renderer errors");
 }
 
 async function openRattishWorkflowFile() {

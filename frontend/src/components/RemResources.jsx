@@ -1,5 +1,5 @@
 import { lazy, Suspense, useId, useState } from "react";
-import { AppWindow, BookOpen, FolderOpen, Globe, Network, Pencil, Plug, Plus, Search, Terminal, Trash2 } from "lucide-react";
+import { AppWindow, BookOpen, Eraser, FolderOpen, Globe, Network, Pencil, Plug, Plus, Search, Terminal, Trash2 } from "lucide-react";
 import { DEFAULT_REM_RESOURCES, remResourceError } from "../lib/remResources.js";
 import { editRemLibrary, skillKey, useRemLibrary } from "../lib/remLibrary.js";
 import { IconAction, ToolRow, ToolSection } from "./RemToolRows.jsx";
@@ -13,6 +13,16 @@ const baseName = (path = "") => skillKey(path).split(/[\\/]/).pop() || path;
 const serverDetail = (server) => server.description || (server.type === "stdio"
   ? [server.command, ...(server.args || [])].join(" ")
   : server.url);
+const serverRowKey = (row) => `${row.kind}:${row.server.name}`;
+// Sizes as the operating system's file manager shows them (1 MB = 1,000,000 bytes).
+export function cacheSizeText(bytes = 0) {
+  if (bytes < 1000) return `${bytes} bytes`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1000;
+  let unit = 0;
+  while (value >= 1000 && unit < units.length - 1) { value /= 1000; unit += 1; }
+  return `${value.toFixed(1)} ${units[unit]}`;
+}
 const serverLink = (server) => ({ name: server.name, type: server.type || "http", url: server.url || "", command: server.command || "", args: server.args || [], enabled: true, library: true });
 
 // Thread selections reference Raticode's shared library. Entries that exist only
@@ -47,6 +57,7 @@ export default function RemResources({ value = DEFAULT_REM_RESOURCES, onChange, 
   const [query, setQuery] = useState("");
   const [form, setForm] = useState(null);
   const [failure, setFailure] = useState("");
+  const [notice, setNotice] = useState("");
   const update = (patch) => onChange({ ...config, ...patch });
   const { skills, servers } = remToolRows(config, library);
   const needle = query.trim().toLowerCase();
@@ -99,12 +110,20 @@ export default function RemResources({ value = DEFAULT_REM_RESOURCES, onChange, 
     if (row.kind === "library") await editRemLibrary({ action: "remove_mcp", name: row.server.name });
     update({ mcpServers: config.mcpServers.filter((item) => item !== row.selected) });
   };
+  // mcp-tool steps keep a local server's downloaded packages between starts.
+  const clearCache = async (row) => {
+    const { cacheCleared = 0 } = await editRemLibrary({ action: "clear_mcp_cache", name: row.server.name });
+    setNotice(cacheCleared
+      ? `Cleared ${cacheSizeText(cacheCleared)} from ${row.server.name}'s package cache. Its next start in a workflow downloads its packages again.`
+      : `${row.server.name}'s package cache is already empty.`);
+  };
   const removeSkill = async (row) => {
     if (row.kind === "library" && row.skill.registered) await editRemLibrary({ action: "remove_skill", path: row.skill.path });
     update({ skills: config.skills.filter((item) => item !== row.selected) });
   };
   const run = (action) => (...args) => {
     setFailure("");
+    setNotice("");
     return action(...args).catch((error) => {
       if (form) setForm((current) => current && { ...current, error: error.message });
       else setFailure(error.message);
@@ -116,6 +135,7 @@ export default function RemResources({ value = DEFAULT_REM_RESOURCES, onChange, 
 
   return <div className="rem-tools">
     {issue || failure ? <p role="alert" className="rem-tools__alert">{issue || failure}</p> : null}
+    {notice ? <p role="status" className="rem-tools__note">{notice}</p> : null}
     {skills.length + servers.length > SEARCH_THRESHOLD ? <label className="rem-tools__search">
       <Search aria-hidden="true" size={14} />
       <input aria-label="Filter skills and MCP servers" placeholder="Filter skills and servers" value={query} onChange={(event) => setQuery(event.target.value)} />
@@ -149,11 +169,12 @@ export default function RemResources({ value = DEFAULT_REM_RESOURCES, onChange, 
     </ToolSection>
 
     <ToolSection title="MCP servers" summary={servers.length ? `${enabledServers} on` : ""} action={<IconAction label="Add MCP server" icon={Plus} onClick={() => setForm({ type: "server" })} />}>
-      {form?.type === "server" && !form.row ? <ServerForm error={form.error} onCancel={() => setForm(null)} onSubmit={run((server) => saveServer(server))} /> : null}
-      {visibleServers.map((row) => form?.type === "server" && form.row === row
+      {form?.type === "server" && !form.key ? <ServerForm error={form.error} onCancel={() => setForm(null)} onSubmit={run((server) => saveServer(server))} /> : null}
+      {/* Rows are rebuilt on every render, so the edited row is found by its key. */}
+      {visibleServers.map((row) => form?.type === "server" && form.key === serverRowKey(row)
         ? <ServerForm key={`edit:${row.server.name}`} initial={row.server} error={form.error} onCancel={() => setForm(null)} onSubmit={run((server) => saveServer(server, row))} />
         : <ToolRow
-          key={`${row.kind}:${row.server.name}`}
+          key={serverRowKey(row)}
           icon={Plug}
           title={row.server.name || "Unnamed server"}
           detail={row.kind === "removed" ? "Removed from Raticode. Turn off or remove." : serverDetail(row.server)}
@@ -162,7 +183,8 @@ export default function RemResources({ value = DEFAULT_REM_RESOURCES, onChange, 
           disabled={row.kind === "removed" && row.selected?.enabled === false}
           onChange={(on) => setServer(row, on)}
           actions={<>
-            {row.kind !== "removed" ? <IconAction label={`Edit server ${row.server.name}`} icon={Pencil} onClick={() => setForm({ type: "server", row })} /> : null}
+            {row.kind !== "removed" ? <IconAction label={`Edit server ${row.server.name}`} icon={Pencil} onClick={() => setForm({ type: "server", key: serverRowKey(row) })} /> : null}
+            {row.kind === "library" && row.server.type === "stdio" && libraryReady ? <IconAction label={`Clear package cache for ${row.server.name}`} icon={Eraser} onClick={run(() => clearCache(row))} /> : null}
             <IconAction danger label={`Remove server ${row.server.name}`} icon={Trash2} onClick={run(() => removeServer(row))} />
           </>}
         />)}
@@ -203,11 +225,16 @@ function SkillForm({ error, onCancel, onSubmit }) {
   </form></li>;
 }
 
+// Names, one per line; commas and spaces also separate them.
+export function envNames(text = "") {
+  return [...new Set(String(text).split(/[\s,]+/).filter(Boolean))];
+}
+
 function ServerForm({ initial, error, onCancel, onSubmit }) {
   const id = useId();
   const [draft, setDraft] = useState(() => ({
     name: initial?.name || "", type: initial?.type || "http", url: initial?.url || "",
-    command: initial?.command || "", args: (initial?.args || []).join("\n"), description: initial?.description || "",
+    command: initial?.command || "", args: (initial?.args || []).join("\n"), env: (initial?.env || []).join("\n"), description: initial?.description || "",
   }));
   const [busy, setBusy] = useState(false);
   const set = (patch) => setDraft((current) => ({ ...current, ...patch }));
@@ -215,7 +242,7 @@ function ServerForm({ initial, error, onCancel, onSubmit }) {
     event.preventDefault();
     setBusy(true);
     const server = draft.type === "stdio"
-      ? { name: draft.name.trim(), type: "stdio", command: draft.command.trim(), args: draft.args ? draft.args.split("\n").filter((arg) => arg !== "") : [], description: draft.description.trim() }
+      ? { name: draft.name.trim(), type: "stdio", command: draft.command.trim(), args: draft.args ? draft.args.split("\n").filter((arg) => arg !== "") : [], env: envNames(draft.env), description: draft.description.trim() }
       : { name: draft.name.trim(), type: "http", url: draft.url.trim(), description: draft.description.trim() };
     try { await onSubmit(server); } finally { setBusy(false); }
   };
@@ -230,6 +257,9 @@ function ServerForm({ initial, error, onCancel, onSubmit }) {
       <input id={`${id}-command`} aria-label="Server program" value={draft.command} placeholder="npx" onChange={(event) => set({ command: event.target.value })} />
       <label className="rem-tools__field" htmlFor={`${id}-args`}>Arguments, one per line</label>
       <textarea id={`${id}-args`} aria-label="Server arguments" rows={2} value={draft.args} placeholder={"-y\n@modelcontextprotocol/server-filesystem"} onChange={(event) => set({ args: event.target.value })} />
+      <label className="rem-tools__field" htmlFor={`${id}-env`}>Environment variables for workflows <span>optional</span></label>
+      <textarea id={`${id}-env`} aria-label="Server environment variables" rows={2} value={draft.env} placeholder="GITHUB_PERSONAL_ACCESS_TOKEN" spellCheck={false} onChange={(event) => set({ env: event.target.value })} />
+      <p className="rem-tools__field-hint">Names only, one per line. An mcp-tool workflow step passes these from Raticode&apos;s environment, along with the basics such as PATH and HOME. Rem threads aren&apos;t affected.</p>
     </> : <>
       <label className="rem-tools__field" htmlFor={`${id}-url`}>URL</label>
       <input id={`${id}-url`} aria-label="Server URL" value={draft.url} placeholder="https://example.com/mcp" onChange={(event) => set({ url: event.target.value })} />

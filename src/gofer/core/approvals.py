@@ -29,6 +29,7 @@ else:
     import fcntl
 
 ApprovalDecisionValue = Literal["approved", "rejected", "timeout"]
+ApprovalReplyMode = Literal["none", "optional", "required"]
 
 # Written when a gate's own task stops. The run's end reason replaces it once known.
 APPROVAL_GATE_STOPPED_REASON = "The approval gate was stopped."
@@ -50,6 +51,10 @@ class ApprovalDecision:
     decided_by: str = "unknown"
     notes: str = ""
     decided_at: str = field(default_factory=_now)
+    # The option label picked on a gate with options; None otherwise and on timeouts.
+    choice: str | None = None
+    # The text typed for a gate that asks for a reply.
+    reply: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -57,6 +62,8 @@ class ApprovalDecision:
             "decidedBy": self.decided_by,
             "notes": self.notes,
             "decidedAt": self.decided_at,
+            "choice": self.choice,
+            "reply": self.reply,
         }
 
     @classmethod
@@ -64,11 +71,14 @@ class ApprovalDecision:
         decision = str(data.get("decision", "rejected"))
         if decision not in {"approved", "rejected", "timeout"}:
             decision = "rejected"
+        choice = data.get("choice")
         return cls(
             decision=decision,  # type: ignore[arg-type]
             decided_by=str(data.get("decidedBy") or data.get("decided_by") or "unknown"),
             notes=str(data.get("notes") or ""),
             decided_at=str(data.get("decidedAt") or data.get("decided_at") or _now()),
+            choice=choice if isinstance(choice, str) else None,
+            reply=str(data.get("reply") or ""),
         )
 
 
@@ -93,6 +103,11 @@ class ApprovalRequest:
     resume_claimed_at: str | None = None
     resume_claimed_by_pid: int | None = None
     cancelled_reason: str | None = None
+    # Answer buttons that replace Approve and Reject; empty for a plain gate.
+    options: list[str] = field(default_factory=list)
+    # Options that count as a rejection: approved is false when one is picked.
+    reject_options: list[str] = field(default_factory=list)
+    reply_mode: ApprovalReplyMode = "none"
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -115,7 +130,20 @@ class ApprovalRequest:
             "resumeClaimedAt": self.resume_claimed_at,
             "resumeClaimedByPid": self.resume_claimed_by_pid,
             "cancelledReason": self.cancelled_reason,
+            "options": self.options,
+            "rejectOptions": self.reject_options,
+            "reply": self.reply_mode,
         }
+
+    def matching_option(self, choice: str) -> str | None:
+        """The option label a typed choice names, matched exactly first, then ignoring case."""
+        if choice in self.options:
+            return choice
+        folded = choice.strip().casefold()
+        return next((option for option in self.options if option.casefold() == folded), None)
+
+    def decision_for_choice(self, choice: str) -> ApprovalDecisionValue:
+        return "rejected" if choice in self.reject_options else "approved"
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> ApprovalRequest:
@@ -133,6 +161,11 @@ class ApprovalRequest:
         )
         if timeout_decision not in {"reject", "timeout"}:
             timeout_decision = "timeout"
+        options = data.get("options")
+        reject_options = data.get("rejectOptions")
+        reply_mode = str(data.get("reply") or "none")
+        if reply_mode not in {"none", "optional", "required"}:
+            reply_mode = "none"
         if decision is not None:
             status = "decided"
         elif data.get("status") == "cancelled":
@@ -189,6 +222,11 @@ class ApprovalRequest:
             cancelled_reason=(
                 str(data.get("cancelledReason") or data.get("cancelled_reason") or "") or None
             ),
+            options=[str(item) for item in options] if isinstance(options, list) else [],
+            reject_options=(
+                [str(item) for item in reject_options] if isinstance(reject_options, list) else []
+            ),
+            reply_mode=reply_mode,  # type: ignore[arg-type]
         )
 
 
@@ -229,11 +267,20 @@ class ApprovalStore:
         workflow_id: str,
         run_id: str,
         node_id: str,
-        decision: ApprovalDecisionValue,
+        decision: ApprovalDecisionValue | None = None,
         *,
         decided_by: str = "cli",
         notes: str = "",
+        choice: str | None = None,
+        reply: str = "",
+        timed_out: bool = False,
     ) -> ApprovalRequest:
+        """Record a decision.
+
+        A gate with options takes ``choice`` instead of ``decision``: the option sets the
+        decision, rejected for one of the gate's reject options and approved otherwise.
+        ``timed_out`` records a deadline's decision, which picks no option and no reply.
+        """
         path = self.request_path(workflow_id, run_id, node_id)
         if not path.exists():
             raise ValueError("Pending approval not found")
@@ -255,11 +302,21 @@ class ApprovalStore:
                 raise ValueError(
                     f"Approver {decided_by!r} is not allowed; expected one of: {allowed}"
                 )
+            picked: str | None = None
+            if timed_out:
+                if decision is None:
+                    raise ValueError("A timed-out approval needs its decision.")
+                reply = ""
+            else:
+                decision, picked = _checked_answer(request, decision, choice)
+                reply = _checked_reply(request, reply)
             request.status = "decided"
             request.decision = ApprovalDecision(
                 decision=decision,
                 decided_by=decided_by,
                 notes=notes,
+                choice=picked,
+                reply=reply,
             )
             self.create_or_update(request)
         return request
@@ -352,7 +409,15 @@ class ApprovalStore:
             roots = sorted(root.glob("*")) if root.exists() else []
         requests: list[ApprovalRequest] = []
         for request_root in roots:
-            for path in sorted(request_root.glob("*/*.json")):
+            # A waiting gate replaces its file several times a second, and a directory
+            # listing taken during a replace can miss the name (btrfs does). Each
+            # request's lock file is made once and never replaced, so it finds those.
+            paths = set(request_root.glob("*/*.json"))
+            paths.update(
+                lock.with_name(lock.name.removesuffix(".lock"))
+                for lock in request_root.glob("*/*.json.lock")
+            )
+            for path in sorted(paths):
                 if path.name.endswith(".checkpoint.json"):
                     continue
                 request = _read_request(path)
@@ -380,6 +445,38 @@ class ApprovalStore:
             )
             _write_request(path, current)
         return current
+
+
+def _checked_answer(
+    request: ApprovalRequest,
+    decision: ApprovalDecisionValue | None,
+    choice: str | None,
+) -> tuple[ApprovalDecisionValue, str | None]:
+    """The decision and option label an answer records, or why it can't be recorded."""
+    if not request.options:
+        if choice is not None:
+            raise ValueError("This approval has no options; approve or reject it instead.")
+        if decision is None:
+            raise ValueError("Choose approve or reject.")
+        return decision, None
+    listed = ", ".join(request.options)
+    if choice is None or not choice.strip():
+        raise ValueError(f"This approval asks you to choose one of: {listed}.")
+    picked = request.matching_option(choice)
+    if picked is None:
+        raise ValueError(f"{choice!r} isn't one of this approval's options: {listed}.")
+    return request.decision_for_choice(picked), picked
+
+
+def _checked_reply(request: ApprovalRequest, reply: str) -> str:
+    text = reply.strip()
+    if request.reply_mode == "none":
+        if text:
+            raise ValueError("This approval doesn't take a reply; use notes instead.")
+        return ""
+    if request.reply_mode == "required" and not text:
+        raise ValueError("This approval needs a reply.")
+    return text
 
 
 def _has_timed_out(request: ApprovalRequest) -> bool:
@@ -448,17 +545,10 @@ def _request_lock(path: Path) -> Iterator[None]:
 
 
 def _pid_is_live(pid: int | None) -> bool:
-    if pid is None:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    from gofer.utils.pids import pid_alive
+
+    # Never os.kill(pid, 0): on Windows that ends the process it asks about.
+    return pid_alive(pid)
 
 
 @dataclass

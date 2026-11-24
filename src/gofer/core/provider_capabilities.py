@@ -71,6 +71,8 @@ BROWSER_LOGIN_COMMANDS = {
     "codex": ("login",),
     "claude_code": ("auth", "login"),
     "copilot": ("login", "--web-flow"),
+    # Grok opens the browser itself and waits for the approval on its own callback.
+    "grok": ("login",),
 }
 DISCOVERY_TIMEOUT_SECONDS = 10
 DISCOVERY_MAX_OUTPUT_BYTES = 2 * 1024 * 1024
@@ -603,6 +605,18 @@ class ProviderCapabilityService:
         self._inflight: dict[_CacheKey, threading.Event] = {}
         self._lock = threading.RLock()
 
+    def discovered_version(
+        self, provider_id: ProviderId, executable: str, mtime_ns: int | None
+    ) -> tuple[bool, str | None]:
+        """The version discovery read for this executable as it is now, without probing.
+
+        Returns ``(False, None)`` when nothing is cached for it. An expired entry still
+        counts: a version only changes with the executable, which changes its mtime.
+        """
+        with self._lock:
+            cached = self._cache.get(_CacheKey(provider_id, executable, mtime_ns))
+        return (True, cached.capability.version) if cached else (False, None)
+
     def payload(self, *, refresh: bool = False) -> dict[str, list[dict[str, Any]]]:
         _require_sync_context("ProviderCapabilityService.payload", "payload_async")
         return asyncio.run(self.payload_async(refresh=refresh))
@@ -835,6 +849,78 @@ def provider_capability_service() -> ProviderCapabilityService:
         if _service is None:
             _service = ProviderCapabilityService()
         return _service
+
+
+# Run records name the provider app version each worker turn and agent step started.
+# Tests turn this off (tests/conftest.py) so a real CLI on PATH never adds a version.
+APP_VERSION_READS = True
+_VERSION_NUMBER = re.compile(r"\d+(?:\.\d+)+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?")
+# Versions read for run records when discovery had none cached, by executable and mtime.
+_app_versions: dict[tuple[str, int | None], str | None] = {}
+_app_versions_lock = threading.Lock()
+
+
+def version_number(text: str | None) -> str | None:
+    """The version in a CLI's version output, such as 2.3.1 from ``2.3.1 (Claude Code)``.
+
+    Output with no dotted number comes back as its first line, cut to 40 characters.
+    """
+    if not text or not text.strip():
+        return None
+    found = _VERSION_NUMBER.search(text)
+    if found:
+        return found.group(0)
+    return text.strip().splitlines()[0].strip()[:40] or None
+
+
+def _read_app_version(provider_id: ProviderId, executable: str) -> str | None:
+    """The CLI's own version output: the same local ``--version`` call discovery makes."""
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            [executable, "version" if provider_id == "grok" else "--version"],
+            env=env_with_executable_on_path(executable),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=DISCOVERY_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout[:4096].decode("utf-8", errors="replace").strip() or None
+
+
+def provider_app_version(provider_id: str) -> str | None:
+    """The installed provider app's version number for a run record, or None.
+
+    It is the version provider discovery reads (``ProviderCapability.version``). When
+    discovery has nothing cached for the executable as it is now, the CLI's version is
+    read once and kept until the executable's modification time changes, so a run makes
+    no provider calls beyond that one local ``--version``. Never touches the network.
+    """
+    if not APP_VERSION_READS or provider_id not in PROVIDER_BINARIES:
+        return None
+    provider = cast(ProviderId, provider_id)
+    executable = resolve_provider_executable(provider)
+    if executable is None:
+        return None
+    mtime_ns = _executable_mtime_ns(executable)
+    found, raw = provider_capability_service().discovered_version(provider, executable, mtime_ns)
+    if found:
+        return version_number(raw)
+    key = (executable, mtime_ns)
+    with _app_versions_lock:
+        if key in _app_versions:
+            return _app_versions[key]
+    version = version_number(_read_app_version(provider, executable))
+    with _app_versions_lock:
+        _app_versions[key] = version
+        while len(_app_versions) > 64:
+            _app_versions.pop(next(iter(_app_versions)))
+    return version
 
 
 def provider_capabilities_payload(*, refresh: bool = False) -> dict[str, list[dict[str, Any]]]:

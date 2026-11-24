@@ -45,3 +45,13 @@ test("an edited turn compares against the preceding turn, including unloaded his
     },
   }, "thread", [history[1]], "edit"), previous);
 });
+
+test("the divider names a thread's account when it changes", () => {
+  const work = remModelSelection("claude_code", "fable", "high", null, "work");
+  assert.deepEqual(work, { provider: "claude_code", model: "fable", effort: "high", account: "work" });
+  assert.equal("account" in remModelSelection("claude_code", "fable", "high"), false);
+  assert.equal(remModelSwitchBanner(work, { ...work }, "Claude Code"), null);
+  assert.equal(remModelSwitchBanner({ ...work, account: undefined }, work, "Claude Code"), "switched to Claude Code - fable - high - work");
+  assert.equal(remModelSwitchBanner(work, { ...work, account: "@default" }, "Claude Code"), "switched to Claude Code - fable - high - default sign-in");
+  assert.equal(remModelSwitchBanner(work, remModelSelection("claude_code", "fable", "high"), "Claude Code"), "switched to Claude Code - fable - high - Rem’s account setting");
+});

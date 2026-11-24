@@ -189,6 +189,7 @@ async def _fake_claude_turn(
     *,
     scratch: Path | None = None,
     during: str = "",
+    cli: Path | None = None,
 ) -> dict[str, Any]:
     """Run one managed turn through a fake Claude CLI that records argv and env."""
     report = tmp_path / "report.json"
@@ -214,7 +215,7 @@ async def _fake_claude_turn(
 
     monkeypatch.setattr(chat, "_compact_chat_messages_if_needed", no_compaction)
     monkeypatch.setattr(chat, "resolve_provider_executable", lambda _: sys.executable)
-    monkeypatch.setattr(chat, "ensure_local_gofer_cli", lambda _data_dir: gof)
+    monkeypatch.setattr(chat, "ensure_local_gofer_cli", lambda _data_dir: cli or gof)
     monkeypatch.setattr(chat, "_build_chat_command", build_command)
     project = tmp_path / "project"
     project.mkdir(exist_ok=True)
@@ -274,6 +275,140 @@ async def test_unattended_claude_turns_pass_sandbox_settings(monkeypatch, tmp_pa
     assert env["CLAUDE_CODE_TMPDIR"] == str(scratch)
     assert env["MYPY_CACHE_DIR"] == str(scratch / "mypy-cache")
     assert env[command_slots.SANDBOX_ENV] == "1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="Claude Code has no sandbox on Windows")
+async def test_unattended_claude_turns_skip_project_settings_but_keep_claude_md(
+    monkeypatch, tmp_path
+) -> None:
+    """A project's .claude/settings.json hooks would run outside the sandbox."""
+    monkeypatch.setattr(claude_sandbox, "unavailable_reason", lambda: None)
+    project = tmp_path / "project"
+    (project / ".claude").mkdir(parents=True)
+    (project / "CLAUDE.md").write_text("Run the project's own checks.\n")
+    (project / ".claude" / "settings.json").write_text('{"hooks": {}}\n')
+    seen = await _fake_claude_turn(
+        monkeypatch,
+        tmp_path,
+        {"readOnly": False, "claudeSandbox": True, "runId": "run"},
+        scratch=tmp_path / "data" / "rem-work" / "turn-scratch" / "run-x",
+    )
+    argv = seen["argv"]
+    assert argv[argv.index("--setting-sources") + 1] == "user"
+    appended = argv[argv.index("--append-system-prompt") + 1]
+    assert "Run the project's own checks." in appended
+    # Raticode's own settings, with the slot hook, still go in.
+    assert "PreToolUse" in json.loads(argv[argv.index("--settings") + 1])["hooks"]
+
+
+def test_project_instructions_come_from_claude_md_files_but_never_through_links(
+    monkeypatch, tmp_path
+) -> None:
+    home = tmp_path / "home"
+    project = home / "code" / "project"
+    (project / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    (home / ".claude").mkdir()
+    (home / "CLAUDE.md").write_text("home rules")
+    (home / ".claude" / "CLAUDE.md").write_text("user memory")
+    (home / "code" / "CLAUDE.md").write_text("code rules")
+    (project / "CLAUDE.md").write_text("project rules")
+    (project / ".claude" / "CLAUDE.md").write_text("dot rules")
+    for nested in ("app/CLAUDE.md", "node_modules/pkg/CLAUDE.md", ".worktrees/w/CLAUDE.md"):
+        (project / nested).parent.mkdir(parents=True)
+        (project / nested).write_text("nested")
+    secret = tmp_path / "id_rsa"
+    secret.write_text("PRIVATE KEY")
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    (linked / "CLAUDE.md").symlink_to(secret)
+
+    args = claude_sandbox.project_instruction_args(project)
+
+    assert args[:2] == ["--setting-sources", "user"]
+    text = args[args.index("--append-system-prompt") + 1]
+    assert text.index("code rules") < text.index("project rules") < text.index("dot rules")
+    # Home's own files stop the walk: the "user" setting source already loads them.
+    assert "home rules" not in text and "user memory" not in text
+    assert "- app/CLAUDE.md" in text
+    assert "node_modules" not in text and ".worktrees" not in text
+    # A CLAUDE.md that links to a key file adds nothing, so only the setting is left.
+    assert claude_sandbox.project_instruction_args(linked) == ["--setting-sources", "user"]
+
+
+def test_project_instructions_are_capped(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "CLAUDE.md").write_text("x" * (claude_sandbox.MAX_INSTRUCTION_BYTES + 100))
+    text = claude_sandbox.project_instruction_args(project)[-1]
+    assert "at most 64 KB" in text
+    assert text.count("x") <= claude_sandbox.MAX_INSTRUCTION_BYTES
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="Claude Code has no sandbox on Windows")
+async def test_a_sandboxed_claude_turns_own_commit_loses_its_co_author_line(
+    monkeypatch, tmp_path
+) -> None:
+    """Settings > Rem > Remove Co-authored-by lines reaches the sandboxed shell.
+
+    The fake Claude Code does what its sandbox does to a Bash command's environment
+    (2.1.319): it assigns GIT_CONFIG_PARAMETERS its proxy settings, dropping what
+    Raticode put there, and appends to GIT_CONFIG_COUNT. Then it runs `git commit`.
+    """
+    from gofer.core import commit_attribution
+    from gofer.core.provider_preferences import save_commit_message_preference
+
+    if not commit_attribution.config_hooks_supported():
+        pytest.skip("this git doesn't run hooks named in config")
+    monkeypatch.setattr(claude_sandbox, "unavailable_reason", lambda: None)
+    save_commit_message_preference({"stripCoAuthors": True})
+    source = Path(chat.__file__).resolve().parents[2]
+    cli = tmp_path / "trusted" / "Raticode"
+    cli.parent.mkdir()
+    cli.write_text(
+        f"#!/bin/sh\nPYTHONPATH='{source}' exec '{sys.executable}' -m gofer.cli.main \"$@\"\n"
+    )
+    cli.chmod(0o700)
+    repo = tmp_path / "project"
+    repo.mkdir()
+    for args in (
+        ["init", "-q"],
+        ["config", "user.name", "T"],
+        ["config", "user.email", "t@example.com"],
+        ["config", "commit.gpgsign", "false"],
+    ):
+        subprocess.run(["git", "-C", str(repo), *args], check=True)
+    message = "Fix it\n\nCo-Authored-By: Claude <noreply@example.com>\n"
+    during = (
+        "import subprocess\n"
+        "env = dict(os.environ)\n"
+        "env['GIT_CONFIG_PARAMETERS'] = "
+        "\"'http.proxyAuthMethod=basic' 'credential.http://127.0.0.1:3128.helper='\"\n"
+        "n = int(env.get('GIT_CONFIG_COUNT', '0'))\n"
+        "env[f'GIT_CONFIG_KEY_{n}'] = 'credential.interactive'\n"
+        "env[f'GIT_CONFIG_VALUE_{n}'] = 'false'\n"
+        "env['GIT_CONFIG_COUNT'] = str(n + 1)\n"
+        f"subprocess.run(['git', 'commit', '-q', '--allow-empty', '-m', {message!r}], env=env,"
+        " check=True)\n"
+    )
+    await _fake_claude_turn(
+        monkeypatch,
+        tmp_path,
+        {"readOnly": False, "claudeSandbox": True, "runId": "run"},
+        scratch=tmp_path / "data" / "rem-work" / "turn-scratch" / "run-commit",
+        during=during,
+        cli=cli,
+    )
+    log = subprocess.run(
+        ["git", "-C", str(repo), "log", "-1", "--format=%B"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert log.rstrip("\n") == "Fix it"
 
 
 MOUNT_POINTS = (
@@ -341,6 +476,8 @@ def test_mount_points_stay_while_another_sandboxed_turn_runs_in_the_folder(tmp_p
 
 @pytest.mark.asyncio
 async def test_other_claude_turns_keep_running_without_the_sandbox(monkeypatch, tmp_path) -> None:
+    # Run inside a Claude Code sandbox, the suite inherits this; the turn must not add it.
+    monkeypatch.delenv("CLAUDE_CODE_TMPDIR", raising=False)
     monkeypatch.setattr(claude_sandbox, "unavailable_reason", lambda: "should not be checked")
     stub = tmp_path / "project" / ".bashrc"
     seen = await _fake_claude_turn(

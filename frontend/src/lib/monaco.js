@@ -1,33 +1,35 @@
-import TsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
-import CssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
-import HtmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
-import "monaco-editor/esm/vs/language/typescript/monaco.contribution";
-import "monaco-editor/esm/vs/language/css/monaco.contribution";
-import "monaco-editor/esm/vs/language/html/monaco.contribution";
-import "monaco-editor/esm/vs/editor/contrib/smartSelect/browser/smartSelect";
-import "monaco-editor/esm/vs/editor/contrib/gotoSymbol/browser/goToCommands";
-import "monaco-editor/esm/vs/editor/contrib/parameterHints/browser/parameterHints";
-import JsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
-import "monaco-editor/esm/vs/language/json/monaco.contribution";
-import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
-import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
-import "monaco-editor/esm/vs/basic-languages/monaco.contribution";
-import "monaco-editor/esm/vs/editor/contrib/bracketMatching/browser/bracketMatching";
-import "monaco-editor/esm/vs/editor/contrib/caretOperations/browser/caretOperations";
-import "monaco-editor/esm/vs/editor/contrib/clipboard/browser/clipboard";
-import "monaco-editor/esm/vs/editor/contrib/codelens/browser/codelensController";
-import "monaco-editor/esm/vs/editor/contrib/comment/browser/comment";
-import "monaco-editor/esm/vs/editor/contrib/contextmenu/browser/contextmenu";
-import "monaco-editor/esm/vs/editor/contrib/find/browser/findController";
-import "monaco-editor/esm/vs/editor/contrib/folding/browser/folding";
-import "monaco-editor/esm/vs/editor/contrib/format/browser/formatActions";
-import "monaco-editor/esm/vs/editor/contrib/gotoError/browser/gotoError";
-import "monaco-editor/esm/vs/editor/contrib/hover/browser/hoverContribution";
-import "monaco-editor/esm/vs/editor/contrib/linesOperations/browser/linesOperations";
-import "monaco-editor/esm/vs/editor/contrib/multicursor/browser/multicursor";
-import "monaco-editor/esm/vs/editor/contrib/suggest/browser/suggestController";
-import "monaco-editor/esm/vs/editor/contrib/wordHighlighter/browser/wordHighlighter";
-import "monaco-editor/esm/vs/editor/contrib/wordOperations/browser/wordOperations";
+// Monaco 0.56+ exposes its ESM files as "monaco-editor/<path>" and moved the
+// CSS, HTML, JSON and TypeScript language features to languages/features/*.
+import TsWorker from "monaco-editor/languages/features/typescript/ts.worker?worker";
+import CssWorker from "monaco-editor/languages/features/css/css.worker?worker";
+import HtmlWorker from "monaco-editor/languages/features/html/html.worker?worker";
+import JsonWorker from "monaco-editor/languages/features/json/json.worker?worker";
+import EditorWorker from "monaco-editor/editor/editor.worker?worker";
+import { getJavaScriptWorker, getTypeScriptWorker } from "monaco-editor/languages/features/typescript/register";
+import "monaco-editor/languages/features/css/register";
+import "monaco-editor/languages/features/html/register";
+import { getWorker as getJsonWorker } from "monaco-editor/languages/features/json/register";
+import * as monaco from "monaco-editor/editor/editor.api";
+import "monaco-editor/languages/definitions/register.all";
+import "monaco-editor/editor/contrib/smartSelect/browser/smartSelect";
+import "monaco-editor/editor/contrib/gotoSymbol/browser/goToCommands";
+import "monaco-editor/editor/contrib/parameterHints/browser/parameterHints";
+import "monaco-editor/editor/contrib/bracketMatching/browser/bracketMatching";
+import "monaco-editor/editor/contrib/caretOperations/browser/caretOperations";
+import "monaco-editor/editor/contrib/clipboard/browser/clipboard";
+import "monaco-editor/editor/contrib/codelens/browser/codelensController";
+import "monaco-editor/editor/contrib/comment/browser/comment";
+import "monaco-editor/editor/contrib/contextmenu/browser/contextmenu";
+import "monaco-editor/editor/contrib/find/browser/findController";
+import "monaco-editor/editor/contrib/folding/browser/folding";
+import "monaco-editor/editor/contrib/format/browser/formatActions";
+import "monaco-editor/editor/contrib/gotoError/browser/gotoError";
+import "monaco-editor/editor/contrib/hover/browser/hoverContribution";
+import "monaco-editor/editor/contrib/linesOperations/browser/linesOperations";
+import "monaco-editor/editor/contrib/multicursor/browser/multicursor";
+import "monaco-editor/editor/contrib/suggest/browser/suggestController";
+import "monaco-editor/editor/contrib/wordHighlighter/browser/wordHighlighter";
+import "monaco-editor/editor/contrib/wordOperations/browser/wordOperations";
 
 if (typeof self !== "undefined") {
   self.MonacoEnvironment = {
@@ -44,13 +46,10 @@ if (typeof self !== "undefined") {
 export async function prepareLanguageServices(model) {
   const language = model.getLanguageId();
   const workerFactory = {
-    typescript: monaco.languages.typescript.getTypeScriptWorker,
-    javascript: monaco.languages.typescript.getJavaScriptWorker,
-    json: monaco.languages.json.getWorker,
-    css: monaco.languages.css.getCSSWorker,
-    scss: monaco.languages.css.getSCSSWorker,
-    less: monaco.languages.css.getLESSWorker,
-    html: monaco.languages.html.getHTMLWorker,
+    // CSS and HTML expose no worker getter; their providers load on first use.
+    typescript: getTypeScriptWorker,
+    javascript: getJavaScriptWorker,
+    json: getJsonWorker,
   }[language];
   if (workerFactory) {
     // The encounter-language event may register the mode on the next turn.
@@ -108,7 +107,7 @@ function registerRattishLanguage() {
         [/\b\d+(?:\.\d+)?(?:ms|s|m|h|d)?\b/, "number"],
         [/\b(?:and|or|not|contains|matches|exists|is)\b/, "keyword.operator"],
         [/(?:==|!=|<=|>=|<|>)/, "operator"],
-        [/\b(?:agent|bash-command|python-script|prompt-file|file|folder|open-resource|http-request|jev|notification|approval-gate|local-search|local-vectorize|common-llm-task|rem-prompt|rem-task|loop|break|workflow)\b/, "type"],
+        [/\b(?:agent|bash-command|python-script|prompt-file|file|folder|open-resource|http-request|read-web-page|mcp-tool|jev|notification|approval-gate|local-search|local-vectorize|common-llm-task|rem-prompt|rem-task|loop|break|workflow)\b/, "type"],
         [/^(\s*)([A-Za-z][A-Za-z0-9-]*)(\s*:)/, ["", "attribute.name", "delimiter"]],
         [/[{},]/, "delimiter"],
       ],

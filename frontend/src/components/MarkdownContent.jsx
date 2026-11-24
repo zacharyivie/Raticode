@@ -71,7 +71,9 @@ function MarkdownContent({
     "ticket-pill"({ node, children }) {
       const key = node?.properties?.dataTicketKey || String(children ?? "");
       const ticket = ticketIndex?.[key] || null;
-      return ticket ? <Suspense fallback={key}><TicketPill ticketKey={key} ticket={ticket} /></Suspense> : key;
+      // In a table cell only the key shows, as a link, so the column stays as narrow as its text.
+      const compact = node?.properties?.dataTicketCompact === "true";
+      return ticket ? <Suspense fallback={key}><TicketPill ticketKey={key} ticket={ticket} compact={compact} inverse={inverse} /></Suspense> : key;
     },
     a({ children, href = "", title }) {
       const external = isExternalUrl(href);

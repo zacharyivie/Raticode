@@ -21,6 +21,11 @@ The first representative set covers the contracts that force the most reusable b
   platform opener.
 - `http-request.json` defines request policy, retries, typed request bindings, structured
   response output, and plaintext credential warnings.
+- `read-web-page.json` reads one HTML or plain-text page as Markdown or text with its title,
+  description and links, behind the same private-address refusal and allowlist.
+- `mcp-tool.json` calls one tool on a server from Rem's MCP server list without a model,
+  with templated JSON arguments checked against the tool's input schema and a sandboxed
+  local server.
 - `notification.json` covers desktop, webhook, and email delivery without publishing
   connection credentials in node output.
 - `approval-gate.json` persists an externally actionable decision request and optionally
@@ -56,6 +61,12 @@ cross-field invariants that the meta-schema cannot express cleanly:
 - reject input names whose runtime name transformation collides;
 - verify that the named runtime handler implements the declared contract version during
   deployment preflight.
+
+Each built-in contract also has a `catalog` entry that editors use to list it: a picker
+`category` (`code`, `files`, `ai`, `web`, `approvals`, `flow` or `workflows`), a one-line
+`summary`, and the `docs_path` of its page on raticode.dev. The catalog is presentation only.
+It is left out of the contract fingerprint, so rewording it never changes compiled IR or
+invalidates a saved workflow. A contract without one still loads and is listed under Other.
 
 These files do not expand common node fields such as `needs`, `to`, `timeout`, or
 `allow-fail`. The language contract owns those fields.

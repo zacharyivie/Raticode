@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_BACKUP, archiveLabel, backupSettings, packageFit, scheduleLabel } from "./secondBrainBackups.js";
+import { DEFAULT_BACKUP, archiveLabel, backupCounts, backupSettings, packageFit, scheduleLabel } from "./secondBrainBackups.js";
 
 test("brains saved before backups existed get the off-by-default settings", () => {
   assert.deepEqual(backupSettings({ id: "b" }), DEFAULT_BACKUP);
@@ -24,4 +24,10 @@ test("the conversation archive decides whether a package fits the 1 GB limit", (
   assert.equal(packageFit(null, true), null);
   assert.match(archiveLabel(estimate), /^Include Rem’s conversation archive \(1\.0\d? GB\)$/);
   assert.equal(archiveLabel({ ...estimate, conversations: 0 }), "Include Rem’s conversation archive");
+});
+
+test("a kept backup and the last full one read as comparable counts", () => {
+  assert.equal(backupCounts({ files: 1, documents: 0, size: 512 }), "1 file · 0 documents · 512 B");
+  assert.match(backupCounts({ files: 1240, documents: 900, size: 3 * 1024 ** 2 }), /^1,240 files · 900 documents · 3(\.0)? MB$/);
+  assert.equal(backupCounts(null), "");
 });

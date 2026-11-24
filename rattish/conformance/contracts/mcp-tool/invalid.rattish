@@ -1,0 +1,6 @@
+Rattish: 1
+Workflow:
+  name: Invalid MCP tool contract
+Node example:
+  type: mcp-tool
+  server: docs

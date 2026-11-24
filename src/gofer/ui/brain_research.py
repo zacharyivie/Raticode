@@ -20,6 +20,7 @@ from urllib.parse import quote, urljoin, urlparse
 from xml.etree import ElementTree  # nosemgrep: python.lang.security.use-defused-xml.use-defused-xml
 from xml.parsers import expat  # nosemgrep: python.lang.security.use-defused-xml.use-defused-xml
 
+from gofer.core.network_policy import is_global_address
 from gofer.ui.brain_documents import MAX_TEXT
 from gofer.utils.http_read import read_before
 
@@ -112,7 +113,11 @@ def fetch_public_page(
     if port not in {80, 443}:
         raise ValueError("Only standard web ports are supported")
     addresses = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
-    if not addresses or any(not ipaddress.ip_address(info[4][0]).is_global for info in addresses):
+    if not addresses or any(
+        # is_global alone passes IPv4 hidden in IPv6 forms such as ::127.0.0.1.
+        not is_global_address(ipaddress.ip_address(info[4][0]))
+        for info in addresses
+    ):
         raise ValueError("Captures cannot access private, loopback or local network addresses")
     connection = http.client.HTTPConnection(parsed.hostname, port=port, timeout=15)
     sock = socket.create_connection((str(addresses[0][4][0]), port), timeout=15)
@@ -491,15 +496,22 @@ Retrieval generation {report["retrievalGeneration"]}.</footer>
 
 
 def saved_search_matches(doc: dict[str, Any], saved: dict[str, Any]) -> bool:
-    """Job-side evaluation of the same persisted visual filter families."""
+    """Job-side evaluation of the same persisted visual filter families.
+
+    Values compare without case, as the app's filters do: typed clauses arrive lowercased.
+    """
     filters = saved.get("filters", {})
+
+    def among(values: Any, value: Any) -> bool:
+        return str(value or "").casefold() in {str(item).casefold() for item in values}
+
     for key, field in (
         ("types", "type"),
         ("projects", "project"),
         ("origins", "origin"),
         ("extraction", "extraction"),
     ):
-        if filters.get(key) and doc.get(field) not in filters[key]:
+        if filters.get(key) and not among(filters[key], doc.get(field)):
             return False
     if filters.get("authors") and not any(
         str(value).casefold() in str(doc.get("author", "")).casefold()
@@ -512,17 +524,24 @@ def saved_search_matches(doc: dict[str, Any], saved: dict[str, Any]) -> bool:
         not selected <= tags if filters.get("requireAllTags") else not selected & tags
     ):
         return False
-    folder = filters.get("folder", "")
+    folder = str(filters.get("folder", "")).casefold().rstrip("/")
+    doc_folder = str(doc.get("folder", "")).casefold()
     if folder and not (
-        doc["folder"] == folder
-        or (filters.get("subfolders", True) and doc["folder"].startswith(folder + "/"))
+        doc_folder == folder
+        or (filters.get("subfolders", True) and doc_folder.startswith(folder + "/"))
     ):
         return False
-    if filters.get("domains") and doc["source"].get("domain") not in filters["domains"]:
+    if filters.get("domains") and not among(filters["domains"], doc["source"].get("domain")):
         return False
     if filters.get("includeGenerated") is False and doc["origin"] == "generated":
         return False
-    date = doc["dates"].get(filters.get("dateField", "modified"), "")
+    field = filters.get("dateField", "modified")
+    # A report's generated date is when it was added; other documents have none.
+    date = (
+        (doc["dates"].get("added", "") if doc.get("type") == "report" else "")
+        if field == "generated"
+        else doc["dates"].get(field, "")
+    )
     if filters.get("from") or filters.get("to"):
         if not date:
             if not filters.get("includeUnknownDates"):

@@ -162,12 +162,11 @@ class X11Client extends EventEmitter {
     const vendor = body.readUInt16LE(16);
     const screens = body[20];
     const formats = body[21];
-    let offset = 32 + vendor + pad4(vendor) + formats * 8;
+    const offset = 32 + vendor + pad4(vendor) + formats * 8;
     if (!screens) { reject(new Error("The display has no screens.")); return false; }
     this.root = body.readUInt32LE(offset);
     this.screenWidth = body.readUInt16LE(offset + 20);
     this.screenHeight = body.readUInt16LE(offset + 22);
-    offset += 32;
     this.ready = true;
     resolve(this);
     return true;

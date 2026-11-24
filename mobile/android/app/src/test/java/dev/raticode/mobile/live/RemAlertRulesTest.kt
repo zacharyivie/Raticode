@@ -255,7 +255,45 @@ class RemAlertRulesTest {
         assertEquals("workflow-3", shown.key)
         // No title falls back to the workflow's name.
         assertEquals("Nightly", RemAlertRules.workflowAlert(message.copy(title = ""), showText = true, now = 5).title)
+        // A notice that names no run, such as a trigger waiting for approval, opens the workflow.
+        val noRun = RemAlertRules.workflowAlert(message.copy(runId = ""), showText = false, now = 5)
+        assertEquals("Tap to open the workflow.", noRun.text)
+        assertEquals("nightly backup/1" to "", RemAlertRules.parseWorkflowTarget(noRun.target))
         assertEquals(RemAlertRules.WORKFLOW_GENERIC, RemAlertRules.lines(listOf(message), 0, showText = false, now = 1).single().text)
+    }
+
+    @Test fun aQuestionOfRemsCountsUnderNeedsYouAndOpensItsDecision() {
+        val question = RemNotice("decision-D-12", RemAlertRules.DECISION, "Rem has a question: Ship to **beta** first?", "2026-11-22T09:30:00+00:00",
+            "Ship to beta first?", true, RemAlertRules.NEEDS_YOU, decisionId = "D-12", question = "Ship to **beta** first?", projectName = "Raticode",
+            recommended = "Beta first")
+        val own = notice("r1", "reply")
+        // Kept with Needs you on, dropped with it off, whatever other switches are on.
+        assertEquals(listOf("r1", "decision-D-12"), RemAlertRules.incoming(read(own, question), listOf(RemAlertRules.NEEDS_YOU), emptyList(), false).notices.map { it.id })
+        val others = listOf(RemAlertRules.FINISHED, RemAlertRules.PROPOSALS, RemAlertRules.WORKFLOW)
+        assertEquals(listOf("r1"), RemAlertRules.incoming(read(own, question), others, emptyList(), false).notices.map { it.id })
+        // Rem's chat on screen doesn't show the question, so it still alerts.
+        assertEquals(listOf("decision-D-12"), RemAlertRules.incoming(read(own, question), listOf(RemAlertRules.NEEDS_YOU), emptyList(), chatOpen = true).notices.map { it.id })
+        // Its own alert, not a line in Rem's conversation.
+        val (questions, rest) = RemAlertRules.questions(listOf(own, question))
+        assertEquals(listOf("decision-D-12"), questions.map { it.id })
+        assertEquals(listOf("r1"), rest.map { it.id })
+        val shown = RemAlertRules.decisionAlert(question, showText = true, now = 5)
+        assertEquals("Rem has a question: Ship to beta first?", shown.title)
+        assertEquals("Raticode · Rem recommends: Beta first", shown.text)
+        assertEquals("D-12", RemAlertRules.parseDecisionTarget(shown.target))
+        // Without Rem's words it only says Rem has a question; one alert per decision either way.
+        val generic = RemAlertRules.decisionAlert(question, showText = false, now = 5)
+        assertEquals(RemAlertRules.QUESTION_GENERIC, generic.title)
+        assertFalse("beta" in generic.text || "Raticode" in generic.text)
+        assertEquals(shown.key, generic.key)
+        assertEquals(shown.target, generic.target)
+        assertEquals("Rem has a question", RemNoticeText.line(question, showText = false))
+        assertEquals("Rem has a question: Ship to beta first?", RemNoticeText.line(question, showText = true))
+        // The lock screen keeps its generic Rem text.
+        assertEquals("New message from Rem", RemAlertRules.LOCK_SCREEN_TEXT)
+        assertNull(RemAlertRules.parseDecisionTarget("decision/../etc"))
+        assertNull(RemAlertRules.parseDecisionTarget(RemAlertRules.workflowTarget("D-12", "")))
+        assertNull(RemAlertRules.parseWorkflowTarget(shown.target))
     }
 
     @Test fun workflowTargetsRoundTripAndRejectOtherDestinations() {

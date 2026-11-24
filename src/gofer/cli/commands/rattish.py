@@ -8,7 +8,12 @@ from typing import TYPE_CHECKING, Any
 
 import typer
 
-from gofer.cli.commands import rattish_cache, rattish_secrets, rattish_triggers
+from gofer.cli.commands import (
+    rattish_cache,
+    rattish_secrets,
+    rattish_shortcuts,
+    rattish_triggers,
+)
 
 if TYPE_CHECKING:
     from gofer.rattish.artifacts import CompiledArtifact, RattishArtifactError
@@ -27,6 +32,7 @@ app = typer.Typer(
 app.add_typer(rattish_triggers.app, name="triggers")
 app.add_typer(rattish_secrets.app, name="secrets")
 app.add_typer(rattish_cache.app, name="cache")
+app.add_typer(rattish_shortcuts.app, name="shortcuts")
 
 
 @app.command("docs")
@@ -139,9 +145,20 @@ def list_starters_command(
     for item in starters:
         typer.echo(f"{item['id']}  {item['name']}")
         typer.echo(f"  {item['summary']}")
+        needs = ["Git for Windows"] if item["needsGitForWindows"] else []
+        needs += [f"the {name} provider" for name in item["providers"]]
+        needs += [f"the secret {name} when used" for name in item["secrets"]]
+        typer.echo(f"  Needs: {', '.join(needs) if needs else 'nothing beyond Raticode'}.")
+    typer.echo(
+        "Create one with: Raticode rattish create --from STARTER_ID --project PROJECT_FOLDER"
+    )
 
 
 def _echo_starter_next_steps(starter: dict[str, Any], entrypoint: Path) -> None:
+    if starter["needsGitForWindows"]:
+        from gofer.rattish.shells import GIT_FOR_WINDOWS_URL
+
+        typer.echo(f"Needs Git for Windows for its shell steps: {GIT_FOR_WINDOWS_URL}")
     if starter["providers"]:
         typer.echo(f"Uses the provider: {', '.join(starter['providers'])}.")
     for secret in starter["secrets"]:
@@ -349,21 +366,55 @@ def run(
     input_: list[str] | None = typer.Option(
         None,
         "--input",
-        help="Workflow input as NAME=JSON. Repeat for multiple inputs.",
+        help="Workflow input as NAME=JSON. Repeat for multiple inputs. A file input takes a "
+        'path, such as doc="report.pdf", relative to this folder. With --from, only the '
+        "password inputs the reused run didn't save.",
     ),
     output_format: str = typer.Option("text", "--format", help="Output format: text or json."),
     data_dir: Path | None = typer.Option(
         None, "--data-dir", help="Override the app data directory used for runs and artifacts."
     ),
+    from_node: str | None = typer.Option(
+        None,
+        "--from",
+        help="Run from this node: reuse an earlier run's results for the unchanged nodes "
+        "upstream of it, then run it and everything after it.",
+    ),
+    reuse: str | None = typer.Option(
+        None,
+        "--reuse",
+        help="With --from, the run whose results to reuse. Default: the newest run that fits.",
+    ),
 ) -> None:
-    """Compile, preflight, run, and persist a Rattish workflow."""
+    """Compile, preflight, run, and persist a Rattish workflow.
+
+    With --from NODE, the run reuses the saved results of the nodes upstream of NODE
+    from the newest run that reached NODE with those nodes unchanged (or the run named
+    with --reuse), and uses that run's inputs. NODE and everything after it run from the
+    current source. Reused steps make no calls and cost $0. Approval steps are never
+    reused: they ask again. It refuses when an upstream node changed, naming it, and
+    when NODE is inside a loop body.
+    """
     _require_format(output_format)
+    if reuse is not None and from_node is None:
+        typer.echo("--reuse needs --from NODE.", err=True)
+        raise typer.Exit(2)
     try:
         workflow_inputs = _parse_run_inputs(input_ or [])
     except ValueError as exc:
         diagnostic = _run_input_diagnostic(source, exc).to_json()
         _emit(_error_payload("run", source, [diagnostic]), output_format)
         raise typer.Exit(2)
+    if from_node is not None:
+        execute_rattish_run_from(
+            source,
+            from_node,
+            reuse_run_id=reuse,
+            password_inputs=workflow_inputs,
+            output_format=output_format,
+            data_dir=data_dir,
+        )
+        return
     execute_rattish_run(source, workflow_inputs, output_format=output_format, data_dir=data_dir)
 
 
@@ -488,6 +539,22 @@ def test_workflow(
     skip_judge: bool = typer.Option(
         False, "--skip-judge", help="Skip model-judgment checks, so they cost nothing."
     ),
+    model: list[str] | None = typer.Option(
+        None,
+        "--model",
+        help=(
+            "Try another model on a node: NODE=PROVIDER:MODEL. Runs the cases with it beside "
+            "the current model, for this test run only; the source is not changed."
+        ),
+    ),
+    use_model_text: list[str] | None = typer.Option(
+        None,
+        "--use-model",
+        help=(
+            "Write NODE=PROVIDER:MODEL into the workflow and run nothing. "
+            "Triggers ask for approval again."
+        ),
+    ),
     output_format: str = typer.Option("text", "--format", help="Output format: text or json."),
     data_dir: Path | None = typer.Option(
         None, "--data-dir", help="Override the app data directory used for runs and results."
@@ -500,23 +567,41 @@ def test_workflow(
     runs. Results are saved with the workflow revision and compared with the last
     result of a different revision. Exit code 0 means every case passed, 1 that a
     case failed, 2 that the test set or workflow could not be used.
+
+    --model tries another model on a node: each case runs with the current model
+    (or reuses the newest result of this revision) and then with the candidate, and
+    a side-by-side table shows pass/fail, cost and time. Judge checks keep their own
+    model. --use-model writes the winner into the node.
     """
     import asyncio
 
     from gofer.rattish.artifacts import RattishArtifactError
     from gofer.rattish.diagnostics import RattishError
+    from gofer.rattish.model_overrides import ModelOverrideError, parse_model_override
     from gofer.rattish.test_sets import (
         WorkflowTestError,
         enforce_cost_limit,
         prepare_test_run,
         run_test_set,
         short_revision,
+        variant_label,
         with_comparison,
     )
 
     _require_format(output_format)
     if estimate_only and history:
         typer.echo("Use either --estimate or --history, not both.", err=True)
+        raise typer.Exit(2)
+    if use_model_text and (model or estimate_only or history):
+        typer.echo("--use-model runs nothing; use it without --model, --estimate or --history.")
+        raise typer.Exit(2)
+    try:
+        overrides = [parse_model_override(item) for item in model or []]
+        if use_model_text:
+            _use_test_model(source, use_model_text, data_dir, output_format)
+            return
+    except ModelOverrideError as exc:
+        _emit_test_error(source, str(exc), output_format)
         raise typer.Exit(2)
     try:
         if history:
@@ -528,6 +613,7 @@ def test_workflow(
             case_ids=case or None,
             skip_judge=skip_judge,
             data_dir=data_dir,
+            models=overrides,
         )
     except (WorkflowTestError, RattishArtifactError) as exc:
         _emit_test_error(source, str(exc), output_format)
@@ -542,26 +628,44 @@ def test_workflow(
         "source": str(prepared.source_path),
         "testSetPath": str(prepared.tests_path),
         "revision": revision,
-        "estimate": prepared.estimate,
+        "estimate": prepared.cost_estimate,
     }
+    trial = prepared.variant is not None
     if output_format == "text":
         typer.echo(
             f"{prepared.ir['workflow']['name']}  revision {short_revision(revision)}  "
             f"{len(prepared.cases)} case{'' if len(prepared.cases) == 1 else 's'}"
         )
-        typer.echo(f"Expected cost: {prepared.estimate['summary']}")
+        if trial:
+            sides = prepared.cost_estimate
+            typer.echo("Expected cost:")
+            typer.echo(f"  Current model: {sides['current']['summary']}")
+            typer.echo(
+                f"  Candidate ({variant_label(prepared.variant)}): {sides['candidate']['summary']}"
+            )
+        else:
+            typer.echo(f"Expected cost: {prepared.estimate['summary']}")
     if estimate_only:
         if output_format == "json":
             _emit_json({**base, "ok": True})
         return
     try:
-        enforce_cost_limit(prepared.estimate, max_cost)
+        enforce_cost_limit(prepared.cost_estimate, max_cost)
     except WorkflowTestError as exc:
         _emit_test_error(source, str(exc), output_format, base)
         raise typer.Exit(2)
 
     def progress(document: dict[str, Any]) -> None:
         if output_format != "text":
+            return
+        if trial:
+            for row in (document.get("modelComparison") or {}).get("cases") or []:
+                if row["candidate"]["status"] in {"pending", "running"} or row["id"] in reported:
+                    continue
+                if not reported:
+                    _echo_trial_header(prepared.variant)
+                reported.add(row["id"])
+                _echo_trial_row(row)
             return
         for item in document["cases"]:
             key = str(item["id"])
@@ -590,18 +694,72 @@ def test_workflow(
     else:
         _echo_test_totals(document)
         typer.echo(f"Result: {result_path}")
+        if trial:
+            comparison = result.get("modelComparison") or {}
+            typer.echo(comparison.get("sentence") or "")
+            if comparison.get("baselineReused"):
+                typer.echo(f"Current model from result {comparison.get('baselineId')}.")
+            uses = " ".join(f"--use-model {item.label}" for item in prepared.models)
+            typer.echo(f"Use it with {uses}")
         _echo_test_comparison(result.get("comparison"))
     if document["status"] != "passed":
         raise typer.Exit(1)
 
 
+def _use_test_model(
+    source: Path, values: list[str], data_dir: Path | None, output_format: str
+) -> None:
+    from gofer.rattish.artifacts import RattishArtifactError
+    from gofer.rattish.diagnostics import RattishError
+    from gofer.rattish.model_overrides import ModelOverrideError, parse_model_override, use_model
+    from gofer.utils.paths import get_data_dir
+
+    overrides = [parse_model_override(item) for item in values]
+    resolved = (data_dir or get_data_dir()).expanduser().resolve()
+    try:
+        result = use_model(source.expanduser().resolve(), overrides, data_dir=resolved)
+    except (ModelOverrideError, RattishArtifactError, RattishError, OSError) as exc:
+        _emit_test_error(source, str(exc), output_format)
+        raise typer.Exit(2)
+    if output_format == "json":
+        _emit_json({"command": "test", "ok": True, "source": str(source), **result})
+        return
+    for item in result["models"]:
+        typer.echo(f"Node {item['node']} now uses {item['provider']} {item['model']}.")
+    typer.echo("Any trigger on this workflow asks for approval again before it runs.")
+
+
+def _echo_trial_header(variant: dict[str, Any] | None) -> None:
+    from gofer.rattish.test_sets import variant_label
+
+    typer.echo(f"Case          Current model           Candidate ({variant_label(variant)})")
+
+
+def _echo_trial_row(row: dict[str, Any]) -> None:
+    def side(item: dict[str, Any]) -> str:
+        from gofer.rattish.test_sets import format_usd
+
+        label = {"passed": "PASS", "failed": "FAIL", "error": "ERROR", "skipped": "SKIP"}.get(
+            str(item.get("status")), str(item.get("status") or "-").upper()
+        )
+        seconds = (item.get("durationMs") or 0) / 1000
+        cost = item.get("costUsd")
+        money = format_usd(float(cost)) if isinstance(cost, (int, float)) else "cost ?"
+        return f"{label:<5} {seconds:5.1f}s {money:>8}"
+
+    change = "" if row["change"] in {"same", "pending"} else f"  {row['change']}"
+    typer.echo(f"{row['id']:<13} {side(row['current'])}    {side(row['candidate'])}{change}")
+
+
 def _emit_test_history(source: Path, data_dir: Path | None, output_format: str) -> None:
     from gofer.rattish.artifacts import compile_rattish_file
     from gofer.rattish.test_sets import (
+        latest_result,
         list_test_results,
         result_summary,
         results_directory,
         short_revision,
+        variant_label,
         with_comparison,
         workflow_tests_file,
     )
@@ -613,7 +771,8 @@ def _emit_test_history(source: Path, data_dir: Path | None, output_format: str) 
         artifact.source_path, str(artifact.ir["workflow"]["id"]), resolved_data_dir
     )
     documents = list_test_results(directory)
-    latest = with_comparison(documents[0], documents) if documents else None
+    newest = latest_result(documents)
+    latest = with_comparison(newest, documents) if newest is not None else None
     if output_format == "json":
         _emit_json(
             {
@@ -634,9 +793,11 @@ def _emit_test_history(source: Path, data_dir: Path | None, output_format: str) 
     for item in documents:
         totals = item.get("totals") or {}
         marker = " (current)" if item.get("revision") == current else ""
+        tried = variant_label(item.get("variant"))
+        tried = f"  [tried {tried}]" if tried else ""
         typer.echo(
             f"{item['id']}  {item.get('status')}  revision {short_revision(item.get('revision'))}"
-            f"{marker}  {totals.get('passed', 0)}/{totals.get('cases', 0)} passed"
+            f"{marker}  {totals.get('passed', 0)}/{totals.get('cases', 0)} passed{tried}"
         )
     if latest is not None:
         _echo_test_comparison(latest.get("comparison"))
@@ -707,6 +868,29 @@ def _emit_test_error(
         typer.echo(message, err=True)
 
 
+def _checked_file_inputs(
+    source: Path, workflow_inputs: dict[str, Any], data_dir: Path | None
+) -> dict[str, Any]:
+    """Inputs with each file input's path checked and made absolute from this folder.
+
+    Raises ``ValueError`` (``FileInputError``) for a missing or unsuitable file, before
+    any run record exists. A workflow that doesn't compile is left to the run to report.
+    """
+    from gofer.rattish.artifacts import RattishArtifactError, compile_rattish_file
+    from gofer.rattish.diagnostics import RattishError
+    from gofer.rattish.file_inputs import check_file_inputs, file_input_specs
+
+    if not any(isinstance(value, str) for value in workflow_inputs.values()):
+        return workflow_inputs
+    try:
+        compiled = compile_rattish_file(source, data_dir=data_dir)
+    except (RattishError, RattishArtifactError, OSError):
+        return workflow_inputs
+    if not file_input_specs(compiled.ir):
+        return workflow_inputs
+    return check_file_inputs(compiled.ir, workflow_inputs, base=Path.cwd())
+
+
 def execute_rattish_run(
     source: Path,
     workflow_inputs: dict[str, Any],
@@ -723,6 +907,12 @@ def execute_rattish_run(
     from gofer.rattish.run_service import RattishRunArtifactError, run_rattish_file
 
     try:
+        workflow_inputs = _checked_file_inputs(source, workflow_inputs, data_dir)
+    except ValueError as exc:
+        diagnostic = _run_input_diagnostic(source, exc).to_json()
+        _emit(_error_payload("run", source, [diagnostic]), output_format)
+        raise typer.Exit(2)
+    try:
         result = asyncio.run(
             run_rattish_file(
                 source,
@@ -731,6 +921,60 @@ def execute_rattish_run(
                 started_by="rem" if in_agent_session() else "manual",
             )
         )
+    except RattishError as exc:
+        diagnostics = [item.to_json() for item in exc.diagnostics]
+        _emit(_error_payload("run", source, diagnostics), output_format)
+        raise typer.Exit(1)
+    except (RattishArtifactError, RattishRunArtifactError) as exc:
+        diagnostic = _artifact_diagnostic(source, exc).to_json()
+        _emit(_error_payload("run", source, [diagnostic]), output_format)
+        raise typer.Exit(2)
+
+    _emit_run(result, output_format)
+    if result.status == "invalid_inputs":
+        raise typer.Exit(2)
+    if not result.ok:
+        raise typer.Exit(1)
+
+
+def execute_rattish_run_from(
+    source: Path,
+    from_node: str,
+    *,
+    reuse_run_id: str | None = None,
+    password_inputs: dict[str, Any] | None = None,
+    output_format: str = "text",
+    data_dir: Path | None = None,
+) -> None:
+    """Run a Rattish file from one node, reusing an earlier run's upstream results."""
+    import asyncio
+
+    from gofer.cli.client import in_agent_session
+    from gofer.rattish.artifacts import RattishArtifactError
+    from gofer.rattish.diagnostics import RattishError
+    from gofer.rattish.run_service import (
+        RattishResumeRefused,
+        RattishRunArtifactError,
+        run_rattish_file,
+    )
+
+    try:
+        result = asyncio.run(
+            run_rattish_file(
+                source,
+                data_dir=data_dir,
+                from_node=from_node,
+                reuse_run_id=reuse_run_id,
+                resume_inputs=password_inputs or None,
+                started_by="rem" if in_agent_session() else "manual",
+            )
+        )
+    except RattishResumeRefused as exc:
+        if output_format == "json":
+            _emit_json({**_error_payload("run", source, []), "error": str(exc)})
+        else:
+            typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
     except RattishError as exc:
         diagnostics = [item.to_json() for item in exc.diagnostics]
         _emit(_error_payload("run", source, diagnostics), output_format)
@@ -868,20 +1112,20 @@ def _emit(payload: dict[str, Any], output_format: str) -> None:
     if payload["ok"]:
         cache_label = "cached" if payload["cache"] and payload["cache"]["hit"] else "compiled"
         if payload["command"] == "preflight":
-            typer.echo(f"{source}: deployment ready ({cache_label})")
+            typer.echo(f"{source}: ready to run on this computer ({cache_label})")
         elif payload["command"] == "compile":
             typer.echo(f"{source}: valid IR ({cache_label})")
         else:
             typer.echo(f"{source}: valid Rattish ({cache_label})")
     else:
         failure = {
-            "preflight": "deployment preflight failed",
+            "preflight": "not ready to run on this computer",
             "format": "Rattish format failed",
             "compile": "Rattish compilation failed",
             "inspect-ir": "Rattish IR inspection failed",
         }.get(payload["command"], "Rattish check failed")
         typer.echo(f"{source}: {failure}", err=True)
-    for diagnostic in payload["diagnostics"]:
+    for diagnostic, also in _grouped_diagnostics(payload["diagnostics"]):
         start = diagnostic["span"]["start"]
         file = diagnostic["file"]
         if file == Path(source).name:
@@ -890,9 +1134,39 @@ def _emit(payload: dict[str, Any], output_format: str) -> None:
             f"{file}:{start['line']}:{start['column']}: "
             f"{diagnostic['severity']} {diagnostic['code']}: {diagnostic['message']}"
         )
+        if also:
+            label = "line" if len(also) == 1 else "lines"
+            line += f" (also {label} {', '.join(str(item) for item in also)})"
         typer.echo(line, err=diagnostic["severity"] == "error")
         for suggestion in diagnostic["suggestions"]:
             typer.echo(f"  suggestion: {suggestion}", err=diagnostic["severity"] == "error")
+
+
+def _grouped_diagnostics(
+    diagnostics: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], list[int]]]:
+    """Print a problem that repeats word for word on several nodes once.
+
+    A missing key or provider fails every step that uses it, so text output names the
+    other lines instead of repeating the same message. JSON output keeps every item.
+    """
+    groups: dict[tuple[Any, ...], tuple[dict[str, Any], list[int]]] = {}
+    for diagnostic in diagnostics:
+        key = (
+            diagnostic["file"],
+            diagnostic["severity"],
+            diagnostic["code"],
+            diagnostic["message"],
+            tuple(diagnostic["suggestions"]),
+        )
+        line = diagnostic["span"]["start"]["line"]
+        if key in groups:
+            first, also = groups[key]
+            if line != first["span"]["start"]["line"] and line not in also:
+                also.append(line)
+            continue
+        groups[key] = (diagnostic, [])
+    return [(first, sorted(also)) for first, also in groups.values()]
 
 
 def _artifact_diagnostic(
@@ -913,8 +1187,15 @@ def _artifact_diagnostic(
 
 def _run_input_diagnostic(source: Path, exc: ValueError) -> RattishDiagnostic:
     from gofer.rattish.diagnostics import RattishDiagnostic, SourcePosition, SourceSpan
+    from gofer.rattish.file_inputs import FileInputError
 
     position = SourcePosition(offset=0, line=1, column=1)
+    suggestion = (
+        "Give the path of an existing file that fits the input, such as "
+        "--input 'doc=\"report.pdf\"'."
+        if isinstance(exc, FileInputError)
+        else "Use --input NAME=JSON, for example --input count=3."
+    )
     return RattishDiagnostic(
         code="RATTISH_CLI_INPUT_INVALID",
         severity="error",
@@ -922,7 +1203,7 @@ def _run_input_diagnostic(source: Path, exc: ValueError) -> RattishDiagnostic:
         message=str(exc),
         file=str(source.expanduser().resolve()),
         span=SourceSpan(position, position),
-        suggestions=("Use --input NAME=JSON, for example --input count=3.",),
+        suggestions=(suggestion,),
     )
 
 
@@ -955,6 +1236,13 @@ def _emit_run(result: RattishRunResult, output_format: str) -> None:
         return
     typer.echo(f"{payload['source']}: run {result.document['run_id']} {result.status}")
     typer.echo(f"Run artifact: {result.path}")
+    replayed = result.document.get("replayed_from")
+    if isinstance(replayed, dict):
+        count = int(replayed.get("reused_runs") or 0)
+        typer.echo(
+            f"Reused {count} step{'' if count == 1 else 's'} from run {replayed['run_id']} "
+            f"(no calls, $0); ran from {replayed['node_id']}"
+        )
     usage = result.document.get("usage")
     if isinstance(usage, dict) and (usage.get("calls") or usage.get("cached_results")):
         from gofer.rattish.run_usage import usage_line

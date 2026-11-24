@@ -18,8 +18,9 @@ const STATUS_ICONS = {
 // A board ticket named in Rem's chat, shown like a smart link: its key, a status mark and
 // its current title. Clicking opens the ticket on the global board. [ticket] is the ticket
 // as the board has it now; [stored] is what a task card remembered, used when the ticket
-// was deleted, so history still says which ticket it was.
-export default function TicketPill({ ticketKey, ticket = null, stored = null, role = "" }) {
+// was deleted, so history still says which ticket it was. [compact] shows only the key, as a
+// link, for table cells; its label and tooltip still give the title and status.
+export default function TicketPill({ ticketKey, ticket = null, stored = null, role = "", compact = false, inverse = false }) {
   const key = ticket?.key || stored?.key || ticketKey;
   if (!ticket) {
     if (!stored) return <>{key}</>;
@@ -34,8 +35,13 @@ export default function TicketPill({ ticketKey, ticket = null, stored = null, ro
   const Mark = STATUS_ICONS[ticket.status] || Circle;
   const where = ticket.scope === "organization" && ticket.organization_name ? `, ${ticket.organization_name}` : "";
   const label = `Open ticket ${key}: ${ticket.title}${status ? ` (${status}${ticket.proposed ? ", waiting for your approval" : ""})` : ""}${where}${role ? `. ${role}` : ""}`;
+  const open = event => { event.preventDefault(); event.stopPropagation(); openKanbanTicket(ticket); };
+  if (compact) {
+    return <button type="button" className="ticket-key-link" data-status={ticket.status} data-inverse={inverse ? "true" : undefined}
+      aria-label={label} title={label} onClick={open}>{key}</button>;
+  }
   return <button type="button" className="ticket-pill" data-status={ticket.status} aria-label={label} title={label}
-    onClick={event => { event.preventDefault(); event.stopPropagation(); openKanbanTicket(ticket); }}>
+    onClick={open}>
     <Mark className="ticket-pill-mark" size={11} strokeWidth={2.4} aria-hidden="true" />
     <span className="ticket-pill-key">{key}</span>
     {ticket.title ? <span className="ticket-pill-title">{ticket.title}</span> : null}

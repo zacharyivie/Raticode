@@ -54,7 +54,7 @@ internal fun GeckoImportSheet(gecko: GeckoBrowser, onDismiss: () -> Unit) {
                 }
             }
             if (preview.extensions.isNotEmpty()) {
-                item { SectionTitle("Extensions") }
+                item { BrowserSectionTitle("Extensions") }
                 items(preview.extensions, key = { "e-" + it.id }) { found ->
                     val listing = importer.listings[found.id]
                     val added = gecko.extensions.any { it.id == found.id }
@@ -76,7 +76,7 @@ internal fun GeckoImportSheet(gecko: GeckoBrowser, onDismiss: () -> Unit) {
                 }
             }
             if (preview.settings.isNotEmpty()) {
-                item { SectionTitle("Settings") }
+                item { BrowserSectionTitle("Settings") }
                 items(preview.settings, key = { "s-" + it.key }) { change ->
                     Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = 8.dp).testTag("geckoImportSetting-${change.key}"), verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(change.key !in importer.unticked, { importer.toggle(change.key) })
@@ -88,7 +88,7 @@ internal fun GeckoImportSheet(gecko: GeckoBrowser, onDismiss: () -> Unit) {
                 }
             }
             if (preview.bookmarks.isNotEmpty()) item {
-                SectionTitle("Bookmarks")
+                BrowserSectionTitle("Bookmarks")
                 Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = 8.dp).testTag("geckoImportFavorites"), verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(importer.favorites, { importer.favorites = it })
                     Column(Modifier.weight(1f)) {
@@ -107,7 +107,7 @@ internal fun GeckoImportSheet(gecko: GeckoBrowser, onDismiss: () -> Unit) {
                 }
             }
             if (importer.hasResults) {
-                item { SectionTitle("Not brought over") }
+                item { BrowserSectionTitle("Not brought over") }
                 items((preview.notes + GeckoImport.ALWAYS_UNAVAILABLE + if (fromPhone) GeckoImport.PHONE_UNAVAILABLE else emptyList()), key = { "n-" + it.what }) { note -> NoteRow(note) }
                 if (preview.builtIn > 0) item { NoteRow(GeckoImport.Note("${preview.builtIn} parts of Firefox itself", "They appear in Firefox's list but aren't extensions you added.")) }
             }

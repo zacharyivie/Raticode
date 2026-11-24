@@ -36,11 +36,13 @@ import dev.raticode.mobile.live.LiveClient
  * claims the site from taking it; without a default browser any app that views web pages is used.
  */
 internal fun openInBrowser(context: Context, url: String): Boolean {
+    // Only web addresses: a file: address would end the app (FileUriExposedException) and another scheme opens another app.
+    if (dev.raticode.mobile.live.ChatLinks.web(url) == null) return false
     val view = Intent(Intent.ACTION_VIEW, url.toUri()).addCategory(Intent.CATEGORY_BROWSABLE)
     if (context !is android.app.Activity) view.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     val browser = Intent(view).apply { selector = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_BROWSER) }
     for (intent in listOf(browser, view)) {
-        try { context.startActivity(intent); return true } catch (_: ActivityNotFoundException) {} catch (_: SecurityException) {}
+        try { context.startActivity(intent); return true } catch (_: ActivityNotFoundException) {} catch (_: SecurityException) {} catch (_: RuntimeException) {}
     }
     return false
 }

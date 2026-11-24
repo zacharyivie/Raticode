@@ -3,6 +3,6 @@
   "contract_version": 1,
   "provider_id": "anthropic-api",
   "runtime_subscription": "anthropic_api",
-  "default_model": "claude-3-5-sonnet-latest",
+  "default_model": "claude-sonnet-5-5",
   "default_effort": "high"
 }

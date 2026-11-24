@@ -27,6 +27,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from gofer.core.commit_attribution import clean_commit_message
 from gofer.utils.process import (
     NO_REPOSITORY_PROGRAMS,
     build_subprocess_env,
@@ -387,13 +388,43 @@ def _lock(repository: str) -> threading.Lock:
         return _locks.setdefault(key, threading.Lock())
 
 
-def commit_leftovers(checkout: str, message: str) -> bool:
-    """Commit what the worker left uncommitted in its checkout. True when it committed."""
+def require_head_on(checkout: Path | str, branch: str) -> None:
+    """Raise PatchError unless the checkout's HEAD still names ``branch``.
+
+    A worker can rewrite its worktree's HEAD file to name another branch, such as the
+    project's ``main``. Raticode's own commit runs outside the worker's sandbox, so it
+    would then land on that branch with nobody reviewing it.
+    """
+    found = _run(checkout, "symbolic-ref", "-q", "HEAD", check=False)
+    head = found.stdout.decode(errors="replace").strip()
+    if found.returncode or head != f"refs/heads/{branch}":
+        named = head.removeprefix("refs/heads/") if head else "no branch"
+        raise PatchError(
+            f"The worktree at {checkout} is on {named}, not its own branch {branch}, so "
+            "Raticode won't commit there. Look at what changed before doing anything else."
+        )
+
+
+def commit_leftovers(checkout: str, message: str, *, branch: str) -> bool:
+    """Commit what the worker left uncommitted on ``branch``. True when it committed.
+
+    Refuses with PatchError when the checkout's HEAD no longer names ``branch``.
+    """
     path = Path(checkout)
     if not path.is_dir() or not _uncommitted(path):
         return False
+    require_head_on(path, branch)
     _run(path, "add", "-A")
-    _run(path, "-c", "commit.gpgsign=false", "commit", "--no-verify", "-q", "-m", message[:200])
+    _run(
+        path,
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--no-verify",
+        "-q",
+        "-m",
+        clean_commit_message(message[:200]),
+    )
     return True
 
 
@@ -442,7 +473,7 @@ def land(
                 "-p",
                 tip,
                 "-m",
-                message[:2000],
+                clean_commit_message(message[:2000]),
             )
         folder = _checked_out(repository, base_branch)
         if folder:

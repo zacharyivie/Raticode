@@ -11,12 +11,14 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import typer
 
 from gofer.cli import client_options as opts
 from gofer.cli.client import ApiClient, CliError, CommandResult, ExitCode, Output, wait_until
 from gofer.cli.commands import _backend as backend
+from gofer.cli.commands._resources import write_private_text
 
 # Rem run states that are still going (``rem_home_models.ACTIVE``).
 ACTIVE_RUNS = {"queued", "executing", "verifying", "repairing", "cancelling"}
@@ -29,9 +31,14 @@ settings_app = typer.Typer(
     help="Read and apply Rem's settings as a JSON file.", no_args_is_help=True
 )
 memories_app = typer.Typer(help="List and change what Rem remembers.", no_args_is_help=True)
+decisions_app = typer.Typer(
+    help="Rem's decisions: questions waiting for you and the answers Rem reuses.",
+    no_args_is_help=True,
+)
 tasks_app = typer.Typer(help="Rem's tasks: list, create, edit, run and wait.", no_args_is_help=True)
 runs_app = typer.Typer(
-    help="One run of a Rem task: show, pause, resume, cancel, acknowledge.", no_args_is_help=True
+    help="Runs of Rem tasks: show, pause, resume, cancel, acknowledge one or all.",
+    no_args_is_help=True,
 )
 thread_app = typer.Typer(help="A Rem task's work thread.", no_args_is_help=True)
 
@@ -47,8 +54,10 @@ def register(app: typer.Typer) -> None:
     app.command("search")(search)
     app.command("follow")(follow)
     app.command("notices")(notices)
+    app.command("context")(context)
     app.add_typer(settings_app, name="settings")
     app.add_typer(memories_app, name="memories")
+    app.add_typer(decisions_app, name="decisions")
     app.add_typer(tasks_app, name="tasks")
     app.add_typer(runs_app, name="runs")
     app.add_typer(thread_app, name="thread")
@@ -155,6 +164,168 @@ def messages(
     backend.run("rem messages", output, (endpoint, token_file, data_dir), body)
 
 
+def _approx(tokens: Any) -> str:
+    """An estimated token count, marked with ~ and right-aligned."""
+    return f"~{int(tokens or 0):,}".rjust(8)
+
+
+def _parts_lines(newest: dict[str, Any]) -> list[str]:
+    """One call's or turn's parts as aligned lines, then what it sent in all."""
+    width = max((len(str(p["label"])) for p in newest["parts"]), default=0)
+    lines = [
+        f"  {part['label']:<{width}}  {part['chars']:>8,} chars  "
+        f"{_approx(part['tokens_estimate'])} tokens"
+        f"{'  in a file' if part.get('file') else '' if part['sent'] else '  kept'}"
+        for part in newest["parts"]
+    ]
+    lines.append(
+        f"  {'Sent':<{width}}  {newest['sent_chars']:>8,} chars  "
+        f"{_approx(newest['sent_tokens_estimate'])} tokens"
+    )
+    return lines
+
+
+def _context_text(found: dict[str, Any]) -> str:
+    """The newest turn's parts as aligned lines, then the earlier turns' totals."""
+    turns = found.get("turns") or []
+    if not turns:
+        return "No turns recorded for this thread yet."
+    newest = turns[0]
+    lines = [
+        f"Context sent, newest turn ({newest.get('observed_at', '')}, "
+        f"{newest.get('provider') or 'unknown provider'}):"
+    ]
+    if newest.get("resumed"):
+        lines.append("Resumed session: parts marked 'kept' were not sent again.")
+    lines.extend(_parts_lines(newest))
+    if len(turns) > 1:
+        lines.append("Earlier turns:")
+        lines.extend(
+            f"  {turn.get('observed_at', '')}  {turn['sent_chars']:>8,} chars  "
+            f"{_approx(turn['sent_tokens_estimate'])} tokens sent"
+            for turn in turns[1:]
+        )
+    lines.append(str(found.get("estimate") or ""))
+    return "\n".join(line for line in lines if line)
+
+
+def _attempt_note(call: dict[str, Any]) -> str:
+    """Why a call was asked, when it wasn't the first ask, and whether it failed."""
+    notes = []
+    if call.get("attempt") not in (None, "first"):
+        notes.append(str(call.get("attempt_label") or call.get("attempt")).lower())
+    if call.get("failed"):
+        notes.append("failed")
+    return f"  ({', '.join(notes)})" if notes else ""
+
+
+def _kinds_lines(kinds: list[dict[str, Any]]) -> list[str]:
+    """Each call kind's calls, re-asks and failures as aligned lines, then per rules version."""
+    if not kinds:
+        return []
+    width = max(len(str(kind.get("label") or kind.get("call"))) for kind in kinds)
+    lines = ["Calls by kind (re-asked: asked again because the answer couldn't be used):"]
+    for kind in kinds:
+        lines.append(
+            f"  {str(kind.get('label') or kind.get('call')):<{width}}  "
+            f"{int(kind.get('calls') or 0):>6,} calls  "
+            f"{int(kind.get('reasked') or 0):>5,} re-asked  "
+            f"{int(kind.get('failed') or 0):>5,} failed"
+        )
+        lines.extend(_version_lines(kind.get("versions")))
+    return lines
+
+
+def _version_lines(versions: Any) -> list[str]:
+    """A kind's counts per fixed rules version, newest first; none before versions were kept."""
+    found = [v for v in versions or [] if isinstance(v, dict) and v.get("version")]
+    return [
+        f"    rules {version['version']}  since {str(version.get('first_seen') or '')[:10]}"
+        f"{' (current)' if version.get('current') else ''}  "
+        f"{int(version.get('calls') or 0):,} calls  "
+        f"{int(version.get('re_asked') or 0):,} re-asked  "
+        f"{int(version.get('failed') or 0):,} failed"
+        for version in found
+    ]
+
+
+def _calls_text(found: dict[str, Any]) -> str:
+    """Rem's newest own call, part by part, the earlier calls' totals, then each kind."""
+    calls = found.get("calls") or []
+    if not calls:
+        return "No Rem calls recorded yet."
+    newest = calls[0]
+    lines = [
+        f"Rem's newest call: {newest.get('call_label') or newest.get('call')} "
+        f"({newest.get('observed_at', '')}, {newest.get('provider') or 'unknown provider'})"
+        f"{_attempt_note(newest)}:"
+    ]
+    lines.extend(_parts_lines(newest))
+    if len(calls) > 1:
+        lines.append("Earlier calls:")
+        width = max(len(str(call.get("call_label") or "")) for call in calls[1:])
+        lines.extend(
+            f"  {call.get('observed_at', '')}  {str(call.get('call_label') or ''):<{width}}  "
+            f"{call['sent_chars']:>8,} chars  {_approx(call['sent_tokens_estimate'])} tokens"
+            f"{_attempt_note(call)}"
+            for call in calls[1:]
+        )
+    lines.extend(_kinds_lines([k for k in found.get("by_kind") or [] if isinstance(k, dict)]))
+    lines.append(str(found.get("estimate") or ""))
+    return "\n".join(line for line in lines if line)
+
+
+def context(
+    thread_id: str | None = typer.Argument(
+        None, help="The thread's ID. Leave it out for Rem's own model calls"
+    ),
+    turns: int = typer.Option(
+        5, "--turns", "-n", min=1, max=100, help="The newest N turns or calls"
+    ),
+    call: str | None = typer.Option(
+        None,
+        "--call",
+        help="Rem's own calls of one kind: chat_reply, worker_answer, conversation, "
+        "task_update, self_work_plan, self_work_fit, self_work_stop or organization "
+        "(self_work for the records from before self-work's kinds were split)",
+    ),
+    run_id: str | None = typer.Option(None, "--run", help="Rem's own calls about one task run"),
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Show how big each part of a prompt was: a thread's turns, or Rem's own calls.
+
+    Sizes only, no text. Without THREAD_ID it lists Rem's own tool-free calls: chat
+    replies, answers to workers, conversation decisions, task updates, self-work's
+    objective planning, objective checks and stop checks, and organization request
+    reviews, with each kind's calls, re-asks and failures.
+    """
+
+    def body(client: ApiClient, out: Output) -> CommandResult:
+        if thread_id is None:
+            query: dict[str, Any] = {"limit": turns}
+            if call:
+                query["call"] = call
+            if run_id:
+                query["run"] = run_id
+            calls: dict[str, Any] = client.get("/rem/calls", query=query)
+            return CommandResult(data=calls, text=_calls_text(calls))
+        if call or run_id:
+            raise CliError(
+                "--call and --run are for Rem's own calls; leave out THREAD_ID.",
+                code="invalid_request",
+                exit_code=ExitCode.USAGE,
+            )
+        found: dict[str, Any] = client.get(
+            f"/rem/threads/{backend.segment(thread_id)}/context", query={"limit": turns}
+        )
+        return CommandResult(data=found, text=_context_text(found))
+
+    backend.run("rem context", output, (endpoint, token_file, data_dir), body)
+
+
 def search(
     query: str = typer.Argument(..., help="Words to find in the whole saved chat"),
     before: int | None = typer.Option(None, "--before", help="Continue from this position"),
@@ -240,6 +411,12 @@ def follow(
 
 
 def _notice_line(notice: dict[str, Any]) -> str:
+    decision = notice.get("decision") if notice.get("kind") == "decision" else None
+    if isinstance(decision, dict):
+        # needs_you: Rem has a question: Which branch …? (D-7, Raticode; Rem recommends dev)
+        where = ", ".join(p for p in (decision.get("id"), notice.get("project_name")) if p)
+        tail = f"; Rem recommends {decision['recommended']}" if decision.get("recommended") else ""
+        return f"{notice['reason']}: {notice.get('body', '')} ({where}{tail})"
     return f"{notice['reason']}: {notice.get('title') or notice.get('body', '')}"
 
 
@@ -277,6 +454,10 @@ def notices(
     the phone; each names its workflow_id and run_id. A run past 20 notices has one
     notice with more_from_run set instead, and dropped counts workflow notices removed
     from the computer's store (it keeps the newest 500) before this read reached them.
+
+    A question of Rem's that waits for you while no task stops for it (auto mode) is
+    one needs_you alert of kind decision, with its decision id, question, recommended
+    answer and project_name.
 
     The first read without --cursor returns no alerts, only the cursor to start from, so
     a new script isn't flooded with history. Use `rem tasks list --needs-you` for what is
@@ -350,7 +531,7 @@ def settings_export(
             out.stdout.flush()
             return None
         try:
-            file.write_text(text, encoding="utf-8")
+            write_private_text(file, text)
         except OSError as exc:
             raise backend.invalid(f"Couldn't write {file}: {exc.strerror}") from None
         return CommandResult(data={"file": str(file)}, text=f"Wrote Rem's settings to {file}.")
@@ -393,8 +574,32 @@ def settings_apply(
 
 
 def _memories(data: dict[str, Any]) -> CommandResult:
-    lines = [f"{m['id']}  {m['text']}" for m in data.get("memories", [])]
+    lines = [
+        f"{m['id']}  {m['text']}"
+        + (f"  [{m.get('project_name') or m['project']}]" if m.get("project") else "")
+        + (
+            f"  ({'ended' if m.get('ended') else 'until'} {str(m['until'])[:10]})"
+            if m.get("until")
+            else ""
+        )
+        for m in data.get("memories", [])
+    ]
     return CommandResult(data=data, text="\n".join([f"Memory is {data.get('mode')}.", *lines]))
+
+
+_MEMORY_PROJECT = typer.Option(
+    None,
+    "--project",
+    help="Root folder of an open project the memory belongs to; Rem uses it only for work there",
+)
+_MEMORY_UNTIL = typer.Option(
+    None,
+    "--until",
+    help=(
+        "Last day the memory applies (YYYY-MM-DD, or a date and time with its timezone); "
+        "after it Rem stops using it but keeps it listed"
+    ),
+)
 
 
 @memories_app.command("list")
@@ -416,38 +621,67 @@ def memories_list(
 @memories_app.command("add")
 def memories_add(
     text: str = typer.Argument(...),
+    project: str | None = _MEMORY_PROJECT,
+    until: str | None = _MEMORY_UNTIL,
     output: opts.Output = opts.OutputFormat.json,
     endpoint: opts.EndpointUrl = None,
     token_file: opts.TokenFile = None,
     data_dir: opts.DataDir = None,
 ) -> None:
-    """Remember a fact. Text that looks like a password or key is refused."""
+    """Remember a fact, for every project or one. Text that looks like a key is refused."""
+    body: dict[str, Any] = {
+        "text": text,
+        **({"project": project} if project else {}),
+        **({"until": until} if until else {}),
+    }
     backend.run(
         "rem memories add",
         output,
         (endpoint, token_file, data_dir),
-        lambda client, out: _memories(client.post("/rem/memories", {"text": text})),
+        lambda client, out: _memories(client.post("/rem/memories", body)),
     )
 
 
 @memories_app.command("edit")
 def memories_edit(
     memory_id: str = typer.Argument(...),
-    text: str = typer.Argument(...),
+    text: str | None = typer.Argument(None, help="The corrected text; leave out to keep it"),
+    project: str | None = _MEMORY_PROJECT,
+    every_project: bool = typer.Option(
+        False, "--global", help="Make the memory apply to every project again"
+    ),
+    until: str | None = _MEMORY_UNTIL,
+    keep: bool = typer.Option(
+        False, "--keep", help="Remove the memory's end date, so an ended memory applies again"
+    ),
     output: opts.Output = opts.OutputFormat.json,
     endpoint: opts.EndpointUrl = None,
     token_file: opts.TokenFile = None,
     data_dir: opts.DataDir = None,
 ) -> None:
-    """Correct one remembered fact."""
-    backend.run(
-        "rem memories edit",
-        output,
-        (endpoint, token_file, data_dir),
-        lambda client, out: _memories(
-            client.patch(f"/rem/memories/{backend.segment(memory_id)}", {"text": text})
-        ),
-    )
+    """Correct one remembered fact, move it to a project or every project, or set its end."""
+    body: dict[str, Any] = {} if text is None else {"text": text}
+    if project or every_project:
+        body["project"] = project or None
+    if until or keep:
+        body["until"] = until or None
+
+    def edit(client: ApiClient, out: Output) -> CommandResult:
+        if (project and every_project) or (until and keep):
+            raise CliError(
+                "Use --project or --global, and --until or --keep, not both of a pair.",
+                code="invalid_input",
+                exit_code=ExitCode.USAGE,
+            )
+        if not body:
+            raise CliError(
+                "Give the corrected text, --project, --global, --until or --keep.",
+                code="invalid_input",
+                exit_code=ExitCode.USAGE,
+            )
+        return _memories(client.patch(f"/rem/memories/{backend.segment(memory_id)}", body))
+
+    backend.run("rem memories edit", output, (endpoint, token_file, data_dir), edit)
 
 
 @memories_app.command("forget")
@@ -503,6 +737,608 @@ def memories_undo(
     )
 
 
+# Decisions ------------------------------------------------------------------------
+
+_DECISION_STATUS = {
+    "pending": "waiting for you",
+    "queued": "queued behind the questions waiting for you",
+    "provisional": "Rem decided (auto mode)",
+    "confirmed": "decided",
+    "superseded": "replaced",
+    "rejected": "turned down",
+}
+
+
+def _decision_status(item: dict[str, Any]) -> str:
+    if item.get("status") == "rejected" and item.get("retired_at"):
+        return "retired"
+    status = str(item["status"])
+    return _DECISION_STATUS.get(status, status)
+
+
+def _decision_line(item: dict[str, Any]) -> str:
+    answer = item.get("answer") or item.get("recommended") or ""
+    where = f"  [{item.get('project_name') or item['project']}]" if item.get("project") else ""
+    return (
+        f"{item['id']}  {_decision_status(item)}: "
+        f"{item['question']} -> {answer or '(no answer yet)'}{where}"
+    )
+
+
+def _edit_lines(edit: dict[str, Any]) -> list[str]:
+    verb = "Replace" if edit.get("action") == "replace" else "Change"
+    lines = [
+        f"{edit.get('id')} waits for your OK: {verb} {edit.get('decision')} "
+        f"({edit.get('question') or edit.get('topic') or ''})"
+    ]
+    for part in edit.get("changes") or []:
+        lines.append(f"  {part.get('label')}: {part.get('before') or '(empty)'}")
+        lines.append(f"  {' ' * len(str(part.get('label')))}  -> {part.get('after') or '(empty)'}")
+    return lines
+
+
+def _counted_path(kind: str, glob: str, counted: dict[str, Any]) -> str:
+    """A record path with its tracked-file count: ``docs/** (12 files)``."""
+    from gofer.ui.rem_decision_records import count_note
+
+    if kind not in {"applies_to", "forbids"}:
+        return glob
+    note = count_note(kind, (counted.get(kind) or {}).get(glob))
+    return f"{glob} ({note})" if note else glob
+
+
+def _decision_lines(item: dict[str, Any]) -> list[str]:
+    """The decision's line, and under a waiting one who asked it and what waits on it."""
+    from gofer.ui.rem_decisions import asked_line
+
+    asked = asked_line(item.get("asked"))
+    return [_decision_line(item), *([f"      {asked}"] if asked else [])]
+
+
+def _decisions(data: dict[str, Any]) -> CommandResult:
+    lines = [line for item in data.get("items", []) for line in _decision_lines(item)]
+    queued = f" ({data['queued']} more queued)" if data.get("queued") else ""
+    head = f"{data.get('waiting', 0)} waiting{queued}, {data.get('confirmed', 0)} decided."
+    edits = [line for edit in data.get("edits") or [] for line in _edit_lines(edit)]
+    return CommandResult(data=data, text="\n".join([head, *edits, *lines]))
+
+
+def _change_decision(
+    command: str,
+    body: dict[str, Any],
+    output: opts.OutputFormat,
+    connection: tuple[str | None, Path | None, Path | None],
+) -> None:
+    backend.run(
+        command,
+        output,
+        connection,
+        lambda client, out: _changed(body, client.post("/rem/decisions", body)),
+    )
+
+
+def _changed(body: dict[str, Any], data: dict[str, Any]) -> CommandResult:
+    """The list after a change, led by what forget or retire did to a written record."""
+    result = _decisions(data)
+    if body.get("action") not in {"forget", "retire"}:
+        return result
+    item = next((i for i in data.get("items", []) if i.get("id") == body.get("id")), None)
+    if item is None:
+        lead = f"Forgot {body.get('id')}."
+    else:
+        path = item.get("record_path") or "its file"
+        lead = (
+            f"Retired {item['id']}: workers stop getting it, and {path} stays in the "
+            "repository marked status: rejected, committed on the landing branch."
+        )
+    return CommandResult(data=result.data, text=f"{lead}\n{result.text}")
+
+
+_CONTEXT = typer.Option(None, "--context", help="Record: what forced the choice")
+_OPTIONS = typer.Option(None, "--options", help="Record: the options not chosen, and why")
+_CONSEQUENCES = typer.Option(
+    None, "--consequences", help="Record: what gets easier and what gets harder"
+)
+_CHECK = typer.Option(None, "--check", help="Record: how the decision is checked")
+_APPLIES = typer.Option(
+    None, "--applies-to", help="Record: a path glob it is about (repeat for more)"
+)
+_FORBIDS = typer.Option(
+    None, "--forbids", help="Record: a path glob a change must never add (repeat for more)"
+)
+_SIGNALS = typer.Option(
+    None, "--signal", help="Record: a word that flags a contradicting proposal (repeat)"
+)
+_NOTE = typer.Option(None, "--note", help="One line on why, kept in its history")
+
+
+def _record_body(
+    body: dict[str, Any],
+    *,
+    context: str | None,
+    options: str | None,
+    consequences: str | None,
+    check: str | None,
+    applies_to: list[str] | None,
+    forbids: list[str] | None,
+    signals: list[str] | None,
+    note: str | None = None,
+) -> dict[str, Any]:
+    for key, value in (
+        ("context", context),
+        ("options", options),
+        ("consequences", consequences),
+        ("check", check),
+        ("applies_to", applies_to),
+        ("forbids", forbids),
+        ("signals", signals),
+        ("note", note),
+    ):
+        if value is not None:
+            body[key] = value
+    return body
+
+
+_DECISION_PROJECT = typer.Option(
+    None, "--project", help="Only decisions for this project root folder"
+)
+_EXPECTED = typer.Option(
+    None,
+    "--expected-revision",
+    help="Refuse the change if the decisions changed since this revision",
+)
+
+
+@decisions_app.command("list")
+def decisions_list(
+    project: str | None = _DECISION_PROJECT,
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """List decisions: waiting for you first, then in force, then replaced or turned down."""
+    path = "/rem/decisions" + (f"?project={quote(project, safe='')}" if project else "")
+    backend.run(
+        "rem decisions list",
+        output,
+        (endpoint, token_file, data_dir),
+        lambda client, out: _decisions(client.get(path)),
+    )
+
+
+@decisions_app.command("show")
+def decisions_show(
+    decision_id: str = typer.Argument(..., help="The decision's ID, such as D-3"),
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Show one decision with its evidence, other options and history."""
+
+    def show(client: ApiClient, out: Output) -> CommandResult:
+        data = client.get("/rem/decisions")
+        item = next((i for i in data.get("items", []) if i.get("id") == decision_id), None)
+        if item is None:
+            raise CliError(
+                f"No decision {decision_id}.", code="not_found", exit_code=ExitCode.NOT_FOUND
+            )
+        lines = [_decision_line(item)]
+        if item.get("why"):
+            lines.append(f"Why: {item['why']}")
+        for evidence in item.get("evidence") or []:
+            lines.append(f"Evidence: {evidence.get('kind')} {evidence.get('ref')}")
+        for other in item.get("alternatives") or []:
+            lines.append(f"Other option: {other.get('answer')} ({other.get('why_not') or ''})")
+        if (item.get("source") or {}).get("via") == "carried over":
+            lines.append("Carried over: Raticode already did this before it became a decision.")
+        record = item.get("record") if item.get("remember_as") == "record" else None
+        if record is not None:
+            lines.append(f"Record: {item.get('record_path') or 'not in the repository yet'}")
+            if item.get("record_error"):
+                lines.append(f"Not written yet: {item['record_error']}")
+            if item.get("edited_outside"):
+                lines.append("Edited outside Raticode.")
+            counted = item.get("path_counts") or {}
+            for key, label in (
+                ("applies_to", "Applies to"),
+                ("forbids", "Never"),
+                ("signals", "Signals"),
+            ):
+                if record.get(key):
+                    shown = [_counted_path(key, entry, counted) for entry in record[key]]
+                    lines.append(f"{label}: {', '.join(shown)}")
+            if counted.get("branch"):
+                at = counted.get("commit", "")
+                lines.append(f"Paths counted on {counted['branch']} at {at}.")
+            for key, label in (
+                ("context", "Context"),
+                ("options", "Options we didn't choose"),
+                ("consequences", "Consequences"),
+                ("check", "How we check it"),
+            ):
+                if record.get(key):
+                    lines.append(f"{label}: {record[key]}")
+        if item.get("supersedes_all"):
+            replaced = ", ".join(item["supersedes_all"])
+            lines.append(f"Conflict: {item.get('conflict', '')} Replaces {replaced}.")
+        check = item.get("last_check") or {}
+        if check:
+            state = "passed" if check.get("passed") else f"failed (exit {check.get('exit_code')})"
+            lines.append(f"Raticode's last run of it: {state} at {check.get('ran_at', '')}")
+        return CommandResult(data=item, text="\n".join(lines))
+
+    backend.run("rem decisions show", output, (endpoint, token_file, data_dir), show)
+
+
+@decisions_app.command("use")
+def decisions_use(
+    decision_id: str = typer.Argument(..., help="The waiting decision's ID"),
+    expected_revision: int | None = _EXPECTED,
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Use Rem's recommendation. Work that waited on it continues."""
+    body: dict[str, Any] = {"action": "use", "id": decision_id}
+    if expected_revision is not None:
+        body["expected_revision"] = expected_revision
+    _change_decision("rem decisions use", body, output, (endpoint, token_file, data_dir))
+
+
+@decisions_app.command("change")
+def decisions_change(
+    decision_id: str = typer.Argument(...),
+    answer: str = typer.Argument(..., help="Your answer instead of Rem's recommendation"),
+    expected_revision: int | None = _EXPECTED,
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Decide with your own answer; it replaces any decision in force on the same topic."""
+    body: dict[str, Any] = {"action": "change", "id": decision_id, "answer": answer}
+    if expected_revision is not None:
+        body["expected_revision"] = expected_revision
+    _change_decision("rem decisions change", body, output, (endpoint, token_file, data_dir))
+
+
+@decisions_app.command("edit")
+def decisions_edit(
+    decision_id: str = typer.Argument(...),
+    answer: str | None = typer.Option(None, "--answer", help="The corrected answer"),
+    question: str | None = typer.Option(None, "--question", help="The corrected question"),
+    why: str | None = typer.Option(None, "--why", help="The corrected reason"),
+    context: str | None = _CONTEXT,
+    options: str | None = _OPTIONS,
+    consequences: str | None = _CONSEQUENCES,
+    check: str | None = _CHECK,
+    applies_to: list[str] | None = _APPLIES,
+    forbids: list[str] | None = _FORBIDS,
+    signals: list[str] | None = _SIGNALS,
+    note: str | None = _NOTE,
+    expected_revision: int | None = _EXPECTED,
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Correct a decision's wording, or a record's parts, without changing its status."""
+    body: dict[str, Any] = {"action": "edit", "id": decision_id}
+    for key, value in (("answer", answer), ("question", question), ("why", why)):
+        if value is not None:
+            body[key] = value
+    _record_body(
+        body,
+        context=context,
+        options=options,
+        consequences=consequences,
+        check=check,
+        applies_to=applies_to,
+        forbids=forbids,
+        signals=signals,
+    )
+    if len(body) == 2:
+        raise CliError(
+            "Give --answer, --question, --why or a record part.",
+            code="invalid_input",
+            exit_code=ExitCode.USAGE,
+        )
+    if note is not None:
+        body["note"] = note
+    if expected_revision is not None:
+        body["expected_revision"] = expected_revision
+    _change_decision("rem decisions edit", body, output, (endpoint, token_file, data_dir))
+
+
+@decisions_app.command("replace")
+def decisions_replace(
+    decision_id: str = typer.Argument(..., help="The decision in force to replace"),
+    answer: str = typer.Argument(..., help="The new decision"),
+    question: str | None = typer.Option(None, "--question", help="A new title or question"),
+    why: str | None = typer.Option(None, "--why", help="Why it changed"),
+    context: str | None = _CONTEXT,
+    options: str | None = _OPTIONS,
+    consequences: str | None = _CONSEQUENCES,
+    check: str | None = _CHECK,
+    applies_to: list[str] | None = _APPLIES,
+    forbids: list[str] | None = _FORBIDS,
+    signals: list[str] | None = _SIGNALS,
+    note: str | None = _NOTE,
+    expected_revision: int | None = _EXPECTED,
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Replace a decision with a new one; the old one is kept as replaced, linked both ways.
+
+    A record keeps its parts unless you give new ones, and its file is updated in the
+    project's repository.
+    """
+    body: dict[str, Any] = {"action": "replace", "id": decision_id, "answer": answer}
+    if question:
+        body["question"] = question
+    if why:
+        body["why"] = why
+    _record_body(
+        body,
+        context=context,
+        options=options,
+        consequences=consequences,
+        check=check,
+        applies_to=applies_to,
+        forbids=forbids,
+        signals=signals,
+        note=note,
+    )
+    if expected_revision is not None:
+        body["expected_revision"] = expected_revision
+    _change_decision("rem decisions replace", body, output, (endpoint, token_file, data_dir))
+
+
+def _simple(action: str, help_text: str) -> Callable[..., None]:
+    def command(
+        decision_id: str = typer.Argument(...),
+        expected_revision: int | None = _EXPECTED,
+        output: opts.Output = opts.OutputFormat.json,
+        endpoint: opts.EndpointUrl = None,
+        token_file: opts.TokenFile = None,
+        data_dir: opts.DataDir = None,
+    ) -> None:
+        body: dict[str, Any] = {"action": action, "id": decision_id}
+        if expected_revision is not None:
+            body["expected_revision"] = expected_revision
+        _change_decision(f"rem decisions {action}", body, output, (endpoint, token_file, data_dir))
+
+    command.__doc__ = help_text
+    command.__name__ = f"decisions_{action}"
+    return command
+
+
+decisions_app.command("reject")(
+    _simple("reject", "Turn down a waiting decision. Work that waited on it skips that part.")
+)
+decisions_app.command("reopen")(
+    _simple(
+        "reopen",
+        "Ask a decided question again: a new card waits for you, and the decision stays in "
+        "force until you answer it.",
+    )
+)
+decisions_app.command("forget")(
+    _simple(
+        "forget",
+        "Delete a decision from the record. A record whose file is in the repository is "
+        "refused: retire it instead.",
+    )
+)
+decisions_app.command("retire")(
+    _simple(
+        "retire",
+        "Retire a decision record whose file is in the repository: workers stop getting it, "
+        "it stays turned down, and its file is rewritten with status: rejected and committed "
+        "on the landing branch.",
+    )
+)
+
+
+def _settle(action: str, help_text: str) -> Callable[..., None]:
+    def command(
+        edit_id: str = typer.Argument(..., help="The change's ID, such as E-2"),
+        output: opts.Output = opts.OutputFormat.json,
+        endpoint: opts.EndpointUrl = None,
+        token_file: opts.TokenFile = None,
+        data_dir: opts.DataDir = None,
+    ) -> None:
+        name = action.replace("_", "-")
+        body: dict[str, Any] = {"action": action, "id": edit_id}
+        _change_decision(f"rem decisions {name}", body, output, (endpoint, token_file, data_dir))
+
+    command.__doc__ = help_text
+    command.__name__ = f"decisions_{action}"
+    return command
+
+
+decisions_app.command("confirm-edit")(
+    _settle(
+        "confirm_edit",
+        "Press OK on a change you asked Rem for in chat: the decision changes, and so does "
+        "its record file. Refused if the decision changed since Rem showed it.",
+    )
+)
+decisions_app.command("cancel-edit")(
+    _settle("cancel_edit", "Press Cancel on a change you asked Rem for in chat: nothing changes.")
+)
+
+
+@decisions_app.command("add")
+def decisions_add(
+    topic: str = typer.Argument(..., help="A short key, such as checks.fast"),
+    answer: str = typer.Argument(..., help="The decision"),
+    question: str | None = typer.Option(None, "--question", help="The question it answers"),
+    project: str | None = typer.Option(
+        None, "--project", help="Project root it applies to; leave out for one about you"
+    ),
+    record: bool = typer.Option(
+        False,
+        "--record",
+        help="Keep it as a decision record in the project's repository (needs --project)",
+    ),
+    context: str | None = _CONTEXT,
+    options: str | None = _OPTIONS,
+    consequences: str | None = _CONSEQUENCES,
+    check: str | None = _CHECK,
+    applies_to: list[str] | None = _APPLIES,
+    forbids: list[str] | None = _FORBIDS,
+    signals: list[str] | None = _SIGNALS,
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Record a decision yourself; it replaces any decision in force on the same topic."""
+    body: dict[str, Any] = {"action": "add", "topic": topic, "answer": answer}
+    if question:
+        body["question"] = question
+    if project:
+        body["project"] = str(Path(project).expanduser().resolve())
+    if record:
+        if not project:
+            raise CliError(
+                "A decision record belongs to a project; give --project.",
+                code="invalid_input",
+                exit_code=ExitCode.USAGE,
+            )
+        body["remember_as"] = "record"
+        _record_body(
+            body,
+            context=context,
+            options=options,
+            consequences=consequences,
+            check=check,
+            applies_to=applies_to,
+            forbids=forbids,
+            signals=signals,
+        )
+    _change_decision("rem decisions add", body, output, (endpoint, token_file, data_dir))
+
+
+@decisions_app.command("paths")
+def decisions_paths(
+    applies_to: list[str] | None = _APPLIES,
+    forbids: list[str] | None = _FORBIDS,
+    project: str | None = typer.Option(
+        None, "--project", help="Project root to count in, for a record you're about to add"
+    ),
+    decision_id: str | None = typer.Option(
+        None, "--id", help="Count in this decision's project, for an edit or replacement"
+    ),
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Count the tracked files record paths match on the project's landing branch.
+
+    Shows what an Applies to or Never touch path covers before you save it. A path that
+    matches no files, or a Never touch path that matches files, is a warning, not an error:
+    a path can be planned. Nothing changes.
+    """
+    if bool(project) == bool(decision_id):
+        raise CliError("Give --project or --id.", code="invalid_input", exit_code=ExitCode.USAGE)
+    if not applies_to and not forbids:
+        raise CliError(
+            "Give --applies-to or --forbids.", code="invalid_input", exit_code=ExitCode.USAGE
+        )
+    body: dict[str, Any] = {"applies_to": applies_to or [], "forbids": forbids or []}
+    if project:
+        body["project"] = str(Path(project).expanduser().resolve())
+    else:
+        body["id"] = decision_id
+
+    def count(client: ApiClient, out: Output) -> CommandResult:
+        data = client.post("/rem/decisions/paths", body)
+        counted = data.get("path_counts")
+        if not counted:
+            return CommandResult(data=data, text=data.get("reason") or "Paths can't be counted.")
+        lines = [f"Counted on {counted.get('branch')} at {counted.get('commit', '')}."]
+        for key, label in (("applies_to", "Applies to"), ("forbids", "Never")):
+            for glob in counted.get(key) or {}:
+                lines.append(f"{label}: {_counted_path(key, glob, counted)}")
+        return CommandResult(data=data, text="\n".join(lines))
+
+    backend.run("rem decisions paths", output, (endpoint, token_file, data_dir), count)
+
+
+_SCAN_OUTCOMES = {
+    "pending": "waiting for you",
+    "queued": "queued behind the questions waiting for you",
+    "provisional": "Rem decided it (auto mode)",
+    "waiting": "already waiting for you",
+    "answered": "already decided",
+    "rechecked": "already decided; evidence refreshed",
+    "skipped": "already recorded",
+    "turned down before": "you turned this down before",
+    "unchecked": "its evidence couldn't be checked",
+}
+
+
+def _scan_result(data: dict[str, Any]) -> CommandResult:
+    scan = data.get("scan") or {}
+    outcomes = {o.get("topic"): o for o in data.get("outcomes") or []}
+    read = ", ".join(scan.get("read") or []) or "no docs or CI files"
+    lines = [f"Scanned {scan.get('project', '')} (read: {read})."]
+    for topic, candidates in (scan.get("topics") or {}).items():
+        if not candidates:
+            lines.append(f"{topic}: nothing found")
+            continue
+        best = candidates[0]
+        where = "; ".join(f"{s['label']} ({s['ref']})" for s in best.get("sources", [])[:3])
+        outcome = outcomes.get(topic)
+        state = (
+            f" [{_SCAN_OUTCOMES.get(outcome['outcome'], outcome['outcome'])}"
+            + (f" {outcome['id']}]" if outcome.get("id") else "]")
+            if outcome
+            else ""
+        )
+        lines.append(f"{topic}: {best['answer']}{state}")
+        lines.append(f"  found in: {where}")
+        for other in candidates[1:]:
+            lines.append(f"  also: {other['answer']}")
+    return CommandResult(data=data, text="\n".join(lines))
+
+
+@decisions_app.command("scan")
+def decisions_scan(
+    project: str = typer.Argument(..., help="The project's root folder"),
+    preview: bool = typer.Option(
+        False, "--preview", help="Show what the scan finds without recording anything"
+    ),
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Find the project's check command, landing branch and decision folder in its files.
+
+    Reads CI files, agent docs, package and build files and git history; no model is asked
+    and nothing runs. What it finds becomes decisions waiting for you, or Rem's
+    provisional ones while self-work's auto mode is on. A decision in force never changes.
+    """
+    body: dict[str, Any] = {"project": str(Path(project).expanduser().resolve())}
+    if preview:
+        body["preview"] = True
+    backend.run(
+        "rem decisions scan",
+        output,
+        (endpoint, token_file, data_dir),
+        lambda client, out: _scan_result(client.post("/rem/decisions/scan", body)),
+    )
+
+
 # Tasks ----------------------------------------------------------------------------
 
 
@@ -542,9 +1378,12 @@ def _task_line(task: dict[str, Any]) -> str:
 
 
 def _task(client: ApiClient, identity: str) -> dict[str, Any]:
-    for task in client.get("/rem/tasks")["tasks"]:
-        if task["id"] == identity:
-            return dict(task)
+    """One task with its prompt; task lists leave prompts out."""
+    try:
+        return dict(client.get(f"/rem/tasks/{backend.segment(identity)}")["task"])
+    except CliError as exc:
+        if exc.code != "not_found":
+            raise
     raise CliError(f"No Rem task {identity}.", code="not_found", exit_code=ExitCode.NOT_FOUND)
 
 
@@ -561,7 +1400,7 @@ def tasks_list(
     token_file: opts.TokenFile = None,
     data_dir: opts.DataDir = None,
 ) -> None:
-    """List Rem's tasks with their latest run."""
+    """List Rem's tasks with their latest run, without prompts (show has them)."""
 
     def body(client: ApiClient, out: Output) -> CommandResult:
         found = list(client.get("/rem/tasks")["tasks"])
@@ -582,7 +1421,7 @@ def tasks_show(
     token_file: opts.TokenFile = None,
     data_dir: opts.DataDir = None,
 ) -> None:
-    """Show one task, its revision and recent runs."""
+    """Show one task, its prompt, revision and recent runs."""
 
     def body(client: ApiClient, out: Output) -> CommandResult:
         task = _task(client, task_id)
@@ -646,6 +1485,22 @@ def tasks_create(
     spec: Path | None = typer.Option(
         None, "--spec", help="JSON task fields (provider, model, acceptance_criteria...)"
     ),
+    provider: str | None = typer.Option(
+        None, "--provider", help="Provider for the task's thread, such as claude_code"
+    ),
+    model: str | None = typer.Option(None, "--model", help="Model for the task's thread"),
+    account: str | None = typer.Option(
+        None,
+        "--account",
+        help="Run the task's thread on this account of its provider "
+        "(see `provider account list`), whatever Rem's account setting says",
+    ),
+    computer: str | None = typer.Option(
+        None,
+        "--computer",
+        help="Run the task only on this computer, by its ID from `computers list`. A paired "
+        "desktop runs research and conversation tasks only, in its matching project",
+    ),
     request: opts.RequestId = None,
     output: opts.Output = opts.OutputFormat.json,
     endpoint: opts.EndpointUrl = None,
@@ -662,6 +1517,14 @@ def tasks_create(
         fields = {**extra, **_recipe(title, kind, prompt, prompt_file, project, schedule)}
         if after:
             fields["after"] = list(after)
+        for key, value in (
+            ("provider", provider),
+            ("model", model),
+            ("provider_profile", account),
+            ("computer", computer),
+        ):
+            if value:
+                fields[key] = value
         return _task_result(client.post("/rem/tasks", fields, request_id=identity))
 
     backend.run(
@@ -887,6 +1750,109 @@ def tasks_resume(
     )
 
 
+@tasks_app.command("make-workflow")
+def tasks_make_workflow(
+    task_id: str = typer.Argument(..., help="A Daily, Weekly or Custom cron task"),
+    request: opts.RequestId = None,
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Start a Rem task that drafts a workflow from a repeating task that passed twice.
+
+    The draft is checked, preflighted and tested once. Nothing switches until you run
+    `rem tasks switch-over` on it or press Switch over in the app.
+    """
+    identity = backend.request_id(request)
+
+    def body(client: ApiClient, out: Output) -> CommandResult:
+        started = client.post(
+            f"/rem/tasks/{backend.segment(task_id)}/workflow",
+            {"action": "draft"},
+            request_id=identity,
+        )
+        return CommandResult(
+            data=started,
+            text=f"Drafting: {started['draft']['title']} (task {started['draft']['id']}).",
+        )
+
+    backend.run(
+        "rem tasks make-workflow",
+        output,
+        (endpoint, token_file, data_dir),
+        body,
+        request_id=identity,
+    )
+
+
+@tasks_app.command("switch-over")
+def tasks_switch_over(
+    task_id: str = typer.Argument(..., help="The repeating task, or its drafting task"),
+    yes: opts.Yes = False,
+    unseen: bool = typer.Option(
+        False,
+        "--unseen",
+        help="Also approve files the diff couldn't show in full and MCP servers whose "
+        "package has no exact version",
+    ),
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Run a repeating task's drafted workflow on its schedule instead of the task.
+
+    Prints the workflow files and the cron trigger it would add. With --yes it adds the
+    trigger, approves exactly the version shown and pauses the task's schedule.
+    `rem tasks resume` undoes it. Only you can do this: inside an agent turn it is
+    refused (exit 5).
+    """
+    from gofer.rattish.trigger_approval import unified_diff_text, unseen_message
+
+    def body(client: ApiClient, out: Output) -> CommandResult:
+        backend.require_user("switch a task over to a workflow")
+        path = f"/rem/tasks/{backend.segment(task_id)}/workflow"
+        shown = client.post(path, {"action": "preview"})
+        changes = shown["changes"]
+        lines = [
+            f"Workflow: {shown['workflow_path']}",
+            f"Trigger: cron {shown['cron']} ({shown['timezone']}), the task's {shown['schedule']}",
+            unified_diff_text(changes),
+        ]
+        if not yes:
+            raise CliError(
+                "Add --yes to add the trigger, approve this version and pause the task.",
+                code="confirmation_required",
+                exit_code=ExitCode.USAGE,
+                data=shown,
+            )
+        if changes.get("unseen") and not unseen:
+            raise CliError(
+                unseen_message(changes["unseen"]).replace(
+                    "then confirm that you approve", "then add --unseen to approve"
+                ),
+                code="unseen_changes",
+                exit_code=ExitCode.USAGE,
+                data=shown,
+            )
+        switched = client.post(
+            path,
+            {
+                "action": "switch",
+                "fingerprint": changes["fingerprint"],
+                "accept_unseen": bool(unseen),
+            },
+        )
+        lines.append(
+            f"Switched over: trigger {switched['trigger_id']} runs the workflow, and the "
+            "task's schedule is paused."
+        )
+        return CommandResult(data={**switched, "preview": shown}, text="\n".join(lines))
+
+    backend.run("rem tasks switch-over", output, (endpoint, token_file, data_dir), body)
+
+
 @tasks_app.command("delete")
 def tasks_delete(
     task_id: str = typer.Argument(...),
@@ -914,6 +1880,19 @@ def tasks_delete(
 # Runs and threads -----------------------------------------------------------------
 
 
+def _provider_lines(run: dict[str, Any]) -> list[str]:
+    """Which provider app versions the run's turns started, and any change since it passed."""
+    from gofer.core.provider_versions import rem_turn_lines
+
+    turns = [turn for turn in run.get("turns") or [] if isinstance(turn, dict)]
+    changes = [
+        str(item["text"])
+        for item in run.get("provider_version_changes") or []
+        if isinstance(item, dict) and item.get("text")
+    ]
+    return [*rem_turn_lines(turns), *changes]
+
+
 @runs_app.command("show")
 def runs_show(
     run_id: str = typer.Argument(...),
@@ -926,7 +1905,15 @@ def runs_show(
 
     def body(client: ApiClient, out: Output) -> CommandResult:
         run = client.get(f"/rem/runs/{backend.segment(run_id)}")["run"]
-        return CommandResult(data=run, text=f"Run {run['id']} {run.get('state')}.")
+        lines = [f"Run {run['id']} {run.get('state')}."]
+        if run.get("state") == "queued" and run.get("waiting_reason"):
+            lines.append(f"Waiting: {run['waiting_reason']}")
+        suggestion = run.get("suggestion")
+        if isinstance(suggestion, dict) and suggestion.get("text"):
+            # A paired desktop with room; nothing goes there until you pick it.
+            lines.append(f"{suggestion['text']} (Raticode rem runs run-there {run['id']})")
+        lines += _provider_lines(run)
+        return CommandResult(data=run, text="\n".join(lines))
 
     backend.run("rem runs show", output, (endpoint, token_file, data_dir), body)
 
@@ -1006,6 +1993,30 @@ def runs_acknowledge(
     _run_action("rem runs acknowledge", run_id, "acknowledge", request, output, connection)
 
 
+@runs_app.command("acknowledge-all")
+def runs_acknowledge_all(
+    request: opts.RequestId = None,
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Dismiss every task update at once; tasks still waiting for your answer stay."""
+    connection = (endpoint, token_file, data_dir)
+    identity = backend.request_id(request)
+
+    def body(client: ApiClient, out: Output) -> CommandResult:
+        result = client.post("/rem/runs/acknowledge", {}, request_id=identity)
+        count = int(result.get("count") or 0)
+        waiting = int(result.get("needs_you") or 0)
+        text = f"Dismissed {count} task {'update' if count == 1 else 'updates'}."
+        if waiting:
+            text += f" {waiting} still {'needs' if waiting == 1 else 'need'} you."
+        return CommandResult(data=result, text=text)
+
+    backend.run("rem runs acknowledge-all", output, connection, body, request_id=identity)
+
+
 @runs_app.command("retry-review")
 def runs_retry_review(
     run_id: str = typer.Argument(...),
@@ -1032,6 +2043,38 @@ def runs_wake(
     """Wake a sleeping run now; its worker resumes in the same thread."""
     connection = (endpoint, token_file, data_dir)
     _run_action("rem runs wake", run_id, "wake", request, output, connection)
+
+
+@runs_app.command("run-there")
+def runs_run_there(
+    run_id: str = typer.Argument(...),
+    computer: str | None = typer.Option(
+        None, "--computer", help="The paired desktop's ID; defaults to the suggested one."
+    ),
+    request: opts.RequestId = None,
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Run a waiting task on the paired desktop its suggestion names (Run there).
+
+    Only a research or conversation task waiting for room, when a paired desktop has
+    room for it. It counts as your own start.
+    """
+    identity = backend.request_id(request)
+    payload = {"computer_id": computer} if computer else {}
+
+    def body(client: ApiClient, out: Output) -> CommandResult:
+        changed = client.post(
+            f"/rem/runs/{backend.segment(run_id)}/run_there", payload, request_id=identity
+        )
+        name = ((changed.get("run") or {}).get("run_there") or {}).get("computer_name")
+        return CommandResult(data=changed, text=f"Run {run_id} starts on {name or computer}.")
+
+    backend.run(
+        "rem runs run-there", output, (endpoint, token_file, data_dir), body, request_id=identity
+    )
 
 
 @thread_app.command("show")

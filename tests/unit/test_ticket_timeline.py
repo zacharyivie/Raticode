@@ -7,6 +7,7 @@ from typing import Any
 
 from gofer.ui import rem_ticket_activity as activity
 from gofer.ui.rem_kanban import get_ticket, put_ticket
+from gofer.ui.rem_self_work import RESEARCH_ANGLES
 from tests.unit.test_device_application import application as application
 from tests.unit.test_device_desktop_control import phone as phone
 from tests.unit.test_rem_kanban import (
@@ -274,6 +275,9 @@ def test_blocked_tickets_come_before_todo_and_respect_the_thread_limit(board):
     settle(home, "Broken")
     assert ticket(home, "Broken")["status"] == "blocked"
     fake.failing.discard("Broken")
+    # A research pass can take the only thread while Broken waits; let research finish,
+    # so it can't keep the thread from the follow-up while other runs are held.
+    fake.released.update(title.format(name="project") for title, _ in RESEARCH_ANGLES)
     fake.hold.clear()
     add(home, "Next", priority="critical")
     tick(home)

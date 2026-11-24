@@ -15,13 +15,23 @@ export function providerLabel(choice) {
   return choice.model ? `${name} (${choice.model})` : name;
 }
 
-// One sentence per switch, in the order the step made them.
+// Why a step passes over another account of a provider that hit its usage limit.
+export const SKIPPED_ACCOUNT_TEXT =
+  "Raticode doesn't move work to another account of the same provider at a usage limit";
+
+// One sentence per switch or skipped entry, in the order the step made them.
 export function fallbackLines(fallbacks) {
   if (!Array.isArray(fallbacks)) return [];
   return fallbacks
     .filter((item) => item?.from && item?.to)
     .map((item) => {
+      if (item.skipped) return `Skipped ${providerLabel(item.to)}: ${SKIPPED_ACCOUNT_TEXT}.`;
       const reason = FALLBACK_REASON_LABELS[item.reason] ?? String(item.reason ?? "");
       return `Switched from ${providerLabel(item.from)} to ${providerLabel(item.to)}: ${reason}.`;
     });
+}
+
+// Whether a run's fallbacks include a real switch, not only skipped accounts.
+export function switchedProvider(fallbacks) {
+  return Array.isArray(fallbacks) && fallbacks.some((item) => item && !item.skipped);
 }

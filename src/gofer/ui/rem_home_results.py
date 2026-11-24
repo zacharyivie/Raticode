@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from gofer.core.network_policy import is_global_address
 from gofer.utils.atomic_output import open_binary_input
 
 # The same rules as frontend/src/lib/chatSources.js, so a task's sources match
@@ -43,7 +44,8 @@ def public_url(value: str) -> str:
     if port not in {None, 80, 443} or host == "localhost" or host.endswith(".local"):
         return ""
     try:
-        if not ipaddress.ip_address(host).is_global:
+        # is_global alone passes IPv4 hidden in IPv6 forms such as [::127.0.0.1].
+        if not is_global_address(ipaddress.ip_address(host)):
             return ""
     except ValueError:
         pass

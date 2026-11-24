@@ -70,6 +70,22 @@ def run(
     return result.stdout
 
 
+def speech_libraries(platform: str) -> list[str]:
+    """The offline dictation libraries a packaged backend must carry on ``platform``.
+
+    sherpa-onnx's native module loads its own ONNX Runtime from the same folder. On
+    Windows that file has the same name as Raticode's own ONNX Runtime
+    (onnxruntime/capi/onnxruntime.dll), so both copies must stay in their own folders.
+    """
+    if platform == "win32":
+        names = ["_sherpa_onnx.cp311-win_amd64.pyd", "onnxruntime.dll"]
+    elif platform == "darwin":
+        names = ["_sherpa_onnx.cpython-311-darwin.so", "libonnxruntime.dylib"]
+    else:
+        names = ["_sherpa_onnx.cpython-311-x86_64-linux-gnu.so", "libonnxruntime.so"]
+    return [f"sherpa_onnx/lib/{name}" for name in names]
+
+
 def probe(binary: Path) -> None:
     if not binary.is_file():
         raise RuntimeError(f"Packaged backend missing: {binary}")
@@ -85,11 +101,11 @@ def probe(binary: Path) -> None:
     inventory = json.loads(archive.extract(entries[required]))
     if not inventory:
         raise RuntimeError(f"Packaged backend has an empty license inventory: {binary}")
-    speech_library = {"darwin": "libvosk.dyld", "win32": "libvosk.dll"}.get(
-        sys.platform, "libvosk.so"
-    )
-    if f"vosk/{speech_library}" not in entries:
-        raise RuntimeError(f"Packaged backend missing Vosk speech library: {binary}")
+    missing = [name for name in speech_libraries(sys.platform) if name not in entries]
+    if missing:
+        raise RuntimeError(
+            f"Packaged backend missing sherpa-onnx speech libraries {missing}: {binary}"
+        )
     for required in (
         "gofer/devices/protocol/v2/event.schema.json",
         "third-party-licenses/PYTHON-LICENSE.txt",

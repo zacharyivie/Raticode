@@ -16,6 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from gofer.core.commit_attribution import clean_commit_message
 from gofer.core.provider_preferences import commit_message_preference
 from gofer.ui.commit_message import generate_commit_message
 from gofer.ui.report_theme_generation import generate_report_theme
@@ -116,6 +117,7 @@ def commit_captured_changes(
 ) -> str:
     """Commit only the captured tree, with an atomic compare-and-swap of its branch."""
     root = Path(snapshot["projectRoot"])
+    message = clean_commit_message(message)
     # Use a detached worktree so ordinary commit hooks and signing still run,
     # while the user's checkout and index remain untouched during generation.
     base = snapshot["head"] or git(

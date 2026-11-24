@@ -3,6 +3,7 @@
   "contract_version": 1,
   "node_type": "local-vectorize",
   "runtime_handler": "raticode.local_vectorize",
+  "catalog": {"category": "files", "summary": "Build a local search index of project text", "docs_path": "/docs/nodes/local-vectorize"},
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object",
     "properties": {

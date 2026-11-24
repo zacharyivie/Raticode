@@ -246,6 +246,7 @@ REFUSED_WRITES = [
     ("POST", "/api/rattish/triggers/t1"),
     ("DELETE", "/api/rattish/triggers/t1"),
     ("POST", "/api/rattish/triggers/t1/rotate-token"),
+    ("POST", "/api/rattish/triggers/t1/approve"),
     ("POST", "/api/rattish/triggers/login"),
     ("POST", "/api/rattish/triggers/pause"),
     ("POST", "/api/swarms"),
@@ -304,6 +305,11 @@ def test_agent_tokens_can_read_and_make_listed_writes(method: str, path: str) ->
         "/api/desktop/trusted-roots",
         "/api/rem/context",
         "/api/rem-resources",
+        # A phone-started sign-in shows its one-time code and link here.
+        "/api/provider/accounts",
+        "/api/provider/accounts?provider=codex",
+        "/api/provider/claude-accounts",
+        "/api/provider/claude-accounts?refresh=1",
     ],
 )
 def test_agent_tokens_cant_even_read_owner_only_routes(path: str) -> None:

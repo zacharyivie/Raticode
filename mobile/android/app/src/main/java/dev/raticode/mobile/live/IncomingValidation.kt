@@ -188,11 +188,18 @@ internal object IncomingValidation {
                 val approvals = payload.getJSONArray("approvals"); require(approvals.length() <= 50)
                 repeat(approvals.length()) { i ->
                     val a = approvals.getJSONObject(i)
-                    a.fields("approval_id", "action_digest", "source", "title", "summary", "requested_at", "instruction_required")
+                    a.fields(*(listOf("approval_id", "action_digest", "source", "title", "summary", "requested_at", "instruction_required") +
+                        listOf("options", "reply").filter { a.has(it) }).toTypedArray())
                     a.uuid("approval_id"); require(a.string("action_digest", 64).matches(Regex("[0-9a-f]{64}")))
                     require(a.string("source", 10) in setOf("workflow", "swarm"))
                     a.string("title", 160); a.string("summary", 1000); a.string("requested_at", 80)
                     require(a.get("instruction_required") is Boolean)
+                    if (a.has("options")) {
+                        val options = a.getJSONArray("options"); require(options.length() in 2..8)
+                        val labels = (0 until options.length()).map { n -> (options.get(n) as? String).also { require(it != null && it.length in 1..60) }!! }
+                        require(labels.toSet().size == labels.size)
+                    }
+                    if (a.has("reply")) require(a.string("reply", 10) in setOf("optional", "required"))
                 }
             }
             "desktop.result" -> {

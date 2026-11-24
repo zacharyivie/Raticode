@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { AlarmClock, AlertCircle, BellRing, Check, CheckCircle2, Clock3, Hammer, Hourglass, Loader2, Moon, MousePointerClick, Pause, PauseCircle, PencilLine, Play, RotateCw, StopCircle, Telescope, Trash2, Wrench, XCircle } from "lucide-react";
+import { AlarmClock, AlertCircle, BellRing, Check, CheckCircle2, Clock3, Hammer, Hourglass, Loader2, Moon, MousePointerClick, Pause, PauseCircle, PencilLine, Play, RotateCw, StopCircle, Telescope, Trash2, Workflow, Wrench, XCircle } from "lucide-react";
 import { TASK_TYPES, canRetryPrerequisite, runControls } from "../lib/remHome.js";
-import { acknowledgeRemRun, cancelRemRun, pauseRemRun, pauseRemTask, resumeRemRun, resumeRemTask, runRemTaskNow, wakeRemRun } from "../lib/remHomeStore.js";
+import { acknowledgeRemRun, cancelRemRun, draftRemWorkflow, pauseRemRun, pauseRemTask, resumeRemRun, resumeRemTask, runRemTaskNow, wakeRemRun } from "../lib/remHomeStore.js";
 
 const TYPE_ICONS = { research: Telescope, maintain: Wrench, develop: Hammer, operations: MousePointerClick, reminder: BellRing };
 export function TaskTypeIcon({ type, size = 15, ...props }) {
@@ -56,7 +56,7 @@ export function RemMenu({ label, trigger, items, className = "" }) {
   return <div className={`rem-menu-anchor ${className}`} data-open={open || undefined}>
     <button ref={triggerRef} type="button" className="rem-menu-trigger" aria-haspopup="menu" aria-expanded={open} aria-label={label} title={label} onClick={event => { event.stopPropagation(); setOpen(!open); }}>{trigger}</button>
     {open ? <div ref={panelRef} role="menu" aria-label={label} className="rem-menu">
-      {visible.map(item => <button key={item.label} type="button" role="menuitem" data-danger={item.danger || undefined} disabled={item.disabled} onClick={() => { setOpen(false); item.onSelect(); }}>
+      {visible.map(item => <button key={item.label} type="button" role="menuitem" title={item.title || undefined} data-danger={item.danger || undefined} disabled={item.disabled} onClick={() => { setOpen(false); item.onSelect(); }}>
         {item.icon ? <item.icon size={14} aria-hidden="true" /> : null}<span>{item.label}</span>
       </button>)}
     </div> : null}
@@ -86,6 +86,8 @@ export function taskActions(task, activity, { onEdit, onDelete }) {
       : pausedRun ? { id: "stop", label: "Stop", icon: StopCircle, onSelect: () => void cancelRemRun({ ...task, active_run: task.last_run }) }
         : { id: "run", label: waiting ? "Start now" : task.last_run ? "Run again" : "Run now", icon: waiting ? Play : RotateCw, onSelect: () => void runRemTaskNow(task) },
     task.state === "paused" ? { id: "resume", label: "Resume schedule", icon: Play, onSelect: () => void resumeRemTask(task) } : task.schedule?.kind && task.schedule.kind !== "once" ? { id: "pause", label: "Pause schedule", icon: Pause, onSelect: () => void pauseRemTask(task) } : null,
+    // Offered once a Daily, Weekly or Custom cron task has passed twice (rem_task_workflow).
+    task.workflow_offer ? { id: "make-workflow", label: "Make it a workflow", icon: Workflow, onSelect: () => void draftRemWorkflow(task) } : null,
     activity.kind === "attention" && !activity.held ? { id: "dismiss", label: "Dismiss", icon: Check, onSelect: () => void acknowledgeRemRun(task) } : null,
     { id: "delete", label: "Delete…", icon: Trash2, danger: true, onSelect: onDelete },
   ].filter(Boolean);

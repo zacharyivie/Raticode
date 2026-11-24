@@ -14,7 +14,7 @@ const read = (storage, key, fallback) => { try { return JSON.parse(storage.getIt
 export function reconcileDesktopThread(local, remote) {
   if (!local) return remote.metadata;
   const base = remote.base_metadata || remote.metadata;
-  const fields = ["provider", "model", "effort", "projectRoot", "projectName", "scopeMode", "permissionsByProvider", "resources"];
+  const fields = ["provider", "model", "effort", "projectRoot", "projectName", "scopeMode", "permissionsByProvider", "accountsByProvider", "resources"];
   const unchanged = fields.every(key => JSON.stringify(local[key]) === JSON.stringify(base[key]));
   let result = remote.context_modified && unchanged
     ? { ...local, ...Object.fromEntries(fields.filter(key => key in remote.metadata).map(key => [key, remote.metadata[key]])) }

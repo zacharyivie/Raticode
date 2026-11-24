@@ -30,6 +30,10 @@ def notice_file(path: Path) -> bool:
     )
 
 
+def sbom_file(path: Path) -> bool:
+    return path.parent.name == "sboms" and path.parent.parent.name.endswith(".dist-info")
+
+
 def python_license_declaration(dist) -> str:
     classifiers = (
         dist.metadata.get_all("Classifier", []) if hasattr(dist.metadata, "get_all") else []
@@ -121,11 +125,9 @@ def collect(output: Path) -> None:
             if notice_file(source) and source.is_file():
                 shutil.copy2(source, target / f"{count}-{source.name}")
                 count += 1
-        if normalized == "vosk":
-            shutil.copy2(
-                ROOT / "packaging/licenses" / f"vosk-{version}-COPYING", target / "COPYING"
-            )
-            count += 1
+            elif sbom_file(source) and source.is_file():
+                # Native wheels (python-calamine) list their statically linked crates here.
+                shutil.copy2(source, target / f"sbom-{source.name}")
         for supplied in (ROOT / "packaging/licenses").glob(f"{normalized}-{version}-LICENSE"):
             shutil.copy2(supplied, target / supplied.name)
             count += 1

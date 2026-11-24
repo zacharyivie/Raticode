@@ -31,12 +31,22 @@ export function diagnosticToMarker(monaco, model, source, diagnostic) {
     code: diagnostic?.code,
     endColumn: end.column,
     endLineNumber: end.lineNumber,
-    message: diagnostic?.message || "Rattish diagnostic",
+    message: diagnosticMessage(diagnostic),
     severity: markerSeverity(monaco, diagnostic?.severity),
     source: "Rattish",
     startColumn: start.column,
     startLineNumber: start.lineNumber,
   };
+}
+
+// The message plus the compiler's fix hints, such as "Did you mean 'write-file'?",
+// one per line so the editor's hover shows them under the error.
+export function diagnosticMessage(diagnostic) {
+  const message = diagnostic?.message || "Rattish diagnostic";
+  const hints = Array.isArray(diagnostic?.suggestions)
+    ? diagnostic.suggestions.filter((hint) => typeof hint === "string" && hint.trim())
+    : [];
+  return hints.length ? [message, ...hints].join("\n") : message;
 }
 
 export function diagnosticsToMarkers(monaco, model, source, diagnostics = []) {

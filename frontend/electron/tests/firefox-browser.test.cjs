@@ -29,6 +29,7 @@ const {
 } = require("../firefox-contents.cjs");
 const { createAgentBrowserController } = require("../agent-browser.cjs");
 const { remSiteAllowed, sanitizeBrowserPolicy } = require("../browser-policy.cjs");
+const { checkHiddenTextPages, pageText, serveHiddenTextPages } = require("./hidden-text-pages.cjs");
 
 const FIREFOX = process.env.RATICODE_SKIP_FIREFOX_TESTS === "1" ? "" : findFirefox();
 const realFirefox = { skip: FIREFOX ? false : "Firefox is not installed" };
@@ -184,6 +185,55 @@ test("a Firefox whose control session another program took is closed, not used",
   }
 });
 
+test("a frame's requests reach its tab, and a held request nobody owns goes on", async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "firefox-frames-"));
+  const sent = [];
+  let socket;
+  const spawnFake = () => {
+    const child = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => true;
+    setImmediate(() => child.stderr.emit("data", "WebDriver BiDi listening on ws://127.0.0.1:45679\n"));
+    return child;
+  };
+  class FakeSocket {
+    constructor() { socket = this; setImmediate(() => this.onopen?.()); }
+    send(text) {
+      const { id, method, params } = JSON.parse(text);
+      sent.push([method, params]);
+      const result = method === "browser.createUserContext" ? { userContext: "rem" } : {};
+      setImmediate(() => this.onmessage?.({ data: JSON.stringify({ type: "success", id, result }) }));
+    }
+    close() {}
+  }
+  const fire = (method, params) => socket.onmessage({ data: JSON.stringify({ type: "event", method, params }) });
+  try {
+    const engine = createFirefoxEngine({ dataDir, find: () => "/usr/bin/firefox-fake", spawn: spawnFake, WebSocketImpl: FakeSocket, watchdog: false });
+    await engine.ensure();
+    const seen = [];
+    engine.register("tab", { handleEvent: (method, params) => seen.push([method, params.context]) });
+    fire("browsingContext.contextCreated", { context: "frame", parent: "tab", url: "about:blank" });
+    fire("browsingContext.contextCreated", { context: "inner", parent: "frame", url: "about:blank" });
+    fire("network.beforeRequestSent", { context: "inner", isBlocked: true, navigation: "n1", request: { request: "r1", url: "http://a.test/inner" } });
+    // A frame finishing its load is not the tab's page loading.
+    fire("browsingContext.load", { context: "frame", url: "http://a.test/frame" });
+    fire("browsingContext.contextCreated", { context: "popup", parent: null, originalOpener: "inner", url: "about:blank" });
+    assert.deepEqual(seen, [["network.beforeRequestSent", "inner"], ["popup", "popup"]]);
+
+    // Once the tab is gone, Raticode answers its held requests itself.
+    engine.unregister("tab");
+    fire("browsingContext.contextDestroyed", { context: "tab" });
+    fire("network.beforeRequestSent", { context: "inner", isBlocked: true, request: { request: "r2", url: "http://a.test/late" } });
+    fire("network.beforeRequestSent", { context: "elsewhere", isBlocked: false, request: { request: "r3", url: "http://a.test/" } });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(sent.filter(([method]) => method === "network.continueRequest").map(([, params]) => params.request), ["r2"]);
+    assert.equal(seen.length, 2);
+    engine.stop();
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("Rem's DevTools commands map to WebDriver BiDi", async () => {
   const calls = [];
   const contents = Object.assign(new EventEmitter(), {
@@ -320,7 +370,7 @@ test("Rem drives Firefox with real input, keeps its site rules and asks for appr
     assert.equal(await read("document.getElementById('out').textContent"), "confirm:true");
 
     const evaluated = await call("evaluate", { expression: "navigator.userActivation.isActive" });
-    assert.equal(evaluated.result, "true");
+    assert.equal(pageText(evaluated.result, base), "true");
     assert.deepEqual(approvals, ["Upload notes.txt", "Run a script on this page"]);
 
     // Site rules: typed addresses and links the page follows.
@@ -341,6 +391,38 @@ test("Rem drives Firefox with real input, keeps its site rules and asks for appr
   } finally {
     engine.stop();
     server.close();
+  }
+});
+
+test("Rem's Firefox snapshot leaves out text each hiding trick keeps off screen, and labels what it reads as page content", realFirefox, async () => {
+  const server = http.createServer((request, response) => {
+    if (!serveHiddenTextPages(request, response)) { response.statusCode = 404; response.end(); }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "firefox-hidden-test-"));
+  const engine = createFirefoxEngine({ dataDir, idleShutdownMs: 1000 });
+  const tabs = [];
+  const controller = createAgentBrowserController({
+    openTab: ({ agent, label }) => {
+      const session = { id: `tab-${tabs.length}`, agent: { id: agent, label, shared: false }, contents: new FirefoxContents({ engine, kind: "rem", nativeImage: fakeImage }), viewSize: null };
+      tabs.push(session);
+      return session;
+    },
+    agentTabs: (agent) => tabs.filter((item) => item.agent.id === agent && !item.contents.isDestroyed()),
+    closeTab: (session) => session.contents.close(),
+    normalizeUrl: (value) => value,
+    policy: () => sanitizeBrowserPolicy({ engine: "firefox", remConfirm: "never" }),
+  });
+  const call = (action, extra = {}) => controller.handle({ agent: "agent-firefox-0002", action, ...extra });
+  try {
+    await call("open", { url: `${base}/hidden/kept` });
+    await checkHiddenTextPages(call, base, "Firefox");
+    await call("close");
+  } finally {
+    await engine.stopAndWait();
+    server.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
 

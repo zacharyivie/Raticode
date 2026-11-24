@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from gofer.core.command_slots import read_settings, slots_root
+from gofer.core.computers import local_room_limit
 from gofer.core.resources import ResourceLimits
+from gofer.core.worker_claims import ORGANIZATIONS, PHONE, THIS_COMPUTER, Claim, WorkerClaims
 from gofer.devices.registry import PairingError, device_id
 from gofer.ui.chat import _messages_with_attachment_paths, stream_workflow_chat
 from gofer.ui.chat_jobs import ChatJobs
@@ -91,8 +93,24 @@ def validate_context(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _sender_label(request: dict[str, Any]) -> str:
+    """A worker label for a claimed request: "phone turn", or "work from <desktop>"."""
+    if request.get("peer_role") != "desktop":
+        return "phone turn"
+    return f"work from {request.get('peer_name') or 'another desktop'}"
+
+
+def _incoming(request: dict[str, Any]) -> bool:
+    """Whether a claimed request is work another desktop's organization sent."""
+    event = request.get("event") or {}
+    payload = event.get("payload") or {}
+    return bool(event.get("type") == "job.submit" and payload.get("organization"))
+
+
 class DeviceWork(Protocol):
-    def claim(self) -> dict[str, Any] | None: ...
+    def claim(
+        self, *, own: bool = True, organization: bool = True, waiting: str | None = None
+    ) -> dict[str, Any] | None: ...
 
     def authorized(self, peer: str, thread: str) -> bool: ...
 
@@ -137,6 +155,28 @@ class DeviceChatBridge:
         self._lock = threading.Lock()
         self._active: dict[tuple[str, str], tuple[str, str]] = {}
         self.error: str | None = None
+        # Each phone turn, and each organization job another desktop sent, holds a
+        # worker claim so the computer counts it exactly, once. The UI server shares
+        # one with Rem and organizations and sets this computer's ID.
+        self.claims = WorkerClaims()
+        self.computer_id: Callable[[], str] = lambda: THIS_COMPUTER
+
+    def running(self) -> int:
+        """Phone turns running now."""
+        return self.claims.held(consumer=PHONE)
+
+    def _turn_account(self, thread: str, context: dict[str, Any], provider: str) -> str | None:
+        from gofer.ui.rem_provider_accounts import turn_account
+
+        choices = context.get("provider_accounts") or {}
+        choice = choices.get(provider, "") if isinstance(choices, dict) else ""
+        rem = (getattr(self.fleet_control, "services", None) or {}).get("rem")
+        read_config = getattr(rem, "_current_config", None)
+        try:
+            config = read_config() if callable(read_config) else {}
+        except Exception:  # noqa: BLE001 - the thread's own choice still applies.
+            config = {}
+        return turn_account(thread, str(choice), config, self.data_dir, provider=provider)
 
     async def run(self) -> None:
         while not self._closed.is_set():
@@ -159,10 +199,13 @@ class DeviceChatBridge:
                 await asyncio.sleep(0.25)
 
     def _tick(self) -> bool:
-        # Phone turns share Rem's worker limit from Settings > Rem.
+        # Your own turns (from a phone, or a thread you run here from another desktop)
+        # use this computer's worker limit (Settings > Computers > Worker limit) but count
+        # only each other against it, so other work never holds them back. Only this
+        # loop starts them, so their count can't change before dispatch.
         limit = read_settings(slots_root(self.data_dir)).resolved()["maxWorkers"]
+        own = self.claims.held(consumer=PHONE) < limit
         with self._lock:
-            capacity = len(self._active) < limit
             active = list(self._active.items())
         for (thread, turn), (peer, request_id) in active:
             if not self.application.runnable(peer, request_id):
@@ -170,12 +213,41 @@ class DeviceChatBridge:
                     self.steering.stop(thread, turn)
                 except ValueError:
                     pass
-        if capacity:
-            request = self.application.claim()
-            if request is not None:
-                self.dispatch(request)
-                return True
-        return False
+        # Work another desktop's organization sent counts every worker on this computer,
+        # Rem's, organizations', phone turns' and other incoming work, against the whole
+        # limit lowered by CPU and memory pressure, as placed starts do. Its worker is
+        # taken before the request is, under the claims' one lock, so a Rem or
+        # organization start on another thread can't take the same one. A computer short
+        # of memory with a worker running takes none, and the sender is told so.
+        computer_id = self.computer_id()
+        room = local_room_limit(self.data_dir)
+        worker = self.claims.claim(computer_id, ORGANIZATIONS, room)
+        # Short of memory with a worker free: say so. A full computer waits for a worker.
+        waiting = (
+            self.claims.held_back(computer_id)
+            if worker is None and self.claims.held(computer_id) < room
+            else None
+        )
+        try:
+            # Asked even with no room, so a waiting organization job says it waits.
+            request = self.application.claim(
+                own=own, organization=worker is not None, waiting=waiting
+            )
+        except BaseException:
+            if worker is not None:
+                worker.release()
+            raise
+        if request is None:
+            if worker is not None:
+                worker.release()
+            return False
+        if not _incoming(request) and worker is not None:
+            worker.release()
+            worker = None
+        if worker is not None:
+            worker.describe(_sender_label(request))
+        self.dispatch(request, worker)
+        return True
 
     def _complete(self, request: dict[str, Any], text: str, error: str | None) -> None:
         try:
@@ -198,18 +270,31 @@ class DeviceChatBridge:
                     exc_info=True,
                 )
 
-    def dispatch(self, request: dict[str, Any]) -> None:
+    def dispatch(self, request: dict[str, Any], claimed: Claim | None = None) -> None:
+        """Start one claimed request as a turn that holds a worker claim while it runs.
+
+        ``claimed`` is the worker ``_tick`` took for an organization job; any other
+        request is counted as a phone turn, never refused.
+        """
         event = request["event"]
         context = request["context"]
         thread, turn = context.get("desktop_thread_id", event["thread_id"]), request["turn_id"]
         key = (thread, turn)
+        computer_id = self.computer_id()
         with self._lock:
             if key in self._active:
+                if claimed is not None:
+                    claimed.release()
                 return
             if self._closed.is_set():
+                if claimed is not None:
+                    claimed.release()
                 self._complete(request, "", "backend_stopping")
                 return
             self._active[key] = (request["peer"], event["request_id"])
+            # Your own turn is counted, never refused: ``_tick`` already checked the count
+            # of your own turns. An organization job brings the worker it took.
+            worker = claimed or self.claims.record(computer_id, PHONE, _sender_label(request))
 
         def run(emit: Callable[[dict[str, Any]], None]) -> None:
             async def consume() -> None:
@@ -350,9 +435,15 @@ class DeviceChatBridge:
 
                     factory = remote_source
 
+                account = None
+                if not context.get("machine") and not event.get("payload", {}).get("organization"):
+                    # The thread's own account wins over Rem's setting, as on the desktop.
+                    # A paired desktop running the thread has its own accounts.
+                    account = await asyncio.to_thread(self._turn_account, thread, context, provider)
                 source = self.steering.stream(
                     chat_turn,
                     factory,
+                    **({"provider_profile": account} if account else {}),
                     provider=provider,
                     model=model,
                     messages=messages,
@@ -420,8 +511,12 @@ class DeviceChatBridge:
                     self._active.pop(key, None)
 
         try:
-            self.jobs.start(thread, turn, run)
-        except (ValueError, OSError):
+            # The turn's thread holds the claim and releases it when it ends.
+            self.jobs.start(thread, turn, worker.wrap(run))
+        except BaseException as exc:
+            worker.release()
+            if not isinstance(exc, ValueError | OSError):
+                raise
             with self._lock:
                 self._active.pop(key, None)
             self._complete(request, "", "dispatch_not_started")

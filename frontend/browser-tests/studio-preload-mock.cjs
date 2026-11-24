@@ -2,7 +2,7 @@
 
 // Seed before React mounts: writing this in an active page can race with
 // session persistence and lose the selected project just before reload.
-if (process.env.GOFER_TERMINAL_ONLY === "1") {
+if (process.env.GOFER_TERMINAL_ONLY === "1" || process.env.GOFER_PALETTE_ONLY === "1") {
   window.localStorage.setItem("raticode.studioSession.v1", JSON.stringify({
     projectRoot: "/workspace/current-worktree", view: "code", workflowId: "rattish-editor",
   }));
@@ -50,6 +50,12 @@ window.goferDesktop = {
     return selectedPath;
   },
   workspace: {
+    // Quick open's file list for the open project.
+    listProjectFiles: async (projectRoot) => {
+      recordBridgeCall("workspace.listProjectFiles", projectRoot);
+      return { truncated: false, files: ["src/App.jsx", "src/lib/settings.js", "README.md", "workflows/release/workflow.rattish"]
+        .map((relativePath) => ({ path: `${projectRoot}/${relativePath}`, relativePath })) };
+    },
     copyPath: async (options) => {
       recordBridgeCall("workspace.copyPath", options);
       return true;

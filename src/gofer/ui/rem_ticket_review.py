@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from gofer.ui import organization_landing, ticket_patch
-from gofer.ui.rem_home_landing import INTEGRATION_BRANCH
+from gofer.ui.rem_home_landing import LEGACY_LANDING_BRANCH
 
 ONLY_YOU = "Only you can accept and land a ticket's work."
 
@@ -55,15 +55,19 @@ def run_sources(run: dict[str, Any] | None) -> list[dict[str, Any]]:
             }
         )
     tips = run.get("branch_tips") or {}
+    # The branch the run had to land on; runs from before it was a decision used dev.
+    landing = run.get("landing_branch") or (
+        LEGACY_LANDING_BRANCH if "landing_branch" not in run else None
+    )
     for branch in run.get("work_branches") or []:
         if project and Path(project).is_dir() and ticket_patch.branch_commit(project, branch):
             sources.append(
                 {
                     "branch": branch,
                     "repository": project,
-                    "baseBranch": INTEGRATION_BRANCH,
+                    "baseBranch": landing,
                     "baseBranchGuessed": False,
-                    "base": tips.get(INTEGRATION_BRANCH),
+                    "base": tips.get(landing) if landing else None,
                     "checkout": None,
                 }
             )
@@ -113,7 +117,7 @@ def land_rem(run: dict[str, Any] | None, payload: dict[str, Any], title: str) ->
             )
         tip = current["tip"]
         if current["uncommitted"] and source.get("checkout"):
-            ticket_patch.commit_leftovers(source["checkout"], f"Rem: {title}")
+            ticket_patch.commit_leftovers(source["checkout"], f"Rem: {title}", branch=branch)
             tip = ticket_patch.branch_commit(repository, branch) or tip
         result = ticket_patch.land(
             repository,

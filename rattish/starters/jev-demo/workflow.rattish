@@ -53,6 +53,7 @@ node pick-team:
 
 node refund:
   type: bash-command
+  shell: bash
   command: echo "Refund request (label $LABEL, score $SCORE). A real workflow would start the refund steps here."
   with:
     label: node.wants-refund.output.label
@@ -62,6 +63,7 @@ node refund:
 
 node check-refund-by-hand:
   type: bash-command
+  shell: bash
   command: echo "Maybe a refund request (label $LABEL, score $SCORE is below $SURE_SCORE). A person should check it."
   with:
     label: node.wants-refund.output.label
@@ -72,6 +74,7 @@ node check-refund-by-hand:
 
 node bug-report:
   type: bash-command
+  shell: bash
   command: echo "Not a refund (score $REFUND_SCORE). Bug report for the bugs team (confidence $SCORE)."
   with:
     refund-score: node.wants-refund.output.score
@@ -81,6 +84,7 @@ node bug-report:
 
 node send-to-team:
   type: bash-command
+  shell: bash
   command: echo "Not a refund (score $REFUND_SCORE). Send to the $TEAM team (confidence $SCORE)."
   with:
     refund-score: node.wants-refund.output.score
@@ -91,6 +95,7 @@ node send-to-team:
 
 node pick-team-by-hand:
   type: bash-command
+  shell: bash
   command: echo "Not a refund (score $REFUND_SCORE). Jev leaned to $TEAM but only at $SCORE, so a person should pick the team. Every option - $CHOICES"
   with:
     refund-score: node.wants-refund.output.score

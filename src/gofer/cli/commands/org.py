@@ -31,7 +31,9 @@ app = typer.Typer(
     ),
     no_args_is_help=True,
 )
-employees_app = typer.Typer(help="List workers and hold or release one.", no_args_is_help=True)
+employees_app = typer.Typer(
+    help="List workers, hold or release one, or choose its account.", no_args_is_help=True
+)
 schedule_app = typer.Typer(help="Read or replace the work schedule.", no_args_is_help=True)
 tickets_app = typer.Typer(help="Organization tickets (tasks).", no_args_is_help=True)
 knowledge_app = typer.Typer(help="Shared organization knowledge.", no_args_is_help=True)
@@ -103,6 +105,17 @@ def show_organization(
             f"Projects: {', '.join(config.get('projectRoots') or []) or 'none'}",
             f"Tickets:  {len(runtime.get('tasks') or [])}",
         ]
+        if runtime.get("state") == "running" and runtime.get("placementWait"):
+            lines.append(f"Waiting:  {runtime['placementWait']}")
+            # A paired desktop with room, offered to each waiting ticket; never used unpicked.
+            for task_id, offer in (runtime.get("placementSuggestions") or {}).items():
+                if isinstance(offer, dict) and offer.get("text"):
+                    how = (
+                        f" (Raticode org tickets run-there {organization_id} {task_id})"
+                        if offer.get("pick")
+                        else ""
+                    )
+                    lines.append(f"Ticket {task_id}: {offer['text']}{how}")
         if config.get("mission"):
             lines.append(f"Mission:  {config['mission']}")
         return "\n".join(lines)
@@ -399,6 +412,82 @@ def _hold(paused: bool) -> Any:
 
 employees_app.command("hold")(_hold(True))
 employees_app.command("release")(_hold(False))
+
+
+@employees_app.command("account")
+def employee_account(
+    organization_id: str = typer.Argument(...),
+    employee_id: str = typer.Argument(...),
+    account: str = typer.Argument(
+        ...,
+        help="An account name or ID from `Raticode provider account list`, or 'default' for the "
+        "provider's default sign-in.",
+    ),
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Choose the provider account a worker's turns run as, or 'default'."""
+    current = session("org employees account", output, endpoint, token_file, data_dir)
+
+    def apply(backend: Backend, out: Output) -> dict[str, Any]:
+        org = _read(backend, organization_id)
+        config = dict(org["config"])
+        employees = list(config.get("employees") or [])
+        found = next((e for e in employees if e.get("id") == employee_id), None)
+        if found is None:
+            raise failure(f"Worker '{employee_id}' isn't in this organization", ExitCode.NOT_FOUND)
+        provider = found.get("provider") or "codex"
+        chosen: dict[str, Any] | None = None
+        if account != "default":
+            choices = [
+                a
+                for a in (call(backend, "providers").get("accounts") or [])
+                if a.get("provider") == provider
+            ]
+            chosen = next((a for a in choices if account in {a.get("id"), a.get("name")}), None)
+            if chosen is None:
+                names = ", ".join(str(a.get("name")) for a in choices) or "none"
+                raise failure(
+                    f"'{account}' isn't one of this worker's {provider} accounts ({names}). "
+                    "Add accounts in Settings > Providers.",
+                    ExitCode.NOT_FOUND,
+                )
+        value = chosen["id"] if chosen else None
+        result = {
+            "id": employee_id,
+            "account": value,
+            "accountName": chosen["name"] if chosen else None,
+        }
+        if found.get("account") == value:
+            return {**result, "changed": False}
+        config["employees"] = [
+            {**e, "account": value} if e.get("id") == employee_id else e for e in employees
+        ]
+        name = found.get("name") or employee_id
+        call(
+            backend,
+            "configure",
+            organization_id,
+            config=config,
+            expectedRevision=org["revision"],
+            reason=(
+                f"{name} runs as the account {chosen['name']}, set from the CLI"
+                if chosen
+                else f"{name} uses the default sign-in, set from the CLI"
+            ),
+        )
+        return {**result, "changed": True}
+
+    finish(
+        current,
+        apply,
+        lambda d: (
+            f"{employee_id} runs as {d['accountName'] or 'the default sign-in'}"
+            + ("" if d["changed"] else " (unchanged)")
+        ),
+    )
 
 
 # Work schedule ---------------------------------------------------------------------
@@ -789,6 +878,56 @@ def comment_ticket(
         )
 
     finish(current, comment, lambda d: f"Commented on {ticket_id}.")
+
+
+@tickets_app.command("run-there")
+def run_ticket_there(
+    organization_id: str = typer.Argument(...),
+    ticket_id: str = typer.Argument(...),
+    computer: str | None = typer.Option(
+        None, "--computer", help="The paired desktop's ID; defaults to the suggested one."
+    ),
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Run a waiting ticket on the paired desktop its suggestion names (Run there).
+
+    Only through a fleet execution target the owner already made there for the
+    ticket's worker; without one, the suggestion says what to grant.
+    """
+    current = session("org tickets run-there", output, endpoint, token_file, data_dir)
+    require_user("send a ticket to another computer")
+
+    def pick(backend: Backend, out: Output) -> dict[str, Any]:
+        org = _read(backend, organization_id)
+        offers = (org.get("runtime") or {}).get("placementSuggestions") or {}
+        offer = offers.get(ticket_id)
+        if not isinstance(offer, dict):
+            res.invalid(current, f"No paired desktop has room for ticket {ticket_id} now.")
+        if not offer.get("pick"):
+            res.invalid(current, str(offer.get("grant") or offer.get("text")))
+        call(
+            backend,
+            "run_there",
+            organization_id,
+            taskId=ticket_id,
+            computerId=computer or offer.get("computer_id"),
+        )
+        return {
+            "organizationId": organization_id,
+            "taskId": ticket_id,
+            "computerId": computer or offer.get("computer_id"),
+            "computerName": offer.get("computer_name"),
+            "chosenBy": "user",
+        }
+
+    finish(
+        current,
+        pick,
+        lambda d: f"Ticket {ticket_id} runs on {d.get('computerName') or d.get('computerId')}.",
+    )
 
 
 @tickets_app.command("changes")

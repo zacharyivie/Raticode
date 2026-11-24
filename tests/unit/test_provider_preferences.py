@@ -169,6 +169,7 @@ def test_commit_model_preference_roundtrip_and_validation() -> None:
     assert preferences.commit_message_preference() == {
         **selection,
         "autoCommit": False,
+        "stripCoAuthors": False,
         "template": DEFAULT_COMMIT_MESSAGE_TEMPLATE,
     }
     for invalid in [
@@ -184,6 +185,7 @@ def test_commit_model_preference_roundtrip_and_validation() -> None:
         assert preferences.commit_message_preference() == {
             **selection,
             "autoCommit": False,
+            "stripCoAuthors": False,
             "template": DEFAULT_COMMIT_MESSAGE_TEMPLATE,
         }
     preferences.save_commit_message_preference({"provider": "", "model": ""})
@@ -191,6 +193,7 @@ def test_commit_model_preference_roundtrip_and_validation() -> None:
         "provider": "",
         "model": "",
         "autoCommit": False,
+        "stripCoAuthors": False,
         "template": DEFAULT_COMMIT_MESSAGE_TEMPLATE,
     }
 
@@ -204,6 +207,7 @@ def test_commit_template_migrates_old_preferences_and_preserves_model_selection(
         "provider": "codex",
         "model": "sol",
         "autoCommit": False,
+        "stripCoAuthors": False,
         "template": template,
     }
     preferences.save_commit_message_preference({"provider": "cursor", "model": "auto"})
@@ -217,6 +221,7 @@ def test_commit_template_migrates_old_preferences_and_preserves_model_selection(
         "provider": "cursor",
         "model": "auto",
         "autoCommit": False,
+        "stripCoAuthors": False,
         "template": DEFAULT_COMMIT_MESSAGE_TEMPLATE,
     }
 
@@ -248,3 +253,20 @@ def test_auto_commit_preference_defaults_off_and_requires_boolean() -> None:
     preferences.save_commit_message_preference({"autoCommit": False})
     assert preferences.commit_message_preference()["autoCommit"] is False
     assert preferences.commit_message_preference()["model"] == "sol"
+
+
+def test_remove_co_authors_preference_defaults_off_and_requires_boolean() -> None:
+    assert preferences.commit_message_preference()["stripCoAuthors"] is False
+    assert preferences.strip_co_authors_enabled() is False
+    preferences.save_commit_message_preference({"stripCoAuthors": True})
+    # Other commit settings keep it.
+    preferences.save_commit_message_preference({"autoCommit": True})
+    assert preferences.strip_co_authors_enabled() is True
+    invalid: object
+    for invalid in (None, 0, 1, "true", []):
+        with pytest.raises(ValueError, match="Remove Co-authored-by lines must be a boolean"):
+            preferences.save_commit_message_preference({"stripCoAuthors": invalid})
+        assert preferences.strip_co_authors_enabled() is True
+    preferences.save_commit_message_preference({"stripCoAuthors": False})
+    assert preferences.strip_co_authors_enabled() is False
+    assert preferences.commit_message_preference()["autoCommit"] is True

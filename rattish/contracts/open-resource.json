@@ -3,6 +3,7 @@
   "contract_version": 1,
   "node_type": "open-resource",
   "runtime_handler": "raticode.open_resource",
+  "catalog": {"category": "files", "summary": "Open a file, folder, web address or app", "docs_path": "/docs/nodes/open-resource"},
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",

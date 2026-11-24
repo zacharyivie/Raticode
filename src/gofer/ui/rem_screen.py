@@ -135,6 +135,11 @@ def acts(decision: Any) -> bool:
         or decision.open_projects
         or decision.tickets
         or getattr(decision, "org_approvals", None)
+        or getattr(decision, "objectives", None)
+        or getattr(decision, "decision_requests", None)
+        or getattr(decision, "decision_answers", None)
+        or getattr(decision, "decision_edits", None)
+        or getattr(decision, "plan", None)
         # Asking whether self-work is on, or for its report, changes nothing; the rest do.
         or (
             getattr(decision, "self_work", None)

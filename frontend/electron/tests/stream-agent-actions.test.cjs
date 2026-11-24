@@ -18,6 +18,8 @@ const { createFirefoxEngine, findFirefox } = require("../firefox-engine.cjs");
 const { FirefoxContents } = require("../firefox-contents.cjs");
 const { createAgentBrowserController } = require("../agent-browser.cjs");
 const { remSiteAllowed, sanitizeBrowserPolicy } = require("../browser-policy.cjs");
+const { checkSlowFramePage, createSlowFramePages } = require("./slow-frame-page.cjs");
+const { pageText } = require("./hidden-text-pages.cjs");
 
 function chromeForTesting() {
   const root = path.join(os.homedir(), ".cache", "ms-playwright");
@@ -142,7 +144,8 @@ for (const [name, spec] of Object.entries(ENGINES)) {
       assert.equal(opened.title, "Actions 1");
       assert.deepEqual((await call("tabs")).tabs.map((tab) => tab.tab), [opened.tab]);
       const page = tabs[0].contents;
-      const out = async () => (await call("evaluate", { expression: "document.getElementById('out').textContent" })).result;
+      const value = async (expression) => pageText((await call("evaluate", { expression })).result, base);
+      const out = () => value("document.getElementById('out').textContent");
       let { snapshot } = await call("snapshot");
 
       // Hover reaches the page as real pointer movement.
@@ -158,11 +161,11 @@ for (const [name, spec] of Object.entries(ENGINES)) {
       // Typing, keys with modifiers, and Enter submitting the form.
       const query = ref(snapshot, "textbox", "Query");
       await call("type", { ref: query, text: "hello" });
-      assert.equal((await call("evaluate", { expression: "document.getElementById('q').value" })).result, '"hello"');
+      assert.equal(await value("document.getElementById('q').value"), '"hello"');
       await call("press", { key: "Backspace" });
       await call("press", { key: "Control+a" });
       await call("press", { key: "X" });
-      assert.equal((await call("evaluate", { expression: "document.getElementById('q').value" })).result, '"X"', "Control+a should select the text, so X replaces it");
+      assert.equal(await value("document.getElementById('q').value"), '"X"', "Control+a should select the text, so X replaces it");
       await waitFor(async () => /key:a\+ctrl:true/.test(await out()), `Control+a did not reach the page: ${await out()}`);
       const submitted = await call("type", { ref: query, text: "go", submit: true });
       await waitFor(async () => (await call("tabs")).tabs[0].title === "submitted:go", `Enter did not submit: ${submitted.title}`);
@@ -173,7 +176,7 @@ for (const [name, spec] of Object.entries(ENGINES)) {
       ({ snapshot } = await call("snapshot"));
       assert.deepEqual((await call("select", { ref: ref(snapshot, "combobox", "One"), values: ["blue"] })).selected, ["blue"]);
       assert.deepEqual((await call("select", { ref: ref(snapshot, "listbox", "Many"), values: ["a", "c"] })).selected, ["a", "c"]);
-      assert.equal((await call("evaluate", { expression: "document.getElementById('one').value" })).result, '"blue"');
+      assert.equal(await value("document.getElementById('one').value"), '"blue"');
 
       // Waiting for text to appear and to go.
       await call("click", { ref: ref(snapshot, "button", "Later") });
@@ -233,6 +236,32 @@ for (const [name, spec] of Object.entries(ENGINES)) {
     } finally {
       user.close();
       await (engine.stopAndWait?.() ?? engine.stop());
+      server.close();
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  // Open, a click, and a click to another page each return once the main
+  // document is ready, while a frame on the page never finishes loading.
+  test(`a frame that never finishes doesn't hold up Rem in ${/^[aeiou]/.test(name) ? "an" : "a"} ${name} tab`, skip, async () => {
+    const pages = createSlowFramePages();
+    const server = http.createServer((request, response) => {
+      if (!pages.serve(request, response)) response.writeHead(404).end();
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), `${name}-slow-frame-test-`));
+    const engine = spec.engine(dataDir);
+    const { controller, tabs } = harness(spec, engine);
+    const call = (action, extra = {}) => controller.handle({ agent: "agent-slow-0001", action, ...extra });
+    try {
+      // Start the browser first so its launch isn't counted against open.
+      await engine.ensure();
+      await checkSlowFramePage(call, base, name);
+    } finally {
+      for (const tab of tabs) tab.contents.close();
+      await (engine.stopAndWait?.() ?? engine.stop());
+      pages.stop();
       server.close();
       fs.rmSync(dataDir, { recursive: true, force: true });
     }

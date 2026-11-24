@@ -12,6 +12,8 @@ export const SIDEBAR_PLUGINS = Object.freeze([
   { id: "search", label: "Search", description: "Find and replace text across the project." },
   { id: "source-control", label: "Source control", description: "Changes, branches, worktrees, and history." },
   { id: "kanban", label: "Kanban", description: "Tickets from Rem and every organization in one board." },
+  // `badge` marks a plugin as experimental wherever it is shown, not only in Feature Preview.
+  { id: "posts", label: "Posts", description: "Review, approve and schedule social posts that Rem, tasks and workflows propose. Untested, and it may change.", experimental: true, pane: false, badge: "Experimental" },
   { id: "swarms", label: "Swarms", description: "Agent teams working in the current project.", experimental: true },
   { id: "organizations", label: "Organizations", description: "Rem employees, teams, and their work queues.", experimental: true },
   { id: "second-brain", label: "Second Brain", description: "Notes, reports, and knowledge collections.", experimental: true },
@@ -138,11 +140,11 @@ export const EDITOR_CONTENT = "editor";
 export const BROWSER_CONTENT = "browser";
 // Every workflow's runs in one list. It belongs to no plugin, so it is always available.
 export const WORKFLOW_RUNS_CONTENT = "workflow-runs";
-const WORKSPACE_PLUGIN_IDS = ["rem", "second-brain", "swarms", "organizations", "kanban", BROWSER_CONTENT];
+const WORKSPACE_PLUGIN_IDS = ["rem", "second-brain", "swarms", "organizations", "kanban", "posts", BROWSER_CONTENT];
 // Plugins whose home fills the main area. Clicking one in the activity rail
 // opens it, and clicking File explorer shows the editor's tabs; every other
 // plugin changes only the sidebar.
-const HOME_PLUGIN_IDS = ["rem", "second-brain", "kanban", BROWSER_CONTENT];
+const HOME_PLUGIN_IDS = ["rem", "second-brain", "kanban", "posts", BROWSER_CONTENT];
 
 export function resolveMainContent(pluginSettings, content) {
   // Hiding Browser from the rail keeps web tabs reachable: links, Rem's tabs

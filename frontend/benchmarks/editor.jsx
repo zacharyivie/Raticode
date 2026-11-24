@@ -1,4 +1,4 @@
-import React, { createRef, useState } from 'react';
+import { createRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import CodeWorkspace from '../src/components/CodeWorkspace.jsx';
 import RemAvatar from '../src/components/RemAvatar.jsx';
@@ -17,6 +17,10 @@ window.__editorRef=ref;
 const settings={...DEFAULT_APP_SETTINGS,editor:{...DEFAULT_APP_SETTINGS.editor,minimap:false}};
 function Fixture(){const [active,setActive]=useState(paths[0]);window.__activate=setActive;return <><RemAvatar animated={false}/><div style={{height:650,display:'flex'}}><CodeWorkspace ref={ref} active activePath={active} openPaths={paths} settings={settings} theme="light" onActivePathChange={setActive}/></div></>;}
 createRoot(document.getElementById('root')).render(<Fixture/>);
+// Editor open: from page navigation until the first file's text is on screen, which
+// includes loading Monaco's lazy chunk and creating the editor.
+window.__editorOpenMs = null;
+(function waitForEditor(){const line=document.querySelector('.monaco-editor .view-line');if(line?.textContent.includes('fixture')) window.__editorOpenMs=performance.now();else requestAnimationFrame(waitForEditor);})();
 window.__benchmark = async () => {
  const {loadRattishMonaco}=await import('../src/lib/monaco.js');
  const monaco=loadRattishMonaco();
@@ -34,7 +38,7 @@ window.__benchmark = async () => {
  const blobs=await Promise.all(images.map(i=>fetch(i.currentSrc).then(r=>r.blob())));
  const decodes=[];
  for(let i=0;i<5;i++){const start=performance.now();const bitmaps=await Promise.all(blobs.map(blob=>createImageBitmap(blob)));bitmaps.forEach(bitmap=>bitmap.close());decodes.push(performance.now()-start);}
- return {avatarDecodeMedianMs:decodes.sort((a,b)=>a-b)[2],characters:model.getValueLength(),typing,idleGitCalls,activationGitCalls,heapBytes:performance.memory?.usedJSHeapSize,images:[...document.querySelectorAll('.rem-avatar img')].map(i=>({width:i.naturalWidth,url:i.currentSrc})),saveMatches:true};
+ return {editorOpenMs:window.__editorOpenMs,avatarDecodeMedianMs:decodes.sort((a,b)=>a-b)[2],characters:model.getValueLength(),typing,idleGitCalls,activationGitCalls,heapBytes:performance.memory?.usedJSHeapSize,images:[...document.querySelectorAll('.rem-avatar img')].map(i=>({width:i.naturalWidth,url:i.currentSrc})),saveMatches:true};
 };
 
 window.__splitCheck = async () => {

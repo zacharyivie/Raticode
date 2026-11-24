@@ -18,6 +18,7 @@ import socket
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,10 @@ from gofer.utils.logging import RepeatingFailure
 # listening yet checks sooner, so starting Tailscale after Raticode still works.
 TAILNET_RECHECK = 120
 TAILNET_RETRY = 20
+
+# Seconds between checks of this computer's own local address. The listener follows
+# a new address once two checks in a row agree, so within about half a minute.
+HOST_RECHECK = 15
 
 # Seconds between automatic fleet refreshes. Snapshots stay fresh for sixty.
 FLEET_REFRESH = 30
@@ -75,6 +80,24 @@ def default_device_host(network_enabled: bool) -> str:
     return "127.0.0.1"
 
 
+def address_still_assigned(host: str) -> bool:
+    """Whether ``host`` is still one of this computer's addresses.
+
+    Binding a throwaway socket to it fails with EADDRNOTAVAIL once the address is gone.
+    Any other outcome counts as still assigned, so the listener doesn't move on a guess.
+    """
+    try:
+        family = socket.AF_INET6 if ipaddress.ip_address(host).version == 6 else socket.AF_INET
+    except ValueError:
+        return False
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as probe:
+            probe.bind((host, 0))
+    except OSError as exc:
+        return exc.errno != errno.EADDRNOTAVAIL
+    return True
+
+
 class DeviceControl:
     def __init__(self, directory: Path, *, store: SecretStore | None = None) -> None:
         self.directory = directory / "devices"
@@ -86,8 +109,13 @@ class DeviceControl:
         self.host = os.environ.get("RATICODE_DEVICE_HOST") or default_device_host(
             self.experimental_network
         )
+        # The last address the listener failed to move to, so the failure is logged once.
         self.host_change_noted: str | None = None
         self.host_checked = 0.0
+        # A new address seen once; the listener moves when the next check agrees.
+        self.host_pending: str | None = None
+        # The last time the listener followed the computer to a new address.
+        self.lan_moved: dict[str, Any] | None = None
         self.tailnet_logged: tuple[str, str | None, str | None] | None = None
         self.registry: DeviceRegistry | None = None
         self.invitations: Invitations | None = None
@@ -97,6 +125,10 @@ class DeviceControl:
         self.services: dict[str, Any] = {}
         self.chat_source: Any = None
         self.bridge: Any = None
+        # The UI server's worker claims and this computer's ID, given to the phone
+        # bridge so phone turns are counted with Rem's and organizations' workers.
+        self.worker_claims: Any = None
+        self.computer_id: Any = None
         self.remote_tasks: dict[tuple[str, str], concurrent.futures.Future[str]] = {}
         # The request handler and the background loop both start exchanges.
         self.tasks_lock = threading.Lock()
@@ -162,6 +194,9 @@ class DeviceControl:
                 raise PairingError("device_configuration_invalid")
             if self.registry is not None:
                 return
+            if self.host_detected:
+                # The network may have come up after Raticode started, as at boot.
+                self.host = default_device_host(self.experimental_network)
             registry = DeviceRegistry(
                 self.directory, self.store or OSSecretStore(), initialize=initialize
             )
@@ -254,6 +289,8 @@ class DeviceControl:
                 "dispatch_error": getattr(self.bridge, "error", None),
                 "rem_ready": self.bridge is not None and not getattr(self.bridge, "error", None),
                 "lan_host": self.host if self.listener else None,
+                # Set after the listener followed this computer to a new network.
+                "lan_moved": self.lan_moved if self.listener else None,
                 "grants": self.application.grants() if self.application else [],
                 "workspace_peers": self.application.workspace.enabled() if self.application else [],
                 "remote_control_peers": self.application.remote.enabled()
@@ -451,34 +488,100 @@ class DeviceControl:
             f"; still listening on {self.tailnet_host}" if self.tailnet_host else "",
         )
 
-    def _note_host_change(self) -> None:
-        """Warn when the computer's local address moved away from the listening one.
+    def _host_to_follow(self) -> str | None:
+        """This computer's new local address once two checks agree, otherwise None.
 
-        Phones save the address shown in Paired devices. After a laptop joins another
-        network the listener keeps its old address, so phones on Wi-Fi time out until
-        Raticode restarts. Report that once per new address.
+        Phones and paired desktops use the address the listener has. When a laptop
+        joins another network, or Raticode started before Wi-Fi was up, the listener
+        follows the computer to its new private address instead of waiting for a
+        restart. A fixed ``RATICODE_DEVICE_HOST`` is the user's choice and never moves.
+        Losing the network keeps the old socket, which works again when the address
+        comes back.
         """
         if not (self.host_detected and self.experimental_network and self.listener):
-            return
+            return None
         now = time.monotonic()
-        if now - self.host_checked < 60:
-            return
+        if now - self.host_checked < HOST_RECHECK:
+            return None
         self.host_checked = now
         current = default_device_host(True)
-        if current == self.host or current == "127.0.0.1":
+        if current in (self.host, "127.0.0.1"):
+            self.host_pending = None
             if current == self.host:
                 self.host_change_noted = None
+            return None
+        if current != self.host_pending:
+            # Joining a network can pass through short-lived addresses; check once more.
+            self.host_pending = current
+            return None
+        if self.host != "127.0.0.1" and address_still_assigned(self.host):
+            # The default route moved (a dock's Ethernet, a full-tunnel VPN) but the
+            # address phones saved is still this computer's: keep answering there.
+            self.host_pending = None
+            return None
+        return current
+
+    async def _follow_host(self, host: str) -> None:
+        """Move the Wi-Fi listener to ``host`` on the same port. Runs on the device loop.
+
+        Only the address changes: the port, pairing, pinned identities and limits stay
+        the same, and the listener never holds more than one local address.
+        """
+        listener, port, previous = self.listener, self.port, self.host
+        if listener is None or port is None:
             return
-        if current == self.host_change_noted:
+        try:
+            await listener.move(host, port)
+        except (OSError, PairingError) as exc:
+            if self.host_change_noted != host:
+                self.host_change_noted = host
+                logger.error(
+                    "This computer's local network address changed from %s to %s, but "
+                    "Raticode could not listen for phones there on port %d: %s. It keeps "
+                    "trying; phones on Wi-Fi cannot connect until it succeeds.",
+                    previous,
+                    host,
+                    port,
+                    _failure_name(exc),
+                )
             return
-        self.host_change_noted = current
-        logger.warning(
-            "This computer's local network address changed from %s to %s, but phones are "
-            "still offered %s. Phones on Wi-Fi cannot connect until Raticode restarts.",
-            self.host,
-            current,
-            self.host,
-        )
+        self.host, self.host_pending, self.host_change_noted = host, None, None
+        endpoint = {"host": host, "port": port}
+        if self.application is not None:
+            # As in start(): only another desktop on this machine can use loopback.
+            self.application.lan_endpoint = (
+                None if ipaddress.ip_address(host).is_loopback else endpoint
+            )
+            self.application.listener_endpoint = dict(endpoint)
+        # A detected address is 127.0.0.1 only when the computer had no network.
+        was_local_only = previous == "127.0.0.1"
+        self.lan_moved = {
+            "from": None if was_local_only else previous,
+            "to": host,
+            "at": time.time(),
+        }
+        # Paired desktops learn the new address on the next exchange; start one now.
+        self.fleet_due = True
+        if self.invitations is not None:
+            # A QR code showing the old address can no longer reach this computer.
+            self.invitations.cancel()
+        if was_local_only:
+            logger.info(
+                "This computer joined a local network as %s; listening for phones there on port %d",
+                host,
+                port,
+            )
+        else:
+            logger.warning(
+                "This computer's local network address changed from %s to %s; phones now "
+                "reach Raticode at %s port %d. Phones connected through Tailscale learn the "
+                "new address by themselves; others need it entered in their connection "
+                "settings.",
+                previous,
+                host,
+                host,
+                port,
+            )
 
     def _tailnet_action(self, body: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
@@ -508,9 +611,17 @@ class DeviceControl:
         return self.experimental_network or ipaddress.ip_address(endpoint["host"]).is_loopback
 
     def _dispatch(
-        self, key: tuple[str, str], peer: str, event: dict[str, Any]
+        self,
+        key: tuple[str, str],
+        peer: str,
+        event: dict[str, Any],
+        extra: Callable[[], list[dict[str, Any]]] | None = None,
     ) -> concurrent.futures.Future[str]:
-        """Run one exchange per key. Runs on any thread and never takes ``self.lock``."""
+        """Run one exchange per key. Runs on any thread and never takes ``self.lock``.
+
+        ``extra`` makes requests sent after the answer, before the announcement; it
+        is called only when a new exchange starts.
+        """
         assert self.registry is not None and self.application is not None
         with self.tasks_lock:
             running = self.remote_tasks.get(key)
@@ -526,11 +637,16 @@ class DeviceControl:
                     event,
                     partial(app.remote_result, peer),
                     preface=[app.acknowledgment(peer)],
-                    trailer=[app.advertisement(peer)],
+                    trailer=[*(extra() if extra else []), app.advertisement(peer)],
                 ),
                 self.loop,
             )
             return task
+
+    def _catalog_probe(self, peer: str) -> list[dict[str, Any]]:
+        assert self.application is not None
+        probe = self.application.catalog_probe(peer)
+        return [probe] if probe is not None else []
 
     def _refresh_fleet(
         self, *, force: bool = False, requested: bool = False
@@ -538,7 +654,9 @@ class DeviceControl:
         """Ask paired desktops for their fleet. Never takes ``self.lock``.
 
         The background loop asks each desktop every ``FLEET_REFRESH`` seconds. A
-        status request also asks any desktop without a fresh answer right away.
+        status request also asks any desktop without a fresh answer right away. Each
+        probe also asks for the desktop's catalog with its repository fingerprints,
+        which placement reads (gofer.core.placement_eligibility).
         """
         if self.registry is None or self.application is None:
             return []
@@ -559,7 +677,12 @@ class DeviceControl:
             self.fleet_probed[peer] = now
             try:
                 started.append(
-                    self._dispatch((peer, "fleet"), peer, self.application.fleet_probe(peer))
+                    self._dispatch(
+                        (peer, "fleet"),
+                        peer,
+                        self.application.fleet_probe(peer),
+                        partial(self._catalog_probe, peer),
+                    )
                 )
             except ValueError:
                 continue
@@ -871,7 +994,9 @@ class DeviceControl:
                     ):
                         # Picks up Tailscale starting late or its address changing.
                         self._tailnet_start()
-                    await asyncio.to_thread(self._note_host_change)
+                    moved_to = await asyncio.to_thread(self._host_to_follow)
+                    if moved_to is not None:
+                        await self._follow_host(moved_to)
             except Exception as error:  # noqa: BLE001
                 # Keep retrying and refreshing; one bad tick must not end the loop.
                 failure.failed(error)
@@ -915,13 +1040,27 @@ class DeviceControl:
             desktop.rem.phone_guard = self.application.locks
         desktop.organizations = self.services.get("organizations")
         desktop.usage = self.services.get("usage")
+        desktop.computers = self.services.get("computers")
+        desktop.posts.service = self.services.get("social")
 
     def attach_desktop(
-        self, *, rem: Any = None, organizations: Any = None, usage: Any = None
+        self,
+        *,
+        rem: Any = None,
+        organizations: Any = None,
+        usage: Any = None,
+        social: Any = None,
+        computers: Any = None,
     ) -> None:
-        """Rem, organizations and usage for phones allowed to use Raticode remotely."""
+        """Rem, organizations, usage, posts and computers for phones allowed to use Raticode."""
         with self.lock:
-            self.services.update(rem=rem, organizations=organizations, usage=usage)
+            self.services.update(
+                rem=rem,
+                organizations=organizations,
+                usage=usage,
+                social=social,
+                computers=computers,
+            )
             self._apply_services()
 
     def attach_chat(
@@ -950,6 +1089,10 @@ class DeviceControl:
                 fleet_control=self,
                 **({"source": self.chat_source} if self.chat_source else {}),
             )
+            if self.worker_claims is not None:
+                self.bridge.claims = self.worker_claims
+            if self.computer_id is not None:
+                self.bridge.computer_id = self.computer_id
             self.application.rem_ready = lambda: (
                 self.bridge is not None and self.bridge.error is None
             )

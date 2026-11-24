@@ -147,6 +147,19 @@ function createIpcSecurity({
     return candidate;
   }
 
+  // A local HTML preview's file:// requests: only inside the folder its grant names.
+  // Unlike resolveAllowedPath this never allows Raticode's data folder, and unlike
+  // resolveDesktopPath it does check the grant.
+  function resolveGrantedPath(targetPath, { grantId = "", mustExist = false } = {}) {
+    if (!grantId) throw new Error("No folder grant.");
+    const root = userPaths.get(grantId) || grantedRoots.get(grantId);
+    if (!root) throw new Error("Path grant is invalid or expired.");
+    const candidate = resolveCandidatePath(targetPath, getDataDir());
+    const canonical = mustExist ? realpathExisting(candidate) : realpathForContainment(candidate);
+    if (!isPathInside(canonical, root)) throw new Error("Path is outside the granted folder.");
+    return canonical;
+  }
+
   // Desktop actions run as the user. Resolving their paths must not issue or
   // require the separate grants used by Rem and workflow agents.
   function resolveDesktopPath(targetPath, { mustExist = false } = {}) {
@@ -234,6 +247,7 @@ function createIpcSecurity({
     isUserGrant: (grantId) => userPaths.has(grantId),
     grantPath,
     resolveDesktopPath,
+    resolveGrantedPath,
     resolveAllowedChildPath,
     resolveAllowedPath,
     resolvePickerPath,

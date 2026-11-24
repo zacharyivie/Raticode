@@ -353,16 +353,16 @@ private fun StartPage(browser: BrowserRuntime, client: LiveClient, computer: Des
             }
         }
         if (client.paired) {
-            SectionTitle(computerTitle(computer))
+            BrowserSectionTitle(computerTitle(computer))
             ComputerTabs(browser, client, computer, limit = 4)
             if ((computer?.tabs?.size ?: 0) > 4) TextButton(onClick = onAllTabs, Modifier.padding(horizontal = 8.dp)) { Text("All ${computer!!.tabs.size} computer tabs") }
         }
         if (saved.bookmarks.isNotEmpty()) {
-            SectionTitle("Bookmarks")
+            BrowserSectionTitle("Bookmarks")
             saved.bookmarks.take(8).forEach { b -> PageRow(BrowserRules.title(b.title, b.url), b.url, null) { browser.go(b.url) } }
         }
         if (saved.history.isNotEmpty()) {
-            SectionTitle("Recent")
+            BrowserSectionTitle("Recent")
             saved.history.distinctBy { it.url }.take(6).forEach { v -> PageRow(BrowserRules.title(v.title, v.url), v.url, null) { browser.go(v.url) } }
         }
         Text("${BrowserTabs.CHROMIUM_NAME}: pages load over this phone's own internet connection, not through your computer. Only secure (https) pages open here.",
@@ -371,7 +371,7 @@ private fun StartPage(browser: BrowserRuntime, client: LiveClient, computer: Des
 }
 
 @Composable
-internal fun SectionTitle(text: String) = Text(text, Modifier.padding(start = 16.dp, top = 12.dp, end = 16.dp).semantics { heading() },
+internal fun BrowserSectionTitle(text: String) = Text(text, Modifier.padding(start = 16.dp, top = 12.dp, end = 16.dp).semantics { heading() },
     style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
 
 /**

@@ -1,14 +1,16 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { Activity, AlertCircle, AlertTriangle, ChevronDown, FlaskConical, History, Terminal as TerminalIcon } from "lucide-react";
+import { Activity, AlertCircle, AlertTriangle, ChevronDown, FlaskConical, GitBranch, History, Info, Terminal as TerminalIcon } from "lucide-react";
 
 const RunTimelinePanel = lazy(() => import("./DagCanvas.jsx").then(module => ({ default: module.RunTimelinePanel })));
 import { DEFAULT_APP_SETTINGS, formatKeybinding, matchesCommand, settingBinding } from "../lib/settings.js";
 
 import RunSummary from "./RunSummary.jsx";
+import AskRemButton from "./AskRemButton.jsx";
 import { workflowRunSummary } from "../lib/workflowRuns.js";
 
 const TerminalWorkspace = lazy(() => import("./TerminalWorkspace.jsx"));
 const WorkflowTestsPanel = lazy(() => import("./WorkflowTestsPanel.jsx"));
+const RunChangesPanel = lazy(() => import("./RunChangesPanel.jsx"));
 import { bottomPanelTabForShortcut, clamp } from "../lib/terminalWorkspace.js";
 import { trackPointerDrag } from "../lib/paneResize.js";
 import { bottomPanelStartState, openTerminalTab, terminalInEditor } from "../lib/workspaceLayout.js";
@@ -19,6 +21,7 @@ const PANEL_MAX_HEIGHT = 480;
 
 export default function UnifiedBottomPanel({
   diagnostics = [],
+  onAskRemAboutDiagnostic,
   onRevealDiagnostic,
   onSettingChange,
   projectRoot = "",
@@ -27,6 +30,7 @@ export default function UnifiedBottomPanel({
   timelineProps,
   runsProps = {},
   testsProps = {},
+  changesProps = {},
 }) {
   const [startState] = useState(() => bottomPanelStartState(settings.layout));
   const hasExplicitPanelSelectionRef = useRef(startState.explicit);
@@ -37,6 +41,11 @@ export default function UnifiedBottomPanel({
   const [terminalMounted, setTerminalMounted] = useState(startState.tab === "terminal");
   const [runsMounted, setRunsMounted] = useState(startState.tab === "runs");
   const [testsMounted, setTestsMounted] = useState(startState.tab === "tests");
+  // The Changes tab belongs to a run of a workspace: worktree workflow.
+  const hasChanges = Boolean(changesProps.worktree);
+  useEffect(() => {
+    if (!hasChanges) setActiveTab((current) => current === "changes" ? "timeline" : current);
+  }, [hasChanges]);
   // Settings > Layout can move terminals into an editor tab.
   const editorTerminal = terminalInEditor(settings);
   const [timelineMounted, setTimelineMounted] = useState(false);
@@ -248,6 +257,14 @@ export default function UnifiedBottomPanel({
           {runSummary.unread.length ? <span className="text-brand">· {runSummary.unread.length} unread</span> : null}
           {runSummary.disconnected.length ? <span aria-label="Some run status is out of date" title="Some run status is out of date">!</span> : null}
         </PanelTab>
+        {hasChanges ? <PanelTab
+          active={activeTab === "changes"}
+          icon={GitBranch}
+          label="Changes"
+          onClick={() => handleTabClick("changes")}
+        >
+          {changesProps.worktree.state === "pending" ? <span className="text-brand" title="Changes waiting to be landed or discarded">· to review</span> : null}
+        </PanelTab> : null}
         <PanelTab
           active={activeTab === "tests"}
           icon={FlaskConical}
@@ -274,7 +291,7 @@ export default function UnifiedBottomPanel({
 
       <div className="h-[calc(100%-36px)] min-h-0">
         <div className={activeTab === "problems" ? "h-full" : "hidden"} role="tabpanel">
-          <ProblemsPanel diagnostics={diagnostics} onRevealDiagnostic={onRevealDiagnostic} />
+          <ProblemsPanel diagnostics={diagnostics} onAskRem={onAskRemAboutDiagnostic} onRevealDiagnostic={onRevealDiagnostic} />
         </div>
         <div className={activeTab === "timeline" ? "h-full" : "hidden"} role="tabpanel">
           {timelineMounted ? <Suspense fallback={<p role="status" className="p-3 text-xs">Loading run history...</p>}><RunTimelinePanel {...timelineProps} collapsed={false} embedded height={height - 36} /></Suspense> : null}
@@ -282,6 +299,13 @@ export default function UnifiedBottomPanel({
         {runsMounted ? <div className={activeTab === "runs" ? "h-full" : "hidden"} role="tabpanel" aria-label="Runs">
           <RunSummary {...runsProps} embedded onClose={() => setCollapsed(true)} />
         </div> : null}
+        {hasChanges && activeTab === "changes" && !collapsed ? (
+          <div className="h-full" role="tabpanel" aria-label="Changes">
+            <Suspense fallback={<p role="status" className="p-3 text-xs text-muted">Loading changes...</p>}>
+              <RunChangesPanel {...changesProps} theme={theme} />
+            </Suspense>
+          </div>
+        ) : null}
         {testsMounted ? (
           <div className={activeTab === "tests" ? "h-full" : "hidden"} role="tabpanel" aria-label="Tests">
             <Suspense fallback={<p role="status" className="p-3 text-xs text-muted">Loading tests...</p>}>
@@ -322,7 +346,7 @@ function PanelTab({ active, children, icon: Icon, label, onClick }) {
   );
 }
 
-function ProblemsPanel({ diagnostics, onRevealDiagnostic }) {
+function ProblemsPanel({ diagnostics, onAskRem, onRevealDiagnostic }) {
   if (!diagnostics.length) {
     return (
       <div className="grid h-full place-items-center px-6 text-xs text-muted">
@@ -335,22 +359,30 @@ function ProblemsPanel({ diagnostics, onRevealDiagnostic }) {
     <div className="workflow-scrollbar h-full overflow-y-auto py-1">
       {diagnostics.map((diagnostic, index) => {
         const warning = diagnostic.severity === "warning";
-        const Icon = warning ? AlertTriangle : AlertCircle;
+        // An info note, such as a preflight check that was skipped, isn't a problem to fix.
+        const info = diagnostic.severity === "info";
+        const Icon = info ? Info : warning ? AlertTriangle : AlertCircle;
+        const iconColor = info ? "text-sky-700" : warning ? "text-amber-600" : "text-red-600";
         const line = diagnostic.span?.start?.line ?? 1;
         return (
-          <button
+          <div
             key={`${diagnostic.code}-${diagnostic.span?.start?.offset ?? 0}-${index}`}
-            className="flex w-full items-start gap-2 px-3 py-2 text-left text-[11px] leading-4 transition hover:bg-slate-50"
-            type="button"
-            onClick={() => onRevealDiagnostic?.(diagnostic)}
+            className="group flex w-full items-start gap-2 px-3 text-[11px] leading-4 transition hover:bg-slate-50"
           >
-            <Icon aria-hidden="true" className={`mt-0.5 shrink-0 ${warning ? "text-amber-600" : "text-red-600"}`} size={13} />
-            <span className="min-w-0 flex-1 text-ink">
-              {diagnostic.runtime ? `${diagnostic.nodeId}: ` : ""}{diagnostic.message}
-              {diagnostic.code ? <span className="ml-2 font-mono text-[10px] text-muted">{diagnostic.code}</span> : null}
-            </span>
-            <span className="shrink-0 font-mono text-[10px] text-muted">{diagnostic.runtime ? "Run failure" : `workflow.rattish:${line}`}</span>
-          </button>
+            <button
+              className="flex min-w-0 flex-1 items-start gap-2 py-2 text-left"
+              type="button"
+              onClick={() => onRevealDiagnostic?.(diagnostic)}
+            >
+              <Icon aria-hidden="true" className={`mt-0.5 shrink-0 ${iconColor}`} size={13} />
+              <span className="min-w-0 flex-1 text-ink">
+                {diagnostic.runtime ? `${diagnostic.nodeId}: ` : ""}{diagnostic.message}
+                {diagnostic.code ? <span className="ml-2 font-mono text-[10px] text-muted">{diagnostic.code}</span> : null}
+              </span>
+              <span className="shrink-0 font-mono text-[10px] text-muted">{diagnostic.runtime ? "Run failure" : `workflow.rattish:${line}`}</span>
+            </button>
+            {onAskRem ? <AskRemButton className="my-1.5" label={`Ask Rem about this failure: ${diagnostic.runtime ? `${diagnostic.nodeId}: ` : ""}${diagnostic.code || diagnostic.message}`} onAsk={() => onAskRem(diagnostic)} /> : null}
+          </div>
         );
       })}
     </div>

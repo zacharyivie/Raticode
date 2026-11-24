@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import signal
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Any, cast
@@ -130,6 +132,25 @@ def test_agent_create_prompts_for_required_fields(tmp_path: Path) -> None:
     assert cfg.prompt_path.read_text(encoding="utf-8") == "Prompt from stdin"
 
 
+def test_agent_create_and_edit_refuse_credentials_in_env(tmp_path: Path) -> None:
+    base = ["--data-dir", str(tmp_path), "--name", "Keyed", "--subscription", "codex"]
+    base += ["--working-dir", str(tmp_path), "--prompt", "Hi"]
+    refused = runner.invoke(
+        app, ["agent", "create", *base, "--env", "ANTHROPIC_API_KEY=sk-ant-SECRET"]
+    )
+    assert refused.exit_code == 2, refused.output
+    assert "credential" in refused.output
+    assert not (tmp_path / "keyed.toml").exists()
+
+    created = runner.invoke(app, ["agent", "create", *base, "--env", "LOG_LEVEL=debug"])
+    assert created.exit_code == 0, created.output
+    edited = runner.invoke(
+        app, ["agent", "edit", "keyed", "--data-dir", str(tmp_path), "--env", "GH_TOKEN=x"]
+    )
+    assert edited.exit_code == 2, edited.output
+    assert "GH_TOKEN" not in (tmp_path / "keyed.toml").read_text(encoding="utf-8")
+
+
 def test_agent_create_persists_all_optional_flags(tmp_path: Path) -> None:
     extra_a = tmp_path / "shared-a"
     extra_b = tmp_path / "shared-b"
@@ -162,7 +183,7 @@ def test_agent_create_persists_all_optional_flags(tmp_path: Path) -> None:
             "--extra-path",
             str(extra_b),
             "--env",
-            "API_KEY=secret",
+            "REGION=eu",
             "--env",
             "MODE=test",
             "--data-dir",
@@ -178,7 +199,7 @@ def test_agent_create_persists_all_optional_flags(tmp_path: Path) -> None:
     assert cfg.tools == ["read", "write"]
     assert cfg.mcp_servers == ["fs", "github"]
     assert cfg.extra_paths == [extra_a.resolve(), extra_b.resolve()]
-    assert cfg.env == {"API_KEY": "secret", "MODE": "test"}
+    assert cfg.env == {"REGION": "eu", "MODE": "test"}
 
 
 @pytest.mark.parametrize(
@@ -673,7 +694,7 @@ def test_schedule_background_start_running_and_stale_pid(
     pid_file = data_dir / "scheduler.pid"
     pid_file.write_text("123", encoding="utf-8")
     monkeypatch.setattr(schedule_cmd, "_data_dir", lambda: data_dir)
-    monkeypatch.setattr("gofer.cli.commands.schedule.os.kill", lambda pid, sig: None)
+    monkeypatch.setattr(schedule_cmd, "_is_scheduler", lambda pid: True)
 
     running = runner.invoke(app, ["schedule", "start", "--db", str(tmp_path / "s.db")])
     assert running.exit_code == 1
@@ -690,13 +711,96 @@ def test_schedule_background_start_running_and_stale_pid(
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
-    monkeypatch.setattr("gofer.cli.commands.schedule.os.kill", stale_kill)
+        def wait(self, timeout: float | None = None) -> int:
+            raise subprocess.TimeoutExpired("scheduler", timeout or 0)
+
+    monkeypatch.setattr(schedule_cmd, "_is_scheduler", lambda pid: False)
     monkeypatch.setattr("gofer.cli.commands.schedule.subprocess.Popen", FakePopen)
     stale = runner.invoke(app, ["schedule", "start", "--db", str(tmp_path / "s.db")])
 
     assert stale.exit_code == 0, stale.output
     assert "PID 789" in stale.output
     assert pid_file.read_text(encoding="utf-8") == "789"
+
+
+def test_schedule_background_command_runs_the_packaged_cli_itself(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    db = tmp_path / "s.db"
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    source = schedule_cmd._foreground_command(db)
+    assert source[:3] == [sys.executable, "-m", "gofer.cli.main"]
+
+    # The packaged CLI is one executable that rejects -m (No such option: -m).
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    packaged = schedule_cmd._foreground_command(db)
+    assert packaged == [sys.executable, "schedule", "start", "--foreground", "--db", str(db)]
+
+
+def test_schedule_background_start_reports_a_scheduler_that_exits_at_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(schedule_cmd, "_data_dir", lambda: data_dir)
+
+    class ExitedPopen:
+        pid = 790
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 2
+
+    monkeypatch.setattr("gofer.cli.commands.schedule.subprocess.Popen", ExitedPopen)
+    result = runner.invoke(app, ["schedule", "start", "--db", str(tmp_path / "s.db")])
+
+    assert result.exit_code == 1, result.output
+    assert "stopped right after starting (exit 2)" in result.output
+    assert not (data_dir / "scheduler.pid").exists()
+
+
+@pytest.mark.parametrize("content", ["0", "-1", "not a pid", ""])
+def test_schedule_stop_never_signals_a_process_group_from_a_bad_pid_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, content: str
+) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    pid_file = data_dir / "scheduler.pid"
+    pid_file.write_text(content, encoding="utf-8")
+    monkeypatch.setattr(schedule_cmd, "_data_dir", lambda: data_dir)
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "gofer.cli.commands.schedule.os.kill", lambda pid, sig: killed.append((pid, sig))
+    )
+
+    result = runner.invoke(app, ["schedule", "stop"])
+
+    # os.kill(0, ...) signals this process group and os.kill(-1, ...) every process.
+    assert killed == []
+    assert result.exit_code == 1
+    assert "unreadable" in result.output
+    assert not pid_file.exists()
+
+
+@pytest.mark.skipif(not Path("/proc/self/cmdline").exists(), reason="reads /proc")
+def test_schedule_stop_leaves_a_program_that_reused_the_pid_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(schedule_cmd, "_data_dir", lambda: data_dir)
+    other = subprocess.Popen(["sleep", "30"])
+    try:
+        (data_dir / "scheduler.pid").write_text(str(other.pid), encoding="utf-8")
+        result = runner.invoke(app, ["schedule", "stop"])
+        assert result.exit_code == 0, result.output
+        assert "was not running" in result.output
+        assert other.poll() is None
+    finally:
+        other.kill()
+        other.wait()
 
 
 def test_schedule_stop_missing_running_and_stale(
@@ -713,6 +817,7 @@ def test_schedule_stop_missing_running_and_stale(
 
     killed: list[tuple[int, int]] = []
     pid_file.write_text("111", encoding="utf-8")
+    monkeypatch.setattr(schedule_cmd, "_is_scheduler", lambda pid: True)
     monkeypatch.setattr(
         "gofer.cli.commands.schedule.os.kill",
         lambda pid, sig: killed.append((pid, sig)),

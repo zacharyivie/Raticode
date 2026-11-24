@@ -1,10 +1,11 @@
 [Desktop Entry]
 Name=Raticode
 Comment=Local workflow automation studio
-Exec=raticode %U
+Exec=raticode -- %U
 Terminal=false
 Type=Application
 Icon=raticode
 StartupWMClass=gofer-flow
-Keywords=workflow;automation;agents;raticode;
-Categories=Development;
+Keywords=workflow;automation;agents;raticode;browser;web;
+Categories=Development;Network;WebBrowser;
+MimeType=text/html;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;

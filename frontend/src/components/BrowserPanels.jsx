@@ -218,6 +218,27 @@ export function BlockedPopupsBar({ popups, onOpen, onAllow, onDismiss }) {
   );
 }
 
+// A local HTML preview is offline. A project file that asked for something on
+// the internet offers to load it, remembered for that file; a file another app
+// opened stays offline and runs no scripts.
+export function RemoteContentBar({ remoteContent, external = false, onAllow }) {
+  if (external) {
+    return (
+      <p role="note" data-testid="browser-external-note" className="shrink-0 border-b border-line bg-slate-50 px-3 py-1.5 text-xs text-muted">
+        Opened from another app. Scripts and content from the internet are off for this file.
+      </p>
+    );
+  }
+  if (!remoteContent?.blocked || remoteContent.allowed) return null;
+  return (
+    <div role="status" data-testid="browser-remote-content-bar" className="flex flex-wrap items-center gap-2 border-b border-line bg-slate-50 px-3 py-1.5 text-xs text-ink">
+      <Globe size={13} aria-hidden="true" className="shrink-0 text-muted" />
+      <span className="min-w-0 flex-1">This file asked for content from the internet. Raticode didn&apos;t load it.</span>
+      <button className={BUTTON} type="button" onClick={onAllow}>Load remote content</button>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Page overlays: load errors, certificate interstitial, crashes
 

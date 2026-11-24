@@ -35,6 +35,7 @@ const {
 } = require("../chromium-contents.cjs");
 const { createAgentBrowserController } = require("../agent-browser.cjs");
 const { remSiteAllowed, sanitizeBrowserPolicy } = require("../browser-policy.cjs");
+const { checkHiddenTextPages, pageText, serveHiddenTextPages } = require("./hidden-text-pages.cjs");
 
 function chromeForTesting() {
   const root = path.join(os.homedir(), ".cache", "ms-playwright");
@@ -274,7 +275,7 @@ test("Rem drives Chrome with real input, keeps its site rules and asks for appro
     assert.equal(await read("document.getElementById('out').textContent"), "confirm:true");
 
     const evaluated = await call("evaluate", { expression: "navigator.userActivation.isActive" });
-    assert.equal(evaluated.result, "true");
+    assert.equal(pageText(evaluated.result, base), "true");
     assert.deepEqual(approvals, ["Upload notes.txt", "Run a script on this page"]);
 
     // Site rules: typed addresses and links the page follows.
@@ -298,6 +299,38 @@ test("Rem drives Chrome with real input, keeps its site rules and asks for appro
     assert.ok(shot.image.length > 1000);
     await call("close");
     assert.equal(page.isDestroyed(), true);
+  } finally {
+    await engine.stopAndWait();
+    server.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Rem's Chrome snapshot leaves out text each hiding trick keeps off screen, and labels what it reads as page content", realChrome, async () => {
+  const server = http.createServer((request, response) => {
+    if (!serveHiddenTextPages(request, response)) { response.statusCode = 404; response.end(); }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "chrome-hidden-test-"));
+  const engine = createChromiumEngine(engineOptions(dataDir, { idleShutdownMs: 1000 }));
+  const tabs = [];
+  const controller = createAgentBrowserController({
+    openTab: ({ agent, label }) => {
+      const session = { id: `tab-${tabs.length}`, agent: { id: agent, label, shared: false }, contents: new ChromiumContents({ engine, kind: "rem", nativeImage: fakeImage }), viewSize: null };
+      tabs.push(session);
+      return session;
+    },
+    agentTabs: (agent) => tabs.filter((item) => item.agent.id === agent && !item.contents.isDestroyed()),
+    closeTab: (session) => session.contents.close(),
+    normalizeUrl: (value) => value,
+    policy: () => sanitizeBrowserPolicy({ engine: "chrome", remConfirm: "never" }),
+  });
+  const call = (action, extra = {}) => controller.handle({ agent: "agent-chrome-0002", action, ...extra });
+  try {
+    await call("open", { url: `${base}/hidden/kept` });
+    await checkHiddenTextPages(call, base, "Chrome");
+    await call("close");
   } finally {
     await engine.stopAndWait();
     server.close();

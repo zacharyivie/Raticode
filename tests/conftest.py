@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from gofer.core import command_slots, secrets_folder
+from gofer.core import command_slots, model_lifecycle, secrets_folder
 from gofer.core.agent import AgentResult
 from gofer.core.provider_profiles import ResolvedProviderSettings
 from gofer.subscriptions.base import Subscription
@@ -65,6 +65,52 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 @pytest.fixture(autouse=True)
+def fake_cli_arguments() -> Iterator[None]:
+    """Fake provider CLIs see the arguments their tests expect.
+
+    Codex's credential profile and the bubblewrap mask for unsandboxed providers rewrite
+    the command; test_agent_credentials.py turns both back on with ``credential_guards``.
+    Set and restored directly, so it doesn't change when ``monkeypatch`` is set up.
+    """
+    from gofer.core import codex_sandbox, credential_mask
+
+    codex_sandbox.ENABLED = credential_mask.ENABLED = False
+    try:
+        yield
+    finally:
+        codex_sandbox.ENABLED = credential_mask.ENABLED = True
+
+
+@pytest.fixture(autouse=True)
+def host_independent_worker_room() -> Iterator[None]:
+    """New workers see a computer with free memory and no CPU or memory pressure.
+
+    Every start waits while the host is short of memory (command_slots.memory_hold),
+    and swarm turns and incoming work claim against a limit lowered by the host's
+    pressure (computers.local_room_limit), so a busy test machine would hold workers
+    back. Tests of either set their own readings. Set and restored directly, like
+    ``fake_cli_arguments``.
+    """
+    from gofer.core import command_slots, computers
+
+    hold, pressure = command_slots.memory_hold, computers.local_pressure
+    command_slots.memory_hold = lambda: None
+    computers.local_pressure = lambda: (None, None)
+    try:
+        yield
+    finally:
+        command_slots.memory_hold, computers.local_pressure = hold, pressure
+
+
+@pytest.fixture
+def credential_guards(monkeypatch: pytest.MonkeyPatch) -> None:
+    from gofer.core import codex_sandbox, credential_mask
+
+    monkeypatch.setattr(codex_sandbox, "ENABLED", True)
+    monkeypatch.setattr(credential_mask, "ENABLED", True)
+
+
+@pytest.fixture(autouse=True)
 def isolated_gofer_data_dir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -80,8 +126,10 @@ def isolated_gofer_data_dir(
 
     # Agents run tests from inside Raticode, which exports its own settings such as
     # the phone network opt-in, command slots and UI tokens. Tests set what they need.
+    # Raticode's "remove Co-authored-by lines" setting also arrives as GIT_CONFIG_* git
+    # config, which would rewrite every commit a test makes.
     for name in list(os.environ):
-        if name.startswith(("RATICODE_", "GOFER_")):
+        if name.startswith(("RATICODE_", "GOFER_", "GIT_CONFIG_")) or name == "GIT_CONFIG":
             monkeypatch.delenv(name)
     monkeypatch.setenv("NVM_DIR", str(home / ".nvm"))
     monkeypatch.setenv("HOME", str(home))
@@ -102,6 +150,25 @@ def isolated_gofer_data_dir(
     monkeypatch.setenv(
         "DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/raticode-test-session-bus"
     )
+
+    # Preflight asks Anthropic and OpenAI for their model lists when a key is set. Tests
+    # are offline unless they replace this, and start with nothing remembered.
+    def _offline(request: object) -> object:
+        raise OSError("Tests don't reach provider APIs")
+
+    monkeypatch.setattr(model_lifecycle, "_send", _offline)
+    model_lifecycle.clear_cache()
+    # Preflight checks an account profile's sign-in with the provider's own CLI. Tests
+    # never start a real one: the state is unknown, which passes, unless a test sets it.
+    from gofer.rattish import preflight
+
+    monkeypatch.setattr(preflight, "account_sign_in_state", lambda name, data_dir: None)
+    # Run records name the provider app's version. A real CLI on PATH must not add one,
+    # so tests that check versions turn this on with a fake CLI of their own.
+    from gofer.core import provider_capabilities
+
+    monkeypatch.setattr(provider_capabilities, "APP_VERSION_READS", False)
+    monkeypatch.setattr(provider_capabilities, "_app_versions", {})
 
     # A backend whose data folder is tmp_path puts its trusted tools folder in the
     # base folder that the test's neighbours share (one per pytest-xdist worker).

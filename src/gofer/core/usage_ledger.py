@@ -28,11 +28,28 @@ TOKEN_FIELDS = (
     "cache_write_tokens",
     "reasoning_tokens",
 )
+# Kept per call beside TOKEN_FIELDS but not summed in the history: the part of
+# cache_write_tokens written for an hour, which Anthropic prices higher than five minutes.
+STORED_TOKEN_FIELDS = (*TOKEN_FIELDS, "cache_write_1h_tokens")
 logger = logging.getLogger(__name__)
 
 
 def now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _is_account_profile(name: str, provider: str, data_dir: Path | None) -> bool:
+    """Whether the profile is an account of a provider with an account adapter.
+
+    Each account's turns report its own limits, which choosing by usage reads.
+    """
+    from gofer.core.provider_accounts import account_adapter
+    from gofer.core.provider_profiles import load_provider_profiles
+
+    if account_adapter(provider) is None:
+        return False
+    profile = load_provider_profiles(data_dir).get(name)
+    return bool(profile and profile.account_id and profile.subscription == provider)
 
 
 def profile_usage_identity(name: str, data_dir: Path | None = None) -> str:
@@ -41,13 +58,23 @@ def profile_usage_identity(name: str, data_dir: Path | None = None) -> str:
     profile = load_provider_profiles(data_dir).get(name)
     if profile is None:
         return f"profile:{name}:missing"
+    if profile.account_id:
+        # An account is its folder: changing its model keeps its usage history. Claude
+        # Code accounts keep the "claude-account" prefix they were first recorded with.
+        kind = (
+            "claude-account"
+            if profile.subscription == "claude_code"
+            else f"{profile.subscription}-account"
+        )
+        fingerprint = hashlib.sha256(f"{kind}:{profile.account_id}".encode()).hexdigest()[:16]
+        return f"profile:{name}:{fingerprint}"
     fingerprint = hashlib.sha256(profile.model_dump_json().encode()).hexdigest()[:16]
     return f"profile:{name}:{fingerprint}"
 
 
 # Raised when the ledger's tables, columns, indexes or triggers change, so an open only
 # prepares the file when it is older than this code.
-USAGE_SCHEMA = 1
+USAGE_SCHEMA = 8
 _USAGE_TABLES = (
     "CREATE TABLE IF NOT EXISTS usage_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     """CREATE TABLE IF NOT EXISTS usage_invocations (
@@ -65,6 +92,38 @@ _USAGE_TABLES = (
         observed_at TEXT NOT NULL, windows TEXT NOT NULL,
         PRIMARY KEY(provider, profile, model)
     )""",
+    # Limit alerts already sent: one row per account, window and alert level, kept
+    # until the window resets so a restart doesn't repeat them (gofer.core.usage_alerts).
+    """CREATE TABLE IF NOT EXISTS usage_limit_alerts (
+        account TEXT NOT NULL, window TEXT NOT NULL, threshold INTEGER NOT NULL,
+        resets_at TEXT NOT NULL, percent REAL NOT NULL, alerted_at TEXT NOT NULL,
+        PRIMARY KEY(account, window, threshold)
+    )""",
+    # Every allowance reading that differed from the window's last one, so a card can
+    # chart the window and its pace (gofer.core.usage_allowance_history). Profile is ""
+    # for the provider's own sign-in, else the profile's usage identity.
+    """CREATE TABLE IF NOT EXISTS usage_allowance_history (
+        provider TEXT NOT NULL, profile TEXT NOT NULL, window_id TEXT NOT NULL,
+        used_percent REAL NOT NULL, resets_at TEXT NOT NULL, observed_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS usage_allowance_window ON usage_allowance_history"
+    "(provider, profile, window_id, observed_at)",
+    "CREATE INDEX IF NOT EXISTS usage_allowance_time ON usage_allowance_history(observed_at)",
+    # How big each part of a Rem turn's prompt was: sizes only, never the text
+    # (gofer.core.turn_context). The id is the turn's invocation id, so its tokens are the
+    # usage_invocations row with the same id. ``call`` names the kind of one of Rem's own
+    # tool-free calls; NULL is a thread's turn. ``attempt`` says
+    # why the call was asked (turn_context.ATTEMPTS) and ``failed`` that its answer was
+    # still unusable, so Rem's re-asks can be counted. ``rules_version`` names the call's
+    # fixed rules (turn_context.rules_version), so re-asks can be counted per rules change.
+    """CREATE TABLE IF NOT EXISTS usage_turn_context (
+        id TEXT PRIMARY KEY, thread_id TEXT, run_id TEXT, provider TEXT, model TEXT,
+        observed_at TEXT NOT NULL, resumed INTEGER NOT NULL DEFAULT 0, parts TEXT NOT NULL,
+        call TEXT, attempt TEXT, failed INTEGER NOT NULL DEFAULT 0, rules_version TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS usage_turn_context_thread ON usage_turn_context"
+    "(thread_id, observed_at)",
+    "CREATE INDEX IF NOT EXISTS usage_turn_context_time ON usage_turn_context(observed_at)",
 )
 
 
@@ -84,15 +143,30 @@ def _prepare_usage_db(db: sqlite3.Connection) -> None:
         columns = {row[1] for row in db.execute("PRAGMA table_info(usage_invocations)")}
         # A Rattish run also names the node that made the call, and what the call cost
         # when the provider reported it (NULL is unknown, never zero).
+        # A row for work a paired desktop ran names that computer (``computer_id``); its
+        # calls are counted there, so it stays out of this computer's account totals.
         for column, kind in (
             ("run_id", "TEXT"),
             ("thread_id", "TEXT"),
             ("node_id", "TEXT"),
             ("cost_usd", "REAL"),
+            ("computer_id", "TEXT"),
         ):
             if column not in columns:
                 db.execute(f"ALTER TABLE usage_invocations ADD COLUMN {column} {kind}")
         db.execute("CREATE INDEX IF NOT EXISTS usage_run ON usage_invocations(run_id)")
+        # A ledger from before Rem's own calls were recorded has no call kind column.
+        turn_columns = {row[1] for row in db.execute("PRAGMA table_info(usage_turn_context)")}
+        for column, kind in (
+            ("call", "TEXT"),
+            # Why each of Rem's calls was asked and whether it still failed.
+            ("attempt", "TEXT"),
+            ("failed", "INTEGER NOT NULL DEFAULT 0"),
+            # Which fixed rules each of Rem's calls was sent with.
+            ("rules_version", "TEXT"),
+        ):
+            if column not in turn_columns:
+                db.execute(f"ALTER TABLE usage_turn_context ADD COLUMN {column} {kind}")
         db.execute("INSERT OR IGNORE INTO usage_meta VALUES ('started_at', ?)", (now_iso(),))
         # A replayed invocation updates its row in place, which the newest row doesn't show,
         # so updates are counted for readers that cache totals (ledger_mark).
@@ -133,11 +207,16 @@ def ledger_mark(data_dir: Path | None = None) -> tuple[int, int] | None:
     """
     try:
         with usage_db(data_dir) as db:
-            newest = db.execute("SELECT MAX(rowid) FROM usage_invocations").fetchone()[0]
-            updates = db.execute("SELECT value FROM usage_meta WHERE key='updates'").fetchone()
+            return read_ledger_mark(db)
     except (OSError, sqlite3.Error) as exc:
         logger.warning("Could not read the usage ledger (%s)", type(exc).__name__)
         return None
+
+
+def read_ledger_mark(db: sqlite3.Connection) -> tuple[int, int]:
+    """``ledger_mark`` on a ledger that is already open."""
+    newest = db.execute("SELECT MAX(rowid) FROM usage_invocations").fetchone()[0]
+    updates = db.execute("SELECT value FROM usage_meta WHERE key='updates'").fetchone()
     return int(newest or 0), int(updates[0]) if updates else 0
 
 
@@ -153,8 +232,14 @@ def record_invocation(
     run_id: str | None = None,
     thread_id: str | None = None,
     node_id: str | None = None,
+    computer_id: str | None = None,
 ) -> None:
     """Replace a replayed invocation; new retries must have a new invocation id.
+
+    ``computer_id`` names the paired desktop that ran the work, for the one summary row
+    this computer keeps per Rem task run there (gofer.ui.rem_remote_tasks). That desktop
+    keeps the call-by-call rows under its own account, so the row is left out of this
+    computer's account totals (``LOCAL_ROWS``) and counts only for its run.
 
     ``run_id`` and ``thread_id`` name the Rem or organization run and the chat thread that
     made the call, when there is one. A call made inside a Rattish run's node is tagged
@@ -170,12 +255,14 @@ def record_invocation(
         node_id = observer.node_id
     cost = reported_cost(metadata)
     tokens = ledger_tokens(metadata)
+    recorded_model = served_model(model, metadata)
     try:
         with usage_db(data_dir) as db:
             db.execute(
                 """INSERT INTO usage_invocations (id, provider, profile, model, observed_at,
-                status, tokens, estimated, partial, run_id, thread_id, node_id, cost_usd)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                status, tokens, estimated, partial, run_id, thread_id, node_id, cost_usd,
+                computer_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET tokens=excluded.tokens,
                 status=excluded.status, estimated=excluded.estimated, partial=excluded.partial,
                 cost_usd=excluded.cost_usd,
@@ -186,7 +273,7 @@ def record_invocation(
                     invocation_id,
                     provider,
                     profile,
-                    model,
+                    recorded_model,
                     now_iso(),
                     status,
                     json.dumps(tokens),
@@ -196,11 +283,13 @@ def record_invocation(
                     thread_id or None,
                     node_id or None,
                     cost,
+                    computer_id or None,
                 ),
             )
-            if provider in {"openai_api", "anthropic_api", "claude_code"} and isinstance(
-                metadata.get("quota_windows"), list
-            ):
+            if (
+                provider in {"openai_api", "anthropic_api", "claude_code"}
+                or (profile and _is_account_profile(profile, provider, data_dir))
+            ) and isinstance(metadata.get("quota_windows"), list):
                 windows = []
                 for raw in metadata["quota_windows"]:
                     if not isinstance(raw, dict) or raw.get("unit") not in {
@@ -242,19 +331,17 @@ def record_invocation(
                             observed_at = observed.astimezone(UTC).isoformat()
                     except (ValueError, TypeError):
                         pass
+                    identity = profile_usage_identity(profile, data_dir) if profile else ""
                     db.execute(
                         """INSERT INTO usage_rate_limits VALUES (?, ?, ?, ?, ?)
                         ON CONFLICT(provider, profile, model) DO UPDATE SET
                         observed_at=excluded.observed_at, windows=excluded.windows
                         WHERE excluded.observed_at >= usage_rate_limits.observed_at""",
-                        (
-                            provider,
-                            profile_usage_identity(profile, data_dir) if profile else "",
-                            model or "",
-                            observed_at,
-                            json.dumps(windows),
-                        ),
+                        (provider, identity, model or "", observed_at, json.dumps(windows)),
                     )
+                    from gofer.core.usage_allowance_history import record_allowance_readings
+
+                    record_allowance_readings(db, provider, identity, windows, observed_at)
     except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
         # Accounting must never fail the user's model invocation.
         logger.warning("Could not save provider usage (%s)", type(exc).__name__)
@@ -286,11 +373,26 @@ def record_invocation(
     notify_usage_activity(provider, data_dir)
 
 
+def served_model(model: str | None, metadata: Mapping[str, Any]) -> str | None:
+    """The model to record for a call: the chosen one, or the one the provider reported.
+
+    A call made with ``cli-default`` (or no model) lets the provider's app pick, so the
+    choice alone can't name a list price. When the provider's own output names the model
+    that answered, as Claude Code's does, that name is recorded instead.
+    """
+    if model and model != "cli-default":
+        return model
+    reported = metadata.get("model")
+    if isinstance(reported, str) and reported.strip() and reported.strip() != "cli-default":
+        return reported.strip()[:200]
+    return model
+
+
 def ledger_tokens(metadata: Mapping[str, Any]) -> dict[str, int]:
     """The token counts a provider reported, with a total when input and output are known."""
     tokens = {
         key: value
-        for key in TOKEN_FIELDS
+        for key in STORED_TOKEN_FIELDS
         if isinstance(value := metadata.get(key), int)
         and not isinstance(value, bool)
         and value >= 0
@@ -314,13 +416,28 @@ def reported_cost(metadata: Mapping[str, Any]) -> float | None:
     return None
 
 
+# Calls made on this computer. A summary row for work a paired desktop ran names that
+# computer and is left out of this computer's account totals.
+LOCAL_ROWS = "computer_id IS NULL"
+
+
 def activity_payload(data_dir: Path | None = None, *, days: int = 30) -> dict[str, Any]:
     cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
     with usage_db(data_dir) as db:
         rows = db.execute(
-            "SELECT * FROM usage_invocations WHERE observed_at >= ?", (cutoff,)
+            f"SELECT * FROM usage_invocations WHERE observed_at >= ? AND {LOCAL_ROWS}",
+            (cutoff,),
         ).fetchall()
         started = db.execute("SELECT value FROM usage_meta WHERE key='started_at'").fetchone()[0]
+    return {"tracking_started_at": started, "activity": summarize_calls(rows)}
+
+
+def summarize_calls(rows: Iterable[Any]) -> dict[str, Any]:
+    """Call counts and reported tokens, in total and per provider account.
+
+    Each row needs provider, profile, tokens, estimated and partial. Estimated counts are
+    kept apart, and a token field no call reported stays None rather than 0.
+    """
     groups: dict[tuple[str, str | None], dict[str, Any]] = {}
 
     def empty() -> dict[str, Any]:
@@ -356,11 +473,9 @@ def activity_payload(data_dir: Path | None = None, *, days: int = 30) -> dict[st
                 target["unknown_calls"] += 1
             if not row["estimated"]:
                 for field, value in tokens.items():
-                    target[field] = (target[field] or 0) + value
-    return {
-        "tracking_started_at": started,
-        "activity": {**total, "providers": list(groups.values())},
-    }
+                    if field in target:
+                        target[field] = (target[field] or 0) + value
+    return {**total, "providers": list(groups.values())}
 
 
 def usage_scope(workflow: Any, conversation_id: Any = None) -> dict[str, str | None]:
@@ -472,6 +587,46 @@ def run_usage(run_ids: Iterable[Any], data_dir: Path | None = None) -> dict[str,
     return totals
 
 
+def run_summary(run_id: str, data_dir: Path | None = None) -> dict[str, Any]:
+    """What one run used, as one summary another computer can record.
+
+    Token counts and cost add up the run's reported calls; a field no call reported is
+    left out. ``provider`` and ``model`` are the ones most of its calls used. Empty
+    when the run made no recorded call.
+    """
+    summary: dict[str, Any] = {}
+    try:
+        with usage_db(data_dir) as db:
+            rows = db.execute(
+                "SELECT provider, model, tokens, estimated, cost_usd FROM usage_invocations "
+                "WHERE run_id=? ORDER BY rowid",
+                (run_id,),
+            ).fetchall()
+    except (OSError, sqlite3.Error) as exc:
+        logger.warning("Could not read a run's usage (%s)", type(exc).__name__)
+        return summary
+    if not rows:
+        return summary
+    providers: dict[str, int] = {}
+    models: dict[str, int] = {}
+    for row in rows:
+        providers[row["provider"]] = providers.get(row["provider"], 0) + 1
+        if row["model"]:
+            models[row["model"]] = models.get(row["model"], 0) + 1
+        if row["estimated"]:
+            continue
+        tokens = json.loads(row["tokens"])
+        for key in ("input_tokens", "output_tokens", "total_tokens"):
+            if isinstance(tokens.get(key), int):
+                summary[key] = summary.get(key, 0) + tokens[key]
+        if row["cost_usd"] is not None:
+            summary["cost_usd"] = summary.get("cost_usd", 0.0) + float(row["cost_usd"])
+    summary["provider"] = max(providers, key=lambda name: providers[name])
+    if models:
+        summary["model"] = max(models, key=lambda name: models[name])
+    return summary
+
+
 def organization_ticket_usage(org: dict[str, Any], data_dir: Path) -> dict[str, dict[str, Any]]:
     """Each organization ticket's model use, by task ID.
 
@@ -520,6 +675,105 @@ def run_tokens_since(since: datetime, data_dir: Path | None = None) -> dict[str,
     return totals
 
 
+# The event a chat stream yields once it has built its prompt, with each part's size.
+CONTEXT_SENT = "context_sent"
+
+
+def record_turn_parts(
+    invocation_id: str,
+    event: Mapping[str, Any],
+    *,
+    provider: str,
+    model: Any,
+    data_dir: Path | None,
+    run_id: str | None,
+    thread_id: str | None,
+) -> None:
+    """Save the part sizes a ``context_sent`` event carries. Never fails the turn."""
+    from gofer.core.turn_context import record_turn_context
+
+    parts = event.get("parts")
+    if not isinstance(parts, list):
+        return
+    try:
+        with usage_db(data_dir) as db:
+            record_turn_context(
+                db,
+                invocation_id=invocation_id,
+                parts=[part for part in parts if isinstance(part, dict)],
+                resumed=event.get("resumed") is True,
+                provider=provider,
+                model=model if isinstance(model, str) else None,
+                thread_id=thread_id,
+                run_id=run_id,
+            )
+    except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+        logger.warning("Could not save the turn's context sizes (%s)", type(exc).__name__)
+
+
+def record_rem_call(
+    call: str,
+    prompt: str,
+    system: str,
+    sizes: Mapping[str, int] | None,
+    *,
+    config: Mapping[str, Any],
+    data_dir: Path | None,
+    run_id: str | None = None,
+    attempt: str = "first",
+) -> str | None:
+    """Save the part sizes of one of Rem's own calls (turn_context.rem_call_parts).
+
+    ``attempt`` says why it was asked (turn_context.ATTEMPTS): the first ask, a re-ask for
+    the JSON format, a repair of invalid fields or an ask after a read. The fixed rules
+    are kept only as their version (turn_context.rules_version). Sizes only, never the
+    text, and never fails the call. Returns the record's ID for mark_rem_call_failed,
+    or None when it couldn't be saved. The caller makes the provider call inside
+    usage_context.named_invocation with that ID, so the call's tokens are recorded under
+    it too and its cache use counts per kind (turn_context.standing_parts).
+    """
+    from gofer.core.turn_context import record_turn_context, rem_call_parts, rules_version
+
+    model = config.get("model")
+    invocation_id = uuid.uuid4().hex
+    try:
+        with usage_db(data_dir) as db:
+            record_turn_context(
+                db,
+                invocation_id=invocation_id,
+                parts=rem_call_parts(prompt, system, sizes),
+                resumed=False,
+                provider=str(config.get("provider") or "") or None,
+                model=model if isinstance(model, str) and model != "cli-default" else None,
+                thread_id=None,
+                run_id=run_id,
+                call=call,
+                attempt=attempt,
+                rules_version=rules_version(system),
+            )
+    except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+        logger.warning("Could not save the size of Rem's call (%s)", type(exc).__name__)
+        return None
+    return invocation_id
+
+
+def mark_rem_call_failed(invocation_id: str | None, data_dir: Path | None) -> None:
+    """Mark one of Rem's recorded calls as failed: its answer still couldn't be used.
+
+    Never fails the caller.
+    """
+    if not invocation_id:
+        return
+    try:
+        with usage_db(data_dir) as db:
+            db.execute(
+                "UPDATE usage_turn_context SET failed=1 WHERE id=? AND call IS NOT NULL",
+                (invocation_id,),
+            )
+    except (OSError, sqlite3.Error) as exc:
+        logger.warning("Could not mark Rem's call as failed (%s)", type(exc).__name__)
+
+
 def track_chat_usage(
     function: Callable[P, AsyncGenerator[dict[str, Any], None]],
 ) -> Callable[P, AsyncGenerator[dict[str, Any], None]]:
@@ -548,6 +802,17 @@ def track_chat_usage(
                     }
                     metadata = normalize_usage(provider, event["usage"])
                     metadata = {**quota, **metadata}
+                if event.get("type") == CONTEXT_SENT:
+                    # Sizes for the turn's info; the event stays inside the ledger.
+                    record_turn_parts(
+                        invocation_id,
+                        event,
+                        provider=provider,
+                        model=bound.arguments.get("model"),
+                        data_dir=bound.arguments.get("data_dir"),
+                        **scope,
+                    )
+                    continue
                 if event.get("type") == "final":
                     status = "completed"
                     terminal = True
@@ -571,6 +836,7 @@ def track_chat_usage(
                 record_invocation(
                     invocation_id=invocation_id,
                     provider=provider,
+                    profile=bound.arguments.get("provider_profile") or None,
                     model=bound.arguments.get("model"),
                     metadata=metadata,
                     status=status,

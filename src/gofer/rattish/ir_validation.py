@@ -100,6 +100,25 @@ def copy_validated_ir(ir: ValidatedRattishIR) -> ValidatedRattishIR:
     return ValidatedRattishIR._from_validated(ir)
 
 
+def relocated_ir(
+    ir: ValidatedRattishIR, project_root: str, working_dirs: Mapping[str, str]
+) -> ValidatedRattishIR:
+    """Validated IR whose nodes work in another copy of the project, such as a worktree.
+
+    Only ``source.project_root`` and the named nodes' ``working_dir`` change, so every
+    relative path a node resolves lands in the copy. Nothing else is touched, and the
+    fingerprints stay those of the compiled source.
+    """
+    if not isinstance(ir, ValidatedRattishIR):
+        raise InvalidRattishIrError("Only validated Rattish IR can be relocated.")
+    document = json.loads(json.dumps(ir))
+    document["source"]["project_root"] = project_root
+    for node in document["nodes"]:
+        if node["id"] in working_dirs:
+            node["configuration"]["working_dir"] = working_dirs[node["id"]]
+    return ValidatedRattishIR._from_validated(document)
+
+
 def validate_ir_versions(document: Mapping[str, Any]) -> None:
     """Reject documents whose execution contract is not supported by this runtime."""
     ir_version = document.get("ir_version")

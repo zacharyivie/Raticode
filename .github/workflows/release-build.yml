@@ -158,6 +158,13 @@ jobs:
       - name: Test platform filesystem security
         run: uv run --locked pytest tests/unit/test_atomic_output.py tests/unit/test_native_filesystem_security.py tests/unit/test_resource_security.py tests/unit/test_rattish_workspaces.py tests/unit/test_rattish_process_liveness.py
 
+      # Starter shell steps say shell: bash. On Windows that has to be Git for Windows'
+      # bash (installed on the runner), never the WSL launcher in System32, so the
+      # starters' runs and test sets prove the lookup on a real Windows machine.
+      - name: Check starter workflows on Windows
+        if: runner.os == 'Windows'
+        run: uv run --locked pytest tests/integration/test_starter_workflows.py tests/unit/test_rattish_shells.py -v -s -p no:cacheprovider
+
       - name: Set up Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:

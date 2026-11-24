@@ -30,6 +30,7 @@
     "max_tokens": null,
     "max_cost_usd": null,
     "timeout_ms": 7200000,
+    "workspace": "project",
     "inputs": [],
     "outputs": []
   },
@@ -66,6 +67,7 @@
         "env": {
           "BUILD_MODE": "local"
         },
+        "shell": "auto",
         "command": "echo build"
       },
       "execution": {
@@ -146,7 +148,7 @@
         {
           "id": "shell-available",
           "severity": "error",
-          "description": "The configured Bash runtime must be available."
+          "description": "The selected shell must be available: PowerShell on Windows and bash elsewhere for auto, Git for Windows' bash on Windows for bash, PowerShell for powershell."
         },
         {
           "id": "working-dir-available",

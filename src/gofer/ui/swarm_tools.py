@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from gofer.core.prompt_envelope import add_tool_server_host, remove_tool_server_host
+
 MAX_REQUEST_BYTES = 1024 * 1024
 MCP_JSON_MAX_DEPTH = 64
 REQUEST_READ_DEADLINE_SECONDS = 5.0
@@ -21,6 +23,26 @@ SWARM_FAILURE_HINT = "Retry or ask the orchestrator to inspect it."
 TOOL_FAILURE_HINT = "Try once more; if it fails again, report this error instead of repeating it."
 
 log = logging.getLogger(__name__)
+
+
+def _request_token(path: str, authorization: list[str]) -> str | None:
+    """Read the turn token from the URL path or from one Bearer header.
+
+    Claude Code gets the token in its URL from a private config file. Codex's
+    configuration is on its command line, so it gets a tokenless URL and sends
+    the token as a Bearer header from its own environment. A request may carry
+    the token one way only.
+    """
+    path_token = path.removeprefix("/")
+    if not authorization:
+        return path_token or None
+    if path_token or len(authorization) != 1:
+        return None
+    scheme, _, value = authorization[0].strip().partition(" ")
+    value = value.strip()
+    if scheme.lower() != "bearer" or not value or " " in value:
+        return None
+    return value
 
 
 @dataclass(frozen=True)
@@ -106,8 +128,8 @@ class SwarmToolServer:
                 if host != owner._host or self.headers.get("Origin"):
                     self.respond(403)
                     return
-                grant = owner._grant(self.path)
-                if grant is None:
+                token = _request_token(self.path, self.headers.get_all("Authorization", []))
+                if token is None or (grant := owner._grant(token)) is None:
                     self.respond(401)
                     return
                 if not owner._slots.acquire(blocking=False):
@@ -152,7 +174,7 @@ class SwarmToolServer:
                     # Reading a slow body may outlive the turn or server. Admit
                     # the complete request only while its original grant is live.
                     # Already-dispatched callbacks retain their own state checks.
-                    if owner._grant(self.path) is not grant:
+                    if owner._grant(token) is not grant:
                         self.respond(401)
                         return
                     if "id" not in request:
@@ -189,6 +211,7 @@ class SwarmToolServer:
         self._connection_slots = threading.BoundedSemaphore(16)
         self._server = Server(("127.0.0.1", 0), Handler)
         self._host = f"127.0.0.1:{self._server.server_port}"
+        add_tool_server_host(self._host)
         self._thread = threading.Thread(
             target=self._server.serve_forever,
             kwargs={"poll_interval": 0.1},
@@ -219,9 +242,8 @@ class SwarmToolServer:
         with self._lock:
             self._grants.pop(url.rsplit("/", 1)[-1], None)
 
-    def _grant(self, path: str) -> _Grant | None:
-        token = path.removeprefix("/")
-        if not token.isascii():
+    def _grant(self, token: str) -> _Grant | None:
+        if not token or not token.isascii():
             return None
         with self._lock:
             for candidate, grant in self._grants.items():
@@ -287,6 +309,7 @@ class SwarmToolServer:
                 return
             self._closed = True
             self._grants.clear()
+        remove_tool_server_host(self._host)
         self._server.shutdown()
         self._server.server_close()
         self._thread.join(timeout=2)

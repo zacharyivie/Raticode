@@ -46,6 +46,8 @@ The team view has member conversations and a task board. Send a message to the o
 
 Up to three member turns run at once. Every 60 seconds a check wakes the orchestrator, but only when the board has new activity.
 
+From 0.6.0, each member turn also takes one of this computer's workers, shared with Rem tasks, phone turns and organization workers under its **Worker limit** in Settings › Computers (see [Where work runs](../rem/home.md#where-work-runs)). High CPU or memory pressure lowers how many fit, as it does for every start. When none is free, the assignment stays queued and the run shows *Waiting for a free worker on Studio*, with your computer's name. While the computer is short of memory and a worker already runs there, the turn waits too and the run shows *Waiting for free memory (0.9 GB available)*, the same as a Rem task. It starts as soon as a worker or memory frees up.
+
 Each run has limits, set under **Team setup → Limits and checks**:
 
 | Limit | Default | When reached |

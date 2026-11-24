@@ -20,6 +20,7 @@ workflow:
 
 node collect:
   type: bash-command
+  shell: bash
   command: |
     output=$(bash -c "$REPORT_COMMAND" 2>&1)
     code=$?
@@ -53,6 +54,7 @@ node write-report:
 
 node save-report:
   type: bash-command
+  shell: bash
   command: |
     mkdir -p "$REPORTS_FOLDER" || exit 1
     report="$REPORTS_FOLDER/$(date +%Y-%m-%d).md"

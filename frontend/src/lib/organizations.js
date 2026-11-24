@@ -229,6 +229,7 @@ export function approveAllSummary(results = []) {
 export function runProvenance(attempt = {}) {
   return [
     attempt.provider && `${attempt.provider} · ${attempt.model === "cli-default" ? "provider default" : attempt.model}${attempt.effort ? ` · ${attempt.effort}` : ""}`,
+    attempt.account?.name ? `account ${attempt.account.name}` : attempt.account?.accountId ? attempt.account.why : null,
     attempt.permissionMode,
     attempt.isolation === "worktree" ? "own worktree" : attempt.isolation === "folder" ? "project folder" : null,
     attempt.headCommit && `ended at ${attempt.headCommit.slice(0, 10)}${attempt.uncommittedChanges ? " + uncommitted changes" : ""}`,
@@ -297,7 +298,7 @@ const FIELD_LABELS = {
   employees: "Employees", projects: "Initiatives", projectRoots: "Project folders", teams: "Teams", title: "Title", role: "Role", reportsTo: "Reports to",
   provider: "Provider", model: "Model", effort: "Effort", permissionMode: "Permission mode", resources: "Tools",
   skills: "Skills", paused: "Paused", heartbeatSeconds: "Heartbeat", memory: "Persistent memory",
-  monthlyBudgetUsd: "Monthly budget", monthlyTurnLimit: "Monthly run limit", maxConcurrency: "Concurrent employees",
+  monthlyBudgetUsd: "Monthly budget", monthlyTurnLimit: "Monthly run limit", maxConcurrency: "Workers at once",
   maxTaskTurns: "Runs per task", turnTimeoutSeconds: "Run time limit", monthlyTokenLimit: "Monthly token limit",
   maxChildTasksPerTurn: "Tasks one run can create", maxDelegationDepth: "Delegation depth", workspaceIsolation: "Workspace isolation", blockGitPush: "Block git push", pullBacklog: "Pull from Backlog", remSecondBrain: "Second Brain",
   remReportTheme: "Report theme", packageFiles: "Package files", metadata: "Metadata", owner: "Owner",

@@ -404,6 +404,107 @@ class KanbanTest {
         assertTrue(Kanban.onBoard(marked))
     }
 
+    @Test fun aTicketThatViolatesDecisionsIsMarkedWithItsIdsAndReason() {
+        val reason = "Violates decisions: D-4 (How are workflows written?): it mentions “toml workflows”."
+        val parsed = (DesktopViews.parse(Kanban.BOARD, JSONObject("""{"tickets":[
+            {"ticket_id":"8","scope":"rem","key":"REM-8","title":"TOML","status":"blocked","revision":2,"block_reason":"$reason",
+             "violates_decisions":["D-4","D-7","D-9","D-11"],"violation_reason":"$reason"},
+            {"ticket_id":"9","scope":"rem","key":"REM-9","title":"Docs","status":"todo","revision":1}]}""")) as KanbanBoard).tickets
+        val marked = parsed.first { it.id == "8" }
+        assertEquals(listOf("D-4", "D-7", "D-9", "D-11"), marked.violatesDecisions)
+        assertEquals(reason, marked.violationReason)
+        assertEquals("Violates D-4, D-7, D-9 +1", Kanban.violatesLine(marked))
+        assertEquals(reason, Kanban.blockText(marked))
+        // An older desktop sends no marker: nothing shows.
+        val plain = parsed.first { it.id == "9" }
+        assertTrue(plain.violatesDecisions.isEmpty()); assertEquals("", Kanban.violatesLine(plain))
+    }
+
+    @Test fun aGuardrailTicketCarriesItsTagAndOlderDesktopsSendNone() {
+        val parsed = (DesktopViews.parse(Kanban.BOARD, JSONObject("""{"tickets":[
+            {"ticket_id":"10","scope":"rem","key":"REM-10","title":"Test for the ruff rule","status":"backlog","revision":1,"type":"maintain","tags":["Guardrail"]},
+            {"ticket_id":"11","scope":"rem","key":"REM-11","title":"Docs","status":"todo","revision":1}]}""")) as KanbanBoard).tickets
+        val guarded = parsed.first { it.id == "10" }
+        assertEquals(listOf("Guardrail"), guarded.tags); assertTrue(guarded.guardrail)
+        val plain = parsed.first { it.id == "11" }
+        assertTrue(plain.tags.isEmpty()); assertFalse(plain.guardrail)
+    }
+
+    @Test fun dailyCapIsHiddenFromOlderDesktopsAndSendsOnlyItsPercent() {
+        // This test's desktop answer predates the cap: no row.
+        assertNull(selfWork.settings.dailyCap)
+        assertEquals("", selfWork.state.dailyAllowance)
+        // The parts of a desktop answer with the cap on and no current usage reading.
+        val view = DesktopViews.parse(Kanban.SELF_WORK, JSONObject("""{"settings":{"enabled":true,"max_threads":2,"auto_pull_backlog":false,"idle_minutes":15,
+            "revision":4,"daily_allowance_percent":11},"limits":{"max_threads_min":1,"max_threads_max":16,"daily_allowance_percent_max":100},
+            "state":{"mode":"waiting","detail":"","daily_allowance":{"cap_percent":11,"used_percent":2.5,"available":false,
+            "message":"No current Claude Code usage reading, so self-work starts nothing new. Used today: about 2.5% of 11%."}}}""")) as SelfWorkView
+        assertEquals(11, view.settings.dailyCap)
+        assertEquals(100, view.limits.dailyCapMax)
+        assertTrue(view.state.dailyAllowanceUnknown)
+        assertTrue(view.state.dailyAllowance.startsWith("No current Claude Code usage reading"))
+        assertTrue(Kanban.dailyCapDetail(view).contains("Your own use of that account while it runs counts too"))
+        assertEquals("Off", Kanban.dailyCapLabel(0)); assertEquals("11%", Kanban.dailyCapLabel(11))
+        val params = Kanban.settingsParams(view.settings, dailyCap = 12)
+        assertEquals(12, params.getInt("daily_allowance_percent")); assertEquals(4L, params.getLong("expected_revision"))
+        assertFalse(params.has("max_threads"))
+        assertFalse(Kanban.settingsParams(view.settings, maxThreads = 3).has("daily_allowance_percent"))
+        assertEquals(100, Kanban.settingsParams(view.settings, dailyCap = 250).getInt("daily_allowance_percent"))
+    }
+
+    @Test fun allowanceUseIsOneChoiceAndPaceToResetShowsTheDesktopsLine() {
+        // An older desktop has only the daily cap: no Allowance use choice.
+        assertNull(selfWork.settings.allowanceMode)
+        val view = DesktopViews.parse(Kanban.SELF_WORK, JSONObject("""{"settings":{"enabled":true,"max_threads":2,"auto_pull_backlog":false,"idle_minutes":15,
+            "revision":9,"daily_allowance_percent":0,"rate_limit_percent":80,"allowance_mode":"pace","pace_aim_percent":95,"pace_lead_hours":4},
+            "limits":{"max_threads_min":1,"max_threads_max":16,"daily_allowance_percent_max":100,"pace_aim_percent_min":1,"pace_aim_percent_max":100,"pace_lead_hours_max":24},
+            "state":{"mode":"waiting","detail":"","allowance_pace":{"mode":"pace","state":"ahead","starts":0,
+            "message":"Holding new work: Codex's weekly allowance is 60% used, 3.4% ahead of its pace line (56.6%). Next start around 18:20."}}}""")) as SelfWorkView
+        assertEquals("pace", view.settings.allowanceMode)
+        assertEquals(95, view.settings.paceAim); assertEquals(4, view.settings.paceLead)
+        assertEquals(1, view.limits.paceAimMin); assertEquals(24, view.limits.paceLeadMax)
+        assertTrue(view.state.paceHolding)
+        assertTrue(view.state.allowancePace.startsWith("Holding new work: Codex's weekly allowance is 60% used"))
+        assertEquals(listOf("Off", "Daily cap", "Pace to reset"), Kanban.ALLOWANCE_MODES.map { it.second })
+        assertTrue(Kanban.allowanceDetail("pace").contains("Running work and your own work are never held"))
+        assertEquals("Rate limit use stops self-work at 80%, before the pace aim of 95%.", Kanban.paceRateWarning(view.settings, view.settings.rateLimitPercent))
+        assertNull(Kanban.paceRateWarning(view.settings, 0))
+        val chosen = Kanban.settingsParams(view.settings, allowanceMode = "daily")
+        assertEquals("daily", chosen.getString("allowance_mode")); assertFalse(chosen.has("daily_allowance_percent"))
+        assertFalse(Kanban.settingsParams(view.settings, allowanceMode = "weekly").has("allowance_mode"))
+        assertEquals(100, Kanban.settingsParams(view.settings, paceAim = 120).getInt("pace_aim_percent"))
+        // Any aim from 1 to 100: 50 gives self-work half the week, with no 80% floor.
+        assertEquals(50, Kanban.settingsParams(view.settings, paceAim = 50).getInt("pace_aim_percent"))
+        assertEquals(1, Kanban.settingsParams(view.settings, paceAim = 0).getInt("pace_aim_percent"))
+        val half = DesktopViews.parse(Kanban.SELF_WORK, JSONObject("""{"settings":{"allowance_mode":"pace","pace_aim_percent":50},"limits":{},"state":{}}""")) as SelfWorkView
+        assertEquals(50, half.settings.paceAim); assertEquals(1, half.limits.paceAimMin)
+        assertEquals(24, Kanban.settingsParams(view.settings, paceLead = 30).getInt("pace_lead_hours"))
+        // With room under the line, the line isn't a hold.
+        val room = DesktopViews.parse(Kanban.SELF_WORK, JSONObject("""{"settings":{"allowance_mode":"pace"},"limits":{},
+            "state":{"allowance_pace":{"mode":"pace","state":"room","starts":2,"message":"Pacing Codex's weekly allowance: 40% used, line 48.5%. Up to 2 tasks can start."}}}""")) as SelfWorkView
+        assertFalse(room.state.paceHolding)
+    }
+
+    @Test fun selfWorkAccountsComeFromTheDesktopAndSendOneProvidersChange() {
+        // An older desktop sends no rows, so the phone shows no Accounts group.
+        assertTrue(selfWork.accounts.isEmpty())
+        val view = DesktopViews.parse(Kanban.SELF_WORK, JSONObject("""{"settings":{"enabled":true,"max_threads":2,"auto_pull_backlog":false,"idle_minutes":15,
+            "revision":6,"provider_accounts":{"claude_code":"gone"}},"limits":{"max_threads_min":1,"max_threads_max":16},"state":{"mode":"waiting","detail":""},
+            "accounts":[{"provider":"claude_code","label":"Claude Code","choice":"gone","rem_setting":"auto","rem_setting_label":"Choose by usage","accounts":["home","work"]},
+            {"provider":"","label":"Nameless","choice":"","accounts":[]}]}""")) as SelfWorkView
+        val row = view.accounts.single()
+        assertEquals("Claude Code", row.label); assertEquals(listOf("home", "work"), row.accounts)
+        assertEquals(listOf("" to "Rem’s setting (Choose by usage)", "@default" to "Default sign-in", "auto" to "Choose by usage", "home" to "home",
+            "work" to "work", "gone" to "gone (removed)"), Kanban.accountChoices(row))
+        assertEquals("gone (removed)", Kanban.accountLabel(row))
+        assertEquals("Rem’s setting (Choose by usage)", Kanban.accountLabel(row.copy(choice = "")))
+        val params = Kanban.accountParams(view.settings, "claude_code", "@default")
+        assertEquals(6L, params.getLong("expected_revision"))
+        assertEquals("@default", params.getJSONObject("provider_accounts").getString("claude_code"))
+        assertEquals(1, params.getJSONObject("provider_accounts").length())
+        assertFalse(params.has("max_threads"))
+    }
+
     @Test fun statusSaysWhatRemIsDoing() {
         assertEquals("Working in 2 of 2 threads", Kanban.status(selfWork.copy(state = selfWork.state.copy(threadLimit = 2))))
         assertEquals("2 threads working. 4 to-dos left.", Kanban.status(selfWork.copy(state = selfWork.state.copy(detail = "2 threads working. 4 to-dos left."))))
@@ -546,6 +647,42 @@ class KanbanTest {
         assertEquals("Its window ended", Kanban.periodEnd(period.copy(endedBy = "window")))
         // Self-work off with its switch off: nothing to note.
         assertNull(Kanban.windowNote(view.copy(settings = view.settings.copy(enabled = false))))
+    }
+
+    @Test fun readsWhenSelfWorkStopsAndBuildsTheEditorsParams() {
+        // An older desktop sends no stop: the page offers no stop condition.
+        assertNull(selfWork.stop)
+        val json = JSONObject(selfJson.toString()).put("stop", JSONObject("""{"revision":4,"active":true,
+            "condition":"REM-205 to REM-212 are done","no_later_than":"2026-11-21T05:00:00+00:00",
+            "no_later_than_label":"12:00 AM tomorrow (America/New_York)","timezone":"America/New_York",
+            "label":"Stops when “REM-205 to REM-212 are done”, or at 12:00 AM tomorrow (America/New_York) at the latest",
+            "judgment":{"met":false,"evidence":"REM-210 is still in review.","at":"2026-11-21T01:40:00+00:00","at_label":"8:40 PM today (America/New_York)"},
+            "judging":false,"judge_failed":false,"stopped":null,
+            "last":{"condition":"REM-3 is done","no_later_than":null,"no_later_than_label":"","stopped_by":"done_when","ended_by":"done_when",
+              "ended_at":"2026-11-20T20:00:00+00:00","judgment":{"met":true,"evidence":"REM-3 is done.","at_label":"3:00 PM today"}}}"""))
+        val stop = (DesktopViews.parse(Kanban.SELF_WORK, json) as SelfWorkView).stop!!
+        assertTrue(stop.active); assertEquals(4, stop.revision)
+        assertEquals("REM-205 to REM-212 are done", stop.condition)
+        assertEquals("Last check 8:40 PM today (America/New_York): not met. REM-210 is still in review.", Kanban.stopJudgmentLine(stop))
+        assertEquals("Checking the condition now…", Kanban.stopJudgmentLine(stop.copy(judging = true)))
+        assertEquals("Not checked yet: Rem checks it after each self-work task finishes. The last check failed; Rem tries again in 10 minutes.",
+            Kanban.stopJudgmentLine(stop.copy(judgment = null, judgeFailed = true)))
+        assertEquals("Stopped: “REM-3 is done” was met. REM-3 is done.", Kanban.lastStopLine(stop.last!!))
+        assertEquals("Self-work ended before “REM-3 is done” was met.", Kanban.lastStopLine(stop.last!!.copy(stoppedBy = "")))
+        assertEquals("Its stop condition was met", Kanban.periodEnd(SelfWorkPeriod("p", "", "", "done_when", "", "")))
+        // Save: the condition, a clock time the desktop resolves, and the revision the edit began from.
+        val saved = Kanban.stopParams(stop, "  REM-1 is done ", "23:30", "tomorrow")
+        assertEquals(4, saved.getLong("expected_revision"))
+        assertEquals("REM-1 is done", saved.getString("condition"))
+        assertEquals("""{"time":"23:30","day":"tomorrow"}""", saved.getJSONObject("no_later_than").toString())
+        assertEquals("""{"time":"00:00"}""", Kanban.stopParams(null, "x", "00:00", "").getJSONObject("no_later_than").toString())
+        assertTrue(Kanban.stopParams(null, "x", "", "").isNull("no_later_than"))
+        assertFalse(Kanban.stopParams(null, "x", "", "").has("expected_revision"))
+        assertEquals("both", Kanban.clearStopParams(stop).getString("clear"))
+        assertTrue(Kanban.validClock("7:05")); assertTrue(Kanban.validClock("23:59"))
+        assertFalse(Kanban.validClock("24:00")); assertFalse(Kanban.validClock("7pm"))
+        assertTrue(Kanban.STOP in Kanban.ACTIONS)
+        assertEquals(Kanban.SELF_WORK, DesktopViews.key(Kanban.STOP, JSONObject()))
     }
 
     @Test fun anEmptyScheduleShowsNothing() {

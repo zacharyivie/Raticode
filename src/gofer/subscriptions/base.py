@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import threading
 import time
@@ -18,9 +19,15 @@ from gofer.core.usage_context import LiveCall
 from gofer.subscriptions.usage import track_invocation
 from gofer.utils.process import env_with_executable_on_path, stream_subprocess
 from gofer.utils.protocol import ProtocolLines, ProtocolRecordLimitError, retained_text
+from gofer.utils.terminal_text import plain_terminal_text
 
 # Records that end a provider's turn: Claude Code's result and Codex's turn events.
 TERMINAL_RECORDS = frozenset({"result", "turn.completed", "turn.failed"})
+
+
+# CLI providers with no sandbox Raticode can configure; gofer.core.credential_mask hides
+# Raticode's credential folders from them instead.
+UNSANDBOXED_CLI_PROVIDERS = frozenset({"cursor", "copilot", "opencode", "antigravity", "grok"})
 
 
 class Subscription(ABC):
@@ -114,11 +121,33 @@ class Subscription(ABC):
                 extra_paths or [],
                 provider_settings,
             )
+            from gofer.core.credential_mask import inner_command
+
+            # A Codex command can come back already inside bubblewrap
+            # (codex_sandbox.credential_guard); the CLI's own folder goes on PATH.
+            child_env = env_with_executable_on_path(inner_command(cmd)[0], env)
+            provider_id = str(getattr(self, "provider", ""))
+            if provider_id in {*UNSANDBOXED_CLI_PROVIDERS, "claude_code", "codex"}:
+                from gofer.core.credential_mask import mask_unsandboxed, strict_mcp_args
+
+                step_env = {**os.environ, **(env or {})}
+                if provider_id == "claude_code":
+                    # A Raticode account's .claude.json is writable to earlier turns, so
+                    # its MCP servers aren't started.
+                    cmd = strict_mcp_args(cmd, step_env)
+                # A step with no sandbox of its own (other providers, Claude Code with
+                # sandbox: off, Codex with full access) can't see the credential folders.
+                cmd = mask_unsandboxed(provider_id, cmd, env=step_env)
+            if getattr(self, "provider", None) == "claude_code":
+                from gofer.core.commit_attribution import count_hook_environment
+
+                # Remove Co-authored-by lines survives Claude Code's sandbox this way.
+                child_env.update(count_hook_environment({**os.environ, **child_env}))
             source = stream_subprocess(
                 cmd,
                 cancel_event=live.cancel_event,
                 cwd=working_dir,
-                env=env_with_executable_on_path(cmd[0], env),
+                env=child_env,
                 timeout=timeout,
                 max_output_bytes=(
                     max_output_bytes
@@ -182,8 +211,8 @@ class Subscription(ABC):
         message = (
             (live.stop_message() if live.stopped else None)
             or (protocol_error if local_limit_error else None)
-            or provider_error
-            or (stderr.strip() if returncode else None)
+            or (plain_terminal_text(provider_error).strip() if provider_error else None)
+            or (plain_terminal_text(stderr).strip() if returncode else None)
             or protocol_error
             or final_message
             or message

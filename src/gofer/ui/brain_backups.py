@@ -2,14 +2,18 @@
 
 A backup is the existing complete-brain package written to a folder outside the
 brain, checked with the package verifier after it is saved, and pruned to the last
-few copies. Settings and results live on the brain's local record, never in the
-portable ``.raticode/brain.json``, because the folder is a path on this computer.
+few copies plus the newest copy of each recent week and month. A copy much smaller
+than the last verified one is kept without pruning anything, so an emptied or
+unmounted brain folder can never rotate out the last good copy. Settings and
+results live on the brain's local record, never in the portable
+``.raticode/brain.json``, because the folder is a path on this computer.
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
+import secrets
 import time
 import zipfile
 from datetime import UTC, datetime, timedelta
@@ -17,6 +21,8 @@ from pathlib import Path
 from typing import Any
 
 from gofer.ui.brain_documents import checked_archive
+from gofer.utils.atomic_output import atomic_binary_output
+from gofer.utils.drive_format import write_error_message
 
 FREQUENCIES = ("daily", "weekly")
 MAX_KEEP = 60
@@ -35,14 +41,25 @@ FIELDS = set(DEFAULT_BACKUP)
 # The name slug is for people; the tag (from the brain's ID) is what ties a file to its
 # brain, so copies made before a rename are still pruned afterwards.
 NAME = re.compile(r"(?:.*-)?(?P<tag>[0-9a-f]{8})-backup-(?P<stamp>\d{8}-\d{6})Z\.zip")
-# Unfinished files a killed backup can leave: export_package's staging file and
-# atomic_binary_output's publication file.
+# Unfinished files a killed backup can leave: export_package's staging file,
+# atomic_binary_output's publication file, and the folder check's probe file.
 PARTIAL = re.compile(
     r"\.raticode-export-[A-Za-z0-9_]+\.zip\.partial"
     r"|\.(?:.*-)?[0-9a-f]{8}-backup-\d{8}-\d{6}Z\.zip\.[0-9a-f]{32}\.tmp"
+    r"|\.?\.raticode-backup-probe-[0-9a-f]{16}(?:\.[0-9a-f]{32}\.tmp)?"
 )
 # A file still being written is touched constantly; anything idle this long is abandoned.
 PARTIAL_AGE = 60 * 60
+# Besides the last ``keep`` copies, the newest copy of each of this many recent weeks
+# and months that have one is kept.
+KEEP_WEEKS = 4
+KEEP_MONTHS = 3
+# A new copy holding less than this share of the last verified copy's files, documents
+# or bytes is kept, and nothing is pruned, until the user accepts the smaller size.
+SHRINK_RATIO = 0.5
+# The counts compared, as (key on the backup record, word people read).
+COUNTS = (("files", "files"), ("documents", "documents"), ("size", "bytes"))
+KEPT_SMALLER = "kept, much smaller than the last backup"
 
 
 def format_size(size: int) -> str:
@@ -96,6 +113,25 @@ def validate_backup(settings: Any, root: Path) -> dict[str, Any]:
     return merged
 
 
+def probe_folder(folder: Path) -> None:
+    """Write and delete a small file the way a backup publishes, so problems show now.
+
+    Raises ValueError with a message that names the drive format. A folder that isn't
+    there yet is left alone: the backup creates it, and creating it now could put it
+    on the computer's own disk while a backup drive is unplugged.
+    """
+    if not folder.is_dir():
+        return
+    probe = folder / f".raticode-backup-probe-{secrets.token_hex(8)}"
+    try:
+        with atomic_binary_output(probe, exclusive=True) as output:
+            output.write(b"Raticode checks that backups can be written here.\n")
+        probe.unlink()
+    except OSError as exc:
+        probe.unlink(missing_ok=True)
+        raise ValueError(write_error_message(exc, folder)) from exc
+
+
 def brain_tag(brain: dict[str, Any]) -> str:
     """Short tag from the brain's ID: it ties backup files to one brain across renames."""
     return hashlib.sha256(str(brain["id"]).encode()).hexdigest()[:8]
@@ -147,13 +183,62 @@ def clean_partials(folder: Path, now: float | None = None) -> list[str]:
     return removed
 
 
+def backup_time(path: Path) -> datetime | None:
+    """When a backup file was made, from the UTC time in its name."""
+    match = NAME.fullmatch(path.name)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match["stamp"], "%Y%m%d-%H%M%S").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def retained(paths: list[Path], keep: int, newest: Path) -> set[Path]:
+    """The copies some retention tier claims, from ``paths`` sorted newest first.
+
+    ``newest`` (the copy just verified) and the ``keep - 1`` newest others always stay.
+    So does the newest copy from each of the last ``KEEP_WEEKS`` calendar weeks and
+    ``KEEP_MONTHS`` calendar months, counted back from ``newest``, so a run of bad days
+    can't push out every older copy. Weeks (Monday to Sunday) and months follow this
+    computer's local calendar, like the schedule.
+    """
+    claimed = {newest}
+    claimed.update([path for path in paths if path != newest][: max(keep - 1, 0)])
+    anchor = (backup_time(newest) or datetime.now(UTC)).astimezone()
+    monday = anchor.date() - timedelta(days=anchor.weekday())
+    weeks = {(monday - timedelta(weeks=n)).isocalendar()[:2] for n in range(KEEP_WEEKS)}
+    months = {
+        ((anchor.year * 12 + anchor.month - 1 - n) // 12, (anchor.month - 1 - n) % 12 + 1)
+        for n in range(KEEP_MONTHS)
+    }
+    seen_weeks: set[tuple[int, int]] = set()
+    seen_months: set[tuple[int, int]] = set()
+    for path in paths:
+        made = backup_time(path)
+        if made is None:
+            # A name the pattern matched but no real time: never guess, keep it.
+            claimed.add(path)
+            continue
+        local = made.astimezone()
+        week = local.isocalendar()[:2]
+        if week in weeks and week not in seen_weeks:
+            seen_weeks.add(week)
+            claimed.add(path)
+        month = (local.year, local.month)
+        if month in months and month not in seen_months:
+            seen_months.add(month)
+            claimed.add(path)
+    return claimed
+
+
 def prune(folder: Path, brain: dict[str, Any], keep: int, newest: Path) -> list[str]:
-    """Delete this brain's older backups beyond ``keep``, never the one just verified."""
+    """Delete this brain's backups that no retention tier claims, never the one just verified."""
     removed = []
-    kept = 0
-    for path in existing_backups(folder, brain):
-        if path == newest or kept < keep - 1:
-            kept += path != newest
+    paths = existing_backups(folder, brain)
+    claimed = retained(paths, keep, newest)
+    for path in paths:
+        if path in claimed:
             continue
         try:
             path.unlink()
@@ -174,6 +259,57 @@ def verify_package(path: Path) -> dict[str, Any]:
         "files": len(manifest["files"]),
         "documents": len(manifest["library"].get("documents", [])),
         "expanded": sum(entry.file_size for entry in entries),
+    }
+
+
+def smaller_counts(new: dict[str, Any], last: dict[str, Any] | None) -> list[str]:
+    """Which of files, documents and bytes fell below half of the last verified copy's.
+
+    Returns the words people read, such as ``["files", "bytes"]``; empty when the new
+    copy is about as large or larger, or when there is nothing to compare with.
+    """
+    if not last:
+        return []
+    smaller = []
+    for key, word in COUNTS:
+        before, after = last.get(key), new.get(key)
+        if not isinstance(before, int) or not isinstance(after, int) or before <= 0:
+            continue  # Older records may lack a count; never block on a missing one.
+        if after < before * SHRINK_RATIO:
+            smaller.append(word)
+    return smaller
+
+
+def count_summary(record: dict[str, Any]) -> str:
+    """A backup's files, documents and bytes, as people read them."""
+    return (
+        f"{int(record.get('files') or 0):,} files, "
+        f"{int(record.get('documents') or 0):,} documents, "
+        f"{format_size(int(record.get('size') or 0))}"
+    )
+
+
+def backup_health(brain: dict[str, Any]) -> dict[str, Any] | None:
+    """The Library health problem for a backup kept because it was much smaller, if any."""
+    status = brain.get("backupStatus") or {}
+    attempt = status.get("lastAttempt") or {}
+    if attempt.get("state") != "kept":
+        return None
+    last = status.get("lastVerified") or {}
+    key = f"backup:{brain['id']}:{attempt.get('at', '')}"
+    return {
+        "id": hashlib.sha256(key.encode()).hexdigest()[:24],
+        "kind": "backup",
+        "brainId": brain["id"],
+        "path": str(attempt.get("path", "")),
+        "detail": (
+            f"The last backup was {KEPT_SMALLER}: it holds {count_summary(attempt)}, "
+            f"and the last full backup holds {count_summary(last)}. "
+            "No older copies were removed."
+        ),
+        "newest": {key: attempt.get(key) for key, _ in COUNTS},
+        "lastVerified": {key: last.get(key) for key, _ in COUNTS},
+        "fix": "Open backup settings",
     }
 
 
@@ -209,6 +345,12 @@ def backup_warning(brain: dict[str, Any], moment: datetime) -> str:
     """Why the settings page should warn about backups, or an empty string."""
     status = brain.get("backupStatus") or {}
     settings = backup_settings(brain)
+    attempt = status.get("lastAttempt") or {}
+    if attempt.get("state") == "kept":
+        return (
+            "The last backup was much smaller than the last full backup, "
+            "so no older copies were removed."
+        )
     verified = _parse((status.get("lastVerified") or {}).get("at"))
     if verified is not None:
         age = moment - verified

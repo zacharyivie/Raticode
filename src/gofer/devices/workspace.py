@@ -472,6 +472,7 @@ class DeviceWorkspace:
                     {
                         "effort": context.get("effort"),
                         "permissionsByProvider": context.get("provider_permissions", {}),
+                        "accountsByProvider": context.get("provider_accounts", {}),
                         "projectRoot": context.get("project_path")
                         if context.get("project_id")
                         else "",
@@ -617,29 +618,65 @@ class DeviceWorkspace:
             (self.app._encode(peer, context), peer, thread),
         )
 
-    def catalog(self, peer: str) -> dict[str, Any]:
+    def catalog(self, peer: str, fingerprints: bool = False) -> dict[str, Any]:
+        """The projects and providers this peer's grants cover; never a path.
+
+        With ``fingerprints`` (a paired desktop asks, gofer.devices.application) each
+        project also has its repository fingerprint, or null when its folder isn't a
+        git repository, and the providers are only those the grants allow. A project
+        whose folder is still being read has no fingerprint field yet. Phones never
+        ask, so their answer keeps the shared schema.
+        """
+        from gofer.core import repository_fingerprint
+
         self.refresh_providers()
-        projects = {}
+        projects: dict[str, dict[str, Any]] = {}
+        roots: dict[str, str] = {}
+        allowed: set[str] = set()
         for row in self.db.execute("SELECT context FROM device_grants WHERE peer=?", (peer,)):
             context = self.app._decode(peer, row[0])
             for project in context.get("projects", []):
                 projects[project["id"]] = {"id": project["id"], "name": project["name"][:160]}
+                if project.get("root"):
+                    roots[project["id"]] = project["root"]
             if context.get("project_id"):
                 projects[context["project_id"]] = {
                     "id": context["project_id"],
                     "name": context.get("project_name", context.get("title", "Project"))[:160],
                 }
+                if context.get("project_path"):
+                    roots[context["project_id"]] = context["project_path"]
+            permissions = context.get("provider_permissions")
+            if isinstance(permissions, dict):
+                allowed.update(str(p) for p in permissions)
+            elif context.get("provider"):
+                allowed.add(str(context["provider"]))
+        listed = list(projects.values())[:100]
+        providers = self.providers
+        if fingerprints:
+            for project in listed:
+                value = repository_fingerprint.known(roots.get(project["id"]))
+                if value != repository_fingerprint.PENDING:
+                    project["fingerprint"] = value
+            capable = {p["id"]: p for p in self.providers}
+            providers = [capable.get(p, {"id": p, "models": []}) for p in sorted(allowed)][:32]
         return {
             "revision": 1,
-            "projects": list(projects.values())[:100],
+            "projects": listed,
             "resources": [],
-            "providers": self.providers,
+            "providers": providers,
         }
 
     def handle(self, peer: str, event: dict[str, Any]) -> list[dict[str, Any]] | None:
         kind, payload, thread = event["type"], event["payload"], event["thread_id"]
         if kind == "catalog.request":
-            return [self.app._emit(peer, event, "catalog.snapshot", self.catalog(peer))]
+            # Only desktops ask for fingerprints; a phone's answer keeps the shared schema.
+            asked = (
+                payload.get("fingerprints") is True
+                and self.app.registry._row(peer)["role"] == "desktop"
+            )
+            snapshot = self.catalog(peer, fingerprints=asked)
+            return [self.app._emit(peer, event, "catalog.snapshot", snapshot)]
         if kind == "thread.search.request":
             return [
                 self.app._emit(peer, event, "thread.search.snapshot", self.search(peer, payload))
@@ -875,8 +912,16 @@ class DeviceWorkspace:
             except ValueError:
                 raise ValueError("This provider does not support that permission mode.")
         permissions = {**permissions, provider: mode}
+        accounts = dict(context.get("provider_accounts") or {})
+        if "account" in payload:
+            # The phone's Account menu: "" follows Rem's setting, "@default" is the
+            # default sign-in, anything else names one of the provider's accounts.
+            accounts = self.thread_account_choice(
+                accounts, provider, payload["account"], getattr(self.app.remote, "data_dir", None)
+            )
         context = {
             **context,
+            "provider_accounts": accounts,
             "provider_permissions": permissions,
             "effort": effort,
             "provider": provider,
@@ -885,6 +930,28 @@ class DeviceWorkspace:
             "revision": context.get("revision", 1) + 1,
         }
         return context
+
+    @staticmethod
+    def thread_account_choice(
+        accounts: dict[str, str], provider: str, choice: Any, data_dir: Any = None
+    ) -> dict[str, str]:
+        from gofer.core.provider_accounts import NEEDS_SIGN_IN, account_status, list_accounts
+        from gofer.ui.rem_provider_accounts import DEFAULT_SIGN_IN, valid_thread_choice
+
+        if not valid_thread_choice(choice):
+            raise ValueError("Choose an account from the list.")
+        if choice in {"", DEFAULT_SIGN_IN}:
+            pass
+        else:
+            found = list_accounts(data_dir, provider).get(choice)
+            if found is None:
+                raise ValueError("This account is no longer on desktop. Refresh and choose again.")
+            if account_status(found, data_dir=data_dir).get("state") == NEEDS_SIGN_IN:
+                raise ValueError("Sign in to this account on desktop first.")
+        accounts = {k: v for k, v in accounts.items() if k != provider}
+        if choice:
+            accounts[provider] = choice
+        return accounts
 
     def details(
         self,

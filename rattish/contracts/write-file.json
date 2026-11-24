@@ -3,6 +3,7 @@
   "contract_version": 1,
   "node_type": "write-file",
   "runtime_handler": "raticode.write_file",
+  "catalog": {"category": "files", "summary": "Create, replace or append to a text file", "docs_path": "/docs/nodes/write-file"},
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",

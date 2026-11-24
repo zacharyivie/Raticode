@@ -35,13 +35,90 @@ logger = logging.getLogger(__name__)
 _SCHEMA = json.loads((Path(__file__).parent / "protocol/v2/event.schema.json").read_text())
 
 
+_LOAD_READING = {
+    "type": "object",
+    "properties": {
+        "max_threads": {"type": "integer", "minimum": 1, "maximum": 16},
+        "running_threads": {"type": "integer", "minimum": 0, "maximum": 1000},
+        "cpu_pressure": {
+            "oneOf": [{"type": "number", "minimum": 0, "maximum": 100}, {"type": "null"}]
+        },
+        "memory_pressure": {
+            "oneOf": [{"type": "number", "minimum": 0, "maximum": 100}, {"type": "null"}]
+        },
+        # Sent only to a desktop that asked with ``memory_hold: true`` (see _desktop_schema).
+        "memory_hold": {
+            "oneOf": [{"type": "string", "minLength": 1, "maxLength": 80}, {"type": "null"}]
+        },
+        # Sent only to a desktop that asked with ``running_by_kind: true``: counts only,
+        # never what the workers are.
+        "running_by_kind": {
+            "type": "object",
+            "properties": {
+                kind: {"type": "integer", "minimum": 0, "maximum": 1000}
+                for kind in ("rem", "phone", "organizations", "swarms")
+            },
+            "additionalProperties": False,
+        },
+    },
+    "required": ["max_threads", "running_threads", "cpu_pressure", "memory_pressure"],
+    "additionalProperties": False,
+}
+
+
+# A project's repository fingerprint (gofer.core.repository_fingerprint), or null when
+# its folder isn't a git repository. Never a path.
+_FINGERPRINT = {"oneOf": [{"type": "string", "pattern": "^[0-9a-f]{64}$"}, {"type": "null"}]}
+# How long a paired desktop's catalog answer counts for placement; it is asked every
+# FLEET_REFRESH (30 s) seconds with the fleet status.
+CATALOG_FRESH = 120.0
+# How long before asking again a desktop that refused the fingerprint request.
+CATALOG_RETRY = 600.0
+
+
 def _desktop_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Desktop-only fleet extension: a paired desktop announces its own listener.
 
     It is sent last in a session, after the answer arrives, so an older desktop
     that rejects the field still answers the request first.
+
+    An announcement with ``load: true`` also asks for the answering desktop's own
+    worker limit, running workers and pressure (gofer.core.computers), which it adds
+    as ``load`` to its own entry in the fleet.snapshot reply. Only desktops send
+    announcements, so phones never receive the field, and an older desktop that
+    refuses ``load`` is sent plain announcements from then on.
+
+    With ``memory_hold: true`` as well, the reading also carries ``memory_hold``: why
+    the answering desktop is short of memory with a worker running (such as "0.9 GB
+    available"), or null, so a held desktop gets none of the asker's work. A desktop
+    asked without it never sends the field, as an older asker's schema has none. A
+    desktop that refuses ``memory_hold`` (one from before it) is asked for ``load``
+    alone from then on, and if it refuses that too, sent plain announcements.
+
+    With ``running_by_kind: true`` as well, the reading also counts its running workers
+    by kind (rem, phone, organizations, swarms), never naming them, for Settings ›
+    Computers. A desktop asked without it never sends the field. A desktop that refuses
+    it (one from before it) is asked for ``load`` and ``memory_hold`` from then on.
+
+    A catalog.request with ``fingerprints: true`` asks for each project's repository
+    fingerprint, which the answer adds as ``fingerprint`` to each catalog project, so
+    placement can match a project here to the same repository there
+    (gofer.core.placement_eligibility). Only desktops ask, and only desktops get the
+    field. An older desktop refuses the request, and is listed as needing an update.
     """
     for rule in schema["allOf"]:
+        kind = rule.get("if", {}).get("properties", {}).get("type", {}).get("const")
+        if kind == "catalog.request":
+            rule["then"]["properties"]["payload"]["properties"]["fingerprints"] = {"const": True}
+        if kind == "catalog.snapshot":
+            projects = rule["then"]["properties"]["payload"]["properties"]["projects"]
+            projects["items"]["properties"]["fingerprint"] = _FINGERPRINT
+        if (
+            rule.get("if", {}).get("properties", {}).get("type", {}).get("const")
+            == "fleet.snapshot"
+        ):
+            devices = rule["then"]["properties"]["payload"]["properties"]["devices"]
+            devices["items"]["properties"]["load"] = _LOAD_READING
         if rule.get("if", {}).get("properties", {}).get("type", {}).get("const") == "fleet.request":
             rule["then"]["properties"]["payload"]["properties"]["advertise"] = {
                 "type": "object",
@@ -65,10 +142,15 @@ def _desktop_schema(schema: dict[str, Any]) -> dict[str, Any]:
                 "required": ["name", "lan_endpoint"],
                 "additionalProperties": False,
             }
+            advertised = rule["then"]["properties"]["payload"]["properties"]["advertise"]
+            advertised["properties"]["load"] = {"const": True}
+            advertised["properties"]["memory_hold"] = {"const": True}
+            advertised["properties"]["running_by_kind"] = {"const": True}
     return schema
 
 
 _VALIDATOR = Draft202012Validator(_desktop_schema(event_schema(_SCHEMA)))
+_LOAD_VALIDATOR = Draft202012Validator(_LOAD_READING)
 _EVENT_TYPES = frozenset(_SCHEMA["properties"]["type"]["enum"])
 # Refusals that still end the session: the phone is no longer trusted, or there is no
 # room to answer. A full outbox recovers when the phone's next sync acknowledges events.
@@ -175,6 +257,25 @@ class DeviceApplication:
         self.registry = registry
         self.name = display_name(socket.gethostname()) or DEFAULT_DESKTOP_NAME
         self.rem_ready: Callable[[], bool] = lambda: False
+        # Announcements that asked a desktop for its load reading, by request ID, with
+        # how much they asked for ("kinds": the load, memory hold and counts by kind;
+        # "hold": the load and memory hold; "load": the load alone), and the desktops
+        # that refused one (older versions): those refusing the counts are asked for
+        # the load and hold, those refusing the hold for the load alone, and those
+        # refusing the load get plain announcements.
+        self._load_requests: dict[str, tuple[str, str]] = {}
+        self._hold_only_announcements: set[str] = set()
+        self._load_only_announcements: set[str] = set()
+        self._plain_announcements: set[str] = set()
+        # Catalog requests that asked a desktop for its fingerprints, by request ID, and
+        # each desktop's last answer for placement (see catalog_probe).
+        self._catalog_requests: dict[str, str] = {}
+        self._peer_catalogs: dict[str, dict[str, Any]] = {}
+        # Organization jobs whose sender was told why they wait here, by (peer, request),
+        # with what it was told. After a restart a waiting job is announced once more.
+        self._waiting_told: dict[tuple[str, str], str] = {}
+        # The last reason each handed-over Rem task's sender was told it waits for.
+        self._rem_waiting: dict[tuple[str, str], str] = {}
         with registry.lock:
             registry.db.execute(
                 "CREATE TABLE IF NOT EXISTS device_thread_requests ("
@@ -237,11 +338,20 @@ class DeviceApplication:
               CREATE TABLE IF NOT EXISTS device_peer_snapshots (
                 peer TEXT NOT NULL, kind TEXT NOT NULL, sequence INTEGER NOT NULL,
                 event BLOB NOT NULL, PRIMARY KEY(peer,kind));
+              CREATE TABLE IF NOT EXISTS device_rem_tasks (
+                peer TEXT NOT NULL, request TEXT NOT NULL, run_id TEXT,
+                settled INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(peer,request));
             """)
         self.files = DeviceFiles(registry)
         with registry.transaction():
+            # A Rem task a paired desktop handed over runs as this desktop's own Rem
+            # run, which survives a restart, so it keeps running (gofer.ui.rem_remote_tasks).
+            handed_over = (
+                "NOT EXISTS (SELECT 1 FROM device_rem_tasks r WHERE r.peer=device_work.peer "
+                "AND r.request=device_work.request)"
+            )
             for row in registry.db.execute(
-                "SELECT * FROM device_work WHERE state='running'"
+                f"SELECT * FROM device_work WHERE state='running' AND {handed_over}"
             ).fetchall():
                 self._status(
                     row["peer"],
@@ -250,7 +360,8 @@ class DeviceApplication:
                     "Desktop stopped during dispatch; review locally before retrying",
                 )
             registry.db.execute(
-                "UPDATE device_work SET state='outcome_unknown' WHERE state='running'"
+                f"UPDATE device_work SET state='outcome_unknown' WHERE state='running' "
+                f"AND {handed_over}"
             )
 
         from gofer.devices.workspace import DeviceWorkspace
@@ -648,6 +759,9 @@ class DeviceApplication:
                                 "allow_thread_create": False,
                                 "parent_thread": parent,
                                 "revision": 1,
+                                # A new thread follows Rem's account setting unless the
+                                # phone's Account menu names one (payload "account").
+                                "provider_accounts": {},
                             }
                         )
                     except (ValueError, OSError):
@@ -820,10 +934,16 @@ class DeviceApplication:
                 )
                 return events
             if kind == "fleet.request":
+                load = None
                 if "advertise" in payload:
                     # A paired desktop names its own listener inside its pinned session,
                     # so the reverse direction works without typing an address.
                     self._advertised(peer, payload["advertise"])
+                    if payload["advertise"].get("load") is True:
+                        load = self._load_reading(
+                            memory_hold=payload["advertise"].get("memory_hold") is True,
+                            running_by_kind=payload["advertise"].get("running_by_kind") is True,
+                        )
                 now = int(self.registry.clock())
                 devices = [
                     {
@@ -868,6 +988,7 @@ class DeviceApplication:
                         "observed_at": now,
                         "fresh_until": now + 60,
                         "running_jobs": jobs[:100],
+                        **({"load": load} if load is not None else {}),
                     },
                 )
                 return [
@@ -1004,13 +1125,20 @@ class DeviceApplication:
                     (peer, event["thread_id"]),
                 ).fetchone()
                 context = self._decode(peer, grant_row[0]) if grant_row else {}
-                if (
-                    self.registry._row(peer)["role"] != "desktop"
-                    or payload["target_device_id"] != self.registry.identity.device_id
-                    or payload["project_id"] != context.get("project_id")
-                    or payload["expected_policy_revision"] != context.get("policy_revision", 1)
-                    or payload["resource_ids"]
-                ):
+                refusal = (
+                    self._rem_task_refusal(peer, event, context)
+                    if payload.get("rem_task") is not None
+                    else "Target desktop project grant required"
+                    if (
+                        self.registry._row(peer)["role"] != "desktop"
+                        or payload["target_device_id"] != self.registry.identity.device_id
+                        or payload["project_id"] != context.get("project_id")
+                        or payload["expected_policy_revision"] != context.get("policy_revision", 1)
+                        or payload["resource_ids"]
+                    )
+                    else None
+                )
+                if refusal is not None:
                     return [
                         self._emit(
                             peer,
@@ -1020,7 +1148,7 @@ class DeviceApplication:
                                 "job_id": payload["job_id"],
                                 "state": "rejected",
                                 "revision": 1,
-                                "detail": "Target desktop project grant required",
+                                "detail": refusal,
                             },
                         )
                     ]
@@ -1130,6 +1258,12 @@ class DeviceApplication:
                         str(uuid4()),
                     ),
                 )
+                if kind == "job.submit" and payload.get("rem_task") is not None:
+                    # This desktop's Rem picks it up (rem_tasks), never the chat bridge.
+                    db.execute(
+                        "INSERT OR IGNORE INTO device_rem_tasks VALUES (?,?,NULL,0)",
+                        (peer, event["request_id"]),
+                    )
                 if kind == "chat.submit":
                     self.workspace.name_from_message(
                         peer, event["thread_id"], payload.get("text", "")
@@ -1181,17 +1315,49 @@ class DeviceApplication:
                 )
             ]
 
-    def claim(self) -> dict[str, Any] | None:
+    def claim(
+        self, *, own: bool = True, organization: bool = True, waiting: str | None = None
+    ) -> dict[str, Any] | None:
+        """Mark the oldest startable request running and return it, or None.
+
+        Work another desktop's organization sent (a ``job.submit`` with an
+        ``organization`` payload) starts only with ``organization``; every other
+        request, your own turns from a phone or a thread you run here, only with
+        ``own``. The bridge passes whichever has a free worker. An organization job
+        skipped for want of one stays accepted, and its sender is told why it waits:
+        ``waiting`` when the bridge gives one (such as "Waiting for free memory
+        (0.9 GB available)"), otherwise that it waits for a free worker on this
+        computer. It is told again only when the reason changes.
+        """
         with self.registry.transaction():
-            row = self.registry.db.execute(
-                "SELECT w.*,g.context FROM device_work w JOIN peers p ON p.device_id=w.peer "
+            row = None
+            for candidate in self.registry.db.execute(
+                "SELECT w.*,g.context,p.role AS peer_role,n.name AS peer_name FROM device_work w "
+                "JOIN peers p ON p.device_id=w.peer "
+                "LEFT JOIN peer_names n ON n.device_id=w.peer "
                 "JOIN device_grants g ON g.peer=w.peer AND g.thread=w.thread WHERE "
                 "w.state='accepted' AND p.state='active' AND NOT EXISTS (SELECT 1 FROM "
                 "device_work busy WHERE busy.thread=w.thread AND busy.state='running') "
-                "ORDER BY w.rowid LIMIT 1"
-            ).fetchone()
+                "ORDER BY w.rowid"
+            ).fetchall():
+                queued = self._decode(candidate["peer"], candidate["event"])
+                if queued["type"] == "job.submit" and "rem_task" in queued["payload"]:
+                    # A handed-over Rem task runs as this desktop's own Rem task.
+                    continue
+                if own and organization:
+                    row = candidate
+                    break
+                incoming = bool(
+                    queued["type"] == "job.submit" and queued["payload"].get("organization")
+                )
+                if organization if incoming else own:
+                    row = candidate
+                    break
+                if incoming:
+                    self._tell_waiting(candidate["peer"], candidate["request"], queued, waiting)
             if row is None:
                 return None
+            self._waiting_told.pop((row["peer"], row["request"]), None)
             context = self._decode(row["peer"], row["context"])
             native = context.get("desktop_thread_id")
             if (
@@ -1221,6 +1387,9 @@ class DeviceApplication:
             self._status(row["peer"], event, "running", "Rem dispatch started")
             return {
                 "peer": row["peer"],
+                # Who sent it, for the worker's label: a phone, or a desktop by its name.
+                "peer_role": row["peer_role"],
+                "peer_name": display_name(row["peer_name"]),
                 "event": event,
                 "turn_id": row["turn"],
                 "context": self._decode(row["peer"], row["context"]),
@@ -1229,6 +1398,262 @@ class DeviceApplication:
                 ),
                 "attachments": attachments,
             }
+
+    def _tell_waiting(
+        self, peer: str, request: str, event: dict[str, Any], reason: str | None = None
+    ) -> None:
+        """Tell the sending desktop why its job waits here, once per reason.
+
+        Called inside ``claim``'s transaction. The job stays accepted: it starts when
+        a worker frees up.
+        """
+        key = (peer, request)
+        detail = reason or f"Waiting for a free worker on {self.name}"
+        if self._waiting_told.get(key) == detail:
+            return
+        try:
+            self._emit(
+                peer,
+                event,
+                "job.status",
+                {
+                    "job_id": event["payload"]["job_id"],
+                    "state": "accepted",
+                    "revision": 1,
+                    "detail": detail,
+                },
+            )
+        except PairingError:
+            # A full outbox only loses this notice; the job still starts when it can.
+            pass
+        self._waiting_told[key] = detail
+
+    def _rem_task_refusal(
+        self, peer: str, event: dict[str, Any], context: dict[str, Any]
+    ) -> str | None:
+        """Why this desktop refuses a Rem task a paired desktop handed over, or None.
+
+        Called inside ``_handle``'s transaction. The task reuses "Run threads from this
+        desktop": it comes on that grant's thread, for one of the projects it shares,
+        with a provider it allows, and only read-only task types run here.
+        """
+        payload = event["payload"]
+        task = payload["rem_task"]
+        if (
+            self.registry._row(peer)["role"] != "desktop"
+            or payload["target_device_id"] != self.registry.identity.device_id
+            or payload["resource_ids"]
+        ):
+            return "Target desktop project grant required"
+        hosting = self.registry.db.execute(
+            "SELECT 1 FROM device_thread_hosts WHERE peer=?", (peer,)
+        ).fetchone()
+        if event["thread_id"] != host_template(peer) or hosting is None or not context:
+            return f"Run threads from this desktop is off on {self.name} for that computer"
+        if payload["expected_policy_revision"] != context.get("policy_revision", 1):
+            return "Target desktop project grant required"
+        if not any(p.get("id") == payload["project_id"] for p in context.get("projects") or []):
+            return f"{self.name} doesn't share that project with that computer"
+        if task["type"] != "research" and task["execution_mode"] != "conversation":
+            return "Only research and conversation tasks run on another computer for now"
+        provider = task.get("provider")
+        if provider and provider not in (context.get("provider_permissions") or {}):
+            return f"{self.name} doesn't allow that provider for that computer's work"
+        return None
+
+    def rem_tasks(self) -> list[dict[str, Any]]:
+        """Rem tasks paired desktops handed over that this desktop hasn't settled yet.
+
+        Each has the sending ``peer`` and its name, the ``request``, its ``state``
+        (accepted, running, or cancelled when the sender asked to stop it), this
+        desktop's Rem ``run_id`` once one was made, the ``task`` and the project's
+        ``root`` here, and whether the sender still has the hosting grant
+        (``authorized``). A task whose sender was unpaired stays listed, not authorized,
+        so its run here is stopped instead of left running unseen.
+        """
+        with self.registry.lock:
+            rows = self.registry.db.execute(
+                "SELECT w.peer, w.request, w.thread, w.event, w.state, r.run_id, n.name, "
+                "p.state AS peer_state, g.context FROM device_rem_tasks r JOIN device_work w "
+                "ON w.peer=r.peer AND w.request=r.request LEFT JOIN peers p ON p.device_id=r.peer "
+                "LEFT JOIN peer_names n ON n.device_id=r.peer "
+                "LEFT JOIN device_grants g ON g.peer=w.peer AND g.thread=w.thread "
+                "WHERE r.settled=0 ORDER BY w.rowid"
+            ).fetchall()
+            tasks = []
+            for row in rows:
+                event = self._decode(row["peer"], row["event"])
+                context = self._decode(row["peer"], row["context"]) if row["context"] else {}
+                project: dict[str, Any] = next(
+                    (
+                        p
+                        for p in context.get("projects") or []
+                        if p.get("id") == event["payload"]["project_id"]
+                    ),
+                    {},
+                )
+                tasks.append(
+                    {
+                        "peer": row["peer"],
+                        "peer_name": row["name"] or "a paired desktop",
+                        "request": row["request"],
+                        "state": row["state"],
+                        "run_id": row["run_id"],
+                        "task": event["payload"]["rem_task"],
+                        "root": project.get("root"),
+                        "authorized": bool(
+                            row["context"]
+                            and row["peer_state"] == "active"
+                            and row["peer"] in self._hosting_peers()
+                        ),
+                    }
+                )
+            return tasks
+
+    def _hosting_peers(self) -> set[str]:
+        return {r[0] for r in self.registry.db.execute("SELECT peer FROM device_thread_hosts")}
+
+    def rem_task_started(self, peer: str, request: str, run_id: str) -> None:
+        """Record this desktop's Rem run for a handed-over task and tell the sender."""
+        with self.registry.transaction():
+            row = self.registry.db.execute(
+                "SELECT * FROM device_work WHERE peer=? AND request=?", (peer, request)
+            ).fetchone()
+            if row is None:
+                raise PairingError("request_unavailable")
+            self.registry.db.execute(
+                "UPDATE device_rem_tasks SET run_id=? WHERE peer=? AND request=?",
+                (run_id, peer, request),
+            )
+            if row["state"] != "accepted":
+                return
+            self.registry.db.execute(
+                "UPDATE device_work SET state='running' WHERE peer=? AND request=?",
+                (peer, request),
+            )
+            event = self._decode(peer, row["event"])
+            self._emit(
+                peer,
+                event,
+                "job.status",
+                {
+                    "job_id": event["payload"]["job_id"],
+                    "state": "running",
+                    "revision": 2,
+                    "detail": f"Rem task started on {self.name}",
+                },
+            )
+
+    def rem_task_waiting(self, peer: str, request: str, reason: str) -> None:
+        """Tell the sender why its task waits here, such as for a free worker, once a reason."""
+        key = (peer, request)
+        if self._rem_waiting.get(key) == reason:
+            return
+        with self.registry.transaction():
+            row = self.registry.db.execute(
+                "SELECT event FROM device_work WHERE peer=? AND request=?", (peer, request)
+            ).fetchone()
+            if row is None:
+                return
+            event = self._decode(peer, row[0])
+            try:
+                self._emit(
+                    peer,
+                    event,
+                    "job.status",
+                    {
+                        "job_id": event["payload"]["job_id"],
+                        "state": "running",
+                        "revision": 2,
+                        "detail": reason[:1000],
+                    },
+                )
+            except PairingError:
+                return
+        self._rem_waiting[key] = reason
+
+    def finish_rem_task(
+        self,
+        peer: str,
+        request: str,
+        state: str,
+        text: str = "",
+        *,
+        detail: str = "",
+        usage: dict[str, Any] | None = None,
+        run_id: str | None = None,
+        report: str | None = None,
+    ) -> None:
+        """Send a handed-over task's outcome: its answer, usage and report, once.
+
+        ``state`` is completed, failed, rejected or cancelled. A task the sender asked
+        to stop settles as cancelled unless it had already completed.
+        """
+        with self.registry.transaction():
+            row = self.registry.db.execute(
+                "SELECT * FROM device_work WHERE peer=? AND request=?", (peer, request)
+            ).fetchone()
+            if row is None:
+                raise PairingError("request_unavailable")
+            if row["state"] == "cancelled" and state != "completed":
+                state = "cancelled"
+            gone = (
+                self.registry.db.execute(
+                    "SELECT 1 FROM peers WHERE device_id=?", (peer,)
+                ).fetchone()
+                is None
+            )
+            if gone:
+                # The sender was unpaired: nothing goes to it; the task only settles here.
+                self.registry.db.execute(
+                    "UPDATE device_rem_tasks SET settled=1 WHERE peer=? AND request=?",
+                    (peer, request),
+                )
+                self._rem_waiting.pop((peer, request), None)
+                return
+            event = self._decode(peer, row["event"])
+            for start in range(0, len(text), 4000):
+                self._emit(
+                    peer,
+                    event,
+                    "chat.message",
+                    {
+                        "message_id": str(
+                            uuid5(
+                                NAMESPACE_URL,
+                                "raticode-message:reply-" + request + ":" + str(start),
+                            )
+                        ),
+                        "text": text[start : start + 4000],
+                        "attachment_ids": [],
+                        "final": start + 4000 >= len(text),
+                    },
+                )
+            result: dict[str, Any] = {}
+            if run_id:
+                result = {"rem_task": {"run_id": run_id[:100], "report": report}}
+            self._emit(
+                peer,
+                event,
+                "job.status",
+                {
+                    "job_id": event["payload"]["job_id"],
+                    "state": state,
+                    "revision": 3,
+                    "detail": (detail or f"Rem task {state} on {self.name}")[:1000],
+                    **({"usage": usage} if usage else {}),
+                    **result,
+                },
+            )
+            self.registry.db.execute(
+                "UPDATE device_work SET state=? WHERE peer=? AND request=?",
+                (state, peer, request),
+            )
+            self.registry.db.execute(
+                "UPDATE device_rem_tasks SET settled=1 WHERE peer=? AND request=?",
+                (peer, request),
+            )
+            self._rem_waiting.pop((peer, request), None)
 
     def history(
         self, peer: str, thread: str, *, through_request: str | None = None
@@ -1460,6 +1885,7 @@ class DeviceApplication:
                         and (
                             old["payload"]["project_id"] != body.get("project_id")
                             or old["payload"].get("organization") != body.get("organization")
+                            or old["payload"].get("rem_task") != body.get("rem_task")
                             or old["payload"]["expected_policy_revision"]
                             != body.get("policy_revision", 1)
                         )
@@ -1486,6 +1912,7 @@ class DeviceApplication:
                     "intent": body.get("text", ""),
                     "expected_policy_revision": body.get("policy_revision", 1),
                     **({"organization": body["organization"]} if body.get("organization") else {}),
+                    **({"rem_task": body["rem_task"]} if body.get("rem_task") else {}),
                 }
             event = {
                 "version": 2,
@@ -1523,8 +1950,25 @@ class DeviceApplication:
             self.registry.db.execute(
                 "UPDATE peers SET last_seen=? WHERE device_id=?", (self.registry.clock(), peer)
             )
+            if self._catalog_requests.get(str(event["request_id"])) == peer:
+                del self._catalog_requests[str(event["request_id"])]
+                if event["type"] in ("catalog.snapshot", "error"):
+                    self._peer_catalogs[peer] = self._catalog_answer(event)
+                    return
             if event["type"] in ("catalog.snapshot", "thread.snapshot", "thread.history.snapshot"):
                 # Answers to a live remote thread are consumed by that turn's stream.
+                return
+            asked = self._load_requests.pop(str(event["request_id"]), None)
+            if asked is not None and asked[0] == peer and event["type"] == "error":
+                if asked[1] == "kinds":
+                    # An older desktop refused the counts by kind; ask for its load and hold.
+                    self._hold_only_announcements.add(peer)
+                elif asked[1] == "hold":
+                    # An older desktop refused the memory hold; ask for its load alone.
+                    self._load_only_announcements.add(peer)
+                else:
+                    # An older desktop refused the load request; announce plainly from now on.
+                    self._plain_announcements.add(peer)
                 return
             if event["type"] in ("fleet.snapshot", "sync.snapshot"):
                 # Periodic status snapshots replace each other instead of filling the
@@ -1615,7 +2059,11 @@ class DeviceApplication:
                 **event,
                 "id": str(uuid5(NAMESPACE_URL, "raticode-cancel:" + request_id)),
                 "type": "request.cancel",
-                "payload": {"reason": "Organization execution stopped"},
+                "payload": {
+                    "reason": "Rem task stopped"
+                    if "rem_task" in event["payload"]
+                    else "Organization execution stopped"
+                },
                 "sequence": self._next_outbound_sequence(peer),
             }
             self.registry.db.execute(
@@ -1888,7 +2336,12 @@ class DeviceApplication:
                     "running_jobs": observed["running_jobs"]
                     if fresh and observed is not None
                     else None,
+                    # Its worker limit and pressure, when it reports them (gofer.core.computers).
+                    "load": observed.get("load") if fresh and observed is not None else None,
                 }
+                if peer["role"] == "desktop" and peer["state"] == "active":
+                    # The projects and providers it shares with this computer, for placement.
+                    entry["catalog"] = self._fresh_catalog(peer["device_id"], now)
                 if peer["role"] == "desktop":
                     entry["endpoint_known"] = (
                         self.registry.db.execute(
@@ -2064,11 +2517,107 @@ class DeviceApplication:
         )
 
     def advertisement(self, peer: str) -> dict[str, Any]:
-        return self._session_event(
-            peer,
-            "fleet.request",
-            {"advertise": {"name": self.name, "lan_endpoint": self.listener_endpoint}},
-        )
+        advert: dict[str, Any] = {"name": self.name, "lan_endpoint": self.listener_endpoint}
+        ask = peer not in self._plain_announcements
+        hold = ask and peer not in self._load_only_announcements
+        kinds = hold and peer not in self._hold_only_announcements
+        if ask:
+            advert["load"] = True
+        if hold:
+            advert["memory_hold"] = True
+        if kinds:
+            advert["running_by_kind"] = True
+        event = self._session_event(peer, "fleet.request", {"advertise": advert})
+        if ask:
+            if len(self._load_requests) >= 1000:
+                self._load_requests.clear()
+            self._load_requests[event["request_id"]] = (
+                peer,
+                "kinds" if kinds else "hold" if hold else "load",
+            )
+        return event
+
+    def _load_reading(
+        self, *, memory_hold: bool = False, running_by_kind: bool = False
+    ) -> dict[str, Any] | None:
+        """This desktop's worker limit, running workers and pressure, when it has them.
+
+        With ``memory_hold`` the reading keeps its memory hold, and with
+        ``running_by_kind`` its counts by kind; a field not asked for (an older desktop
+        asked) is left out.
+        """
+        service = getattr(self.desktop, "computers", None)
+        if service is None:
+            return None
+        try:
+            reading = service.load_reading()
+        except Exception:
+            logger.warning("Couldn't read this computer's load for a paired desktop", exc_info=True)
+            return None
+        if isinstance(reading, dict):
+            left_out = {
+                key
+                for key, asked in (
+                    ("memory_hold", memory_hold),
+                    ("running_by_kind", running_by_kind),
+                )
+                if not asked
+            }
+            reading = {key: value for key, value in reading.items() if key not in left_out}
+        return reading if _LOAD_VALIDATOR.is_valid(reading) else None
+
+    def catalog_probe(self, peer: str) -> dict[str, Any] | None:
+        """A catalog request asking a paired desktop for its repository fingerprints.
+
+        Sent after each fleet probe. Placement reads the answer through ``fleet``:
+        the projects and providers that desktop's grants for this computer cover,
+        each project with its fingerprint. None while a desktop that refused the
+        request (an older version) waits ``CATALOG_RETRY`` seconds to be asked again.
+        """
+        if self.registry._row(peer)["role"] != "desktop":
+            raise PairingError("mobile_is_not_worker")
+        with self.registry.lock:
+            known = self._peer_catalogs.get(peer)
+            if (
+                known is not None
+                and known["state"] == "unsupported"
+                and self.registry.clock() - known["at"] < CATALOG_RETRY
+            ):
+                return None
+        event = self._session_event(peer, "catalog.request", {"fingerprints": True})
+        with self.registry.lock:
+            if len(self._catalog_requests) >= 1000:
+                self._catalog_requests.clear()
+            self._catalog_requests[event["request_id"]] = peer
+        return event
+
+    def _catalog_answer(self, event: dict[str, Any]) -> dict[str, Any]:
+        """What a desktop's answer to ``catalog_probe`` says, as placement reads it."""
+        at = self.registry.clock()
+        if event["type"] == "error":
+            # An older desktop refuses the field it doesn't know as unsupported.
+            unsupported = event["payload"].get("code") == "unsupported"
+            return {"state": "unsupported" if unsupported else "refused", "at": at}
+        payload = event["payload"]
+        return {
+            "state": "shared",
+            "at": at,
+            "projects": [
+                {key: project[key] for key in ("id", "name", "fingerprint") if key in project}
+                for project in payload["projects"]
+            ],
+            "providers": [provider["id"] for provider in payload["providers"]],
+        }
+
+    def _fresh_catalog(self, peer: str, now: float) -> dict[str, Any] | None:
+        """A desktop's last catalog answer while it counts, without its time."""
+        known = self._peer_catalogs.get(peer)
+        if known is None:
+            return None
+        limit = CATALOG_RETRY if known["state"] == "unsupported" else CATALOG_FRESH
+        if not 0 <= now - known["at"] <= limit:
+            return None
+        return {key: value for key, value in known.items() if key != "at"}
 
     def fleet_probe(self, peer: str) -> dict[str, Any]:
         """A read-only status request that is never journaled as delegated work."""

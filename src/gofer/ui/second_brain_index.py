@@ -48,6 +48,9 @@ MAX_WATCH_PREFLIGHT_SECONDS = 0.1
 RECOVERY_SECONDS = 60.0
 FALLBACK_SECONDS = 1.0
 NOTE_SUFFIXES = {".md", ".markdown", ".html", ".htm", ".txt"}
+# SQLite user_version of the folder index. 2 stores extracted text; 1 (or 0) held each
+# note's raw bytes, HTML markup and CSS included, and is rebuilt on its next search.
+INDEX_VERSION = 2
 
 
 def _included(relative: Path) -> bool:
@@ -71,6 +74,27 @@ def _note_stat(root: Path, relative: Path) -> os.stat_result | None:
         return result
     except OSError:
         return None
+
+
+def searchable_text(relative: Path, data: bytes) -> str:
+    """A note's text as the Second Brain library extracts it, for the folder index.
+
+    HTML loses its markup, styles and scripts, and Markdown its front matter, so a
+    search for "color" matches what the note says, not its CSS. Text that isn't valid
+    UTF-8 is read with replacement characters, as before.
+    """
+    from gofer.ui.brain_documents import extract, passages_text
+
+    suffix = relative.suffix.lower()
+    try:
+        try:
+            extracted = extract(data, suffix)
+        except UnicodeDecodeError:
+            extracted = extract(data.decode("utf-8", errors="replace").encode("utf-8"), suffix)
+    except (ValueError, RecursionError):
+        # Too large to extract or unreadable: index the path alone.
+        return ""
+    return passages_text(extracted["blocks"])
 
 
 def read_note_bytes(root: Path, relative: Path) -> tuple[bytes, os.stat_result] | None:
@@ -450,7 +474,7 @@ class NoteIndex:
                     connection.execute("DELETE FROM notes WHERE id=?", (note_id,))
                     connection.execute(
                         "INSERT INTO notes VALUES (?, ?, ?)",
-                        (note_id, path, content.decode("utf8", errors="replace")),
+                        (note_id, path, searchable_text(relative, content)),
                     )
                     connection.execute(
                         "INSERT OR REPLACE INTO note_state VALUES (?, ?, ?)",
@@ -486,6 +510,14 @@ def note_index(root: Path) -> NoteIndex:
             _, expired = _indexes.popitem(last=False)
             expired.close()
         return index
+
+
+def forget_note_index(root: Path) -> None:
+    """Stop the folder's index worker, which would otherwise recreate its database."""
+    with _indexes_lock:
+        index = _indexes.pop(root, None)
+    if index is not None:
+        index.close()
 
 
 def close_note_indexes() -> None:

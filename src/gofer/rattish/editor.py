@@ -295,6 +295,7 @@ class RattishEditorService:
                 "fingerprint": contract.fingerprint,
                 "configurationSchema": contract.document["configuration_schema"],
                 "defaults": contract.document.get("defaults", {}),
+                **_contract_catalog(contract.node_type, contract.document),
             }
             for contract in sorted(
                 _compiler(rattish_asset_root()).contracts,
@@ -396,6 +397,19 @@ class RattishEditorService:
             )
 
 
+def _contract_catalog(node_type: str, document: Mapping[str, Any]) -> dict[str, Any]:
+    """Return how the node picker lists a contract, with defaults for one without a catalog."""
+    catalog = document.get("catalog")
+    if not isinstance(catalog, Mapping):
+        catalog = {}
+    docs_path = str(catalog.get("docs_path") or f"/docs/nodes/{node_type}")
+    return {
+        "category": str(catalog.get("category") or "other"),
+        "summary": str(catalog.get("summary") or ""),
+        "docsUrl": f"https://raticode.dev{docs_path}",
+    }
+
+
 def source_revision(source: str) -> str:
     return "sha256:" + hashlib.sha256(source.encode("utf-8")).hexdigest()
 
@@ -441,8 +455,11 @@ def _apply_source_mutation(
             edit = _span_edit(existing["value"]["span"], rendered)
         else:
             insert_at = declaration["span"]["end"]["offset"]
-            prefix = "" if source[:insert_at].endswith(("\n", "\r")) else "\n"
-            edit = (insert_at, insert_at, f"{prefix}  {field}: {rendered}")
+            # At the start of a line the new field needs its own line ending, or the
+            # declaration that follows would continue on the same line.
+            at_line_start = source[:insert_at].endswith(("\n", "\r"))
+            text = f"  {field}: {rendered}\n" if at_line_start else f"\n  {field}: {rendered}"
+            edit = (insert_at, insert_at, text)
         return _apply_byte_edits(source, [edit]), [_edit_payload(edit)]
 
     if kind == "set_needs":
@@ -464,8 +481,9 @@ def _apply_source_mutation(
                 replacement = _render_identifier_list("needs", node_ids)
                 edit = (offset, offset, f"\n{replacement}")
             else:
-                replacement = _render_identifier_list("needs", node_ids, indent="") + "\n"
-                edit = _span_edit(existing["span"], replacement)
+                indent = _entry_indent(existing)
+                rendered = _render_identifier_list("needs", node_ids, indent=indent)
+                edit = _span_edit(existing["span"], rendered[len(indent) :] + "\n")
         return _apply_byte_edits(source, [edit]), [_edit_payload(edit)]
 
     if kind == "set_routes":
@@ -486,8 +504,9 @@ def _apply_source_mutation(
                 replacement = _render_routes(routes)
                 edit = (offset, offset, f"\n{replacement}")
             else:
-                replacement = _render_routes(routes, indent="") + "\n"
-                edit = _span_edit(existing["span"], replacement)
+                indent = _entry_indent(existing)
+                rendered = _render_routes(routes, indent=indent)
+                edit = _span_edit(existing["span"], rendered[len(indent) :] + "\n")
         return _apply_byte_edits(source, [edit]), [_edit_payload(edit)]
 
     if kind == "add_node":
@@ -674,9 +693,11 @@ _STARTER_FIELDS: dict[str, dict[str, Any]] = {
     "loop": {"source": {"type": "count", "count": 1}},
     "move-file": {"source-path": "input.txt", "destination-path": "output.txt"},
     "open-resource": {"target": "https://example.com"},
+    "mcp-tool": {"server": "my-server", "tool": "tool-name"},
     "prompt-file": {"output-path": "prompt.md"},
     "python-script": {"script-path": "script.py"},
     "read-file": {"path": "input.txt"},
+    "read-web-page": {"url": "https://example.com"},
     "rem-prompt": {"prompt": "What should Rem answer?"},
     "shell-script": {"script-path": "script.sh"},
     "write-file": {"path": "output.txt"},
@@ -848,6 +869,11 @@ def _render_field(indent: str, key: str, rendered: str) -> str:
         return f"{indent}{key}: {rendered}"
     lines = rendered.splitlines()
     return f"{indent}{key}: |\n" + "\n".join(f"{indent}  {line}" for line in lines)
+
+
+def _entry_indent(entry: Mapping[str, Any]) -> str:
+    """Indent of an existing entry, so a list that replaces it nests under its key."""
+    return " " * (int(entry["span"]["start"]["column"]) - 1)
 
 
 def _render_identifier_list(key: str, values: list[str], *, indent: str = "  ") -> str:

@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
   <bool name="share_to_rem">true</bool>
+  <bool name="open_with_raticode">true</bool>
 </resources>

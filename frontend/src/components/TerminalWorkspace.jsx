@@ -5,13 +5,14 @@ import "@xterm/xterm/css/xterm.css";
 import { ChevronDown, FolderPlus, FolderOpen, Pencil, Plus, Terminal as TerminalIcon, Trash2, X } from "lucide-react";
 
 
+import { askRemAboutTerminalSelection } from "../lib/askRemAboutFailure.js";
 import { formatKeybinding, settingBinding } from "../lib/settings.js";
 import { useReducedMotion } from "../lib/useReducedMotion.js";
 
 const { FitAddon } = fitAddonPackage;
 const { Terminal: XTerm } = xtermPackage;
 
-import { projectFolderName, terminalDirectoryFromOsc, terminalProjectGroupId, terminalGroupName, terminalTabGroupId, moveTerminalTabToGroup, terminalTabsAfterDeletingGroup, upsertTerminalGroupDefinition, groupTerminalTabsByProject, shouldCreateInitialTerminal, handleTerminalClipboardShortcut, terminalWordEraseInput, createDisposableTerminalSession, terminalWorkspaceShortcutAction } from "../lib/terminalWorkspace.js";
+import { projectFolderName, terminalDirectoryFromOsc, terminalProjectGroupId, terminalGroupName, terminalTabGroupId, moveTerminalTabToGroup, terminalTabsAfterDeletingGroup, upsertTerminalGroupDefinition, groupTerminalTabsByProject, shouldCreateInitialTerminal, copyTerminalSelection, handleTerminalClipboardShortcut, terminalWordEraseInput, createDisposableTerminalSession, terminalWorkspaceShortcutAction } from "../lib/terminalWorkspace.js";
 export default function TerminalWorkspace({ active, projectRoot, settings, theme, newTerminalRequest = 0 }) {
   const reduceMotion = useReducedMotion();
   const nextTabRef = useRef(1);
@@ -596,6 +597,52 @@ function TerminalSession({ active, onCwdChange, onLabelChange, projectRoot, sett
   const activeRef = useRef(active);
   const initialThemeRef = useRef(theme);
   const initialSettingsRef = useRef(settings.terminal);
+  // The shell and folder, named in what Ask Rem about selection attaches.
+  const placeRef = useRef({ shell: "", cwd: projectRoot });
+  const contextMenuRef = useRef(null);
+  // Right-click menu: where it opens and the text that was selected then.
+  const [contextMenu, setContextMenu] = useState(null);
+
+  useEffect(() => {
+    if (!contextMenu) return undefined;
+    contextMenuRef.current?.querySelector("button:not(:disabled)")?.focus();
+    const dismiss = (event) => { if (!contextMenuRef.current?.contains(event.target)) setContextMenu(null); };
+    const escape = (event) => { if (event.key === "Escape") { setContextMenu(null); terminalRef.current?.focus(); } };
+    window.addEventListener("pointerdown", dismiss);
+    window.addEventListener("keydown", escape);
+    window.addEventListener("blur", dismiss);
+    return () => {
+      window.removeEventListener("pointerdown", dismiss);
+      window.removeEventListener("keydown", escape);
+      window.removeEventListener("blur", dismiss);
+    };
+  }, [contextMenu]);
+
+  function openContextMenu(event) {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    event.preventDefault();
+    const width = 208;
+    const height = 112;
+    setContextMenu({
+      left: Math.max(4, Math.min(event.clientX, window.innerWidth - width - 4)),
+      top: Math.max(4, Math.min(event.clientY, window.innerHeight - height - 4)),
+      selection: terminal.hasSelection() ? terminal.getSelection() : "",
+    });
+  }
+
+  function runMenuAction(action) {
+    const terminal = terminalRef.current;
+    const selection = contextMenu?.selection ?? "";
+    setContextMenu(null);
+    if (!terminal) return;
+    if (action === "copy" && selection) void navigator.clipboard?.writeText(selection).catch(() => {});
+    else if (action === "copy") void copyTerminalSelection(terminal).catch(() => {});
+    if (action === "select-all") terminal.selectAll();
+    // Attaches the selection to Rem's message box; the person writes the question and sends it.
+    if (action === "ask") askRemAboutTerminalSelection(selection, placeRef.current);
+    if (action !== "ask") terminal.focus();
+  }
 
   useEffect(() => {
     activeRef.current = active;
@@ -648,6 +695,7 @@ function TerminalSession({ active, onCwdChange, onLabelChange, projectRoot, sett
     const cwdDisposable = terminal.parser.registerOscHandler(633, (data) => {
       const currentDirectory = terminalDirectoryFromOsc(data);
       if (!currentDirectory) return false;
+      placeRef.current = { ...placeRef.current, cwd: currentDirectory };
       onCwdChange?.(tabKey, currentDirectory);
       return true;
     });
@@ -725,6 +773,7 @@ function TerminalSession({ active, onCwdChange, onLabelChange, projectRoot, sett
       },
       onReady(session) {
         sessionIdRef.current = session.id;
+        placeRef.current = { shell: session.shell || "", cwd: session.cwd || placeRef.current.cwd };
         onLabelChange?.(tabKey, session.shell);
         onCwdChange?.(tabKey, session.cwd);
         fitAddon.fit();
@@ -746,12 +795,38 @@ function TerminalSession({ active, onCwdChange, onLabelChange, projectRoot, sett
     };
   }, [onCwdChange, onLabelChange, projectRoot, tabKey]);
 
+  const hasSelection = Boolean(contextMenu?.selection?.trim());
+  const menuItem = "flex h-7 w-full items-center rounded px-2 text-left hover:bg-slate-100 focus-visible:bg-slate-100 focus-visible:outline-none disabled:cursor-default disabled:text-muted disabled:hover:bg-transparent";
   return (
-    <div
-      ref={containerRef}
-      className={`terminal-host absolute inset-0 px-2 py-1 ${active ? "" : "invisible"}`}
-      onPointerDown={() => terminalRef.current?.focus()}
-    />
+    <>
+      <div
+        ref={containerRef}
+        className={`terminal-host absolute inset-0 px-2 py-1 ${active ? "" : "invisible"}`}
+        onContextMenu={openContextMenu}
+        onPointerDown={(event) => { if (event.button === 0) terminalRef.current?.focus(); }}
+      />
+      {contextMenu && active ? (
+        <div
+          ref={contextMenuRef}
+          aria-label="Terminal actions"
+          className="fixed z-[100] w-52 rounded-md border border-line bg-white p-1 text-[11px] text-ink shadow-lg"
+          role="menu"
+          style={{ left: contextMenu.left, top: contextMenu.top }}
+          onKeyDown={(event) => {
+            if (!["ArrowDown", "ArrowUp"].includes(event.key)) return;
+            event.preventDefault();
+            const items = [...event.currentTarget.querySelectorAll("button:not(:disabled)")];
+            const index = items.indexOf(document.activeElement);
+            items[(index + (event.key === "ArrowDown" ? 1 : items.length - 1)) % items.length]?.focus();
+          }}
+        >
+          <button className={menuItem} disabled={!hasSelection} role="menuitem" type="button" onClick={() => runMenuAction("copy")}>Copy</button>
+          <button className={menuItem} role="menuitem" type="button" onClick={() => runMenuAction("select-all")}>Select all</button>
+          <div className="my-1 border-t border-line" role="separator" />
+          <button className={menuItem} disabled={!hasSelection} role="menuitem" title={hasSelection ? "Attach the selected text to Rem's message box. Nothing is sent until you send it." : "Select text in the terminal first"} type="button" onClick={() => runMenuAction("ask")}>Ask Rem about selection</button>
+        </div>
+      ) : null}
+    </>
   );
 }
 

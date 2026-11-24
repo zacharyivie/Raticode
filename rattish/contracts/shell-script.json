@@ -3,6 +3,7 @@
   "contract_version": 1,
   "node_type": "shell-script",
   "runtime_handler": "raticode.shell_script",
+  "catalog": {"category": "code", "summary": "Run a shell script kept in the project", "docs_path": "/docs/nodes/shell-script"},
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
@@ -15,14 +16,16 @@
       "env": {
         "type": "object",
         "additionalProperties": {"type": "string"}
-      }
+      },
+      "shell": {"enum": ["auto", "bash", "powershell"], "x-rattish-case-insensitive": true}
     },
     "required": ["script_path"],
     "additionalProperties": false
   },
   "defaults": {
     "args": [],
-    "env": {}
+    "env": {},
+    "shell": "auto"
   },
   "computed_defaults": {},
   "input_ports": {
@@ -77,7 +80,7 @@
     {
       "id": "interpreter-available",
       "severity": "error",
-      "description": "The Bash interpreter must be available on PATH."
+      "description": "The selected shell must be available: bash on PATH for auto, Git for Windows' bash on Windows for bash, PowerShell for powershell."
     },
     {
       "id": "script-readable",

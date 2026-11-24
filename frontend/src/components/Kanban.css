@@ -12,6 +12,10 @@
 .kb-proposed { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: var(--k-decision); }
 /* Self-work approved it on its own: says so in words, quieter than a decision waiting. */
 .kb-auto { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: var(--ink-2, currentColor); }
+.kb-guardrail { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: var(--ink-2, currentColor); }
+.kb-violates { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: var(--blocked); }
+.kb-violates-note h3 { display: flex; align-items: center; gap: 6px; color: var(--blocked); }
+.kb-violates-note .kb-hint { margin-top: 4px; font-size: 12px; color: var(--ink-2, currentColor); }
 .kb-auto-note { display: flex; align-items: flex-start; gap: 6px; margin: 0; padding: 8px 10px; border: 1px dashed var(--line); border-radius: 8px; font-size: 12.5px; color: var(--ink-2, currentColor); }
 .kb-auto-note svg { flex: none; margin-top: 2px; }
 /* Paused keeps its claim but isn't stuck: a quiet chip in words, not the red flag. */
@@ -134,6 +138,10 @@
 .kb-comment textarea { width: 100%; height: auto; min-height: 52px; padding: 6px 8px; resize: vertical; font: inherit; }
 
 /* Tickets that wait for other tickets. */
+.kb-objective { display: flex; gap: 5px; align-items: flex-start; margin: 0; font-size: 11px; color: var(--muted); line-height: 1.3; }
+.kb-objective svg { flex: none; margin-top: 1px; color: var(--accent); }
+.kb-objective.is-off svg { color: var(--faint); }
+.kb-objective span { min-width: 0; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
 .kb-waits { display: flex; gap: 5px; align-items: flex-start; margin: 0; font-size: 11px; color: var(--muted); line-height: 1.3; }
 .kb-waits svg, .kb-wait-notice svg { flex: none; margin-top: 1px; }
 .kb-waits span { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }

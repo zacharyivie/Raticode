@@ -318,10 +318,8 @@ def test_only_rem_uploads_are_read_never_links_or_other_paths(tmp_path: Path):
 
 
 def home_for(data: Path, provider: str, monkeypatch: pytest.MonkeyPatch) -> RemHome:
-    import gofer.ui.rem_home as rem_home_module
-
-    monkeypatch.setattr(rem_home_module, "memory_available_bytes", lambda: 8 * 1024**3)
-    monkeypatch.setattr(rem_home_module, "swap_blocked", lambda: None)
+    # New workers wait while this computer is short of memory; keep tests host-independent.
+    monkeypatch.setattr("gofer.core.command_slots.memory_hold", lambda: None)
 
     async def source(**kwargs: Any):
         yield {"type": "final", "message": {"body": "done"}}
@@ -346,8 +344,12 @@ def test_rem_reply_sends_the_screenshot_to_its_chat_model(
 
     calls: list[dict[str, Any]] = []
 
-    def generate_decision(prompt, config, cancel, data_dir, on_reply=None, images=()):
-        calls.append({"prompt": prompt, "config": config, "images": list(images)})
+    def generate_decision(
+        prompt, config, cancel, data_dir, on_reply=None, images=(), *, system_prompt=""
+    ):
+        calls.append(
+            {"prompt": prompt, "config": config, "images": list(images), "system": system_prompt}
+        )
         return {"reply": "That's the certificate list."}
 
     monkeypatch.setattr(rem_home_module, "generate_decision", generate_decision)

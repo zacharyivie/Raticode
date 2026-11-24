@@ -17,6 +17,8 @@ Raticode rattish create --from webhook-approval --project .
 Raticode rattish triggers add webhook PATH/.raticode/webhook-approval/workflow.rattish
 ```
 
+On Windows, its shell steps run in Git for Windows' bash (`shell: bash`), so install [Git for Windows](https://git-scm.com/downloads/win) first. Until you do, **Start from** says **Needs Git for Windows** and preflight stops the run with a link to the download. Windows support for starters is new in Raticode 0.6.0.
+
 The trigger command prints the URL and a token once. Call it like this:
 
 ```bash

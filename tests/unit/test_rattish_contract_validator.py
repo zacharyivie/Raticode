@@ -39,6 +39,8 @@ def test_representative_contracts_validate() -> None:
         "open-resource",
         "prompt-file",
         "read-file",
+        "read-web-page",
+        "mcp-tool",
         "rem-prompt",
         "rem-task",
         "python-script",

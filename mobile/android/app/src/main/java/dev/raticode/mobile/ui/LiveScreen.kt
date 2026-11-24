@@ -33,10 +33,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
 import dev.raticode.mobile.live.LiveRuntime
 import dev.raticode.mobile.live.DeviceSyncService
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.launch
 import dev.raticode.mobile.live.VoiceTidy
+import dev.raticode.mobile.live.ThreadAccounts
 import dev.raticode.mobile.live.LiveClient
 import dev.raticode.mobile.live.RemAlertRules
 import dev.raticode.mobile.live.Kanban
@@ -59,8 +58,12 @@ internal object LiveNavigation {
     /** People Rem's call and text cards can reach, reached from More. */
     const val PEOPLE = "People"
     const val APP_LOCK = "AppLock"
+    /** Raticode as the phone's default browser and file viewer, reached from More. */
+    const val OPEN_WITH = "OpenWith"
     /** Rem's self-work settings, reached from Desktop settings, the board's Self-work and Rem's report. */
     const val SELF_WORK = "SelfWork"
+    /** Each computer's worker limit and load, reached from Usage. */
+    const val COMPUTERS = "Computers"
     const val MAX = 4
     /** A page the bar can show: its page name, its short bar label, and its full name in More and settings. */
     data class Destination(val page: String, val label: String, val title: String)
@@ -80,6 +83,7 @@ internal object LiveNavigation {
         Destination("Developer", "Log", "Developer log"),
         Destination("Browser", "Browser", "Browser"),
         Destination("Kanban", "Board", "Global board"),
+        Destination("Posts", "Posts", "Posts"),
     )
     private val byPage = destinations.associateBy { it.page }
     /** The bar before the user changes it, and after a saved choice turns out unreadable. */
@@ -116,12 +120,14 @@ internal object LiveNavigation {
         initialThread == null -> home
         initialThread == "approvals" -> "Approvals"
         initialThread == "rem" -> "Rem"
+        RemAlertRules.parseDecisionTarget(initialThread) != null -> "Rem"
         RemAlertRules.parseWorkflowTarget(initialThread) != null -> "Workflows"
         else -> "Chat"
     }
     /** The thread a notification opens, or null when it opens a page instead. */
     fun initialThread(initialThread: String?) =
-        initialThread?.takeIf { it != "approvals" && it != "rem" && RemAlertRules.parseWorkflowTarget(it) == null }
+        initialThread?.takeIf { it != "approvals" && it != "rem" && RemAlertRules.parseWorkflowTarget(it) == null &&
+            RemAlertRules.parseDecisionTarget(it) == null }
     /** Where system back goes from [page], or null when back leaves the app. A page opened from More goes back to More. */
     fun back(page: String, lastTop: String, home: String = HOME, bar: List<String> = DEFAULT) = when (page) {
         home -> null
@@ -136,7 +142,8 @@ internal object LiveNavigation {
 @androidx.annotation.RequiresApi(29)
 @Composable
 fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClient: LiveClient? = null, consumeInitialThread: () -> Unit = {}, scanOnOpen: Boolean = false, consumeScan: () -> Unit = {},
-               offerVoiceSetup: Boolean = false, consumeVoiceOffer: () -> Unit = {}, startPage: String? = null) {
+               offerVoiceSetup: Boolean = false, consumeVoiceOffer: () -> Unit = {}, startPage: String? = null,
+               externalLink: String? = null, consumeExternalLink: () -> Unit = {}) {
     val context = LocalContext.current
     // The user's bottom bar; the app opens to its first destination unless a caller names one.
     var bar by remember { mutableStateOf(NavBarPrefs.load(context)) }
@@ -168,11 +175,27 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
     }
     val topLevel = LiveNavigation.topLevel(bar)
     var browserReveal by remember { mutableIntStateOf(0) }
+    // A link another app sent while Raticode is the phone's default browser: a new tab in the browser chosen for links
+    // from other apps (Settings › Open with Raticode). It is a tab like any other; Rem sees it only through Ask Rem.
+    LaunchedEffect(externalLink) {
+        val url = externalLink ?: return@LaunchedEffect
+        consumeExternalLink()
+        val browser = dev.raticode.mobile.browser.BrowserRuntime.get(context)
+        val gecko = dev.raticode.mobile.open.OpenTypes.linkEngine(browser.saved.externalEngine) == dev.raticode.mobile.browser.BrowserRules.ENGINE_GECKO
+        val engine = when {
+            gecko && dev.raticode.mobile.browser.GeckoBrowser.get(context).newTab(url) != null -> dev.raticode.mobile.browser.BrowserRules.ENGINE_GECKO
+            browser.newTab(url) != null -> dev.raticode.mobile.browser.BrowserRules.ENGINE_RATICODE
+            else -> null
+        }
+        if (engine != null) { browser.show(engine); page = "Browser" }
+    }
     // The global board's section, kept across pages so Rem's report can open it, and saved so it comes back after a restart.
     var kanbanTab by rememberSaveable { mutableStateOf(BoardFilterPrefs.tab(context)) }
     LaunchedEffect(kanbanTab) { BoardFilterPrefs.saveTab(context, kanbanTab) }
     // A workflow run a tapped workflow message asked to open, taken up by the Workflows page.
     var workflowRunToOpen by remember { mutableStateOf(RemAlertRules.parseWorkflowTarget(initialThread)) }
+    // A decision a tapped question asked to open, taken up by the Rem page's Decisions screen.
+    var decisionToOpen by remember { mutableStateOf(RemAlertRules.parseDecisionTarget(initialThread)) }
     // An organization the board asked to open, taken up by the Organizations page.
     var organizationToOpen by remember { mutableStateOf<String?>(null) }
     // A ticket a pill in Rem's chat asked to open, taken up by the global board.
@@ -188,6 +211,7 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
         LiveNavigation.back(page, lastTop, home, bar)?.let { page = it }
     }
     BackHandler(enabled = client.paired && page == LiveNavigation.SELF_WORK) { page = selfWorkBack }
+    BackHandler(enabled = client.paired && page == LiveNavigation.COMPUTERS) { page = "Usage" }
     /** A destination on the bar has no back arrow; opened from More, it has one that goes back there. */
     fun backFrom(target: String): (() -> Unit)? = if (target in bar) null else ({ page = LiveNavigation.back(target, lastTop, home, bar) ?: home })
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -226,6 +250,11 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
     LaunchedEffect(initialThread) {
         if (initialThread == "approvals") { page = "Approvals"; consumeInitialThread() }
         else if (initialThread == "rem") { page = "Rem"; consumeInitialThread() }
+        else if (RemAlertRules.parseDecisionTarget(initialThread) != null) {
+            decisionToOpen = RemAlertRules.parseDecisionTarget(initialThread); page = "Rem"; consumeInitialThread()
+        }
+        // Run a workflow from another app's share sheet: the Workflows page takes the waiting share.
+        else if (initialThread == dev.raticode.mobile.share.WorkflowShare.TARGET) { page = "Workflows"; consumeInitialThread() }
         else if (RemAlertRules.parseWorkflowTarget(initialThread) != null) {
             workflowRunToOpen = RemAlertRules.parseWorkflowTarget(initialThread); page = "Workflows"; consumeInitialThread()
         }
@@ -313,12 +342,9 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
     var reset by remember { mutableStateOf(false) }
     var clearHistory by remember { mutableStateOf<String?>(null) }
     var removeFile by remember { mutableStateOf<String?>(null) }
-    val scanner = rememberLauncherForActivityResult(ScanContract()) { result -> result.contents?.let(client::preview) }
-    val scan = {
-        scanner.launch(ScanOptions().setCaptureActivity(SecureCaptureActivity::class.java)
-            .setDesiredBarcodeFormats(ScanOptions.QR_CODE).setPrompt("Scan the invitation in desktop Device settings")
-            .setBeepEnabled(false).setOrientationLocked(false))
-    }
+    // SecureCaptureActivity reads QR codes only, never beeps and turns with the phone.
+    val scanner = rememberLauncherForActivityResult(ScanQrContract()) { text -> text?.let(client::preview) }
+    val scan = { scanner.launch("Scan the invitation in desktop Device settings") }
     LaunchedEffect(scanOnOpen) { if (scanOnOpen) { consumeScan(); scan() } }
     val imagesEnabled = client.mediaProxy && client.connected
     val imageSource = remember(client, imagesEnabled) { ChatImageSource(imagesEnabled, { client.images[it] }, client::requestImage) }
@@ -367,17 +393,20 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
             if (mediaTrack != null && !fullscreenVideo && !compactTyping && !(typing && shortScreen))
                 BrowserMediaBar(mediaTrack, onOpen = { dev.raticode.mobile.browser.BrowserMedia.reveal(context, it); page = "Browser" })
             if (!fullscreenVideo && !(typing && shortScreen)) AppUpdateBanner()
-            if (page == "Desktop" || page == "Files" || !client.paired) StudioHeader(if (client.paired) { if (client.connected) "Encrypted ${client.route}" else "Offline" } else "Mobile companion") {
+            if (page == "Desktop" || page == "Files" || (!client.paired && page != "Browser")) StudioHeader(if (client.paired) { if (client.connected) "Encrypted ${client.route}" else "Offline" } else "Mobile companion") {
                 if (client.paired) TextButton(onClick = { page = if (page == "Desktop") "Threads" else "Desktop" },
                     colors = ButtonDefaults.textButtonColors(contentColor = LocalStudioColors.current.onNavigation)) {
                     Text(if (page == "Desktop") "Threads" else "Desktop")
                 }
             }
-            if (page == "Desktop" || !client.paired) ConnectionStatus(client.connected, client.status, Modifier.fillMaxWidth())
+            if (page == "Desktop" || (!client.paired && page != "Browser")) ConnectionStatus(client.connected, client.status, Modifier.fillMaxWidth())
             if (!fullscreenVideo && dev.raticode.mobile.live.WakeOnLan.showsBanner(client.paired, client.cantConnect, client.wakeAvailable, typing, page, topLevel)) WakeBanner(client)
             Column(Modifier.weight(1f).fillMaxWidth()) {
                 if (!client.loaded) {
                     LinearProgressIndicator(Modifier.fillMaxWidth())
+                } else if (!client.paired && page == "Browser") {
+                    // Links from other apps open here before the phone is paired too; Back returns to pairing.
+                    BrowserPage(client, { page = home }, browserReveal, ::askRem)
                 } else if (!client.paired) {
                     Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Text("Connect to your desktop", style = MaterialTheme.typography.headlineMedium)
@@ -416,13 +445,16 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
                         // With the board off on the computer, the report is with self-work's settings.
                         if ((client.desktopViews[Kanban.SELF_WORK] as? SelfWorkView)?.state?.boardEnabled == false) openSelfWork("Rem")
                         else { kanbanTab = KanbanTabs.SELF; page = "Kanban" }
-                    }, onTicket = { ticket -> ticketToOpen = ticket.uid; kanbanTab = KanbanTabs.BOARD; page = "Kanban" }) }
+                    }, onTicket = { ticket -> ticketToOpen = ticket.uid; kanbanTab = KanbanTabs.BOARD; page = "Kanban" },
+                        openDecision = decisionToOpen, onDecisionOpened = { decisionToOpen = null }) }
                 } else if (page == "Developer") {
                     DeveloperLogPage(client, backFrom("Developer")) { file, name ->
                         remHandoff = RemHandoff(System.nanoTime(), listOf(Picked(FileProvider.getUriForFile(context,
                             context.packageName + dev.raticode.mobile.data.OpenedFiles.AUTHORITY_SUFFIX, file), name, file)))
                         page = "Rem"
                     }
+                } else if (page == "Posts") {
+                    PostsPage(client, backFrom("Posts"))
                 } else if (page == "Organizations") {
                     OrganizationsPage(client, backFrom("Organizations"), organizationToOpen) { organizationToOpen = null }
                 } else if (page == "Kanban") {
@@ -435,6 +467,8 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
                     MorePage(client, bar) { page = it }
                 } else if (page == LiveNavigation.APP_LOCK) {
                     AppLockPage { page = LiveNavigation.MORE }
+                } else if (page == LiveNavigation.OPEN_WITH) {
+                    OpenWithSettingsPage { page = LiveNavigation.MORE }
                 } else if (page == LiveNavigation.PEOPLE) {
                     PeoplePage { page = LiveNavigation.MORE }
                 } else if (page == LiveNavigation.NAV_BAR) {
@@ -442,11 +476,18 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
                 } else if (page == "Settings") {
                     DesktopSettingsPage(client, backFrom("Settings")) { openSelfWork("Settings") }
                 } else if (page == "Usage") {
-                    UsagePage(client, backFrom("Usage"))
+                    UsagePage(client, backFrom("Usage")) { page = LiveNavigation.COMPUTERS }
+                } else if (page == LiveNavigation.COMPUTERS) {
+                    ComputersPage(client) { page = "Usage" }
                 } else if (page == "Voice") {
                     VoicePage(client, backFrom("Voice"))
                 } else if (page == "Workflows") {
-                    WorkflowsPage(client, backFrom("Workflows"), workflowRunToOpen) { workflowRunToOpen = null }
+                    WorkflowsPage(client, backFrom("Workflows"), workflowRunToOpen, consumeOpenRun = { workflowRunToOpen = null }) { file, name ->
+                        // Ask Rem about this failure: the run's summary waits in Rem's message box as a file. Nothing sends.
+                        remHandoff = RemHandoff(System.nanoTime(), listOf(Picked(FileProvider.getUriForFile(context,
+                            context.packageName + dev.raticode.mobile.data.OpenedFiles.AUTHORITY_SUFFIX, file), name, file)))
+                        page = "Rem"
+                    }
                 } else if (page == "SourceControl") {
                     homeState.SaveableStateProvider(SOURCE_CONTROL_STATE) {
                         SourceControlPage(client, backFrom("SourceControl")) { words -> keepSourceControl = true; askRem(words) }
@@ -490,6 +531,8 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
                     val messages = client.messages.filter { it.thread == current }
                     val chatItems = remember(messages) { buildChatItems(messages) }
                     var highlightedMessage by remember(current) { mutableStateOf<String?>(null) }
+                    var accountWarning by remember(current) { mutableStateOf<String?>(null) }
+                    LaunchedEffect(current, client.threadAccountsSync, client.connected) { if (client.threadAccountsSync) client.readThreadAccounts(current) }
                     val history = rememberLazyListState()
                     var followLatest by remember(current) { mutableStateOf(searchTarget == null) }
                     LaunchedEffect(current, messages, searchTarget) {
@@ -537,6 +580,16 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
                     if (!compactTyping && info != null) ModelControls(client, info.provider, info.model, info.effort, !info.deletePending) { p, m, e ->
                         client.updateContext(current, p, m, info.project, e, info.revision,
                             if (p == info.provider) info.permission else client.defaultPermissions[p])
+                    }
+                    val accountMenu = info?.provider?.let { p -> client.threadAccounts?.takeIf { it.thread == current }?.menus?.get(p) }
+                    if (!compactTyping && info != null && accountMenu != null) {
+                        val chosen = accountMenu.choice
+                        AccountMenu(accountMenu, chosen, !info.deletePending, accountWarning, phoneSignIn(client)) { choice ->
+                            // A started thread on another account starts a new provider session, as switching providers does.
+                            accountWarning = if (chatItems.isNotEmpty() && ThreadAccounts.effective(accountMenu, choice) != ThreadAccounts.effective(accountMenu, chosen))
+                                ThreadAccounts.warning(accountMenu.label, ThreadAccounts.label(accountMenu, choice)) else null
+                            client.updateContext(current, info.provider, info.model, info.project, info.effort, info.revision, account = choice)
+                        }
                     }
                     if (!compactTyping && info != null) ChoiceMenu(permissionLabel(info.permission), "Permissions",
                         client.permissionModes[info.provider].orEmpty().map { it to permissionLabel(it) }, info.permission,

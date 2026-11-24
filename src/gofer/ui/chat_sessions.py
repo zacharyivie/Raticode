@@ -57,6 +57,11 @@ async def _recovery_delay(delay: float, cancel: Any) -> bool:
     return cancel is None or not cancel.is_set()
 
 
+def session_key(provider: str, profile: Any = None) -> str:
+    """The saved-session key: the provider, plus the Claude Code account when there is one."""
+    return f"{provider}@{profile}" if isinstance(profile, str) and profile else provider
+
+
 def _digest(value: Any) -> str:
     return sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
@@ -132,7 +137,11 @@ def _fork_source(
     after it. A fork from an earlier message or another provider re-sends history.
     """
     parent = options.get("fork_from")
-    if provider not in NATIVE_FORK_PROVIDERS or not isinstance(parent, str) or not parent:
+    if (
+        provider.split("@", 1)[0] not in NATIVE_FORK_PROVIDERS
+        or not isinstance(parent, str)
+        or not parent
+    ):
         return None
     try:
         with open_binary_input(root.parent / _digest(parent) / "session.json") as source:
@@ -167,7 +176,10 @@ def _fork_source(
 
 def _plan(root: Path, options: dict[str, Any]) -> tuple[ChatSession, list[dict[str, Any]]]:
     messages = options["messages"]
-    provider = options["provider"]
+    # Each Claude Code account keeps its own sessions in its own folder, so a
+    # thread's session belongs to the provider and the account together. Moving a
+    # thread to another account is a handoff, like moving it to another provider.
+    provider = session_key(options["provider"], options.get("provider_profile"))
     workflow = options.get("workflow") or {}
     # ACP requires the same cwd on load. Also keep different projects isolated.
     project = workflow.get("projectRoot") or str(options.get("working_dir") or "")

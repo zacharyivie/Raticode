@@ -20,6 +20,7 @@ const {
 } = require("./browser-utils.cjs");
 const policyRules = require("./browser-policy.cjs");
 const { FirefoxContents } = require("./firefox-contents.cjs");
+const { PAGE_AGENT } = require("./agent-browser.cjs");
 const { ChromiumContents, isInternalPage: isChromiumInternalPage } = require("./chromium-contents.cjs");
 const { addonSlugFromUrl, createFirefoxManager } = require("./firefox-manager.cjs");
 const { watchMedia } = require("./browser-media.cjs");
@@ -56,12 +57,60 @@ const {
 } = policyRules;
 
 const PROMPT_TIMEOUT_MS = 2 * 60 * 1000;
+// What the preview profile's request guard decides: local files, and anything
+// that would reach the network (ws: and wss: included).
+const PREVIEW_GUARDED_URLS = ["file://*/*", "http://*/*", "https://*/*", "ws://*/*", "wss://*/*"];
 // Google's "Couldn't sign you in · This browser or app may not be secure" page.
 const GOOGLE_REJECTED = /^https:\/\/accounts\.google\.com\/(?:v\d+\/)?signin\/rejected/i;
 const PDF_TIMEOUT_MS = 60 * 1000;
 const SAVE_AS_TIMEOUT_MS = 30 * 1000;
 const PAGE_CONTEXT_WORLD_ID = 1918;
 const UA_SAMPLE_WORLD_ID = 1919;
+// Where a file from another app (scripts off) notes the link the user clicked.
+const LINK_CLICK_WORLD_ID = 1921;
+// A clicked link's navigation follows its click within moments.
+const LINK_CLICK_MS = 3000;
+// The offline preview profile's only way out: a proxy on the discard port,
+// loopback included, so routes the request guard can't see (WebRTC over TCP,
+// preconnect hints, WebTransport) lead nowhere. WebRTC there may use only
+// proxied routes, which turns its UDP off.
+const OFFLINE_PROXY = Object.freeze({ mode: "fixed_servers", proxyRules: "http://127.0.0.1:9", proxyBypassRules: "<-loopback>" });
+const OFFLINE_WEBRTC_POLICY = "disable_non_proxied_udp";
+
+const NETWORK_FILE_ERROR = "Raticode opens only files on this computer, not file:// addresses on another computer or network share.";
+
+// The path a file: URL names on this computer, or "" for anything else. A file:
+// URL with a host (file://server/share/page.html) names a network share, and on
+// Windows just resolving its path contacts that server and offers it the user's
+// sign-in, so such URLs are refused before any path or disk call.
+function localFilePath(value) {
+  let url;
+  try { url = value instanceof URL ? value : new URL(String(value ?? "")); } catch { return ""; }
+  if (url.protocol !== "file:") return "";
+  if (url.host !== "" && url.hostname.toLowerCase() !== "localhost") return "";
+  try { return fileURLToPath(url); } catch { return ""; }
+}
+const LINK_CLICK_RECORDER = `(() => {
+  if (window.__raticodeLinkClick) return true;
+  const state = window.__raticodeLinkClick = { url: "", at: 0 };
+  const record = (event) => {
+    if (!event.isTrusted || (event.type === "click" && event.button !== 0) || (event.type === "auxclick" && event.button !== 1)) return;
+    const anchor = event.composedPath().find((node) => node && (node.tagName === "A" || node.tagName === "AREA"));
+    if (!anchor || anchor.hasAttribute("download")) return;
+    state.url = String(anchor.href || "");
+    state.at = Date.now();
+  };
+  window.addEventListener("click", record, true);
+  window.addEventListener("auxclick", record, true);
+  return true;
+})()`;
+const LINK_CLICK_TAKE = `(() => {
+  const state = window.__raticodeLinkClick;
+  if (!state || !state.url) return null;
+  const taken = { url: state.url, age: Date.now() - state.at };
+  state.url = "";
+  return taken;
+})()`;
 const HIGH_ENTROPY_FIELDS = ["architecture", "bitness", "formFactors", "fullVersionList", "model", "platformVersion", "uaFullVersion", "wow64"];
 // Client hint headers only apply to potentially trustworthy URLs.
 const CLIENT_HINT_URLS = ["https://*/*", "wss://*/*", "http://localhost/*", "http://127.0.0.1/*", "http://*.localhost/*", "ws://localhost/*", "ws://127.0.0.1/*"];
@@ -96,6 +145,9 @@ function createBrowserSessions({
   session: electronSession,
   getMainWindow,
   resolvePath,
+  // Checks a preview's file:// request against its folder grant; main.js passes
+  // security.resolveGrantedPath. resolvePath alone may only check the file exists.
+  resolvePreviewPath = resolvePath,
   store,
   log = () => {},
   openWith = null,
@@ -104,6 +156,9 @@ function createBrowserSessions({
   chromeVersion = process.versions.chrome,
   firefox = null,
   chrome = null,
+  // Rem's tabs in Raticode (gecko), from gecko-control.cjs. Only Rem's tabs
+  // stream from it; the user's Gecko tab is Firefox's own window.
+  gecko = null,
   // Other Chromium-based browsers from chromium-engine.cjs, by engine name.
   chromium = {},
   nativeImage = null,
@@ -113,6 +168,9 @@ function createBrowserSessions({
   preloadPath = "",
   // The window a view sits in: "main" is Raticode's, "popout" the Browser's own window.
   getHostWindow = () => null,
+  // Told the user's Gecko tabs shared with Rem whenever they change, for every
+  // window that can show Raticode (gecko).
+  onGeckoShared = () => {},
 }) {
   const sessions = new Map();
   const ownersWithCleanup = new WeakSet();
@@ -127,7 +185,7 @@ function createBrowserSessions({
   const lastMedia = new WeakMap();
   let policy = sanitizeBrowserPolicy({});
   // Browsers that run without a window and stream their tabs, by engine name.
-  const streamEngines = Object.fromEntries(Object.entries({ ...chromium, firefox, chrome }).filter(([, engine]) => engine));
+  const streamEngines = Object.fromEntries(Object.entries({ ...chromium, firefox, chrome, gecko }).filter(([, engine]) => engine));
   // Firefox settings, extensions and importing (Settings > Browser).
   const firefoxManager = firefox ? createFirefoxManager({
     engine: firefox,
@@ -170,7 +228,9 @@ function createBrowserSessions({
     app.userAgentFallback = identity.userAgent;
     installedIdentity = identity;
     for (const kind of ["user", "rem"]) installProfile(kind, identity);
-    installPreviewFileGuard();
+    installPreviewRequestGuard("preview");
+    installPreviewRequestGuard("previewOnline");
+    installOfflineProxy();
     removeStrayQuarantine();
     sampleUserAgentMetadata();
     const user = profile("user");
@@ -227,26 +287,137 @@ function createBrowserSessions({
   // file:// URL (grantFileProtocolExtraPrivileges). Without a check a previewed page
   // could fetch ~/.ssh or list folders and send the result to a website (CWE-552).
   // Every file:// request in the preview profile, the page itself included, must be
-  // inside the folder an open preview was granted.
-  function installPreviewFileGuard() {
-    const webRequest = profile("preview")?.webRequest;
+  // inside the grant or folder of the preview that made it. Another open preview's
+  // folder doesn't count, and a request no open preview made is refused.
+  //
+  // Previews are also offline: a page can't send what it read from its own folder
+  // anywhere, or tell a website it was opened. A project file loads web content
+  // only after the user chose "Load remote content" for that file; a file another
+  // app handed to Raticode never does. Electron keeps one listener per profile,
+  // so this one decides both.
+  function installPreviewRequestGuard(kind) {
+    const webRequest = profile(kind)?.webRequest;
     if (typeof webRequest?.onBeforeRequest !== "function") return;
-    webRequest.onBeforeRequest({ urls: ["file://*/*"] }, (details, callback) => {
-      callback({ cancel: !previewFileAllowed(details?.url) });
+    webRequest.onBeforeRequest({ urls: PREVIEW_GUARDED_URLS }, (details, callback) => {
+      if (/^file:/i.test(String(details?.url ?? ""))) {
+        callback({ cancel: !previewFileAllowed(details || {}) });
+        return;
+      }
+      callback({ cancel: !previewRemoteRequestAllowed(details || {}) });
     });
   }
 
-  function previewFileAllowed(value) {
-    let target;
-    try { target = fileURLToPath(value); } catch { return false; }
-    for (const session of sessions.values()) {
-      if (session.kind !== "preview") continue;
+  // The open preview whose page made a request, if any.
+  function previewForRequest(details) {
+    const id = details?.webContentsId;
+    if (typeof id !== "number") return null;
+    return [...sessions.values()].find((item) => item.kind === "preview" && liveContents(item)?.id === id) || null;
+  }
+
+  function previewRemoteRequestAllowed(details) {
+    const session = previewForRequest(details);
+    if (!session) return false;
+    if (remoteContentAllowed(session)) return true;
+    // Counted for the page on screen; the bar appears with the first one.
+    const url = liveContents(session)?.getURL() || "";
+    if (session.remoteBlocked?.url !== url) session.remoteBlocked = { url, count: 0 };
+    session.remoteBlocked.count += 1;
+    if (session.remoteBlocked.count === 1) emitState(session);
+    return false;
+  }
+
+  function remoteBlockedCount(session) {
+    const url = liveContents(session)?.getURL() || "";
+    return session.remoteBlocked?.url === url ? session.remoteBlocked.count : 0;
+  }
+
+  // The local file a preview shows, while it shows one.
+  function previewFilePath(session) {
+    const url = liveContents(session)?.getURL() || "";
+    return localFilePath(url);
+  }
+
+  function remoteContentAllowed(session) {
+    if (session.kind !== "preview" || session.external || session.online !== true) return false;
+    const file = previewFilePath(session);
+    return Boolean(file) && store.previewRemoteAllowed?.(file) === true;
+  }
+
+  // Whether a preview showing this file belongs in the online profile.
+  function previewBelongsOnline(session, file) {
+    return session.kind === "preview" && !session.external && Boolean(file) && store.previewRemoteAllowed?.(file) === true;
+  }
+
+  // The offline preview profile reaches nothing, even by routes its request
+  // guard never sees. Previews wait for this before loading their file.
+  let offlineProxyReady = null;
+  function installOfflineProxy() {
+    const offline = profile("preview");
+    if (typeof offline?.setProxy !== "function") return;
+    const failed = (error) => log("warn", `Could not close the offline preview profile's network routes: ${error?.message || error}`);
+    let setting;
+    try { setting = offline.setProxy(OFFLINE_PROXY); } catch (error) { failed(error); return; }
+    if (typeof setting?.then !== "function") return;
+    offlineProxyReady = Promise.resolve(setting).catch(failed).finally(() => { offlineProxyReady = null; });
+  }
+
+  // "Load remote content" for the file a project preview shows, remembered by
+  // its path. Every open preview of that file moves to the profile that
+  // matches the new choice and loads the file again.
+  function setPreviewRemote(session, allowed) {
+    if (session.kind !== "preview") throw new Error("Only local HTML previews block remote content.");
+    if (session.external) throw new Error("Files opened from another app never load remote content.");
+    const file = previewFilePath(session);
+    if (!file) throw new Error("This tab isn't showing a local file.");
+    store.setPreviewRemote(file, allowed);
+    for (const other of sessions.values()) {
+      if (other.kind !== "preview" || other.external || previewFilePath(other) !== file) continue;
+      other.remoteBlocked = null;
+      if ((other.online === true) !== previewBelongsOnline(other, file)) moveToProfile(other, previewBelongsOnline(other, file));
+      else reload(other, false);
+      emitState(other);
+    }
+    return sessionState(session);
+  }
+
+  // A preview's profile is fixed when its view is made, so changing between
+  // offline and online makes a new view for the same tab and page.
+  function moveToProfile(session, online, url = "") {
+    if (!session.view || sessions.get(session.id) !== session) return;
+    const contents = liveContents(session);
+    const target = url || contents?.getURL() || session.initialUrl;
+    session.online = online;
+    session.mediaWatch?.stop();
+    session.mediaWatch = null;
+    // The old page going away must not close the tab.
+    session.contents = null;
+    removeView(session, contents);
+    session.pendingSrc = target;
+    createView(session);
+    if (session.lastPlace) placeView(session, session.lastPlace);
+  }
+
+  // A preview may read a local file only inside its folder grant or, without one, the
+  // folder of the file it opened with. The real path counts, so links can't lead out.
+  function previewMayRead(session, target) {
+    if (session.grantId) {
       try {
-        resolvePath(target, { grantId: session.grantId, mustExist: true });
+        resolvePreviewPath(target, { grantId: session.grantId, mustExist: true });
         return true;
       } catch { /* Not inside this preview's grant. */ }
     }
-    return false;
+    if (!session.previewFolder) return false;
+    let real;
+    try { real = fs.realpathSync(target); } catch { return false; }
+    const relative = path.relative(session.previewFolder, real);
+    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  }
+
+  function previewFileAllowed(details) {
+    const session = previewForRequest(details);
+    if (!session) return false;
+    const target = localFilePath(details.url);
+    return Boolean(target) && previewMayRead(session, target);
   }
 
   // ---------------------------------------------------------------------------
@@ -261,7 +432,8 @@ function createBrowserSessions({
   // Which profile a tab's cookies and storage live in. Private tabs are the
   // user's own tabs in every other respect.
   function profileKind(session) {
-    return session.privateBrowsing ? "private" : session.kind;
+    if (session.privateBrowsing) return "private";
+    return session.kind === "preview" && session.online === true ? "previewOnline" : session.kind;
   }
 
   // Private tabs neither read nor write the user's saved site settings.
@@ -473,17 +645,26 @@ function createBrowserSessions({
     let url = "about:blank";
     let grantId = "";
     let kind = "user";
+    // The folder of the file a preview opened with; without a grant it reads only there.
+    let previewFolder = "";
+    // A file another app opened with Raticode runs no scripts and stays offline,
+    // as in the phone's file viewer.
+    let external = false;
     if (requestedPath) {
       const targetPath = resolvePath(requestedPath, { grantId: options.grantId, mustExist: true });
       if (!fs.statSync(targetPath).isFile()) throw new Error(`Browser preview path is not a file: ${targetPath}`);
       url = pathToFileURL(targetPath).toString();
+      previewFolder = path.dirname(fs.realpathSync(targetPath));
       grantId = typeof options.grantId === "string" ? options.grantId : "";
       kind = "preview";
+      external = options.external === true;
     } else if (options.url) {
       url = browserLoadUrl(normalizeBrowserUrl(options.url, policy.searchUrl));
       // Local files always render in the in-memory preview profile.
       if (url.startsWith("file:")) {
-        resolvePath(fileURLToPath(url), { mustExist: true });
+        const file = localFilePath(url);
+        if (!file) throw new Error(NETWORK_FILE_ERROR);
+        previewFolder = path.dirname(fs.realpathSync(resolvePath(file, { mustExist: true })));
         kind = "preview";
       }
     }
@@ -524,6 +705,11 @@ function createBrowserSessions({
       openBrowserBinding: typeof options.openBrowserBinding === "string" ? options.openBrowserBinding.slice(0, 120) : "Mod+Alt+Slash",
     });
     session.pendingHistory = history;
+    session.external = external;
+    session.previewFolder = previewFolder;
+    if (kind === "preview") {
+      session.online = previewBelongsOnline(session, localFilePath(url));
+    }
     if (privateTab) {
       installPrivateProfile();
       session.privateBrowsing = true;
@@ -619,6 +805,7 @@ function createBrowserSessions({
   function viewPreferences(session) {
     return {
       partition: PARTITIONS[profileKind(session)],
+      ...(session.external ? { javascript: false } : {}),
       ...(preloadPath ? { preload: preloadPath } : {}),
       sandbox: true,
       contextIsolation: true,
@@ -663,7 +850,10 @@ function createBrowserSessions({
       void restoreHistory(session, contents, history);
     } else if (first && first !== "about:blank") {
       session.localNavigation = first.startsWith("file:");
-      void run(session, () => contents.loadURL(first));
+      const load = () => run(session, () => contents.loadURL(first));
+      const proxyPending = profileKind(session) === "preview" ? offlineProxyReady : null;
+      if (proxyPending) void proxyPending.then(() => (liveContents(session) === contents ? load() : undefined));
+      else void load();
     } else {
       // A view that never loaded has no page yet; a webview always showed
       // about:blank first, and Rem's controls expect a page to talk to.
@@ -688,15 +878,37 @@ function createBrowserSessions({
     return window;
   }
 
+  // The zoom of the page that measured a tab's slot: the Browser's own window
+  // when the slot is there, Raticode's otherwise. The two can differ.
+  function hostZoomFactor(session, host) {
+    const popout = host === "popout" ? getHostWindow("popout") : null;
+    const contents = popout && !popout.isDestroyed() ? popout.webContents : session.owner;
+    let zoom = 1;
+    try {
+      if (contents && !contents.isDestroyed?.()) zoom = contents.getZoomFactor?.();
+    } catch {
+      zoom = 1;
+    }
+    return Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+  }
+
   function placeView(session, options = {}) {
     if (!session.view || !liveContents(session)) return { placed: false };
-    hostView(session, options.host === "popout" ? "popout" : "main");
-    // The studio measures in its own CSS pixels; the window counts them zoomed.
-    const zoom = session.owner.getZoomFactor?.() || 1;
+    const host = options.host === "popout" ? "popout" : "main";
+    hostView(session, host);
+    // The studio measures in CSS pixels of the window the slot is in; that
+    // window counts them zoomed. The page is zoomed like that window too.
+    const zoom = hostZoomFactor(session, host);
+    if (session.ownerZoomFactor !== zoom) {
+      session.ownerZoomFactor = zoom;
+      syncZoom(session);
+    }
     const scaled = (value, low, high) => Math.min(Math.max(Number.isFinite(value) ? Math.round(value * zoom) : 0, low), high);
     const width = scaled(Number(options.width), 0, 20000);
     const height = scaled(Number(options.height), 0, 20000);
     const shown = options.visible === true && width > 0 && height > 0;
+    // A preview that changes profile gets a new view in the same place.
+    session.lastPlace = { ...options };
     // A hidden view keeps its last size, so its page doesn't lay out again.
     if (shown) session.view.setBounds({ x: scaled(Number(options.x), -20000, 20000), y: scaled(Number(options.y), -20000, 20000), width, height });
     session.view.setVisible(shown);
@@ -762,6 +974,7 @@ function createBrowserSessions({
     const restoreOwnerFocus = contents?.isFocused() === true;
     sessions.delete(session.id);
     if (session.privateBrowsing && ![...sessions.values()].some((item) => item.privateBrowsing)) forgetPrivateDataSoon();
+    if (session.geckoShared) notifyGeckoShared();
     session.closed = true;
     session.contents = null;
     clearTimeout(session.detachTimer);
@@ -769,7 +982,8 @@ function createBrowserSessions({
     session.mediaWatch?.stop();
     session.mediaWatch = null;
     emitMedia(session.owner);
-    if (isStreamed(contents)) contents.close();
+    // A Gecko tab's contents call themselves Firefox; the session knows it's Gecko.
+    if (isStreamed(contents) || (contents && isStreamed(session))) contents.close();
     removeView(session, contents);
     for (const [requestId, prompt] of prompts) {
       if (prompt.session === session) settlePrompt(requestId, null);
@@ -828,6 +1042,19 @@ function createBrowserSessions({
   function configure(session) {
     const contents = session.contents;
     const update = () => emitState(session);
+    if (profileKind(session) === "preview") {
+      // WebRTC may use only proxied routes, and the offline profile's proxy leads nowhere.
+      try { contents.setWebRTCIPHandlingPolicy?.(OFFLINE_WEBRTC_POLICY); } catch (error) { log("warn", `Could not limit WebRTC in a preview: ${error.message}`); }
+    }
+    if (session.kind === "preview" && session.external) {
+      // A file from another app runs no scripts, so Raticode's preload doesn't
+      // either; a script world of Raticode's own notes the links the user clicks.
+      contents.on("dom-ready", () => {
+        void Promise.resolve()
+          .then(() => contents.executeJavaScriptInIsolatedWorld(LINK_CLICK_WORLD_ID, [{ code: LINK_CLICK_RECORDER }]))
+          .catch(() => { /* Then no link in this page opens a Browser tab. */ });
+      });
+    }
     contents.on("input-event", (_event, input) => {
       if (USER_INPUT_TYPES.has(input?.type)) session.lastUserInputAt = Date.now();
     });
@@ -855,6 +1082,8 @@ function createBrowserSessions({
     });
     contents.on("did-stop-loading", update);
     contents.on("did-navigate", (_event, url) => {
+      // Back and forward skip will-navigate: a file in the wrong profile moves now.
+      if (session.kind === "preview" && /^file:/i.test(String(url))) setImmediate(() => moveToMatchingProfile(session, url));
       session.favicon = "";
       session.localNavigation = String(url).startsWith("file:");
       if (!session.certificateErrorPending) session.certificateError = null;
@@ -945,7 +1174,11 @@ function createBrowserSessions({
     const guardNavigation = (event, url) => {
       if (!isAllowedNavigation(session, url)) event.preventDefault();
     };
-    contents.on("will-navigate", guardNavigation);
+    contents.on("will-navigate", (event, url) => {
+      if (handOffPreviewNavigation(session, url)) event.preventDefault();
+      else if (moveToMatchingProfile(session, url)) event.preventDefault();
+      else guardNavigation(event, url);
+    });
     contents.on("will-redirect", guardNavigation);
     contents.on("ipc-message", (event, channel, payload) => {
       if (event.senderFrame !== contents.mainFrame) return;
@@ -1101,16 +1334,64 @@ function createBrowserSessions({
     // App links such as mailto: continue to Chromium, which asks the user first.
     if (policyRules.EXTERNAL_PROTOCOLS.has(url.protocol) && session.kind === "user") return true;
     if (url.protocol !== "file:" || session.kind !== "preview") return false;
-    try {
-      resolvePath(fileURLToPath(url), { grantId: session.grantId, mustExist: true });
-      return true;
-    } catch {
-      return false;
-    }
+    const file = localFilePath(url);
+    return Boolean(file) && previewMayRead(session, file);
   }
 
   // ---------------------------------------------------------------------------
   // Links, tabs and popups
+
+  function userActivated(session) {
+    return Date.now() - session.lastUserInputAt <= policyRules.USER_ACTIVATION_MS;
+  }
+
+  // A preview never turns into a website in its own profile, and only a link
+  // the user really clicked opens one in a Browser tab. A click anywhere else,
+  // or a key press, doesn't let the page's scripts (or a meta refresh) send
+  // the user to an address that carries what the page read off.
+  // - A page that runs scripts: Raticode's preload hands clicked links over
+  //   before any navigation starts, so every navigation to a website here is
+  //   the page's own and goes nowhere.
+  // - A file from another app (scripts off, so no preload): Raticode's own
+  //   script world noted the link the user clicked; only that address opens.
+  function handOffPreviewNavigation(session, value) {
+    if (session.kind !== "preview") return false;
+    if (!/^(?:https?|wss?):/i.test(String(value ?? ""))) return false;
+    openIfClickedLink(session, value, {});
+    return true;
+  }
+
+  function openIfClickedLink(session, value, { background = false }) {
+    const blocked = () => log("warn", "Blocked a local preview from opening a website on its own.");
+    const contents = liveContents(session);
+    if (!session.external || !contents || typeof contents.executeJavaScriptInIsolatedWorld !== "function") {
+      blocked();
+      return;
+    }
+    void Promise.resolve()
+      .then(() => contents.executeJavaScriptInIsolatedWorld(LINK_CLICK_WORLD_ID, [{ code: LINK_CLICK_TAKE }]))
+      .then((clicked) => {
+        if (clickedLinkMatches(clicked, value)) openPageLink(session, value, { background });
+        else blocked();
+      }, blocked);
+  }
+
+  function clickedLinkMatches(clicked, value) {
+    if (!clicked || typeof clicked.url !== "string" || !(Number(clicked.age) >= 0 && Number(clicked.age) <= LINK_CLICK_MS)) return false;
+    try { return new URL(clicked.url).href === new URL(String(value)).href; } catch { return false; }
+  }
+
+  // A preview's file opens in the profile its remote-content choice says, so
+  // a page moving within its folder can't carry the online profile with it.
+  function moveToMatchingProfile(session, value) {
+    if (session.kind !== "preview" || session.external || !session.view) return false;
+    const file = localFilePath(value);
+    if (!file || !isAllowedNavigation(session, value)) return false;
+    const online = previewBelongsOnline(session, file);
+    if ((session.online === true) === online) return false;
+    setImmediate(() => moveToProfile(session, online, String(value)));
+    return true;
+  }
 
   function openPageLink(session, value, { background = false } = {}) {
     if (session.owner.isDestroyed()) return;
@@ -1120,7 +1401,11 @@ function createBrowserSessions({
       // Local previews hand links to the studio, which checks the destination's
       // own path grant and reports missing files. Never grant remote pages this route.
       if (session.kind !== "preview" || !/^file:/i.test(liveContents(session)?.getURL() || "")) return;
-      session.owner.send("gofer:browser-open-file", { href: url.toString() });
+      // A link to a network share isn't a file on this computer.
+      if (!localFilePath(url)) return;
+      // A file from another app stays scripts-off through its own links, including
+      // one back to itself, so a click can't reopen it (or a sibling) with scripts on.
+      session.owner.send("gofer:browser-open-file", { href: url.toString(), fromPage: true, ...(session.external ? { external: true } : {}) });
       return;
     }
     if (!["http:", "https:"].includes(url.protocol)) return;
@@ -1129,15 +1414,17 @@ function createBrowserSessions({
       return;
     }
     // Pages and Rem never take the user's view; only user clicks may.
-    const foreground = !background && !session.agent && Date.now() - session.lastUserInputAt <= policyRules.USER_ACTIVATION_MS;
+    const foreground = !background && !session.agent && userActivated(session);
     session.owner.send("gofer:browser-open-tab", { url: url.toString(), background: !foreground, engine: session.engine || "raticode", ...(session.privateBrowsing ? { private: true } : {}) });
   }
 
   function openWindow(session, details = {}) {
     const contents = liveContents(session);
     if (!contents) return { action: "deny" };
-    if (session.kind === "preview" && /^file:/i.test(contents.getURL())) {
-      openPageLink(session, details.url, { background: details.disposition === "background-tab" });
+    if (session.kind === "preview") {
+      // Only a link the user clicked opens a tab from a local file, never its
+      // scripts, even right after a click (see handOffPreviewNavigation).
+      openIfClickedLink(session, details.url, { background: details.disposition === "background-tab" });
       return { action: "deny" };
     }
     const origin = siteKey(contents.getURL());
@@ -1247,8 +1534,11 @@ function createBrowserSessions({
   function ownerZoom(event) {
     const ownerZoomFactor = event.sender.getZoomFactor();
     for (const session of sessions.values()) {
-      if (session.ownerId !== event.sender.id || session.ownerZoomFactor === ownerZoomFactor) continue;
-      session.ownerZoomFactor = ownerZoomFactor;
+      if (session.ownerId !== event.sender.id) continue;
+      // A tab in the Browser's own window keeps that window's zoom.
+      const zoom = hostZoomFactor(session, session.lastPlace?.host);
+      if (session.ownerZoomFactor === zoom) continue;
+      session.ownerZoomFactor = zoom;
       syncZoom(session);
     }
     return { zoomFactor: ownerZoomFactor };
@@ -1270,7 +1560,8 @@ function createBrowserSessions({
   // History
 
   function recordHistory(session, url) {
-    if (session.kind !== "user" || session.privateBrowsing || !/^https?:/i.test(String(url))) return;
+    // A shared Gecko tab's history is Firefox's own.
+    if (session.kind !== "user" || session.privateBrowsing || session.geckoShared || !/^https?:/i.test(String(url))) return;
     const key = String(url).split("#", 1)[0];
     if (key === session.lastRecordedUrl) return;
     session.lastRecordedUrl = key;
@@ -1803,14 +2094,34 @@ function createBrowserSessions({
   // ---------------------------------------------------------------------------
   // Rem
 
-  function openAgentTab({ agent, label }) {
+  // The browser Rem asked for, or the default from Settings > Browser. Rem
+  // uses Raticode (gecko) only when it asks for it and the user lets it.
+  function agentStreamEngine(requested) {
+    const wanted = requested === "chromium" ? "raticode" : requested;
+    if (wanted === "gecko") {
+      if (!gecko) throw new Error("Rem can't use Raticode (gecko) in this version of Raticode.");
+      if (!gecko.status().enabled) throw new Error(gecko.offMessage || "Turn on \"Let Rem use Raticode (gecko)\" in Settings > Browser.");
+      return "gecko";
+    }
+    if (wanted === "raticode") return "";
+    if (typeof wanted === "string" && wanted) {
+      if (!streamEngines[wanted] || wanted === "gecko") throw new Error(`Rem can't open tabs in ${engineLabel(wanted)}. Use chromium, gecko, firefox, chrome or edge.`);
+      return wanted;
+    }
+    return streamEngine();
+  }
+
+  function openAgentTab({ agent, label, engine: requested = "" }) {
     const mainWindow = getMainWindow();
     if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
       throw new Error("The Raticode window is closed. Open Raticode and retry.");
     }
     const owner = mainWindow.webContents;
-    const streamed = streamEngine();
-    if (streamed && !streamEngines[streamed].status().available) {
+    const streamed = agentStreamEngine(requested);
+    if (streamed === "gecko") {
+      const found = gecko.status();
+      if (!found.executable || found.problem) throw new Error(found.problem || "Firefox was not found, so Raticode (gecko) can't start. Use browser: \"chromium\".");
+    } else if (streamed && !streamEngines[streamed].status().available) {
       const name = engineLabel(streamed);
       throw new Error(`${name} is the default browser in Settings > Browser, but it is not installed. Ask the user to install ${name} or choose Raticode (chromium) as the default browser.`);
     }
@@ -1886,8 +2197,92 @@ function createBrowserSessions({
 
   function stopSharing(session) {
     if (!session.agent) return;
+    // A shared Gecko tab has no Raticode tab of its own: Rem lets go of it,
+    // and it stays open in Gecko's window.
+    if (session.geckoShared) {
+      detachAgent(session);
+      closeSession(session);
+      return;
+    }
     detachAgent(session);
     emitState(session);
+  }
+
+  // ---------------------------------------------------------------------------
+  // The user's Raticode (gecko) tab, shared with Rem
+  //
+  // Gecko is Firefox's own window, so its tabs aren't Raticode tabs. The user
+  // shares the one in front; Rem drives it like a shared Raticode (chromium)
+  // tab, with the same approvals, until the user stops sharing, closes it, or
+  // Gecko stops. Private windows can't be shared (see gecko-control.cjs).
+  async function shareGeckoTab(owner, threadId, label = "Rem") {
+    if (!gecko) throw new Error("Raticode (gecko) is not available in this version of Raticode.");
+    if (typeof threadId !== "string" || !threadId.trim()) throw new Error("Choose a Rem thread to share this tab with.");
+    if (!gecko.status().enabled) throw new Error("Turn on \"Let Rem use Raticode (gecko)\" in Settings > Browser > Raticode (gecko) first.");
+    const found = await gecko.shareableTab();
+    if ([...sessions.values()].some((item) => item.geckoShared === found.context)) throw new Error("This Gecko tab is already shared with Rem.");
+    const session = baseSession({
+      id: crypto.randomUUID(),
+      owner,
+      kind: "user",
+      url: found.url,
+      agent: { id: remOwnerForThread(threadId.trim()), label: String(label || "Rem").slice(0, 60), shared: true },
+    });
+    session.geckoShared = found.context;
+    session.agentUsedAt = Date.now();
+    session.agentLog = [{ action: "shared", detail: "You shared this Gecko tab", at: Date.now() }];
+    sessions.set(session.id, session);
+    registerOwnerCleanup(owner);
+    const contents = createStreamContents(session, "gecko", { adopt: found.context });
+    try {
+      await contents.ready;
+    } catch (error) {
+      closeSession(session);
+      throw error;
+    }
+    notifyGeckoShared();
+    return { id: session.id, url: contents.getURL() || found.url, title: contents.getTitle() || found.title || "" };
+  }
+
+  function geckoSharedTabs() {
+    return [...sessions.values()].filter((item) => item.geckoShared && item.agent).map((session) => {
+      const contents = liveContents(session);
+      return {
+        id: session.id,
+        url: contents?.getURL() || session.initialUrl || "",
+        title: contents?.getTitle() || "",
+        agent: { label: session.agent.label, shared: true, paused: session.agentPaused, dialog: session.agentDialog || null, log: (session.agentLog || []).slice(-20) },
+        prompts: promptsFor(session),
+      };
+    });
+  }
+
+  function notifyGeckoShared() {
+    try { onGeckoShared(geckoSharedTabs()); } catch { /* A window is closing. */ }
+  }
+
+  // The controls for a shared Gecko tab, from whichever window shows Gecko.
+  function geckoSharedAction(options = {}) {
+    const session = typeof options.id === "string" ? sessions.get(options.id) : null;
+    if (!session?.geckoShared) throw new Error("That Gecko tab isn't shared with Rem anymore.");
+    switch (options.command) {
+      case "stop":
+        stopSharing(session);
+        break;
+      case "pause":
+        session.agentPaused = options.paused === true;
+        recordAgentActivity(session, { action: session.agentPaused ? "paused" : "resumed", detail: "by you", at: Date.now() });
+        break;
+      case "respond": {
+        const pending = prompts.get(String(options.requestId || ""));
+        if (!pending || pending.session !== session) throw new Error("That request has already been answered.");
+        settlePrompt(String(options.requestId), sanitizePromptResponse(pending.kind, options.response));
+        break;
+      }
+      default:
+        throw new Error(`Unknown action for a shared Gecko tab: ${options.command || "missing"}`);
+    }
+    return geckoSharedTabs();
   }
 
   // Ask Rem: the page's address, title, selection and readable text.
@@ -1897,14 +2292,17 @@ function createBrowserSessions({
     let text = "";
     let pageSelection = selection;
     try {
+      // The same reader as Rem's page snapshots, so text the page hides
+      // (transparent, covered, off the page) doesn't reach Rem this way either.
       const result = await Promise.race([
         contents.executeJavaScriptInIsolatedWorld(PAGE_CONTEXT_WORLD_ID, [{
-          code: "({ selection: String(getSelection() || ''), text: (document.body?.innerText || '').slice(0, 40000) })",
+          code: `${PAGE_AGENT};__raticodeAgent("readable", { max: 40000 })`,
         }]),
         new Promise((resolve) => setTimeout(() => resolve(null), 3000)),
       ]);
-      text = String(result?.text || "");
-      pageSelection = pageSelection || String(result?.selection || "");
+      const read = result?.value || {};
+      text = `${read.hidden ? "[hidden text skipped]\n" : ""}${String(read.text || "")}`;
+      pageSelection = pageSelection || String(read.selection || "");
     } catch { /* Some pages refuse scripts; the address still helps. */ }
     return { url: contents.getURL(), title: contents.getTitle(), selection: pageSelection.slice(0, 20000), text };
   }
@@ -1932,6 +2330,7 @@ function createBrowserSessions({
   // A session or tab contents that streams from Firefox or Chrome.
   function isStreamed(item) {
     const name = item?.engine;
+    // Only Rem's Gecko tabs are sessions here; the user's Gecko tab never is.
     return Boolean(name && name !== "raticode" && streamEngines[name]);
   }
 
@@ -1946,15 +2345,16 @@ function createBrowserSessions({
   function engineStatus() {
     const missing = { available: false, executable: "", running: false };
     const status = { firefox: missing, chrome: missing, edge: missing };
-    for (const [name, engine] of Object.entries(streamEngines)) status[name] = engine.status();
+    for (const [name, engine] of Object.entries(streamEngines)) if (name !== "gecko") status[name] = engine.status();
     return status;
   }
 
-  function createStreamContents(session, name) {
+  function createStreamContents(session, name, { adopt = "" } = {}) {
     const engine = streamEngines[name];
-    const Contents = name === "firefox" ? FirefoxContents : ChromiumContents;
+    const Contents = name === "firefox" || name === "gecko" ? FirefoxContents : ChromiumContents;
     const contents = new Contents({
       engine,
+      ...(adopt ? { adopt } : {}),
       kind: session.kind === "rem" ? "rem" : "user",
       nativeImage,
       clipboard: { writeText: (text) => clipboard.writeText(text) },
@@ -1971,6 +2371,8 @@ function createBrowserSessions({
       }));
       contents.ready.catch(() => {});
     }
+    // A shared tab already shows its page.
+    if (adopt) contents.url = session.initialUrl || contents.url;
     session.engine = name;
     session.contents = contents;
     session.pendingSrc = "";
@@ -2032,6 +2434,9 @@ function createBrowserSessions({
   async function answerFirefoxDialog(session, contents, details) {
     // Rem answers dialogs in its own tabs with browser_handle_dialog.
     if (session.agent && !session.agent.shared) return;
+    // A shared Gecko tab's dialog shows in Gecko's own window, where the user
+    // answers it, or Rem does with browser_handle_dialog.
+    if (session.geckoShared) return;
     const host = hostOf(contents.getURL()) || "This page";
     let accept = true;
     let text;
@@ -2126,8 +2531,10 @@ function createBrowserSessions({
 
   // Firefox or Chrome stopped. Its tabs stay open and start it again when reloaded.
   function streamStopped(name, reason = `${engineLabel(name)} stopped`) {
-    for (const session of sessions.values()) {
-      if (session.engine === name) liveContents(session)?.markDead(reason);
+    for (const session of [...sessions.values()]) {
+      // A shared Gecko tab ends with Gecko; the user shares it again.
+      if (session.geckoShared && session.engine === name) closeSession(session);
+      else if (session.engine === name) liveContents(session)?.markDead(reason);
     }
   }
 
@@ -2209,6 +2616,8 @@ function createBrowserSessions({
       // The same refusal in any browser that streams its tabs.
       signInBlocked: isStreamed(session) && session.kind === "user" && Boolean(contents && GOOGLE_REJECTED.test(contents.getURL())),
       error: session.error,
+      // A file another app opened: no scripts, never online.
+      external: session.external === true,
       favicon: session.favicon || "",
       fullscreen: session.fullscreen === true,
       id: session.id,
@@ -2216,6 +2625,9 @@ function createBrowserSessions({
       muted: session.muted,
       profile: session.kind,
       prompts: promptsFor(session),
+      // A local HTML preview's web content: blocked requests on this page, and
+      // whether the user let this file load it.
+      remoteContent: session.kind === "preview" ? { allowed: remoteContentAllowed(session), blocked: remoteBlockedCount(session) } : null,
       unresponsive: session.unresponsive,
       zoom: session.pageZoomFactor,
     };
@@ -2254,6 +2666,7 @@ function createBrowserSessions({
   }
 
   function emitState(session) {
+    if (session.geckoShared && sessions.get(session.id) === session) notifyGeckoShared();
     try {
       if (sessions.get(session.id) === session && liveContents(session) && !session.owner.isDestroyed()) {
         session.owner.send("gofer:browser-state", sessionState(session));
@@ -2308,7 +2721,7 @@ function createBrowserSessions({
     if (!contents) throw new Error("Browser view is unavailable.");
     // Firefox shows its own pages, such as about:preferences, only to remote
     // control that is also allowed to run programs; Raticode never asks for that.
-    if (session.engine === "firefox" && /^\s*(?:about:(?!blank\s*$)|moz-extension:|chrome:|resource:)/i.test(String(value ?? ""))) {
+    if ((session.engine === "firefox" || session.engine === "gecko") && /^\s*(?:about:(?!blank\s*$)|moz-extension:|chrome:|resource:)/i.test(String(value ?? ""))) {
       throw new Error("Firefox's own pages, such as about:preferences, can't be shown in Raticode. Change Firefox settings and extensions in Settings > Browser > Firefox.");
     }
     // Chrome's own pages, such as chrome://settings, can change how Chrome
@@ -2320,8 +2733,15 @@ function createBrowserSessions({
     const normalizedUrl = normalizeBrowserUrl(value, policy.searchUrl);
     // Typed local paths open as previews in their own profile.
     if (normalizedUrl.startsWith("file:") && session.kind !== "preview") {
-      resolvePath(fileURLToPath(normalizedUrl), { mustExist: true });
+      const file = localFilePath(normalizedUrl);
+      if (!file) throw new Error(NETWORK_FILE_ERROR);
+      resolvePath(file, { mustExist: true });
       session.owner.send("gofer:browser-open-file", { href: normalizedUrl });
+      return Promise.resolve();
+    }
+    // A preview's profile is offline; a website typed there opens in a Browser tab.
+    if (session.kind === "preview" && /^https?:/i.test(normalizedUrl)) {
+      session.owner.send("gofer:browser-open-tab", { url: normalizedUrl, background: false, engine: session.engine || "raticode" });
       return Promise.resolve();
     }
     if (session.agent && !session.agent.shared && !remSiteAllowed(normalizedUrl, policy) && !normalizedUrl.startsWith("about:")) {
@@ -2491,6 +2911,8 @@ function createBrowserSessions({
         session.blockedPopups = [];
         break;
       }
+      case "preview-remote":
+        return setPreviewRemote(session, options.allowed !== false);
       case "dismiss-blocked-popups":
         session.blockedPopups = [];
         break;
@@ -2700,7 +3122,7 @@ function createBrowserSessions({
       default: {
         // Chromium-based browsers share "<engine>-sign-in-window" and "<engine>-restart".
         const [, name, verb] = /^([a-z]+)-(sign-in-window|restart)$/.exec(String(options.action || "")) || [];
-        if (name && name !== "firefox" && streamEngines[name]) {
+        if (name && name !== "firefox" && name !== "gecko" && streamEngines[name]) {
           if (verb === "sign-in-window") return streamSignInWindow(name, typeof options.url === "string" && options.url ? options.url : "https://accounts.google.com/");
           streamStopped(name, `Raticode is restarting ${engineLabel(name)}`);
           await streamEngines[name].stopAndWait();
@@ -2723,6 +3145,9 @@ function createBrowserSessions({
   return {
     agentTabs,
     allAgentTabs,
+    geckoSharedAction,
+    geckoSharedTabs,
+    shareGeckoTab,
     browserAction,
     browserLibrary,
     closeAgentTab,

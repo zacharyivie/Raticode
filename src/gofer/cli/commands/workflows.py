@@ -37,7 +37,8 @@ class _RunsGroup(TyperGroup):
     """``rattish runs``: its own subcommands, else the run list (``rattish runs list``).
 
     ``rattish runs WORKFLOW_ID`` and ``rattish runs --all`` keep working; a workflow
-    that is itself named ``list`` or ``rerun`` is listed with ``rattish runs list ID``.
+    that is itself named like a subcommand (``list``, ``rerun``, ``changes``, ``land``,
+    ``discard``) is listed with ``rattish runs list ID``.
     """
 
     def parse_args(self, ctx: _click.Context, args: list[str]) -> list[str]:
@@ -51,8 +52,9 @@ runs_app = typer.Typer(
     cls=_RunsGroup,
     help=(
         "(Backend) List workflow runs (`rattish runs WORKFLOW_ID`, `rattish runs --all`, the "
-        "same as `rattish runs list`), or run one again with its inputs (`rattish runs rerun "
-        "RUN_ID`)."
+        "same as `rattish runs list`), run one again with its inputs (`rattish runs rerun "
+        "RUN_ID`), or review, land or discard a worktree run's changes (`rattish runs "
+        "changes|land|discard RUN_ID`)."
     ),
 )
 
@@ -198,13 +200,47 @@ def show_workflow(
     finish(current, call, text)
 
 
+def _checked_file_inputs(
+    backend: Backend, workflow_id: str, values: dict[str, Any]
+) -> dict[str, Any]:
+    """``values`` with each file input's path checked here and made absolute.
+
+    The backend copies the file when the run starts, so a relative path is taken
+    from this folder rather than the backend's.
+    """
+    from gofer.rattish.file_inputs import FileInputError, FileInputSpec, check_file
+
+    plan = backend.request(
+        "POST", f"/workflows/{quote(workflow_id)}/run", {"inputs": {}, "dryRun": True}
+    ).get("plan")
+    declared = plan.get("inputs") if isinstance(plan, dict) else None
+    if not isinstance(declared, dict):
+        return values
+    checked = dict(values)
+    for name, entry in declared.items():
+        options = entry.get("file") if isinstance(entry, dict) else None
+        if not isinstance(options, dict) or name not in values:
+            continue
+        spec = FileInputSpec(
+            str(name),
+            tuple(str(item) for item in options.get("accept") or []),
+            int(options.get("maxSize") or 0) or FileInputSpec(str(name)).max_size,
+        )
+        try:
+            checked[name] = str(check_file(spec, values[name], base=Path.cwd()))
+        except FileInputError as exc:
+            raise CliError(str(exc), code="invalid_input", exit_code=ExitCode.USAGE) from None
+    return checked
+
+
 @app.command("start")
 def run_workflow(
     workflow_id: str = typer.Argument(..., help="Workflow ID from `Raticode rattish list`."),
     inputs: list[str] | None = typer.Option(
         None,
         "--input",
-        help="Workflow input as name=value. Values that parse as JSON keep their type.",
+        help="Workflow input as name=value. Values that parse as JSON keep their type. A file "
+        "input takes a path, relative to this folder.",
     ),
     inputs_file: Path | None = typer.Option(
         None, "--inputs-file", help="JSON object of inputs; - reads standard input."
@@ -220,6 +256,17 @@ def run_workflow(
     expected_revision: str | None = typer.Option(
         None, "--expected-revision", help="Refuse to run if the source changed since this revision."
     ),
+    from_node: str | None = typer.Option(
+        None,
+        "--from",
+        help="Run from this node, reusing an earlier run's results for the unchanged nodes "
+        "upstream of it. --input then gives only the password inputs that run didn't save.",
+    ),
+    reuse: str | None = typer.Option(
+        None,
+        "--reuse",
+        help="With --from, the run whose results to reuse. Default: the newest run that fits.",
+    ),
     output: opts.Output = opts.OutputFormat.json,
     endpoint: opts.EndpointUrl = None,
     token_file: opts.TokenFile = None,
@@ -229,10 +276,18 @@ def run_workflow(
 
     The run's nodes really run: providers, commands and services.
 
+    With --from NODE the run reuses the saved results of the nodes upstream of NODE
+    from the newest run that fits (or --reuse RUN_ID) and that run's inputs, then runs
+    NODE and everything after it. Approval steps are never reused: they ask again.
+    With --dry-run it shows which run and nodes it would reuse, the approval steps
+    that ask again and which password inputs it needs.
+
     Without --wait it returns as soon as the run starts. With --wait the exit code is
     the run's: 0 succeeded, 1 failed or stopped, 7 waiting on an approval, 8 timed out.
     """
     current = session("rattish start", output, endpoint, token_file, data_dir)
+    if reuse and not from_node:
+        res.invalid(current, "--reuse needs --from NODE.")
     limit = res.duration(current, timeout, 3600)
     values = res.parse_assignments(current, inputs)
     if inputs_file is not None:
@@ -245,8 +300,14 @@ def run_workflow(
         body["background"] = True
     if expected_revision:
         body["expectedRevision"] = expected_revision
+    if from_node:
+        body["fromNode"] = from_node
+    if reuse:
+        body["reuseRunId"] = reuse
 
     def call(backend: Backend, out: Output) -> dict[str, Any]:
+        if not from_node and any(isinstance(value, str) for value in values.values()):
+            body["inputs"] = _checked_file_inputs(backend, workflow_id, values)
         result = backend.request("POST", f"/workflows/{quote(workflow_id)}/run", body)
         if dry_run:
             return {"plan": result.get("plan")}
@@ -258,8 +319,19 @@ def run_workflow(
         return run
 
     def text(data: dict[str, Any]) -> str:
+        plan = data.get("plan")
+        if isinstance(plan, dict) and "reuseRunId" in plan:
+            lines = [
+                f"Run from {plan.get('fromNode')} would reuse run {plan['reuseRunId']}: "
+                + (", ".join(plan.get("reusedNodes") or []) or "no steps")
+            ]
+            if plan.get("askAgainNodes"):
+                lines.append("Approval steps that ask again: " + ", ".join(plan["askAgainNodes"]))
+            if plan.get("needsInputs"):
+                lines.append("Give again with --input: " + ", ".join(plan["needsInputs"]))
+            return "\n".join(lines)
         if "plan" in data:
-            return json.dumps(data["plan"], indent=2)
+            return json.dumps(plan, indent=2)
         return f"Run {data.get('id') or data.get('runId')}: {data.get('status', 'started')}"
 
     finish(current, call, text)
@@ -461,6 +533,8 @@ _STARTED_BY = {"manual": "manual", "trigger": "trigger", "phone": "phone", "rem"
 
 
 def _all_runs_text(data: dict[str, Any]) -> str:
+    from gofer.rattish.provider_fallback import switched
+
     rows = [
         [
             str(run.get("startedAt") or "")[:19].replace("T", " "),
@@ -468,7 +542,7 @@ def _all_runs_text(data: dict[str, Any]) -> str:
             _STARTED_BY.get(str(run.get("startedBy")), str(run.get("startedBy") or "")),
             str(run.get("status"))
             + (" (needs approval)" if run.get("awaitingApproval") else "")
-            + (" (switched provider)" if run.get("fallbacks") else ""),
+            + (" (switched provider)" if switched(run.get("fallbacks")) else ""),
             f"{float(run.get('durationSeconds') or 0):.1f}s",
             *_usage_cells(run.get("usage")),
             str(run.get("id")),
@@ -547,6 +621,189 @@ def rerun_run(
         call,
         lambda d: f"Run {d.get('id') or d.get('runId')}: {d.get('status', 'started')}",
     )
+
+
+_WORKTREE_STATES = {
+    "active": "running in its worktree",
+    "pending": "changes waiting to be landed or discarded",
+    "no_changes": "changed nothing; its worktree was removed",
+    "landed": "landed",
+    "discarded": "discarded",
+}
+_MERGE_STATES = {
+    "fast_forward": "lands as a fast-forward",
+    "clean": "merges cleanly",
+    "conflict": "conflicts",
+    "landed": "already in the branch",
+}
+
+
+def _unified(item: dict[str, Any]) -> str:
+    import difflib
+
+    if item.get("binary"):
+        return f"Binary file {item.get('path')} changed\n"
+    return "".join(
+        difflib.unified_diff(
+            str(item.get("original") or "").splitlines(keepends=True),
+            str(item.get("modified") or "").splitlines(keepends=True),
+            fromfile=f"a/{item.get('oldPath') or item.get('path')}",
+            tofile=f"b/{item.get('path')}",
+        )
+    )
+
+
+def _changes_text(data: dict[str, Any], *, diff: bool) -> str:
+    worktree = data.get("worktree") or {}
+    state = str(worktree.get("state") or "")
+    lines = [
+        f"Run {data.get('runId')}: {_WORKTREE_STATES.get(state, state)}",
+        f"Branch: {worktree.get('branch')} from {worktree.get('baseBranch') or 'a detached HEAD'}",
+    ]
+    merge = data.get("merge") or {}
+    if merge.get("state"):
+        where = worktree.get("baseBranch")
+        lines.append(f"Into {where}: {_MERGE_STATES.get(merge['state'], merge['state'])}")
+        lines.extend(f"  conflict: {path}" for path in merge.get("conflicts") or [])
+    if worktree.get("message"):
+        lines.append(str(worktree["message"]))
+    files = data.get("files") or []
+    if files:
+        lines.append("")
+        lines.extend(f"{item.get('status')}  {item.get('path')}" for item in files)
+    if diff:
+        lines.append("")
+        lines.extend(_unified(item) for item in files)
+    return "\n".join(lines).rstrip()
+
+
+@runs_app.command("failure")
+def run_failure(
+    run_id: str = typer.Argument(..., help="A run from `rattish runs`."),
+    workflow_id: str | None = typer.Option(
+        None, "--workflow", help="The run's workflow. Found from the run ID when left out."
+    ),
+    node_id: str | None = typer.Option(
+        None,
+        "--node",
+        help="The node to describe, or `workflow` for the run itself. "
+        "Defaults to the node that failed.",
+    ),
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Print what Ask Rem about this failure attaches for a run.
+
+    It names the workflow file, the run, the node and its type, the error, the end of
+    the node's output (up to 200 lines or 8 KB), preflight problems and the run's input
+    names, with password inputs masked. All of it is marked as untrusted run output.
+    `--output text` prints just that text; JSON adds `name`, `nodeId` and `workflowId`.
+    """
+    current = session("rattish runs failure", output, endpoint, token_file, data_dir)
+
+    def call(backend: Backend, out: Output) -> dict[str, Any]:
+        query = {
+            key: value for key, value in (("workflowId", workflow_id), ("nodeId", node_id)) if value
+        }
+        return dict(
+            backend.request("GET", f"/rattish/runs/{quote(run_id)}/failure", query=query or None)
+        )
+
+    finish(current, call, lambda data: str(data.get("text") or "").rstrip())
+
+
+@runs_app.command("changes")
+def run_changes(
+    run_id: str = typer.Argument(..., help="A run of a workflow with workspace: worktree."),
+    workflow_id: str | None = typer.Option(
+        None, "--workflow", help="The run's workflow. Found from the run ID when left out."
+    ),
+    diff: bool = typer.Option(False, "--diff", help="With --output text, print the diff too."),
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Show what a worktree run changed: its branch, files and whether it lands cleanly.
+
+    JSON output has each file's full text before and after (`files`), the branch tip
+    (`tip`) and the merge check (`merge`).
+    """
+    current = session("rattish runs changes", output, endpoint, token_file, data_dir)
+
+    def call(backend: Backend, out: Output) -> dict[str, Any]:
+        query = {"workflowId": workflow_id} if workflow_id else None
+        return dict(backend.request("GET", f"/rattish/runs/{quote(run_id)}/changes", query=query))
+
+    finish(current, call, lambda data: _changes_text(data, diff=diff))
+
+
+@runs_app.command("land")
+def land_run(
+    run_id: str = typer.Argument(..., help="A run with changes waiting, from `rattish runs`."),
+    workflow_id: str | None = typer.Option(
+        None, "--workflow", help="The run's workflow. Found from the run ID when left out."
+    ),
+    expected_tip: str | None = typer.Option(
+        None,
+        "--expected-tip",
+        help="Land only if the run's branch is still this commit (`tip` from `changes`).",
+    ),
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Land a worktree run's changes in the branch the project was on, then remove its
+    worktree and branch.
+
+    It fast-forwards that branch, or records a merge after checking that the two merge
+    without conflicts. It refuses while that branch's folder has uncommitted changes and
+    never pushes. A conflict changes nothing, names the files and exits 4.
+    """
+    current = session("rattish runs land", output, endpoint, token_file, data_dir)
+    body: dict[str, Any] = {}
+    if workflow_id:
+        body["workflowId"] = workflow_id
+    if expected_tip:
+        body["expectedTip"] = expected_tip
+
+    def call(backend: Backend, out: Output) -> dict[str, Any]:
+        require_user("land a run's changes")
+        result = dict(backend.request("POST", f"/rattish/runs/{quote(run_id)}/land", body))
+        if result.get("conflict"):
+            raise failure(str(result.get("message")), ExitCode.CONFLICT, data=result)
+        return result
+
+    def text(data: dict[str, Any]) -> str:
+        how = "already in" if data.get("how") == "landed" else "landed in"
+        return f"{data.get('branch')} {how} {data.get('baseBranch')} ({data.get('commit')})."
+
+    finish(current, call, text)
+
+
+@runs_app.command("discard")
+def discard_run(
+    run_id: str = typer.Argument(..., help="A run with changes waiting, from `rattish runs`."),
+    workflow_id: str | None = typer.Option(
+        None, "--workflow", help="The run's workflow. Found from the run ID when left out."
+    ),
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Discard a worktree run's changes: remove its worktree and its branch."""
+    current = session("rattish runs discard", output, endpoint, token_file, data_dir)
+    body = {"workflowId": workflow_id} if workflow_id else {}
+
+    def call(backend: Backend, out: Output) -> dict[str, Any]:
+        require_user("discard a run's changes")
+        return dict(backend.request("POST", f"/rattish/runs/{quote(run_id)}/discard", body))
+
+    finish(current, call, lambda data: f"Discarded {data.get('branch')} and its worktree.")
 
 
 @app.command("logs")
@@ -695,39 +952,80 @@ def list_approvals(
     )
 
 
-def _decide(decision: str) -> Any:
-    def command(
-        workflow_id: str = typer.Argument(...),
-        run_id: str = typer.Argument(...),
-        node_id: str = typer.Argument(..., help="The approval node's ID."),
-        notes: str = typer.Option("", "--notes", help="Recorded with the decision."),
-        output: opts.Output = opts.OutputFormat.json,
-        endpoint: opts.EndpointUrl = None,
-        token_file: opts.TokenFile = None,
-        data_dir: opts.DataDir = None,
-    ) -> None:
-        current = session(f"rattish {decision}", output, endpoint, token_file, data_dir)
-        path = (
-            f"/workflows/{quote(workflow_id)}/approvals/{quote(run_id)}/{quote(node_id)}/{decision}"
-        )
+_CHOICE_HELP = (
+    "The option to answer with, for a gate that lists options instead of Approve and "
+    "Reject. Matches the label, ignoring capital letters."
+)
+_REPLY_HELP = "Typed reply, for a gate whose reply is optional or required."
 
-        def decide(backend: Backend, out: Output) -> Any:
-            # A workflow run by Rem or a worker must not approve its own gate.
-            require_user(f"{decision} a workflow approval")
-            return backend.request("POST", path, {"by": "cli", "notes": notes})
 
-        finish(current, decide, lambda d: f"{decision.capitalize()}d {node_id} in run {run_id}.")
+def _decide_request(
+    decision: str,
+    workflow_id: str,
+    run_id: str,
+    node_id: str,
+    body: dict[str, Any],
+    output: opts.Output,
+    endpoint: opts.EndpointUrl,
+    token_file: opts.TokenFile,
+    data_dir: opts.DataDir,
+) -> None:
+    current = session(f"rattish {decision}", output, endpoint, token_file, data_dir)
+    path = f"/workflows/{quote(workflow_id)}/approvals/{quote(run_id)}/{quote(node_id)}/{decision}"
 
-    command.__doc__ = (
-        "Approve an approval-gate node so the run continues."
-        if decision == "approve"
-        else "Reject an approval-gate node."
+    def decide(backend: Backend, out: Output) -> Any:
+        # A workflow run by Rem or a worker must not approve its own gate.
+        require_user(f"{decision} a workflow approval")
+        return backend.request("POST", path, body)
+
+    def text(data: Any) -> str:
+        choice = ((data.get("approval") or {}).get("decision") or {}).get("choice")
+        if choice:
+            return f"Answered {node_id} in run {run_id} with {choice}."
+        return f"{decision.capitalize()}d {node_id} in run {run_id}."
+
+    finish(current, decide, text)
+
+
+@app.command("approve")
+def approve_approval(
+    workflow_id: str = typer.Argument(...),
+    run_id: str = typer.Argument(...),
+    node_id: str = typer.Argument(..., help="The approval node's ID."),
+    choice: str | None = typer.Option(None, "--choice", help=_CHOICE_HELP),
+    reply: str = typer.Option("", "--reply", help=_REPLY_HELP),
+    notes: str = typer.Option("", "--notes", help="Recorded with the decision."),
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Approve an approval-gate node so the run continues, or answer one with --choice."""
+    body: dict[str, Any] = {"by": "cli", "notes": notes, "reply": reply}
+    if choice is not None:
+        body["choice"] = choice
+    _decide_request(
+        "approve", workflow_id, run_id, node_id, body, output, endpoint, token_file, data_dir
     )
-    return command
 
 
-app.command("approve")(_decide("approve"))
-app.command("reject")(_decide("reject"))
+@app.command("reject")
+def reject_approval(
+    workflow_id: str = typer.Argument(...),
+    run_id: str = typer.Argument(...),
+    node_id: str = typer.Argument(..., help="The approval node's ID."),
+    reply: str = typer.Option("", "--reply", help=_REPLY_HELP),
+    notes: str = typer.Option("", "--notes", help="Recorded with the decision."),
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Reject an approval-gate node. A gate with options is answered with approve --choice."""
+    body: dict[str, Any] = {"by": "cli", "notes": notes, "reply": reply}
+    _decide_request(
+        "reject", workflow_id, run_id, node_id, body, output, endpoint, token_file, data_dir
+    )
 
 
 @app.command("export")
@@ -757,7 +1055,16 @@ def export_workflow(
             )
         )
         written = Path(str(result.get("bundlePath") or ""))
-        if written.is_file():
+        # Move only the file this export asked for. Whatever answers on the backend's
+        # port names bundlePath, and must not get any other file of the user's moved.
+        expected = Path(relative)
+        if (
+            written.is_absolute()
+            and written.name == expected.name
+            and written.parent.name == expected.parent.name
+            and not written.is_symlink()
+            and written.is_file()
+        ):
             target = file.expanduser().resolve()
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(written), target)
@@ -811,7 +1118,19 @@ def import_workflow(
 # Triggers --------------------------------------------------------------------------
 
 # Fields a trigger file carries. IDs, tokens and history stay on this computer.
-_PORTABLE_TRIGGER_FIELDS = ("kind", "label", "config", "overlap", "missed", "inputs", "enabled")
+_PORTABLE_TRIGGER_FIELDS = (
+    "kind",
+    "label",
+    "config",
+    "overlap",
+    "missed",
+    "inputs",
+    "enabled",
+    "dailyMaxCostUsd",
+    "dailyMaxTokens",
+    "maxRunSeconds",
+    "waitForUsageLimit",
+)
 
 
 def _triggers(backend: Backend, workflow_id: str) -> dict[str, Any]:

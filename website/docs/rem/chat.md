@@ -54,6 +54,7 @@ Pick a provider, model and effort in the composer. Your next message uses them, 
 switched to Codex - gpt-6.1-sol - high
 ```
 
+- When the provider has accounts, an **Account** menu sits under the picker. Changing it also adds a divider naming the account; see [Choose a thread's account](./providers.md#choose-a-thread-s-account).
 - Changing the picker without sending records nothing. Thirty changes then one send record only the last.
 - Going back to the settings you last sent with adds no divider.
 - The thread keeps its project, resources and visible history.

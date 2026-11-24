@@ -123,6 +123,42 @@ def test_turn_capability_is_not_interchangeable(tool_server: SwarmToolServer) ->
     assert request(b, body)[0] == 200
 
 
+def test_bearer_header_authorizes_the_tokenless_url(tool_server: SwarmToolServer) -> None:
+    tools = [{"name": "identity", "inputSchema": {"type": "object"}}]
+    url = tool_server.register(lambda _name, _args: "granted", tools)
+    other = tool_server.register(lambda _name, _args: "other", tools)
+    base, token = url.rsplit("/", 1)
+    base += "/"
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "identity"}}
+
+    status, result = request(base, body, {"Authorization": f"Bearer {token}"})
+    assert status == 200
+    assert json.loads(result["result"]["content"][0]["text"]) == "granted"
+    # The scheme name is case-insensitive.
+    assert request(base, body, {"Authorization": f"bearer {token}"})[0] == 200
+
+    for header in (
+        {},
+        {"Authorization": "Bearer wrong-token"},
+        {"Authorization": f"Bearer {token[:-1]}"},
+        {"Authorization": f"Basic {token}"},
+        {"Authorization": "Bearer "},
+        {"Authorization": f"Bearer {token} extra"},
+    ):
+        assert request(base, body, header) == (401, None), header
+    # One token source per request: a path token plus any header is refused, even
+    # when both name live grants.
+    other_token = other.rsplit("/", 1)[1]
+    assert request(url, body, {"Authorization": f"Bearer {other_token}"}) == (401, None)
+    assert request(url, body, {"Authorization": f"Bearer {token}"}) == (401, None)
+    # Claude Code's path-token URL keeps working.
+    assert request(url, body)[0] == 200
+
+    tool_server.revoke(url)
+    assert request(base, body, {"Authorization": f"Bearer {token}"}) == (401, None)
+    assert request(other, body)[0] == 200
+
+
 def test_tools_reject_browser_origin_and_unknown_tools(tool_server: SwarmToolServer) -> None:
     url = tool_server.register(lambda _name, _args: pytest.fail("must not be called"), [])
     body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "anything"}}

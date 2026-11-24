@@ -6,6 +6,7 @@ FIRST VIEWPORT: A searchable two-column dropdown with categories left and dense 
 FORM: Operate-mode app popover extending the existing studio chrome.
 */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { apiUrl } from "../lib/api";
 import {
   Bot,
   Brain,
@@ -22,6 +23,7 @@ import {
   Puzzle,
   RotateCcw,
   Search,
+  Server,
   Terminal,
   Wrench,
   X,
@@ -35,16 +37,20 @@ import ProviderSettings from "./ProviderSettings.jsx";
 import CommitMessageSettings from "./CommitMessageSettings.jsx";
 import VoiceTidySettings from "./VoiceTidySettings.jsx";
 import DictateAnywhereSettings from "./DictateAnywhereSettings.jsx";
+import WorkflowShortcutsSettings from "./WorkflowShortcutsSettings.jsx";
 import ScreenContextSettings from "./ScreenContextSettings.jsx";
 import SpeechEngineSettings from "./SpeechEngineSettings.jsx";
 import UsageDashboard from "./UsageDashboard.jsx";
 import PairedDevices from "./PairedDevices.jsx";
+import ComputersSettings from "./ComputersSettings.jsx";
 import { FEATURE_PREVIEWS } from "../lib/featurePreview.js";
 import FirefoxSettings from "./FirefoxSettings.jsx";
 import ChromeSettings from "./ChromeSettings.jsx";
 import EdgeSettings from "./EdgeSettings.jsx";
 import { WEB_BROWSER_OPTIONS } from "../lib/browserEngines.js";
 import GeckoSettings from "./GeckoSettings.jsx";
+import DefaultBrowserSettings from "./DefaultBrowserSettings.jsx";
+import { EXTERNAL_ENGINE_OPTIONS } from "../lib/externalOpens.js";
 import "./SettingsPopover.css";
 import { PLUGIN_ICONS } from "./pluginIcons.js";
 import { useProviderSettingsCapabilities } from "../lib/useProviderSettingsCapabilities.js";
@@ -85,25 +91,19 @@ import {
   withPluginPreview,
 } from "../lib/plugins.js";
 import { menuModels } from "../lib/providerModels.js";
+import { SETTINGS_SECTIONS } from "../lib/settingsSections.js";
 
-const INITIAL_ACTIVITY_IDS = ["rem", "workflows", "files", "search", "source-control", "kanban", "organizations", "second-brain"];
+const INITIAL_ACTIVITY_IDS = ["rem", "workflows", "files", "search", "source-control", "kanban", "posts", "organizations", "second-brain"];
 
-const CATEGORIES = [
-  { id: "general", label: "General", icon: MonitorCog },
-  { id: "devices", label: "Devices", icon: PcCase },
-  { id: "appearance", label: "Appearance", icon: Palette },
-  { id: "editor", label: "Editor", icon: Code2 },
-  { id: "browser", label: "Browser", icon: Globe2 },
-  { id: "terminal", label: "Terminal", icon: Terminal },
-  { id: "providers", label: "Providers", icon: PlugZap },
-  { id: "usage", label: "Usage", icon: ChartNoAxesCombined },
-  { id: "assistant", label: "Rem", icon: Bot },
-  { id: "memory", label: "Memory", icon: Brain },
-  { id: "developer", label: "Developer", icon: Wrench },
-  { id: "layout", label: "Layout", icon: LayoutPanelLeft },
-  { id: "plugins", label: "Plugins", icon: Puzzle },
-  { id: "keybindings", label: "Keybindings", icon: Command },
-];
+const SECTION_ICONS = {
+  general: MonitorCog, devices: PcCase, computers: Server, appearance: Palette, editor: Code2, browser: Globe2, terminal: Terminal,
+  providers: PlugZap, usage: ChartNoAxesCombined, assistant: Bot, memory: Brain, developer: Wrench,
+  layout: LayoutPanelLeft, plugins: Puzzle, keybindings: Command,
+};
+// How many 50 ms looks a Change link's setting gets before Settings settles for its fallback.
+const REVEAL_TRIES = 40;
+const FOCUSABLE_TAGS = new Set(["SELECT", "INPUT", "BUTTON", "TEXTAREA"]);
+const CATEGORIES = SETTINGS_SECTIONS.map((section) => ({ ...section, icon: SECTION_ICONS[section.id] }));
 
 export default function SettingsPopover({
   initialCategory = "general",
@@ -123,6 +123,14 @@ export default function SettingsPopover({
   const [category, setCategory] = useState(initialCategory);
   const [query, setQuery] = useState("");
   const providerState = useProviderSettingsCapabilities(open);
+  // A setting another category's link asked for, such as a Change link in Settings >
+  // Providers: { category, selectors }, tried in order until one is on the page.
+  const [reveal, setReveal] = useState(null);
+  const openSetting = useCallback((target) => {
+    setQuery("");
+    setCategory(target.category);
+    setReveal({ selectors: target.selectors ?? [] });
+  }, []);
   onCloseRef.current = onClose;
 
   useEffect(() => {
@@ -159,9 +167,30 @@ export default function SettingsPopover({
     };
   }, [category, open]);
 
+  useEffect(() => {
+    if (!open || !reveal) return undefined;
+    // Parts of a category load their settings first (Self-work does), so look for a
+    // moment. The exact control wins; a broader fallback is used only at the end.
+    let tries = 0;
+    let timer = 0;
+    const find = () => {
+      const panel = panelRef.current;
+      const [exact, ...fallbacks] = reveal.selectors.map((selector) => panel?.querySelector(selector) ?? null);
+      const last = tries >= REVEAL_TRIES;
+      const node = exact ?? (last ? fallbacks.find(Boolean) : null);
+      if (!node && !last) { tries += 1; timer = window.setTimeout(find, 50); return; }
+      setReveal(null);
+      if (!node) return;
+      node.scrollIntoView?.({ block: "center", inline: "nearest" });
+      if (FOCUSABLE_TAGS.has(node.tagName)) node.focus?.({ preventScroll: true });
+    };
+    timer = window.setTimeout(find, 0);
+    return () => window.clearTimeout(timer);
+  }, [open, reveal]);
+
   const matchingCategories = useMemo(
-    () => settingsCategoriesForQuery(query),
-    [query],
+    () => settingsCategoriesForQuery(query, providerState.capabilities),
+    [query, providerState.capabilities],
   );
   if (!open) return null;
 
@@ -242,6 +271,7 @@ export default function SettingsPopover({
                 category={categoryId}
                 query={query}
                 providerState={providerState}
+                openSetting={openSetting}
                 settings={settings}
                 dataDir={dataDir}
                 onChange={onChange}
@@ -253,6 +283,7 @@ export default function SettingsPopover({
               browserSection={initialBrowserSection}
               category={category}
               providerState={providerState}
+              openSetting={openSetting}
               settings={settings}
               dataDir={dataDir}
               onChange={onChange}
@@ -265,12 +296,13 @@ export default function SettingsPopover({
   );
 }
 
-function SettingsCategory({ browserSection = "", category, dataDir, onChange, onChooseDataDirectory, providerState, query = "", settings }) {
+function SettingsCategory({ browserSection = "", category, dataDir, onChange, onChooseDataDirectory, openSetting, providerState, query = "", settings }) {
   const heading = CATEGORIES.find((item) => item.id === category)?.label ?? "Settings";
   const rows = categoryRows(category, settings, onChange, providerState, {
     browserSection,
     dataDir,
     onChooseDataDirectory,
+    openSetting,
   });
   const normalizedQuery = query.trim().toLowerCase();
   const visibleRows = normalizedQuery
@@ -289,11 +321,15 @@ function SettingsCategory({ browserSection = "", category, dataDir, onChange, on
 
 function categoryRows(category, settings, onChange, providerState, appControls) {
   const row = (key, label, description, element, options = {}) => ({
-    element: <SettingRow key={key} label={label} description={description} stacked={options.stacked}>{element}</SettingRow>,
+    element: <SettingRow key={key} rowKey={key} label={label} description={description} stacked={options.stacked}>{element}</SettingRow>,
     searchText: `${label} ${description}`,
   });
-  if (category === "providers") return [{ searchText: "Providers enabled disabled executable coding harness path apps models allowed denied classification classifier Jev TypeSafe API key local model server Ollama llama.cpp LM Studio", element: <ProviderSettings key="providers" providerState={providerState} /> }];
-  if (category === "usage") return [{ searchText: "Usage tokens allowance limits remaining quotas credits billing spend accounts providers history refresh", element: <UsageDashboard key="usage" /> }];
+  if (category === "providers") return [{ searchText: providerSearchText(providerState.capabilities), element: <ProviderSettings key="providers" providerState={providerState} remAccounts={settings.assistant.providerAccounts} onOpenSetting={appControls.openSetting} /> }];
+  if (category === "computers") return [{
+    searchText: `Computers ${categoryKeywords("computers")}`,
+    element: <ComputersSettings key="computers" maxWorkers={settings.assistant.maxWorkers} onMaxWorkers={(value) => onChange("assistant.maxWorkers", value)} />,
+  }];
+  if (category === "usage") return [{ searchText: "Usage tokens allowance limits remaining quotas credits billing spend accounts providers history refresh alerts notifications", element: <UsageDashboard key="usage" /> }];
   if (category === "developer") return [
     { searchText: "Developer diagnostics application log logs logging errors warnings debug info filter connection app data storage version backend restart tools", element: <DeveloperSettings key="developer" /> },
     {
@@ -351,6 +387,10 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
       searchText: "Show Rem your screen screenshot screen capture window focused ask about my screen share display privacy Wayland portal macOS screen recording",
       element: <ScreenContextSettings key="screen-context" enabled={settings.devices.screenContext} anywhere={settings.devices.dictateAnywhere} binding={settingBinding(settings, "voice.askAboutScreen")} onChange={onChange} />,
     },
+    {
+      searchText: "Workflow shortcuts global system-wide hotkey run workflow from any app keyboard key clipboard Run sheet",
+      element: <WorkflowShortcutsSettings key="workflow-shortcuts" settings={settings} />,
+    },
     row("speech", "Speech recognition", "Turns dictation into text on this computer, using the speech recognizer built into the operating system where there is one.", (
       <SpeechEngineSettings />
     ), { stacked: true }),
@@ -371,6 +411,8 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
   ];
   if (category === "browser") return [
     row("engine", "Default browser for new tabs", "The Browser plugin keeps tabs from every browser in one tab bar, and each tab stays in the browser it opened in. New tab opens here; the arrow beside it picks another browser for one tab. Raticode (chromium) is Raticode's own browser. Raticode (gecko) puts real Firefox, with its own tabs, settings and extensions, directly inside one tab on Linux. Firefox, Chrome and Edge run without a window in their own profile, separate from your everyday Firefox, Chrome or Edge; Raticode shows their pages in tabs and passes your clicks and typing through. Rem's tabs and pages sent from your phone use this browser, or Raticode (chromium) when it is Raticode (gecko). Local files and previews always use Raticode (chromium).", <WebBrowserControl value={settings.browser.engine} onChange={(value) => onChange("browser.engine", value)} />),
+    row("defaultBrowser", "Default web browser", "Lets links and web pages you open in other apps open in Raticode. The system makes the change: Windows and macOS only allow it in their own settings, and on Linux Raticode asks you first. Raticode never changes it by itself.", <DefaultBrowserSettings />, { stacked: true }),
+    row("externalEngine", "Links from other apps open in", "When Raticode is the default browser. Raticode (gecko) is one Firefox window inside one Raticode tab, so each link becomes a new Firefox tab there; where Raticode (gecko) can't run, links open in Raticode (chromium) and Raticode says so. Web-page files always open in Raticode's file preview, and Rem isn't told about them.", <SelectControl label="Links from other apps open in" value={settings.browser.externalEngine} onChange={(value) => onChange("browser.externalEngine", value)} options={EXTERNAL_ENGINE_OPTIONS} />),
     row("engineSettings", "Settings for each browser", "Profiles and importing for Raticode (gecko), whose own tabs, settings, bookmarks and extensions are inside its tab; settings, extensions, sign-in and importing for Raticode's Firefox, Chrome and Microsoft Edge. Your everyday Firefox, Chrome and Edge are not changed. Tabs can run in any of them, whatever the default.", <BrowserEngineSections defaultEngine={settings.browser.engine} requested={appControls.browserSection} />, { stacked: true }),
     row("homepage", "Home page", "Address loaded when you open a new integrated browser tab.", <TextControl value={settings.browser.homepage} placeholder={DEFAULT_APP_SETTINGS.browser.homepage} onCommit={(value) => onChange("browser.homepage", value)} />),
     row("search", "Search URL", "Use {query} where the encoded search terms belong.", <TextControl value={settings.browser.searchUrl} placeholder="https://www.google.com/search?q={query}" onCommit={(value) => onChange("browser.searchUrl", value)} />),
@@ -391,7 +433,7 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
     row("cursor", "Blinking cursor", "Animate the terminal cursor while it is ready for input.", <SwitchControl checked={settings.terminal.cursorBlink} onChange={(value) => onChange("terminal.cursorBlink", value)} />),
     row("scrollback", "Scrollback lines", "Maximum number of terminal lines retained in memory.", <NumberControl value={settings.terminal.scrollback} min={100} max={100000} step={100} onCommit={(value) => onChange("terminal.scrollback", value)} />),
   ];
-  if (category === "assistant") return assistantRows(settings, onChange, row, providerState);
+  if (category === "assistant") return assistantRows(settings, onChange, row, providerState, appControls);
   if (category === "layout") return layoutRows(settings, onChange, row);
   if (category === "plugins") return [
     row("pluginLock", "Lock plugin order", "Keep plugins in place so they cannot be dragged in the sidebar or here.", (
@@ -406,7 +448,34 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
   return [];
 }
 
-function assistantRows(settings, onChange, row, providerState) {
+// Settings > Rem > account: one picker per provider that supports accounts.
+function ProviderAccountSelects({ value, onChange }) {
+  const [overview, setOverview] = useState(null);
+  useEffect(() => {
+    let live = true;
+    fetch(apiUrl("/provider/accounts")).then((response) => response.json()).then((payload) => {
+      if (live) setOverview({ providers: payload.providers ?? [], accounts: payload.accounts ?? [] });
+    }).catch(() => { if (live) setOverview({ providers: [], accounts: [] }); });
+    return () => { live = false; };
+  }, []);
+  const chosen = value && typeof value === "object" ? value : {};
+  if (!overview) return <SelectControl disabled value="" onChange={() => {}} options={[["", "Default sign-in"]]} />;
+  return <div className="space-y-2">
+    {overview.providers.map((provider) => {
+      const current = chosen[provider.id] || "";
+      const options = [["", "Default sign-in"], ["auto", "Choose by usage"],
+        ...overview.accounts.filter((account) => account.provider === provider.id)
+          .map((account) => [account.name, `${account.label}${account.needs_sign_in ? " (needs sign-in)" : ""}`])];
+      if (current && !options.some(([id]) => id === current)) options.push([current, `${current} (removed)`]);
+      return <div key={provider.id} className="space-y-1 text-xs text-muted" data-provider-account={provider.id}>
+        <span aria-hidden="true">{provider.label} account</span>
+        <SelectControl label={`${provider.label} account`} value={current} onChange={(next) => onChange({ ...chosen, [provider.id]: next })} options={options} />
+      </div>;
+    })}
+  </div>;
+}
+
+function assistantRows(settings, onChange, row, providerState, appControls) {
   const { capabilities, loading } = providerState;
   const availableProviders = capabilities.filter((provider) => provider.available && provider.enabled !== false);
   const provider = availableProviders.find((item) => item.id === settings.assistant.provider)
@@ -422,14 +491,14 @@ function assistantRows(settings, onChange, row, providerState) {
     ?? chatModels[0];
   return [
     { searchText: "Self-work self work idle quiet away minutes max threads backlog auto pull tickets projects research report kanban board", element: <SelfWorkSettings key="self-work" /> },
-    { searchText: "Rem commit messages provider model auto commit changes template format", element: <CommitMessageSettings key="commit-messages" capabilities={capabilities} /> },
+    { searchText: "Rem commit messages provider model auto commit changes template format remove co-authored-by co-author coauthor trailer attribution", element: <CommitMessageSettings key="commit-messages" capabilities={capabilities} /> },
     { searchText: "Tidy voice messages dictation transcription speech punctuation model provider", element: <VoiceTidySettings key="voice-tidy" capabilities={capabilities} defaultProvider={provider?.id ?? settings.assistant.provider} /> },
     row("defaultScope", "Default scope", "Start threads in the current directory or let Rem choose from open projects.", <SelectControl value={settings.assistant.defaultScope} onChange={(value) => onChange("assistant.defaultScope", value)} options={[["current-directory", "Current directory"], ["global", "Global"]]} />),
     row("avatar", "Show Rem avatar", "Show Rem on the welcome screen of Rem’s home.", <SwitchControl checked={settings.assistant.avatarEnabled} onChange={(value) => onChange("assistant.avatarEnabled", value)} />),
     row("autoHideThoughts", "Auto-hide thoughts", "Collapse thoughts when Rem replies. You can reopen them at any time.", <SwitchControl checked={settings.assistant.autoHideThoughts} onChange={(value) => onChange("assistant.autoHideThoughts", value)} />),
     row("avatarAnimation", "Animate Rem", "Greet you when Rem’s home opens, then blink while seated. Respects reduced motion.", <SwitchControl checked={settings.assistant.avatarAnimated} onChange={(value) => onChange("assistant.avatarAnimated", value)} />),
     row("swarmAccess", "Swarm access", "Let Rem manage project teams and runs when asked. Instructions load on demand. Changes apply to the next message.", <SwitchControl checked={settings.assistant.swarmAccessEnabled} onChange={(value) => onChange("assistant.swarmAccessEnabled", value)} />),
-    row("maxWorkers", "Rem task workers", "How many Rem tasks and phone turns can run at once. Each idle worker uses about 0.5 GB of memory, and all of them share your provider's usage limits. 0 picks a number from this computer's cores and memory.", <NumberControl value={settings.assistant.maxWorkers} min={0} max={16} onCommit={(value) => onChange("assistant.maxWorkers", Math.round(value))} />),
+    { searchText: WORKER_LIMIT_SEARCH, element: <WorkerLimitPointer key="workerLimit" onOpen={appControls.openSetting} /> },
     row("commandSlots", "Queue tests and builds", "Tests, builds and browser test runs from all Rem tasks and threads wait for a free slot, so many agents can work at once without overloading this computer. On Linux, agents also get less CPU than your own apps when both are busy.", <SwitchControl checked={settings.assistant.commandSlotsEnabled} onChange={(value) => onChange("assistant.commandSlotsEnabled", value)} />),
     ...(settings.assistant.commandSlotsEnabled ? [
       row("testSlots", "Test runs at once", "0 picks a number from this computer's cores.", <NumberControl value={settings.assistant.testSlots} min={0} max={16} onCommit={(value) => onChange("assistant.testSlots", Math.round(value))} />),
@@ -446,6 +515,9 @@ function assistantRows(settings, onChange, row, providerState) {
     row("effort", "Default reasoning effort", "Reasoning level for new tasks and threads.", (
       <SelectControl disabled={!model?.efforts?.length} value={settings.assistant.effort || model?.defaultEffort || ""} onChange={(value) => onChange("assistant.effort", value)} options={(model?.efforts ?? []).map((item) => [item.id, item.displayName ?? item.id])} />
     )),
+    row("providerAccounts", "Accounts", "Which account each provider’s threads, tasks and Rem’s replies use, such as your Claude Code or Codex account. Choose by usage picks the signed-in account with the most room left when a thread or task starts, and keeps it there. Add accounts in Settings › Providers.", (
+      <ProviderAccountSelects value={settings.assistant.providerAccounts} onChange={(value) => onChange("assistant.providerAccounts", value)} />
+    ), { stacked: true }),
     row("chatProvider", "Rem chat provider", "Who writes Rem’s replies in its chat. A faster model or lower effort here makes chat quicker, while tasks and threads keep the defaults above.", (
       <SelectControl
         disabled={loading || !availableProviders.length}
@@ -568,22 +640,32 @@ function keybindingRows(settings, onChange) {
 }
 
 // Stacked rows give list-like controls the full width beneath their label.
-function SettingRow({ children, description, label, stacked = false }) {
+function SettingRow({ children, description, label, rowKey, stacked = false }) {
   if (stacked) return (
-    <div className="py-3">
+    <div className="py-3" data-setting-row={rowKey}>
       <p className="text-xs font-semibold text-ink">{label}</p>
       <p className="mt-1 max-w-[54ch] text-[10px] leading-4 text-muted">{description}</p>
       <div className="mt-3 rounded-lg border border-line px-2 py-3">{children}</div>
     </div>
   );
   return (
-    <div className="flex min-h-[66px] items-center gap-5 py-3">
+    <div className="flex min-h-[66px] items-center gap-5 py-3" data-setting-row={rowKey}>
       <div className="min-w-0 flex-1">
         <p className="text-xs font-semibold text-ink">{label}</p>
         <p className="mt-1 max-w-[54ch] text-[10px] leading-4 text-muted">{description}</p>
       </div>
       <div className="w-52 shrink-0">{children}</div>
     </div>
+  );
+}
+
+// The worker limit is per computer, so it lives on this computer's row in Settings > Computers.
+function WorkerLimitPointer({ onOpen }) {
+  const open = () => onOpen?.({ category: "computers", selectors: ['[data-setting-row="maxWorkers"] input', '[data-testid="computers-settings"]'] });
+  return (
+    <p className="py-3 text-[11px] text-muted" data-setting-row="workerLimit">
+      How many workers run at once is the <button type="button" className="font-medium text-brand underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500" onClick={open}>Worker limit in Settings › Computers</button>.
+    </p>
   );
 }
 
@@ -910,7 +992,7 @@ function FeaturePreviewSettings({ onChange, settings }) {
         {features.map((feature) => (
           <li key={feature.id} className="flex items-center gap-2.5 px-3 py-2">
             <div className="min-w-0 flex-1">
-              <p className="text-xs font-semibold text-ink">{feature.label}</p>
+              <p className="text-xs font-semibold text-ink">{feature.label}{feature.badge ? <span className="ui-badge ml-1.5 align-middle" data-tone="warning">{feature.badge}</span> : null}</p>
               <p className="mt-0.5 text-[10px] leading-4 text-muted">
                 {feature.description}{restarts(feature) ? " Changing this restarts the backend." : ""}
               </p>
@@ -1011,7 +1093,7 @@ function PluginSettings({ onChange, value }) {
                 <Icon aria-hidden="true" size={15} strokeWidth={1.5} />
               </span>
               <div className="min-w-0 flex-1">
-                <p className="text-xs font-semibold text-ink">{plugin.label}</p>
+                <p className="text-xs font-semibold text-ink">{plugin.label}{plugin.badge ? <span className="ui-badge ml-1.5 align-middle" data-tone="warning">{plugin.badge}</span> : null}</p>
                 <p className="mt-0.5 truncate text-[10px] leading-4 text-muted" title={plugin.description}>{plugin.description}</p>
               </div>
               {plugin.required ? (
@@ -1159,7 +1241,18 @@ function EmptySettingsSearch({ query }) {
   );
 }
 
-export function settingsCategoriesForQuery(query) {
+// Every coding app Raticode knows, so searching one by name finds Settings > Providers before
+// the list loads. Names the provider list reports are added on top.
+const PROVIDER_NAMES = "Claude Code Codex Cursor GitHub Copilot OpenCode Antigravity xAI Grok";
+const PROVIDER_TERMS = "Providers coding apps for workflows only enabled disabled executable app location override version coding harness path accounts add account sign in signed in sign-in sign out skills setup folder models allowed denied default model effort reasoning effort classification classifier Jev TypeSafe API key local model server Ollama llama.cpp LM Studio";
+
+/** Search text for Settings > Providers: its terms plus each provider's display name. */
+export function providerSearchText(capabilities = []) {
+  const names = (capabilities ?? []).map((provider) => provider.displayName || provider.id).filter(Boolean);
+  return [PROVIDER_TERMS, PROVIDER_NAMES, ...names].join(" ");
+}
+
+export function settingsCategoriesForQuery(query, capabilities = []) {
   const normalized = String(query ?? "").trim().toLowerCase();
   if (!normalized) return CATEGORIES.map((category) => category.id);
   return CATEGORIES.filter((category) => {
@@ -1167,19 +1260,25 @@ export function settingsCategoriesForQuery(query) {
     if (category.id === "keybindings") {
       return KEYBINDING_COMMANDS.some((command) => `${command.label} ${command.group}`.toLowerCase().includes(normalized));
     }
-    return categoryKeywords(category.id).includes(normalized);
+    if (category.id === "providers") return providerSearchText(capabilities).toLowerCase().includes(normalized);
+    return categoryKeywords(category.id).toLowerCase().includes(normalized);
   }).map((category) => category.id);
 }
+
+// Search words for the Worker limit row on this computer in Settings > Computers. The
+// old name stays here only, so settings search still finds the row under it. Keep them
+// to words that name this limit: broad ones such as "phone" belong to other sections.
+const WORKER_LIMIT_SEARCH = "Worker limit Rem task workers max workers workers at once";
 
 function categoryKeywords(category) {
   return {
     general: "startup default workspace run target update queue local data directory storage artifacts autosave files archived threads delete cleanup retention",
-    devices: "microphone mic audio input device recording transcription dictation speech recognition recognizer offline model macOS Windows Linux test signal level paired devices phone mobile desktop pairing qr trust revoke",
+    devices: "microphone mic audio input device recording transcription dictation speech recognition recognizer offline model macOS Windows Linux test signal level paired devices phone mobile desktop pairing qr trust revoke workflow shortcuts global hotkey run workflow from any app",
+    computers: `computers paired desktops ${WORKER_LIMIT_SEARCH} running room load pressure order move up down where work runs placement strategy fill one computer then the next overflow spread evenly balanced only computers i pick manual shared organizations rem`,
     appearance: "theme dark light system motion animation",
     editor: "font line tab wrap minimap autosave markdown html preview code",
-    browser: "web browser default new tab raticode chromium engine firefox gecko google chrome chromium microsoft edge msedge sync extensions add-ons addons import profile preferences about:config https-only tracking dns proxy homepage new tab search engine url web rem agent playwright chrome automation testing sign-in cookies sites allowlist blocklist downloads memory approval approve prompts full access permission scripts",
+    browser: "web browser default new tab raticode chromium engine system default browser default apps links from other apps open with xdg-settings mimeapps firefox gecko google chrome chromium microsoft edge msedge sync extensions add-ons addons import profile preferences about:config https-only tracking dns proxy homepage new tab search engine url web rem agent playwright chrome automation testing sign-in cookies sites allowlist blocklist downloads memory approval approve prompts full access permission scripts",
     terminal: "font line cursor blink scrollback shell",
-    providers: "providers enabled disabled executable coding harness path apps default model reasoning effort",
     usage: "usage tokens allowance limits remaining quotas credits billing spend accounts providers history refresh",
     assistant: "self-work self work idle away max threads backlog auto pull research report kanban commit messages auto commit template format default scope current directory global projects rem provider model effort chat faster speed codex claude conversation skills tools mcp servers resources swarm access teams runs",
     memory: "rem memory conversation archive folder purge retention delete permanently git second brain knowledge notes reports html markdown",

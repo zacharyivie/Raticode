@@ -87,6 +87,13 @@ export default function GeckoSettings() {
         <p className="text-[11px] text-muted">Each profile has its own sign-ins, extensions and bookmarks. Switching closes Raticode (gecko).</p>
       </div>
       <div className="grid gap-1">
+        <label className="flex items-center gap-2 text-[11px] font-semibold text-ink">
+          <input type="checkbox" checked={status?.remControl === true} disabled={busy || !status} onChange={(event) => void run(async () => setStatus(await gecko("rem-control", { enabled: event.target.checked })))} />
+          Let Rem use Raticode (gecko)
+        </label>
+        <p className="text-[11px] text-muted">Rem and its workers can then open their own background tabs here, in a separate container that starts signed out, and read, click, type, take screenshots and play or pause media in them. They never see your own tabs. While this is on, Firefox shows its robot icon and tells websites it is remote-controlled, so some sign-ins, such as Google&apos;s, may refuse. Saved passwords no longer fill in by themselves; pick one from the field&apos;s dropdown in your own tabs. Changing it restarts Raticode (gecko); your tabs come back.</p>
+      </div>
+      <div className="grid gap-1">
         <span className="text-[11px] font-semibold text-ink">Import from your everyday Firefox</span>
         {sources && !sources.sources.length ? <p className="text-[11px] text-muted">No Firefox profiles were found on this computer.</p> : null}
         {sources?.sources.length ? (

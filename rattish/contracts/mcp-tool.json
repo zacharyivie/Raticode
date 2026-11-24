@@ -1,0 +1,99 @@
+{
+  "$schema": "../schemas/node-contract.schema.json",
+  "contract_version": 1,
+  "node_type": "mcp-tool",
+  "runtime_handler": "raticode.mcp_tool",
+  "catalog": {"category": "web", "summary": "Call one tool on an MCP server, without a model", "docs_path": "/docs/nodes/mcp-tool"},
+  "configuration_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "server": {"type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$"},
+      "tool": {"type": "string", "minLength": 1, "maxLength": 256},
+      "arguments": {"type": ["object", "string"]},
+      "output_schema": {"type": ["object", "null"]},
+      "output_schema_path": {"type": ["string", "null"], "x-rattish-type": "Path"},
+      "working_dir": {"type": "string", "x-rattish-type": "Path"},
+      "call_timeout": {"type": "string", "pattern": "^[1-9][0-9]*(?:ms|s|m|h)$"},
+      "sandbox": {"enum": ["on", "off"]},
+      "network": {
+        "anyOf": [
+          {"const": "any"},
+          {"type": "null"},
+          {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^(localhost|(\\*\\.)?[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+)$"
+            },
+            "uniqueItems": true
+          }
+        ]
+      }
+    },
+    "required": ["server", "tool"],
+    "additionalProperties": false
+  },
+  "defaults": {
+    "arguments": {},
+    "output_schema": null,
+    "output_schema_path": null,
+    "working_dir": ".",
+    "call_timeout": "60s",
+    "sandbox": "on",
+    "network": []
+  },
+  "computed_defaults": {},
+  "input_ports": {
+    "mode": "closed",
+    "ports": {
+      "arguments": {
+        "schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object"},
+        "required": false,
+        "delivery": "local_binding",
+        "encoding": "identity",
+        "description": "The tool's arguments. Overrides the authored arguments."
+      }
+    }
+  },
+  "success_output": {
+    "kind": "configuration_selected",
+    "schema_fields": ["output_schema", "output_schema_path"],
+    "default_schema": {"$schema": "https://json-schema.org/draft/2020-12/schema"}
+  },
+  "error_kinds": [
+    "cancelled",
+    "command",
+    "configuration",
+    "internal",
+    "network",
+    "output_validation",
+    "timeout"
+  ],
+  "effects": ["command", "network"],
+  "preflight_checks": [
+    {"id": "server-registered", "severity": "error", "description": "The server must be in Rem's MCP server list (Raticode rem mcp add)."},
+    {"id": "sandbox-available", "severity": "error", "description": "A local server must be able to start in its operating-system sandbox, unless the step sets sandbox: off."},
+    {"id": "tool-arguments-valid", "severity": "error", "description": "The server must list the tool, and the arguments must fit the tool's input schema."},
+    {"id": "runs-unsandboxed", "severity": "warning", "description": "Warn when a local server would run outside the sandbox."},
+    {"id": "package-pinned", "severity": "warning", "description": "Warn when a local server starts through a package runner (npx, bunx, pnpm dlx, uvx, pipx run) without an exact package version, so each run can fetch a newer release."},
+    {"id": "env-set", "severity": "warning", "description": "Warn when an environment variable the server names isn't set where Raticode runs."},
+    {"id": "cache-readable", "severity": "warning", "description": "Note, with severity info, when tool calls on this computer can't read the server's package cache and the step's network doesn't list the package host, so each call needs a download the step can't make."}
+  ],
+  "static_diagnostics": [
+    {
+      "code": "RATTISH_MCP_TOOL_SANDBOX_OFF",
+      "severity": "warning",
+      "rule": "sandbox_off",
+      "fields": ["sandbox"],
+      "description": "Warn when an MCP tool step runs its local server outside the operating-system sandbox."
+    },
+    {
+      "code": "RATTISH_SUSPECTED_PLAINTEXT_SECRET",
+      "severity": "warning",
+      "rule": "suspected_plaintext_secret",
+      "fields": ["arguments"],
+      "description": "Warn about credential-shaped plaintext arguments without rejecting the source."
+    }
+  ]
+}

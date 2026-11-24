@@ -1,7 +1,7 @@
 import SecondBrainProvider, { useResearchSelection } from "./SecondBrainProvider.jsx";
 import { useEffect, useState } from "react";
 import { AlertTriangle, CircleCheck, FolderOpen, Library, ShieldCheck, Sparkles, FileArchive, Files, Quote } from "lucide-react";
-import { formatBytes, parseDateBound, searchLibrary, wordDiff, formatDay, formatTime } from "../lib/secondBrain.js";
+import { formatBytes, parseDateBound, searchLibrary, wordDiff, formatDay, formatTime, SUMMARY_MAX, summaryPatch, folderRuleFor } from "../lib/secondBrain.js";
 import { useSecondBrain, viewFor, closeDialog, openDialog, createBrain, removeBrain, updateBrain, createCollection, updateCollection, addToCollection, navigate, saveSearch, documentById, blockById, updateReportCitation, updateClaim, updateReport, updateDocument, confirmReplacement, resolveHealth, startTask, notify, openDocument, captureSource, libraryFor, uid, getState, isSampleLibrary, previewAbsoluteLinks } from "../lib/secondBrainStore.js";
 import { brainRequest } from "../lib/secondBrainApi.js";
 import { DraftInput, Modal, Segmented, TypeIcon, askRem } from "./SecondBrainParts.jsx";
@@ -240,12 +240,16 @@ function FindSupport({ claim, reportId, onClose }) {
 function EditMetadata({ docId, onClose }) {
   const store = useSecondBrain();
   const doc = documentById(store, docId);
-  const [draft, setDraft] = useState({ title: doc.title, author: doc.author || "", published: doc.dates.published || "", tags: doc.tags.join(", "), url: doc.source?.url || "", doi: doc.source?.doi || "", checkBy: doc.checkBy || "" });
+  // A folder rule that leaves this file out wins; change it in Brain settings › Folders.
+  const folderRule = folderRuleFor(doc.path, store.brains.find(item => item.id === doc.brainId)?.settings?.folderRules);
+  const byFolder = folderRule?.rule === "leave-out" ? folderRule.folder : "";
+  const [draft, setDraft] = useState({ title: doc.title, author: doc.author || "", published: doc.dates.published || "", tags: doc.tags.join(", "), url: doc.source?.url || "", doi: doc.source?.doi || "", checkBy: doc.checkBy || "", summary: doc.summary || "", leftOut: Boolean(doc.excluded && !doc.excludedBy) });
+  const summary = draft.summary.replace(/\s+/g, " ").trim();
   const invalidDate = draft.published && parseDateBound(draft.published) === null;
   const set = patch => setDraft({ ...draft, ...patch });
   return <Modal title="Edit metadata" description={doc.path} onClose={onClose}
-    footer={<Footer onCancel={onClose} confirm="Save" disabled={invalidDate || !draft.title.trim()} onConfirm={() => {
-      updateDocument(docId, current => ({ checkBy: draft.checkBy, title: draft.title.trim(), author: draft.author.trim(), tags: draft.tags.split(",").map(tag => tag.trim().toLowerCase()).filter(Boolean), dates: { ...current.dates, published: draft.published ? parseDateBound(draft.published) : "" }, source: draft.url || draft.doi ? { ...current.source, url: draft.url, doi: draft.doi, domain: (() => { try { return new URL(draft.url).hostname.replace(/^www\./, ""); } catch { return current.source?.domain || ""; } })() } : current.source }));
+    footer={<Footer onCancel={onClose} confirm="Save" disabled={invalidDate || !draft.title.trim() || summary.length > SUMMARY_MAX} onConfirm={() => {
+      updateDocument(docId, current => ({ ...summaryPatch(current, summary), ...(byFolder || doc.missing || draft.leftOut === Boolean(current.excluded && !current.excludedBy) ? {} : { excluded: draft.leftOut }), checkBy: draft.checkBy, title: draft.title.trim(), author: draft.author.trim(), tags: draft.tags.split(",").map(tag => tag.trim().toLowerCase()).filter(Boolean), dates: { ...current.dates, published: draft.published ? parseDateBound(draft.published) : "" }, source: draft.url || draft.doi ? { ...current.source, url: draft.url, doi: draft.doi, domain: (() => { try { return new URL(draft.url).hostname.replace(/^www\./, ""); } catch { return current.source?.domain || ""; } })() } : current.source }));
       if (draft.author.trim() && draft.published) resolveHealth(getState().health.filter(issue => issue.docId === docId && issue.kind === "metadata").map(issue => issue.id));
       onClose(); notify("Metadata saved.");
     }} note="Stored in library metadata." />}>
@@ -256,7 +260,9 @@ function EditMetadata({ docId, onClose }) {
       <label className="sb-field"><span>Tags</span><input value={draft.tags} placeholder="comma, separated" onChange={event => set({ tags: event.target.value })} /></label>
       <label className="sb-field"><span>Source URL</span><input value={draft.url} placeholder="https://" onChange={event => set({ url: event.target.value })} /></label>
       <label className="sb-field"><span>DOI</span><input value={draft.doi} placeholder="10.xxxx/…" onChange={event => set({ doi: event.target.value })} /></label>
+      <label className="sb-field sb-field-wide"><span>Summary (optional)</span><textarea rows={3} value={draft.summary} maxLength={SUMMARY_MAX + 200} aria-invalid={summary.length > SUMMARY_MAX || undefined} placeholder="Two or three sentences on what this document finds or answers" onChange={event => set({ summary: event.target.value })} /><small className={summary.length > SUMMARY_MAX ? "sb-field-error" : undefined}>{summary.length} / {SUMMARY_MAX} characters. Rem sees it first in search; it is never cited. {doc.summarySource === "metadata" ? "Clear it to use the file’s own summary." : "Leave it as is to keep the file’s summary."}</small></label>
       <label className="sb-field"><span>Check by (optional)</span><input type="date" value={draft.checkBy} onChange={event => set({ checkBy: event.target.value })} /><small>Library health reminds you to check this report again on this day.</small></label>
+      {doc.missing ? null : <label className="sb-check sb-field-wide" data-disabled={byFolder ? true : undefined}><input type="checkbox" disabled={Boolean(byFolder)} checked={Boolean(byFolder) || draft.leftOut} onChange={event => set({ leftOut: event.target.checked })} /><span>Leave out of search<small>{byFolder ? `Left out by the rule for ${byFolder}. Change it in Brain settings › Folders.` : "The file stays where it is, but isn’t indexed or given to Rem. The Library lists it under More filters › Left out."}</small></span></label>}
     </div>
   </Modal>;
 }

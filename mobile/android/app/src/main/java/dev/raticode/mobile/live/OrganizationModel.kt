@@ -57,6 +57,7 @@ object OrganizationModel {
     const val NOTE = "organizations.note"
     const val KNOWLEDGE = "organizations.knowledge"
     const val WORKER = "organizations.worker"
+    const val DEFAULT_SIGN_IN = "Default sign-in"
     const val UPDATE_DESKTOP = "Update Raticode on your computer to use this here."
     val COLUMNS = listOf("backlog", "todo", "running", "review", "done")
     val COLUMN_LABELS = mapOf("backlog" to "Backlog", "todo" to "To do", "running" to "In progress", "review" to "Review", "done" to "Done")
@@ -65,6 +66,19 @@ object OrganizationModel {
         "queued" to "Ready to check", "running" to "Checking", "unverified" to "Not rerun")
     val PROJECT_COLORS = listOf("#215879", "#17767b", "#6a4bb0", "#8f5d16", "#2f6fb3", "#a13c36", "#5f6f2a", "#4d5d6a")
     val WORKER_COLORS = listOf("#6a4bb0", "#215879", "#17767b", "#2f6fb3", "#a13c36", "#8f5d16", "#5f6f2a", "#7a4a7f", "#3b6e5a", "#4d5d6a")
+
+    /** The accounts a worker can run as, its provider's; null when the desktop can't choose a worker's account. */
+    fun workerAccounts(org: Organization, e: OrganizationEmployee): List<OrgAccount>? = org.accounts?.filter { it.provider == e.provider }
+
+    /** The worker's account by name, the default sign-in, or a removed account its turns no longer use. */
+    fun accountLabel(org: Organization, e: OrganizationEmployee): String = when {
+        e.accountId.isBlank() -> DEFAULT_SIGN_IN
+        else -> workerAccounts(org, e)?.firstOrNull { it.id == e.accountId }?.name ?: "Removed account (runs on the default sign-in)"
+    }
+
+    /** The organizations.worker action that runs the worker as [accountId], or the default sign-in when it's blank. */
+    fun accountParams(orgId: String, employeeId: String, accountId: String): JSONObject =
+        JSONObject().put("organization_id", orgId).put("employee_id", employeeId).put("account", accountId)
 
     fun hashColor(id: String, palette: List<String> = WORKER_COLORS): String {
         var hash = 0L

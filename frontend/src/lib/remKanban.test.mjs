@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { autoApproveHint, autoApproveWarning, hasAutoApprove } from "./remKanban.js";
-import { activityLine, assignmentLine, formatTokens, selfWorkLimitsLine, usageSentence, usageShort, autoPullHint, avatarColor, boardOn, cappedThreads, canDropOn, checksLine, columnTickets, entryHeadline, entryTone, filterTickets, initials, modeLabel, ownerFilters, participantOf, remProjectChoices, savedSwitchNote, scopeNote, selfWorkLine, selfWorkWindows, visibleEntries, windowDetail, withProject } from "./remKanban.js";
+import { allowanceMode, allowancePaceLine, autoApproveHint, autoApproveWarning, hasAllowanceModes, hasAutoApprove, paceRateWarning, selfWorkAccountChange, selfWorkAccountRows } from "./remKanban.js";
+import { activityLine, assignmentLine, formatTokens, selfWorkLimitsLine, dailyAllowanceLine, usageSentence, usageShort, autoPullHint, avatarColor, boardOn, cappedThreads, canDropOn, checksLine, columnTickets, entryHeadline, entryTone, filterTickets, initials, modeLabel, ownerFilters, participantOf, remProjectChoices, savedSwitchNote, scopeNote, selfWorkLine, selfWorkWindows, selfWorkStop, stopJudgmentLine, lastStopLine, stopPayload, visibleEntries, windowDetail, withProject } from "./remKanban.js";
 
 const ticket = (fields = {}) => ({ ticket_id: "t", key: "REM-1", title: "Export", scope: "rem", organization_id: "", status: "todo", priority: "medium", proposed: false, running: false, created_at: "2026-11-01", ...fields });
 
@@ -221,6 +221,28 @@ test("self-work limits read as one line", () => {
     "Stops starting new work past 500k tokens a session or 2M tokens a day or at 80% of a rate limit. Running work finishes normally.",
   );
   assert.equal(selfWorkLimitsLine({ rate_limit_percent: 90 }), "Stops starting new work at 90% of a rate limit. Running work finishes normally.");
+  assert.equal(selfWorkLimitsLine({ daily_allowance_percent: 11 }), "Stops starting new work after 11% of a weekly allowance in a day. Running work finishes normally.");
+  assert.equal(dailyAllowanceLine({ cap_percent: 11, message: "Used today: about 3% of 11% of work's weekly allowance. Resets at midnight." }), "Used today: about 3% of 11% of work's weekly allowance. Resets at midnight.");
+  assert.equal(dailyAllowanceLine(undefined), "");
+});
+
+test("allowance use is one choice of Off, Daily cap or Pace to reset", () => {
+  // A desktop from before the choice: its daily percent decides.
+  assert.equal(hasAllowanceModes({ daily_allowance_percent: 11 }), false);
+  assert.equal(allowanceMode({ daily_allowance_percent: 11 }), "daily");
+  assert.equal(allowanceMode({ daily_allowance_percent: 0 }), "off");
+  assert.equal(hasAllowanceModes({ allowance_mode: "pace" }), true);
+  assert.equal(allowanceMode({ allowance_mode: "pace", daily_allowance_percent: 0 }), "pace");
+  assert.equal(
+    selfWorkLimitsLine({ allowance_mode: "pace", pace_aim_percent: 95 }),
+    "Holds new work while ahead of a pace line to 95% by the weekly reset. Running work finishes normally.",
+  );
+  assert.equal(allowancePaceLine({ message: "Pacing Codex's weekly allowance: 23% used, line 24%. Up to 1 task can start." }), "Pacing Codex's weekly allowance: 23% used, line 24%. Up to 1 task can start.");
+  assert.equal(allowancePaceLine(null), "");
+  // The rate-limit stop set below the aim would stop self-work first.
+  assert.equal(paceRateWarning({ allowance_mode: "pace", pace_aim_percent: 97, rate_limit_percent: 80 }), "Rate limit use stops self-work at 80%, before the pace aim of 97%.");
+  assert.equal(paceRateWarning({ allowance_mode: "pace", pace_aim_percent: 97, rate_limit_percent: 0 }), "");
+  assert.equal(paceRateWarning({ allowance_mode: "daily", rate_limit_percent: 50 }), "");
 });
 
 test("auto-approval explains what it does and is hidden from older desktops", () => {
@@ -252,6 +274,23 @@ test("a card says what its ticket still waits for", async () => {
   assert.equal(waitsLine(ticket()), "");
 });
 
+test("a card says which decisions its ticket violates", async () => {
+  const { violatesLine } = await import("./remKanban.js");
+  assert.equal(violatesLine(ticket({ violates_decisions: ["D-4"] })), "Violates D-4");
+  assert.equal(violatesLine(ticket({ violates_decisions: ["D-4", "D-7", "D-9", "D-11", "D-12"] })), "Violates D-4, D-7, D-9 +2");
+  // An older backend sends no marker.
+  assert.equal(violatesLine(ticket({ violates_decisions: [] })), "");
+  assert.equal(violatesLine(ticket()), "");
+});
+
+test("a card shows the Guardrail tag a retro put on its ticket", async () => {
+  const { guardrailTag } = await import("./remKanban.js");
+  assert.equal(guardrailTag(ticket({ tags: ["Guardrail"] })), "Guardrail");
+  assert.equal(guardrailTag(ticket({ tags: ["Other"] })), "");
+  // An older backend sends no tags.
+  assert.equal(guardrailTag(ticket()), "");
+});
+
 test("a ticket waits only for tickets with the same owner, each once", async () => {
   const { waitChoices, waitsChange, canEditWaits } = await import("./remKanban.js");
   const me = ticket({ ticket_id: "me", key: "REM-1", waits_for: [{ ticket_id: "listed" }], revision: 4 });
@@ -272,4 +311,54 @@ test("a ticket waits only for tickets with the same owner, each once", async () 
   assert.equal(canEditWaits(ticket({ scope: "organization", running: true })), false);
   assert.equal(canEditWaits(ticket({ status: "done" })), false);
   assert.equal(canEditWaits(ticket({ proposed: true, status: "backlog" })), false);
+});
+
+test("a Rem ticket says which self-work objective it advances, or that self-work leaves it", async () => {
+  const { objectiveLine } = await import("./remKanban.js");
+  const serving = objectiveLine(ticket({ objective: { id: "o1", text: "Improve UI responsiveness" } }));
+  assert.equal(serving.off, false);
+  assert.equal(serving.short, "Improve UI responsiveness");
+  assert.match(serving.detail, /Advances the self-work objective “Improve UI responsiveness”/);
+  const left = objectiveLine(ticket({ status: "backlog", objective: null, objective_left: "It doesn't advance an open self-work objective. Unrelated work." }));
+  assert.equal(left.off, true);
+  assert.equal(left.short, "Not on an objective: self-work leaves it");
+  assert.match(left.detail, /Unrelated work/);
+  // Nothing to say without open objectives, for finished work, or on organization tickets.
+  assert.equal(objectiveLine(ticket()), null);
+  assert.equal(objectiveLine(ticket({ status: "done", objective: { id: "o1", text: "x" } })), null);
+  assert.equal(objectiveLine(ticket({ scope: "organization", objective_left: "x" })), null);
+});
+
+test("self-work's account rows offer Rem's setting, the default sign-in, choose by usage and each account", () => {
+  assert.deepEqual(selfWorkAccountRows(null), []);
+  const [row] = selfWorkAccountRows({ accounts: [{ provider: "codex", label: "Codex", choice: "gone", rem_setting: "", accounts: ["work"] }] });
+  assert.equal(row.choice, "gone");
+  assert.deepEqual(row.options, [["", "Rem’s setting (Default sign-in)"], ["@default", "Default sign-in"], ["auto", "Choose by usage"], ["work", "work"], ["gone", "gone (removed)"]]);
+  assert.equal(selfWorkAccountRows({ accounts: [{ provider: "claude_code", rem_setting: "auto", accounts: [] }] })[0].options[0][1], "Rem’s setting (Choose by usage)");
+  assert.deepEqual(selfWorkAccountChange("codex", ""), { provider_accounts: { codex: "" } });
+});
+
+
+test("when self-work stops: the condition, the last check and what Save sends", () => {
+  // An older desktop sends no stop.
+  assert.equal(selfWorkStop({ settings: {} }), null);
+  const stop = {
+    revision: 4, active: true, condition: "REM-205 to REM-212 are done", no_later_than: "2026-11-21T05:00:00+00:00",
+    no_later_than_label: "12:00 AM tomorrow (America/New_York)", label: "Stops when …",
+    judgment: { met: false, evidence: "REM-210 is still in review.", at_label: "8:40 PM today (America/New_York)" },
+    judging: false, judge_failed: false,
+  };
+  assert.equal(selfWorkStop({ stop }), stop);
+  assert.equal(stopJudgmentLine(stop), "Last check 8:40 PM today (America/New_York): not met. REM-210 is still in review.");
+  assert.equal(stopJudgmentLine({ ...stop, judging: true }), "Checking the condition now…");
+  assert.equal(stopJudgmentLine({ ...stop, judgment: null, judge_failed: true }), "Not checked yet: Rem checks it after each self-work task finishes. The last check failed; Rem tries again in 10 minutes.");
+  assert.equal(stopJudgmentLine({ ...stop, active: false }), "");
+  assert.equal(lastStopLine({ condition: "REM-3 is done", stopped_by: "done_when", judgment: { evidence: "REM-3 is done." } }), "Stopped: “REM-3 is done” was met. REM-3 is done.");
+  assert.equal(lastStopLine({ condition: "", stopped_by: "no_later_than", no_later_than_label: "12:00 AM today" }), "Stopped at its latest time, 12:00 AM today.");
+  assert.equal(lastStopLine({ condition: "REM-3 is done", stopped_by: "" }), "Self-work ended before “REM-3 is done” was met.");
+  assert.deepEqual(stopPayload(stop, { condition: " REM-1 is done ", time: "23:30", day: "tomorrow", keepTime: true }),
+    { condition: "REM-1 is done", expected_revision: 4, no_later_than: { time: "23:30", day: "tomorrow" } });
+  // An empty time keeps the latest time when one is set, and clears it otherwise.
+  assert.deepEqual(stopPayload(stop, { condition: "x", time: "", day: "", keepTime: true }), { condition: "x", expected_revision: 4 });
+  assert.deepEqual(stopPayload({ revision: 0 }, { condition: "x", time: "", day: "", keepTime: false }), { condition: "x", no_later_than: null });
 });

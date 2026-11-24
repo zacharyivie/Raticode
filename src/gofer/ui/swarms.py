@@ -2,6 +2,18 @@
 
 The loopback tool endpoint binds each short-lived capability to its calling agent.
 Board text never grants authority to edit scope or accept somebody else's work.
+
+Every swarm turn, and the coordinator's explanation of an idle run, is a worker on
+this computer. Once the UI server shares its worker claims (gofer.core.worker_claims)
+through ``claims``, each one takes a claim before its provider call and gives it back
+when it ends: turns of an organization's swarm run count as ``organizations``, all
+others as ``swarms``. They count against the worker limit lowered by CPU and memory
+pressure (``computers.local_room_limit``), and while the computer is short of memory
+with a worker running they wait like every other start. A delivery that can't claim
+stays queued and the run says why in ``waitReason``, such as "Waiting for free memory
+(0.9 GB available)". ``max_concurrency`` (GOFER_SWARM_MAX_CONCURRENCY) still caps all
+swarm turns together on top of that. No swarm call waits for a turn, so a worker that
+holds its own claim while it starts or messages a swarm never waits on that swarm.
 """
 
 from __future__ import annotations
@@ -25,9 +37,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from gofer.core.computers import local_room_limit
 from gofer.core.prompt_envelope import AgentResources
 from gofer.core.provider_permissions import provider_permission_args
 from gofer.core.resources import ResourceLimits
+from gofer.core.worker_claims import (
+    ORGANIZATIONS,
+    SWARMS,
+    THIS_COMPUTER,
+    Claim,
+    WorkerClaims,
+    waiting_reason,
+)
 from gofer.ui import swarm_git, worktree_setup
 from gofer.ui import swarm_workspaces as workspaces
 from gofer.ui.chat import stream_workflow_chat
@@ -123,6 +144,8 @@ def set_run_state(run: dict[str, Any], state: str, *, at: float | None = None) -
     if run.get("state") == "running" and state != "running":
         run["runningSeconds"] = running_seconds(run, now)
         run.pop("runningSince", None)
+        # Only a running run waits for a worker.
+        run.pop("waitReason", None)
     elif state == "running" and (run.get("state") != "running" or "runningSince" not in run):
         run["runningSince"] = now
     run["state"] = state
@@ -173,6 +196,15 @@ class SwarmManager:
         )
         if self.max_concurrency < 1:
             raise ValueError("Swarm concurrency must be positive")
+        # This computer's worker claims, shared with Rem, phone turns and organizations
+        # by the UI server. None (a manager on its own) counts no workers, so only
+        # max_concurrency limits its turns.
+        self.claims: WorkerClaims | None = None
+        # This computer's ID and name, as the computer registry knows it.
+        self.computer: Callable[[], tuple[str, str]] = lambda: (THIS_COMPUTER, "this computer")
+        # This computer's worker limit (Settings › Rem) lowered by CPU and memory
+        # pressure, as placed starts see it; None never has room.
+        self.worker_limit: Callable[[], int | None] = lambda: local_room_limit(self.data_dir)
         self._runnable: dict[str, str] = {}
         self._due: dict[str, float] = {}
         self._wake = threading.Event()
@@ -2864,16 +2896,25 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                 }
         raise SwarmError("Coordinator ended without an explanation")
 
-    async def _finish_run(self, root: str, swarm_id: str) -> None:
-        """Drain diagnosis, then remove all child workspaces outside the manager lock."""
+    @staticmethod
+    def _diagnosis_due(swarm: dict[str, Any]) -> bool:
+        """Whether finishing this run asks its coordinator to explain why it went idle."""
+        return (
+            not swarm["run"].get("organization")
+            and swarm["run"].get("idleDiagnosis", {}).get("state") == "pending"
+        )
+
+    async def _finish_run(self, root: str, swarm_id: str, worker: Claim | None = None) -> None:
+        """Drain diagnosis, then remove all child workspaces outside the manager lock.
+
+        ``worker`` is the claim the loop took for the diagnosis; it is given back as
+        soon as the diagnosis ends, before the workspaces are cleaned up.
+        """
         try:
             with self._lock:
                 swarm = self._get(root, swarm_id)
                 run_id = swarm["run"]["id"]
-                diagnose = (
-                    not swarm["run"].get("organization")
-                    and swarm["run"].get("idleDiagnosis", {}).get("state") == "pending"
-                )
+                diagnose = self._diagnosis_due(swarm)
                 actor = self._orchestrator(swarm)
                 cancel = threading.Event()
                 if diagnose:
@@ -2927,6 +2968,9 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                     )
                     self._active.pop(f"{swarm_id}:{actor}", None)
                     self._save(swarm)
+            if worker is not None:
+                # Cleaning up workspaces makes no provider call.
+                worker.release()
             try:
                 result: dict[str, Any] = {"passed": True, "removed": [], "archives": []}
                 for workspace in self._workspaces(swarm["run"]):
@@ -2982,6 +3026,51 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                 for a in [*self._active.values(), *self._checks.values()]
             )
         return False
+
+    def _take_worker(self, run: dict[str, Any], label: str = "") -> tuple[Claim | None, str | None]:
+        """Claim a worker on this computer for one of ``run``'s provider calls.
+
+        Returns the claim and None, or None and why the call waits. Without shared
+        claims (a manager on its own) every call may start, holding no claim. Called
+        on the runtime's thread, which holds the claim until the call releases it.
+        ``label`` names the worker in Settings › Computers: the swarm's name.
+        """
+        if self.claims is None:
+            return None, None
+        kind = ORGANIZATIONS if run.get("organization") else SWARMS
+        computer_id, name = self.computer()
+        limit = self.worker_limit()
+        claim = self.claims.claim(computer_id, kind, limit, label=label)
+        if claim is not None:
+            return claim, None
+        titles = self.claims.waiting([computer_id])
+        if titles:
+            return None, waiting_reason(titles)
+        # Short of memory with a worker free: say so. A full computer waits for a worker.
+        free = limit is not None and self.claims.held(computer_id) < limit
+        memory = self.claims.held_back(computer_id) if free else None
+        return None, memory or f"Waiting for a free worker on {name}"
+
+    def _show_wait(self, swarm: dict[str, Any], reason: str | None) -> None:
+        """Keep the run's wait reason current, saving only when it changes."""
+        run = swarm["run"]
+        if run.get("waitReason") == reason:
+            return
+        if reason is None:
+            run.pop("waitReason", None)
+        else:
+            run["waitReason"] = reason
+        self._save(swarm)
+
+    async def _with_worker(self, worker: Claim | None, work: Any) -> None:
+        """Run a turn or a run's finish, giving its worker back however it ends."""
+        try:
+            await work
+        finally:
+            if worker is not None:
+                worker.release()
+            # A waiting delivery may take the worker now.
+            self._wake.set()
 
     async def _loop(self) -> None:
         tasks: set[asyncio.Task[None]] = set()
@@ -3062,11 +3151,27 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                             ),
                             None,
                         )
-                        if (
-                            target
+                        worker: Claim | None = None
+                        waiting: str | None = None
+                        admitted = (
+                            target is not None
                             and len(self._active) < self.max_concurrency
                             and len(busy) < run["configuration"]["maxConcurrency"]
-                        ):
+                        )
+                        if admitted:
+                            # The turn needs a worker on this computer; without one the
+                            # delivery stays queued and the run says why.
+                            worker, waiting = self._take_worker(run, str(swarm.get("name") or ""))
+                        try:
+                            self._show_wait(swarm, waiting)
+                        except BaseException:
+                            # The runtime's thread never ends, so a claim it keeps here
+                            # would hold one of this computer's workers until restart.
+                            if worker is not None:
+                                worker.release()
+                            raise
+                        if admitted and waiting is None:
+                            assert target is not None
                             cancel = threading.Event()
                             self._active[f"{swarm['id']}:{target}"] = {
                                 "swarmId": swarm["id"],
@@ -3081,7 +3186,10 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                             self._runnable.pop(swarm_id, None)
                             self._runnable[swarm_id] = root
                             task = asyncio.create_task(
-                                self._turn(swarm["projectRoot"], swarm["id"], target, cancel)
+                                self._with_worker(
+                                    worker,
+                                    self._turn(swarm["projectRoot"], swarm["id"], target, cancel),
+                                )
                             )
                             tasks.add(task)
                             task.add_done_callback(tasks.discard)
@@ -3099,8 +3207,19 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                             continue
                         if len(self._active) + len(self._finalizing) >= self.max_concurrency:
                             continue
+                        finisher: Claim | None = None
+                        ending = self._get(root, sid)
+                        if self._diagnosis_due(ending):
+                            # Explaining an idle run is a provider call: it needs a worker.
+                            finisher, waiting = self._take_worker(
+                                ending["run"], str(ending.get("name") or "")
+                            )
+                            if waiting is not None:
+                                continue
                         self._finalizing.add(sid)
-                    task = asyncio.create_task(self._finish_run(root, sid))
+                    task = asyncio.create_task(
+                        self._with_worker(finisher, self._finish_run(root, sid, finisher))
+                    )
                     tasks.add(task)
                     task.add_done_callback(tasks.discard)
                     task.add_done_callback(_log_task_failure)

@@ -60,6 +60,7 @@ Look at routes and `allow-fail` before adding retries. Retrying a write, a netwo
 - Run `Raticode rattish triggers status`.
 - Triggers fire only while Raticode or its background scheduler is running and the computer is awake.
 - `Raticode rattish triggers history --problems` lists missed, failed, skipped and interrupted runs with the reason.
+- **Workflow changed since you approved it** means the workflow, or a prompt file, script or child workflow it runs, changed after you approved it. Open **Review changes** in the workflow's Triggers section, or run `Raticode rattish triggers approve ID`. See [Approved versions](../workflows/triggers.md#approved-versions).
 
 ## Knowledge isn't found, or a report didn't save
 

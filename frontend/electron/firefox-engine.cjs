@@ -261,6 +261,8 @@ function createFirefoxEngine({
 } = {}) {
   const events = new EventEmitter();
   const contexts = new Map();
+  // Frame context → the tab's top-level context.
+  const frames = new Map();
   let child = null;
   let guard = null;
   let signInWindow = null;
@@ -441,6 +443,7 @@ function createFirefoxEngine({
       connection = null;
       stopWatchdog();
       remUserContext = "";
+      frames.clear();
       if (!stopping) log("warn", `Firefox stopped unexpectedly (${code ?? signal ?? "unknown"}).`);
       events.emit("exit", { expected: stopping });
     });
@@ -519,13 +522,37 @@ function createFirefoxEngine({
     if (watcher) { try { watcher.kill(); } catch { /* Already gone. */ } }
   }
 
+  // The tab a frame belongs to: a tab's own context is its key in
+  // `contexts`, and each frame inside it is recorded in `frames` as Firefox
+  // creates it.
+  function topLevelOf(context) {
+    return frames.get(context) || context;
+  }
+
   function route(method, params) {
-    if (method === "browsingContext.contextCreated" && params.originalOpener && contexts.has(params.originalOpener)) {
-      contexts.get(params.originalOpener).handleEvent("popup", params);
+    if (method === "browsingContext.contextCreated" && params.parent) {
+      frames.set(params.context, topLevelOf(params.parent));
+    } else if (method === "browsingContext.contextDestroyed") {
+      frames.delete(params.context);
+      for (const [frame, top] of frames) if (top === params.context) frames.delete(frame);
+    }
+    // A page in a frame can open a pop-up too.
+    const opener = params.originalOpener ? topLevelOf(params.originalOpener) : "";
+    if (method === "browsingContext.contextCreated" && opener && contexts.has(opener)) {
+      contexts.get(opener).handleEvent("popup", params);
       return;
     }
-    const target = contexts.get(params.context);
+    let target = contexts.get(params.context);
+    // A tab's requests include those of the frames inside it. Frames' other
+    // events would read as the tab's own page loading, so only these go on.
+    if (!target && method.startsWith("network.")) target = contexts.get(frames.get(params.context));
     if (target) target.handleEvent(method, params);
+    else if (method === "network.beforeRequestSent" && params.isBlocked) {
+      // A request Firefox holds for a tab that has closed, or for a frame
+      // Raticode never saw created, would otherwise wait forever and keep
+      // its page from finishing loading.
+      void send("network.continueRequest", { request: params.request?.request }).catch(() => {});
+    }
     if (method.startsWith("browsingContext.download")) events.emit(method, params);
   }
 
@@ -574,6 +601,7 @@ function createFirefoxEngine({
     const processHandle = child;
     connection = null;
     remUserContext = "";
+    frames.clear();
     if (current && !current.closed) {
       void current.send("browser.close", {}, { timeout: STOP_TIMEOUT_MS }).catch(() => {}).finally(() => current.close());
     }

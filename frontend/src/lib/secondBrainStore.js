@@ -1,6 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { brainRequest } from "./secondBrainApi.js";
-import { EMPTY_FILTERS } from "./secondBrain.js";
+import { EMPTY_FILTERS, withFolderRule } from "./secondBrain.js";
 import { mergedProject } from "./secondBrainGraph.js";
 
 // One shared library state for the sidebar and workspace. Each brain keeps its
@@ -13,7 +13,7 @@ let sequence = 0;
 export const uid = prefix => `${prefix}-${Date.now().toString(36)}-${(++sequence).toString(36)}`;
 
 function initialState() {
-  return { loaded: false, brains: [], activeBrainId: "", documents: [], collections: [], savedSearches: [], reports: [], health: [], families: [], jobs: [], citations: [], projects: [], topics: [], views: {}, tasks: [], dialog: null, toast: null };
+  return { loaded: false, brains: [], activeBrainId: "", documents: [], collections: [], savedSearches: [], reports: [], health: [], families: [], series: [], jobs: [], citations: [], projects: [], topics: [], views: {}, tasks: [], dialog: null, toast: null };
 }
 function seededState(sample) {
   return {
@@ -61,7 +61,7 @@ function persistChanges(before, after) {
     const old = new Map(before[kind].map(item => [item.id, item]));
     const next = new Map(after[kind].map(item => [item.id, item]));
     for (const [id, item] of next) if (JSON.stringify(old.get(id)) !== JSON.stringify(item)) {
-      enqueue("mutate", { kind, id, item: structuredClone(kind === "documents" ? Object.fromEntries(Object.entries(item).filter(([key]) => ["id", "brainId", "title", "author", "tags", "project", "reading", "dates", "source", "inbox", "excluded", "encoding", "ignoredIssues", "checkBy"].includes(key))) : item) });
+      enqueue("mutate", { kind, id, item: structuredClone(kind === "documents" ? Object.fromEntries(Object.entries(item).filter(([key]) => ["id", "brainId", "title", "author", "tags", "project", "reading", "dates", "source", "inbox", "excluded", "encoding", "ignoredIssues", "checkBy", "summary"].includes(key))) : item) });
     }
     for (const id of old.keys()) if (!next.has(id)) enqueue("mutate", { kind, id, delete: true });
   }
@@ -167,7 +167,7 @@ export function libraryFor(current, brainId = current.activeBrainId) {
   }
   const citationsByDoc = {};
   for (const citation of current.citations.filter(item => item.brainId === brainId)) (citationsByDoc[citation.docId] ||= []).push(citation);
-  return { documents, citedBy, collectionMembers, citationsByDoc, reportCitations, brainNames: Object.fromEntries(current.brains.map(brain => [brain.id, brain.name])) };
+  return { documents, citedBy, collectionMembers, citationsByDoc, reportCitations, brainNames: Object.fromEntries(current.brains.map(brain => [brain.id, brain.name])), folderRules: Object.fromEntries(current.brains.map(brain => [brain.id, brain.settings?.folderRules || {}])) };
 }
 export const documentById = (current, id) => current.documents.find(doc => doc.id === id);
 export const blockById = (doc, blockId) => doc?.blocks?.find(block => block.id === blockId);
@@ -276,6 +276,11 @@ export function createBrain(params) {
     return brain;
   } catch (error) { notify(error.message, "danger"); return null; } })();
 }
+// Saves a folder's search rule in the brain's settings; the library re-indexes nothing but
+// the files that move in or out of search, and never touches the files.
+export function setFolderRule(brainId, folder, rule) {
+  updateBrain(brainId, current => ({ settings: { ...current.settings, folderRules: withFolderRule(current.settings?.folderRules || {}, folder, rule) } }));
+}
 export function updateBrain(id, patch) { set(current => ({ ...current, brains: current.brains.map(brain => brain.id === id ? { ...brain, ...(typeof patch === "function" ? patch(brain) : patch) } : brain) })); }
 export function removeBrain(id) {
   if (!fixture) enqueue("remove", { id });
@@ -322,6 +327,11 @@ export function confirmReplacement(olderId, newerId) {
     documents: current.documents.map(doc => { if (doc.id !== olderId) return doc; const next = { ...doc, replacedBy }; if (!replacedBy) delete next.replacedBy; return next; }),
     health: newerId ? current.health.filter(issue => !(issue.kind === "family" && issue.docId === olderId)) : current.health,
   }));
+}
+// Marks a detected dated report series "Not a series" (or undoes it) in the brain's portable metadata.
+export function markSeries(seriesId, notSeries = true) {
+  if (!fixture) enqueue("mark_series", { seriesId, notSeries });
+  set(current => ({ ...current, series: (current.series || []).map(item => item.id === seriesId ? { ...item, notSeries } : item) }));
 }
 export function saveJob(job) { job = { ...job, provider: job.provider || researchProvider }; set(current => ({ ...current, jobs: current.jobs.some(item => item.id === job.id) ? current.jobs.map(item => item.id === job.id ? job : item) : [...current.jobs, job] })); }
 export function removeJob(id) { set(current => ({ ...current, jobs: current.jobs.filter(job => job.id !== id) })); }

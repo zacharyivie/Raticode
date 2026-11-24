@@ -19,12 +19,26 @@
     "window-settings": "App settings that the desktop window owns and applies. Most are UI preferences a script doesn't need.",
     "user-decision": "Your decision on a ticket: approve its plan, accept or send back its review, land its branch, request changes from its patch, or reopen it. Each one lets agents start work or changes your branches. The CLI doesn't offer these yet; decide in the ticket's sheet on the Kanban board or in the Organizations tab.",
     "protocol-reply": "Sent by the desktop to a phone: a reply, snapshot, progress update or error for one of the phone's requests. Nothing to call.",
-    "device-link": "Belongs to the encrypted link between paired devices: syncing, file transfer, cancelling a phone's request and remote jobs sent to another desktop. A script on this computer uses the backend directly instead, for example `Raticode rem tasks create`.",
+    "device-link": "Belongs to the encrypted link between paired devices: syncing, file transfer, cancelling a phone's request and remote jobs sent to another desktop. A script on this computer uses the backend directly instead, for example `Raticode rem tasks create`, whose `--computer` sends a research task to a paired desktop and `rem runs cancel` stops it there.",
     "file-explorer": "The desktop window's file explorer, editor and project search. Scripts read and write project files directly.",
     "app-updates": "Updates the desktop app itself. Update the CLI with your package manager or a new release download.",
-    "setup-approval": "Approves or stops a project's worktree setup, which then runs commands as you in every new worktree of the project. Review and approve it in the app, where its commands are shown in full; `Raticode projects setup` shows it."
+    "setup-approval": "Approves or stops a project's worktree setup, which then runs commands as you in every new worktree of the project. Review and approve it in the app, where its commands are shown in full; `Raticode projects setup` shows it.",
+    "social-approval": "Approving, publishing or cancelling a social post, and connecting the accounts that publish, are the user's taps in the app's Posts dashboard or the phone's Posts screen, so no script, workflow or agent can put a post in public. Saving post templates is the dashboard's too. `Raticode social propose`, `list`, `show`, `accounts`, `templates` and `times` cover proposing and reading."
   },
   "routes": {
+    "* /api/rem-resources/mcp-tools": {
+      "cli": "rem mcp tools"
+    },
+    "* /api/social": {
+      "cli": [
+        "social list",
+        "social show",
+        "social accounts"
+      ]
+    },
+    "* /api/social/*": {
+      "excluded": "social-approval"
+    },
     "DELETE /api/chat": {
       "excluded": "thread-list"
     },
@@ -58,6 +72,9 @@
     "DELETE /api/swarms/*": {
       "cli": "swarm delete"
     },
+    "DELETE /api/workflow-shortcuts/*": {
+      "cli": "rattish shortcuts remove"
+    },
     "DELETE /api/workflows/*": {
       "cli": "workflow rm"
     },
@@ -85,6 +102,12 @@
     "GET /api/classifiers/jev": {
       "cli": "provider jev status"
     },
+    "GET /api/computers": {
+      "cli": "computers list"
+    },
+    "GET /api/computers/placement": {
+      "cli": "computers placement"
+    },
     "GET /api/desktop/trusted-roots": {
       "excluded": "desktop-auth"
     },
@@ -109,6 +132,9 @@
     "GET /api/organizations#availability": {
       "cli": "api"
     },
+    "GET /api/provider/accounts": {
+      "cli": "provider account list"
+    },
     "GET /api/provider/auth": {
       "cli": "provider status"
     },
@@ -117,6 +143,9 @@
         "provider list",
         "provider models"
       ]
+    },
+    "GET /api/provider/claude-accounts": {
+      "cli": "provider account list"
     },
     "GET /api/provider/commit-settings": {
       "excluded": "window-settings"
@@ -136,6 +165,12 @@
     "GET /api/rattish/runs": {
       "cli": "rattish runs list"
     },
+    "GET /api/rattish/runs/*/changes": {
+      "cli": "rattish runs changes"
+    },
+    "GET /api/rattish/runs/*/failure": {
+      "cli": "rattish runs failure"
+    },
     "GET /api/rattish/secrets": {
       "cli": "rattish secrets list"
     },
@@ -148,11 +183,20 @@
         "rattish triggers export"
       ]
     },
+    "GET /api/rattish/triggers/*/changes": {
+      "cli": "rattish triggers changes"
+    },
+    "GET /api/rattish/triggers/budget": {
+      "cli": "rattish triggers budget"
+    },
     "GET /api/rattish/triggers/pause": {
       "cli": "rattish triggers status"
     },
     "GET /api/rem-resources": {
       "cli": "rem resources"
+    },
+    "GET /api/rem/calls": {
+      "cli": "rem context"
     },
     "GET /api/rem/context": {
       "cli": [
@@ -162,6 +206,12 @@
     },
     "GET /api/rem/conversation": {
       "cli": "api"
+    },
+    "GET /api/rem/decisions": {
+      "cli": [
+        "rem decisions list",
+        "rem decisions show"
+      ]
     },
     "GET /api/rem/events": {
       "cli": "api"
@@ -190,6 +240,9 @@
     "GET /api/rem/notices": {
       "cli": "rem notices"
     },
+    "GET /api/rem/objectives": {
+      "cli": "selfwork objectives"
+    },
     "GET /api/rem/runs/*": {
       "cli": "rem runs show"
     },
@@ -197,14 +250,20 @@
       "cli": "rem search"
     },
     "GET /api/rem/tasks": {
+      "cli": "rem tasks list"
+    },
+    "GET /api/rem/tasks/*": {
       "cli": [
-        "rem tasks list",
         "rem tasks show",
-        "rem tasks wait"
+        "rem tasks wait",
+        "rem tasks wake"
       ]
     },
     "GET /api/rem/threads/*": {
       "cli": "rem thread show"
+    },
+    "GET /api/rem/threads/*/context": {
+      "cli": "rem context"
     },
     "GET /api/retention": {
       "cli": "api"
@@ -227,11 +286,29 @@
     "GET /api/swarms/*/history": {
       "cli": "swarm history"
     },
+    "GET /api/usage/alerts": {
+      "cli": "usage alerts"
+    },
     "GET /api/usage/credentials": {
       "excluded": "credentials"
     },
     "GET /api/usage/overview": {
       "cli": "usage show"
+    },
+    "GET /api/usage/verified-work": {
+      "cli": "usage verified"
+    },
+    "GET /api/workflow-shortcuts": {
+      "cli": "rattish shortcuts list"
+    },
+    "GET /api/workflow-shortcuts/*": {
+      "cli": "rattish shortcuts list"
+    },
+    "GET /api/workflow-shortcuts/*/changes": {
+      "cli": "rattish shortcuts approve"
+    },
+    "GET /api/workflow-shortcuts/target": {
+      "excluded": "window-ui"
     },
     "GET /api/workflow-templates": {
       "excluded": "window-ui"
@@ -278,6 +355,9 @@
     },
     "GET /api/workflows/*/retention": {
       "cli": "api"
+    },
+    "GET /api/workflows/*/run-worktrees": {
+      "cli": "workflow rm"
     },
     "GET /api/workflows/*/tests": {
       "cli": "rattish test"
@@ -377,6 +457,15 @@
       "cli": [
         "provider jev enable",
         "provider jev disable"
+      ]
+    },
+    "POST /api/computers": {
+      "cli": "computers set"
+    },
+    "POST /api/computers/placement": {
+      "cli": [
+        "computers place",
+        "computers order"
       ]
     },
     "POST /api/desktop/path-grants": {
@@ -542,7 +631,8 @@
       "cli": [
         "org apply",
         "org employees hold",
-        "org employees release"
+        "org employees release",
+        "org employees account"
       ]
     },
     "POST /api/organizations#control": {
@@ -686,6 +776,9 @@
     "POST /api/organizations#run_input": {
       "cli": "api"
     },
+    "POST /api/organizations#run_there": {
+      "cli": "org tickets run-there"
+    },
     "POST /api/organizations#secret_reference": {
       "excluded": "credentials"
     },
@@ -725,8 +818,33 @@
     "POST /api/projects/open": {
       "excluded": "folder-approval"
     },
+    "POST /api/provider/accounts": {
+      "cli": [
+        "provider account add",
+        "provider account login",
+        "provider account status",
+        "provider account rename",
+        "provider account import-setup",
+        "provider account copy-setup",
+        "provider account rm"
+      ]
+    },
     "POST /api/provider/auth": {
       "excluded": "provider-sign-in"
+    },
+    "POST /api/provider/claude-accounts": {
+      "cli": [
+        "provider account add",
+        "provider account login",
+        "provider account status",
+        "provider account rename",
+        "provider account import-setup",
+        "provider account copy-setup",
+        "provider account rm"
+      ]
+    },
+    "POST /api/provider/commit-message/clean": {
+      "excluded": "source-control"
     },
     "POST /api/provider/commit-settings": {
       "excluded": "window-settings"
@@ -745,6 +863,12 @@
     },
     "POST /api/queue/*/cancel": {
       "cli": "runner cancel"
+    },
+    "POST /api/rattish/runs/*/discard": {
+      "cli": "rattish runs discard"
+    },
+    "POST /api/rattish/runs/*/land": {
+      "cli": "rattish runs land"
     },
     "POST /api/rattish/runs/*/rerun": {
       "cli": "rattish runs rerun"
@@ -766,8 +890,14 @@
         "rattish triggers disable"
       ]
     },
+    "POST /api/rattish/triggers/*/approve": {
+      "cli": "rattish triggers approve"
+    },
     "POST /api/rattish/triggers/*/rotate-token": {
       "cli": "rattish triggers rotate-token"
+    },
+    "POST /api/rattish/triggers/budget": {
+      "cli": "rattish triggers budget"
     },
     "POST /api/rattish/triggers/login": {
       "cli": "rattish triggers login"
@@ -793,6 +923,9 @@
     "POST /api/rem-resources#add_skill": {
       "cli": "rem skill add"
     },
+    "POST /api/rem-resources#clear_mcp_cache": {
+      "cli": "rem mcp clear-cache"
+    },
     "POST /api/rem-resources#remove_mcp": {
       "cli": "rem mcp remove"
     },
@@ -805,6 +938,27 @@
     "POST /api/rem/context": {
       "cli": "rem settings apply"
     },
+    "POST /api/rem/decisions": {
+      "cli": [
+        "rem decisions use",
+        "rem decisions change",
+        "rem decisions edit",
+        "rem decisions replace",
+        "rem decisions reject",
+        "rem decisions reopen",
+        "rem decisions forget",
+        "rem decisions retire",
+        "rem decisions add",
+        "rem decisions confirm-edit",
+        "rem decisions cancel-edit"
+      ]
+    },
+    "POST /api/rem/decisions/paths": {
+      "cli": "rem decisions paths"
+    },
+    "POST /api/rem/decisions/scan": {
+      "cli": "rem decisions scan"
+    },
     "POST /api/rem/kanban/participant": {
       "cli": "tickets projects"
     },
@@ -813,6 +967,9 @@
     },
     "POST /api/rem/kanban/report/seen": {
       "cli": "selfwork report"
+    },
+    "POST /api/rem/kanban/stop": {
+      "cli": "selfwork stop-when"
     },
     "POST /api/rem/kanban/ticket#approve": {
       "cli": "tickets approve"
@@ -859,6 +1016,9 @@
     "POST /api/rem/messages/*/undo-memory": {
       "cli": "rem memories undo"
     },
+    "POST /api/rem/objectives": {
+      "cli": "selfwork objectives"
+    },
     "POST /api/rem/reset": {
       "cli": "api"
     },
@@ -877,8 +1037,14 @@
     "POST /api/rem/runs/*/retry_review": {
       "cli": "rem runs retry-review"
     },
+    "POST /api/rem/runs/*/run_there": {
+      "cli": "rem runs run-there"
+    },
     "POST /api/rem/runs/*/wake": {
       "cli": "rem runs wake"
+    },
+    "POST /api/rem/runs/acknowledge": {
+      "cli": "rem runs acknowledge-all"
     },
     "POST /api/rem/tasks": {
       "cli": "rem tasks create"
@@ -888,6 +1054,12 @@
     },
     "POST /api/rem/tasks/*/run": {
       "cli": "rem tasks run"
+    },
+    "POST /api/rem/tasks/*/workflow": {
+      "cli": [
+        "rem tasks make-workflow",
+        "rem tasks switch-over"
+      ]
     },
     "POST /api/rem/threads/*/messages": {
       "cli": "rem thread send"
@@ -929,6 +1101,9 @@
       "excluded": "folder-approval"
     },
     "POST /api/second-brains#job_sources": {
+      "cli": "api"
+    },
+    "POST /api/second-brains#mark_series": {
       "cli": "api"
     },
     "POST /api/second-brains#mutate": {
@@ -1033,11 +1208,23 @@
     "POST /api/swarms/*/start": {
       "excluded": "runs-agents"
     },
+    "POST /api/usage/alerts": {
+      "cli": "usage alerts"
+    },
     "POST /api/usage/credentials": {
       "excluded": "credentials"
     },
     "POST /api/usage/refresh": {
       "cli": "usage refresh"
+    },
+    "POST /api/workflow-shortcuts": {
+      "excluded": "window-settings"
+    },
+    "POST /api/workflow-shortcuts/*/approve": {
+      "cli": "rattish shortcuts approve"
+    },
+    "POST /api/workflow-shortcuts/*/run": {
+      "cli": "rattish start"
     },
     "POST /api/workflows": {
       "cli": "rattish create"
@@ -1099,6 +1286,9 @@
     "POST /api/workflows/*/tests": {
       "excluded": "window-ui"
     },
+    "POST /api/workflows/*/tests/estimate": {
+      "cli": "rattish test"
+    },
     "POST /api/workflows/*/tests/results/*/stop": {
       "cli": "api"
     },
@@ -1154,6 +1344,24 @@
     "browser.tabs": {
       "excluded": "browser"
     },
+    "computers.list": {
+      "cli": "computers list"
+    },
+    "computers.place": {
+      "cli": "computers place"
+    },
+    "computers.placement": {
+      "cli": "computers placement"
+    },
+    "computers.run_there": {
+      "cli": [
+        "rem runs run-there",
+        "org tickets run-there"
+      ]
+    },
+    "computers.set": {
+      "cli": "computers set"
+    },
     "developer.log": {
       "excluded": "phone-only"
     },
@@ -1195,10 +1403,13 @@
     "media.preview": {
       "excluded": "phone-only"
     },
-    "organizations.control": {
-      "excluded": "org-run-control"
+    "organizations.auto_mode": {
+      "cli": "org auto-mode"
     },
-    "organizations.requests": {
+    "organizations.backlog_pull": {
+      "cli": "org backlog-pulls"
+    },
+    "organizations.control": {
       "excluded": "org-run-control"
     },
     "organizations.knowledge": {
@@ -1213,11 +1424,8 @@
     "organizations.read": {
       "cli": "org show"
     },
-    "organizations.backlog_pull": {
-      "cli": "org backlog-pulls"
-    },
-    "organizations.auto_mode": {
-      "cli": "org auto-mode"
+    "organizations.requests": {
+      "excluded": "org-run-control"
     },
     "organizations.schedule": {
       "cli": "org schedule apply"
@@ -1232,14 +1440,44 @@
     "organizations.worker": {
       "cli": [
         "org employees hold",
-        "org employees release"
+        "org employees release",
+        "org employees account"
       ]
     },
     "overview": {
       "excluded": "phone-only"
     },
+    "posts.decide": {
+      "excluded": "social-approval"
+    },
+    "posts.list": {
+      "cli": "social list"
+    },
+    "provider.account.sign_in": {
+      "cli": "provider account login"
+    },
+    "provider.accounts": {
+      "cli": "provider account list"
+    },
     "rem.attachment": {
       "excluded": "phone-only"
+    },
+    "rem.decision.change": {
+      "cli": [
+        "rem decisions use",
+        "rem decisions change",
+        "rem decisions edit",
+        "rem decisions replace",
+        "rem decisions reject",
+        "rem decisions reopen",
+        "rem decisions forget",
+        "rem decisions scan",
+        "rem decisions confirm-edit",
+        "rem decisions cancel-edit"
+      ]
+    },
+    "rem.decisions": {
+      "cli": "rem decisions list"
     },
     "rem.draft": {
       "excluded": "phone-only"
@@ -1282,6 +1520,9 @@
     },
     "rem.run.acknowledge": {
       "cli": "rem runs acknowledge"
+    },
+    "rem.run.acknowledge_all": {
+      "cli": "rem runs acknowledge-all"
     },
     "rem.run.cancel": {
       "cli": "rem runs cancel"
@@ -1332,7 +1573,13 @@
       "cli": "selfwork report"
     },
     "selfwork.settings": {
-      "cli": "selfwork set"
+      "cli": [
+        "selfwork set",
+        "selfwork apply"
+      ]
+    },
+    "selfwork.stop": {
+      "cli": "selfwork stop-when"
     },
     "settings.get": {
       "excluded": "window-settings"
@@ -1361,6 +1608,9 @@
     "usage.overview": {
       "cli": "usage show"
     },
+    "workflows.failure": {
+      "cli": "rattish runs failure"
+    },
     "workflows.list": {
       "cli": "rattish list"
     },
@@ -1382,11 +1632,29 @@
     "workflows.stop": {
       "cli": "rattish stop"
     },
+    "workflows.tests": {
+      "cli": "rattish test"
+    },
+    "workflows.tests.estimate": {
+      "cli": "rattish test"
+    },
+    "workflows.tests.try": {
+      "cli": "rattish test"
+    },
+    "workflows.tests.use_model": {
+      "cli": "rattish test"
+    },
     "workflows.trigger": {
       "cli": [
         "rattish triggers enable",
         "rattish triggers disable"
       ]
+    },
+    "workflows.trigger.approve": {
+      "cli": "rattish triggers approve"
+    },
+    "workflows.trigger.changes": {
+      "cli": "rattish triggers changes"
     },
     "workflows.triggers.pause": {
       "cli": [
@@ -1464,7 +1732,7 @@
       "excluded": "protocol-reply"
     },
     "job.submit": {
-      "excluded": "device-link"
+      "cli": "rem tasks create"
     },
     "request.cancel": {
       "excluded": "device-link"
@@ -1591,6 +1859,9 @@
     "gofer:create-folder": {
       "excluded": "file-explorer"
     },
+    "gofer:default-browser": {
+      "excluded": "window-settings"
+    },
     "gofer:delete-path": {
       "excluded": "file-explorer"
     },
@@ -1672,6 +1943,9 @@
     "gofer:global-dictation-report": {
       "excluded": "window-ui"
     },
+    "gofer:global-dictation-retry": {
+      "excluded": "window-ui"
+    },
     "gofer:global-dictation-suspend": {
       "excluded": "window-ui"
     },
@@ -1688,6 +1962,9 @@
       "excluded": "app-updates"
     },
     "gofer:list-directory": {
+      "excluded": "file-explorer"
+    },
+    "gofer:list-project-files": {
       "excluded": "file-explorer"
     },
     "gofer:migrate-legacy-projects": {
@@ -1795,6 +2072,15 @@
     "gofer:terminal-write": {
       "excluded": "window-ui"
     },
+    "gofer:workflow-run-sheet-action": {
+      "excluded": "window-ui"
+    },
+    "gofer:workflow-shortcuts-suspend": {
+      "excluded": "window-ui"
+    },
+    "gofer:workflow-shortcuts-sync": {
+      "cli": "rattish shortcuts list"
+    },
     "gofer:write-text-file": {
       "excluded": "file-explorer"
     }
@@ -1813,6 +2099,11 @@
     "brain save": "backend",
     "brain search": "backend",
     "completion": "offline",
+    "computers list": "backend",
+    "computers order": "backend",
+    "computers place": "backend",
+    "computers placement": "backend",
+    "computers set": "backend",
     "devices list": "backend",
     "doctor": "offline",
     "licenses": "offline",
@@ -1820,6 +2111,7 @@
     "org auto-mode": "backend",
     "org backlog-pulls": "backend",
     "org config": "backend",
+    "org employees account": "backend",
     "org employees hold": "backend",
     "org employees list": "backend",
     "org employees release": "backend",
@@ -1839,9 +2131,18 @@
     "org tickets comment": "backend",
     "org tickets create": "backend",
     "org tickets list": "backend",
+    "org tickets run-there": "backend",
     "org tickets update": "backend",
     "projects list": "backend",
     "projects setup": "backend",
+    "provider account add": "offline",
+    "provider account copy-setup": "offline",
+    "provider account import-setup": "offline",
+    "provider account list": "offline",
+    "provider account login": "offline",
+    "provider account rename": "offline",
+    "provider account rm": "offline",
+    "provider account status": "offline",
     "provider jev check": "backend",
     "provider jev disable": "backend",
     "provider jev enable": "backend",
@@ -1877,11 +2178,18 @@
     "rattish reject": "backend",
     "rattish resume": "backend",
     "rattish run": "offline",
+    "rattish runs changes": "backend",
+    "rattish runs discard": "backend",
+    "rattish runs failure": "backend",
+    "rattish runs land": "backend",
     "rattish runs list": "backend",
     "rattish runs rerun": "backend",
     "rattish secrets list": "offline",
     "rattish secrets remove": "offline",
     "rattish secrets set": "offline",
+    "rattish shortcuts approve": "offline",
+    "rattish shortcuts list": "offline",
+    "rattish shortcuts remove": "offline",
     "rattish show": "backend",
     "rattish start": "backend",
     "rattish starters": "offline",
@@ -1891,6 +2199,9 @@
     "rattish triggers add file": "offline",
     "rattish triggers add webhook": "offline",
     "rattish triggers apply": "backend",
+    "rattish triggers approve": "offline",
+    "rattish triggers budget": "offline",
+    "rattish triggers changes": "offline",
     "rattish triggers disable": "offline",
     "rattish triggers enable": "offline",
     "rattish triggers export": "backend",
@@ -1899,17 +2210,35 @@
     "rattish triggers login": "offline",
     "rattish triggers pause": "offline",
     "rattish triggers remove": "offline",
-    "rattish triggers rotate-token": "offline",
     "rattish triggers resume": "offline",
+    "rattish triggers rotate-token": "offline",
     "rattish triggers start": "offline",
     "rattish triggers status": "offline",
     "rattish triggers update": "offline",
     "rattish triggers webhook-port": "offline",
     "rattish wait": "backend",
+    "rem context": "backend",
+    "rem decisions add": "backend",
+    "rem decisions cancel-edit": "backend",
+    "rem decisions change": "backend",
+    "rem decisions confirm-edit": "backend",
+    "rem decisions edit": "backend",
+    "rem decisions forget": "backend",
+    "rem decisions list": "backend",
+    "rem decisions paths": "backend",
+    "rem decisions reject": "backend",
+    "rem decisions reopen": "backend",
+    "rem decisions replace": "backend",
+    "rem decisions retire": "backend",
+    "rem decisions scan": "backend",
+    "rem decisions show": "backend",
+    "rem decisions use": "backend",
     "rem follow": "backend",
     "rem mcp add": "offline",
+    "rem mcp clear-cache": "offline",
     "rem mcp list": "offline",
     "rem mcp remove": "offline",
+    "rem mcp tools": "offline",
     "rem memories add": "backend",
     "rem memories edit": "backend",
     "rem memories forget": "backend",
@@ -1921,10 +2250,12 @@
     "rem resources": "offline",
     "rem restore-db": "offline",
     "rem runs acknowledge": "backend",
+    "rem runs acknowledge-all": "backend",
     "rem runs cancel": "backend",
     "rem runs pause": "backend",
     "rem runs resume": "backend",
     "rem runs retry-review": "backend",
+    "rem runs run-there": "backend",
     "rem runs show": "backend",
     "rem runs wake": "backend",
     "rem say": "backend",
@@ -1941,10 +2272,12 @@
     "rem tasks delete": "backend",
     "rem tasks edit": "backend",
     "rem tasks list": "backend",
+    "rem tasks make-workflow": "backend",
     "rem tasks pause": "backend",
     "rem tasks resume": "backend",
     "rem tasks run": "backend",
     "rem tasks show": "backend",
+    "rem tasks switch-over": "backend",
     "rem tasks wait": "backend",
     "rem tasks wake": "backend",
     "rem thread send": "backend",
@@ -1963,13 +2296,21 @@
     "schema": "offline",
     "selfwork apply": "backend",
     "selfwork export": "backend",
+    "selfwork objectives": "backend",
     "selfwork off": "backend",
     "selfwork on": "backend",
     "selfwork report": "backend",
     "selfwork set": "backend",
     "selfwork status": "backend",
+    "selfwork stop-when": "backend",
     "selfwork window": "backend",
     "serve": "offline",
+    "social accounts": "backend",
+    "social list": "backend",
+    "social propose": "backend",
+    "social show": "backend",
+    "social templates": "backend",
+    "social times": "backend",
     "swarm apply": "backend",
     "swarm delete": "backend",
     "swarm export": "backend",
@@ -1998,8 +2339,10 @@
     "ui reports": "hidden",
     "ui second-brain": "hidden",
     "ui serve": "offline",
+    "usage alerts": "backend",
     "usage refresh": "backend",
     "usage show": "backend",
+    "usage verified": "backend",
     "wait": "backend",
     "watch list": "legacy",
     "watch start": "legacy",

@@ -161,7 +161,7 @@ internal fun EdgePage(client: LiveClient, browser: BrowserRuntime, onBack: (() -
                         else "Pages open as tabs in Edge, which keeps them, and their sound, while you switch to Raticode and back.",
                         Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     InsideRaticode("Edge", { browser.setEngine(BrowserRules.ENGINE_GECKO) }) { browser.setEngine(BrowserRules.ENGINE_RATICODE) }
-                    SectionTitle("Your Edge")
+                    BrowserSectionTitle("Your Edge")
                     Text("Edge doesn't let other apps open these screens directly, so each one opens Edge; then follow the steps shown.",
                         Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     EdgeApps.PLACES.forEach { item ->
@@ -173,7 +173,7 @@ internal fun EdgePage(client: LiveClient, browser: BrowserRuntime, onBack: (() -
                         saved.linksInApp, browser::setLinksInApp)
                 }
                 if (client.paired) {
-                    SectionTitle(computerTitle(computer))
+                    BrowserSectionTitle(computerTitle(computer))
                     ComputerTabs(browser, client, computer, limit = 8, open = { url -> openUrl(url) })
                 }
                 Text(buildString {

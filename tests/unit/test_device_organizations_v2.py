@@ -278,8 +278,63 @@ def test_workers_are_held_and_released_but_never_widened(org):
             "organizations.worker",
             {"organization_id": oid, "employee_id": "lead", "paused": "yes"},
         )["code"]
-        == "invalid"
+        # The protocol schema refuses it before the desktop reads it.
+        == "unsupported"
     )
+
+
+def test_the_phone_chooses_a_workers_account(org, monkeypatch):
+    from gofer.core import provider_accounts as accounts
+
+    _, _, _, send, manager, oid = org
+    monkeypatch.setattr(accounts, "account_status", lambda *_a, **_k: {"state": "signed_in"})
+    work = accounts.create_account("work", provider="codex", data_dir=manager.data_dir)
+    other = accounts.create_account("me", provider="claude_code", data_dir=manager.data_dir)
+    before = read(send, oid)
+    # The read lists every provider's accounts by ID; a worker has none at first.
+    assert {"provider": "codex", "account_id": work.account_id, "name": "work"} in before[
+        "accounts"
+    ]
+    assert {e["employee_id"]: e["account_id"] for e in before["employees"]} == {
+        "lead": "",
+        "dev": "",
+    }
+
+    def choose(account: str) -> dict[str, Any]:
+        answer: dict[str, Any] = send(
+            "desktop.action",
+            "organizations.worker",
+            {"organization_id": oid, "employee_id": "lead", "account": account},
+        )
+        return answer
+
+    chosen = choose(work.account_id)["value"]
+    assert {e["employee_id"]: e["account_id"] for e in chosen["employees"]}["lead"] == (
+        work.account_id
+    )
+    history = manager.call("", "user", {"action": "history", "organizationId": oid, "params": {}})
+    assert "Chose an account for Lead from the phone" in json.dumps(history)
+    # Another provider's account is refused, and nothing changes.
+    assert choose(other.account_id)["code"] == "invalid"
+    assert manager.store.get("", oid)["config"]["employees"][0]["account"] == work.account_id
+    # "" is the default sign-in.
+    back = choose("")["value"]
+    assert {e["employee_id"]: e["account_id"] for e in back["employees"]}["lead"] == ""
+    assert manager.store.get("", oid)["config"]["employees"][0]["account"] is None
+    # A name, a path or both changes at once never reach the desktop's configuration:
+    # the protocol schema refuses them first.
+    for params in (
+        {"account": "work"},
+        {"account": "../x"},
+        {"account": work.account_id, "paused": True},
+    ):
+        answer = send(
+            "desktop.action",
+            "organizations.worker",
+            {"organization_id": oid, "employee_id": "lead", **params},
+        )
+        assert answer["code"] == "unsupported", params
+    assert manager.store.get("", oid)["config"]["employees"][0]["account"] is None
 
 
 def test_the_phone_reads_and_edits_the_work_schedule(org):

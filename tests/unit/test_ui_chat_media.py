@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import base64
 import io
-import json
-import sys
 import wave
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +15,7 @@ from gofer.ui.chat_media import (
     store_chat_attachments,
     transcribe_chat_audio,
 )
+from tests.helpers.fake_speech import FakeRecognizerEngine
 
 
 def test_store_chat_attachments_preserves_binary_files_and_confines_paths(tmp_path) -> None:
@@ -79,76 +77,110 @@ def test_transcribe_chat_audio_points_silent_input_to_device_settings(
 
 
 def test_streaming_transcription_returns_partial_and_final_text(monkeypatch, tmp_path) -> None:
-    class FakeRecognizer:
-        def __init__(self) -> None:
-            self.chunks = 0
-
-        def AcceptWaveform(self, pcm) -> bool:
-            assert pcm == b"\x01\x00\x02\x00"
-            self.chunks += 1
-            return self.chunks > 1
-
-        def PartialResult(self) -> str:
-            return json.dumps({"partial": "build the"})
-
-        def Result(self) -> str:
-            return json.dumps({"text": "build the workflow"})
-
-        def FinalResult(self) -> str:
-            return json.dumps({"text": "now"})
-
+    engine = FakeRecognizerEngine(
+        script=[("Build the", False), ("Build the workflow", True)], final="Now."
+    )
     chat_media._transcription_sessions.clear()
-    monkeypatch.setattr(chat_media, "_new_vosk_recognizer", lambda _data_dir: FakeRecognizer())
-    session_id = chat_media.start_chat_transcription(data_dir=tmp_path)["sessionId"]
+    monkeypatch.setattr(chat_media, "_load_offline_model", lambda _data_dir: engine)
+    session_id = chat_media.start_chat_transcription(data_dir=tmp_path, engine="offline")[
+        "sessionId"
+    ]
     chunk = {
         "data": base64.b64encode(b"\x01\x00\x02\x00").decode(),
         "sessionId": session_id,
     }
 
-    assert chat_media.stream_chat_transcription(chunk) == {"text": "build the"}
-    assert chat_media.stream_chat_transcription(chunk) == {"text": "build the workflow"}
+    # A partial, then a phrase the model finished after a long pause, then the end.
+    assert chat_media.stream_chat_transcription(chunk) == {"text": "Build the"}
+    assert chat_media.stream_chat_transcription(chunk) == {"text": "Build the workflow"}
     assert chat_media.finish_chat_transcription({"sessionId": session_id}) == {
-        "text": "build the workflow now"
+        "text": "Build the workflow Now."
     }
     assert session_id not in chat_media._transcription_sessions
+    # Half a second of silence before the first audio and after the reset, and 1.5 s
+    # at the end, so the model doesn't drop first or last words.
+    assert engine.calls == [
+        "create_stream",
+        "silence:8000",
+        "audio:2",
+        "audio:2",
+        "reset",
+        "silence:8000",
+        "silence:24000",
+        "input_finished",
+    ]
+    # 16-bit PCM arrives as floats in [-1, 1].
+    assert engine.fake.streams[0].samples[1] == [1 / 32768, 2 / 32768]
 
 
-def test_local_vosk_recognizer_accepts_pcm_wav(monkeypatch, tmp_path) -> None:
-    class FakeRecognizer:
-        def __init__(self, model, sample_rate) -> None:
-            assert model == "model"
-            assert sample_rate == 16_000
-
-        def AcceptWaveform(self, _data) -> bool:
-            return False
-
-        def Result(self) -> str:
-            return json.dumps({"text": ""})
-
-        def FinalResult(self) -> str:
-            return json.dumps({"text": "local words"})
-
-    monkeypatch.setitem(
-        sys.modules,
-        "vosk",
-        SimpleNamespace(KaldiRecognizer=FakeRecognizer, SetLogLevel=lambda _level: None),
+def test_the_offline_model_only_revises_its_partial_never_finished_phrases(
+    monkeypatch, tmp_path
+) -> None:
+    """The voice tidy only rewrites what follows text it already kept, so finished
+    phrases must stay as they were while the partial changes."""
+    engine = FakeRecognizerEngine(
+        script=[("So", False), ("So we", False), ("So we ship it", True), ("Then", False)],
+        final="Then test it",
     )
-    monkeypatch.setattr(chat_media, "_load_vosk_model", lambda _data_dir: "model")
+    chat_media._transcription_sessions.clear()
+    monkeypatch.setattr(chat_media, "_load_offline_model", lambda _data_dir: engine)
+    session_id = chat_media.start_chat_transcription(data_dir=tmp_path, engine="offline")[
+        "sessionId"
+    ]
+    chunk = {"data": base64.b64encode(b"\x05\x00" * 4000).decode(), "sessionId": session_id}
+    shown = [chat_media.stream_chat_transcription(chunk)["text"] for _ in range(4)]
+    assert shown == ["So", "So we", "So we ship it", "So we ship it Then"]
+    assert all(later.startswith(earlier) for earlier, later in zip(shown, shown[1:], strict=False))
+    final = chat_media.finish_chat_transcription({"sessionId": session_id})["text"]
+    assert final == "So we ship it Then test it"
+
+
+def test_local_offline_recognizer_accepts_pcm_wav(monkeypatch, tmp_path) -> None:
+    engine = FakeRecognizerEngine(script=[("Local", False)], final="Local words.")
+    monkeypatch.setattr(chat_media, "_load_offline_model", lambda _data_dir: engine)
 
     result = chat_media._transcribe_wav_locally(_wav_bytes(b"\x01\x00" * 1600), tmp_path)
 
-    assert result == "local words"
+    assert result == "Local words."
 
 
-def test_local_vosk_recognizer_rejects_compressed_audio(tmp_path) -> None:
+def test_local_offline_recognizer_rejects_compressed_audio(tmp_path) -> None:
     with pytest.raises(ChatMediaError, match="valid WAV"):
         chat_media._transcribe_wav_locally(b"webm audio", tmp_path)
 
 
-def test_vosk_uses_desktop_sized_streaming_model() -> None:
-    assert chat_media.VOSK_MODEL_NAME == "vosk-model-en-us-0.22-lgraph"
-    assert chat_media.VOSK_MODEL_URL.endswith("/vosk-model-en-us-0.22-lgraph.zip")
-    assert chat_media.VOSK_MODEL_DOWNLOAD_MAX_BYTES >= 128 * 1024 * 1024
+def test_the_offline_model_is_nemotron_3_5_streaming_from_a_pinned_archive() -> None:
+    assert chat_media.OFFLINE_MODEL_NAME == (
+        "nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11"
+    )
+    assert chat_media.OFFLINE_MODEL_URL == (
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+        "sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11.tar.bz2"
+    )
+    assert (
+        chat_media.OFFLINE_MODEL_DOWNLOAD_BYTES
+        < chat_media.OFFLINE_MODEL_DOWNLOAD_MAX_BYTES
+        < 2 * chat_media.OFFLINE_MODEL_DOWNLOAD_BYTES
+    )
+    assert round(chat_media.OFFLINE_MODEL_DOWNLOAD_BYTES / 1e6) == (
+        chat_media.OFFLINE_MODEL_DOWNLOAD_MB
+    )
+    assert set(chat_media.OFFLINE_MODEL_FILES) == {
+        "encoder.int8.onnx",
+        "decoder.int8.onnx",
+        "joiner.int8.onnx",
+        "tokens.txt",
+    }
+    # OpenMDW-1.1 asks that copies keep the license and the notices of origin.
+    notice = chat_media.OFFLINE_MODEL_NOTICE
+    assert "OpenMDW License Agreement, version 1.1" in notice
+    assert "https://openmdw.ai/license/1-1/" in notice
+    assert "NVIDIA" in notice and "sherpa-onnx" in notice
+    assert "NVIDIA Open Model License" not in notice
+    # The English-only model local dev builds used is cleaned up like Vosk's.
+    assert "nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25" in (
+        chat_media.LEGACY_MODEL_NAMES
+    )
 
 
 def test_model_download_limit_error_reports_configured_size() -> None:
@@ -169,20 +201,25 @@ def _wav_bytes(pcm: bytes) -> bytes:
     return output.getvalue()
 
 
-def test_vosk_model_canonicalizes_data_root_alias(monkeypatch, tmp_path):
+def test_offline_model_canonicalizes_data_root_alias(monkeypatch, tmp_path):
     real = tmp_path / "private" / "var"
     real.mkdir(parents=True)
     alias = tmp_path / "var"
     alias.symlink_to(real, target_is_directory=True)
     paths: list[Path] = []
-    monkeypatch.setattr(chat_media, "_vosk_model", None)
-    monkeypatch.setattr(chat_media, "_vosk_model_path", None)
-    monkeypatch.setattr(chat_media, "_require_vosk_model", paths.append)
-    monkeypatch.setitem(sys.modules, "vosk", SimpleNamespace(Model=lambda path: path))
-    assert chat_media._load_vosk_model(alias) == str(
-        real / "speech-models" / chat_media.VOSK_MODEL_NAME
+    monkeypatch.setattr(chat_media, "_offline_engine", None)
+    monkeypatch.setattr(chat_media, "_offline_engine_path", None)
+    monkeypatch.setattr(chat_media, "_require_offline_model", paths.append)
+    monkeypatch.setattr(chat_media.offline_speech, "import_sherpa_onnx", lambda: "sherpa")
+    monkeypatch.setattr(
+        chat_media.offline_speech, "new_engine", lambda path, sherpa: (path, sherpa)
     )
-    assert paths == [real / "speech-models" / chat_media.VOSK_MODEL_NAME]
+    expected = real / "speech-models" / chat_media.OFFLINE_MODEL_NAME
+    assert chat_media._load_offline_model(alias) == (expected, "sherpa")
+    assert paths == [expected]
+    # Loaded once and shared by later dictations.
+    assert chat_media._load_offline_model(alias) == (expected, "sherpa")
+    assert paths == [expected]
 
 
 def test_fork_copies_attachments_independently(tmp_path) -> None:
@@ -314,9 +351,10 @@ def test_the_download_passes_its_context_and_names_a_certificate_failure(
         )
 
     no_system_cas(monkeypatch, tmp_path)
+    monkeypatch.setattr(chat_media, "OFFLINE_MODEL_FREE_BYTES", 0)
     monkeypatch.setattr(chat_media, "urlopen", refuse)
     with pytest.raises(ChatMediaError) as raised:
-        chat_media._ensure_vosk_model(tmp_path / "models" / chat_media.VOSK_MODEL_NAME)
+        chat_media._ensure_offline_model(tmp_path / "models" / chat_media.OFFLINE_MODEL_NAME)
     assert isinstance(seen["context"], chat_media.ssl.SSLContext)
     assert "security certificate couldn't be verified" in str(raised.value)
     assert "certificates: bundled certifi" in caplog.text
@@ -329,7 +367,7 @@ def test_the_download_passes_its_context_and_names_a_certificate_failure(
         (chat_media.URLError(TimeoutError("timed out")), "the connection timed out"),
         (TimeoutError("timed out"), "the connection timed out"),
         (
-            chat_media.HTTPError(chat_media.VOSK_MODEL_URL, 503, "busy", {}, None),  # type: ignore[arg-type]
+            chat_media.HTTPError(chat_media.OFFLINE_MODEL_URL, 503, "busy", {}, None),  # type: ignore[arg-type]
             "the server answered HTTP 503",
         ),
         (chat_media.URLError(OSError(8, "nodename nor servname")), "Check the connection"),

@@ -132,9 +132,23 @@ class AppUpdateRulesTest {
         assertEquals(45 * 60_000L, AppUpdateRules.nextCheckDelay(1, retryAt = now + 45 * 60_000, now = now))
     }
 
+    @Test fun aRateLimitNeverHoldsAutomaticChecksBackForMoreThanTwelveHours() {
+        val cap = AppUpdateRules.MAX_RETRY_WAIT_MS
+        assertEquals(12 * 60 * 60 * 1000L, cap)
+        // A phone clock a day behind GitHub's: the reset looks a day away, but the wait stops at the cap.
+        val now = 1_900_000_000_000L - 24 * 60 * 60 * 1000L
+        assertEquals(now + cap, AppUpdateRules.retryAt(403, "0", "1900000000", null, now))
+        assertEquals(now + cap, AppUpdateRules.retryAt(429, null, null, "999999999", now))
+        assertEquals(now + cap, AppUpdateRules.retryAt(403, "0", Long.MAX_VALUE.toString(), null, now))
+        // A longer wait saved by an older version no longer blocks checks; one within the cap still does.
+        assertTrue(AppUpdateRules.checkDue(now, lastCheckAt = now - 60 * 60_000, nextCheckAt = 0, retryAt = now + 3 * cap, appStart = true))
+        assertFalse(AppUpdateRules.checkDue(now, lastCheckAt = now - 60 * 60_000, nextCheckAt = 0, retryAt = now + cap, appStart = true))
+    }
+
     @Test fun rateLimitHeadersBecomeARetryTimeAndAnHonestMessage() {
         val now = 1_000_000L
-        assertEquals(1_900_000_000_000L, AppUpdateRules.retryAt(403, "0", "1900000000", null, now))
+        val soon = 1_899_999_000_000L
+        assertEquals(1_900_000_000_000L, AppUpdateRules.retryAt(403, "0", "1900000000", null, soon))
         assertEquals(now + 120_000, AppUpdateRules.retryAt(429, "12", null, "120", now))
         assertEquals(0L, AppUpdateRules.retryAt(500, "0", "1900000000", "120", now))
         assertTrue(AppUpdateRules.httpProblem(403, now + 30 * 60_000, now).contains("tries again in 30 min"))

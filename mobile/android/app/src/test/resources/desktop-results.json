@@ -248,6 +248,7 @@
    "assistant.effort": null,
    "assistant.defaultScope": null,
    "assistant.autoHideThoughts": null,
+   "commitMessage.stripCoAuthors": true,
    "assistant.avatarEnabled": null,
    "assistant.avatarAnimated": null,
    "memory.reportFormat": null,
@@ -452,6 +453,12 @@
     "kind": "bool"
    },
    {
+    "key": "commitMessage.stripCoAuthors",
+    "group": "Rem",
+    "label": "Remove Co-authored-by lines from commits",
+    "kind": "bool"
+   },
+   {
     "key": "assistant.avatarEnabled",
     "group": "Rem",
     "label": "Show Rem's avatar",
@@ -579,16 +586,376 @@
     ]
    }
   ],
+  "range": {
+   "key": "custom",
+   "label": "Custom range",
+   "days": null,
+   "start": "2026-10-01T00:00:00+00:00",
+   "end": "2026-10-27T10:00:00+00:00",
+   "start_date": "2026-10-01",
+   "end_date": "2026-10-27"
+  },
   "activity": {
-   "calls": 12,
-   "input_tokens": 1000,
+   "calls": 4,
+   "input_tokens": 1300,
    "output_tokens": 200,
+   "total_tokens": 1500,
    "providers": [
     {
      "provider": "claude_code",
-     "calls": 12,
-     "input_tokens": 1000,
-     "output_tokens": 200
+     "calls": 2,
+     "input_tokens": 1100,
+     "output_tokens": 100,
+     "total_tokens": 1200
+    },
+    {
+     "provider": "codex",
+     "calls": 1,
+     "input_tokens": 200,
+     "output_tokens": 100,
+     "total_tokens": 300
+    },
+    {
+     "provider": "cursor",
+     "calls": 1,
+     "input_tokens": null,
+     "output_tokens": null,
+     "total_tokens": null
+    }
+   ]
+  },
+  "series": {
+   "bucket": "day",
+   "providers": [
+    {
+     "provider": "claude_code",
+     "total_tokens": 1200,
+     "calls": 2,
+     "style": {
+      "dark": "#D97757",
+      "light": "#C6613F",
+      "pattern": "solid"
+     }
+    },
+    {
+     "provider": "codex",
+     "total_tokens": 300,
+     "calls": 1,
+     "style": {
+      "dark": "#10A37F",
+      "light": "#0D8A6B",
+      "pattern": "stripes"
+     }
+    },
+    {
+     "provider": "cursor",
+     "total_tokens": null,
+     "calls": 1
+    }
+   ],
+   "accounts": [
+    {
+     "key": "claude_code:work",
+     "provider": "claude_code",
+     "profile": "work",
+     "name": "work",
+     "total_tokens": 900,
+     "calls": 1,
+     "style": {
+      "dark": "#F0C9BC",
+      "light": "#4F2719",
+      "pattern": "dots"
+     }
+    },
+    {
+     "key": "claude_code:",
+     "provider": "claude_code",
+     "profile": null,
+     "name": "Default sign-in",
+     "total_tokens": 300,
+     "calls": 1,
+     "style": {
+      "dark": "#D97757",
+      "light": "#C6613F",
+      "pattern": "solid"
+     }
+    },
+    {
+     "key": "codex:",
+     "provider": "codex",
+     "profile": null,
+     "name": "Default account",
+     "total_tokens": 300,
+     "calls": 1,
+     "style": {
+      "dark": "#10A37F",
+      "light": "#0D8A6B",
+      "pattern": "stripes"
+     }
+    },
+    {
+     "key": "cursor:",
+     "provider": "cursor",
+     "profile": null,
+     "name": "Default account",
+     "total_tokens": null,
+     "calls": 1,
+     "style": null
+    }
+   ],
+   "buckets": [
+    {
+     "start": "2026-10-01T00:00:00+00:00",
+     "end": "2026-10-02T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-02T00:00:00+00:00",
+     "end": "2026-10-03T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-03T00:00:00+00:00",
+     "end": "2026-10-04T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-04T00:00:00+00:00",
+     "end": "2026-10-05T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-05T00:00:00+00:00",
+     "end": "2026-10-06T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-06T00:00:00+00:00",
+     "end": "2026-10-07T00:00:00+00:00",
+     "calls": 2,
+     "unknown_calls": 0,
+     "total_tokens": 1200,
+     "providers": {
+      "claude_code": 900,
+      "codex": 300
+     },
+     "accounts": {
+      "claude_code:work": 900,
+      "codex:": 300
+     }
+    },
+    {
+     "start": "2026-10-07T00:00:00+00:00",
+     "end": "2026-10-08T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-08T00:00:00+00:00",
+     "end": "2026-10-09T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-09T00:00:00+00:00",
+     "end": "2026-10-10T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-10T00:00:00+00:00",
+     "end": "2026-10-11T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-11T00:00:00+00:00",
+     "end": "2026-10-12T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-12T00:00:00+00:00",
+     "end": "2026-10-13T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-13T00:00:00+00:00",
+     "end": "2026-10-14T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-14T00:00:00+00:00",
+     "end": "2026-10-15T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-15T00:00:00+00:00",
+     "end": "2026-10-16T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-16T00:00:00+00:00",
+     "end": "2026-10-17T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-17T00:00:00+00:00",
+     "end": "2026-10-18T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-18T00:00:00+00:00",
+     "end": "2026-10-19T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-19T00:00:00+00:00",
+     "end": "2026-10-20T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-20T00:00:00+00:00",
+     "end": "2026-10-21T00:00:00+00:00",
+     "calls": 1,
+     "unknown_calls": 0,
+     "total_tokens": 300,
+     "providers": {
+      "claude_code": 300
+     },
+     "accounts": {
+      "claude_code:": 300
+     }
+    },
+    {
+     "start": "2026-10-21T00:00:00+00:00",
+     "end": "2026-10-22T00:00:00+00:00",
+     "calls": 1,
+     "unknown_calls": 1,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-22T00:00:00+00:00",
+     "end": "2026-10-23T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-23T00:00:00+00:00",
+     "end": "2026-10-24T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-24T00:00:00+00:00",
+     "end": "2026-10-25T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-25T00:00:00+00:00",
+     "end": "2026-10-26T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-26T00:00:00+00:00",
+     "end": "2026-10-27T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
+    },
+    {
+     "start": "2026-10-27T00:00:00+00:00",
+     "end": "2026-10-28T00:00:00+00:00",
+     "calls": 0,
+     "unknown_calls": 0,
+     "total_tokens": 0,
+     "providers": {},
+     "accounts": {}
     }
    ]
   },

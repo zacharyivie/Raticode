@@ -1,6 +1,6 @@
 ---
 title: Starter workflows
-description: Six ready-made Rattish workflows with typed inputs, a test set and a guide. Copy one into your project from the Studio or with rattish create --from.
+description: Seven ready-made Rattish workflows with typed inputs, a test set and a guide. Copy one into your project from the Studio or with rattish create --from.
 pageClass: docs-layout
 ---
 
@@ -20,8 +20,9 @@ Starter workflows are new in Raticode 0.5.5.
 | [Test and fix](./test-and-fix.md) | Runs the tests and lets an agent fix failures, up to three times | Up to three | None |
 | [Notify on condition](./notify-on-condition.md) | Runs a check and notifies you only when its output matches | None | Cron |
 | [Jev demo](./jev-demo.md) | Asks Jev a yes/no and a multiple-choice question about a message and branches on each answer | Up to two Jev calls | None |
+| [Summarize a link](./summarize-a-link.md) | Reads the page behind a link shared from your phone or copied on the desktop and sends a summary to your phone | One per page | Phone share or desktop shortcut |
 
-The starters that call a model use the `claude-code` provider. Change `provider` on the agent node to use another one. **Jev demo** calls the [Jev classifier](../workflows/jev.md) instead and needs a Jev key.
+The starters that call a model use the `claude-code` provider. Change `provider` on the agent or common-llm-task node to use another one. **Jev demo** calls the [Jev classifier](../workflows/jev.md) instead and needs a Jev key.
 
 ## Start from a starter
 
@@ -34,6 +35,14 @@ Raticode rattish starters                                   # list them
 Raticode rattish create --from daily-report --project .     # copy one
 Raticode rattish create "Morning summary" --from daily-report --project .
 ```
+
+`rattish starters` lists each starter with a **Needs** line: the provider it calls and any secret it reads, or `nothing beyond Raticode`. The Studio shows the same line under **Start from** when you pick one. The **Needs** line is new in Raticode 0.6.0.
+
+## Starters on Windows
+
+Every starter's shell steps say `shell: bash`, and so do the command checks in their test sets. On Windows they run in the bash that comes with [Git for Windows](https://git-scm.com/downloads/win), never the WSL `bash.exe` in System32. See [bash-command](../nodes/bash-command.md#which-shell-runs-the-command) for how Raticode finds it.
+
+Without Git for Windows, **Start from** lists those starters as **Name (Needs Git for Windows)** and links to the download, and the **Needs** line from `rattish starters` starts with `Git for Windows`. You can still create one, but preflight stops each run until bash is installed. This is new in Raticode 0.6.0.
 
 `create --from` prints the provider the starter uses, any secret it reads, the trigger command to add, and the guide's address. `--format json` returns the same as a `starter` object.
 
@@ -76,4 +85,4 @@ Raticode rattish test PATH/workflow.rattish
 
 Each case is a real run, so starters that call a model cost what those calls cost, and **Webhook approval** asks you to approve or reject. Test cases write only under the workflow's `logs/` folder, so they don't touch your own files.
 
-Raticode's own CI copies every starter with `rattish create --from`, runs `rattish check`, and runs its test set. CI has no model, so a stand-in answers agent nodes there and judge checks are skipped. A stand-in also answers jev nodes, so CI never calls Jev.
+Raticode's own CI copies every starter with `rattish create --from`, runs `rattish check`, and runs its test set, on Linux and, when it builds the Windows app, on Windows with Git for Windows' bash. CI has no model, so a stand-in answers agent nodes there and judge checks are skipped. A stand-in also answers jev nodes, so CI never calls Jev.

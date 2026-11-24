@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import secrets
 import shutil
@@ -191,6 +192,53 @@ def unlink_without_links(destination: Path, *, directory: bool = False) -> None:
                 destination.unlink()
 
 
+# What link() returns on drives without hard links: FAT and exFAT give EPERM on Linux
+# and ENOTSUP or EOPNOTSUPP on macOS.
+_NO_HARD_LINKS = frozenset(
+    {errno.EPERM, getattr(errno, "ENOTSUP", errno.EOPNOTSUPP), errno.EOPNOTSUPP}
+)
+
+
+def _publish_exclusive(temporary: str | Path, name: str | Path, parent_fd: int | None) -> None:
+    """Give a finished temporary file its name, failing if the name is already taken.
+
+    A hard link publishes atomically without replacing anything. Drives without hard
+    links instead get a placeholder claimed with O_EXCL, so no second writer can take
+    the name, and the finished file is renamed over it, so it still appears complete.
+    """
+    dir_args: dict[str, int] = {} if parent_fd is None else {"dir_fd": parent_fd}
+    pair_args: dict[str, int] = (
+        {} if parent_fd is None else {"src_dir_fd": parent_fd, "dst_dir_fd": parent_fd}
+    )
+    try:
+        os.link(temporary, name, follow_symlinks=False, **pair_args)
+        return
+    except OSError as exc:
+        if exc.errno not in _NO_HARD_LINKS:
+            raise
+    placeholder = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        **dir_args,
+    )
+    try:
+        claimed = os.fstat(placeholder)
+    finally:
+        os.close(placeholder)
+    try:
+        os.replace(temporary, name, **pair_args)
+    except BaseException:
+        # Remove the placeholder only while it is still the one this call created.
+        try:
+            current = os.stat(name, follow_symlinks=False, **dir_args)
+            if (current.st_dev, current.st_ino) == (claimed.st_dev, claimed.st_ino):
+                os.unlink(name, **dir_args)
+        except OSError:
+            pass
+        raise
+
+
 def remove_tree_without_links(
     directory: Path, *, onerror: Callable[..., None] | None = None
 ) -> None:
@@ -290,13 +338,7 @@ def atomic_binary_output(
         if parent_fd is not None:
             if exclusive:
                 # linkat publishes atomically without replacing an existing name.
-                os.link(
-                    temporary,
-                    destination.name,
-                    src_dir_fd=parent_fd,
-                    dst_dir_fd=parent_fd,
-                    follow_symlinks=False,
-                )
+                _publish_exclusive(temporary, destination.name, parent_fd)
             else:
                 os.replace(temporary, destination.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         else:
@@ -308,7 +350,7 @@ def atomic_binary_output(
                     # Windows rename has no-replace semantics, including on FAT.
                     os.rename(temporary_path, destination)
                 else:
-                    os.link(temporary_path, destination, follow_symlinks=False)
+                    _publish_exclusive(temporary_path, destination, None)
             else:
                 os.replace(temporary_path, destination)
     finally:

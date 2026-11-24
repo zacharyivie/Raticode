@@ -867,3 +867,81 @@ def test_webhook_receipts_older_than_a_day_are_pruned(setup: Any, monkeypatch: A
     receipts = manager.store.get("", org["id"])["runtime"]["webhookReceipts"]
     assert "old:1" not in receipts
     assert {"recent:1", routine["id"] + ":fresh"} <= set(receipts)
+
+
+def test_a_ticket_run_through_a_swarm_gives_its_worker_to_the_swarms_turns(
+    setup: Any, tmp_path: Path
+) -> None:
+    """At a worker limit of 1 the ticket's own worker must not keep its swarm waiting."""
+    from gofer.core.worker_claims import THIS_COMPUTER
+    from gofer.ui.swarm_workspaces import git
+    from gofer.ui.swarms import SwarmManager
+
+    manager, org, call = setup
+    git(tmp_path, "init")
+    (tmp_path / "tracked.txt").write_text("base")
+    git(tmp_path, "add", "tracked.txt")
+    git(tmp_path, "commit", "-m", "Fixture")
+    call("configure", config=org["config"], expectedRevision=1, reason="Fixture git root")
+    calls = []
+
+    async def worker(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        yield {"type": "final", "message": {"body": "One bounded turn"}, "usage": {"cost_usd": 0.1}}
+
+    claims = manager.placement.claims
+    swarms = SwarmManager(tmp_path / "swarms", stream=worker)
+    # The swarm shares the organization's claims on one computer with a single worker.
+    swarms.claims = claims
+    swarms.computer = lambda: (THIS_COMPUTER, "Studio")
+    swarms.worker_limit = lambda: 1
+    manager.executions.swarms = swarms
+    try:
+        swarm = swarms.create(
+            tmp_path,
+            {
+                "name": "Managed",
+                "agents": [
+                    {
+                        "id": "lead",
+                        "name": "Lead",
+                        "role": "Coordinate",
+                        "isOrchestrator": True,
+                        "permissionMode": "workspace-write",
+                        "resources": org["config"]["employees"][0]["resources"],
+                    }
+                ],
+            },
+        )
+        current = call("read")
+        call(
+            "configure",
+            config={
+                **current["config"],
+                "executionTargets": [
+                    {
+                        "id": "team",
+                        "kind": "swarm",
+                        "employees": ["worker"],
+                        "swarmId": swarm["id"],
+                        "turnLimit": 1,
+                    }
+                ],
+            },
+            expectedRevision=current["revision"],
+            reason="Grant swarm",
+        )
+        call("task_create", title="One worker", assignee="worker", execution={"targetId": "team"})
+        call("control", state="running")
+        manager.dispatch()
+        drain(manager)
+        # The swarm's turn ran: the ticket gave its worker back once the swarm started.
+        assert len(calls) == 1
+        run = swarms.get(tmp_path, swarm["id"], include_history=False)["run"]
+        assert run["turnCount"] == 1
+        deadline = time.monotonic() + 5
+        while claims.held() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert claims.held() == 0
+    finally:
+        swarms.close()

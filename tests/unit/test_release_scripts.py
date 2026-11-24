@@ -415,17 +415,12 @@ def test_macos_speech_dependency_and_permissions_are_packaged() -> None:
     from packaging.requirements import Requirement
 
     project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
-    speech = [
-        Requirement(value)
-        for value in project["project"]["dependencies"]
-        if value.startswith("vosk")
+    dependencies = project["project"]["dependencies"]
+    # One offline speech engine on every platform, with no per-OS pin and no Vosk.
+    assert [value for value in dependencies if value.startswith("sherpa-onnx")] == [
+        "sherpa-onnx==2.0.1"
     ]
-    for platform, version in (("darwin", "0.3.44"), ("linux", "0.3.45"), ("win32", "0.3.45")):
-        selected = [
-            req for req in speech if req.marker and req.marker.evaluate({"sys_platform": platform})
-        ]
-        assert len(selected) == 1
-        assert version in selected[0].specifier
+    assert not [value for value in dependencies if Requirement(value).name == "vosk"]
     mac = _read_json(REPO_ROOT / "frontend/package.json")["build"]["mac"]
     assert "Rem" in mac["extendInfo"]["NSMicrophoneUsageDescription"]
     # macOS charges speech recognition to Raticode.app, which launches the helper.
@@ -440,7 +435,10 @@ def test_macos_speech_dependency_and_permissions_are_packaged() -> None:
         entitlements = plistlib.loads((REPO_ROOT / "frontend" / mac[field]).read_bytes())
         assert entitlements["com.apple.security.device.audio-input"] is True
         assert entitlements["com.apple.security.cs.allow-jit"] is True
-    assert '"*.dyld"' in (REPO_ROOT / "raticode.spec").read_text()
+    spec = (REPO_ROOT / "raticode.spec").read_text()
+    # sherpa-onnx's module and its ONNX Runtime are collected as binaries (signed on a Mac).
+    assert 'collect_dynamic_libs(\n    "sherpa_onnx"' in spec
+    assert "vosk" not in spec.lower()
 
 
 AFTER_PACK = REPO_ROOT / "frontend/build-resources/after-pack.cjs"

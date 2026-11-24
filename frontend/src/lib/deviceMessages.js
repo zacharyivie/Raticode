@@ -54,6 +54,11 @@ export function applyPhoneSettings(settings, changes = []) {
   for (const change of changes) {
     for (const [key, value] of Object.entries(change.values || {})) {
       const [section, field, ...rest] = key.split(".");
+      // Settings > Rem > <provider> account: one value per provider ID.
+      if (section === "assistant" && field === "providerAccounts" && rest.length === 1 && /^[a-z][a-z0-9_]{0,39}$/.test(rest[0])) {
+        next.assistant = { ...(next.assistant || {}), providerAccounts: { ...(next.assistant?.providerAccounts || {}), [rest[0]]: value } };
+        continue;
+      }
       if (rest.length || !field) continue;
       if (!PHONE_SETTING_SECTIONS.includes(section) && !PHONE_SETTING_FIELDS[section]?.includes(field)) continue;
       next[section] = { ...(next[section] || {}), [field]: value };

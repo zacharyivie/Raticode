@@ -113,6 +113,15 @@ internal object RemTaskStatus {
         }
     }
 
+    /**
+     * What Dismiss all clears, as the desktop's dismissibleUpdates: tasks whose last run stopped, failed or ended
+     * unclear and wasn't dismissed. A run waiting for the user's answer and a task on hold stay under Needs you.
+     */
+    fun dismissible(tasks: List<RemTask>): List<RemTask> = tasks.filter { task ->
+        val activity = activity(task) { _, _ -> "" }
+        activity.kind == Kind.ATTENTION && activity.state != "held" && task.lastRun?.needsUser != true
+    }
+
     /** The header's one phrase about what Rem is doing, as the desktop's statusLine says it. */
     fun summary(tasks: List<RemTask>): String {
         val kinds = tasks.map { activity(it) { _, _ -> "" } }

@@ -138,6 +138,123 @@
         <data android:mimeType="application/pdf" />
       </intent-filter>
     </activity>
+    <!--
+      Run a workflow from other apps' share sheets. Text and links only: it never reads a shared file. It has no window,
+      keeps the text in memory and opens More › Workflows, where nothing starts until the user taps Run. Recently used
+      workflows are offered as direct-share shortcuts (res/xml/shortcuts.xml).
+    -->
+    <activity
+        android:name=".share.WorkflowShareActivity"
+        android:enabled="@bool/share_to_rem"
+        android:exported="true"
+        android:excludeFromRecents="true"
+        android:label="@string/share_workflow_label"
+        android:theme="@android:style/Theme.NoDisplay">
+      <!-- Text and links, or one file of any kind for a workflow's file input. -->
+      <intent-filter>
+        <action android:name="android.intent.action.SEND" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="text/plain" />
+        <data android:mimeType="*/*" />
+      </intent-filter>
+    </activity>
+    <!--
+      Raticode as the phone's web browser. Android lists Raticode as a browser because of this filter, and sends web links
+      here once the user makes Raticode the default (More › Open with Raticode) or picks it when asked. No window: the link
+      opens as a new tab in Raticode (chromium) or Raticode (gecko). It honours the child lock and app lock like a
+      notification tap.
+    -->
+    <activity
+        android:name=".open.OpenLinkActivity"
+        android:enabled="@bool/open_with_raticode"
+        android:exported="true"
+        android:excludeFromRecents="true"
+        android:noHistory="true"
+        android:theme="@android:style/Theme.NoDisplay">
+      <intent-filter>
+        <action android:name="android.intent.action.VIEW" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <category android:name="android.intent.category.BROWSABLE" />
+        <data android:scheme="http" />
+        <data android:scheme="https" />
+      </intent-filter>
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.APP_BROWSER" />
+        <category android:name="android.intent.category.DEFAULT" />
+      </intent-filter>
+    </activity>
+    <!--
+      Opens files other apps hand to Raticode: web pages, PDFs, pictures, SVG, video, sound, Markdown, text and code, the
+      types Raticode already shows (OpenTypes.kinds; OpenTypesTest keeps this list the same). Only content:// addresses,
+      which come with Android's one-time read grant, so Raticode needs no storage permission. It runs in the opening app's
+      task so that grant lasts while the file is shown. Web pages run no scripts and load nothing; nothing reaches Rem.
+    -->
+    <activity
+        android:name=".open.OpenFileActivity"
+        android:enabled="@bool/open_with_raticode"
+        android:exported="true"
+        android:theme="@style/Theme.Raticode"
+        android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout">
+      <intent-filter>
+        <action android:name="android.intent.action.VIEW" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:scheme="content" />
+        <data android:mimeType="text/html" />
+        <data android:mimeType="application/xhtml+xml" />
+        <data android:mimeType="application/pdf" />
+        <data android:mimeType="image/png" />
+        <data android:mimeType="image/jpeg" />
+        <data android:mimeType="image/gif" />
+        <data android:mimeType="image/webp" />
+        <data android:mimeType="image/bmp" />
+        <data android:mimeType="image/x-ms-bmp" />
+        <data android:mimeType="image/heic" />
+        <data android:mimeType="image/heif" />
+        <data android:mimeType="image/avif" />
+        <data android:mimeType="image/x-icon" />
+        <data android:mimeType="image/vnd.microsoft.icon" />
+        <data android:mimeType="image/svg+xml" />
+        <data android:mimeType="video/mp4" />
+        <data android:mimeType="video/webm" />
+        <data android:mimeType="video/3gpp" />
+        <data android:mimeType="video/quicktime" />
+        <data android:mimeType="video/x-matroska" />
+        <data android:mimeType="video/ogg" />
+        <data android:mimeType="audio/mpeg" />
+        <data android:mimeType="audio/mp4" />
+        <data android:mimeType="audio/x-m4a" />
+        <data android:mimeType="audio/aac" />
+        <data android:mimeType="audio/wav" />
+        <data android:mimeType="audio/x-wav" />
+        <data android:mimeType="audio/ogg" />
+        <data android:mimeType="audio/opus" />
+        <data android:mimeType="audio/flac" />
+        <data android:mimeType="audio/x-flac" />
+        <data android:mimeType="audio/aiff" />
+        <data android:mimeType="audio/x-aiff" />
+        <data android:mimeType="text/markdown" />
+        <data android:mimeType="text/x-markdown" />
+        <data android:mimeType="text/plain" />
+        <data android:mimeType="text/csv" />
+        <data android:mimeType="text/css" />
+        <data android:mimeType="text/xml" />
+        <data android:mimeType="application/xml" />
+        <data android:mimeType="application/json" />
+        <data android:mimeType="text/javascript" />
+        <data android:mimeType="application/javascript" />
+        <data android:mimeType="text/x-python" />
+        <data android:mimeType="text/x-java" />
+        <data android:mimeType="text/x-kotlin" />
+        <data android:mimeType="text/x-c" />
+        <data android:mimeType="text/x-shellscript" />
+        <data android:mimeType="application/x-sh" />
+        <data android:mimeType="text/yaml" />
+        <data android:mimeType="text/x-yaml" />
+        <data android:mimeType="application/x-yaml" />
+        <data android:mimeType="application/toml" />
+      </intent-filter>
+    </activity>
     <!-- Voice mode. Every voice component is off below Android 12, which lacks on-device speech recognition. -->
     <activity
         android:name=".voice.VoiceActivity"

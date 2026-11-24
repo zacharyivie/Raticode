@@ -151,6 +151,19 @@ Each one opens Rem's chat with the project, the file's path inside it, the lines
 
 Line numbers appear when the phone can tell which lines you picked. A word that appears on several lines is settled by where you long-pressed it. Rendered Markdown shows only the words, because it has no line numbers of its own; switch to the source to include them. HTML and SVG previews have no Ask Rem. Files whose names look like they hold secrets, such as `.env` or a private key, offer no Ask Rem and their contents stay on the computer, as before. Needs no desktop update.
 
+### Accounts, Posts, Try another model, Raticode as your browser and a new QR scanner, 0.36.0
+
+- **Raticode as your browser and file viewer**: Android can open web links in Raticode (chromium or gecko, your choice) and open web pages, PDFs, pictures and other files from other apps in a read-only viewer. HTML there runs no scripts and loads nothing from the internet. Needs no desktop update.
+- The pairing QR scanner is rebuilt on Android's current camera library (CameraX).
+- Fixes: post links and sources open only web addresses (a `file:` link crashed the app), **Run a workflow** refuses Raticode's own files, sign-in codes are marked sensitive on the clipboard, update checks keep running when the phone's clock is behind, and bad values from the computer or far-off dates no longer crash the Computers page, the Usage chart, the memory end-date picker or the ticket dialogs. Needs no desktop update.
+- With Raticode 0.6.0 on the computer:
+  - **Accounts**: pick a thread's account in the model picker, see one usage card per account with a weekly pace line, split the Tokens chart by account, choose self-work's own account, and sign a Codex or Grok account in with a link and a one-time code.
+  - **Posts**: review, edit and approve proposed social posts, each decision with a second tap. The phone doesn't show media, so a post with media asks you to confirm again.
+  - **Workflows**: approval steps with named answers and typed replies, **Approve this version** for triggers, files as workflow inputs, **Try another model** on a workflow's tests with both costs first, and **Ask Rem** about a failed run.
+  - **Share into a workflow**: pick **Run a workflow** in any app's share sheet to send a link, text or one file into a workflow's Run sheet.
+  - **Dismiss all** clears every Rem task update, and the Tokens chart uses each provider's brand color.
+  - Each feature appears only when the computer offers it, so an older computer keeps today's screens. Tested with unit tests and protocol fixtures; the emulator and a real phone are untested.
+
 ### Update Raticode, workflow inputs, runs and messages, board filters and an extension crash fix, 0.35.0
 
 - **Update Raticode**: the app checks GitHub for a newer `mobile-v` release while it is on screen and every 10 minutes, downloads the signed APK, checks its size, SHA-256, version and signing certificate, then hands it to Android's installer. 0.34.0 can't update itself, so 0.35.0 is the last version you install by hand. The Google Play build updates through Play and leaves out the install permission. Needs no desktop update. Tested with unit tests; a real install from GitHub is untested.
@@ -210,6 +223,22 @@ This needs the matching desktop update. Until then, **More › Global board** as
 ### Task progress outside the app, 0.29.0
 
 While background sync is on, a task you start from this phone (by asking Rem, or with **Run now**, **Retry review** or a new task from the task screens) shows Plan, Work, Check and Report and the time so far in one ongoing notification. Android 16.1 and newer show it as a Live Update with the current step in a status-bar chip. Android 16.0 and older phones, including the Galaxy S20 on Android 13, get an ordinary ongoing notification with the same steps, and its **Hide** button takes it away. Dismissed, it stays away for that task. It says "Rem is working on your task" unless you turn on **Show Rem's words**, and the lock screen never names a task. Tasks Rem starts on its own never appear. It adds a permission, `POST_PROMOTED_NOTIFICATIONS`, and needs no desktop update.
+
+The code is in `live/TaskProgress.kt` (which runs count and what the notification says) and `live/TaskNotification.kt` (Android's side). `TaskProgressTest` covers the rules on the JVM. `LiveTaskProgressTest` runs the real sync service against the desktop's control code with a scripted task, on a private emulator:
+
+```sh
+INVITATION_ARG=taskProgressInvitationFile ./scripts/run-desktop-fixture-test.sh \
+  dev.raticode.mobile.LiveTaskProgressTest --workspace --remote --desktop --task-progress
+```
+
+It has passed on Android 13, 16.0 and 16.1 emulators. On 16.1 Android promoted the notification and showed the step chip. `POST_PROMOTED_NOTIFICATIONS` is a normal permission granted at install, and the user can revoke it per app. It is listed in `scripts/release-policy.json`, so a candidate whose manifest drops or adds a permission fails.
+
+Still unchecked: a physical phone, including the Galaxy S20 on Android 13, and the battery cost. While a phone-started run is claimed, or for 10 minutes after a request from the phone, background sync reads `rem.home` every 15 seconds. The `known` digest keeps unchanged answers to a few bytes, and Android counts the elapsed time itself, so the notification changes only when a step does. To measure it on a real phone over wireless debugging (a USB cable charges the phone and stops the battery statistics):
+
+1. Pair the phone, turn on **Enable background sync**, and leave **Show Rem's words** off.
+2. `adb shell dumpsys battery unplug && adb shell dumpsys batterystats --reset`, turn the screen off for 30 minutes with no task running, then `adb shell dumpsys batterystats dev.raticode.mobile > idle.txt`.
+3. Reset again, start a task of about 30 minutes from the phone, turn the screen off, and save `running.txt` the same way.
+4. `adb shell dumpsys battery reset`. Compare the app's estimated power use, wake locks and Wi-Fi bytes in the two files, or Raticode's share in Android's battery settings after each period.
 
 ### App lock, 0.27.0
 

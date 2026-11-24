@@ -843,7 +843,7 @@ def _load_tabular(
     aggregate_bytes = 0
 
     def _with_row(row: dict[str, object]) -> dict[str, object]:
-        return {**row, "_row": json.dumps(row)}
+        return {**row, "_row": json.dumps(row, default=str)}
 
     def _append_row(
         rows: list[dict[str, object]],
@@ -883,23 +883,14 @@ def _load_tabular(
                 _append_row(csv_rows, dict(row))
         return csv_rows
     if suffix == ".xlsx":
-        try:
-            import openpyxl
-        except ImportError as exc:
-            raise ImportError(
-                "openpyxl is required for .xlsx support: pip install 'raticode[xlsx]'"
-            ) from exc
-        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-        try:
-            ws = wb.active
-            rows_iter = ws.iter_rows(values_only=True)
-            headers = [str(h) for h in next(rows_iter)]
+        from gofer.utils.xlsx import open_xlsx_rows
+
+        with open_xlsx_rows(path, max_file_bytes=max_file_read_bytes) as rows_iter:
+            headers = [str(h) for h in next(rows_iter, ())]
             xlsx_rows: list[dict[str, object]] = []
-            for row in rows_iter:
-                _append_row(xlsx_rows, dict(zip(headers, row)))
+            for values in rows_iter:
+                _append_row(xlsx_rows, dict(zip(headers, values)))
             return xlsx_rows
-        finally:
-            wb.close()
     raise ValueError(f"Unsupported tabular format: {suffix!r}. Use .jsonl, .csv, or .xlsx")
 
 
@@ -6557,6 +6548,7 @@ class WorkflowExecutor:
                     decision_value,
                     decided_by="gofer",
                     notes=f"Timed out after {op.timeout_seconds} seconds",
+                    timed_out=True,
                 )
                 decided_by = "gofer"
                 notes = f"Timed out after {op.timeout_seconds} seconds"

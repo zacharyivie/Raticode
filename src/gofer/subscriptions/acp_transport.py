@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from gofer.core.command_slots import scoped_command
+from gofer.core.credential_mask import account_folders, masked_command
 from gofer.utils.process import (
     _terminate_process_tree,
     build_subprocess_env,
@@ -333,7 +334,9 @@ async def open_acp_transport(
     child_env = build_subprocess_env(env_with_executable_on_path(command[0], env))
     spawn = asyncio.create_task(
         asyncio.create_subprocess_exec(
-            *scoped_command(command, child_env),
+            # ACP providers have no sandbox: Raticode's credential folders are hidden,
+            # apart from the provider account folder the child runs as (GROK_HOME).
+            *scoped_command(masked_command(command, keep=account_folders(child_env)), child_env),
             cwd=cwd,
             env=child_env,
             stdin=asyncio.subprocess.PIPE,

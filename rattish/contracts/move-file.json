@@ -3,6 +3,7 @@
   "contract_version": 1,
   "node_type": "move-file",
   "runtime_handler": "raticode.move_file",
+  "catalog": {"category": "files", "summary": "Move or rename a file or folder", "docs_path": "/docs/nodes/move-file"},
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",

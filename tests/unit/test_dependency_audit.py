@@ -26,8 +26,8 @@ def audit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
             f'[[package]]\nname = "{name}"\nversion = "{version}"\n'
             f'source = {{ {source} = "https://example.invalid" }}'
             for name, version, source in [
-                ("vosk", "0.3.44", "registry"),
-                ("vosk", "0.3.45", "registry"),
+                ("per-os-pin", "0.3.44", "registry"),
+                ("per-os-pin", "0.3.45", "registry"),
                 ("example", "1.0", "registry"),
                 ("example", "1.0", "registry"),
                 ("local-project", "1.0", "editable"),
@@ -62,7 +62,7 @@ def test_audit_checks_every_locked_version_and_preserves_advisories(
 
     monkeypatch.setattr(audit.subprocess, "run", run)
     assert audit.main() == int(vulnerable_batch is not None)
-    expected = {"example==1.0", "vosk==0.3.44", "vosk==0.3.45"}
+    expected = {"example==1.0", "per-os-pin==0.3.44", "per-os-pin==0.3.45"}
     assert len(batches) == 2
     assert {item for batch in batches for item in batch} == expected
     evidence = audit.ROOT / "audit-evidence"

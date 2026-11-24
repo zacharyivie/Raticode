@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from gofer.core.agent import AgentResult
+from gofer.core.credential_mask import masked_command
 from gofer.core.cursor_models import cursor_model_id
 from gofer.core.prompt_envelope import AgentResources
 from gofer.core.provider_capabilities import (
@@ -36,6 +37,7 @@ from gofer.subscriptions.usage import normalize_usage, track_invocation
 from gofer.utils.atomic_output import mkdir_without_links
 from gofer.utils.process import env_with_executable_on_path, run_subprocess, stream_subprocess
 from gofer.utils.protocol import ProtocolLines, ProtocolRecordLimitError, retained_text
+from gofer.utils.terminal_text import plain_terminal_text
 
 ADDITIONAL_PROVIDERS = {"cursor", "copilot", "opencode"}
 
@@ -356,7 +358,9 @@ class CliOutput:
             self.error = "Provider turn cancelled"
             self.error_kind = "cancelled"
         elif returncode != 0:
-            self.error = self.error or stderr.strip() or f"Provider exited with {returncode}"
+            # The CLI writes its errors for a terminal; people read them as plain text.
+            reason = plain_terminal_text(stderr).strip()
+            self.error = self.error or reason or f"Provider exited with {returncode}"
             self.error_kind = self.error_kind or "provider"
         if self.error:
             self.error_kind = self.error_kind or "provider"
@@ -420,16 +424,13 @@ def cli_command(
     return command
 
 
-# Linux rejects any single argument over 128 KB.
-ARGUMENT_PROMPT_LIMIT = 96 * 1024
-
-
 def cli_prompt_input(provider: str, command: list[str]) -> tuple[list[str], bytes | None]:
     """Move a cli_command prompt to stdin, avoiding OS command-line size limits.
 
-    Cursor and OpenCode read piped stdin as the prompt when none is given. Copilot
-    documents piped stdin as a prompt source too, but keeps its long-proven argument
-    unless the prompt would exceed the OS limit.
+    Cursor, OpenCode and Copilot read piped stdin as the prompt when none is given.
+    Every local account can read a process's command line, and prompts carry Rem's
+    memories and the conversation, so no prompt stays there. Checked with Copilot
+    1.0.108 in text and JSON output, with an attached image.
     """
     if provider == "opencode":
         rest, prompt = command[:-1], command[-1]
@@ -439,8 +440,6 @@ def cli_prompt_input(provider: str, command: list[str]) -> tuple[list[str], byte
         return rest, prompt.encode("utf-8")
     index = command.index("-p")
     prompt = command[index + 1]
-    if provider == "copilot" and len(prompt.encode("utf-8")) <= ARGUMENT_PROMPT_LIMIT:
-        return command, None
     return [*command[:index], *command[index + 2 :]], prompt.encode("utf-8")
 
 
@@ -715,7 +714,8 @@ async def stream_cli(
     output = CliOutput(provider, json_output=json_output)
     stderr = ""
     source = stream_subprocess(
-        command,
+        # No sandbox of its own: Raticode's credential folders are hidden from it.
+        masked_command(command),
         stdin=stdin,
         cwd=cwd,
         env=env,

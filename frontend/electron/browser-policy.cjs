@@ -4,11 +4,14 @@ const path = require("node:path");
 
 // User tabs keep sign-ins across restarts. Rem gets its own profile so pages
 // it reads cannot act through the user's accounts unless a site is shared.
-// Local previews use an in-memory profile that never touches either.
+// Local previews use an in-memory profile that never touches either. Offline
+// previews (the default) get one whose only way out is a proxy that isn't
+// there; a file the user let load remote content runs in its own profile.
 const PARTITIONS = Object.freeze({
   user: "persist:raticode-browser",
   rem: "persist:raticode-rem",
   preview: "raticode-preview",
+  previewOnline: "raticode-preview-online",
   // Held in memory and emptied when the last private tab closes.
   private: "raticode-private",
 });

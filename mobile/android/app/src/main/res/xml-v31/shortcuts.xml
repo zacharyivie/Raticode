@@ -11,4 +11,10 @@
         android:targetClass="dev.raticode.mobile.voice.VoiceActivity"
         android:targetPackage="dev.raticode.mobile" />
   </shortcut>
+  <!-- Run a workflow: the three workflows most recently run from a share appear as direct-share targets (WorkflowShareStore). -->
+  <share-target android:targetClass="dev.raticode.mobile.share.WorkflowShareActivity">
+    <data android:mimeType="text/plain" />
+    <data android:mimeType="*/*" />
+    <category android:name="dev.raticode.mobile.category.RUN_WORKFLOW" />
+  </share-target>
 </shortcuts>

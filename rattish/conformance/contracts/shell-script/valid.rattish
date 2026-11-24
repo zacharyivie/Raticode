@@ -4,3 +4,4 @@ Workflow:
 Node example:
   type: shell-script
   script-path: scripts/task.sh
+  shell: powershell

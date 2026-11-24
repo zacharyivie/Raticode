@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import difflib
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -47,7 +49,7 @@ class RattishDiagnostic:
     """A stable machine-readable Rattish diagnostic."""
 
     code: str
-    severity: Literal["error", "warning"]
+    severity: Literal["error", "warning", "info"]
     phase: Literal["lexer", "parser", "semantic", "lowering", "preflight", "runtime", "export"]
     message: str
     file: str
@@ -87,6 +89,47 @@ class RattishParseError(RattishError):
 
 class RattishCompileError(RattishError):
     """Raised when semantic analysis or lowering rejects source."""
+
+
+def close_names(name: str, candidates: Iterable[str], *, limit: int = 3) -> list[str]:
+    """Names in ``candidates`` that look like a typo of ``name``, closest first.
+
+    Underscores and hyphens are treated alike, so ``write_file`` finds ``write-file``.
+    """
+    by_key: dict[str, str] = {}
+    for candidate in candidates:
+        by_key.setdefault(candidate.lower().replace("_", "-"), candidate)
+    key = name.lower().replace("_", "-")
+    if key in by_key:
+        return [by_key[key]]
+    matches = difflib.get_close_matches(key, list(by_key), n=limit, cutoff=0.6)
+    if matches:
+        # Keep only names about as close as the best one, so a clear winner stands alone.
+        scores = {match: difflib.SequenceMatcher(None, key, match).ratio() for match in matches}
+        best = max(scores.values())
+        matches = sorted(
+            (match for match in matches if scores[match] >= best - 0.1),
+            key=lambda match: (-scores[match], match),
+        )
+    else:
+        # A short name inside a longer one, such as 'claude' in 'claude-code'.
+        matches = [
+            candidate
+            for candidate in sorted(by_key)
+            if len(key) >= 4 and candidate.split("-")[0] == key
+        ][:limit]
+    return [by_key[match] for match in matches]
+
+
+def did_you_mean(name: str, candidates: Iterable[str]) -> tuple[str, ...]:
+    """A one-item suggestion tuple naming the closest candidates, or nothing."""
+    matches = close_names(name, candidates)
+    if not matches:
+        return ()
+    if len(matches) == 1:
+        return (f"Did you mean {matches[0]!r}?",)
+    listed = ", ".join(repr(match) for match in matches[:-1])
+    return (f"Did you mean {listed} or {matches[-1]!r}?",)
 
 
 def path_label(path: Path | str) -> str:

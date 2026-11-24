@@ -46,6 +46,29 @@ test("only keys of tickets on the board become pills; code, links and unknown ke
   assert.equal(render("REM-5", {}), "<p>REM-5</p>");
 });
 
+test("keys in table cells are marked compact, so only the key shows; pills elsewhere keep their look", () => {
+  const html = renderToStaticMarkup(h(ReactMarkdown, {
+    remarkPlugins: [remarkGfm, remarkTicketMentions(index)],
+    components: { "ticket-pill": ({ node }) => h("button", { "data-key": node.properties.dataTicketKey, "data-compact": node.properties.dataTicketCompact || "no" }, node.properties.dataTicketKey) },
+  }, [
+    "Landed REM-5 today.",
+    "",
+    "| Ticket | Win |",
+    "| --- | --- |",
+    "| REM-5 | **AGE-18** helped |",
+    "| REM-99 | `REM-5` in code, xREM-5 and UTF-8 |",
+    "| [REM-5](https://example.com) | plain |",
+  ].join("\n")));
+  // Outside the table the key is a full pill; in cells, including emphasis inside a cell, it is compact.
+  assert.match(html, /<p>Landed <button data-key="REM-5" data-compact="no">REM-5<\/button> today.<\/p>/);
+  assert.match(html, /<td><button data-key="REM-5" data-compact="true">REM-5<\/button><\/td>/);
+  assert.match(html, /<td><strong><button data-key="AGE-18" data-compact="true">AGE-18<\/button><\/strong> helped<\/td>/);
+  // Unknown keys, code, keys inside words and links in a cell stay as written.
+  assert.match(html, /<td>REM-99<\/td><td><code>REM-5<\/code> in code, xREM-5 and UTF-8<\/td>/);
+  assert.match(html, /<td><a href="https:\/\/example.com">REM-5<\/a><\/td>/);
+  assert.equal(html.match(/<button/g).length, 3);
+});
+
 test("text splits around known keys only", () => {
   assert.deepEqual(splitTicketText("REM-5, REM-6.", index), [{ key: "REM-5" }, ", REM-6."]);
   assert.deepEqual(splitTicketText("plain", index), ["plain"]);

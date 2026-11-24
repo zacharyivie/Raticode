@@ -202,6 +202,36 @@ class WorkflowsTest {
         assertNull(list.items[0].latestRun)
         assertEquals(listOf(false, true), list.items.map { it.active })
         assertTrue(DesktopViews.parse(Workflows.LIST, JSONObject().put("workflows", JSONArray())) is WorkflowList)
+        // An older desktop doesn't say which inputs take text, which is not the same as having none.
+        assertEquals(listOf(null, null), list.items.map { it.textInputs })
+    }
+
+    @Test fun listNamesTheTextInputsSharedTextCanFill() {
+        val list = Workflows.parseList(JSONObject().put("workflows", JSONArray()
+            .put(JSONObject().put("workflow_id", "a").put("text_inputs", JSONArray()
+                .put(JSONObject().put("name", "topic").put("label", "Topic"))
+                .put(JSONObject().put("name", "notes"))
+                .put(JSONObject().put("name", "topic").put("label", "Again"))
+                .put(JSONObject().put("label", "No name"))))
+            .put(JSONObject().put("workflow_id", "b").put("text_inputs", JSONArray()))))
+        assertEquals(listOf(WorkflowTextInput("topic", "Topic"), WorkflowTextInput("notes", "notes")), list.items[0].textInputs)
+        assertEquals(emptyList<WorkflowTextInput>(), list.items[1].textInputs)
+    }
+
+    @Test fun listAndFormNameTheFileInputsASharedFileCanFill() {
+        val list = Workflows.parseList(JSONObject().put("workflows", JSONArray()
+            .put(JSONObject().put("workflow_id", "a").put("file_inputs", JSONArray()
+                .put(JSONObject().put("name", "doc").put("label", "Document").put("accept", JSONArray().put(".pdf")).put("max_size", 1024))))
+            .put(JSONObject().put("workflow_id", "b"))))
+        assertEquals(listOf(WorkflowFileInput("doc", "Document", listOf(".pdf"), 1024)), list.items[0].fileInputs)
+        assertNull(list.items[1].fileInputs)
+        val file = WorkflowInput("doc", "Document", "", "file", true, false, false, null, emptyList(), null, null, "value", listOf(".pdf"), 1024)
+        val text = WorkflowInput("note", "Note", "", "text", false, false, false, null, emptyList(), null, null, "value")
+        // A file input never becomes a value: the shared file goes as an upload.
+        assertEquals(mapOf("doc" to RunForm.FILE_NEEDED), RunForm.values(listOf(file, text), mapOf("doc" to "", "note" to "")).second)
+        val (values, errors) = RunForm.values(listOf(file, text), mapOf("doc" to "scan.pdf", "note" to "hi"))
+        assertTrue(errors.isEmpty())
+        assertEquals("""{"note":"hi"}""", values.toString())
     }
 
     @Test fun actionsRefreshTheWorkflowScreenWhicheverRunItShows() {
@@ -213,9 +243,12 @@ class WorkflowsTest {
         assertEquals(Workflows.LIST, DesktopViews.key(Workflows.PAUSE, Workflows.pauseAction(true)))
         assertTrue(Workflows.READS.all { it in DesktopViews.READS } && Workflows.ACTIONS.all { it in DesktopViews.ACTIONS })
         assertTrue(Workflows.READS.none { it in DesktopViews.ACTIONS })
-        // The phone has no op that edits a workflow.
-        assertTrue(DesktopViews.OPERATIONS.filter { it.startsWith("workflows.") }.toSet() == setOf("workflows.list", "workflows.read", "workflows.runs",
-            "workflows.run", "workflows.stop", "workflows.resume", "workflows.rerun", "workflows.trigger", "workflows.triggers.pause"))
+        // The only op that edits a workflow is workflows.tests.use_model, which writes a tried model through the desktop's
+        // editor. workflows.failure only reads one run's summary for Ask Rem.
+        assertTrue(DesktopViews.OPERATIONS.filter { it.startsWith("workflows.") }.toSet() == setOf("workflows.list", "workflows.read", "workflows.runs", "workflows.failure",
+            "workflows.run", "workflows.stop", "workflows.resume", "workflows.rerun", "workflows.trigger", "workflows.triggers.pause",
+            "workflows.trigger.changes", "workflows.trigger.approve", "workflows.tests", "workflows.tests.estimate", "workflows.tests.try",
+            "workflows.tests.use_model"))
         assertTrue(DesktopViews.parse("overview", JSONObject().put("workflows", true)).let { it is DesktopOverview && it.workflows })
         assertFalse((DesktopViews.parse("overview", JSONObject()) as DesktopOverview).workflows)
     }
@@ -335,6 +368,7 @@ class WorkflowsTest {
         assertEquals("On: runs when its webhook is called", dev.raticode.mobile.ui.triggerNextText(triggers[1].copy(enabled = true), paused = false))
         assertEquals("Skipped", Workflows.triggerResultLabel("skipped"))
         assertEquals("Succeeded", Workflows.triggerResultLabel("passed"))
+        assertEquals("Waiting for usage limit", Workflows.triggerResultLabel("waiting"))
         // An older desktop sends no list, so the phone shows no Triggers tab.
         assertNull(Workflows.parse(detail).triggers)
         assertFalse(Workflows.parse(detail).triggersPaused)
@@ -351,6 +385,36 @@ class WorkflowsTest {
         assertEquals(mapOf("paused" to false, "confirmed" to true), fields(Workflows.pauseAction(false)))
     }
 
+    @Test fun dailyLimitsShowTodaysUseAndWhenStartsAreSkipped() {
+        val workflow = Workflows.parse(JSONObject(detail.toString()).put("triggers", JSONArray()
+            .put(JSONObject().put("trigger_id", "trg_1").put("kind", "cron")
+                .put("daily_limit", "Daily limit: \$1.20 of \$1.00 used today. Triggered starts are skipped until midnight (UTC).")
+                .put("limit_reached", true))
+            .put(JSONObject().put("trigger_id", "trg_2").put("kind", "webhook"))))
+        val (capped, plain) = workflow.triggers!!
+        assertTrue(capped.limitReached)
+        assertTrue(capped.dailyLimit.endsWith("skipped until midnight (UTC)."))
+        assertEquals("", plain.dailyLimit)
+        assertFalse(plain.limitReached)
+        val list = Workflows.parseList(JSONObject("""{"workflows": [], "earlier": 0,
+            "triggers": {"paused": false, "count": 1, "enabled": 1, "daily_limit": "Daily limit: 0 of 1,000 tokens used today.", "limit_reached": false}}"""))
+        assertEquals(TriggerPause(false, "", 1, 1, "Daily limit: 0 of 1,000 tokens used today.", false), list.triggers)
+        // A computer from before daily limits sends neither field.
+        assertEquals("", Workflows.parseList(JSONObject("""{"workflows": [], "earlier": 0, "triggers": {"paused": false}}""")).triggers!!.dailyLimit)
+    }
+
+    @Test fun eachTriggerShowsItsTimeLimitAsTheDesktopWordsIt() {
+        val workflow = Workflows.parse(JSONObject(detail.toString()).put("triggers", JSONArray()
+            .put(JSONObject().put("trigger_id", "trg_1").put("kind", "cron").put("time_limit", "Time limit: 6 h"))
+            .put(JSONObject().put("trigger_id", "trg_2").put("kind", "webhook").put("time_limit", "No time limit"))
+            .put(JSONObject().put("trigger_id", "trg_3").put("kind", "file"))))
+        val (limited, unlimited, older) = workflow.triggers!!
+        assertEquals("Time limit: 6 h", limited.timeLimit)
+        assertEquals("No time limit", unlimited.timeLimit)
+        // A computer from before Time limits sends none, so the line stays hidden.
+        assertEquals("", older.timeLimit)
+    }
+
     @Test fun theListCarriesThePauseSwitchAndItsAnswerNeverReplacesTheList() {
         val list = Workflows.parseList(JSONObject("""{"workflows": [], "earlier": 0,
             "triggers": {"paused": true, "paused_at": "2026-11-14T09:00:00+00:00", "count": 3, "enabled": 2}}"""))
@@ -364,5 +428,122 @@ class WorkflowsTest {
         val overview = DesktopViews.parse("overview", JSONObject().put("workflows", true).put("workflow_triggers", true)) as DesktopOverview
         assertTrue(overview.workflowTriggers)
         assertFalse((DesktopViews.parse("overview", JSONObject().put("workflow_triggers", true)) as DesktopOverview).workflowTriggers)
+    }
+
+    @Test fun aChangedTriggerWorkflowIsReviewedAndApprovedAtTheVersionShown() {
+        val workflow = Workflows.parse(JSONObject(detail.toString()).put("triggers", JSONArray("""[
+            {"trigger_id": "trg_1", "kind": "cron", "enabled": true, "approval": "changed",
+             "approval_message": "Workflow changed since you approved it."},
+            {"trigger_id": "trg_2", "kind": "webhook", "enabled": true, "approval": "approved", "approval_message": ""},
+            {"trigger_id": "trg_3", "kind": "file", "enabled": true}]""")))
+        val (changed, approved, older) = workflow.triggers!!
+        assertTrue(changed.needsApproval)
+        assertEquals("changed", changed.approval)
+        assertFalse(approved.needsApproval)
+        // An older desktop sends no approval, so its triggers show as before.
+        assertEquals("approved", older.approval)
+        assertFalse(older.needsApproval)
+
+        val params = Workflows.changesParams(workflow, changed)
+        val key = DesktopViews.key(Workflows.CHANGES, params)
+        assertEquals("workflows.trigger.changes:wf-1/trg_1", key)
+        val changes = DesktopViews.parse(key, JSONObject("""{"workflow_id": "wf-1", "trigger_id": "trg_1", "approval": "changed",
+            "message": "Workflow changed since you approved it.", "fingerprint": "sha256:abc", "approved_at": "2026-11-15T09:00:00+00:00",
+            "truncated": false, "future": 1, "files": [
+              {"path": "scripts/tidy.py", "kind": "Script", "change": "changed", "diff": "@@ -1 +1 @@\n-print(1)\n+print(2)",
+               "diff_available": true, "truncated": false},
+              {"path": "prompts/old.md", "kind": "Prompt file", "change": "removed", "diff": "", "diff_available": true},
+              {"path": "", "kind": "Script", "change": "added"}]}""")) as TriggerChanges
+        assertEquals(listOf("scripts/tidy.py", "prompts/old.md"), changes.files.map { it.path })
+        assertEquals("No longer used", Workflows.fileChangeLabel(changes.files[1].change))
+        assertEquals("Now used", Workflows.fileChangeLabel("added"))
+        assertTrue(dev.raticode.mobile.ui.triggerReviewText(changes).startsWith("Workflow changed since you approved it. Triggered starts are skipped"))
+        assertEquals("Nothing to approve: this trigger runs the workflow as it is now.",
+            dev.raticode.mobile.ui.triggerReviewText(changes.copy(approval = "approved")))
+
+        // Approving names the version shown, and its answer refreshes the workflow screen.
+        val approve = Workflows.approveAction("wf-1", changes)
+        fun fields(params: JSONObject) = params.keys().asSequence().associateWith { params.get(it) }
+        assertEquals(mapOf("workflow_id" to "wf-1", "trigger_id" to "trg_1", "fingerprint" to "sha256:abc"), fields(approve))
+        assertEquals("workflows.read:wf-1", DesktopViews.key(Workflows.APPROVE, approve))
+        assertTrue(Workflows.CHANGES in DesktopViews.READS && Workflows.APPROVE in DesktopViews.ACTIONS)
+
+        val overview = DesktopViews.parse("overview", JSONObject().put("workflows", true).put("workflow_trigger_approval", true)) as DesktopOverview
+        assertTrue(overview.workflowTriggerApproval)
+        assertFalse((DesktopViews.parse("overview", JSONObject().put("workflow_trigger_approval", true)) as DesktopOverview).workflowTriggerApproval)
+    }
+
+    @Test fun changesThePhoneCouldntShowAskASecondTimeAndOpenInTheProject() {
+        val key = "workflows.trigger.changes:wf-1/trg_1"
+        val changes = DesktopViews.parse(key, JSONObject("""{"workflow_id": "wf-1", "trigger_id": "trg_1", "approval": "changed",
+            "fingerprint": "sha256:abc", "project_id": "project-1", "unseen_hidden": 0, "truncated": true, "files": [
+              {"path": "prompts/ask.md", "kind": "Prompt file", "change": "changed", "diff": "@@ -1 +1 @@", "diff_available": true,
+               "truncated": true, "unseen": "cut", "open_path": "prompts/ask.md"},
+              {"path": "data/model.bin", "kind": "Script", "change": "changed", "diff": "", "diff_available": false,
+               "unseen": "unreadable", "open_path": "data/model.bin"},
+              {"path": "scripts/tidy.py", "kind": "Script", "change": "changed", "diff": "+x", "unseen": "", "open_path": "scripts/tidy.py"}]}""")) as TriggerChanges
+        assertEquals("project-1", changes.projectId)
+        assertEquals(listOf("prompts/ask.md", "data/model.bin"), changes.unseen.map { it.path })
+        assertTrue(changes.needsUnseenConfirm)
+        assertEquals("Its diff was cut short", Workflows.unseenLabel(changes.files[0].unseen))
+        assertEquals("Binary or too large to show", Workflows.unseenLabel("unreadable"))
+        assertTrue(dev.raticode.mobile.ui.unseenConfirmText(changes).startsWith("Your phone couldn't show all of these 2 files' changes."))
+
+        // The second yes is sent only after asking; the plain approval stays as before.
+        fun fields(params: JSONObject) = params.keys().asSequence().associateWith { params.get(it) }
+        assertFalse(Workflows.approveAction("wf-1", changes).has("unseen_confirmed"))
+        assertEquals(mapOf("workflow_id" to "wf-1", "trigger_id" to "trg_1", "fingerprint" to "sha256:abc", "unseen_confirmed" to true),
+            fields(Workflows.approveAction("wf-1", changes, unseenConfirmed = true)))
+
+        // Files past the list's limit count as unseen too; an older desktop marks none, so nothing asks again.
+        val hidden = changes.copy(files = changes.files.drop(2), unseenHidden = 3)
+        assertTrue(hidden.needsUnseenConfirm)
+        assertTrue(dev.raticode.mobile.ui.unseenConfirmText(hidden).startsWith("3 more changed files aren't listed here."))
+        val older = DesktopViews.parse(key, JSONObject("""{"trigger_id": "trg_1", "approval": "changed", "fingerprint": "sha256:abc",
+            "files": [{"path": "a.md", "kind": "Prompt file", "change": "changed", "truncated": true}]}""")) as TriggerChanges
+        assertFalse(older.needsUnseenConfirm)
+        assertEquals("", older.projectId)
+    }
+
+    @Test fun anMcpServerWithAnUnpinnedPackageShowsItsWarningAndAsksASecondTime() {
+        val changes = DesktopViews.parse("workflows.trigger.changes:wf-1/trg_1", JSONObject("""{"workflow_id": "wf-1", "trigger_id": "trg_1",
+            "approval": "changed", "fingerprint": "sha256:abc", "files": [
+              {"path": "mcp-server:github", "kind": "MCP server", "change": "changed", "diff": "-x\n+y", "diff_available": true,
+               "unseen": "unpinned", "open_path": "", "warning": "Package version not pinned: each run fetches the newest release"}]}""")) as TriggerChanges
+        val server = changes.files.single()
+        assertEquals("Package version not pinned: each run fetches the newest release", server.warning)
+        assertEquals(server.warning, Workflows.unseenLabel(server.unseen))
+        assertTrue(changes.needsUnseenConfirm)
+        val text = dev.raticode.mobile.ui.unseenConfirmText(changes)
+        assertTrue(text, text.startsWith("This MCP server runs a package with no exact version, so each run fetches the newest release"))
+        assertFalse(text, text.contains("couldn't show"))
+        // With a cut diff as well, both reasons are named.
+        val both = changes.copy(files = changes.files + TriggerChangedFile("prompts/a.md", "Prompt file", "changed", unseen = "cut"))
+        val bothText = dev.raticode.mobile.ui.unseenConfirmText(both)
+        assertTrue(bothText, bothText.startsWith("Your phone couldn't show all of this file's change.") && bothText.contains("This MCP server runs"))
+    }
+    @Test fun askRemAboutAFailureReadsOneRunFromDesktopsThatSaySo() {
+        // Failed and interrupted runs offer it; others don't.
+        assertTrue(Workflows.canAskRem("failed"))
+        assertTrue(Workflows.canAskRem("interrupted"))
+        assertFalse(Workflows.canAskRem("succeeded"))
+        assertFalse(Workflows.canAskRem("running"))
+        // Without a node the desktop picks the one that failed; the node is sent only when named.
+        val params = Workflows.failureParams("wf-1", "r1")
+        assertEquals(setOf("workflow_id", "run_id"), params.keys().asSequence().toSet())
+        assertEquals("ship", Workflows.failureParams("wf-1", "r1", "ship").getString("node_id"))
+        assertFalse(Workflows.failureParams("wf-1", "r1", "").has("node_id"))
+        assertTrue(Workflows.FAILURE in DesktopViews.READS)
+        assertEquals("workflows.failure:wf-1/r1/", DesktopViews.key(Workflows.FAILURE, params))
+        assertNotEquals(DesktopViews.key(Workflows.FAILURE, params), DesktopViews.key(Workflows.FAILURE, Workflows.failureParams("wf-1", "r2")))
+        val failure = Workflows.parseFailure(JSONObject("""{"run_id": "r1", "node_id": "ship", "name": "run-failure-r1-ship.txt",
+            "text": "----- BEGIN UNTRUSTED RUN OUTPUT 0a0b0c0d -----", "future": 1}"""))
+        assertEquals(RunFailure("r1", "ship", "run-failure-r1-ship.txt", "----- BEGIN UNTRUSTED RUN OUTPUT 0a0b0c0d -----"), failure)
+        assertEquals("run-failure.txt", Workflows.parseFailure(JSONObject()).name)
+        // Only a desktop whose overview has workflow_failures, and workflows, gets the read.
+        fun overview(json: String) = DesktopViews.parse("overview", JSONObject(json)) as DesktopOverview
+        assertTrue(overview("""{"workflows": true, "workflow_failures": true}""").workflowFailures)
+        assertFalse(overview("""{"workflows": true}""").workflowFailures)
+        assertFalse(overview("""{"workflows": false, "workflow_failures": true}""").workflowFailures)
     }
 }

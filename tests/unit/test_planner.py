@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import json
-import sys
-from datetime import date
 from pathlib import Path
-from types import SimpleNamespace
 
+import pytest
 from pytest import MonkeyPatch
 
 from gofer.core.agent import AgentConfig
@@ -43,6 +41,7 @@ from gofer.core.workflow import (
     WatchConfig,
     WorkflowConfig,
 )
+from tests.helpers.xlsx_files import write_xlsx
 
 
 def test_plan_command_script_file_agent_and_conditional_edges(
@@ -1011,28 +1010,11 @@ def test_plan_tabular_fan_out_over_limit_keeps_count_samples_and_warning(
 
 def test_plan_tabular_fan_out_xlsx_rows_with_dates_are_serializable(
     tmp_path: Path,
-    monkeypatch: MonkeyPatch,
 ) -> None:
-    rows = tmp_path / "rows.xlsx"
-    rows.write_bytes(b"placeholder")
-
-    class Workbook:
-        active = SimpleNamespace(
-            iter_rows=lambda values_only=True: iter(
-                [
-                    ("name", "created"),
-                    ("one", date(2026, 6, 24)),
-                ]
-            )
-        )
-
-        def close(self) -> None:
-            return None
-
-    monkeypatch.setitem(
-        sys.modules,
-        "openpyxl",
-        SimpleNamespace(load_workbook=lambda *_args, **_kwargs: Workbook()),
+    pytest.importorskip("python_calamine")
+    rows = write_xlsx(
+        tmp_path / "rows.xlsx",
+        [[["name", "created"], ["one", ("xml", '<c r="{ref}" s="1"><v>46197</v></c>')]]],
     )
     workflow = AgenticWorkflow(WorkflowConfig(id="xlsx-plan", name="XLSX Plan"))
     workflow.add_operation(
@@ -1049,7 +1031,9 @@ def test_plan_tabular_fan_out_xlsx_rows_with_dates_are_serializable(
     fan_out = plan["generations"][0]["nodes"][0]["fanOut"]
 
     assert fan_out["count"] == 1
-    assert fan_out["sampleItems"][0]["_row"] == ('{"name": "one", "created": "2026-06-24"}')
+    assert fan_out["sampleItems"][0]["_row"] == (
+        '{"name": "one", "created": "2026-06-24 00:00:00"}'
+    )
 
 
 def test_plan_bindings_ignore_literal_dotted_strings(

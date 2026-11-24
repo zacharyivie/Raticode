@@ -15,6 +15,7 @@ workflow:
 
 node read-request:
   type: bash-command
+  shell: bash
   command: |
     if [ -z "$REQUEST" ] || [ "$REQUEST" = "null" ]; then
       echo "No webhook body. Start this workflow from its webhook trigger." >&2
@@ -49,6 +50,7 @@ node approve:
 
 node act:
   type: bash-command
+  shell: bash
   command: bash -c "$ACTION_COMMAND"
   with:
     action-command: input.action-command
@@ -58,6 +60,7 @@ node act:
 
 node record-rejection:
   type: bash-command
+  shell: bash
   command: echo "Not approved ($DECISION). Nothing ran."
   with:
     decision: node.approve.output.decision

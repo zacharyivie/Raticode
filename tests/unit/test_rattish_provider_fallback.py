@@ -615,3 +615,373 @@ async def test_every_surface_names_the_answering_provider_and_the_switch(
     printed = capsys.readouterr().out
     assert f"ask: {switch}" in printed
     assert "ask: answered by codex (gpt-5-fallback)" in printed
+
+
+# Another account of the same provider at a usage limit
+
+PERSONAL = "aaaaaaaaaaaaaaaa"
+WORK = "bbbbbbbbbbbbbbbb"
+SIGNED_OUT: Script = (False, "", "Not logged in · Please run /login", 1, {})
+
+
+def _save_profiles(tmp_path: Path, profiles: dict[str, dict[str, Any]]) -> None:
+    data = tmp_path / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    (data / "provider-profiles.json").write_text(
+        json.dumps({"profiles": profiles}), encoding="utf-8"
+    )
+
+
+def _claude_accounts(tmp_path: Path, *, api_key: bool = False) -> None:
+    profiles: dict[str, dict[str, Any]] = {
+        "personal": {"subscription": "claude_code", "account_id": PERSONAL},
+        "work-account": {"subscription": "claude_code", "account_id": WORK},
+    }
+    if api_key:
+        profiles["api-key"] = {
+            "subscription": "claude_code",
+            "env": {"ANTHROPIC_API_KEY": "sk-ant-test"},
+        }
+    _save_profiles(tmp_path, profiles)
+
+
+def _two_accounts_source(tmp_path: Path, then: str = "work-account", extra: str = "") -> Path:
+    return _agent_source(
+        tmp_path,
+        node_fields="  profile: personal\n",
+        fallback=f"    -\n      provider: claude-code\n      profile: {then}\n" + extra,
+    )
+
+
+@pytest.mark.anyio
+async def test_a_usage_limit_never_moves_the_step_to_another_account(tmp_path: Path) -> None:
+    _claude_accounts(tmp_path)
+    claude = ScriptedProvider("claude_code", [RATE_LIMITED])
+    source = _two_accounts_source(tmp_path)
+
+    document = await _run(source, tmp_path, claude_code=claude)
+
+    assert document["status"] == "failed"
+    assert len(claude.calls) == 1
+    assert claude.calls[0] is not None and claude.calls[0].account_id == PERSONAL
+    (record,) = document["runs"]
+    assert record["provider"]["profile"] == "personal"
+    assert record["error"]["details"]["availability"] == "rate_limit"
+    (skip,) = record["fallbacks"]
+    assert skip["skipped"] is True
+    assert skip["reason"] == "rate_limit"
+    assert skip["from"]["profile"] == "personal"
+    assert skip["to"]["profile"] == "work-account"
+    assert skip["message"] == (
+        "skipped work-account: Raticode doesn't move work to another account of the same "
+        "provider at a usage limit"
+    )
+    assert _events(document, "node_fell_back") == []
+
+
+@pytest.mark.anyio
+async def test_a_skipped_account_still_lets_the_step_reach_another_provider(
+    tmp_path: Path,
+) -> None:
+    _claude_accounts(tmp_path)
+    claude = ScriptedProvider("claude_code", [RATE_LIMITED])
+    codex = ScriptedProvider("codex")
+    source = _two_accounts_source(tmp_path, extra="    -\n      provider: codex\n")
+
+    document = await _run(source, tmp_path, claude_code=claude, codex=codex)
+
+    assert document["status"] == "passed"
+    assert len(claude.calls) == 1
+    assert len(codex.calls) == 1
+    skip, switch = document["runs"][0]["fallbacks"]
+    assert skip["skipped"] is True and skip["to"]["profile"] == "work-account"
+    assert "skipped" not in switch
+    assert switch["from"]["profile"] == "personal"
+    assert switch["to"]["provider"] == "codex"
+    (event,) = _events(document, "node_fell_back")
+    assert event["provider"]["provider"] == "codex"
+
+
+@pytest.mark.anyio
+async def test_a_usage_limit_skips_the_default_sign_in_too(tmp_path: Path) -> None:
+    _claude_accounts(tmp_path)
+    claude = ScriptedProvider("claude_code", [RATE_LIMITED])
+    source = _agent_source(
+        tmp_path,
+        fallback="    -\n      provider: claude-code\n      profile: work-account\n",
+    )
+    reversed_source = _agent_source(
+        tmp_path / "reversed",
+        node_fields="  profile: work-account\n",
+        fallback="    -\n      provider: claude-code\n      model: claude-haiku-5\n",
+    )
+
+    document = await _run(source, tmp_path, claude_code=claude)
+    claude.script = [RATE_LIMITED]
+    reversed_document = await _run(reversed_source, tmp_path, claude_code=claude)
+
+    assert document["runs"][0]["fallbacks"][0]["skipped"] is True
+    (skip,) = reversed_document["runs"][0]["fallbacks"]
+    assert skip["skipped"] is True
+    assert skip["message"].startswith("skipped claude-code default sign-in: ")
+    assert len(claude.calls) == 2
+
+
+@pytest.mark.anyio
+async def test_a_sign_in_error_still_moves_the_step_to_another_account(tmp_path: Path) -> None:
+    _claude_accounts(tmp_path)
+    claude = ScriptedProvider("claude_code", [SIGNED_OUT])
+    source = _two_accounts_source(tmp_path)
+
+    document = await _run(source, tmp_path, claude_code=claude)
+
+    assert document["status"] == "passed"
+    assert [call.account_id for call in claude.calls if call is not None] == [PERSONAL, WORK]
+    (record,) = document["runs"]
+    assert record["provider"]["profile"] == "work-account"
+    (switch,) = record["fallbacks"]
+    assert switch["reason"] == "signed_out"
+    assert "skipped" not in switch
+
+
+@pytest.mark.anyio
+async def test_a_usage_limit_may_move_the_step_to_an_api_key_profile(tmp_path: Path) -> None:
+    _claude_accounts(tmp_path, api_key=True)
+    claude = ScriptedProvider("claude_code", [RATE_LIMITED])
+    source = _two_accounts_source(tmp_path, then="api-key")
+
+    document = await _run(source, tmp_path, claude_code=claude)
+
+    assert document["status"] == "passed"
+    assert len(claude.calls) == 2
+    (record,) = document["runs"]
+    assert record["provider"]["profile"] == "api-key"
+    (switch,) = record["fallbacks"]
+    assert switch["reason"] == "rate_limit"
+    assert "skipped" not in switch
+
+
+@pytest.mark.anyio
+async def test_a_usage_limit_may_retry_the_same_account_with_another_model(
+    tmp_path: Path,
+) -> None:
+    _claude_accounts(tmp_path)
+    claude = ScriptedProvider("claude_code", [RATE_LIMITED])
+    source = _agent_source(
+        tmp_path,
+        node_fields="  profile: personal\n",
+        fallback=(
+            "    -\n      provider: claude-code\n      profile: personal\n"
+            "      model: claude-haiku-5\n"
+        ),
+    )
+
+    document = await _run(source, tmp_path, claude_code=claude)
+
+    assert document["status"] == "passed"
+    assert [call.model for call in claude.calls if call is not None][-1] == "claude-haiku-5"
+    assert "skipped" not in document["runs"][0]["fallbacks"][0]
+
+
+@pytest.mark.anyio
+async def test_an_outage_after_a_usage_limit_still_skips_that_providers_accounts(
+    tmp_path: Path,
+) -> None:
+    overloaded: Script = (False, "", "503 Service Unavailable", 1, {})
+    _claude_accounts(tmp_path)
+    claude = ScriptedProvider("claude_code", [RATE_LIMITED])
+    codex = ScriptedProvider("codex", [overloaded])
+    source = _agent_source(
+        tmp_path,
+        node_fields="  profile: personal\n",
+        fallback=(
+            "    -\n      provider: codex\n"
+            "    -\n      provider: claude-code\n      profile: work-account\n"
+        ),
+    )
+
+    document = await _run(source, tmp_path, claude_code=claude, codex=codex)
+
+    assert document["status"] == "failed"
+    assert len(claude.calls) == 1
+    switch, skip = document["runs"][0]["fallbacks"]
+    assert switch["to"]["provider"] == "codex"
+    assert skip["skipped"] is True and skip["from"]["provider"] == "codex"
+    assert document["runs"][0]["error"]["details"]["availability"] == "overloaded"
+
+
+def test_preflight_warns_that_another_account_is_only_for_sign_in_or_outages(
+    tmp_path: Path,
+) -> None:
+    _claude_accounts(tmp_path, api_key=True)
+    account_chain = _two_accounts_source(tmp_path)
+    api_key_chain = _two_accounts_source(tmp_path / "api", then="api-key")
+
+    warned = _preflight(account_chain, tmp_path, claude_code=ScriptedProvider("claude_code"))
+    quiet = _preflight(api_key_chain, tmp_path, claude_code=ScriptedProvider("claude_code"))
+
+    (warning,) = warned
+    assert warning.code == "RATTISH_PREFLIGHT_FALLBACK_SAME_PROVIDER_ACCOUNT"
+    assert warning.severity == "warning"
+    assert warning.details["fallback"] == [0]
+    assert warning.details["profiles"] == ["work-account"]
+    assert warning.message.startswith("Fallback entry 1 (claude-code profile work-account)")
+    assert "only be used for sign-in or outage errors" in warning.message
+    assert quiet == []
+
+
+def test_sign_in_tells_accounts_api_keys_and_the_default_sign_in_apart() -> None:
+    from gofer.core.provider_profiles import ProviderProfile
+    from gofer.rattish.provider_fallback import sign_in
+
+    profiles = {
+        "work": ProviderProfile(name="work", subscription="codex", account_id=WORK),
+        "key": ProviderProfile(
+            name="key", subscription="codex", secret_refs={"OPENAI_API_KEY": "openai"}
+        ),
+        "token": ProviderProfile(
+            name="token",
+            subscription="claude_code",
+            secret_refs={"CLAUDE_CODE_OAUTH_TOKEN": "oauth"},
+        ),
+        "plain": ProviderProfile(name="plain", subscription="codex", model="gpt-5"),
+    }
+
+    def choice(provider: str, profile: str | None) -> dict[str, Any]:
+        return {"provider_id": provider, "profile": profile}
+
+    assert sign_in(choice("codex", None), profiles) == ("default", False)
+    assert sign_in(choice("codex", "plain"), profiles) == ("default", False)
+    assert sign_in(choice("codex", "work"), profiles) == (f"account:{WORK}", False)
+    assert sign_in(choice("codex", "key"), profiles) == ("profile:key", True)
+    assert sign_in(choice("claude-code", "token"), profiles) == ("profile:token", False)
+    assert sign_in(choice("anthropic-api", None), profiles)[1] is True
+
+
+def test_skipped_accounts_read_as_skips_on_every_surface() -> None:
+    from gofer.cli.commands.workflows import _all_runs_text
+    from gofer.devices.workflows import _provider_lines
+    from gofer.ui.workflow_runs import _summary_of, fallback_rows
+
+    personal = {"provider": "claude-code", "profile": "personal", "model": "a", "effort": "high"}
+    work = {**personal, "profile": "work-account"}
+    skip = {
+        "from": personal,
+        "to": work,
+        "reason": "rate_limit",
+        "skipped": True,
+        "message": "skipped work-account: ...",
+    }
+    line = (
+        "Skipped claude-code profile work-account (a): Raticode doesn't move work to another "
+        "account of the same provider at a usage limit."
+    )
+
+    assert switch_message(skip) == line
+    rows = fallback_rows(
+        _summary_of(
+            {"run_id": "r-1", "status": "failed", "runs": [{"node_id": "ask", "fallbacks": [skip]}]}
+        )
+    )
+    assert rows[0]["skipped"] is True and rows[0]["line"] == f"ask: {line}"
+    listed = _all_runs_text(
+        {"runs": [{"id": "r-1", "status": "failed", "workflowName": "W", "fallbacks": rows}]}
+    )
+    assert "(switched provider)" not in listed
+    assert f"r-1  ask: {line}" in listed
+    assert _provider_lines({"status": "failure", "fallbacks": [skip]}) == [line]
+
+
+# An account that needs sign-in
+
+
+def _sign_in_states(monkeypatch: pytest.MonkeyPatch, states: dict[str, str | None]) -> list[str]:
+    """Stand in for the accounts' sign-in states; returns the profiles preflight asked about."""
+    from gofer.rattish import preflight
+
+    asked: list[str] = []
+
+    def state(name: str, data_dir: Path) -> str | None:
+        asked.append(name)
+        return states.get(name)
+
+    monkeypatch.setattr(preflight, "account_sign_in_state", state)
+    return asked
+
+
+def test_preflight_fails_when_the_steps_only_account_needs_sign_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _claude_accounts(tmp_path)
+    _sign_in_states(monkeypatch, {"personal": "needs_sign_in"})
+    source = _agent_source(tmp_path, node_fields="  profile: personal\n", fallback="")
+
+    (problem,) = _preflight(source, tmp_path, claude_code=ScriptedProvider("claude_code"))
+
+    assert problem.code == "RATTISH_PREFLIGHT_ACCOUNT_NEEDS_SIGN_IN"
+    assert problem.severity == "error"
+    assert problem.message == (
+        "Claude Code account 'personal' needs sign-in, so the step can't use it."
+    )
+    assert problem.details["profile"] == "personal"
+    assert "Settings > Providers > Claude Code" in problem.suggestions[0]
+
+
+def test_preflight_only_warns_when_the_chain_has_another_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _claude_accounts(tmp_path)
+    _sign_in_states(monkeypatch, {"personal": "needs_sign_in"})
+    primary = _agent_source(tmp_path, node_fields="  profile: personal\n")
+    fallback = _agent_source(
+        tmp_path / "fallback",
+        fallback="    -\n      provider: claude-code\n      profile: personal\n",
+    )
+    providers = {"claude_code": ScriptedProvider("claude_code"), "codex": ScriptedProvider("codex")}
+
+    (warning,) = _preflight(primary, tmp_path, **providers)
+    fallback_warnings = _preflight(fallback, tmp_path, **providers)
+
+    assert warning.code == "RATTISH_PREFLIGHT_ACCOUNT_NEEDS_SIGN_IN"
+    assert warning.severity == "warning"
+    assert warning.message.startswith("Claude Code account 'personal' needs sign-in")
+    (entry,) = fallback_warnings
+    assert (entry.code, entry.severity) == ("RATTISH_PREFLIGHT_ACCOUNT_NEEDS_SIGN_IN", "warning")
+    assert entry.details["fallback"] == 0
+    assert entry.message.startswith(
+        "Fallback entry 1 (claude-code): Claude Code account 'personal' needs sign-in"
+    )
+
+
+def test_preflight_fails_when_every_entry_needs_sign_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _claude_accounts(tmp_path)
+    _sign_in_states(monkeypatch, {"personal": "needs_sign_in", "work-account": "needs_sign_in"})
+
+    diagnostics = _preflight(
+        _two_accounts_source(tmp_path), tmp_path, claude_code=ScriptedProvider("claude_code")
+    )
+
+    (problem,) = diagnostics
+    assert (problem.code, problem.severity) == ("RATTISH_PREFLIGHT_ACCOUNT_NEEDS_SIGN_IN", "error")
+    assert problem.details["profiles"] == ["personal", "work-account"]
+    assert "'personal' needs sign-in" in problem.message
+    assert "'work-account' needs sign-in" in problem.message
+
+
+@pytest.mark.parametrize("state", ["signed_in", "unavailable", None])
+def test_a_signed_in_or_unknown_account_passes_and_api_keys_are_not_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str | None
+) -> None:
+    _claude_accounts(tmp_path, api_key=True)
+    asked = _sign_in_states(monkeypatch, {"personal": state})
+    account = _agent_source(tmp_path, node_fields="  profile: personal\n", fallback="")
+    api_key = _agent_source(tmp_path / "api", node_fields="  profile: api-key\n", fallback="")
+    default = _agent_source(tmp_path / "default", fallback="")
+    provider = ScriptedProvider("claude_code")
+
+    assert _preflight(account, tmp_path, claude_code=provider) == []
+    assert _preflight(api_key, tmp_path, claude_code=provider) == []
+    assert _preflight(default, tmp_path, claude_code=provider) == []
+    assert asked == ["personal"]

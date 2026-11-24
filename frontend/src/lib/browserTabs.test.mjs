@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { browserFamilyChoices, browserGroupHasNewTab, browserTabEngine, browserTabGroupKey, groupBrowserTabPaths, groupedBrowserPaths, browserTabOpening, geckoTabPath, viewedBrowserMedia, withBrowserTabEngines } from "./browserTabs.js";
-import { WEB_BROWSER_OPTIONS, controlledEngine, engineBadge, engineLabel, newTabEngine, webBrowserEngine } from "./browserEngines.js";
+import { browserFamilyChoices, browserGroupHasNewTab, browserTabEngine, browserTabGroupKey, groupBrowserTabPaths, groupedBrowserPaths, browserTabOpening, geckoTabPath, isGeckoWindowTab, viewedBrowserMedia, withBrowserTabEngines } from "./browserTabs.js";
+import { WEB_BROWSER_OPTIONS, controlledEngine, engineBadge, engineLabel, isStreamedEngine, newTabEngine, streamsIntoView, webBrowserEngine } from "./browserEngines.js";
 import { mediaForBar } from "./browserMedia.js";
 
 test("the integrated browsers are Raticode (chromium) and Raticode (gecko), and stored values don't change", () => {
@@ -117,4 +117,23 @@ test("the tab bar keeps each browser's tabs together, in the order each browser 
     const only = groupBrowserTabPaths(["x"], { x: { engine } });
     assert.ok(browserGroupHasNewTab(only[0]) !== browserFamilyChoices(only).choices.includes(engine), engine);
   }
+});
+
+test("Rem's Raticode (gecko) tabs sit beside the Gecko window tab instead of folding into it", () => {
+  const tabs = {
+    window: { url: "https://music.example/", engine: "gecko" },
+    remOne: { url: "https://a.example/", agentSessionId: "s1", agentEngine: "gecko", engine: "gecko" },
+    remTwo: { url: "https://b.example/", agentSessionId: "s2", agentEngine: "gecko", engine: "gecko" },
+  };
+  const result = withBrowserTabEngines(["remOne", "window", "remTwo"], tabs);
+  assert.deepEqual(result.paths, ["remOne", "window", "remTwo"]);
+  assert.equal(result.tabs.window.pendingUrls, undefined);
+  assert.equal(geckoTabPath(["remOne", "window"], tabs), "window");
+  assert.equal(geckoTabPath(["remOne"], tabs), "");
+  assert.equal(isGeckoWindowTab(tabs.remOne), false);
+  assert.deepEqual(viewedBrowserMedia(["remOne"], tabs), ["remOne"]);
+  assert.equal(browserTabEngine(tabs.remOne), "gecko");
+  assert.equal(streamsIntoView("gecko"), true);
+  assert.equal(streamsIntoView("raticode"), false);
+  assert.equal(isStreamedEngine("gecko"), false);
 });

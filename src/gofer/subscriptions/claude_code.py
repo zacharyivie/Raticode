@@ -78,7 +78,11 @@ class ClaudeCodeSubscription(Subscription):
             *(provider_settings.mcp_servers if provider_settings else []),
             *mcp_servers,
         ]:
-            cmd += ["--mcp-server", server]
+            # An agent's MCP servers are names of servers Claude Code already knows.
+            # Claude Code has no option that picks a server by name (it rejects
+            # --mcp-server); allowing the server's tools is what lets a print-mode
+            # run use them.
+            cmd += ["--allowedTools", mcp_tool_rule(server)]
         budget = run_cost_budget()
         if budget is not None:
             cap = claude_budget_cap(budget.remaining_usd)
@@ -115,6 +119,12 @@ class ClaudeCodeSubscription(Subscription):
 
     def is_available(self) -> bool:
         return resolve_provider_executable("claude_code") is not None
+
+
+def mcp_tool_rule(server: str) -> str:
+    """The --allowedTools rule that allows every tool of the named MCP server."""
+    name = server.strip()
+    return name if name.startswith("mcp__") else f"mcp__{name}"
 
 
 def claude_budget_cap(remaining_usd: float) -> float:

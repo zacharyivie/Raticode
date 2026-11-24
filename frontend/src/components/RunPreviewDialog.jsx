@@ -1,7 +1,8 @@
-import { useState } from "react";
-import { X } from "lucide-react";
+import { useRef, useState } from "react";
+import { FileUp, X } from "lucide-react";
 import { Dialog } from "./Dialog.jsx";
 import { initialWorkflowParameters, normalizeWorkflowFilesystemAccess } from "../lib/workflowRunSetup.js";
+import { describeFileInput, fileInputOptions, fileInputProblem, fileName } from "../lib/fileInputs.js";
 
 function formatPreviewValue(value) {
   if (value && typeof value === "object") {
@@ -185,6 +186,8 @@ export default function RunPreviewDialog({
     ...initialParameters,
   }));
   const [parameterErrors, setParameterErrors] = useState({});
+  // Problems with a file picked or dropped in this dialog, found before Run.
+  const [fileProblems, setFileProblems] = useState({});
   const warnings = plan?.warnings ?? [];
   const blockingDiagnostics = plan?.blockingDiagnostics ?? [];
   const destructiveActions = plan?.destructiveActions ?? [];
@@ -253,16 +256,30 @@ export default function RunPreviewDialog({
               </h3>
               <div className="space-y-3 rounded-lg border border-line bg-slate-50 p-3">
                 {Object.entries(parameterSchema).map(([name, spec]) => (
-                  <RunParameterField
-                    key={name}
-                    name={name}
-                    spec={spec}
-                    value={parameters[name]}
-                    error={parameterErrors[name]}
-                    onChange={(value) =>
-                      setParameters((current) => ({ ...current, [name]: value }))
-                    }
-                  />
+                  spec.type === "file" ? (
+                    <RunFileField
+                      key={name}
+                      name={name}
+                      spec={spec}
+                      value={parameters[name]}
+                      error={fileProblems[name] || parameterErrors[name]}
+                      onChange={(value, problem = "") => {
+                        setParameters((current) => ({ ...current, [name]: value }));
+                        setFileProblems((current) => ({ ...current, [name]: problem }));
+                      }}
+                    />
+                  ) : (
+                    <RunParameterField
+                      key={name}
+                      name={name}
+                      spec={spec}
+                      value={parameters[name]}
+                      error={parameterErrors[name]}
+                      onChange={(value) =>
+                        setParameters((current) => ({ ...current, [name]: value }))
+                      }
+                    />
+                  )
                 ))}
               </div>
             </section>
@@ -420,6 +437,9 @@ export default function RunPreviewDialog({
                 workflow,
                 parameters,
               );
+              for (const [name, problem] of Object.entries(fileProblems)) {
+                if (problem) errors[name] = problem;
+              }
               setParameterErrors(errors);
               if (Object.keys(errors).length === 0) {
                 onRun(typedParameters);
@@ -566,6 +586,107 @@ function RunParameterField({ error, name, onChange, spec, value }) {
       ) : null}
       {error ? <span className="mt-1 block text-xs text-rose-700">{error}</span> : null}
     </label>
+  );
+}
+
+// A file input: Choose file, a drop zone and the path, which can also be typed.
+// The desktop sends the path; the run copies the file into its own folder when it starts.
+export function RunFileField({ error, name, onChange, spec, value }) {
+  const id = `run-param-${name}`;
+  const pickerRef = useRef(null);
+  const [dragging, setDragging] = useState(false);
+  const { accept } = fileInputOptions(spec);
+  const label = spec.label || name;
+  const desktop = typeof window !== "undefined" ? window.goferDesktop : null;
+
+  function takeFile(file) {
+    if (!file) return;
+    const path = desktop?.getDroppedFilePath?.(file) || "";
+    if (!path) {
+      onChange(value ?? "", "Raticode couldn't read where this file is. Type its path instead.");
+      return;
+    }
+    onChange(path, fileInputProblem(spec, file));
+  }
+
+  return (
+    <div className="block text-sm">
+      <label className="font-medium" htmlFor={id}>
+        {label}
+        {spec.required ? <span className="text-rose-600"> *</span> : null}
+      </label>
+      {spec.description ? (
+        <span className="mt-0.5 block text-xs text-muted">{spec.description}</span>
+      ) : null}
+      <div
+        aria-label={`Drop a file for ${label}`}
+        className={`mt-1 rounded-md border border-dashed px-3 py-3 transition ${
+          dragging ? "border-brand bg-indigo-50 dark:bg-indigo-950/40" : "border-line bg-white dark:bg-transparent"
+        }`}
+        data-testid={`run-file-drop-${name}`}
+        role="group"
+        onDragEnter={(event) => {
+          event.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDragOver={(event) => {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          setDragging(false);
+          takeFile(event.dataTransfer?.files?.[0]);
+        }}
+      >
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-white px-3 text-xs font-medium hover:bg-slate-50 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+            type="button"
+            onClick={() => pickerRef.current?.click()}
+          >
+            <FileUp aria-hidden="true" size={14} />
+            Choose file
+          </button>
+          <span className="min-w-0 flex-1 text-xs text-muted">
+            {value ? (
+              <span className="block truncate font-medium text-ink" title={value}>
+                {fileName(value)}
+              </span>
+            ) : (
+              "or drop a file here"
+            )}
+          </span>
+        </div>
+        <input
+          ref={pickerRef}
+          accept={accept.join(",") || undefined}
+          aria-hidden="true"
+          className="hidden"
+          tabIndex={-1}
+          type="file"
+          onChange={(event) => {
+            takeFile(event.target.files?.[0]);
+            event.target.value = "";
+          }}
+        />
+        <input
+          id={id}
+          aria-describedby={`${id}-help`}
+          className="mt-2 w-full rounded-md border border-line bg-white px-3 py-1.5 font-mono text-xs outline-none focus:border-brand dark:bg-zinc-900"
+          placeholder="/path/to/file"
+          spellCheck={false}
+          type="text"
+          value={value ?? ""}
+          onChange={(event) => onChange(event.target.value, "")}
+        />
+      </div>
+      <span className="mt-1 block text-xs text-muted" id={`${id}-help`}>
+        {describeFileInput(spec)}. The run uses its own copy, readable only by you.
+      </span>
+      {error ? <span className="mt-1 block text-xs text-rose-700">{error}</span> : null}
+    </div>
   );
 }
 

@@ -31,7 +31,7 @@ from gofer.utils.brand_compat import (
 
 @pytest.mark.parametrize(
     "workspace_directory,workflow_ignore",
-    zip(LEGACY_WORKSPACE_DIRECTORIES, LEGACY_WORKFLOW_IGNORES),
+    list(zip(LEGACY_WORKSPACE_DIRECTORIES, LEGACY_WORKFLOW_IGNORES, strict=True)),
 )
 def test_previous_workspace_requires_rename_and_exports_with_current_names(
     tmp_path: Path, workspace_directory: str, workflow_ignore: str

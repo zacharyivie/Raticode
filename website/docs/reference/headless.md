@@ -19,7 +19,7 @@ Raticode serve --headless
 ```
 
 - It listens on `127.0.0.1:8765`. `--port 0` lets the system pick a free port.
-- `--data-dir PATH` (or the `GOFER_DATA_DIR` environment variable) uses a different data folder.
+- `--data-dir PATH` (or the `RATICODE_DATA_DIR` or `GOFER_DATA_DIR` environment variable) uses a different data folder. Every part of the backend uses it, and `Raticode tokens` and the CLI's backend commands look in the same folder.
 - It listens only on this computer, over TCP. It refuses `--host 0.0.0.0` or any other non-loopback address, and it can't listen on a Unix socket.
 - To reach it from another machine, forward the port over SSH, for example `ssh -L 8765:127.0.0.1:8765 box`. Raticode has no remote listener or TLS yet.
 - `Raticode serve` without `--headless` is the same as `Raticode ui serve`, the backend the desktop app starts.
@@ -130,9 +130,9 @@ Raticode doctor --secrets-dir ~/.config/raticode/secrets
 - The folder belongs to the backend. `Raticode rattish run` runs a workflow inside the CLI process, which doesn't read it, so a jev node there can't use the folder's key and `secret["NAME"]` there can't read `workflow-secret-NAME`. Start runs through the backend with `Raticode rattish start`.
 
 ::: warning Same account, same access
-Self-work and reviews that use Claude Code run in [Claude Code's sandbox](../rem/board.md#claude-code-s-sandbox), which hides the secrets folder and `$CREDENTIALS_DIRECTORY` from their shell commands and file tools. Everything else running as the backend's account can still read these files: workers and reviews that use other providers, the worker of a task you ask Rem for, and workflow commands. Removing `$CREDENTIALS_DIRECTORY` from their environment doesn't stop them, because the folder's usual places, such as `/run/credentials/<unit>/`, are easy to guess.
+Self-work and reviews that use Claude Code run in [Claude Code's sandbox](../rem/board.md#claude-code-s-sandbox), which hides the secrets folder and `$CREDENTIALS_DIRECTORY` from their shell commands and file tools. From 0.6.0 every agent run hides it too: Claude Code's file tools in any turn, Codex through a permission profile that denies the folder, and, through bubblewrap on Linux, Claude Code turns you watch, Codex with full access, and Cursor, Copilot, OpenCode, Antigravity and Grok. See [Credential folders no agent can reach](../advanced/security.md#credential-folders-no-agent-can-reach).
 
-Running the backend under its own account, as with `owner-token`, keeps other programs of yours away from the files, but not these: the backend starts them, so they run as its account. Put in the folder only secrets you'd let any worker read, and use Claude Code for self-work and reviews on projects you don't trust.
+What still runs as the backend's account and can read these files: workflow `bash` and `python` steps, and, when bubblewrap isn't installed or the server isn't Linux, Claude Code turns you watch, Claude Code steps with `sandbox: off`, Codex with full access or with `sandbox_mode` in its config, and the providers without a sandbox. Removing `$CREDENTIALS_DIRECTORY` from their environment doesn't stop them, because the folder's usual places, such as `/run/credentials/<unit>/`, are easy to guess. Running the backend under its own account, as with `owner-token`, keeps other programs of yours away from the files, but not these: the backend starts them, so they run as its account. Install bubblewrap, and put in the folder only secrets your own workflow commands may read.
 :::
 
 ### With systemd credentials
@@ -251,13 +251,22 @@ An agent token acts with Rem's authority, not yours:
 - Starting an organization, granting it full access or lifting holds records a consent request that you approve in the Organizations tab. An agent token can't approve it, approve Kanban proposals, store credentials or approve workflow approval gates. It also can't give an organization a folder inside Raticode's data folder.
 - It can't send Rem messages, create or change Kanban tickets, or control Rem's tasks and memories, because Rem treats those as your requests. Rem's self-work, for example, starts To-do tickets on its own.
 - It can't change Rem's settings, self-work settings, provider settings or sign-ins, Rem's skills and MCP servers, or retention. It can't pair or control devices, manage folder grants, start chat threads, or read the owner token.
-- It can't create, edit, run, queue, resume, stop or delete workflows, change their triggers, or create, start or control swarms. Editing a workflow and then running it would let it run any command it wrote, with your account.
+- It can't create, edit, run, queue, resume, stop or delete workflows, change their triggers, approve a changed workflow version for a trigger, or create, start or control swarms. Editing a workflow and then running it would let it run any command it wrote, with your account.
 - It can't change Second Brain libraries.
+- It can't read a Second Brain with **Allow cloud processing** off. Searching one, or listing its projects, topics or report and job sources, gets HTTP 403 with the code `brain_private`, and so does opening, relating or connecting a document stored in one. In `Raticode brain list` such a brain shows its name and the state `private`, with no folder, documents, reports or tasks.
 
-It can read workflows, runs, triggers, swarms, tickets, organizations and other state. The exceptions are Rem's context and Rem's MCP server list (`/api/rem-resources`), whose addresses and arguments can hold keys. Beyond reads, an agent token can only:
+A local script that reads your private brains and keeps what it reads on this computer can get a token that reads them:
+
+```bash
+Raticode tokens create notes-index --output ~/notes-index.token --private-brains
+```
+
+The choice is stored with the token's hash, and `Raticode tokens list` shows it. Tokens without `--private-brains` stay closed to private brains. The **Settings > Memory** folder counts as private here too while its brain has **Allow cloud processing** off.
+
+It can read workflows, runs, triggers, swarms, tickets, organizations and other state. The exceptions are Rem's context, Rem's MCP server list (`/api/rem-resources`), whose addresses and arguments can hold keys, your provider accounts with their emails, plans and any phone sign-in's link and code (`/api/provider/accounts`), and usage-reporting credentials (`/api/usage/credentials`). Beyond reads, an agent token can only:
 
 - Check a workflow without saving it: validate a draft, analyze a document, preview a bundle import or a trigger.
-- Read a ticket's timeline and search or read Second Brain.
+- Read a ticket's timeline and search or read Second Brains that allow cloud processing.
 - Use Organizations as Rem would. Changes that need your consent become consent requests you approve in the Organizations tab.
 
 Any other change, including endpoints added in later versions, is refused with HTTP 403 (`agent_token_forbidden`) until Raticode allows it for agent tokens on purpose.

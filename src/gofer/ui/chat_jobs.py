@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from gofer.ui.chat_steering import _identifier
+from gofer.ui.turn_failures import TURN_START_FAILED
 from gofer.utils.logging import get_logger
 
 log = get_logger(__name__)
@@ -78,9 +79,7 @@ class ChatJobs:
             with self._condition:
                 try:
                     handle.write(
-                        json.dumps(
-                            {"type": "error", "error": "Could not start Rem turn", "sequence": 1}
-                        )
+                        json.dumps({"type": "error", "error": TURN_START_FAILED, "sequence": 1})
                         + "\n"
                     )
                 finally:
@@ -89,7 +88,7 @@ class ChatJobs:
                     finally:
                         self._active.discard(key)
                         self._condition.notify_all()
-            raise ValueError("Could not start Rem turn") from exc
+            raise ValueError(TURN_START_FAILED) from exc
 
     def events(
         self, conversation_id: str, turn_id: str, after: int = 0

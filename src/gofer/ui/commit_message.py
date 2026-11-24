@@ -10,6 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
+from gofer.core import codex_sandbox, credential_mask
 from gofer.core.commit_message_format import (
     DEFAULT_COMMIT_MESSAGE_TEMPLATE,
     MAX_COMMIT_CHANGES,
@@ -89,6 +90,7 @@ def commit_message_command(
     if provider == "codex":
         command[command.index("--sandbox") + 1] = "read-only"
         command[-1:-1] = ["-c", 'approval_policy="never"']
+        command = codex_sandbox.credential_guard(command)
     else:
         command[command.index("--tools") + 1] = "Read" if read_diff_file else ""
         index = command.index("--allowedTools")
@@ -365,7 +367,8 @@ async def generate_commit_message(
                 else:
                     del command[command.index("-p") : command.index("-p") + 2]
                 code, stdout, stderr = await run_subprocess(
-                    command,
+                    # Claude Code here has no sandbox: keep it out of credential folders.
+                    credential_mask.mask_unsandboxed(provider, command),
                     cancel_event=cancel_event,
                     stdin=request_prompt.encode("utf-8"),
                     cwd=root,

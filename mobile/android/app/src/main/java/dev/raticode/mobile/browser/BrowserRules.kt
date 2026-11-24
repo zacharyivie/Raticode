@@ -284,6 +284,11 @@ object BrowserRules {
         val firefoxMode: String = FirefoxApps.MODE_APP,
         /** How Edge shows pages: in the Edge app ("app", the default, like Firefox) or as an Edge tab over Raticode ("tab"). */
         val edgeMode: String = EdgeApps.MODE_APP,
+        /**
+         * Which built-in browser opens links other apps send while Raticode is the phone's default browser: [ENGINE_RATICODE]
+         * (the default) or [ENGINE_GECKO]. See dev.raticode.mobile.open.OpenLinkActivity.
+         */
+        val externalEngine: String = ENGINE_RATICODE,
     )
 
     const val ENGINE_RATICODE = "raticode"
@@ -329,7 +334,7 @@ object BrowserRules {
         .put("keep_history", saved.keepHistory).put("links_in_app", saved.linksInApp)
         .put("search", saved.search).put("computer_search", saved.computerSearch).put("text_zoom", saved.textZoom)
         .put("engine", saved.engine).put("firefox_opens", saved.firefoxMode)
-        .put("edge_opens", saved.edgeMode)
+        .put("edge_opens", saved.edgeMode).put("external_engine", saved.externalEngine)
         .also { json -> saved.showing?.takeIf { inApp(it) && it != saved.engine }?.let { json.put("showing", it) } }
         .toString()
 
@@ -372,6 +377,7 @@ object BrowserRules {
             firefoxMode = if (json.optString("firefox_opens") == FirefoxApps.MODE_TAB) FirefoxApps.MODE_TAB else FirefoxApps.MODE_APP,
             // Edge opens in its own app unless the user chose a tab over Raticode, for the same reason as Firefox.
             edgeMode = if (json.optString("edge_opens") == EdgeApps.MODE_TAB) EdgeApps.MODE_TAB else EdgeApps.MODE_APP,
+            externalEngine = if (json.optString("external_engine") == ENGINE_GECKO) ENGINE_GECKO else ENGINE_RATICODE,
         )
     }
 

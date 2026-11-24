@@ -26,14 +26,16 @@ Your provider's version, account and policies decide which models you get. A too
 
 ## Discover providers in Raticode
 
-1. Open **Settings > Providers**.
-2. Turn on your provider.
-3. Check the executable path. If the desktop app's PATH differs from your terminal's, select the binary yourself.
+1. Open **Settings > Providers**. Each app Raticode found has a row with its status, such as **Ready** or **Needs sign-in**.
+2. Turn on your provider's **Enabled** switch. Choose **Sign in** on its row if it needs sign-in.
+3. Open the provider's details with the arrow next to its name and check the executable path. If the desktop app's PATH differs from your terminal's, select the binary yourself with **Choose executable...**. An app Raticode didn't find is under **Not installed** at the end of the list.
 4. Refresh discovery after you install or sign in.
-5. Optionally pick a default model and effort from the list it returns.
+5. Optionally pick a default model and effort in the details, from the list the provider returns.
 
 ::: warning Keep the provider's own config folder
 Don't move a provider's configuration into a new XDG folder just to isolate Raticode. Its sign-in may depend on that folder. Giving Raticode its own data folder is a separate change from moving a provider's login.
+
+To use more than one subscription of Claude Code, Codex or Grok, add [accounts](./rem/providers.md#several-accounts) instead. Raticode makes each account's folder for you.
 :::
 
 ## Choose defaults for Rem
@@ -73,7 +75,7 @@ Workflow agent nodes can also call the OpenAI or Anthropic API directly through 
 
 New in 0.5.5. Workflow agent nodes can use a model server you run yourself, such as [Ollama](https://ollama.com/), llama.cpp's `llama-server` or LM Studio, through its OpenAI-compatible API. Raticode doesn't bundle or install a model server and doesn't download models: install and start the server, and load or pull a model in it, first.
 
-Add the server in **Settings > Providers** under **Local model servers**: give the profile a name, enter the server's address and choose **Add server**. **Check server** lists the models it has. Or use the command line:
+Add the server in **Settings > Providers** under **Local model servers** (from 0.6.0, open it under **For workflows only**): give the profile a name, enter the server's address and choose **Add server**. **Check server** lists the models it has. Or use the command line:
 
 ```bash
 Raticode provider profile create ollama --local --api-base-url http://127.0.0.1:11434/v1
@@ -117,7 +119,7 @@ What to expect:
 
 The [jev node](./nodes/jev.md) asks TypeSafe's Jev classifier yes/no and multiple-choice questions (from 0.5.5). It needs its own TypeSafe API key:
 
-1. Open **Settings > Providers** and find **Classification models**.
+1. Open **Settings > Providers** and find **Classification models**. From 0.6.0 it's under **For workflows only**; choose it to open the form.
 2. Paste the key under **Jev (TypeSafe)**, choose **Save**, then **Check key**.
 
 Or run `Raticode provider jev set-key`, which asks for the key without showing it. The key goes into your system keychain, never an environment variable. See [Jev classifier](./workflows/jev.md).

@@ -7,3 +7,10 @@ Node example:
   decision-timeout: 30m
   approvers:
     - release-owner
+  options:
+    - Ship
+    - Hold
+    - Cancel
+  reject-options:
+    - Cancel
+  reply: optional

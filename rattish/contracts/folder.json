@@ -3,6 +3,7 @@
   "contract_version": 1,
   "node_type": "folder",
   "runtime_handler": "raticode.folder",
+  "catalog": {"category": "files", "summary": "Check a folder exists and pass on its path details", "docs_path": "/docs/nodes/folder"},
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",

@@ -40,7 +40,7 @@ function SelfWorkPanel({ view }) {
     {state.activity?.length ? <ul className="kb-activity" aria-label="Now working on">{state.activity.map(item => <li key={item.thread_id || activityLine(item)}>
       {item.thread_id ? <button type="button" onClick={() => openRemThread(item.thread_id)}>{activityLine(item)}</button> : <span>{activityLine(item)}</span>}
     </li>)}</ul> : null}
-    {capped ? <p className="kb-hint">Limited to {capped} threads by Rem task workers in Settings.</p> : null}
+    {capped ? <p className="kb-hint">Limited to {capped} threads by the Worker limit in Settings › Computers.</p> : null}
     {state.outside_projects ? <p className="kb-hint">{state.outside_projects} {state.outside_projects === 1 ? "ticket is" : "tickets are"} outside Rem&rsquo;s projects. Assign projects under People on the board.</p> : null}
     {state.proposals_waiting ? <p className="kb-side-note">{state.proposals_waiting} {state.proposals_waiting === 1 ? "idea waits" : "ideas wait"} for your approval.</p> : null}
     <button type="button" className="kb-open kb-settings-link" onClick={openSelfWorkSettings}><Settings2 size={14} aria-hidden="true" />Self-work settings</button>

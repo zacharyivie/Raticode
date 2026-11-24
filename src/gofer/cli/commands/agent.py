@@ -51,6 +51,27 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+def _parse_env(pairs: list[str]) -> dict[str, str]:
+    """--env KEY=VALUE pairs. Keys, tokens and passwords never go into an agent file."""
+    from gofer.core.provider_profiles import is_sensitive_env_name
+
+    env_dict: dict[str, str] = {}
+    for pair in pairs:
+        if "=" not in pair:
+            err_console.print(f"[red]Invalid --env value '{pair}': expected KEY=VALUE[/red]")
+            raise typer.Exit(1)
+        k, _, v = pair.partition("=")
+        if is_sensitive_env_name(k):
+            err_console.print(
+                f"[red]--env {k} looks like a credential, and agent files are stored as plain "
+                "text.[/red] Use a provider profile with --secret-ref instead "
+                "(Raticode provider profile --help)."
+            )
+            raise typer.Exit(2)
+        env_dict[k] = v
+    return env_dict
+
+
 @app.command("create")
 def create(
     name: str | None = typer.Option(None, "--name", help="Human-readable agent name"),
@@ -73,7 +94,10 @@ def create(
         help="Additional path to grant the provider sandbox (repeatable)",
     ),
     env: list[str] | None = typer.Option(
-        None, "--env", help="Environment variables as KEY=VALUE (repeatable)"
+        None,
+        "--env",
+        help="Environment variables as KEY=VALUE (repeatable). Credentials are refused; "
+        "use a provider profile",
     ),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
@@ -124,13 +148,7 @@ def create(
 
     tools_list = [t.strip() for t in tools.split(",")] if tools else []
     mcp_list = [s.strip() for s in mcp_servers.split(",")] if mcp_servers else []
-    env_dict: dict[str, str] = {}
-    for pair in env or []:
-        if "=" not in pair:
-            err_console.print(f"[red]Invalid --env value '{pair}': expected KEY=VALUE[/red]")
-            raise typer.Exit(1)
-        k, _, v = pair.partition("=")
-        env_dict[k] = v
+    env_dict = _parse_env(env or [])
 
     # ── Write TOML ───────────────────────────────────────────────────────────
 
@@ -175,7 +193,10 @@ def edit(
         help="Replace additional provider sandbox paths (repeatable)",
     ),
     env: list[str] | None = typer.Option(
-        None, "--env", help="Environment variables as KEY=VALUE (repeatable)"
+        None,
+        "--env",
+        help="Environment variables as KEY=VALUE (repeatable). Credentials are refused; "
+        "use a provider profile",
     ),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
@@ -256,14 +277,7 @@ def edit(
         cfg = cfg.model_copy(update={"extra_paths": _resolve_extra_paths(extra_path)})
 
     if env is not None:
-        env_dict: dict[str, str] = {}
-        for pair in env:
-            if "=" not in pair:
-                err_console.print(f"[red]Invalid --env value '{pair}': expected KEY=VALUE[/red]")
-                raise typer.Exit(1)
-            k, _, v = pair.partition("=")
-            env_dict[k] = v
-        cfg = cfg.model_copy(update={"env": env_dict})
+        cfg = cfg.model_copy(update={"env": _parse_env(env)})
 
     wf.agents[agent_id] = cfg
     dest_path = base / f"{wf.config.id}.toml"

@@ -9,3 +9,4 @@ Node example:
     -
       provider: claude-code
       effort: medium
+  network: any

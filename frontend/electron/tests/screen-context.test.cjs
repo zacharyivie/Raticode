@@ -220,6 +220,29 @@ test("the Ask Rem about your screen shortcut registers only when on, and reports
   assert.equal(registered.size, 0);
 });
 
+test("on a Wayland desktop the screen shortcut is asked of the desktop with the dictation one, and says why it can't work", async () => {
+  const updates = [];
+  let answer = { route: "kde", state: "registered", trigger: "Ctrl+Alt+S", message: "" };
+  const desktop = { update: (id, entry) => { updates.push([id, entry]); return Promise.resolve(entry ? answer : { state: "off" }); } };
+  const grabbed = [];
+  let pressed = 0;
+  const shortcut = createScreenShortcut({ globalShortcut: { register: (key) => grabbed.push(key), unregister() {} }, desktopShortcuts: desktop, onPress: () => { pressed += 1; }, now: () => 7 });
+  const on = await shortcut.configure({ enabled: true, binding: "Ctrl+Alt+KeyS" });
+  assert.deepEqual(updates, [["ask-rem-about-screen", { description: "Ask Rem about your screen", accelerator: "Control+Alt+S" }]]);
+  assert.equal(on.registered, true);
+  assert.equal(on.trigger, "Ctrl+Alt+S");
+  assert.deepEqual(grabbed, []);
+  shortcut.press();
+  assert.equal(pressed, 1);
+  assert.equal(shortcut.status().lastPressedAt, 7);
+  answer = { route: "manual", state: "manual", trigger: "", message: "" };
+  assert.match((await shortcut.configure({ enabled: true, binding: "Ctrl+Alt+KeyD" })).error, /doesn't let apps add shortcuts/);
+  assert.equal(shortcut.desktopChanged({ shortcuts: { "ask-rem-about-screen": { state: "registered", trigger: "Meta+S" } } }).trigger, "Meta+S");
+  const off = await shortcut.configure({ enabled: false, binding: "Ctrl+Alt+KeyD" });
+  assert.equal(off.registered, false);
+  assert.deepEqual(updates.at(-1), ["ask-rem-about-screen", null]);
+});
+
 test("main.js wires screenshots to the main window only, on request, without the overlay in the picture", () => {
   const main = read("main.js");
   assert.match(main, /const screenContext = createScreenContext\(\{/);

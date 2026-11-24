@@ -24,10 +24,11 @@ import threading
 import time
 import uuid
 import zipfile
-from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
+from collections.abc import AsyncGenerator, Callable, Coroutine, Iterable, Iterator
 from contextlib import aclosing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Literal
@@ -65,14 +66,21 @@ from gofer.rattish.editor import RattishEditorError, RattishRevisionConflict
 from gofer.rattish.test_sets import WorkflowTestError
 from gofer.rattish.trigger_login import LoginEntryError
 from gofer.rattish.trigger_service import TriggerEngine
-from gofer.rattish.triggers import TriggerError, TriggerNotFound
+from gofer.rattish.triggers import (
+    ApprovalConflict,
+    TriggerError,
+    TriggerNotFound,
+    UnseenChanges,
+)
 from gofer.rattish.workspaces import list_registered_workflows
 from gofer.ui import headless as headless_support
 from gofer.ui import (
     rattish_cache,
     rattish_secrets,
     rattish_triggers,
+    rem_project_checks,
     system_speech,
+    workflow_shortcuts,
     worktree_setup,
 )
 from gofer.ui.api import (
@@ -144,7 +152,14 @@ from gofer.ui.api import (
     workflow_revision_diff_payload,
     workflow_run_events_payload,
     workflow_run_log_payload,
+    workflow_run_worktrees_payload,
     workflow_template_payload,
+)
+from gofer.ui.brain_privacy import (
+    AGENT_BRAIN_PRIVATE,
+    agent_brain_refusal,
+    agent_brain_result,
+    agent_snapshot,
 )
 from gofer.ui.chat import (
     ChatChangeError,
@@ -164,6 +179,7 @@ from gofer.ui.chat_media import (
     ChatMediaError,
     attachment_thread_dir,
     cancel_chat_transcription,
+    clean_legacy_speech_models,
     finish_chat_transcription,
     locate_chat_attachment,
     offline_model_status,
@@ -179,6 +195,7 @@ from gofer.ui.file_mentions import with_file_mentions
 from gofer.ui.generation_jobs import GenerationJobs
 from gofer.ui.headless import (
     AGENT_SECOND_BRAIN_ACTIONS,
+    AgentGrant,
     AgentTokenStore,
     agent_request_refusal,
 )
@@ -191,8 +208,11 @@ from gofer.ui.organizations import OrganizationManager
 from gofer.ui.rem_home import RemHome
 from gofer.ui.rem_home_models import RemConflict
 from gofer.ui.rem_kanban import KanbanRefused, message_ticket_keys, task_ticket_keys
+from gofer.ui.rem_thread_listing import desktop_listing
+from gofer.ui.scratch_cleanup import start_scratch_cleanup
 from gofer.ui.swarms import SwarmManager
 from gofer.ui.workflow_tests import (
+    estimate_workflow_tests_payload,
     save_workflow_tests_payload,
     start_workflow_tests_payload,
     stop_all_workflow_tests,
@@ -278,6 +298,37 @@ def _device_provider_catalog() -> list[dict[str, Any]]:
 def _optional_query(query: dict[str, list[str]], name: str) -> str | None:
     value = query.get(name, [None])[0]
     return value if value not in {None, ""} else None
+
+
+def _usage_with_accounts(overview: dict[str, Any], data_dir: Path, rem_home: Any) -> dict[str, Any]:
+    """Settings > Usage cards: account sign-in states and Rem's next account under "auto"."""
+    from gofer.core.provider_accounts import adapters
+    from gofer.core.usage_accounts import with_account_glance
+    from gofer.ui.rem_claude_accounts import usage_next_account
+
+    pick = None
+    picks: dict[str, dict[str, Any] | None] = {}
+    if rem_home is not None:
+        try:
+            config = rem_home._current_config()
+            pick = usage_next_account(config, data_dir)
+            for provider in adapters():
+                if provider != "claude_code":
+                    picks[provider] = usage_next_account(config, data_dir, provider=provider)
+        except Exception as exc:  # The cards still show without the badge.
+            log.info("Could not work out Rem's next account (%s)", type(exc).__name__)
+    return with_account_glance(overview, data_dir, rem_pick=pick, rem_picks=picks)
+
+
+def _usage_period(query: dict[str, list[str]]) -> dict[str, Any]:
+    """Settings > Usage period options: range (or the older days), start, end and tz."""
+    return {
+        "period": _optional_query(query, "range"),
+        "days": _optional_query(query, "days"),
+        "start": _optional_query(query, "start"),
+        "end": _optional_query(query, "end"),
+        "tz": _optional_query(query, "tz"),
+    }
 
 
 def _int_query(query: dict[str, list[str]], name: str, default: int) -> int:
@@ -466,31 +517,102 @@ class DesktopPathGrantStore:
             self._grants.pop(grant_id, None)
 
 
+def library_brain(server: Any, config: Any) -> Any:
+    """A folder-only Second Brain setting, served by the library brain registered there.
+
+    See second_brain.library_brain_config. The folder's old SecondBrain index is deleted
+    once the library serves it, since nothing writes it any more. Takes any server-like
+    object, so test doubles without a library get the setting back unchanged.
+    """
+    from gofer.ui.second_brain import (
+        MEMORY_FOLDER_KEY,
+        library_brain_config,
+        retire_folder_index,
+    )
+
+    library = getattr(server, "second_brains", None)
+    data_dir = getattr(server, "data_dir", None)
+    if library is None or data_dir is None:
+        return config
+    filled = library_brain_config(config, library.brains(), Path(data_dir))
+    if isinstance(filled, dict) and filled.get(MEMORY_FOLDER_KEY):
+        retire_folder_index(Path(filled["root"]))
+    return filled
+
+
+def with_library_brain(server: Any, options: dict[str, Any]) -> dict[str, Any]:
+    """Turn options whose Second Brain names only a folder use the library brain there.
+
+    Organization runs and Rem tasks take their setting from stored configuration, which
+    keeps the folder as the user saved it; this fills it in for one run.
+    """
+    workflow = options.get("workflow")
+    if not isinstance(workflow, dict) or "remSecondBrain" not in workflow:
+        return options
+    brain = library_brain(server, workflow["remSecondBrain"])
+    return {**options, "workflow": {**workflow, "remSecondBrain": brain}}
+
+
 class GoferUiServer(ThreadingHTTPServer):
+    _social_service: Any = None
+
+    @property
+    def social(self) -> Any:
+        """The social posts of this data folder; the publisher runs in the trigger owner."""
+        if self._social_service is None:
+            from gofer.social.service import SocialService
+            from gofer.ui.rem_kanban import open_project_roots
+
+            def media_roots() -> list[Path]:
+                return [Path(root) for root in open_project_roots(self.rem_home._current_config())]
+
+            self._social_service = SocialService(self.data_dir, media_roots=media_roots)
+        return self._social_service
+
     async def _rem_task_source(self, **options: Any) -> AsyncGenerator[dict[str, Any], None]:
         """Run a Rem task with the fleet status tools desktop threads have.
 
         Sending work to another desktop would delegate the task again, so Rem
         tasks only read fleet status, like a read-only desktop thread. Self-work
-        runs with nobody watching get neither fleet nor Organizations tools.
+        runs with nobody watching get neither fleet nor Organizations tools. Every Rem
+        task gets the propose-only ``social`` tools; proposals wait for the user.
         """
+        from gofer.social.mcp import stream_with_social_tools
         from gofer.ui.device_tools import stream_with_fleet_tools
 
+        options = with_library_brain(self, options)
         if (options.get("workflow") or {}).get("remUnattended") is True:
-            async with aclosing(stream_workflow_chat(**options)) as stream:
+            # Self-work may propose posts too; they wait for the user like any other.
+            async with aclosing(
+                stream_with_social_tools(
+                    stream_workflow_chat, getattr(self, "social", None), **options
+                )
+            ) as stream:
                 async for event in stream:
                     yield event
             return
+
+        async def fleet_source(**fleet_options: Any) -> AsyncGenerator[dict[str, Any], None]:
+            async with aclosing(
+                stream_with_fleet_tools(
+                    self._device_chat_source,
+                    self.devices,
+                    read_only_override=True,
+                    **fleet_options,
+                )
+            ) as fleet_stream:
+                async for event in fleet_stream:
+                    yield event
+
         async with aclosing(
-            stream_with_fleet_tools(
-                self._device_chat_source, self.devices, read_only_override=True, **options
-            )
+            stream_with_social_tools(fleet_source, getattr(self, "social", None), **options)
         ) as stream:
             async for event in stream:
                 yield event
 
     async def _device_chat_source(self, **options: Any) -> AsyncGenerator[dict[str, Any], None]:
         """Use the desktop's provider, resource and swarm services for shared turns."""
+        options = with_library_brain(self, options)
         workflow = dict(options.get("workflow") or {})
         if workflow.get("organizationRun"):
             async with aclosing(stream_workflow_chat(**options)) as stream:
@@ -604,6 +726,11 @@ class GoferUiServer(ThreadingHTTPServer):
             max_concurrency=int(os.environ.get("GOFER_SWARM_MAX_CONCURRENCY", "8")),
         )
 
+        from gofer.core.worker_claims import WorkerClaims
+
+        # Every worker that starts on this computer, Rem's, a phone turn's or an
+        # organization's, holds a claim here, taken under one lock against the limit.
+        self.worker_claims = WorkerClaims()
         self.organizations = OrganizationManager(
             data_dir,
             stream=self._employee_chat_source,
@@ -611,8 +738,14 @@ class GoferUiServer(ThreadingHTTPServer):
             fleet=self.devices,
             enabled=os.environ.get("RATICODE_EXPERIMENTAL_ORGANIZATIONS") == "1",
         )
+        self.organizations.placement.claims = self.worker_claims
+        # Swarm turns take their workers from the same claims, on this computer.
+        self.swarms.claims = self.worker_claims
+        self.swarms.computer = lambda: (self._this_computer_id(), self._computer_name())
 
         if self.devices is not None:
+            self.devices.worker_claims = self.worker_claims
+            self.devices.computer_id = self._this_computer_id
             self.devices.attach_services(
                 providers=_device_provider_catalog,
                 swarms=self.swarms,
@@ -644,16 +777,73 @@ class GoferUiServer(ThreadingHTTPServer):
         # Organizations in Auto mode ask Rem's own model to decide their requests.
         self.organizations.auto_review = rem_reviewer(self.rem_home._current_config, data_dir)
         organizations = self.organizations
+        self.rem_home.placement.claims = self.worker_claims
         # The Second Brain shows which organization tickets read or quoted a note.
         self.second_brains.organization_source = lambda: (
             organizations.store.list_organizations() if organizations.enabled else []
         )
+        from gofer.core.computers import ComputerService
+
+        # This computer and its paired desktops, each with its worker limit and load.
+        self.computers = ComputerService(
+            data_dir,
+            name=self._computer_name,
+            device_id=self._computer_device_id,
+            running=self._running_workers,
+            running_work=lambda: self.worker_claims.running_work(),
+            fleet=self._computer_fleet,
+            organizations=lambda: organizations.store.names() if organizations.enabled else [],
+        )
+        # Each Rem run's start, and each organization worker's, is placed on a computer
+        # from this registry.
+        self.rem_home.placement.computers = self.computers
+        self.organizations.placement.computers = self.computers
+        # A research or conversation task pinned to a paired desktop runs there, and
+        # tasks paired desktops hand here run as this computer's own Rem tasks.
+        self.rem_home.computer_id = self._this_computer_id
+        self.rem_home.remote.fleet = self.devices
         if self.devices is not None:
             self.devices.attach_desktop(
                 rem=self.rem_home,
                 organizations=self.organizations,
-                usage=lambda: usage_overview(data_dir, days=30),
+                computers=self.computers,
+                usage=lambda **period: _usage_with_accounts(
+                    usage_overview(data_dir, **period), data_dir, self.rem_home
+                ),
+                social=self.social,
             )
+
+    def _computer_name(self) -> str:
+        application = getattr(self.devices, "application", None)
+        name = getattr(application, "name", None)
+        if isinstance(name, str) and name:
+            return name
+        import socket
+
+        return socket.gethostname()[:80] or "This computer"
+
+    def _computer_device_id(self) -> str | None:
+        registry = getattr(self.devices, "registry", None)
+        identity = getattr(registry, "identity", None)
+        value = getattr(identity, "device_id", None)
+        return value if isinstance(value, str) else None
+
+    def _computer_fleet(self) -> list[dict[str, Any]]:
+        application = getattr(self.devices, "application", None)
+        return list(application.fleet()) if application is not None else []
+
+    def _this_computer_id(self) -> str:
+        from gofer.core.computers import this_computer_id
+
+        return this_computer_id(self.data_dir, self._computer_device_id())
+
+    def _running_workers(self) -> dict[str, int]:
+        """Workers running on this computer now: Rem tasks, phone turns, organizations and swarms.
+
+        Counted from the worker claims every start takes. Paired desktops run nothing
+        from here yet, so every claim is a worker on this computer.
+        """
+        return self.worker_claims.running()
 
     async def _swarm_chat_source(self, **options: Any) -> AsyncGenerator[dict[str, Any], None]:
         from gofer.ui.organization_operations import resolve_secrets
@@ -682,6 +872,8 @@ class GoferUiServer(ThreadingHTTPServer):
         from gofer.ui.device_tools import stream_with_fleet_tools
         from gofer.ui.rem_threads import stream_with_thread_tools
 
+        # The organization's knowledge folder is searched through its library brain.
+        options = with_library_brain(self, options)
         workflow = dict(options["workflow"])
         project = Path(workflow["projectRoot"])
         workspace_paths = workflow.pop("organizationWorkspacePaths", [str(project)])
@@ -691,6 +883,23 @@ class GoferUiServer(ThreadingHTTPServer):
             if not path.is_dir() or str(path.resolve()) != value:
                 raise ValueError("An organization workspace moved or is no longer available")
             workspace_grants[value] = self.path_grants.register(path)
+        from gofer.ui.brain_privacy import turn_private_brains
+
+        # Workers reach every workspace through their thread and swarm tools, so none may
+        # be or sit inside a private brain. The turn itself hides or refuses brains
+        # inside its own project (chat._private_brains_in_turn).
+        knowledge = workflow.get("remSecondBrain") or {}
+        library = options.get("library_data_dir") or getattr(self, "data_dir", None)
+        if library is not None:
+            turn_private_brains(
+                workspace_paths,
+                provider={
+                    "id": options.get("provider"),
+                    "profile": options.get("provider_profile"),
+                },
+                data_dir=Path(library),
+                approved=[knowledge.get("root")] if knowledge.get("enabled") else [],
+            )
         with self.swarms.rem_session(
             project,
             read_only=True,
@@ -742,11 +951,60 @@ class GoferUiServer(ThreadingHTTPServer):
                 "Open the project and select it again."
             )
 
+    def _private_rem_projects(
+        self, config: dict[str, Any], recipe: dict[str, Any], roots: Iterable[str]
+    ) -> dict[str, str]:
+        """The given Rem project folders a cloud turn may not open, each with the reason.
+
+        Each is, or sits inside, a brain with Allow cloud processing off. A provider on
+        localhost may open them all. Brains inside a project aren't counted here: each
+        turn hides or refuses those itself (chat._private_brains_in_turn).
+        """
+        from gofer.ui.brain_privacy import (
+            PrivateBrainError,
+            memory_folder,
+            private_brain_folders,
+            provider_is_local,
+            registered_brains,
+        )
+
+        provider = {"id": recipe.get("provider"), "profile": recipe.get("provider_profile")}
+        checked = [root for root in roots if root and os.path.lexists(root)]
+        if not checked or provider_is_local(provider, self.data_dir):
+            return {}
+        brains = registered_brains(self.data_dir)
+        brain = config.get("brain") or {}
+        approved = [
+            brain.get("root") if isinstance(brain, dict) and brain.get("enabled") else None,
+            memory_folder(self.data_dir),
+        ]
+        found: dict[str, str] = {}
+        for root in checked:
+            try:
+                private_brain_folders([root], brains, approved=approved)
+            except PrivateBrainError as exc:
+                found[root] = str(exc)
+        return found
+
     def _authorize_rem_home(self, config: dict[str, Any], recipe: dict[str, Any]) -> None:
+        from gofer.ui.brain_privacy import PrivateBrainError
+
         projects = config.get("projects", [])
         if not isinstance(projects, list) or len(projects) > 100:
             raise ValueError("Choose at most 100 Rem projects")
         project_dir = recipe.get("project_dir")
+        brain = config.get("brain") or {}
+        if not isinstance(brain, dict):
+            raise ValueError("Invalid Second Brain configuration")
+        # Rem's tasks run on cloud providers, which may not open a private brain's
+        # folder, so a task whose own folder is or sits inside one is refused. Any other
+        # open project that became private is skipped, the same as a deleted one: it
+        # must not stop Rem's chat or unrelated tasks. Rem's context leaves it out, and
+        # the window context drops it with the reason (_private_rem_projects).
+        if recipe and project_dir:
+            reason = self._private_rem_projects(config, recipe, [project_dir]).get(project_dir)
+            if reason:
+                raise PrivateBrainError(reason)
         for project in projects:
             if not isinstance(project, dict) or not isinstance(project.get("root"), str):
                 raise ValueError("Invalid Rem project")
@@ -767,9 +1025,6 @@ class GoferUiServer(ThreadingHTTPServer):
             self._authorize_swarm_workspace(root, project.get("grantId"))
         if project_dir and not any(p["root"] == project_dir for p in projects):
             raise ValueError("Select an approved project for this task")
-        brain = config.get("brain") or {}
-        if not isinstance(brain, dict):
-            raise ValueError("Invalid Second Brain configuration")
         if brain.get("enabled"):
             root = Path(str(brain.get("root", "")))
             if not root.is_absolute() or not root.is_dir():
@@ -788,11 +1043,18 @@ class GoferUiServer(ThreadingHTTPServer):
                 "Research needs an approved project or enabled Second Brain destination"
             )
 
-    def _rem_home_context(self) -> dict[str, Any]:
+    def _rem_home_context(self, query: str = "") -> dict[str, Any]:
+        """What Rem sees of the desktop, with up to 5 Second Brain notes matching ``query``.
+
+        Each note is its path, title, summary and matched passage, the list capped at
+        CONTEXT_KNOWLEDGE_CHARS; the chat's note lookup reads the rest of one.
+        """
         with self.rem_home.store.connect() as db:
             config = self.rem_home.store.setting(db, "config")
         self._authorize_rem_home(config, {})
         roots = {p["root"] for p in config.get("projects", [])}
+        # A project that became a private brain stays out of what Rem sees.
+        roots -= set(self._private_rem_projects(config, {}, sorted(roots)))
         workflows = [
             {key: workflow.get(key) for key in ("id", "name", "projectRoot", "status", "latestRun")}
             for workflow in list_workflow_payloads(self.data_dir).get("workflows", [])
@@ -806,12 +1068,15 @@ class GoferUiServer(ThreadingHTTPServer):
         notes: list[dict[str, Any]] = []
         brain = config.get("brain") or {}
         if brain.get("enabled") and brain.get("root"):
-            from gofer.ui.second_brain import SecondBrain
+            from gofer.ui.second_brain import (
+                SecondBrain,
+                add_context_note,
+                document_context_note,
+                raw_context_note,
+            )
 
-            # The user's newest message only; the rest of the chat isn't read.
-            latest = self.rem_home.store.tail(1, roles=("user",))
-            query = str(latest[0].get("body") or "") if latest else ""
-            references: list[tuple[str, str]] = []
+            # The Settings > Memory folder is searched through its library brain.
+            brain = library_brain(self, brain)
             if brain.get("brainIds"):
                 hits = self.second_brains.search(
                     {
@@ -820,22 +1085,33 @@ class GoferUiServer(ThreadingHTTPServer):
                         "mode": "exact",
                     }
                 )["hits"]
+                seen: set[str] = set()
                 for hit in hits[:10]:
-                    doc = self.second_brains.entity("documents", hit["docId"])
-                    if not doc.get("excluded") and not doc.get("missing"):
-                        references.append(
-                            (self.second_brains.brain(doc["brainId"])["root"], doc["path"])
+                    if len(notes) == 5 or hit["docId"] in seen:
+                        continue
+                    seen.add(hit["docId"])
+                    try:
+                        # The indexed passages, starting where the search matched.
+                        doc = self.second_brains.entity("documents", hit["docId"])
+                        if doc.get("excluded") or doc.get("missing"):
+                            continue
+                        root = self.second_brains.brain(doc["brainId"])["root"]
+                        build = partial(
+                            document_context_note, doc, root, hit.get("blockId"), query=query
                         )
+                        if not add_context_note(notes, build):
+                            break
+                    except (ValueError, OSError):
+                        continue
             else:
-                knowledge = SecondBrain(Path(brain["root"]), "html")
-                references = [(brain["root"], h["path"]) for h in knowledge.search(query)[:3]]
-            for destination, relative in list(dict.fromkeys(references))[:5]:
-                knowledge = SecondBrain(Path(destination), "html")
-                try:
-                    note = knowledge.call("read_note", {"path": relative})
-                    notes.append({"path": note["path"], "content": note["content"][:6000]})
-                except (ValueError, OSError):
-                    continue
+                root = Path(brain["root"])
+                for hit in SecondBrain(root, "html").search(query)[:3]:
+                    try:
+                        build = partial(raw_context_note, root, hit["path"], query=query)
+                        if not add_context_note(notes, build):
+                            break
+                    except (ValueError, OSError):
+                        continue
         return {
             "at": datetime.now(UTC).isoformat(),
             "workflows": workflows,
@@ -846,7 +1122,8 @@ class GoferUiServer(ThreadingHTTPServer):
                 "enabled": bool(config.get("brain", {}).get("enabled")),
                 "ids": config.get("brain", {}).get("brainIds", []),
             },
-            "desktop": config.get("workspace_snapshot", {}),
+            # The newest threads and a count; Rem's threads lookup finds the rest.
+            "desktop": desktop_listing(config.get("workspace_snapshot", {})),
             "knowledge": notes,
         }
 
@@ -869,6 +1146,11 @@ class GoferUiServer(ThreadingHTTPServer):
         auth = getattr(self, "provider_auth", None)
         if auth is not None:
             auth.close()
+        # Account sign-ins run in their own session and would outlive the backend,
+        # keeping their one-time code and link in the account's scratch folder.
+        from gofer.core.provider_accounts import sign_ins
+
+        sign_ins.cancel_all()
         jobs = getattr(self, "chat_jobs", None)
         if jobs is not None:
             jobs.close()
@@ -1020,6 +1302,8 @@ class GoferUiServer(ThreadingHTTPServer):
 class GoferUiRequestHandler(BaseHTTPRequestHandler):
     # Set per request when it carries a limited agent token instead of the owner's.
     _agent_token_name: str | None = None
+    # Whether that agent token may read brains with Allow cloud processing off.
+    _agent_private_brains: bool = False
 
     def _check_discovery_cancelled(self) -> None:
         """Observe a fetch abort without consuming any HTTP request bytes."""
@@ -1130,11 +1414,19 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/rem-resources":
                 self._dispatch_rem_resources_request(method)
                 return
+            if parsed.path == "/api/rem-resources/mcp-tools":
+                self._dispatch_mcp_tools_request(method, parsed.query)
+                return
             if parsed.path.startswith("/api/rem/"):
                 self._dispatch_rem_home_request(method)
                 return
             if parsed.path == "/api/organizations":
                 self._dispatch_organization_request(method)
+                return
+            if method != "OPTIONS" and (
+                parsed.path == "/api/social" or parsed.path.startswith("/api/social/")
+            ):
+                self._dispatch_social_request(method, parsed)
                 return
             if parsed.path.startswith("/api/organization-webhooks/") and method == "POST":
                 if not self.server.organizations.enabled:
@@ -1170,6 +1462,12 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             ):
                 self._dispatch_rattish_secrets(method, parsed.path, parse_qs(parsed.query))
                 return
+            if method != "OPTIONS" and (
+                parsed.path == "/api/workflow-shortcuts"
+                or parsed.path.startswith("/api/workflow-shortcuts/")
+            ):
+                self._dispatch_workflow_shortcuts(method, parsed.path, parse_qs(parsed.query))
+                return
             if method == "GET" and parsed.path == "/api/rattish/cache":
                 self._dispatch_rattish_cache(method, parse_qs(parsed.query))
                 return
@@ -1185,6 +1483,19 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 and parsed.path.endswith("/rerun")
             ):
                 self._rerun_rattish_run(parsed)
+                return
+            if (
+                method == "GET"
+                and parsed.path.startswith("/api/rattish/runs/")
+                and parsed.path.endswith("/failure")
+            ):
+                self._rattish_run_failure(parsed)
+                return
+            if parsed.path.startswith("/api/rattish/runs/") and (
+                (method == "GET" and parsed.path.endswith("/changes"))
+                or (method == "POST" and parsed.path.endswith(("/land", "/discard")))
+            ):
+                self._rattish_run_changes(method, parsed)
                 return
             if method == "GET" and parsed.path == "/api/rattish/starters":
                 try:
@@ -1295,12 +1606,39 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 page["tickets"] = service.kanban.resolve(message_ticket_keys(page["messages"]))
                 result = page
             elif method == "GET" and parts == ["tasks"]:
-                tasks = service.store.tasks(summary=True)
-                result = rem_poll_result(
-                    # The tickets each task's runs worked on, for the task cards and details.
-                    {"tasks": tasks, "tickets": service.kanban.resolve(task_ticket_keys(tasks))},
-                    known,
+                # The tickets each task's runs worked on, for the task cards and details,
+                # and the self-work objectives the side pane lists above the tasks. Built
+                # again only after a write or a time-based wait comes due (rem_task_list);
+                # prompts are left out, and the task sheet reads one from GET tasks/{id}.
+                listed, version = service.task_list.view()
+                result = (
+                    {"unchanged": True, "version": version}
+                    if known == version
+                    else {**listed, "version": version}
                 )
+            elif method == "GET" and len(parts) == 2 and parts[0] == "tasks":
+                # One task with its prompt and recent runs, for the task sheet and the CLI.
+                # A deleted task is a KeyError, answered 404 below.
+                task = service.store.task_detail(parts[1], summary=True)
+                result = {
+                    "task": task,
+                    "tickets": service.kanban.resolve(task_ticket_keys([task])),
+                }
+            elif method == "GET" and parts == ["objectives"]:
+                result = rem_poll_result(service.self_work.objectives(), known)
+            elif method == "POST" and parts == ["objectives"]:
+                # The user's change: agent tokens can't write Rem routes, and Rem's own
+                # changes go through its chat decisions and self-work, under Rem's rules.
+                from gofer.ui.rem_objectives import ObjectiveRefused
+
+                try:
+                    result = service.self_work.change_objectives(self._read_json())
+                except ObjectiveRefused as exc:
+                    status = {"conflict": 409, "not_found": 404, "unauthorized": 403}.get(
+                        exc.code, 400
+                    )
+                    self._send_json({"error": str(exc), "code": exc.code}, status=status)
+                    return
             elif method == "GET" and len(parts) == 2 and parts[0] == "threads":
                 thread = service.store.thread(parts[1])
                 if self._agent_token_name:
@@ -1312,9 +1650,40 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                         if key != "resources"
                     }
                 result = rem_poll_result(thread, known)
+            elif (
+                method == "GET"
+                and len(parts) == 3
+                and parts[0] == "threads"
+                and parts[2] == "context"
+            ):
+                # How big each part of the thread's newest turns was; sizes only.
+                from gofer.core.turn_context import thread_context
+
+                query = parse_qs(parsed.query)
+                result = thread_context(
+                    parts[1],
+                    self._request_data_dir(query),
+                    limit=int(query.get("limit", ["10"])[0] or 10),
+                )
+            elif method == "GET" and parts == ["calls"]:
+                # How big each part of Rem's own newest model calls was; sizes only.
+                from gofer.core.turn_context import rem_calls
+
+                query = parse_qs(parsed.query)
+                result = rem_calls(
+                    self._request_data_dir(query),
+                    limit=int(query.get("limit", ["10"])[0] or 10),
+                    call=query.get("call", [""])[0] or None,
+                    run_id=query.get("run", [""])[0] or None,
+                )
             elif method == "GET" and len(parts) == 2 and parts[0] == "runs":
                 with service.store.connect() as db:
                     run = service.store.get(db, "runs", parts[1])
+                    changes = service.store.provider_version_changes(db, run)
+                if changes:
+                    # Computed when read: a failed run's provider apps that changed version
+                    # since the task's last passing run.
+                    run["provider_version_changes"] = changes
                 if self._agent_token_name:
                     # A run keeps Rem's whole configuration: projects with their folder
                     # grants, MCP servers and Second Brain grants, all denied to agent
@@ -1349,9 +1718,53 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 )
             elif method == "GET" and parts == ["context"]:
                 # The settings the window (or `Raticode rem settings apply`) last sent.
+                from gofer.ui.rem_provider_accounts import self_work_choices
+
                 with service.store.read() as db:
                     stored = service.store.setting(db, "config")
+                    # Kept with self-work's settings; listed here so `rem settings export`
+                    # and `apply` carry it.
+                    stored["self_work_accounts"] = self_work_choices(
+                        service.store.setting(db, "self_work")
+                    )
                 result = {"config": stored, "context_ready": service.has_context}
+            elif method == "GET" and parts == ["decisions"]:
+                project = parse_qs(parsed.query).get("project", [""])[0] or None
+                # Reads the projects' decision record files in first; never commits.
+                result = rem_poll_result(service.decisions(project, sync=True), known)
+            elif method == "POST" and parts == ["decisions", "scan"]:
+                # Reads the project's files only; what it finds goes through the store.
+                from gofer.ui.rem_decisions import DecisionRefused
+
+                try:
+                    result = service.scan_decisions(self._read_json())
+                except DecisionRefused as exc:
+                    status = {"not_found": 404}.get(exc.code, 400)
+                    self._send_json({"error": str(exc), "code": exc.code}, status=status)
+                    return
+            elif method == "POST" and parts == ["decisions", "paths"]:
+                # Counts tracked files for typed record paths; changes nothing.
+                from gofer.ui.rem_decisions import DecisionRefused
+
+                try:
+                    result = service.decision_paths(self._read_json())
+                except DecisionRefused as exc:
+                    status = {"not_found": 404}.get(exc.code, 400)
+                    self._send_json({"error": str(exc), "code": exc.code}, status=status)
+                    return
+            elif method == "POST" and parts == ["decisions"]:
+                # The user's change: agent tokens can't write Rem routes, and Rem itself only
+                # files requests through rem_decisions.file_request, never changing one.
+                from gofer.ui.rem_decisions import DecisionRefused
+
+                try:
+                    result = service.change_decisions(self._read_json())
+                except DecisionRefused as exc:
+                    status = {"conflict": 409, "not_found": 404, "unauthorized": 403}.get(
+                        exc.code, 400
+                    )
+                    self._send_json({"error": str(exc), "code": exc.code}, status=status)
+                    return
             elif method == "GET" and parts == ["memories"]:
                 result = service.memories()
             elif method == "POST" and parts == ["memories"]:
@@ -1405,10 +1818,29 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             elif (
                 method == "POST"
                 and len(parts) == 3
+                and parts[0] == "tasks"
+                and parts[2] == "workflow"
+            ):
+                # Make it a workflow (draft), and Switch over (preview, then switch).
+                try:
+                    result = service.task_workflow(parts[1], self._read_json())
+                except ApprovalConflict as exc:
+                    self._send_json({"error": str(exc), "conflict": True}, status=409)
+                    return
+                except UnseenChanges as exc:
+                    self._send_json({"error": str(exc), "unseen": exc.files}, status=409)
+                    return
+            elif (
+                method == "POST"
+                and len(parts) == 3
                 and parts[0] == "runs"
                 and parts[2] in {"cancel", "acknowledge"}
             ):
                 result = service.store.mutate_run(parts[1], self._read_json(), parts[2])
+            elif method == "POST" and parts == ["runs", "acknowledge"]:
+                # Dismiss all: every task update at once. Runs still waiting for the
+                # user's answer and held tasks stay.
+                result = service.store.dismiss_updates(self._read_json())
             elif (
                 method == "POST"
                 and len(parts) == 3
@@ -1429,6 +1861,14 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             elif method == "POST" and len(parts) == 3 and parts[0] == "runs" and parts[2] == "wake":
                 # Wake now: a sleeping worker resumes in its thread without waiting out its time.
                 result = service.wake_run(parts[1], self._read_json())
+            elif (
+                method == "POST"
+                and len(parts) == 3
+                and parts[0] == "runs"
+                and parts[2] == "run_there"
+            ):
+                # Run there: the user's pick of the paired desktop a waiting task suggests.
+                result = service.run_there(parts[1], self._read_json())
             elif method == "DELETE" and len(parts) == 2 and parts[0] == "tasks":
                 request_id = parse_qs(parsed.query).get("request_id", [""])[0]
                 result = service.edit_task(parts[1], {"request_id": request_id}, "delete")
@@ -1472,6 +1912,9 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         elif method == "POST" and parts == ["window"]:
             # A timed self-work window: schedule one, end one at a time, or cancel one.
             service.self_work.change_window(self._read_json())
+        elif method == "POST" and parts == ["stop"]:
+            # When self-work stops: the user's condition and latest time, set or cleared.
+            service.self_work.change_stop(self._read_json())
         else:
             raise KeyError(method)
         board = {"board": service.kanban.board(), "self_work": service.self_work.view()}
@@ -1491,11 +1934,18 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "Method not allowed"}, status=405)
             return
         data_dir = self._default_data_dir()
+        extra: dict[str, Any] = {}
         try:
             if method == "POST":
                 body = self._read_json(limit=256 * 1024)
                 action = body.get("action")
-                if action == "add_skill":
+                if action == "clear_mcp_cache":
+                    # A server's downloaded packages; it fetches them again on its next start.
+                    name = body.get("name")
+                    extra["cacheCleared"] = rem_library.clear_mcp_cache(
+                        data_dir, str(name) if name else None
+                    )
+                elif action == "add_skill":
                     rem_library.add_skill(data_dir, str(body.get("path", "")))
                 elif action == "remove_skill":
                     rem_library.remove_skill(data_dir, str(body.get("path", "")))
@@ -1511,12 +1961,43 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                     rem_library.remove_mcp_server(data_dir, str(body.get("name", "")))
                 else:
                     raise ValueError("Unknown resource library action")
-            self._send_json(rem_library.snapshot(data_dir))
+            self._send_json({**rem_library.snapshot(data_dir), **extra})
         except ValidationError as exc:
             message = exc.errors()[0].get("msg", "Invalid MCP server") if exc.errors() else ""
             self._send_json({"error": str(message).removeprefix("Value error, ")}, status=400)
         except (json.JSONDecodeError, ValueError) as exc:
             self._send_json({"error": str(exc)}, status=400)
+
+    def _dispatch_mcp_tools_request(self, method: str, query: str) -> None:
+        """Start an MCP server from Rem's list and return its tools, for the Studio picker.
+
+        ``network`` (repeatable) and ``sandbox=off`` match the mcp-tool step being edited.
+        A local server gets no working folder of its own here: it writes only to scratch.
+        """
+        from urllib.parse import parse_qs
+
+        from gofer.rattish import mcp_tool
+
+        if method == "OPTIONS":
+            self._dispatch_OPTIONS()
+            return
+        if method != "GET":
+            self._send_json({"error": "Method not allowed"}, status=405)
+            return
+        params = parse_qs(query)
+        name = (params.get("name") or [""])[0]
+        try:
+            listing = mcp_tool.server_tools(
+                self._default_data_dir(),
+                name,
+                network=mcp_tool.parse_network(params.get("network")),
+                sandbox=(params.get("sandbox") or ["on"])[0] != "off",
+            )
+        except mcp_tool.McpToolError as exc:
+            status = 404 if exc.code == "RATTISH_MCP_SERVER_UNKNOWN" else 502
+            self._send_json({"error": exc.message, "code": exc.code}, status=status)
+            return
+        self._send_json(listing)
 
     def _dispatch_second_brain_request(self, method: str) -> None:
         if method == "OPTIONS":
@@ -1573,12 +2054,27 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 paths.append((str(params.get("path", "")), not params.get("export", False)))
             if kind in {"import", "export"}:
                 paths.append((str(params.get("destination", "")), False))
+        # An agent token reads only brains that allow cloud processing, unless the owner
+        # created it with `Raticode tokens create --private-brains`.
+        private_closed = bool(self._agent_token_name) and not self._agent_private_brains
         try:
             for value, must_exist in paths:
                 self._assert_bundle_path_allowed(
                     Path(value), grants.get(value), must_exist=must_exist
                 )
-            result = self.server.second_brains.request(action, params)
+            library = self.server.second_brains
+            if private_closed:
+                refusal = agent_brain_refusal(library, action, params)
+                if refusal is not None:
+                    self._send_json({"error": refusal, "code": AGENT_BRAIN_PRIVATE}, status=403)
+                    return
+            result = library.request(action, params)
+            if private_closed:
+                result = (
+                    agent_snapshot(result)
+                    if action == "snapshot"
+                    else agent_brain_result(library, action, result)
+                )
         except WorkflowBundleError as exc:
             self._send_json({"error": str(exc)}, status=403)
             return
@@ -1682,6 +2178,65 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"run": payload})
 
+    def _rattish_run_failure(self, parsed: Any) -> None:
+        """What Ask Rem about this failure attaches for one run (``gofer.ui.run_failure``).
+
+        ``workflowId`` is optional; the run ID finds it. ``nodeId`` names the node to
+        describe, ``workflow`` the run itself; without it, the node that failed.
+        """
+        from gofer.ui.run_failure import RunFailureError, run_failure_payload
+
+        run_id = unquote(parsed.path.removeprefix("/api/rattish/runs/").removesuffix("/failure"))
+        query = parse_qs(parsed.query)
+        try:
+            payload = run_failure_payload(
+                run_id,
+                self._request_data_dir(query),
+                workflow_id=_optional_query(query, "workflowId"),
+                node_id=_optional_query(query, "nodeId"),
+            )
+        except RunFailureError as exc:
+            self._send_json({"error": str(exc)}, status=404)
+            return
+        self._send_json(payload)
+
+    def _rattish_run_changes(self, method: str, parsed: Any) -> None:
+        """A worktree run's changes: GET reads them, POST lands or discards them.
+
+        ``workflowId`` (query or body) is optional; the run ID finds it. Land's body may
+        give ``expectedTip``, the branch tip the user reviewed.
+        """
+        from gofer.ui.api import discard_run_payload, land_run_payload, run_changes_payload
+
+        remainder = parsed.path.removeprefix("/api/rattish/runs/")
+        run_id, _, action = remainder.rpartition("/")
+        run_id = unquote(run_id)
+        query = parse_qs(parsed.query)
+        base = self._request_data_dir(query)
+        try:
+            if method == "GET":
+                workflow_id = _optional_query(query, "workflowId")
+                self._send_json(run_changes_payload(run_id, base, workflow_id=workflow_id))
+                return
+            body = self._read_json()
+            if not isinstance(body, dict):
+                raise WorkflowRunError("The request body must be a JSON object")
+            workflow_id = body.get("workflowId") or _optional_query(query, "workflowId")
+            if workflow_id is not None and not isinstance(workflow_id, str):
+                raise WorkflowRunError("workflowId must be a string")
+            if action == "land":
+                tip = body.get("expectedTip")
+                if tip is not None and not isinstance(tip, str):
+                    raise WorkflowRunError("expectedTip must be a commit hash")
+                payload = land_run_payload(run_id, base, workflow_id=workflow_id, expected_tip=tip)
+            else:
+                payload = discard_run_payload(run_id, base, workflow_id=workflow_id)
+        except (WorkflowRunError, json.JSONDecodeError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        # A conflict is an answer, not a failure: nothing changed and it names the files.
+        self._send_json(payload)
+
     def _dispatch_rattish_secrets(
         self, method: str, path: str, query: dict[str, list[str]]
     ) -> None:
@@ -1706,6 +2261,87 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError):
             # The body may hold the value, so the parser's message is never echoed.
             self._send_json({"error": "Send a secret name and value as JSON."}, status=400)
+
+    def _dispatch_workflow_shortcuts(
+        self, method: str, path: str, query: dict[str, list[str]]
+    ) -> None:
+        """Workflow shortcuts: system-wide keys that run a workflow (Settings > Devices).
+
+        Only the owner adds, removes or runs one; agent tokens can only read the list.
+        """
+        from gofer.rattish.workflow_shortcuts import (
+            ApprovalConflict,
+            ShortcutChanged,
+            ShortcutConflict,
+            ShortcutError,
+            ShortcutNotFound,
+            UnseenChanges,
+        )
+
+        base = self._request_data_dir(query)
+        action = unquote(path.removeprefix("/api/workflow-shortcuts").strip("/"))
+        try:
+            if method == "GET" and not action:
+                self._send_json(
+                    workflow_shortcuts.list_payload(
+                        base,
+                        details=_optional_query(query, "details") == "1",
+                        workflow_id=_optional_query(query, "workflowId"),
+                    )
+                )
+            elif method == "POST" and not action:
+                body = self._read_json(limit=16384)
+                self._send_json(workflow_shortcuts.set_payload(base, body))
+            elif method == "GET" and action == "target":
+                self._send_json(
+                    workflow_shortcuts.target_payload(base, _optional_query(query, "workflowId"))
+                )
+            elif method == "GET" and "/" not in action:
+                self._send_json(workflow_shortcuts.detail_payload(base, action))
+            elif method == "DELETE" and "/" not in action:
+                self._send_json(workflow_shortcuts.remove_payload(base, action))
+            elif method == "POST" and action.endswith("/run"):
+                body = self._read_json(limit=workflow_shortcuts.MAX_BODY_BYTES)
+                self._send_json(
+                    self._run_async(
+                        workflow_shortcuts.run_payload(base, action.removesuffix("/run"), body)
+                    )
+                )
+            elif method == "GET" and action.endswith("/changes"):
+                self._send_json(
+                    workflow_shortcuts.changes_payload(base, action.removesuffix("/changes"))
+                )
+            elif method == "POST" and action.endswith("/approve"):
+                # Agent tokens never get here (agent_request_refusal), so this is the
+                # user's own Approve this version, as for a trigger.
+                self._send_json(
+                    workflow_shortcuts.approve_payload(
+                        base, action.removesuffix("/approve"), self._read_json(limit=16384)
+                    )
+                )
+            else:
+                self._send_json({"error": "Unknown workflow shortcut request"}, status=404)
+        except ShortcutNotFound as exc:
+            self._send_json({"error": str(exc)}, status=404)
+        except ShortcutChanged as exc:
+            self._send_json(
+                {
+                    "error": str(exc),
+                    "code": exc.code,
+                    "state": exc.state,
+                    "shortcutId": exc.shortcut_id,
+                    "workflowName": exc.workflow_name,
+                },
+                status=409,
+            )
+        except ApprovalConflict as exc:
+            self._send_json({"error": str(exc), "conflict": True}, status=409)
+        except UnseenChanges as exc:
+            self._send_json({"error": str(exc), "unseen": exc.files}, status=409)
+        except ShortcutConflict as exc:
+            self._send_json({"error": str(exc)}, status=409)
+        except (ShortcutError, WorkflowRunError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
 
     def _dispatch_rattish_cache(self, method: str, query: dict[str, list[str]]) -> None:
         """A workflow's result cache: GET shows its size, DELETE clears it."""
@@ -1743,11 +2379,27 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(rattish_triggers.trigger_pause_payload(base))
             elif method == "POST" and action == "pause":
                 self._send_json(rattish_triggers.set_trigger_pause_payload(base, self._read_json()))
+            elif method == "GET" and action == "budget":
+                self._send_json(rattish_triggers.daily_budget_payload(base))
+            elif method == "POST" and action == "budget":
+                self._send_json(rattish_triggers.set_daily_budget_payload(base, self._read_json()))
             elif method == "POST" and action == "preview":
                 self._send_json(rattish_triggers.preview_trigger_payload(self._read_json()))
             elif method == "POST" and action == "login":
                 self._send_json(
                     rattish_triggers.set_start_at_login_payload(base, self._read_json())
+                )
+            elif method == "GET" and action.endswith("/changes"):
+                self._send_json(
+                    rattish_triggers.trigger_changes_payload(base, action.removesuffix("/changes"))
+                )
+            elif method == "POST" and action.endswith("/approve"):
+                # Agent tokens never get here (agent_request_refusal), so this is the
+                # user's own Approve this version, as with a ticket's Accept.
+                self._send_json(
+                    rattish_triggers.approve_trigger_payload(
+                        base, action.removesuffix("/approve"), self._read_json()
+                    )
                 )
             elif method == "POST" and action.endswith("/rotate-token"):
                 self._send_json(
@@ -1765,10 +2417,39 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "Method not allowed"}, status=405)
         except TriggerNotFound as exc:
             self._send_json({"error": str(exc)}, status=404)
+        except ApprovalConflict as exc:
+            self._send_json({"error": str(exc), "conflict": True}, status=409)
+        except UnseenChanges as exc:
+            self._send_json({"error": str(exc), "unseen": exc.files}, status=409)
         except TriggerError as exc:
             self._send_json({"error": str(exc)}, status=400)
         except LoginEntryError as exc:
             self._send_json({"error": str(exc)}, status=500)
+
+    def _dispatch_social_request(self, method: str, parsed: Any) -> None:
+        """Social posts. An agent token acts as Rem, which can only propose and revise."""
+        from gofer.social.api import SocialApiError, handle
+
+        parts = [part for part in parsed.path.removeprefix("/api/social").split("/") if part]
+        body = self._read_json(limit=256 * 1024) if method in {"POST", "PUT", "PATCH"} else {}
+        if not isinstance(body, dict):
+            self._send_json({"error": "Expected a JSON object."}, status=400)
+            return
+        actor = "rem" if self._agent_token_name else "user"
+        proposer = body.pop("proposer", None)
+        if (
+            actor == "user"
+            and isinstance(proposer, str)
+            and re.fullmatch(r"cli|rem|workflow:[\w.@:-]{1,80}", proposer)
+        ):
+            # The CLI names who is proposing. It can only lower its own authority.
+            actor = proposer
+        try:
+            payload = handle(self.server.social, method, parts, actor, body, parse_qs(parsed.query))
+        except SocialApiError as exc:
+            self._send_json({"error": str(exc), "code": exc.code}, status=exc.status)
+            return
+        self._send_json(payload)
 
     def _dispatch_organization_request(self, method: str) -> None:
         if method == "OPTIONS":
@@ -1839,8 +2520,11 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                     "files": read_directory(root),
                 }
         if action in {"create", "configure"} and isinstance(params.get("config"), dict):
+            # Saved as entered: runs find the folder's library brain each time, so the
+            # stored folder doesn't change and raise a new approval request.
             self._validate_second_brain(
-                {"workflow": {"remSecondBrain": params["config"].get("remSecondBrain", {})}}
+                {"workflow": {"remSecondBrain": params["config"].get("remSecondBrain", {})}},
+                fill=False,
             )
         if action in {"create", "configure"} and isinstance(params.get("config"), dict):
             oid = body.get("organizationId") or _optional_query(query, "organizationId")
@@ -2023,6 +2707,12 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
             self._send_json({"ok": True})
+            return
+        if parsed.path == "/api/computers":
+            self._send_json(self.server.computers.read())
+            return
+        if parsed.path == "/api/computers/placement":
+            self._send_json(self.server.computers.placement())
             return
         if parsed.path == "/api/chat/attachments/locate":
             # The window previews a sent attachment from where the upload stored it.
@@ -2245,11 +2935,14 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/chat/transcribe/engines":
             query = parse_qs(parsed.query)
             refresh = query.get("refresh", ["0"])[0] in {"1", "true"}
+            preference = speech_preference()
             self._send_json(
                 {
-                    **speech_preference(),
+                    **preference,
                     **transcription_engines(
-                        data_dir=self._request_data_dir(query), refresh=refresh
+                        data_dir=self._request_data_dir(query),
+                        refresh=refresh,
+                        preference=preference,
                     ),
                 }
             )
@@ -2278,10 +2971,15 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/provider/commit-settings":
+            from gofer.core.commit_attribution import status as co_author_status
             from gofer.core.commit_message_format import DEFAULT_COMMIT_MESSAGE_TEMPLATE
 
             self._send_json(
-                {**commit_message_preference(), "defaultTemplate": DEFAULT_COMMIT_MESSAGE_TEMPLATE}
+                {
+                    **commit_message_preference(),
+                    "defaultTemplate": DEFAULT_COMMIT_MESSAGE_TEMPLATE,
+                    "stripCoAuthorsStatus": co_author_status(),
+                }
             )
             return
 
@@ -2321,16 +3019,58 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "Invalid usage reporting account."}, status=400)
             return
 
+        if parsed.path == "/api/usage/alerts":
+            from gofer.core.usage_alerts import alert_settings
+
+            query = parse_qs(parsed.query)
+            self._send_json(alert_settings(self._request_data_dir(query)))
+            return
+
         if parsed.path == "/api/usage/overview":
             query = parse_qs(parsed.query)
             try:
+                data_dir = self._request_data_dir(query)
                 self._send_json(
-                    usage_overview(
-                        self._request_data_dir(query),
-                        days=int(query.get("days", ["30"])[0]),
+                    _usage_with_accounts(
+                        usage_overview(data_dir, **_usage_period(query)),
+                        data_dir,
+                        getattr(self.server, "rem_home", None),
                     )
                 )
             except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            return
+
+        if parsed.path == "/api/usage/verified-work":
+            # Settings › Usage › Verified work on its own, for `Raticode usage verified`.
+            from gofer.core.usage_history import resolve_range
+            from gofer.ui.rem_verified_work import verified_work
+
+            query = parse_qs(parsed.query)
+            try:
+                window = resolve_range(**_usage_period(query))
+                self._send_json(verified_work(self._request_data_dir(query), window))
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            return
+
+        if parsed.path in {"/api/provider/accounts", "/api/provider/claude-accounts"}:
+            # Every provider's accounts, or one provider's with ?provider=. The
+            # claude-accounts path is the first version's and lists Claude Code only.
+            from gofer.core.provider_accounts import AccountError, accounts_overview
+
+            query = parse_qs(parsed.query)
+            try:
+                self._send_json(
+                    accounts_overview(
+                        self._request_data_dir(query),
+                        refresh=query.get("refresh", [""])[0] == "1",
+                        provider="claude_code"
+                        if parsed.path.endswith("/claude-accounts")
+                        else query.get("provider", [""])[0] or None,
+                    )
+                )
+            except (AccountError, ProviderProfileError, ValueError) as exc:
                 self._send_json({"error": str(exc)}, status=400)
             return
 
@@ -2402,6 +3142,17 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 )
             except WorkflowHistoryError as exc:
                 self._send_json({"error": str(exc)}, status=400)
+            return
+
+        if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/run-worktrees"):
+            workflow_id = parsed.path.removeprefix("/api/workflows/").removesuffix("/run-worktrees")
+            query = parse_qs(parsed.query)
+            try:
+                self._send_json(
+                    workflow_run_worktrees_payload(workflow_id, self._request_data_dir(query))
+                )
+            except WorkflowUpdateError as exc:
+                self._send_json({"error": str(exc)}, status=404)
             return
 
         if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/doctor"):
@@ -2519,6 +3270,48 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
 
     def _dispatch_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/computers/placement":
+            try:
+                body = self._read_json()
+                if isinstance(body, dict) and set(body) == {"order"}:
+                    # The user's order of computers, which overflow fills in turn.
+                    view = self.server.computers.set_order(body["order"])
+                elif not isinstance(body, dict) or set(body) - {
+                    "consumer",
+                    "strategy",
+                    "computers",
+                    "shared",
+                }:
+                    raise ValueError(
+                        "Send order alone, or consumer, strategy, and for manual, computers"
+                    )
+                else:
+                    view = self.server.computers.set_placement(
+                        body.get("consumer"),
+                        body.get("strategy"),
+                        body.get("computers"),
+                        body.get("shared"),
+                    )
+            except (ValueError, json.JSONDecodeError) as exc:
+                self._request_failed("Changing where work runs", exc)
+                return
+            self._send_json(view)
+            return
+        if parsed.path == "/api/computers":
+            from gofer.core.computers import ComputerError
+
+            try:
+                body = self._read_json()
+                if not isinstance(body, dict) or set(body) - {"computer_id", "max_threads"}:
+                    raise ComputerError("Send computer_id and max_threads")
+                view = self.server.computers.set_max_threads(
+                    body.get("computer_id"), body.get("max_threads")
+                )
+            except (ValueError, json.JSONDecodeError) as exc:
+                self._request_failed("Changing a computer's worker limit", exc)
+                return
+            self._send_json(view)
+            return
         if parsed.path == "/api/classifiers/jev/key":
             self._jev_post(parsed, "key")
             return
@@ -2549,17 +3342,38 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "Invalid reporting settings."}, status=400)
             return
 
+        if parsed.path == "/api/usage/alerts":
+            from gofer.core.usage_alerts import UsageAlertError, save_alert_settings
+
+            query = parse_qs(parsed.query)
+            try:
+                body = self._read_json(limit=4 * 1024)
+                if not isinstance(body, dict):
+                    raise UsageAlertError("Expected alert settings.")
+                self._send_json(
+                    save_alert_settings(
+                        self._request_data_dir(query),
+                        enabled=body.get("enabled"),
+                        thresholds=body.get("thresholds"),
+                    )
+                )
+            except UsageAlertError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            except (ValueError, json.JSONDecodeError):
+                self._send_json({"error": "Invalid alert settings."}, status=400)
+            return
+
         if parsed.path == "/api/usage/refresh":
             query = parse_qs(parsed.query)
             try:
                 self._read_json()
+                data_dir = self._request_data_dir(query)
+                refreshed = self._run_async(
+                    refresh_usage(data_dir, query=_usage_period(query), explicit=True)
+                )
                 self._send_json(
-                    self._run_async(
-                        refresh_usage(
-                            self._request_data_dir(query),
-                            days=int(query.get("days", ["30"])[0]),
-                            explicit=True,
-                        )
+                    _usage_with_accounts(
+                        refreshed, data_dir, getattr(self.server, "rem_home", None)
                     )
                 )
             except (ValueError, json.JSONDecodeError) as exc:
@@ -2704,13 +3518,16 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             try:
                 self._read_json()
                 tried = system_speech.try_system_engine()
+                preference = speech_preference()
                 engines = transcription_engines(
-                    data_dir=self._request_data_dir(parse_qs(parsed.query)), refresh=True
+                    data_dir=self._request_data_dir(parse_qs(parsed.query)),
+                    refresh=True,
+                    preference=preference,
                 )
             except (json.JSONDecodeError, ValueError, OSError) as exc:
                 self._request_failed("Testing speech recognition", exc)
                 return
-            self._send_json({"test": tried, **speech_preference(), **engines})
+            self._send_json({"test": tried, **preference, **engines})
             return
 
         if parsed.path == "/api/provider/voice-tidy":
@@ -2720,6 +3537,23 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._request_failed("Saving voice tidy settings", exc)
                 return
             self._send_json({"saved": True, **voice_tidy_preference()})
+            return
+
+        if parsed.path == "/api/provider/commit-message/clean":
+            # The Source Control panel commits in the desktop window; it sends the
+            # message here first so the same Python check cleans it.
+            from gofer.core.commit_attribution import clean_commit_message
+
+            try:
+                body = self._read_json()
+            except (ValueError, OSError) as exc:
+                self._request_failed("Checking the commit message", exc)
+                return
+            message = body.get("message") if isinstance(body, dict) else None
+            if not isinstance(message, str) or len(message) > 72000:
+                self._send_json({"error": "Send the commit message as text"}, status=400)
+                return
+            self._send_json({"message": clean_commit_message(message)})
             return
 
         if parsed.path == "/api/provider/commit-settings":
@@ -2791,6 +3625,21 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             try:
                 payload = save_workflow_tests_payload(
+                    workflow_id, self._request_data_dir(query), self._read_json()
+                )
+            except (WorkflowTestError, json.JSONDecodeError) as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            self._send_json(payload)
+            return
+
+        if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/tests/estimate"):
+            workflow_id = parsed.path.removeprefix("/api/workflows/").removesuffix(
+                "/tests/estimate"
+            )
+            query = parse_qs(parsed.query)
+            try:
+                payload = estimate_workflow_tests_payload(
                     workflow_id, self._request_data_dir(query), self._read_json()
                 )
             except (WorkflowTestError, json.JSONDecodeError) as exc:
@@ -2874,6 +3723,10 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             except (RattishEditorError, json.JSONDecodeError, ValueError) as exc:
                 self._send_json({"error": str(exc)}, status=400)
                 return
+            # Saving in the Studio window approves the workflow file it wrote, and only
+            # that file, for the workflow's triggers and its shortcut.
+            rattish_triggers.approve_after_studio_save(self._request_data_dir(query), workflow_id)
+            workflow_shortcuts.approve_after_studio_save(self._request_data_dir(query), workflow_id)
             self._send_json({"document": payload})
             return
 
@@ -2906,6 +3759,10 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             except (RattishEditorError, json.JSONDecodeError, ValueError) as exc:
                 self._send_json({"error": str(exc)}, status=400)
                 return
+            # Saving in the Studio window approves the workflow file it wrote, and only
+            # that file, for the workflow's triggers and its shortcut.
+            rattish_triggers.approve_after_studio_save(self._request_data_dir(query), workflow_id)
+            workflow_shortcuts.approve_after_studio_save(self._request_data_dir(query), workflow_id)
             self._send_json({"document": payload})
             return
 
@@ -3098,8 +3955,11 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                             body.get("grantId"),
                             must_exist=True,
                         )
+                    if not bundle_path:
+                        # An empty path reads the current folder as a ZIP: a 500 before.
+                        raise ValueError("Give the bundle to preview.")
                     payload = preview_workflow_bundle_payload(
-                        bundle_path or Path(""),
+                        bundle_path,
                         self._request_data_dir(query),
                         resource_limits=self._resource_limits(),
                     )
@@ -3201,9 +4061,11 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             try:
                 self._read_json()
+                preference = speech_preference()
                 payload = start_chat_transcription(
                     data_dir=self._request_data_dir(query),
-                    engine=speech_preference()["engine"],
+                    engine=preference["engine"],
+                    engine_chosen=preference["chosen"],
                 )
             except (ChatMediaError, json.JSONDecodeError) as exc:
                 self._send_json({"error": str(exc)}, status=400)
@@ -3528,6 +4390,24 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             self._send_json(payload)
             return
 
+        if parsed.path in {"/api/provider/accounts", "/api/provider/claude-accounts"}:
+            from gofer.core.provider_accounts import AccountError, account_action
+
+            query = parse_qs(parsed.query)
+            try:
+                self._send_json(
+                    account_action(
+                        self._read_json(),
+                        self._request_data_dir(query),
+                        provider="claude_code"
+                        if parsed.path.endswith("/claude-accounts")
+                        else None,
+                    )
+                )
+            except (AccountError, ProviderProfileError, ValueError, OSError) as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            return
+
         if parsed.path == "/api/provider/profiles":
             query = parse_qs(parsed.query)
             try:
@@ -3814,6 +4694,12 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                         raise WorkflowRunError("expectedRevision must be a string")
                     run_options["expected_revision"] = body["expectedRevision"]
                 run_options["started_by"] = _api_started_by(body)
+                # Run from a node, reusing an earlier run's upstream results.
+                for key, option in (("fromNode", "from_node"), ("reuseRunId", "reuse_run_id")):
+                    if body.get(key) is not None:
+                        if not isinstance(body[key], str) or not body[key]:
+                            raise WorkflowRunError(f"{key} must be a non-empty string")
+                        run_options[option] = body[key]
                 trigger_context = body.get("triggerContext")
                 if trigger_context is not None and not isinstance(trigger_context, dict):
                     raise WorkflowRunError("triggerContext must be an object")
@@ -3930,6 +4816,8 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                     self._request_data_dir(query),
                     decided_by=str(body.get("by") or "ui"),
                     notes=str(body.get("notes") or ""),
+                    choice=(None if body.get("choice") is None else str(body["choice"])),
+                    reply=str(body.get("reply") or ""),
                 )
             except (WorkflowApprovalError, json.JSONDecodeError, ValueError) as exc:
                 self._send_json({"error": str(exc)}, status=400)
@@ -4208,10 +5096,22 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                     async for event in stream:
                         yield event
 
+            async def social_source(
+                **social_options: Any,
+            ) -> AsyncGenerator[dict[str, Any], None]:
+                from gofer.social.mcp import stream_with_social_tools
+
+                social = getattr(self.server, "social", None)
+                async with aclosing(
+                    stream_with_social_tools(organization_source, social, **social_options)
+                ) as social_stream:
+                    async for event in social_stream:
+                        yield event
+
             async def fleet_source(**fleet_options: Any) -> AsyncGenerator[dict[str, Any], None]:
                 async with aclosing(
                     stream_with_fleet_tools(
-                        organization_source, getattr(self.server, "devices", None), **fleet_options
+                        social_source, getattr(self.server, "devices", None), **fleet_options
                     )
                 ) as fleet_stream:
                     async for event in fleet_stream:
@@ -4262,6 +5162,20 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 data_dir=data_dir,
                 resource_limits=self._resource_limits(),
             )
+            if (account := _optional_body_str(body, "providerProfile")) and not machine:
+                # The account of this provider the user picked for this thread, or
+                # "auto" for Rem's pick. Another desktop has its own accounts, so a
+                # remote turn never names one.
+                from gofer.ui.rem_provider_accounts import thread_account
+
+                if chosen := await asyncio.to_thread(
+                    thread_account,
+                    body.get("conversationId"),
+                    account,
+                    data_dir,
+                    provider=kwargs["provider"],
+                ):
+                    kwargs["provider_profile"] = chosen
             if "conversationId" in body or "turnId" in body:
                 turn = self.server.chat_steering.begin(
                     body.get("conversationId", ""),
@@ -4390,6 +5304,11 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                     {"workflow": {"remThreads": {"projects": [project]}}}
                 )
                 authorize({"projects": [project]}, {})
+                # Rem's own turns run on a cloud provider (_private_rem_projects).
+                root = str(project.get("root") or "")
+                reason = self.server._private_rem_projects({"brain": brain}, {}, [root]).get(root)
+                if reason:
+                    raise ValueError(reason)
             except ValueError as exc:
                 warnings.append(f"Rem can't use {name or 'a project'}: {exc}")
                 continue
@@ -4397,15 +5316,30 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         body["projects"] = kept
         if brain.get("enabled"):
             try:
-                self._validate_second_brain({"workflow": {"remSecondBrain": brain}})
+                # Rem's saved settings keep the folder; tasks find its brain when they run.
+                self._validate_second_brain({"workflow": {"remSecondBrain": brain}}, fill=False)
                 authorize({"projects": [], "brain": brain}, {})
             except ValueError as exc:
                 body["brain"] = {**brain, "enabled": False}
                 warnings.append(f"Rem can't use Second Brain: {exc}")
         return warnings
 
-    def _validate_second_brain(self, body: dict[str, Any]) -> None:
+    def _validate_second_brain(self, body: dict[str, Any], *, fill: bool = True) -> None:
+        """Check the turn's Second Brain setting and complete it for the run.
+
+        With ``fill``, a folder without brainIds that a library brain is registered at
+        gets that brain, so Rem searches the library instead of the folder's own index.
+        Callers that save the setting pass ``fill=False`` and keep it as entered.
+        """
         config = (body.get("workflow") or {}).get("remSecondBrain") or {}
+        if not isinstance(config, dict):
+            raise ValueError("Invalid Second Brain configuration")
+        from gofer.ui.second_brain import MEMORY_FOLDER_KEY
+
+        # Only the fill below may mark a brain as the approved folder.
+        if config.pop(MEMORY_FOLDER_KEY, None):
+            config.pop("brainIds", None)
+            config.pop("libraryDataDir", None)
         if config.get("enabled") is not True:
             return
         if "brainIds" in config:
@@ -4439,6 +5373,10 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             ) from exc
         if config.get("format", "md") not in {"md", "html", "slides", "pdf"}:
             raise ValueError("Choose Markdown, HTML, Slides, or PDF for reports.")
+        if fill and "brainIds" not in config:
+            # The folder was approved above; its library brain needs no cloud permission
+            # (the documented Settings > Memory rule). The grant stays the folder's own.
+            config.update(library_brain(self.server, config))
 
     def _assert_bundle_path_allowed(
         self,
@@ -4691,6 +5629,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
 
     def _authorize_ui_request(self, method: str, path: str) -> bool:
         self._agent_token_name = None
+        self._agent_private_brains = False
         if not _requires_ui_api_auth(method, path) or self._has_ui_api_token():
             return True
         agent = self._agent_token()
@@ -4699,13 +5638,14 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             if refusal is not None:
                 self._send_json({"error": refusal, "code": "agent_token_forbidden"}, status=403)
                 return False
-            self._agent_token_name = agent
+            self._agent_token_name = agent.name
+            self._agent_private_brains = agent.private_brains
             return True
         self._send_json({"error": "UI API authentication required"}, status=401)
         return False
 
-    def _agent_token(self) -> str | None:
-        """The name of the agent token this request carries, if it is valid."""
+    def _agent_token(self) -> AgentGrant | None:
+        """The agent token this request carries, if it is valid."""
         store = getattr(self.server, "agent_tokens", None)
         if store is None:
             return None
@@ -4714,7 +5654,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         authorization = headers.get("Authorization", "")
         if supplied is None and authorization.startswith("Bearer "):
             supplied = authorization.removeprefix("Bearer ").strip()
-        return store.match(supplied) if supplied else None
+        return store.grant(supplied) if supplied else None
 
 
 def ready_payload(server: GoferUiServer) -> dict[str, Any]:
@@ -4725,7 +5665,10 @@ def ready_payload(server: GoferUiServer) -> dict[str, Any]:
         "dataDir": str(server.data_dir),
         "goferCliAvailable": server.gofer_cli_path is not None,
     }
-    if getattr(server, "emit_ready_token", False):
+    # Only the desktop window reads this line, from a pipe. A headless backend's stdout
+    # goes to a terminal or the journal, so it never carries the token, even when the
+    # flag was inherited from a desktop app's environment.
+    if getattr(server, "emit_ready_token", False) and not getattr(server, "headless", False):
         payload["apiToken"] = server.api_token
     return payload
 
@@ -4978,6 +5921,15 @@ def _install_shutdown_handlers(server: GoferUiServer) -> None:
             log.debug("Could not install handler for signal %s", signum)
 
 
+def _sweep_run_worktrees(data_dir: Path) -> None:
+    from gofer.rattish import run_worktrees
+
+    try:
+        run_worktrees.sweep_at_start(data_dir)
+    except Exception:  # noqa: BLE001 - a clean-up failure must not stop startup
+        log.warning("Couldn't sweep run worktrees of deleted workflows", exc_info=True)
+
+
 def serve(
     host: str = "127.0.0.1",
     port: int = 8765,
@@ -4991,6 +5943,7 @@ def serve(
     configure_backend_logging()
     # Undo the logging setup if startup fails, such as on a bad secrets folder, so a
     # handler isn't left writing to a stream the caller closes.
+    session: HeadlessSession | None = None
     try:
         log.info(
             "Starting Raticode backend (Python %s, %s %s)",
@@ -4998,7 +5951,6 @@ def serve(
             sys.platform,
             os.uname().machine if hasattr(os, "uname") else "",
         )
-        session: HeadlessSession | None = None
         if headless:
             # Check the secrets folder first, so a bad one stops startup before any file is written.
             folder = headless_support.prepare_secrets_dir(secrets_dir)
@@ -5041,9 +5993,30 @@ def serve(
         triggers.start()
         stop_usage_refresh = start_background_refresh(server.data_dir)
         stop_reclaimer = start_leftover_reclaimer()
+        # Scratch folders a stopped or crashed Rem turn or workflow run left behind.
+        start_scratch_cleanup(server.data_dir)
+        # Fresh worktrees of project checks a cancel, crash or restart left behind.
+        rem_project_checks.start_sweep(server.data_dir)
+        # Run worktrees of workflows deleted while the backend wasn't running.
+        threading.Thread(
+            target=_sweep_run_worktrees,
+            args=(server.data_dir,),
+            name="run-worktree-sweep",
+            daemon=True,
+        ).start()
+        # The Vosk model earlier versions downloaded is unusable now; delete it once.
+        threading.Thread(
+            target=clean_legacy_speech_models,
+            args=(server.data_dir,),
+            name="legacy-speech-models",
+            daemon=True,
+        ).start()
         _install_shutdown_handlers(server)
         print(f"GOFER_UI_READY {json.dumps(ready_payload(server), sort_keys=True)}", flush=True)
     except BaseException:
+        if session is not None:
+            # Free the data folder's backend lock and the token this start wrote.
+            session.close()
         reset_backend_logging()
         raise
     try:
@@ -5079,6 +6052,7 @@ class HeadlessSession:
         self.written_token = written_token
         self.endpoint_text = ""
         self.secrets_dir: Path | None = None
+        self.lock: int | None = None
 
     @classmethod
     def prepare(cls, host: str, data_dir: Path, token_file: Path | None) -> HeadlessSession:
@@ -5091,6 +6065,17 @@ class HeadlessSession:
         data_dir.mkdir(parents=True, exist_ok=True)
         restrict_to_owner(data_dir)
         headless_support.ensure_private_dir(headless_support.headless_dir(data_dir))
+        lock = headless_support.hold_backend_lock(data_dir)
+        try:
+            session = cls._with_token(data_dir, token_file)
+        except BaseException:
+            headless_support.release_backend_lock(lock)
+            raise
+        session.lock = lock
+        return session
+
+    @classmethod
+    def _with_token(cls, data_dir: Path, token_file: Path | None) -> HeadlessSession:
         if token_file is not None:
             return cls(data_dir, headless_support.read_token_file(token_file), None)
         if os.environ.get("GOFER_UI_API_TOKEN"):
@@ -5130,6 +6115,8 @@ class HeadlessSession:
             )
         if self.written_token is not None:
             headless_support.remove_if_unchanged(self.written_token, self.token + "\n")
+        headless_support.release_backend_lock(self.lock)
+        self.lock = None
 
 
 def apply_rem_settings(server: GoferUiServer, path: Path) -> None:

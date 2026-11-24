@@ -42,8 +42,9 @@ def test_claude_code_command_with_tools(monkeypatch) -> None:
 def test_claude_code_command_with_mcp(monkeypatch) -> None:
     sub = ClaudeCodeSubscription()
     cmd = sub._build_command("hi", [], ["my-server"])
-    assert "--mcp-server" in cmd
-    assert "my-server" in cmd
+    # Claude Code has no --mcp-server option; the server's tools are allowed by name.
+    assert "--mcp-server" not in cmd
+    assert cmd[cmd.index("mcp__my-server") - 1] == "--allowedTools"
 
 
 def test_claude_code_command_with_model_and_effort(monkeypatch) -> None:

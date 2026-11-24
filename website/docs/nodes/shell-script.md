@@ -1,16 +1,16 @@
 ---
 title: shell-script
-description: Run a Bash script stored in the project, with explicit arguments and environment values.
+description: Run a bash or PowerShell script stored in the project, with explicit arguments and environment values.
 pageClass: docs-layout
 ---
 
 # shell-script
 
-Run a Bash script stored in the project, with explicit arguments and environment values.
+Run a bash or PowerShell script stored in the project, with explicit arguments and environment values.
 
 ## When to use it
 
-Use it for shell logic you want in a reviewed file that several workflows can call. It always runs the script with Bash, unlike [bash-command](./bash-command.md), which uses the platform shell.
+Use it for shell logic you want in a reviewed file that several workflows can call. By default it runs the script with bash, on every platform.
 
 ## Example
 
@@ -22,6 +22,7 @@ Workflow:
 
 Node step:
   type: shell-script
+  shell: bash
   script-path: scripts/check.sh
   args:
     - --quick
@@ -42,6 +43,15 @@ Fields for this node only. The [shared node fields](./index.md#shared-node-field
 | `script-path` | string | Required | Readable script source path. |
 | `args` | list of string | `[]` | Ordered argument strings. |
 | `env` | object | `{}` | Additional string environment values. |
+| `shell` | `auto`, `bash` or `powershell` | `auto` | The program that runs the script. See below. |
+
+## Which shell runs the script
+
+- `auto` runs `bash` from `PATH`, as shell-script always has. On Windows that can be the WSL launcher in System32.
+- `bash` runs bash. On Windows it's Git for Windows' bash, found the same way as for [bash-command](./bash-command.md#which-shell-runs-the-command), and never the WSL launcher. Use it for scripts that should run on Windows too.
+- `powershell` runs the script with `-File` in Windows PowerShell, or in `pwsh` on macOS and Linux. PowerShell wants a `.ps1` file.
+
+The `shell` field is new in Raticode 0.6.0.
 
 ## Inputs and output
 
@@ -66,7 +76,7 @@ Downstream, select a field as `node.step.output.stdout`.
 
 ## Preflight and limits
 
-Bash must be on PATH and the script must be readable. The script runs with the workflow's permissions and can do anything they allow.
+The shell must be installed and the script must be readable. When `shell: bash` finds no bash on Windows, preflight fails and links to the [Git for Windows download](https://git-scm.com/downloads/win). The script runs with the workflow's permissions and can do anything they allow.
 
 Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 

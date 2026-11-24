@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -299,7 +300,7 @@ def test_clear_history_erases_memories_but_keeps_the_memory_mode(home: RemHome):
     home.clear_history(
         {"request_id": "clear", "conversation_id": conversation["id"], "confirm": True}
     )
-    assert home.memories() == {"memories": [], "mode": "paused"}
+    assert home.memories() == {"memories": [], "mode": "paused", "projects": []}
 
 
 def test_memory_change_validation():
@@ -364,3 +365,302 @@ def test_phone_record_shows_texts_only():
     }
     assert memory_book.phone_record({}) is None
     assert json.dumps(shown)
+
+
+def open_projects(home: RemHome, tmp_path: Path, *names: str) -> list[str]:
+    roots = []
+    for name in names:
+        root = tmp_path / name
+        root.mkdir(exist_ok=True)
+        roots.append(str(root))
+    home.configure(
+        {
+            "provider": "codex",
+            "projects": [{"root": root, "name": Path(root).name} for root in roots],
+        }
+    )
+    return roots
+
+
+def test_a_saved_fact_naming_one_open_project_belongs_to_it(home: RemHome, tmp_path: Path):
+    raticode, mobile, _ = open_projects(home, tmp_path, "Raticode", "Raticode Mobile", "Notes")
+    prompts: list[str] = []
+
+    def generate(prompt: str, config: Any, effort: Any) -> dict[str, Any]:
+        prompts.append(prompt)
+        return {
+            "reply": "Noted.",
+            "memories": [
+                "Raticode releases go out on Fridays",
+                "In Raticode Mobile, use Compose for new screens",
+                "Raticode and Notes share the support address",
+                "Prefers short replies",
+            ],
+        }
+
+    home.generate = generate
+    ask(home, "Remember these")
+    by_text = {m["text"]: m for m in saved(home).values()}
+    assert by_text["Raticode releases go out on Fridays"]["project"] == raticode
+    # The longer name wins over the name it contains.
+    assert by_text["In Raticode Mobile, use Compose for new screens"]["project"] == mobile
+    # Naming two projects, or none, keeps a memory for every project.
+    assert "project" not in by_text["Raticode and Notes share the support address"]
+    assert "project" not in by_text["Prefers short replies"]
+    assert "name that project in the memory's text" in prompts[0]
+    note = reply(home)["memory"]["saved"]
+    assert {e.get("project") for e in note} == {raticode, mobile, None}
+
+
+def test_a_project_name_must_be_a_whole_word_and_not_too_short():
+    projects = [{"root": "/w/app", "name": "app"}, {"root": "/w/ui", "name": "ui"}]
+    assert memory_book.project_for("The app ships weekly", projects) == "/w/app"
+    assert memory_book.project_for("Happy path tests first", projects) is None
+    assert memory_book.project_for("Keep the ui calm", projects) is None
+    assert memory_book.project_for("Files under /w/ui are generated", projects) == "/w/ui"
+    assert memory_book.project_for("Anything", []) is None
+
+
+def test_prompts_carry_global_memories_and_only_their_own_projects():
+    saved = {
+        "g": {"text": "Prefers HTML reports", "created_at": "2026-10-01"},
+        "a": {"text": "Alpha deploys with make", "created_at": "2026-10-02", "project": "/w/a"},
+        "b": {"text": "Beta uses pnpm", "created_at": "2026-10-03", "project": "/w/b"},
+    }
+    shown, left = memory_book.choose(saved, "anything")
+    assert [e["id"] for e in shown] == ["g"] and left == 0
+    shown, _ = memory_book.choose(saved, "anything", places=["/w/a"])
+    assert [e["id"] for e in shown] == ["a", "g"]
+    assert shown[0]["project"] == "/w/a" and "project" not in shown[1]
+    # A folder inside the project, such as a worktree or app folder, is in it.
+    assert memory_book.for_worker(saved, {}, "x", "/w/a/.worktrees/fix") == [
+        "Alpha deploys with make",
+        "Prefers HTML reports",
+    ]
+    assert memory_book.for_worker(saved, {}, "x", "/w/abc") == ["Prefers HTML reports"]
+    assert memory_book.for_worker(saved, {}, "x", None) == ["Prefers HTML reports"]
+    fields = memory_book.for_prompt(saved, {}, "x", ["/w/b"])
+    assert [e["id"] for e in fields["memories"]] == ["b", "g"]
+
+
+def test_past_the_cap_global_memories_come_first_and_the_project_fills_the_rest():
+    saved: dict[str, Any] = {
+        f"g{n}": {"text": f"global fact {n}", "created_at": f"2026-10-01T00:00:{n:02d}"}
+        for n in range(15)
+    }
+    saved |= {
+        f"p{n}": {
+            "text": f"project fact {n}",
+            "created_at": f"2026-11-01T00:00:{n:02d}",
+            "project": "/w/a",
+        }
+        for n in range(10)
+    }
+    saved["p-match"] = {
+        "text": "The nightly build runs at two",
+        "created_at": "2026-01-01",
+        "project": "/w/a",
+    }
+    saved["other"] = {"text": "Other project", "created_at": "2026-12-01", "project": "/w/b"}
+    shown, left = memory_book.choose(
+        saved, "when does the nightly build run", limit=20, places=["/w/a"]
+    )
+    ids = [e["id"] for e in shown]
+    assert len(ids) == 20 and left == 26 - 20
+    assert set(ids[:15]) == {f"g{n}" for n in range(15)}
+    # The project's memories fill the 5 places left by today's ranking: matches, then newest.
+    assert ids[15:] == ["p-match", "p9", "p8", "p7", "p6"]
+    assert "other" not in ids
+
+
+def test_workers_get_their_projects_memories_only(home: RemHome, monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(home, "_delegation_context", lambda run, config: {})
+    remember(
+        home,
+        {
+            "g": {"text": "Prefers HTML reports.", "created_at": "2026-10-01"},
+            "a": {"text": "Use uv here.", "created_at": "2026-10-02", "project": str(tmp_path)},
+            "b": {"text": "Elsewhere only.", "created_at": "2026-10-03", "project": "/else"},
+        },
+    )
+    run = {"id": "run-1", "epoch": 1, "recipe": recipe(tmp_path)}
+    assert home._worker_background(run, {})["user_memories"] == [
+        "Use uv here.",
+        "Prefers HTML reports.",
+    ]
+    outside = {"id": "run-2", "epoch": 1, "recipe": recipe()}
+    assert home._worker_background(outside, {})["user_memories"] == ["Prefers HTML reports."]
+
+
+def test_user_moves_memories_between_projects(home: RemHome, tmp_path: Path):
+    (root,) = open_projects(home, tmp_path, "Site")
+    listed = home.add_memory({"text": "Deploys from main", "project": root})
+    (item,) = listed["memories"]
+    assert item["project"] == root and item["project_name"] == "Site"
+    assert listed["projects"] == [{"root": root, "name": "Site"}]
+    with pytest.raises(ValueError, match="open projects"):
+        home.add_memory({"text": "Other", "project": "/not/open"})
+
+    moved = home.edit_memory(item["id"], {"project": None})["memories"][0]
+    assert "project" not in moved and moved["text"] == "Deploys from main"
+    assert "edited_at" not in moved
+    back = home.edit_memory(item["id"], {"project": root, "text": "Deploys from release"})
+    assert back["memories"][0]["project"] == root
+    assert back["memories"][0]["text"] == "Deploys from release"
+    # Editing only the text keeps the project, even once the project is closed.
+    home.configure({"provider": "codex", "projects": []})
+    kept = home.edit_memory(item["id"], {"text": "Deploys from tags"})["memories"][0]
+    assert kept["project"] == root
+    assert home.memories()["projects"] == [{"root": root, "name": "Site", "open": False}]
+    # The closed project can be kept, but no other closed one picked.
+    home.edit_memory(item["id"], {"project": root})
+    with pytest.raises(ValueError):
+        home.edit_memory(item["id"], {"project": "/elsewhere"})
+    with pytest.raises(ValueError):
+        home.edit_memory(item["id"], {})
+    with pytest.raises(ValueError):
+        home.edit_memory(item["id"], {"pinned": True})
+
+
+def test_existing_memories_without_a_project_stay_global(home: RemHome, tmp_path: Path):
+    open_projects(home, tmp_path, "Raticode")
+    remember(
+        home, {"old": {"text": "Raticode docs live on the website", "created_at": "2026-10-01"}}
+    )
+    (item,) = home.memories()["memories"]
+    assert "project" not in item
+    assert memory_book.for_worker(saved(home), {}, "x", None) == [item["text"]]
+
+
+# End dates -------------------------------------------------------------------------
+
+PAST = "2026-01-01T00:00:00+00:00"
+FUTURE = "2099-12-31T23:59:59+00:00"
+
+
+def test_rem_proposes_an_end_date_for_a_dated_fact_and_the_note_shows_it(home: RemHome):
+    prompts = []
+
+    def generate(prompt, config, cancel):
+        prompts.append(prompt)
+        return {
+            "reply": "Noted.",
+            "memories": [
+                {"text": "Flying to Oslo for the conference", "until": "2099-06-30"},
+                "Prefers aisle seats",
+            ],
+        }
+
+    home.generate = generate
+    ask(home, "I'm in Oslo for the conference until June 30, and I like aisle seats")
+    # Rem is told how to propose an end, and what today is in the user's timezone.
+    assert "{text,until}" in prompts[0] and "local_now" in prompts[0]
+    by_text = {m["text"]: m for m in saved(home).values()}
+    dated = by_text["Flying to Oslo for the conference"]
+    # A plain day means the end of that day in the user's timezone.
+    assert dated["until"].startswith("2099-06-30T23:59:59")
+    assert datetime.fromisoformat(dated["until"]).tzinfo is not None
+    assert "until" not in by_text["Prefers aisle seats"]
+    note = reply(home)["memory"]
+    assert note["saved"][0]["until"] == dated["until"]
+    assert "until" not in note["saved"][1]
+    shown = memory_book.phone_record(note)
+    assert shown is not None and shown["saved"][0]["until"] == dated["until"]
+    # Undo removes the dated memory like any other.
+    home.undo_memory("reply-m1")
+    assert saved(home) == {}
+
+
+@pytest.mark.parametrize("until", ["2099-06-30T12:00:00", "2020-01-01", "next week", "2099-02-30"])
+def test_an_unusable_proposed_end_is_dropped_and_the_fact_kept(home: RemHome, until: str):
+    home.generate = lambda p, c, e: {
+        "reply": "Noted.",
+        "memories": [{"text": "Staying at the lake house", "until": until}],
+    }
+    ask(home, "I'm at the lake house")
+    (item,) = saved(home).values()
+    assert item["text"] == "Staying at the lake house" and "until" not in item
+
+
+def test_ended_memories_leave_prompts_and_worker_background_but_stay_saved(
+    home: RemHome, monkeypatch
+):
+    monkeypatch.setattr(home, "_delegation_context", lambda run, config: {})
+    remember(
+        home,
+        {
+            "old": {"text": "On call this week.", "created_at": "2026-10-01", "until": PAST},
+            "soon": {"text": "Trip to Rome.", "created_at": "2026-10-02", "until": FUTURE},
+            "always": {"text": "Prefers HTML reports.", "created_at": "2026-10-03"},
+        },
+    )
+    shown, left_out = memory_book.choose(saved(home), "anything")
+    assert [e["id"] for e in shown] == ["always", "soon"] and left_out == 0
+    assert shown[1]["until"] == FUTURE
+    prompt = memory_book.for_prompt(saved(home), {}, "x")
+    assert "On call" not in json.dumps(prompt) and "memories_not_shown" not in prompt
+    run = {"id": "run-1", "epoch": 1, "recipe": recipe()}
+    assert home._worker_background(run, {})["user_memories"] == [
+        "Prefers HTML reports.",
+        "Trip to Rome.",
+    ]
+    # Nothing is deleted on its own: the ended memory is listed as ended.
+    listed = {m["id"]: m for m in home.memories()["memories"]}
+    assert listed["old"]["ended"] is True and listed["old"]["until"] == PAST
+    assert listed["soon"]["ended"] is False
+    assert "ended" not in listed["always"] and "until" not in listed["always"]
+    # The same memory, seen before its end, still applies.
+    early = datetime(2025, 12, 31, tzinfo=UTC)
+    assert "old" in [e["id"] for e in memory_book.choose(saved(home), "x", at=early)[0]]
+
+
+def test_user_sets_an_end_date_keeps_and_forgets_ended_memories(home: RemHome):
+    listed = home.add_memory({"text": "Kids are at camp", "until": "2099-07-04"})
+    (item,) = listed["memories"]
+    assert item["until"].startswith("2099-07-04T23:59:59") and item["ended"] is False
+    remember(home, {**saved(home), item["id"]: {**saved(home)[item["id"]], "until": PAST}})
+    assert home.memories()["memories"][0]["ended"] is True
+    # Keep clears the date, so the memory applies again.
+    kept = home.edit_memory(item["id"], {"until": None})["memories"][0]
+    assert "until" not in kept and "ended" not in kept
+    assert "until" not in saved(home)[item["id"]]
+    assert memory_book.for_worker(saved(home), {}, "x") == ["Kids are at camp"]
+    # Set an end date on any memory; a date and time must name its timezone.
+    dated = home.edit_memory(item["id"], {"until": "2099-01-02T09:00:00-05:00"})["memories"][0]
+    assert dated["until"] == "2099-01-02T09:00:00-05:00"
+    assert dated["text"] == "Kids are at camp" and "edited_at" not in dated
+    with pytest.raises(ValueError, match="needs a timezone"):
+        home.edit_memory(item["id"], {"until": "2099-01-02T09:00:00"})
+    with pytest.raises(ValueError, match="in the future"):
+        home.edit_memory(item["id"], {"until": "2020-01-02"})
+    with pytest.raises(ValueError):
+        home.edit_memory(item["id"], {"until": 5})
+    with pytest.raises(ValueError):
+        home.add_memory({"text": "Other", "until": "soon"})
+    # Correcting the words keeps the end date.
+    home.edit_memory(item["id"], {"text": "Kids are at summer camp"})
+    assert saved(home)[item["id"]]["until"] == "2099-01-02T09:00:00-05:00"
+    home.forget_memory(item["id"])
+    assert saved(home) == {}
+
+
+def test_organization_and_rem_memories_share_one_timezone_check():
+    from gofer.utils.instants import aware_instant
+
+    assert aware_instant("2099-01-01T00:00:00Z", "Memory expiry").tzinfo is not None
+    with pytest.raises(ValueError, match="^Memory expiry needs a timezone$"):
+        aware_instant("2099-01-01T00:00:00", "Memory expiry")
+    with pytest.raises(ValueError, match="^Choose a memory expiry in the future$"):
+        aware_instant(PAST, "Memory expiry", future=True)
+    assert aware_instant(PAST, "Memory expiry").year == 2026
+    with pytest.raises(ValueError, match="Memory end date needs a timezone"):
+        memory_book.parse_until("2099-01-01T00:00")
+
+
+def test_decision_accepts_memories_with_an_end():
+    decision = Decision.model_validate(
+        {"reply": "Ok", "memories": ["a", {"text": "b", "until": "2099-01-01"}]}
+    )
+    assert decision.memories[0] == "a"
+    with pytest.raises(ValueError):
+        Decision.model_validate({"reply": "Ok", "memories": [{"text": "b", "pinned": True}]})

@@ -46,6 +46,65 @@ Raticode rattish run WORKFLOW_PATH --input 'message="Hello from an input"' --for
 - Invalid inputs fail before anything runs.
 - Each run saves its input values in its run folder so you can [resume it or run it again](../studio/runs.md#saved-inputs-and-trigger-events) (from 0.5.5). An input whose schema says `"format": "password"` is never saved; you enter it again when you resume or run again.
 
+## File inputs
+
+*New in Raticode 0.6.0 and Raticode Mobile 0.36.0.*
+
+An input whose schema is `{"type": "string", "format": "file"}` takes a file. Two optional fields set what it takes:
+
+```rattish
+Workflow:
+  name: Summarize a document
+  inputs:
+    document:
+      schema: {"type": "string", "format": "file", "title": "Document"}
+      required: true
+      accept: [".pdf", ".docx", "text/*"]
+      max-size: 5 MB
+
+Node summarize:
+  type: bash-command
+  command: wc -w "$DOCUMENT"
+  with:
+    document: input.document
+  finish: pass
+```
+
+- `accept` lists file name extensions, such as `.pdf`, and MIME patterns, such as `image/png` or `image/*`. A file fits when it matches any one of them. Leave it out to take any file.
+- `max-size` is a number of bytes or a size such as `500 KB` or `5 MB`, up to `1 GB`. It defaults to 20 MB, the same limit as a file you [attach to Rem's chat](../rem/attachments.md).
+- A file input can't have a `default`, and `format: "file"` works only on the input's own schema, not inside a list or object. Make the input optional (`required: false`) when the workflow can run without one.
+
+When a run starts, Raticode checks that the file exists and fits, then copies it into the run's folder, beside the run's record, as `RUN_ID.files/INPUT/FILE_NAME`. Only your user account can read the copy and its folders. The input's value is the copy's absolute path, so a step reads it as `$DOCUMENT` in a command, or `{{document}}` in a prompt. Later changes to the original file can't change the run, and agent steps in the [sandbox](../nodes/agent.md) can read the copy.
+
+- **Resume**, **Run again** and **Run from here** use the earlier run's copy, not the original. Each run gets its own copy, so deleting one run never removes another's file. If the copy is gone, they say so; start a new run and choose the file again.
+- The copy is deleted with its run: by the automatic clean-up of old runs, by **Prune**, and when you delete the workflow.
+- A [trigger](triggers.md) has nobody to choose a file, so it can't fill a file input. A workflow whose file input is required can't have a trigger, and preflight for a triggered run stops with `RATTISH_PREFLIGHT_FILE_INPUT_UNFILLED`. Make the input optional to add one.
+- A [child workflow](../nodes/workflow.md) gets the path its caller passes, and doesn't make its own copy.
+
+To give the file:
+
+- **In the Studio:** the [Run dialog](../studio/runs.md#file-inputs) shows **Choose file** and a drop zone for each file input. In the file tree, right-click a file and choose **Run workflow with this file**.
+- **From the CLI:** pass the path as a JSON string, relative to the folder you run the command from. The CLI checks that the file exists and fits before anything starts:
+
+  ```bash
+  Raticode rattish run WORKFLOW_PATH --input 'document="reports/q3.pdf"' --format json
+  Raticode rattish start WORKFLOW_ID --input 'document=reports/q3.pdf'
+  ```
+
+- **On the phone:** share one file to **Run a workflow** in any app's share sheet. See [Share to a workflow](../mobile/workspace.md#share-to-a-workflow).
+
+## Fill an input from a shortcut
+
+*New in Raticode 0.6.0.*
+
+A [workflow shortcut](../reference/shortcuts.md#run-a-workflow-from-any-app) runs a workflow from any app. When the workflow has a plain text input, the shortcut opens a small Run sheet filled from the clipboard instead of running at once:
+
+- A plain text input has `"type": "string"` with no `enum` and no `"format": "password"`.
+- The clipboard goes to the first required plain text input, or to the first one when none is required. When there are several, **Add shortcut…** asks which one gets it.
+- Every other input uses its default. A workflow with another required input that has no default, such as a number, a choice or a password, can't have a shortcut.
+- The sheet warns that copied text can contain instructions you didn't write, as the phone's [Share to a workflow](../mobile/workspace.md#share-to-a-workflow) does. Read and edit it before you press Enter.
+- The text is checked against the input's schema like any run's input, and the run saves it with its other inputs. A run takes up to 100,000 characters; when the clipboard holds more, the sheet keeps the start and says so.
+
 ## Bind another node's result
 
 A `with` block binds a reference or a literal to a local name:

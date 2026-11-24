@@ -31,6 +31,8 @@ def test_bundled_provider_contracts_validate_and_have_portable_defaults() -> Non
     assert contracts["codex"].default_model == "gpt-5.6-sol"
     assert contracts["codex"].default_effort == "high"
     assert contracts["codex"].runtime_subscription == "codex"
+    # claude-3-5-sonnet-latest was retired on October 28, 2025.
+    assert contracts["anthropic-api"].default_model == "claude-sonnet-5-5"
     assert all(item.fingerprint.startswith("sha256:") for item in contracts.values())
 
 

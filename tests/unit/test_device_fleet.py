@@ -6,7 +6,7 @@ import secrets
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -134,7 +134,8 @@ def test_desktop_sessions_acknowledge_and_never_replay_delivered_events(desktops
     received.clear()
     probe()
     assert not any(e["payload"].get("detail") == "backlog" for e in received)
-    assert {e["type"] for e in received} <= {"sync.snapshot", "fleet.snapshot"}
+    # Each probe also asks for the catalog placement reads (catalog_probe).
+    assert {e["type"] for e in received} <= {"sync.snapshot", "fleet.snapshot", "catalog.snapshot"}
 
 
 def test_fleet_probes_are_not_journaled_as_work(desktops):
@@ -468,3 +469,861 @@ def test_phone_turns_follow_the_threads_machine(tmp_path):
     assert "machine" not in shared_context({}, workflow, caps, None)
     with pytest.raises(PairingError):
         shared_context({"machine": "not-a-device"}, workflow, caps, None)
+
+
+class LoadService:
+    """Stands in for gofer.core.computers.ComputerService on the answering desktop."""
+
+    def __init__(self, reading: dict[str, Any]) -> None:
+        self.reading = reading
+
+    def load_reading(self) -> dict[str, Any]:
+        return self.reading
+
+
+READING = {"max_threads": 6, "running_threads": 2, "cpu_pressure": 50.0, "memory_pressure": None}
+
+
+def probe(control: DeviceControl) -> None:
+    control.fleet_probed.clear()
+    control.action({"action": "fleet_status"})
+    wait(lambda: all(task.done() for task in control.remote_tasks.values()))
+
+
+def test_paired_desktop_reports_its_worker_limit_and_load(desktops, tmp_path):
+    from gofer.core.computers import ComputerService
+
+    first, second = desktops(), desktops()
+    pair(first, second)
+    assert first.application is not None and second.application is not None
+    second.application.desktop.computers = LoadService(READING)
+    wait(lambda: peer_row(first, second)["reachability"] == "reachable")
+    probe(first)
+    row = wait(lambda: (r := peer_row(first, second))["load"] and r)
+    assert row["load"] == READING
+    registry = ComputerService(
+        tmp_path / "registry",
+        name=lambda: "Desk A",
+        device_id=lambda: identity(first),
+        fleet=first.application.fleet,
+        pressure=lambda: (None, None),
+    )
+    paired = next(c for c in registry.read()["computers"] if c["id"] == identity(second))
+    assert paired["state"] == "online" and paired["max_threads"] == 6
+    assert paired["running_threads"] == 2 and paired["cpu_pressure"] == 50.0
+    # 50% pressure lowers six workers to three; two run, so one more fits.
+    assert paired["effective_threads"] == 3 and paired["capacity"] == 1
+
+
+def test_a_desktop_without_the_registry_reports_no_load(desktops):
+    first, second = desktops(), desktops()
+    pair(first, second)
+    wait(lambda: peer_row(first, second)["reachability"] == "reachable")
+    probe(first)
+    assert peer_row(first, second)["load"] is None
+
+
+def test_older_desktop_that_refuses_the_load_request_gets_plain_announcements(desktops):
+    first, second = desktops(), desktops()
+    pair(first, second)
+    assert first.application is not None and second.application is not None
+    app = second.application
+    original = app.handle
+
+    def older(peer: str, event: dict[str, Any]) -> list[dict[str, Any]]:
+        # An older desktop's schema has no `load`, so it refuses the whole announcement.
+        if event["type"] == "fleet.request" and "load" in event["payload"].get("advertise", {}):
+            return cast(
+                list[dict[str, Any]], app._refuse(peer, event, None, "invalid_application_event")
+            )
+        return cast(list[dict[str, Any]], original(peer, event))
+
+    app.handle = older  # type: ignore[method-assign]
+    wait(lambda: peer_row(first, second)["reachability"] == "reachable")
+    probe(first)
+    # It refuses the counts by kind first, then the memory hold, then the load alone.
+    wait(lambda: identity(second) in first.application._hold_only_announcements)
+    probe(first)
+    wait(lambda: identity(second) in first.application._load_only_announcements)
+    probe(first)
+    wait(lambda: identity(second) in first.application._plain_announcements)
+    plain = first.application.advertisement(identity(second))
+    assert "load" not in plain["payload"]["advertise"]
+    # The refusal isn't kept as an answer to delegated work.
+    assert first.registry is not None
+    errors = [
+        row
+        for row in first.registry.db.execute("SELECT event FROM device_remote_results")
+        if "invalid" in str(first.application._decode(identity(second), row[0]))
+    ]
+    assert errors == []
+    probe(first)
+    assert peer_row(first, second)["reachability"] == "reachable"
+
+
+def test_a_desktop_that_refuses_only_the_memory_hold_still_shares_its_load(desktops):
+    first, second = desktops(), desktops()
+    pair(first, second)
+    assert first.application is not None and second.application is not None
+    app = second.application
+    app.desktop.computers = LoadService({**READING, "memory_hold": "0.9 GB available"})
+    original = app.handle
+    asked: list[dict[str, Any]] = []
+
+    def before_the_hold(peer: str, event: dict[str, Any]) -> list[dict[str, Any]]:
+        # A desktop from before the memory hold knows `load` but not `memory_hold`.
+        if event["type"] == "fleet.request":
+            asked.append(dict(event["payload"].get("advertise", {})))
+            if "memory_hold" in event["payload"].get("advertise", {}):
+                return cast(
+                    list[dict[str, Any]],
+                    app._refuse(peer, event, None, "invalid_application_event"),
+                )
+        return cast(list[dict[str, Any]], original(peer, event))
+
+    app.handle = before_the_hold  # type: ignore[method-assign]
+    wait(lambda: peer_row(first, second)["reachability"] == "reachable")
+    probe(first)
+    # The ask for counts by kind carries the hold too, so it is refused first.
+    wait(lambda: identity(second) in first.application._hold_only_announcements)
+    probe(first)
+    wait(lambda: identity(second) in first.application._load_only_announcements)
+    probe(first)
+    row = wait(lambda: (r := peer_row(first, second))["load"] and r)
+    # Asked without the hold, it answers without it, and its load still counts.
+    assert row["load"] == READING
+    assert asked[-1].get("load") is True and "memory_hold" not in asked[-1]
+    assert "running_by_kind" not in asked[-1]
+    assert identity(second) not in first.application._plain_announcements
+
+
+def test_a_desktop_shares_its_counts_by_kind_only_when_asked(desktops, tmp_path):
+    from gofer.core.computers import ComputerService
+
+    first, second = desktops(), desktops()
+    pair(first, second)
+    assert first.application is not None and second.application is not None
+    kinds = {"rem": 1, "phone": 0, "organizations": 1, "swarms": 0}
+    counted = {**READING, "memory_hold": None, "running_by_kind": kinds}
+    second.application.desktop.computers = LoadService(counted)
+    wait(lambda: peer_row(first, second)["reachability"] == "reachable")
+    probe(first)
+    row = wait(lambda: (r := peer_row(first, second))["load"] and r)
+    assert row["load"] == counted
+    registry = ComputerService(
+        tmp_path / "registry",
+        name=lambda: "Desk A",
+        device_id=lambda: identity(first),
+        fleet=first.application.fleet,
+        pressure=lambda: (None, None),
+    )
+    paired = next(c for c in registry.read()["computers"] if c["id"] == identity(second))
+    assert paired["running_by_kind"] == kinds and paired["running_work"] is None
+    # An older asker, which never asks for the counts, gets a reading without them.
+    assert "running_by_kind" not in second.application._load_reading(memory_hold=True)
+    assert second.application._load_reading(memory_hold=True, running_by_kind=True) == counted
+
+
+def test_a_desktop_that_refuses_only_the_counts_still_shares_its_load_and_hold(desktops):
+    first, second = desktops(), desktops()
+    pair(first, second)
+    assert first.application is not None and second.application is not None
+    app = second.application
+    held = {**READING, "memory_hold": "0.9 GB available"}
+    app.desktop.computers = LoadService({**held, "running_by_kind": {"rem": 2}})
+    original = app.handle
+    asked: list[dict[str, Any]] = []
+
+    def before_the_counts(peer: str, event: dict[str, Any]) -> list[dict[str, Any]]:
+        # A desktop from before the counts knows `load` and `memory_hold` only.
+        if event["type"] == "fleet.request":
+            asked.append(dict(event["payload"].get("advertise", {})))
+            if "running_by_kind" in event["payload"].get("advertise", {}):
+                return cast(
+                    list[dict[str, Any]],
+                    app._refuse(peer, event, None, "invalid_application_event"),
+                )
+        return cast(list[dict[str, Any]], original(peer, event))
+
+    app.handle = before_the_counts  # type: ignore[method-assign]
+    wait(lambda: peer_row(first, second)["reachability"] == "reachable")
+    probe(first)
+    wait(lambda: identity(second) in first.application._hold_only_announcements)
+    probe(first)
+    row = wait(lambda: (r := peer_row(first, second))["load"] and r)
+    assert row["load"] == held
+    assert asked[-1].get("memory_hold") is True and "running_by_kind" not in asked[-1]
+    assert identity(second) not in first.application._load_only_announcements
+
+
+def test_a_desktop_shares_its_memory_hold_only_when_asked(desktops, tmp_path):
+    from gofer.core.computers import ComputerService
+
+    first, second = desktops(), desktops()
+    pair(first, second)
+    assert first.application is not None and second.application is not None
+    held = {**READING, "memory_hold": "0.9 GB available"}
+    second.application.desktop.computers = LoadService(held)
+    wait(lambda: peer_row(first, second)["reachability"] == "reachable")
+    probe(first)
+    row = wait(lambda: (r := peer_row(first, second))["load"] and r)
+    assert row["load"] == held
+    registry = ComputerService(
+        tmp_path / "registry",
+        name=lambda: "Desk A",
+        device_id=lambda: identity(first),
+        fleet=first.application.fleet,
+        pressure=lambda: (None, None),
+    )
+    paired = next(c for c in registry.read()["computers"] if c["id"] == identity(second))
+    # Room by its limit, but held for memory: none of this computer's work goes there.
+    assert paired["capacity"] == 0 and paired["memory_hold"] == "0.9 GB available"
+    # An older asker, which never asks for the hold, gets a reading without it.
+    assert "memory_hold" not in second.application._load_reading()
+    assert second.application._load_reading(memory_hold=True) == held
+
+
+def test_load_stays_out_of_the_shared_phone_protocol():
+    import json
+
+    from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
+
+    from gofer.devices.application import _SCHEMA
+
+    fixture = Path(__file__).parents[2] / (
+        "src/gofer/devices/protocol/v2/fixtures/fleet.snapshot.json"
+    )
+    snapshot = json.loads(fixture.read_text())
+    snapshot["payload"]["devices"][0]["load"] = READING
+    # Desktops accept it from each other; the schema phones and older desktops use doesn't.
+    assert _VALIDATOR.is_valid(snapshot)
+    assert not Draft202012Validator(_SCHEMA).is_valid(snapshot)
+    snapshot["payload"]["devices"][0]["load"] = {**READING, "max_threads": 99}
+    assert not _VALIDATOR.is_valid(snapshot)
+
+
+def registry_row(first: DeviceControl, second: DeviceControl, tmp_path: Path) -> dict[str, Any]:
+    from gofer.core.computers import ComputerService
+
+    assert first.application is not None
+    second.application.desktop.computers = LoadService(READING)  # type: ignore[union-attr]
+    registry = ComputerService(
+        tmp_path / "registry",
+        name=lambda: "Desk A",
+        device_id=lambda: identity(first),
+        fleet=first.application.fleet,
+        pressure=lambda: (None, None),
+    )
+    return next(c for c in registry.read()["computers"] if c["id"] == identity(second))
+
+
+def test_paired_desktops_share_each_projects_repository_fingerprint(desktops, tmp_path):
+    from gofer.core import repository_fingerprint
+    from tests.unit.test_rem_placement import git_repository
+
+    first, second = desktops(), desktops()
+    pair(first, second)
+    assert first.application is not None and second.application is not None
+    root = git_repository(tmp_path / "work" / "Raticode")
+    fingerprint = repository_fingerprint.fingerprint(root)
+    host_for(second, first, root)
+    second.application.desktop.computers = LoadService(READING)
+    wait(lambda: peer_row(first, second)["reachability"] == "reachable")
+    probe(first)
+    row = wait(lambda: (r := peer_row(first, second))["catalog"] and r)
+    [project] = row["catalog"]["projects"]
+    assert row["catalog"]["state"] == "shared"
+    assert project["name"] == "Raticode" and project["fingerprint"] == fingerprint
+    assert row["catalog"]["providers"] == ["codex"]
+    # Never a path.
+    assert str(tmp_path) not in str(row["catalog"])
+    paired = registry_row(first, second, tmp_path)
+    assert paired["catalog"]["projects"][0]["fingerprint"] == fingerprint
+    assert paired["work_reason"] is None
+    # The catalog a phone or a plain request gets keeps the shared schema: no fingerprints.
+    plain = second.application.workspace.catalog(identity(first))
+    assert all("fingerprint" not in p for p in plain["projects"])
+
+
+def test_a_desktop_without_hosting_shares_no_projects(desktops, tmp_path):
+    first, second = desktops(), desktops()
+    pair(first, second)
+    assert first.application is not None and second.application is not None
+    second.application.desktop.computers = LoadService(READING)
+    wait(lambda: peer_row(first, second)["reachability"] == "reachable")
+    probe(first)
+    row = wait(lambda: (r := peer_row(first, second))["catalog"] and r)
+    assert row["catalog"] == {"state": "shared", "projects": [], "providers": []}
+    assert registry_row(first, second, tmp_path)["work_reason"] == (
+        "Desk B hasn't allowed this computer to run work there"
+    )
+
+
+def test_older_desktop_that_refuses_fingerprints_is_listed_as_needing_an_update(desktops, tmp_path):
+    first, second = desktops(), desktops()
+    pair(first, second)
+    assert first.application is not None and second.application is not None
+    app = second.application
+    app.desktop.computers = LoadService(READING)
+    original = app.handle
+
+    def older(peer: str, event: dict[str, Any]) -> list[dict[str, Any]]:
+        # An older desktop's schema has no `fingerprints`, so it refuses the request.
+        if event["type"] == "catalog.request" and "fingerprints" in event["payload"]:
+            return cast(
+                list[dict[str, Any]], app._refuse(peer, event, None, "invalid_application_event")
+            )
+        return cast(list[dict[str, Any]], original(peer, event))
+
+    app.handle = older  # type: ignore[method-assign]
+    wait(lambda: peer_row(first, second)["reachability"] == "reachable")
+    probe(first)
+    row = wait(lambda: (r := peer_row(first, second))["catalog"] and r)
+    assert row["catalog"] == {"state": "unsupported"}
+    assert registry_row(first, second, tmp_path)["work_reason"] == (
+        "Update Raticode on Desk B so it can say which of its projects match"
+    )
+    # It isn't asked again on every probe, and pairing keeps working.
+    assert first.application.catalog_probe(identity(second)) is None
+    probe(first)
+    assert peer_row(first, second)["reachability"] == "reachable"
+    assert peer_row(first, second)["load"] == READING
+
+
+# A research task pinned to a paired desktop -------------------------------------------
+
+
+class Researcher:
+    """The receiving desktop's provider: works until released, then saves a report.
+
+    Its reviewer passes every check, as the report and answer are real.
+    """
+
+    def __init__(self) -> None:
+        import threading
+
+        self.release = threading.Event()
+        self.working = threading.Event()
+        self.runs: list[str] = []
+
+    async def __call__(self, **kwargs: Any) -> Any:
+        import asyncio
+        import json
+
+        from tests.unit.test_swarm_tools import request
+
+        if "independent read-only reviewer" in kwargs["agent_instructions"]:
+            verdict = [
+                {"id": c, "result": "pass", "evidence": "Read findings.html"}
+                for c in ("answer", "report")
+            ]
+            body = json.dumps({"criteria": verdict, "feedback": ""})
+            yield {
+                "type": "thought",
+                "text": "Read the report",
+                "trace": {
+                    "id": "review-read",
+                    "category": "shell",
+                    "phase": "result",
+                    "status": "completed",
+                    "exitCode": 0,
+                    "output": "Three causes",
+                },
+            }
+            yield {"type": "final", "message": {"body": body}}
+            return
+        self.runs.append(kwargs["workflow"]["remManagedTask"]["runId"])
+        self.working.set()
+        while not self.release.is_set():
+            # A stopped turn ends, as a real provider's process does.
+            cancel = kwargs.get("cancel_event")
+            if cancel is not None and cancel.is_set():
+                return
+            await asyncio.sleep(0.02)
+        artifact = next(
+            s
+            for s in kwargs["workflow"]["remResources"]["mcpServers"]
+            if s["name"] == "rem_artifacts"
+        )
+        response = request(
+            artifact["url"],
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "save_report",
+                    "arguments": {
+                        "path": "findings.html",
+                        "content": "<!doctype html><html><body>Three causes</body></html>",
+                    },
+                },
+            },
+        )[1]["result"]
+        assert not response.get("isError"), response
+        yield {"type": "final", "message": {"body": "The slowdown has three causes."}}
+
+
+def rem_on(control: DeviceControl, data: Path, project: Path, source: Any) -> Any:
+    """A desktop's own Rem, with the project open and its device service attached."""
+    from gofer.ui.chat_jobs import ChatJobs
+    from gofer.ui.chat_steering import ChatSteering
+    from gofer.ui.rem_home import RemHome
+
+    home = RemHome(
+        data,
+        source=source,
+        jobs=ChatJobs(data),
+        steering=ChatSteering(data),
+        authorize=lambda c, r: None,
+        generate=lambda p, c, e: {"reply": "Noted.", "tasks": [], "memories": []},
+        start=False,
+    )
+    home.configure(
+        {
+            "provider": "codex",
+            "model": "cli-default",
+            "command_slots": {"maxWorkers": 4},
+            "projects": [{"root": str(project), "name": project.name}],
+            "resources": {"web": True},
+        }
+    )
+    home.remote.fleet = control
+    home.remote.follow_seconds = 0
+    return home
+
+
+def close_rem(home: Any) -> None:
+    home.close()
+    for worker, _ in list(home.workers.values()):
+        worker.join(timeout=5)
+    home.jobs.close()
+    home.steering.close()
+
+
+def run_body(home: Any, run_id: str) -> dict[str, Any]:
+    with home.store.read() as db:
+        return dict(home.store.get(db, "runs", run_id))
+
+
+class Pair:
+    """This computer (``main``) and a paired desktop (``worker``), each with its own Rem."""
+
+    def __init__(self, desktops: Callable[[], Any], tmp_path: Path) -> None:
+        from gofer.core.computers import ComputerService
+        from tests.unit.test_rem_placement import git_repository
+
+        # Free memory and no pressure come from the autouse host_independent_worker_room.
+        self.main, self.worker = desktops(), desktops()
+        pair(self.main, self.worker)
+        assert self.main.application is not None and self.worker.application is not None
+        # One repository, opened on both desktops (here, the same clone).
+        self.project = git_repository(tmp_path / "code" / "Raticode")
+        host_for(self.worker, self.main, self.project)
+        self.worker.application.desktop.computers = LoadService(READING)
+        wait(lambda: peer_row(self.main, self.worker)["reachability"] == "reachable")
+        probe(self.main)
+        wait(lambda: (peer_row(self.main, self.worker)["catalog"] or {}).get("projects"))
+        self.researcher = Researcher()
+        self.main_home = rem_on(self.main, tmp_path / "rem-main", self.project, self.researcher)
+        self.worker_home = rem_on(
+            self.worker, tmp_path / "rem-worker", self.project, self.researcher
+        )
+        app = self.main.application
+        self.registry = ComputerService(
+            tmp_path / "registry",
+            name=lambda: "Desk A",
+            device_id=lambda: identity(self.main),
+            fleet=app.fleet,
+            pressure=lambda: (None, None),
+        )
+        self.main_home.placement.computers = self.registry
+        self.main_home.computer_id = lambda: identity(self.main)
+        self.sends: list[dict[str, Any]] = []
+        original = self.main.action
+
+        def counting(body: dict[str, Any]) -> dict[str, Any]:
+            if body.get("action") == "send":
+                self.sends.append(body)
+            return dict(original(body))
+
+        self.main.action = counting  # type: ignore[method-assign]
+
+    def close(self) -> None:
+        self.researcher.release.set()
+        close_rem(self.main_home)
+        close_rem(self.worker_home)
+
+    def pin(self, request: str = "pin", **fields: Any) -> dict[str, Any]:
+        task = self.main_home.create_task(
+            {
+                "request_id": request,
+                "title": "Find the slowdown",
+                "type": "research",
+                "prompt": "Why did startup slow down? " + "Read every log. " * 400,
+                "project_dir": str(self.project),
+                "computer": identity(self.worker),
+                "acceptance_criteria": [
+                    {"id": "answer", "description": "Name the causes with sources"},
+                    {"id": "report", "description": "Save a readable report"},
+                ],
+                **fields,
+            }
+        )["task"]
+        return dict(task["active_run"])
+
+    def both(self, condition: Callable[[], Any], timeout: float = 30) -> Any:
+        """Tick both desktops' Rem, and deliver the worker's answers, until it holds."""
+        end = time.monotonic() + timeout
+        last_probe = 0.0
+        while time.monotonic() < end:
+            self.main_home.tick()
+            self.worker_home.tick()
+            if result := condition():
+                return result
+            if time.monotonic() - last_probe > 0.5:
+                last_probe = time.monotonic()
+                self.deliver()
+            time.sleep(0.05)
+        import json
+
+        seen = {}
+        for label, home in (("main", self.main_home), ("worker", self.worker_home)):
+            with home.store.read() as db:
+                seen[label] = [
+                    (r["state"], r.get("summary_short"), r.get("waiting_reason"))
+                    for r in (json.loads(row[0]) for row in db.execute("SELECT body FROM runs"))
+                ]
+        raise AssertionError(f"condition not met: {seen}")
+
+    def deliver(self) -> None:
+        """What the device service's background loop does every 30 seconds, now.
+
+        Each queued request or Stop is sent again on a fresh session, which also brings
+        back what the worker sent this computer since. One session per desktop at a time,
+        as the worker turns away a second.
+        """
+        import concurrent.futures
+
+        app = self.main.application
+        assert app is not None
+        pending = [
+            self.main._dispatch((peer, event["request_id"]), peer, event)
+            for peer, event in app.queued_remote()
+        ]
+        if not pending:
+            self.main.fleet_probed.clear()
+            pending = self.main._refresh_fleet(force=True)
+        concurrent.futures.wait(pending, timeout=10)
+
+    def handed_over(self, run_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        """The stand-in once sent, and the worker's own run for it once running."""
+        self.both(lambda: run_body(self.main_home, run_id).get("remote", {}).get("sent"))
+        self.both(lambda: self.researcher.working.is_set())
+        stand_in = run_body(self.main_home, run_id)
+        [remote_run] = self.researcher.runs
+        return stand_in, run_body(self.worker_home, remote_run)
+
+
+@pytest.fixture
+def fleet_pair(desktops, tmp_path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pair]:
+    # Both desktops share 127.0.0.1 here and deliver every half second, far more often
+    # than a real pair. The per-address limit (5 attempts, one more every 10 seconds) can
+    # then turn away the delivery a test waits for on a slow machine, so only the cap on
+    # open connections applies to these pairs.
+    from gofer.devices.service import DeviceListener
+
+    monkeypatch.setattr(DeviceListener, "_allow", lambda self, host: len(self.connections) < 16)
+    pair_ = Pair(desktops, tmp_path)
+    yield pair_
+    pair_.close()
+
+
+def test_research_task_pinned_to_a_paired_desktop_runs_there_and_reports_back(fleet_pair):
+    import sqlite3
+
+    from gofer.core.usage_ledger import activity_payload, record_invocation, run_usage
+    from gofer.core.worker_claims import THIS_COMPUTER
+
+    p = fleet_pair
+    run = p.pin()
+    stand_in, remote_run = p.handed_over(run["id"])
+    # This computer keeps a stand-in that holds no worker here.
+    assert stand_in["state"] == "executing"
+    assert stand_in["phase_label"] == "Running on Desk B"
+    assert stand_in["placement"]["computer_id"] == identity(p.worker)
+    assert stand_in["placement"]["chosen_by"] == "user"
+    assert sum(p.main_home.placement.claims.running().values()) == 0
+    # The worker runs it as its own Rem task in its matched project, counted as rem.
+    assert remote_run["recipe"]["project_dir"] == str(p.project)
+    assert remote_run["recipe"]["prompt"] == run["recipe"]["prompt"]
+    assert len(remote_run["recipe"]["prompt"]) > 4000  # past job.submit's text cap
+    assert remote_run["remote_origin"]["run_id"] == run["id"]
+    assert p.worker_home.placement.claims.running(THIS_COMPUTER)["rem"] == 1
+    # The provider calls there go to the worker's ledger under its own account.
+    record_invocation(
+        invocation_id="call-1",
+        provider="claude_code",
+        model="claude-opus-5-5",
+        metadata={"input_tokens": 1200, "output_tokens": 300, "total_cost_usd": 0.42},
+        data_dir=p.worker_home.data_dir,
+        run_id=remote_run["id"],
+    )
+    p.researcher.release.set()
+    done = p.both(lambda: (r := run_body(p.main_home, run["id"]))["state"] != "executing" and r)
+    assert done["state"] == "succeeded", done["summary_short"]
+    # The final answer and the report's path there reach the stand-in.
+    assert done["worker_result"] == "The slowdown has three causes."
+    report = done["remote"]["result"]["report"]
+    assert report and report.endswith("findings.html") and not report.startswith("/")
+    # The task was sent exactly once.
+    assert len(p.sends) == 1 and p.sends[0]["rem_task"]["run_id"] == run["id"]
+    # One summary row on this computer, tagged with the computer and the real provider.
+    with sqlite3.connect(p.main_home.data_dir / "usage.sqlite3") as db:
+        rows = db.execute(
+            "SELECT provider, model, profile, run_id, computer_id, tokens, cost_usd "
+            "FROM usage_invocations"
+        ).fetchall()
+    assert len(rows) == 1
+    provider, model, profile, run_id, computer, tokens, cost = rows[0]
+    assert (provider, model, profile, run_id, computer) == (
+        "claude_code",
+        "claude-opus-5-5",
+        None,
+        run["id"],
+        identity(p.worker),
+    )
+    assert '"total_tokens": 1500' in tokens and cost == pytest.approx(0.42)
+    # It counts for its run, not toward this computer's account totals.
+    assert run_usage([run["id"]], p.main_home.data_dir)[run["id"]]["total_tokens"] == 1500
+    assert activity_payload(p.main_home.data_dir)["activity"]["calls"] == 0
+    # The worker keeps its call-by-call row under its own account.
+    assert activity_payload(p.worker_home.data_dir)["activity"]["calls"] == 1
+    # Another pass adds no second row.
+    p.main_home.remote.follow()
+    with sqlite3.connect(p.main_home.data_dir / "usage.sqlite3") as db:
+        assert db.execute("SELECT COUNT(*) FROM usage_invocations").fetchone()[0] == 1
+
+
+def test_stop_here_stops_the_task_there_and_settles_as_stopped(fleet_pair):
+    p = fleet_pair
+    run = p.pin()
+    _, remote_run = p.handed_over(run["id"])
+    p.main_home.store.mutate_run(run["id"], {"request_id": "stop"}, "cancel")
+    # Stop doesn't settle here until the other desktop reports the task cancelled.
+    p.main_home.tick()
+    assert run_body(p.main_home, run["id"])["state"] == "cancelling"
+    stopped = p.both(lambda: (r := run_body(p.main_home, run["id"]))["state"] != "cancelling" and r)
+    assert stopped["state"] == "cancelled"
+    assert run_body(p.worker_home, remote_run["id"])["state"] == "cancelled"
+    assert stopped["remote"]["cancel_sent"] is True
+    assert stopped["remote"]["result"]["state"] == "cancelled"
+
+
+def test_forgetting_the_sending_desktop_stops_the_task_it_handed_over(fleet_pair):
+    """Nightly audit, 23 November: unpairing a desktop deleted its peer row, so the task it
+    had handed over vanished from the list of handed-over tasks and kept running here as
+    the user's own Rem task, with no one able to see or stop it from that desktop."""
+    p = fleet_pair
+    run = p.pin()
+    _, remote_run = p.handed_over(run["id"])
+    app = p.worker.application
+    assert app is not None
+    app.remove_peer(identity(p.main))
+    listed = app.rem_tasks()
+    assert [(t["run_id"], t["authorized"]) for t in listed] == [(remote_run["id"], False)]
+    stopped = None
+    end = time.monotonic() + 30
+    while stopped is None and time.monotonic() < end:
+        p.worker_home.tick()
+        body = run_body(p.worker_home, remote_run["id"])
+        if body["state"] not in {"executing", "cancelling", "queued"}:
+            stopped = body
+        time.sleep(0.05)
+    assert stopped is not None and stopped["state"] == "cancelled", body["state"]
+    # It settles here and nothing is queued for the forgotten desktop.
+    end = time.monotonic() + 10
+    while app.rem_tasks() and time.monotonic() < end:
+        p.worker_home.tick()
+        time.sleep(0.05)
+    assert app.rem_tasks() == []
+    with app.registry.lock:
+        queued = app.registry.db.execute(
+            "SELECT COUNT(*) FROM device_outbox WHERE peer=?", (identity(p.main),)
+        ).fetchone()[0]
+    assert queued == 0
+
+
+def test_after_a_restart_the_stand_in_follows_the_same_task_and_never_sends_it_again(
+    fleet_pair, tmp_path
+):
+    p = fleet_pair
+    run = p.pin()
+    stand_in, remote_run = p.handed_over(run["id"])
+    assert len(p.sends) == 1
+    # This computer's backend restarts: a new Rem on the same data folder.
+    close_rem(p.main_home)
+    p.main_home = rem_on(p.main, tmp_path / "rem-main", p.project, p.researcher)
+    p.main_home.placement.computers = p.registry
+    p.main_home.computer_id = lambda: identity(p.main)
+    p.main_home._recover()
+    after = run_body(p.main_home, run["id"])
+    # Recovery left the stand-in as it was: the same handle, nothing queued again.
+    assert after["state"] == "executing" and after["remote"] == stand_in["remote"]
+    p.researcher.release.set()
+    done = p.both(lambda: (r := run_body(p.main_home, run["id"]))["state"] == "succeeded" and r)
+    assert done["worker_result"] == "The slowdown has three causes."
+    assert len(p.sends) == 1
+    # The worker made exactly one task for it.
+    assert [t["title"] for t in p.worker_home.store.tasks()] == ["Find the slowdown"]
+    assert run_body(p.worker_home, remote_run["id"])["state"] == "succeeded"
+
+
+def test_while_the_desktop_is_offline_the_run_waits_for_it_instead_of_moving(fleet_pair):
+    p = fleet_pair
+    run = p.pin()
+    stand_in, _ = p.handed_over(run["id"])
+    real = p.registry.read
+
+    def offline() -> dict[str, Any]:
+        view = dict(real())
+        for computer in view["computers"]:
+            if computer["id"] == identity(p.worker):
+                computer.update(state="offline", capacity=0)
+        return view
+
+    p.registry.read = offline  # type: ignore[method-assign]
+    reason = "Waiting for Desk B to come back; this run's work is there"
+    waiting = p.both(lambda: (r := run_body(p.main_home, run["id"]))["waiting_reason"] and r)
+    assert waiting["waiting_reason"] == reason
+    # It stays the same run on the same computer: not moved, not sent again.
+    assert waiting["state"] == "executing"
+    assert waiting["placement"] == stand_in["placement"]
+    assert waiting["remote"]["request_id"] == stand_in["remote"]["request_id"]
+    assert len(p.sends) == 1
+    # Back online, it carries on there.
+    p.registry.read = real  # type: ignore[method-assign]
+    p.researcher.release.set()
+    done = p.both(lambda: (r := run_body(p.main_home, run["id"]))["state"] == "succeeded" and r)
+    assert done["placement"] == stand_in["placement"]
+
+
+def test_a_develop_task_pinned_to_a_paired_desktop_is_refused_with_a_reason(fleet_pair):
+    from gofer.devices.application import host_template
+
+    p = fleet_pair
+    with pytest.raises(ValueError, match="Only research and conversation tasks can run on another"):
+        p.pin(type="develop")
+    # The same task pinned to this computer is fine.
+    run = p.main_home.create_task(
+        {
+            "request_id": "here",
+            "title": "Fix it",
+            "type": "develop",
+            "prompt": "Fix the bug",
+            "project_dir": str(p.project),
+            "computer": identity(p.main),
+        }
+    )["task"]["active_run"]
+    assert run["recipe"]["computer"] == identity(p.main)
+    # The receiving desktop refuses a task that isn't read-only even if one is sent.
+    request = str(uuid4())
+    p.main.action(
+        {
+            "action": "send",
+            "kind": "job.submit",
+            "device_id": identity(p.worker),
+            "thread_id": host_template(identity(p.main)),
+            "project_id": peer_row(p.main, p.worker)["catalog"]["projects"][0]["id"],
+            "request_id": request,
+            "text": "Fix it",
+            "rem_task": {
+                "run_id": "run-x",
+                "type": "errand",
+                "execution_mode": "work",
+                "title": "Fix it",
+                "prompt": "Fix the bug",
+                "checks": [],
+            },
+        }
+    )
+    status = p.both(
+        lambda: (
+            (
+                s := p.main.action(
+                    {
+                        "action": "work_status",
+                        "device_id": identity(p.worker),
+                        "request_id": request,
+                    }
+                )
+            )["state"]
+            == "rejected"
+            and s
+        )
+    )
+    details = [e["payload"]["detail"] for e in status["events"] if e["type"] == "job.status"]
+    assert "Only research and conversation tasks run on another computer for now" in details
+    assert p.worker_home.store.tasks() == []
+
+
+class JournalFleet:
+    """The device service as a stand-in sees it: a journal of what was queued."""
+
+    def __init__(self, queued: bool) -> None:
+        self.queued = queued
+        self.sent: list[dict[str, Any]] = []
+        self.application = self
+        self.registry = None
+
+    def rem_tasks(self) -> list[dict[str, Any]]:
+        return []
+
+    def action(self, body: dict[str, Any]) -> dict[str, Any]:
+        if body["action"] == "send":
+            self.sent.append(body)
+            self.queued = True
+            return {"state": "queued"}
+        assert body["action"] == "work_status"
+        state = "queued" if self.queued else "unknown"
+        return {"state": state, "request_id": body["request_id"], "events": []}
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_a_saved_hand_off_is_sent_only_if_it_never_reached_the_journal(tmp_path, queued):
+    """A restart between saving the handle and sending sends it once; after, never again."""
+    from tests.unit.test_rem_home import force_run
+
+    project = tmp_path / "Raticode"
+    project.mkdir()
+    fleet = JournalFleet(queued)
+    home = rem_on(cast(DeviceControl, fleet), tmp_path / "rem", project, Researcher())
+    try:
+        run = home.create_task(
+            {
+                "request_id": "pin",
+                "title": "Find the slowdown",
+                "type": "research",
+                "prompt": "Why did startup slow down?",
+                "project_dir": str(project),
+            }
+        )["task"]["active_run"]
+        handle = {
+            "computer_id": str(uuid4()),
+            "computer_name": "Desk B",
+            "request_id": str(uuid4()),
+            "thread_id": str(uuid4()),
+            "project_id": str(uuid4()),
+            "provider": "codex",
+            "sent": False,
+        }
+        force_run(home, run["id"], state="executing", remote=handle)
+        home._recover()
+        home.remote.follow()
+        home.remote.follow()
+        assert len(fleet.sent) == (0 if queued else 1)
+        after = run_body(home, run["id"])
+        assert after["remote"]["sent"] is True and after["state"] == "executing"
+        assert after["remote"]["request_id"] == handle["request_id"]
+    finally:
+        close_rem(home)

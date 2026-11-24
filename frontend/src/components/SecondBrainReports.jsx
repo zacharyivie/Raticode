@@ -1,7 +1,7 @@
 import SecondBrainProvider, { useResearchSelection } from "./SecondBrainProvider.jsx";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowUpRight, CircleCheck, ExternalLink, FolderOpen, Plus, RefreshCw, ScrollText, ShieldCheck, TriangleAlert, Library, ChevronDown, ChevronRight } from "lucide-react";
-import { CITATION_STATES, SUPPORT_LABELS, estimateTokens, formatTime } from "../lib/secondBrain.js";
+import { ArrowLeft, ArrowUpRight, CircleCheck, ExternalLink, FolderOpen, Plus, RefreshCw, ScrollText, ShieldCheck, TriangleAlert, Library, ChevronDown, ChevronRight, Layers } from "lucide-react";
+import { CITATION_STATES, SUPPORT_LABELS, estimateTokens, formatTime, reportSeriesRows, reportSummary } from "../lib/secondBrain.js";
 import { useSecondBrain, viewFor, navigate, openDialog, openDocument, documentById, blockById, updateClaim, updateReport, updateReportCitation, startTask } from "../lib/secondBrainStore.js";
 import { CitationState, Empty, Modal, Pill, ProgressBar, Segmented, TypeIcon } from "./SecondBrainParts.jsx";
 import { OriginalDocument } from "./SecondBrainReader.jsx";
@@ -43,15 +43,26 @@ function ReportProvenance({ report }) {
   return <dl className="sb-facts">{facts.map(([term, value]) => <div key={term}><dt>{term}</dt><dd>{value}</dd></div>)}</dl>;
 }
 
+function ReportRowButton({ report, store, series }) {
+  const health = reportHealth(report);
+  const collection = store.collections.find(item => item.id === report.collectionId);
+  const summary = reportSummary(report, store.documents);
+  return <button type="button" onClick={() => navigate("reports", { reportId: report.id })}>
+    {series ? <Layers size={18} aria-hidden="true" /> : <ScrollText size={18} aria-hidden="true" />}
+    <span><strong>{report.title}</strong><small>{formatTime(report.generatedAt)} · {report.provider}{report.provenance?.taskTitle || report.provenance?.threadTitle ? ` · ${report.provenance.taskTitle || report.provenance.threadTitle}` : ""} · {report.citations.length} citations{collection ? ` · from “${collection.name}”` : ""}</small>{summary ? <span className="sb-report-summary">{summary}</span> : null}</span>
+    <span className="sb-report-status">{series ? <Pill tone="brand">Newest of {series.editions} editions</Pill> : null}{health.changed.length ? <Pill tone="warning">{health.changed.length} citation{health.changed.length === 1 ? "" : "s"} to review</Pill> : null}{report.draft ? <Pill tone="brand">Draft</Pill> : null}{health.unreviewed.length ? <Pill>{health.unreviewed.length} claims unreviewed</Pill> : null}</span>
+  </button>;
+}
+
 function ReportList({ brain, store }) {
   const reports = store.reports.filter(report => report.brainId === brain.id);
+  const rows = reportSeriesRows(reports, store.documents, store.series || []);
   return <div className="sb-page">
-    <div className="sb-page-head"><div><h3>Reports</h3><p>Cited reports generated from this brain, and reports Rem saved here from a task or thread. Generated reports keep the source versions they used, so every citation can be checked later.</p></div><button type="button" className="sb-button sb-primary" onClick={() => openDialog("report-builder", {})}><Plus size={14} />Create cited report</button></div>
-    {reports.length ? <ul className="sb-report-list">{reports.map(report => { const health = reportHealth(report); const collection = store.collections.find(item => item.id === report.collectionId); return <li key={report.id}><button type="button" onClick={() => navigate("reports", { reportId: report.id })}>
-      <ScrollText size={18} aria-hidden="true" />
-      <span><strong>{report.title}</strong><small>{formatTime(report.generatedAt)} · {report.provider}{report.provenance?.taskTitle || report.provenance?.threadTitle ? ` · ${report.provenance.taskTitle || report.provenance.threadTitle}` : ""} · {report.citations.length} citations{collection ? ` · from “${collection.name}”` : ""}</small></span>
-      <span className="sb-report-status">{health.changed.length ? <Pill tone="warning">{health.changed.length} citation{health.changed.length === 1 ? "" : "s"} to review</Pill> : null}{report.draft ? <Pill tone="brand">Draft</Pill> : null}{health.unreviewed.length ? <Pill>{health.unreviewed.length} claims unreviewed</Pill> : null}</span>
-    </button></li>; })}</ul> : <Empty icon={ScrollText} title="No reports yet" actions={<button type="button" className="sb-button sb-primary" onClick={() => openDialog("report-builder", {})}>Create cited report</button>}>Gather evidence in a collection, then ask Rem for a report. Rem cites passages; Raticode checks every citation before showing the report.</Empty>}
+    <div className="sb-page-head"><div><h3>Reports</h3><p>Cited reports generated from this brain, and reports Rem saved here from a task or thread. Generated reports keep the source versions they used, so every citation can be checked later. Dated editions of one report show as one row, newest first.</p></div><button type="button" className="sb-button sb-primary" onClick={() => openDialog("report-builder", {})}><Plus size={14} />Create cited report</button></div>
+    {rows.length ? <ul className="sb-report-list">{rows.map(row => <li key={row.report.id} data-series={row.series ? true : undefined}>
+      <ReportRowButton report={row.report} store={store} series={row.series ? { editions: row.editions.length + 1 } : null} />
+      {row.series ? <ul className="sb-series-editions" aria-label={`Earlier editions of ${row.report.title}`}>{row.editions.map(edition => <li key={edition.report.id}><button type="button" className="sb-link" onClick={() => navigate("reports", { reportId: edition.report.id })}><span className="sb-mono">{edition.date}</span>{edition.report.title}</button><small>{edition.report.citations.length} citations{edition.report.draft ? " · draft" : ""}</small></li>)}</ul> : null}
+    </li>)}</ul> : <Empty icon={ScrollText} title="No reports yet" actions={<button type="button" className="sb-button sb-primary" onClick={() => openDialog("report-builder", {})}>Create cited report</button>}>Gather evidence in a collection, then ask Rem for a report. Rem cites passages; Raticode checks every citation before showing the report.</Empty>}
   </div>;
 }
 

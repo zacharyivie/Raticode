@@ -509,7 +509,7 @@ def test_collection_exact_limit_is_accepted(collection) -> None:
 def test_canonical_mobile_contract_manifest() -> None:
     manifest = (CONTRACT / "SHA256SUMS").read_bytes()
     assert hashlib.sha256(manifest).hexdigest() == (
-        "0e52f977809ad27e14cf23beb23029a34d6fcd8431c2d214cb390b7801fb8456"
+        "86cfd325f2683c046a2b704145e3122ea8fdda8c7cb40ebf5e5a08af2cc79615"
     )
     for line in manifest.decode().splitlines():
         digest, relative = line.split("  ", 1)
@@ -524,6 +524,71 @@ def test_canonical_mobile_schema_fixtures(path: Path) -> None:
     schema = json.loads((CONTRACT / f"{name}.schema.json").read_text())
     Draft202012Validator.check_schema(schema)
     Draft202012Validator(schema).validate(strict_json(path.read_bytes()))
+
+
+@pytest.mark.parametrize(
+    "path", sorted((CONTRACT / "desktop-fixtures").glob("*.json")), ids=lambda p: p.stem
+)
+def test_desktop_only_fixtures_stay_out_of_the_phone_schema(path: Path) -> None:
+    """Desktops send these fields only to each other; the phone schema stays unchanged."""
+    from gofer.devices.application import _VALIDATOR
+
+    record = strict_json(path.read_bytes())
+    _VALIDATOR.validate(record)
+    schema = json.loads((CONTRACT / "event.schema.json").read_text())
+    assert not Draft202012Validator(schema).is_valid(record)
+
+
+def test_desktop_catalog_fingerprint_is_a_hash_or_null() -> None:
+    from gofer.devices.application import _VALIDATOR
+
+    record = strict_json(
+        (CONTRACT / "desktop-fixtures/catalog.snapshot.fingerprints.json").read_bytes()
+    )
+    for value in ("/home/someone/Raticode", "A" * 64, "a" * 63, 7):
+        changed = json.loads(json.dumps(record))
+        changed["payload"]["projects"][0]["fingerprint"] = value
+        assert not _VALIDATOR.is_valid(changed), value
+    request = strict_json(
+        (CONTRACT / "desktop-fixtures/catalog.request.fingerprints.json").read_bytes()
+    )
+    request["payload"]["fingerprints"] = False
+    assert not _VALIDATOR.is_valid(request)
+
+
+def test_desktop_rem_task_carries_a_full_prompt_within_one_event() -> None:
+    from gofer.devices.application import _VALIDATOR
+    from gofer.devices.framing import MAX_RECORD, encode_record
+    from gofer.devices.organization_jobs import (
+        REM_TASK_BYTES,
+        REM_TASK_CHECK,
+        REM_TASK_CHECKS,
+        REM_TASK_PROMPT,
+    )
+
+    record = strict_json((CONTRACT / "desktop-fixtures/job.submit.rem-task.json").read_bytes())
+    task = record["payload"]["rem_task"]
+    # Past the 4,000-character intent cap: a task the sender allows fits one record.
+    task["prompt"] = "x" * REM_TASK_PROMPT
+    task["checks"] = [
+        {"id": f"check-{i}", "description": "x" * (REM_TASK_CHECK - 50)}
+        for i in range(REM_TASK_CHECKS)
+    ]
+    _VALIDATOR.validate(record)
+    assert len(json.dumps(task, separators=(",", ":")).encode()) <= REM_TASK_BYTES
+    assert len(encode_record(record)) <= MAX_RECORD + 4
+    for change in (
+        {"prompt": "x" * (REM_TASK_PROMPT + 1)},
+        {"type": "develop"},
+        {"checks": [{"id": "a", "description": "x" * (REM_TASK_CHECK + 1)}]},
+        {"path": "/home/someone"},
+    ):
+        changed = json.loads(json.dumps(record))
+        changed["payload"]["rem_task"].update(change)
+        assert not _VALIDATOR.is_valid(changed), change
+    status = strict_json((CONTRACT / "desktop-fixtures/job.status.rem-task.json").read_bytes())
+    status["payload"]["usage"]["provider"] = ""
+    assert not _VALIDATOR.is_valid(status)
 
 
 @pytest.mark.parametrize(
@@ -603,6 +668,24 @@ def test_workflow_run_params_stay_closed(field: str, value: object) -> None:
         ("desktop.action.workflows-triggers-pause", "paused", 1),
         ("desktop.action.workflows-triggers-pause", "confirmed", None),
         ("desktop.action.workflows-triggers-pause", "trigger_id", "trg_0123456789abcdef"),
+        # Approving names the trigger and the exact version the phone showed, nothing else.
+        ("desktop.action.workflows-trigger-approve", "fingerprint", ""),
+        ("desktop.action.workflows-trigger-approve", "fingerprint", "x" * 81),
+        ("desktop.action.workflows-trigger-approve", "enabled", True),
+        ("desktop.action.workflows-trigger-approve", "source", "Rattish: 1"),
+        ("desktop.action.workflows-trigger-approve", "run_edits_without_approval", True),
+        # Confirming changes the phone couldn't show in full is a yes/no, sent only as true.
+        ("desktop.action.workflows-trigger-approve-unseen", "unseen_confirmed", "yes"),
+        ("desktop.action.workflows-trigger-approve-unseen", "unseen_confirmed", None),
+        ("desktop.action.workflows-trigger-approve-unseen", "paths", ["data.bin"]),
+        # Reading the changes names the trigger only.
+        ("desktop.read.workflows-trigger-changes", "trigger_id", ""),
+        ("desktop.read.workflows-trigger-changes", "path", "/etc/passwd"),
+        # Ask Rem about a failure names a run and, optionally, one of its nodes.
+        ("desktop.read.workflows-failure", "node_id", ""),
+        ("desktop.read.workflows-failure", "run_id", "r" * 129),
+        ("desktop.read.workflows-failure", "path", "/etc/passwd"),
+        ("desktop.read.workflows-failure", "lines", 100000),
     ],
 )
 def test_workflow_trigger_params_stay_closed(fixture: str, field: str, value: object) -> None:
@@ -620,6 +703,11 @@ def test_workflow_trigger_params_stay_closed(fixture: str, field: str, value: ob
         ("desktop.action.workflows-trigger", "workflow_id"),
         ("desktop.action.workflows-trigger", "enabled"),
         ("desktop.action.workflows-triggers-pause", "paused"),
+        ("desktop.action.workflows-trigger-approve", "fingerprint"),
+        ("desktop.action.workflows-trigger-approve", "trigger_id"),
+        ("desktop.read.workflows-trigger-changes", "trigger_id"),
+        ("desktop.read.workflows-failure", "workflow_id"),
+        ("desktop.read.workflows-failure", "run_id"),
     ],
 )
 def test_workflow_trigger_params_need_their_fields(fixture: str, field: str) -> None:

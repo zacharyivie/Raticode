@@ -1,0 +1,12 @@
+Rattish: 1
+Workflow:
+  name: Read web page contract
+Node example:
+  type: read-web-page
+  url: https://example.com/article
+  max-chars: 5000
+  format: text
+  request-timeout: 20s
+  render: auto
+  network-allowlist:
+    - intranet.example

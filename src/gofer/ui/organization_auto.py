@@ -578,10 +578,19 @@ def rem_reviewer(config: Callable[[], dict[str, Any]], data_dir: Path) -> Review
     """Rem's own chat model as the review step: tool-free and sessionless."""
 
     def review(prompt: str, cancel: threading.Event) -> Any:
+        from gofer.core.usage_context import named_invocation
+        from gofer.core.usage_ledger import record_rem_call
         from gofer.ui.rem_home_models import chat_config
         from gofer.ui.rem_home_provider import generate_decision
 
-        return generate_decision(prompt, chat_config(config()), cancel, data_dir)
+        chosen = chat_config(config())
+        # The call's size goes with Rem's other calls (turn_context); never its text.
+        # Its tokens are recorded under the same ID, so its cache use counts too.
+        recorded = record_rem_call(
+            "organization", prompt, "", None, config=chosen, data_dir=data_dir
+        )
+        with named_invocation(recorded):
+            return generate_decision(prompt, chosen, cancel, data_dir)
 
     return review
 
@@ -633,7 +642,11 @@ def ask_rem(
 def queue_ticket_approvals(manager: OrganizationManager, project: str, oid: str) -> int:
     """Turn plans, proposals and reviews waiting for the user into requests for Rem."""
     from gofer.ui.organization_backlog import proposal_waiting
-    from gofer.ui.organization_recovery import rem_unblock_pending, worker_reviews
+    from gofer.ui.organization_recovery import (
+        rem_unblock_pending,
+        send_backs_spent,
+        worker_reviews,
+    )
 
     made: list[str] = []
 
@@ -666,6 +679,8 @@ def queue_ticket_approvals(manager: OrganizationManager, project: str, oid: str)
             elif (
                 task["status"] == "in_review"
                 and not task.get("claim")
+                # Reviewers sent it back too often in a row: the user reviews it now.
+                and not send_backs_spent(current, task)
                 and (task.get("reviewer") not in employees or not worker_reviews(current, task))
             ):
                 kind, action = "review", "review"
@@ -1003,6 +1018,41 @@ def _escalate(manager: OrganizationManager, project: str, oid: str, task_id: str
     manager.store.mutate(project, oid, AUTO_ACTOR, "auto_escalated", mark)
 
 
+# Requests Auto mode makes for a ticket's own plan, result or block. The ticket itself
+# carries the same decision for the user, so these never need the user on their own.
+TICKET_KINDS = frozenset({"plan", "review", "unblock"})
+
+
+def queued_for_ticket(request: dict[str, Any]) -> bool:
+    """Whether Auto mode queued this request for a ticket (not something Rem asked for)."""
+    return request.get("actor") == "system" and request.get("kind") in TICKET_KINDS
+
+
+def withdraw(request: dict[str, Any], why: str) -> None:
+    """Close a request Auto mode queued for a ticket without anyone deciding it."""
+    request.update(status="expired", decidedAt=now(), error=why)
+    request.setdefault("autoReview", {}).update(state="withdrawn")
+
+
+def _withdraw_stale(
+    manager: OrganizationManager, project: str, oid: str, request: dict[str, Any], why: str
+) -> None:
+    """The ticket moved on (the user decided it, or it changed) before Rem looked.
+
+    Nothing was declined, so nothing is said on the ticket or logged as Rem's decision,
+    and the ticket isn't marked as reviewed: if it still waits, it is asked about again.
+    """
+
+    def close(current: dict[str, Any]) -> dict[str, Any]:
+        item = (current["runtime"].get("consentRequests") or {}).get(request["id"])
+        if item is None or item.get("status") != "pending":
+            return {}
+        withdraw(item, why)
+        return {"requestId": request["id"], "reason": why}
+
+    manager.store.mutate(project, oid, AUTO_ACTOR, "auto_review_withdrawn", close)
+
+
 def _leave_for_user(
     manager: OrganizationManager, project: str, oid: str, request: dict[str, Any], why: str
 ) -> dict[str, Any]:
@@ -1085,6 +1135,15 @@ def review_one(
     if not live or not waits_on_rem(org, live):
         return None
     reason = conflict(org, live)
+    if reason and queued_for_ticket(live):
+        _withdraw_stale(
+            manager,
+            project,
+            oid,
+            live,
+            "Its ticket changed before Rem reviewed it. If it still waits, Rem looks again.",
+        )
+        return None
     if reason:
         # It can't apply as asked; closing it lets it be asked again on fresh data.
         return apply_decision(
@@ -1185,7 +1244,11 @@ def needs_review(org: dict[str, Any]) -> bool:
         return False
     if any(waits_on_rem(org, r) for r in (org["runtime"].get("consentRequests") or {}).values()):
         return True
-    from gofer.ui.organization_recovery import rem_unblock_pending, worker_reviews
+    from gofer.ui.organization_recovery import (
+        rem_unblock_pending,
+        send_backs_spent,
+        worker_reviews,
+    )
 
     reviewed = org["runtime"].get("autoReviewed") or {}
     employees = {e["id"] for e in org["config"]["employees"]}
@@ -1199,6 +1262,7 @@ def needs_review(org: dict[str, Any]) -> bool:
             or (
                 t["status"] == "in_review"
                 and not t.get("claim")
+                and not send_backs_spent(org, t)
                 and (t.get("reviewer") not in employees or not worker_reviews(org, t))
             )
         )
@@ -1250,14 +1314,24 @@ def set_auto_mode(
     def reset(current: dict[str, Any]) -> dict[str, Any]:
         runtime = current["runtime"]
         halted = runtime.pop("autoHalt", None)
+        withdrawn = []
         for request in (runtime.get("consentRequests") or {}).values():
+            if not enabled and request.get("status") == "pending" and queued_for_ticket(request):
+                # The ticket's own card asks the user now; a second item would repeat it.
+                withdraw(request, "Auto mode was turned off; the ticket waits for you itself.")
+                withdrawn.append(request["id"])
+                continue
             if (
                 enabled
                 and request.get("status") == "pending"
                 and (request.get("autoReview") or {}).get("state") not in {"user_only"}
             ):
                 request["route"] = "rem"
-        return {"autoMode": enabled, **({"clearedHalt": halted} if halted else {})}
+        return {
+            "autoMode": enabled,
+            **({"clearedHalt": halted} if halted else {}),
+            **({"withdrawn": withdrawn} if withdrawn else {}),
+        }
 
     manager.store.mutate(project, org["id"], "user", "auto_mode_set", reset)
     manager._wake.set()

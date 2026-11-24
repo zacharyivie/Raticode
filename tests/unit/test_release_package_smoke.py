@@ -67,8 +67,7 @@ def test_probe_checks_archive_and_runs_outside_checkout(
     binary = tmp_path / "gof"
     binary.touch(mode=0o755)
     entries = [
-        "vosk/"
-        + {"darwin": "libvosk.dyld", "win32": "libvosk.dll"}.get(sys.platform, "libvosk.so"),
+        *smoke.speech_libraries(sys.platform),
         "third-party-licenses/inventory.json",
         "gofer/devices/protocol/v2/event.schema.json",
         "third-party-licenses/PYTHON-LICENSE.txt",
@@ -108,14 +107,22 @@ def test_probe_rejects_missing_speech_library(smoke, tmp_path, monkeypatch, plat
     readers = importlib.import_module("PyInstaller.archive.readers")
     binary = tmp_path / "gof"
     binary.touch(mode=0o755)
-    archive = Mock(
-        toc={"third-party-licenses/inventory.json": None},
-        extract=Mock(return_value=b'[{"name":"vosk"}]'),
-    )
-    monkeypatch.setattr(readers, "CArchiveReader", Mock(return_value=archive))
-    monkeypatch.setattr(smoke.sys, "platform", platform)
-    with pytest.raises(RuntimeError, match="Vosk speech library"):
-        smoke.probe(binary)
+    libraries = smoke.speech_libraries(platform)
+    # sherpa-onnx's ONNX Runtime sits next to its module, apart from Raticode's own copy.
+    assert all(name.startswith("sherpa_onnx/lib/") for name in libraries)
+    assert any("onnxruntime" in name for name in libraries)
+    for missing in libraries:
+        archive = Mock(
+            toc=dict.fromkeys(
+                ["third-party-licenses/inventory.json", *(n for n in libraries if n != missing)]
+            ),
+            extract=Mock(return_value=b'[{"name":"sherpa-onnx"}]'),
+        )
+        monkeypatch.setattr(readers, "CArchiveReader", Mock(return_value=archive))
+        monkeypatch.setattr(smoke.sys, "platform", platform)
+        with pytest.raises(RuntimeError, match="sherpa-onnx speech libraries") as raised:
+            smoke.probe(binary)
+        assert missing in str(raised.value)
 
 
 def test_missing_backend_is_rejected(smoke: ModuleType, tmp_path: Path) -> None:

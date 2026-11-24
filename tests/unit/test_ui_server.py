@@ -1628,13 +1628,15 @@ def test_ui_server_retention_queue_and_approval_routes(monkeypatch, tmp_path) ->
     monkeypatch.setattr(
         server_module,
         "decide_workflow_approval_payload",
-        lambda workflow_id, run_id, node_id, decision, data_dir, decided_by, notes: {
+        lambda workflow_id, run_id, node_id, decision, data_dir, decided_by, notes, choice, reply: {
             "workflowId": workflow_id,
             "runId": run_id,
             "nodeId": node_id,
             "decision": decision,
             "decidedBy": decided_by,
             "notes": notes,
+            **({"choice": choice} if choice is not None else {}),
+            **({"reply": reply} if reply else {}),
         },
     )
 
@@ -1684,6 +1686,22 @@ def test_ui_server_retention_queue_and_approval_routes(monkeypatch, tmp_path) ->
         "decision": "rejected",
         "decidedBy": "tester",
         "notes": "no",
+    }
+    # A gate with options is answered on the approve route with a choice and a reply.
+    assert _request(
+        tmp_path,
+        "POST",
+        "/api/workflows/wf/approvals/run-1/node-1/approve",
+        body={"by": "tester", "choice": "Beta", "reply": "Testers only"},
+    ).json() == {
+        "workflowId": "wf",
+        "runId": "run-1",
+        "nodeId": "node-1",
+        "decision": "approved",
+        "decidedBy": "tester",
+        "notes": "",
+        "choice": "Beta",
+        "reply": "Testers only",
     }
 
 
@@ -1843,6 +1861,30 @@ def test_ui_server_rerun_route_passes_the_run_and_given_inputs(monkeypatch, tmp_
         assert refused.status == 400
 
 
+def test_ui_server_run_failure_route_passes_the_run_and_node(monkeypatch, tmp_path) -> None:
+    import gofer.ui.run_failure as run_failure
+
+    def fake_failure(run_id, data_dir, **kwargs):
+        if run_id == "gone":
+            raise run_failure.RunFailureError("Run 'gone' was not found.")
+        return {"runId": run_id, "dataDir": str(data_dir), **kwargs}
+
+    monkeypatch.setattr(run_failure, "run_failure_payload", fake_failure)
+    assert _request(
+        tmp_path, "GET", "/api/rattish/runs/r1/failure?workflowId=wf&nodeId=ship"
+    ).json() == {
+        "runId": "r1",
+        "dataDir": str(tmp_path),
+        "workflow_id": "wf",
+        "node_id": "ship",
+    }
+    found = cast(dict[str, Any], _request(tmp_path, "GET", "/api/rattish/runs/r1/failure").json())
+    assert found["node_id"] is None
+    missing = _request(tmp_path, "GET", "/api/rattish/runs/gone/failure")
+    assert missing.status == 404
+    assert missing.json() == {"error": "Run 'gone' was not found."}
+
+
 def test_ui_server_chat_routes_and_stream_headers(monkeypatch, tmp_path) -> None:
     async def fake_chat(**kwargs):
         assert kwargs["permission_mode"] == "danger-full-access"
@@ -1960,10 +2002,10 @@ def test_ui_server_streams_local_transcription_sessions(monkeypatch, tmp_path) -
 
     monkeypatch.setattr(provider_preferences, "get_data_dir", lambda: tmp_path)
 
-    def fake_start(*, data_dir, engine):
+    def fake_start(*, data_dir, engine, engine_chosen):
         assert data_dir == tmp_path
         # The recognizer chosen in Settings > Devices; the OS's own until changed.
-        assert engine == "system"
+        assert (engine, engine_chosen) == ("system", False)
         return {"sessionId": session_id}
 
     def fake_chunk(body):
@@ -2047,31 +2089,48 @@ def test_ui_server_reports_and_saves_the_speech_recognizer(monkeypatch, tmp_path
     monkeypatch.setattr(provider_preferences, "get_data_dir", lambda: tmp_path)
     calls = []
 
-    def fake_engines(*, data_dir, refresh):
-        calls.append(refresh)
-        return {"system": {"id": "windows", "available": True}, "offline": {"installed": False}}
+    def fake_engines(*, data_dir, refresh, preference: dict[str, object]):
+        calls.append((refresh, preference))
+        # A Windows PC with the offline model downloaded dictates with it until the
+        # user picks the Windows recognizer.
+        engine = "offline" if not preference["chosen"] else preference["engine"]
+        return {
+            "system": {"id": "windows", "available": True},
+            "offline": {"installed": True},
+            "engine": engine,
+        }
 
     monkeypatch.setattr(server_module, "transcription_engines", fake_engines)
     shown = _request(tmp_path, "GET", "/api/chat/transcribe/engines")
     assert shown.json() == {
-        "engine": "system",
+        "engine": "offline",
+        "chosen": False,
         "system": {"id": "windows", "available": True},
-        "offline": {"installed": False},
+        "offline": {"installed": True},
     }
     _request(tmp_path, "GET", "/api/chat/transcribe/engines?refresh=1")
-    assert calls == [False, True]
+    unchosen = {"engine": "system", "chosen": False}
+    assert calls == [(False, unchosen), (True, unchosen)]
 
+    saved = _request(tmp_path, "POST", "/api/chat/transcribe/engines", body={"engine": "system"})
+    assert saved.json() == {"saved": True, "engine": "system", "chosen": True}
+    assert _request(tmp_path, "GET", "/api/chat/transcribe/engines").json() == {
+        "engine": "system",
+        "chosen": True,
+        "system": {"id": "windows", "available": True},
+        "offline": {"installed": True},
+    }
     saved = _request(tmp_path, "POST", "/api/chat/transcribe/engines", body={"engine": "offline"})
-    assert saved.json() == {"saved": True, "engine": "offline"}
-    started = {}
+    assert saved.json() == {"saved": True, "engine": "offline", "chosen": True}
+    started: dict[str, object] = {}
 
-    def fake_start(*, data_dir, engine):
-        started["engine"] = engine
+    def fake_start(*, data_dir, engine, engine_chosen):
+        started.update(engine=engine, chosen=engine_chosen)
         return {"sessionId": "b" * 32}
 
     monkeypatch.setattr(server_module, "start_chat_transcription", fake_start)
     _request(tmp_path, "POST", "/api/chat/transcribe/start", body={})
-    assert started == {"engine": "offline"}
+    assert started == {"engine": "offline", "chosen": True}
     refused = _request(tmp_path, "POST", "/api/chat/transcribe/engines", body={"engine": "cloud"})
     assert refused.status == 400
 
@@ -2087,7 +2146,7 @@ def test_ui_server_downloads_the_offline_model_and_tries_the_mac_recognizer(
     status: dict[str, object] = {
         "name": "Raticode's offline speech model",
         "installed": False,
-        "downloadMb": 130,
+        "downloadMb": 475,
     }
 
     def fake_start(*, data_dir):
@@ -2113,15 +2172,20 @@ def test_ui_server_downloads_the_offline_model_and_tries_the_mac_recognizer(
         lambda: {"id": "macos", "ok": True, "message": "macOS speech recognition works."},
     )
 
-    def fake_engines(*, data_dir, refresh):
+    def fake_engines(*, data_dir, refresh, preference):
         refreshed.append(refresh)
-        return {"system": {"id": "macos", "available": True}, "offline": status}
+        return {
+            "system": {"id": "macos", "available": True},
+            "offline": status,
+            "engine": preference["engine"],
+        }
 
     monkeypatch.setattr(server_module, "transcription_engines", fake_engines)
     tried = _request(tmp_path, "POST", "/api/chat/transcribe/engines/test", body={})
     assert tried.json() == {
         "test": {"id": "macos", "ok": True, "message": "macOS speech recognition works."},
         "engine": "system",
+        "chosen": False,
         "system": {"id": "macos", "available": True},
         "offline": status,
     }
@@ -3624,16 +3688,23 @@ def test_fork_attachment_endpoint_copies_files(tmp_path: Path) -> None:
     assert missing.status == 400
 
 
-def test_commit_settings_routes_persist_validate_and_require_auth(tmp_path) -> None:
+def test_commit_settings_routes_persist_validate_and_require_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from gofer.core.commit_message_format import DEFAULT_COMMIT_MESSAGE_TEMPLATE
 
     endpoint = "/api/provider/commit-settings"
     selection = {"provider": "codex", "model": "sol"}
     defaults = {
         "autoCommit": False,
+        "stripCoAuthors": False,
         "template": DEFAULT_COMMIT_MESSAGE_TEMPLATE,
         "defaultTemplate": DEFAULT_COMMIT_MESSAGE_TEMPLATE,
+        "stripCoAuthorsStatus": {"agentCommitsChecked": True, "helperReady": False},
     }
+    monkeypatch.setattr(
+        "gofer.core.commit_attribution.config_hooks_supported", lambda git="git": True
+    )
     assert _request(tmp_path, "GET", endpoint).json() == defaults
     assert _request(tmp_path, "POST", endpoint, body=selection).status == 200
     assert _request(tmp_path, "GET", endpoint).json() == {**defaults, **selection}
@@ -3645,6 +3716,7 @@ def test_commit_settings_routes_persist_validate_and_require_auth(tmp_path) -> N
     assert _request(tmp_path, "POST", endpoint, body={"template": template}).json() == {
         "saved": True,
         "autoCommit": False,
+        "stripCoAuthors": False,
         **selection,
         "template": template,
     }
@@ -3656,6 +3728,29 @@ def test_commit_settings_routes_persist_validate_and_require_auth(tmp_path) -> N
     assert _request(tmp_path, "GET", endpoint).json() == {**defaults, **selection}
 
 
+def test_commit_message_clean_route_follows_the_setting(tmp_path: Path) -> None:
+    clean = "/api/provider/commit-message/clean"
+    message = "Fix it\n\nBody\n\nCo-authored-by: A <a@example.com>\n"
+    assert _request(tmp_path, "POST", clean, body={"message": message}).json() == {
+        "message": message
+    }
+    saved = {"stripCoAuthors": True}
+    assert _request(tmp_path, "POST", "/api/provider/commit-settings", body=saved).status == 200
+    settings = cast(
+        dict[str, Any], _request(tmp_path, "GET", "/api/provider/commit-settings").json()
+    )
+    assert settings["stripCoAuthors"] is True
+    assert _request(tmp_path, "POST", clean, body={"message": message}).json() == {
+        "message": "Fix it\n\nBody\n"
+    }
+    assert _request(tmp_path, "POST", clean, body={"message": 5}).status == 400
+    assert _request(tmp_path, "POST", clean, body={"message": "x" * 72001}).status == 400
+    assert (
+        _request(tmp_path, "POST", clean, body={"message": message}, authenticated=False).status
+        == 401
+    )
+
+
 def test_usage_overview_and_period_validation(tmp_path: Path) -> None:
     result = _request(tmp_path, "GET", "/api/usage/overview?days=7")
     assert result.status == 200
@@ -3665,19 +3760,58 @@ def test_usage_overview_and_period_validation(tmp_path: Path) -> None:
     assert len(payload["accounts"]) == 9
     assert _request(tmp_path, "GET", "/api/usage/overview?days=0").status == 400
     assert _request(tmp_path, "GET", "/api/usage/overview", authenticated=False).status == 401
+    # The older 90-day period is 3mo; longer and custom periods use range.
+    legacy = cast(dict[str, Any], _request(tmp_path, "GET", "/api/usage/overview?days=90").json())
+    assert legacy["range"]["key"] == "3mo" and legacy["days"] == 90
+    for key in ("6mo", "1y", "5y", "all"):
+        answer = _request(tmp_path, "GET", f"/api/usage/overview?range={key}&tz=UTC")
+        assert answer.status == 200
+        assert cast(dict[str, Any], answer.json())["range"]["key"] == key
+    custom = _request(
+        tmp_path, "GET", "/api/usage/overview?range=custom&start=2026-01-01&end=2026-01-31&tz=UTC"
+    )
+    assert cast(dict[str, Any], custom.json())["range"]["start_date"] == "2026-01-01"
+    backwards = _request(
+        tmp_path, "GET", "/api/usage/overview?range=custom&start=2026-02-01&end=2026-01-01"
+    )
+    assert backwards.status == 400
+    assert "on or before" in cast(dict[str, Any], backwards.json())["error"]
+    assert _request(tmp_path, "GET", "/api/usage/overview?range=2y").status == 400
+
+
+def test_plan_price_route_is_gone(tmp_path: Path) -> None:
+    # The Saved vs API form and its route were removed; an old plans file stays untouched.
+    old_plans = tmp_path / "usage-plans.json"
+    old_plans.write_text('{"version": 1, "plans": {"claude_code": {"monthly_usd": 100}}}')
+    before = old_plans.read_bytes()
+    result = _request(tmp_path, "POST", "/api/usage/plans", body={"plans": {"claude_code": 5}})
+    assert result.status == 404
+    assert old_plans.read_bytes() == before
 
 
 def test_usage_refresh_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    async def refresh(data_dir: Path | None, *, days: int, explicit: bool) -> dict[str, object]:
+    async def refresh(
+        data_dir: Path | None, *, query: dict[str, Any], explicit: bool
+    ) -> dict[str, object]:
         assert data_dir == tmp_path
         # A user's refresh may retry ordinary failures, but never a provider 429.
         assert explicit is True
-        return {"days": days, "accounts": []}
+        return {"query": query, "accounts": []}
 
     monkeypatch.setattr(server_module, "refresh_usage", refresh)
     result = _request(tmp_path, "POST", "/api/usage/refresh?days=90", body={})
     assert result.status == 200
-    assert result.json() == {"days": 90, "accounts": []}
+    assert cast(dict[str, Any], result.json())["query"]["days"] == "90"
+    result = _request(
+        tmp_path, "POST", "/api/usage/refresh?range=custom&start=2026-01-01&end=2026-01-02", body={}
+    )
+    assert cast(dict[str, Any], result.json())["query"] == {
+        "period": "custom",
+        "days": None,
+        "start": "2026-01-01",
+        "end": "2026-01-02",
+        "tz": None,
+    }
 
 
 def test_report_theme_generation_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

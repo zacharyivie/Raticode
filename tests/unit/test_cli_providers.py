@@ -872,9 +872,12 @@ def test_long_cli_prompts_move_to_stdin(provider):
     assert "-p" not in args and max(map(len, args)) < 8192
 
 
-def test_short_copilot_prompts_keep_the_prompt_argument():
+def test_short_copilot_prompts_go_on_stdin_too():
+    # Any local account can read a command line; prompts carry memories and chats.
     command = cli_command("copilot", "Short prompt", executable="copilot")
-    assert cli_prompt_input("copilot", command) == (command, None)
+    args, stdin = cli_prompt_input("copilot", command)
+    assert stdin == b"Short prompt"
+    assert "-p" not in args and "Short prompt" not in args
 
 
 @pytest.mark.asyncio

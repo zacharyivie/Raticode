@@ -21,8 +21,9 @@ export function keySecretName(profileName) {
 // Local model servers (Ollama, llama.cpp, LM Studio) are provider profiles for workflow
 // agent nodes. Raticode doesn't install one; this card points profiles at one the user runs.
 // A key for a server on another computer goes to the keychain as a workflow secret and is
-// never shown again.
-export default function LocalModelServerSettings() {
+// never shown again. Inside Settings > Providers the card sits in a group that supplies its
+// heading (labelledBy) and wants the server list for its one-line summary (onProfilesChange).
+export default function LocalModelServerSettings({ labelledBy = "", onProfilesChange } = {}) {
   const [profiles, setProfiles] = useState(null);
   const [takenNames, setTakenNames] = useState([]);
   const [name, setName] = useState("ollama");
@@ -41,8 +42,10 @@ export default function LocalModelServerSettings() {
   async function load() {
     const payload = await request("/provider/profiles", {});
     const all = Array.isArray(payload.profiles) ? payload.profiles : [];
+    const local = all.filter(profile => profile.local);
     setTakenNames(all.map(profile => profile.name));
-    setProfiles(all.filter(profile => profile.local));
+    setProfiles(local);
+    onProfilesChange?.(local);
   }
   useEffect(() => {
     load().catch(failure => { setProfiles([]); setError(failure.message || "Local model server profiles couldn't be loaded."); });
@@ -93,8 +96,8 @@ export default function LocalModelServerSettings() {
   }
 
   const input = "mt-1 w-full rounded border border-line bg-white px-2 py-1.5 text-xs text-ink";
-  return <section aria-labelledby="local-model-servers-heading" className="space-y-2 border-t border-line pt-3">
-    <h3 id="local-model-servers-heading" className="text-xs font-semibold">Local model servers</h3>
+  return <section aria-labelledby={labelledBy || "local-model-servers-heading"} className={labelledBy ? "space-y-2" : "space-y-2 border-t border-line pt-3"}>
+    {labelledBy ? null : <h3 id="local-model-servers-heading" className="text-xs font-semibold">Local model servers</h3>}
     <p className="text-xs text-muted">{"Workflow agent nodes can use a model server you run, such as Ollama, llama.cpp or LM Studio, through its OpenAI-compatible API. Raticode doesn't install a server or download models. Calls cost $0 in usage totals."}</p>
     {profiles === null && !error ? <p role="status" className="text-xs text-muted">Loading local model servers…</p> : null}
     {(profiles ?? []).map(profile => {

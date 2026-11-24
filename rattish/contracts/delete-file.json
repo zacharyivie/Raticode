@@ -3,6 +3,7 @@
   "contract_version": 1,
   "node_type": "delete-file",
   "runtime_handler": "raticode.delete_file",
+  "catalog": {"category": "files", "summary": "Delete a file or folder, or move it to the trash", "docs_path": "/docs/nodes/delete-file"},
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",

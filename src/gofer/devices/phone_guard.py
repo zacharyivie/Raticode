@@ -83,6 +83,7 @@ _SKIPPED_KEYS = frozenset(
         "href",
         "path",
         "attachment_ids",
+        "file_ids",
         "request_ids",
         "known",
         "digest",

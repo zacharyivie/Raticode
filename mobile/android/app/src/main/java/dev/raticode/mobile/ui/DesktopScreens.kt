@@ -140,15 +140,19 @@ internal fun ThreadComposer(value: String, onValue: (String) -> Unit, placeholde
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun RemPage(client: LiveClient, handoff: RemHandoff? = null, onHandoffTaken: () -> Unit = {}, onSelfWork: () -> Unit = {},
-                     onTicket: ((RemTicket) -> Unit)? = null) {
+                     onTicket: ((RemTicket) -> Unit)? = null, openDecision: String? = null, onDecisionOpened: () -> Unit = {}) {
     // The Rem tab opens to the chat. Tapping Rem's status opens the task list as its own screen, with a back arrow.
     var nav by rememberSaveable(stateSaver = RemNav.Saver) { mutableStateOf(RemNav()) }
     var creating by rememberSaveable { mutableStateOf(false) }
-    // The chat keeps its draft, reply, scroll position and attached files while tasks, a task, a thread or memories are open.
+    // The chat keeps its draft, reply, scroll position and attached files while tasks, a task, a thread, memories or decisions are open.
     val saved = rememberSaveableStateHolder()
     // Files handed over for the message box open the chat, where the message box is.
     LaunchedEffect(handoff?.id) { if (handoff != null) nav = RemNav() }
+    // A tapped question opens the Decisions screen on it.
+    var focusDecision by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(openDecision) { if (openDecision != null) { focusDecision = openDecision; nav = RemNav(decisions = true); onDecisionOpened() } }
     val (op, params) = when {
+        nav.decisions -> RemDecisions.READ to JSONObject()
         nav.memories -> "rem.memories" to JSONObject()
         nav.threadId != null -> "rem.thread" to JSONObject().put("thread_id", nav.threadId)
         nav.taskId != null -> "rem.task" to JSONObject().put("task_id", nav.taskId)
@@ -170,6 +174,9 @@ internal fun RemPage(client: LiveClient, handoff: RemHandoff? = null, onHandoffT
     CompositionLocalProvider(LocalRemTickets provides (client.remEarlierTickets + home?.tickets.orEmpty() + taskTickets), LocalTicketOpener provides onTicket) {
     Column(Modifier.fillMaxSize()) {
         when {
+            // A task opened from a question's asked line covers the decisions until Back.
+            nav.decisions && nav.taskId == null && nav.threadId == null ->
+                RemDecisionScreen(client, focusDecision, onFocused = { focusDecision = null }, onTask = { nav = nav.copy(taskId = it) }) { nav = nav.back() }
             nav.memories -> RemMemoryScreen(client) { nav = nav.back() }
             nav.threadId != null -> RemThreadView(client, nav.threadId!!) { nav = nav.back() }
             nav.taskId != null -> RemTaskView(client, nav.taskId!!, onBack = { nav = nav.back() }, onThread = { nav = nav.copy(threadId = it) })
@@ -181,7 +188,10 @@ internal fun RemPage(client: LiveClient, handoff: RemHandoff? = null, onHandoffT
                 if (client.kanban == true) SelfWorkBanner(client, onSelfWork)
                 Box(Modifier.weight(1f)) {
                     DesktopGate(client, "rem.home", "Loading Rem's tasks from your desktop…") {
-                        if (home != null) RemTasks(home) { nav = nav.copy(taskId = it) }
+                        if (home != null) RemTasks(home, busy = "rem.home" in client.desktopBusy || !client.connected || !client.desktopControl,
+                            onDismissAll = if (home.dismissAll) { runs: List<String> -> client.desktopAction(RemHome.DISMISS_ALL, JSONObject().put("run_ids", JSONArray(runs))) } else null) {
+                            nav = nav.copy(taskId = it)
+                        }
                     }
                 }
             }
@@ -231,6 +241,8 @@ internal fun RemPage(client: LiveClient, handoff: RemHandoff? = null, onHandoffT
                     // An older desktop doesn't know the memory requests, so the button waits for its flag.
                     if (home?.memories == true && client.desktopControl) IconButton(onClick = { nav = nav.copy(memories = true) },
                         modifier = Modifier.testTag("remMemory")) { Icon(ThreadIcons.Memory, "Memory") }
+                    // Rem's decisions, beside its memory; an older desktop doesn't know the requests.
+                    if (home?.decisions == true && client.desktopControl) RemDecisionsButton(home.decisionsWaiting) { nav = nav.copy(decisions = true) }
                 }
                 if (client.kanban == true && !searching) SelfWorkBanner(client, onSelfWork)
                 Box(Modifier.weight(1f)) {
@@ -274,9 +286,11 @@ internal fun RemPage(client: LiveClient, handoff: RemHandoff? = null, onHandoffT
  * each task with a glyph that turns while it works and its status in the desktop's colors and words.
  */
 @Composable
-private fun RemTasks(home: RemHome, onTask: (String) -> Unit) {
+private fun RemTasks(home: RemHome, busy: Boolean = false, onDismissAll: ((List<String>) -> Unit)? = null, onTask: (String) -> Unit) {
     val shown = RemTaskList.shown(home.tasks)
     val groups = RemTaskStatus.groups(shown)
+    // Dismiss all, beside the Needs you / Updates heading: only from a desktop that takes it.
+    val updates = RemTaskStatus.dismissible(shown)
     // Done starts folded, as on the desktop.
     var closed by rememberSaveable { mutableStateOf(listOf("done")) }
     LazyColumn(Modifier.fillMaxSize().testTag("remTasks"), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
@@ -286,11 +300,26 @@ private fun RemTasks(home: RemHome, onTask: (String) -> Unit) {
         groups.forEach { group ->
             val open = group.id !in closed
             item(key = "group-${group.id}") {
-                StatusSectionHeader(group.label, group.tasks.size, open, { closed = if (open) closed + group.id else closed - group.id },
-                    Modifier.padding(top = 8.dp).testTag("remTaskGroup-${group.id}"))
+                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    StatusSectionHeader(group.label, group.tasks.size, open, { closed = if (open) closed + group.id else closed - group.id },
+                        Modifier.weight(1f).testTag("remTaskGroup-${group.id}"))
+                    if (group.id == "attention" && onDismissAll != null && updates.isNotEmpty())
+                        DismissAllButton(updates.size, group.tasks.size - updates.size, busy) { onDismissAll(updates.mapNotNull { it.lastRun?.id }) }
+                }
             }
             if (open) items(group.tasks, key = { it.first.id }) { (task, activity) -> RemTaskRow(task, activity) { onTask(task.id) } }
         }
+    }
+}
+
+/** "Dismiss all 3": every task update at once. Tasks that need an answer or are on hold stay, and its label says so. */
+@Composable
+private fun DismissAllButton(count: Int, staying: Int, busy: Boolean, onClick: () -> Unit) {
+    val what = "$count task ${if (count == 1) "update" else "updates"}"
+    val stays = if (staying > 0) ". $staying that ${if (staying == 1) "needs" else "need"} your answer or ${if (staying == 1) "is" else "are"} on hold ${if (staying == 1) "stays" else "stay"}" else ""
+    TextButton(onClick = onClick, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp).testTag("remDismissAll")
+        .semantics { contentDescription = "Dismiss all: $what$stays" }) {
+        Text("Dismiss all $count", style = MaterialTheme.typography.labelLarge)
     }
 }
 
@@ -345,6 +374,13 @@ private fun RemTaskView(client: LiveClient, id: String, onBack: () -> Unit, onTh
             else Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 val busy = "rem.home" in client.desktopBusy || !client.connected
                 RemTaskStatusCard(task)
+                // What, where and how, as tiles instead of lines of text.
+                FactGrid(buildList {
+                    add(Fact(ThreadIcons.Tag, "Kind", task.type.replaceFirstChar { it.uppercase() }, tag = "remFactKind"))
+                    add(Fact(ThreadIcons.Recent, "Schedule", scheduleText(task.schedule), tag = "remFactSchedule"))
+                    if (task.project.isNotBlank()) add(Fact(ThreadIcons.Folder, "Project", task.project, tag = "remFactProject"))
+                    if (task.model.isNotBlank()) add(Fact(ThreadIcons.Computer, "Model", listOf(task.provider, task.model).filter { it.isNotBlank() }.joinToString(" · "), tag = "remFactModel"))
+                })
                 val refs = TicketMentions.taskTickets(task)
                 if (refs.isNotEmpty()) SettingsGroup("Tickets") {
                     TicketPillRow(refs, LocalRemTickets.current, "Tickets for this task", limit = 12)
@@ -356,6 +392,11 @@ private fun RemTaskView(client: LiveClient, id: String, onBack: () -> Unit, onTh
                     if (active == null) task.dependency?.prerequisites?.filter { it.canRetry }?.forEach { item ->
                         OutlinedButton(onClick = { client.desktopAction("rem.task.run", JSONObject().put("task_id", item.taskId)) }, enabled = !busy) { Text("Retry “${item.title}”") }
                     }
+                    // A paired desktop with room while this task waits; nothing goes there until the user taps Run there.
+                    active?.takeIf { it.state == "queued" }?.let { run -> RunThere.forRun(run.id, run.suggestion, client.desktopRunThere)?.let { pick ->
+                        Text(run.suggestion!!.lead, Modifier.align(Alignment.CenterVertically), style = MaterialTheme.typography.bodyMedium)
+                        Button(onClick = { client.desktopAction(RunThere.OP, pick) }, enabled = !busy, modifier = Modifier.testTag("remRunThere")) { Text(RunThere.LABEL) }
+                    } }
                     // Only a desktop that reports the sleep takes Wake now.
                     active?.sleep?.takeIf { active.state == "queued" }?.let {
                         Button(onClick = { client.desktopAction(RemSleep.WAKE, JSONObject().put("run_id", active.id)) }, enabled = !busy,
@@ -390,7 +431,7 @@ private fun RemTaskView(client: LiveClient, id: String, onBack: () -> Unit, onTh
                                     color = if (tone == RemTaskStatus.Tone.NEUTRAL) MaterialTheme.colorScheme.onSurfaceVariant else toneColor(tone))
                             }
                         }
-                        Note(RemTaskStatus.startsAfterNote(dependency.prerequisites))
+                        InfoChip("How this waits", RemTaskStatus.startsAfterNote(dependency.prerequisites), tag = "remStartsAfterInfo")
                     }
                 }
                 // Which checks failed or stayed unresolved, right under the controls, as on the desktop.
@@ -403,14 +444,19 @@ private fun RemTaskView(client: LiveClient, id: String, onBack: () -> Unit, onTh
                         RemRunRow(run, onThread)
                     }
                 }
-                SettingsGroup("Details") {
-                    if (task.project.isNotBlank()) Note("Project: ${task.project}")
-                    if (task.model.isNotBlank()) Note("Model: ${listOf(task.provider, task.model).filter { it.isNotBlank() }.joinToString(" · ")}")
-                    // A task's prompt can run to pages; it folds like a long message.
-                    if (task.prompt.isNotBlank()) FoldableText { ChatMarkdown(task.prompt, compact = true) }
-                    if (RemTaskList.finishedOnce(task)) Note(cleanupText(task.cleanupAt))
+                if (task.criteria.isNotEmpty()) DetailCard("Done when", Modifier.testTag("remDoneWhen"), icon = ThreadIcons.Succeeded, tone = OrgTone.DONE) {
+                    task.criteria.forEach { c ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+                            Icon(ThreadIcons.Check, null, Modifier.padding(top = 2.dp).size(14.dp), tint = orgColors(OrgTone.DONE).first)
+                            Text(c, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
                 }
-                if (task.criteria.isNotEmpty()) SettingsGroup("Done when") { task.criteria.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall) } }
+                if (task.prompt.isNotBlank() || RemTaskList.finishedOnce(task)) DetailCard("Prompt", Modifier.testTag("remTaskPrompt"), icon = ThreadIcons.FileText) {
+                    // A task's prompt can run to pages; it folds like a long message.
+                    if (task.prompt.isNotBlank()) FoldableText(toggleColor = MaterialTheme.colorScheme.primary) { ChatMarkdown(task.prompt, compact = true) }
+                    if (RemTaskList.finishedOnce(task)) InfoChip("Clean-up", cleanupText(task.cleanupAt), icon = ThreadIcons.Trash, tag = "remCleanup")
+                }
             }
         }
     }
@@ -788,38 +834,93 @@ private fun SelfWorkEntry(client: LiveClient, onOpen: () -> Unit) {
 
 @RequiresApi(29)
 @Composable
-internal fun UsagePage(client: LiveClient, onBack: (() -> Unit)?) {
-    DisposableEffect(Unit) { client.openDesktop("usage.overview"); onDispose { client.openDesktop(null) } }
+internal fun UsagePage(client: LiveClient, onBack: (() -> Unit)?, onComputers: () -> Unit = {}) {
+    val context = LocalContext.current
+    var range by remember { mutableStateOf(UsageRangePrefs.load(context)) }
+    DisposableEffect(range) { client.openDesktop("usage.overview", UsageHistory.params(range)); onDispose { client.openDesktop(null) } }
     val usage = client.desktopViews["usage.overview"] as? DesktopUsage
     Column(Modifier.fillMaxSize()) {
-        Header("Usage", usage?.let { "Last ${it.days} days" }.orEmpty(), onBack)
+        Header("Usage", usage?.let { it.range?.label ?: "Last ${it.days} days" }.orEmpty(), onBack)
         Box(Modifier.weight(1f)) {
             DesktopGate(client, "usage.overview", "Loading provider usage…") {
                 if (usage != null) LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    // The same cards as the top of the desktop's Settings › Usage.
+                    item { UsageAccountCards(usage.accounts, phoneSignIn(client)) }
                     item {
-                        SettingsGroup("Activity") {
-                            Text("${usage.calls} calls", style = MaterialTheme.typography.titleMedium)
-                            if (usage.inputTokens != null || usage.outputTokens != null)
-                                Note("${usage.inputTokens ?: 0} input and ${usage.outputTokens ?: 0} output tokens reported")
-                            usage.providers.forEach { Text("${it.provider}: ${it.calls} calls", style = MaterialTheme.typography.bodySmall) }
+                        SettingsGroup("Tokens in Raticode") {
+                            UsageRangeRow(range) { next -> UsageRangePrefs.save(context, next); range = next }
+                            // An older desktop answers every request with its last 30 days.
+                            if (usage.range == null && range.key != "30d") Note("Update Raticode on your computer to choose other periods. Showing the last ${usage.days} days.")
+                            else if (usage.range != null && usage.range.key != range.key) Note("Loading ${UsageHistory.label(range)}…")
+                            Text(usage.totalTokens?.let { "%,d tokens".format(it) } ?: "Tokens not reported", style = MaterialTheme.typography.titleMedium)
+                            Note("${usage.calls} calls" + (usage.range?.label?.let { " · $it" } ?: ""))
+                            usage.series?.let { TokenChart(it) }
+                            if (usage.series == null) usage.providers.forEach { Text("${UsageHistory.providerName(it.provider)}: ${it.calls} calls", style = MaterialTheme.typography.bodySmall) }
                         }
                     }
-                    items(usage.accounts) { account ->
-                        SettingsGroup(account.label) {
-                            Text(account.status.replace('_', ' ').replaceFirstChar { it.uppercase() }, style = MaterialTheme.typography.labelMedium)
-                            if (account.reason.isNotBlank()) Note(account.reason)
-                            account.windows.forEach { window ->
-                                Text(window.label, style = MaterialTheme.typography.bodySmall)
-                                window.usedPercent?.let { used ->
-                                    LinearProgressIndicator({ (used / 100).toFloat().coerceIn(0f, 1f) }, Modifier.fillMaxWidth().semantics { contentDescription = "${used.toInt()} percent used" })
-                                }
-                                Note(listOfNotNull(window.usedPercent?.let { "${it.toInt()}% used" }, window.resetsAt.takeIf { it.isNotBlank() }?.let { "resets ${whenText(it)}" }).joinToString(" · "))
-                            }
+                    usage.apiCost?.takeIf { it.calls > 0 }?.let { cost -> item { UsageCostGroup(cost) } }
+                    usage.verifiedWork?.let { work -> item { UsageVerifiedGroup(work) } }
+                    // Each computer's worker limit and load; an older desktop says to update instead.
+                    item {
+                        SettingsGroup("Computers") {
+                            Note(if (client.desktopComputers == false) Computers.UPDATE_DESKTOP
+                                else "Workers running on each computer, its worker limit and how much room it has.")
+                            if (client.desktopComputers != false) OutlinedButton(onClick = onComputers, modifier = Modifier.testTag("usageComputers")) { Text("See computers") }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+/** Usage › Cost at API prices: the desktop's estimate of what the period's tokens would cost at list prices. */
+@RequiresApi(29)
+@Composable
+private fun UsageCostGroup(cost: UsageCost) {
+    SettingsGroup("Cost at API prices") {
+        Text(UsageCosts.label(cost.costUsd, cost.lowerBound), style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.semantics { contentDescription = "Estimated API cost ${UsageCosts.label(cost.costUsd, cost.lowerBound)}" })
+        Note("Estimate at public API list prices for this period. Not a bill.")
+        cost.providers.forEach { p ->
+            val name = UsageHistory.providerName(p.provider) + (p.profile?.let { " · $it" } ?: "")
+            Text("$name: ${UsageCosts.label(p.costUsd, p.lowerBound)}", style = MaterialTheme.typography.bodySmall)
+            if (p.unpricedModels.isNotEmpty()) Note("No list price: ${p.unpricedModels.joinToString(", ")}")
+        }
+        if (cost.unsplitCalls > 0) Note("${cost.unsplitCalls} ${if (cost.unsplitCalls == 1) "call has" else "calls have"} no cache breakdown, so all their input is priced as uncached. That overstates a call that used the cache; Claude Code turns stopped before this update saved only part of their input, so for those it understates.")
+        if (cost.unpricedCalls > 0) Note("${cost.unpricedCalls} ${if (cost.unpricedCalls == 1) "call used a model" else "calls used models"} with no list price. Their cost is unknown, not $0.")
+        Note("Cache reads, cache writes and uncached input are priced separately when the provider reported them. Prices checked ${cost.pricesChecked}.")
+    }
+}
+
+/** Usage › Verified work: how often Rem's tickets passed review on their own in the period, as on the desktop. */
+@RequiresApi(29)
+@Composable
+private fun UsageVerifiedGroup(work: VerifiedWork) {
+    SettingsGroup("Verified work") {
+        val headline = UsageVerified.headline(work)
+        if (headline == null) Note("No Rem ticket was accepted or blocked in this period. Choose a longer period to see earlier work.")
+        else {
+            Text(headline + (work.firstPassPercent?.let { " · $it%" } ?: ""), style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.testTag("usageVerifiedHeadline").semantics { contentDescription = work.line })
+            Note(if (work.accepted > 0) "Tickets that passed review first time, with no repair and without you stepping in" else work.line)
+            UsageVerified.facts(work).forEach { (label, value) -> VerifiedRow(label, value) }
+            val causes = UsageVerified.causeRows(work)
+            if (causes.isNotEmpty()) {
+                Text("Why tickets were blocked", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
+                causes.forEach { (label, value) -> VerifiedRow(label, value) }
+            }
+        }
+        Note("Rem's own Kanban tickets that reached Done or Blocked in this period. Only you see these numbers; Rem and its workers never do." +
+            (work.historySince.takeIf { it.isNotBlank() }?.let { " History starts ${it.take(10)}." } ?: ""))
+    }
+}
+
+@Composable
+private fun VerifiedRow(label: String, value: String) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+        Text(value, style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -845,6 +946,7 @@ internal fun MorePage(client: LiveClient, bar: List<String> = LiveNavigation.DEF
             }
             ConversationRow("Connection", "", if (client.connected) "Connected over ${client.route}" else "Reconnect or change the desktop address") { onOpen("Desktop") }
             ConversationRow("Bottom bar", "", "Choose which destinations the bar shows") { onOpen(LiveNavigation.NAV_BAR) }
+            ConversationRow("Open with Raticode", "", "Make Raticode the default browser, or open web pages, PDFs and other files from other apps") { onOpen(LiveNavigation.OPEN_WITH) }
             ConversationRow("People Rem can reach", "", "Who “brother” or “Mom” means on call and text cards. Kept on this phone") { onOpen(LiveNavigation.PEOPLE) }
             // Google Play requires the privacy policy to be reachable from inside the app as well as from its listing.
             ConversationRow("Privacy policy", "", "What Raticode keeps on this phone and what it sends. Opens in your browser") {
@@ -875,6 +977,8 @@ private fun moreRowText(client: LiveClient, page: String, context: android.conte
         else "Live application log from your computer, with this phone's connection events"
     "Voice" -> voiceRowText(context)
     "Browser" -> "Browse the web on this phone and open your computer's tabs"
+    "Posts" -> if (client.desktopControl && client.desktopPosts == false) Posts.UPDATE_DESKTOP
+        else "${Posts.EXPERIMENTAL}. Review and approve social posts Rem and your workflows propose"
     else -> ""
 }
 

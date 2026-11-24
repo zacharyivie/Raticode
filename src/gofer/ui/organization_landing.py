@@ -114,7 +114,9 @@ def land(
         tip = current["tip"]
         if current["uncommitted"] and source.get("checkout"):
             # The user reviewed these files; commit them on the branch so they land too.
-            ticket_patch.commit_leftovers(source["checkout"], f"Organization: {task['title']}")
+            ticket_patch.commit_leftovers(
+                source["checkout"], f"Organization: {task['title']}", branch=branch
+            )
             tip = ticket_patch.branch_commit(repository, branch) or tip
         result = ticket_patch.land(
             repository,

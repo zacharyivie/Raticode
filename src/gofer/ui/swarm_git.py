@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from gofer.core.commit_attribution import clean_commit_message
 from gofer.ui.swarm_workspaces import git
 from gofer.utils.brand_compat import LEGACY_SWARM_BRANCH_PREFIX
 from gofer.utils.process import build_subprocess_env
@@ -54,8 +55,10 @@ def execute(workspace: dict[str, str], settings: Any, payload: dict[str, Any]) -
         raise ValueError("Remote branches and pull requests are disabled for this swarm run")
     root = Path(workspace["path"]).resolve()
     branch = workspace.get("branch", "")
-    if not (branch.startswith(LEGACY_SWARM_BRANCH_PREFIX)
-            or re.fullmatch(r"raticode/swarm/[^/]+/attempt/[^/]+", branch)):
+    if not (
+        branch.startswith(LEGACY_SWARM_BRANCH_PREFIX)
+        or re.fullmatch(r"raticode/swarm/[^/]+/attempt/[^/]+", branch)
+    ):
         raise ValueError("Managed Git requires an isolated swarm assignment branch")
     # Do not inherit a caller's alternate index, Git directory or config injection.
     env = {
@@ -93,7 +96,7 @@ def execute(workspace: dict[str, str], settings: Any, payload: dict[str, Any]) -
                 raise ValueError("Stage path is outside the assignment")
         output = git(root, "add", "--all", "--", *paths, env=env)
     elif operation == "commit":
-        output = git(root, "commit", "-m", _text(payload, "message"), env=env)
+        output = git(root, "commit", "-m", clean_commit_message(_text(payload, "message")), env=env)
     else:
         remote = payload.get("remote", "origin")
         if not isinstance(remote, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", remote):

@@ -8,8 +8,10 @@ and approval policies, so the phone gains no authority the desktop UI lacks.
 
 The phone never sends paths. Projects are named by the IDs in the phone's
 catalog; Rem tasks, runs, threads, organizations, swarms and workflows by their
-desktop IDs. Workflows are viewed, run, stopped, resumed and run again, never edited (see
-``workflows.py``); their triggers can be turned on or off and all paused at once.
+desktop IDs. Workflows are viewed, run, stopped, resumed and run again (see
+``workflows.py``); their triggers can be turned on or off and all paused at once. The
+only workflow edit is Use this model after Try another model on its test set
+(``workflow_tests.py``), which writes a step's provider and model through the editor.
 A run can take typed inputs from the phone's Run form; the desktop checks them
 against the workflow's input schema, and the phone guard screens them first like
 any other request text. Workflow secrets never go to the phone.
@@ -46,8 +48,8 @@ done. Neither device stores the words; a failure answers with the heard text.
 Excluded on purpose: editing, renaming or deleting files, terminals, driving the
 browser (pages, input, Rem's browser tools and its profiles), pairing, provider
 credentials, skill and MCP server definitions, organization configuration and
-imports, workflow editing and workflow secrets, and settings that widen what agents
-may do.
+imports, workflow editing other than Use this model, workflow secrets, and settings
+that widen what agents may do.
 """
 
 from __future__ import annotations
@@ -56,6 +58,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -81,6 +84,8 @@ READ_OPS = frozenset(
     {
         "overview",
         "browser.tabs",
+        "computers.list",
+        "computers.placement",
         "developer.log",
         "files.list",
         "files.text",
@@ -91,6 +96,7 @@ READ_OPS = frozenset(
         "rem.draft",
         "rem.history",
         "rem.home",
+        "rem.decisions",
         "rem.memories",
         "rem.notices",
         "rem.search",
@@ -99,6 +105,8 @@ READ_OPS = frozenset(
         "organizations.list",
         "organizations.read",
         "organizations.note",
+        "posts.list",
+        "provider.accounts",
         "selfwork.read",
         "settings.get",
         "source_control.commit",
@@ -107,24 +115,32 @@ READ_OPS = frozenset(
         "source_control.list",
         "source_control.read",
         "usage.overview",
+        "workflows.failure",
         "workflows.list",
         "workflows.read",
         "workflows.runs",
+        "workflows.tests",
+        "workflows.tests.estimate",
+        "workflows.trigger.changes",
     }
 )
 ACTION_OPS = frozenset(
     {
         "browser.open",
+        "computers.place",
+        "computers.set",
         "files.link",
         "files.open",
         "kanban.participant",
         "kanban.ticket",
         "selfwork.settings",
+        "selfwork.stop",
         "selfwork.report.seen",
         "rem.attachment",
         "rem.message",
         "rem.instruct",
         "rem.tidy",
+        "rem.decision.change",
         "rem.memory.add",
         "rem.memory.edit",
         "rem.memory.forget",
@@ -137,11 +153,13 @@ ACTION_OPS = frozenset(
         "rem.task.delete",
         "rem.run.cancel",
         "rem.run.acknowledge",
+        "rem.run.acknowledge_all",
         "rem.run.retry_review",
         "rem.run.pause",
         "rem.run.resume",
         "rem.run.wake",
         "organizations.control",
+        "computers.run_there",
         "organizations.task",
         "organizations.knowledge",
         "organizations.worker",
@@ -149,6 +167,8 @@ ACTION_OPS = frozenset(
         "organizations.backlog_pull",
         "organizations.requests",
         "organizations.auto_mode",
+        "posts.decide",
+        "provider.account.sign_in",
         "swarms.start",
         "settings.update",
         "workflows.run",
@@ -156,7 +176,10 @@ ACTION_OPS = frozenset(
         "workflows.resume",
         "workflows.rerun",
         "workflows.trigger",
+        "workflows.trigger.approve",
         "workflows.triggers.pause",
+        "workflows.tests.try",
+        "workflows.tests.use_model",
     }
 )
 # Result bodies are JSON text split into parts. Escaping can at most double a
@@ -164,6 +187,160 @@ ACTION_OPS = frozenset(
 CHUNK = 24000
 MAX_PARTS = 48
 OFF = "Turn on Use Raticode from this phone in desktop Paired devices."
+
+
+def _sign_in_field(state: Any) -> dict[str, Any]:
+    """An account's device sign-in for the phone, as ``{"sign_in": ...}``, or nothing.
+
+    Only a device sign-in reaches the phone with its link and one-time code: a
+    sign-in started on the computer opens the computer's browser, and its page
+    can't finish on the phone.
+    """
+    if not isinstance(state, dict) or state.get("mode") != "device":
+        return {}
+    url = state.get("url")
+    seconds = state.get("seconds_left")
+    return {
+        "sign_in": {
+            "state": _text(state.get("state"), 40),
+            "url": url
+            if isinstance(url, str) and url.startswith("https://") and len(url) <= 2048
+            else "",
+            "code": _text(state.get("code"), 64),
+            "reason": _text(state.get("reason"), 600),
+            "help": _text(state.get("help"), 400),
+            "refused": state.get("refused") is True,
+            "seconds_left": seconds if type(seconds) is int and 0 <= seconds <= 86400 else 0,
+        }
+    }
+
+
+def _placement_suggestion(value: Any) -> dict[str, Any] | None:
+    """A paired desktop offered to waiting work (gofer.core.placement_suggestion), bounded.
+
+    ``pick`` says whether Run there is offered; without it ``grant`` says what the owner
+    would grant first. Never a path or a target's details.
+    """
+    if not isinstance(value, dict):
+        return None
+    computer = _text(value.get("computer_id"), 64)
+    if not computer:
+        return None
+    return {
+        "computer_id": computer,
+        "computer_name": _text(value.get("computer_name"), 150),
+        "project": _text(value.get("project"), 200),
+        "text": _text(value.get("text"), 400),
+        "pick": value.get("pick") is True,
+        "grant": _text(value.get("grant"), 400),
+    }
+
+
+def _usd(value: Any) -> float | None:
+    if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value):
+        return round(float(value), 6)
+    return None
+
+
+def _api_cost_view(cost: Any) -> dict[str, Any] | None:
+    """The usage page's API-price estimate for the phone, bounded. None from older code."""
+    if not isinstance(cost, dict):
+        return None
+    total: dict[str, Any] = cost["total"] if isinstance(cost.get("total"), dict) else {}
+    counts = (
+        "calls",
+        "priced_calls",
+        "unpriced_calls",
+        "unsplit_calls",
+        "no_token_calls",
+        "estimated_calls",
+        "partial_calls",
+    )
+    return {
+        "method": _text(cost.get("method"), 600),
+        "prices_checked": _text(cost.get("prices_checked"), 20),
+        "total": {
+            "cost_usd": _usd(total.get("cost_usd")),
+            "lower_bound": total.get("lower_bound") is True,
+            **{name: _count(total.get(name)) for name in counts},
+        },
+        "providers": [
+            {
+                "provider": _text(p.get("provider"), 80),
+                "profile": _text(p.get("profile"), 120) or None,
+                "cost_usd": _usd(p.get("cost_usd")),
+                "lower_bound": p.get("lower_bound") is True,
+                "calls": _count(p.get("calls")),
+                "unsplit_calls": _count(p.get("unsplit_calls")),
+                "unpriced_calls": _count(p.get("unpriced_calls")),
+                "unpriced_models": [_text(m, 120) for m in (p.get("unpriced_models") or [])[:6]],
+            }
+            for p in (cost.get("providers") or [])[:40]
+            if isinstance(p, dict)
+        ],
+    }
+
+
+def _verified_work_view(numbers: Any) -> dict[str, Any] | None:
+    """Usage › Verified work for the phone, bounded. None from older code."""
+    if not isinstance(numbers, dict):
+        return None
+
+    def share(value: Any) -> int | None:
+        return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
+
+    def group(value: Any, keys: tuple[str, ...]) -> dict[str, Any]:
+        found = value if isinstance(value, dict) else {}
+        return {key: _count(found.get(key)) for key in keys}
+
+    tokens: dict[str, Any] = numbers["tokens"] if isinstance(numbers.get("tokens"), dict) else {}
+    check = numbers.get("project_check")
+    repairs = numbers.get("repairs_per_ticket")
+    return {
+        "line": _text(numbers.get("line"), 160),
+        **{
+            key: _count(numbers.get(key))
+            for key in ("accepted", "first_pass", "repairs", "accepted_by_hand", "finished")
+        },
+        "blocked": _count(numbers.get("blocked")),
+        "first_pass_percent": share(numbers.get("first_pass_percent")),
+        "blocked_percent": share(numbers.get("blocked_percent")),
+        "repairs_per_ticket": float(repairs)
+        if isinstance(repairs, int | float) and not isinstance(repairs, bool)
+        else None,
+        "blocked_causes": [
+            {
+                "cause": _text(c.get("cause"), 40),
+                "label": _text(c.get("label"), 80),
+                "tickets": _count(c.get("tickets")),
+            }
+            for c in (numbers.get("blocked_causes") or [])[:10]
+            if isinstance(c, dict)
+        ],
+        "project_check": {
+            **group(check, ("checked", "failed_first")),
+            "failed_first_percent": share((check or {}).get("failed_first_percent"))
+            if isinstance(check, dict)
+            else None,
+            # Left out for older code, so the phone doesn't show a 0 it never counted.
+            **(
+                {"flaky": _count(check.get("flaky"))}
+                if isinstance(check, dict) and "flaky" in check
+                else {}
+            ),
+        },
+        "step_ins": group(
+            numbers.get("step_ins"), ("total", "request_changes", "manual_moves", "tickets")
+        ),
+        "tokens": {
+            # Token totals pass a million quickly, so they aren't capped like counts.
+            "total": share(tokens.get("total")) or 0,
+            "tickets": _count(tokens.get("tickets")),
+            "per_accepted": share(tokens.get("per_accepted")),
+            "partial": tokens.get("partial") is True,
+        },
+        "history_since": _text(numbers.get("history_since"), 40) or None,
+    }
 
 
 def _comment_author(actor: Any, employees: dict[Any, Any]) -> str:
@@ -303,6 +480,7 @@ SETTINGS: list[dict[str, Any]] = [
     {"key": "assistant.provider", "group": "Rem", "label": "Default provider", "kind": "provider"},
     {"key": "assistant.model", "group": "Rem", "label": "Default model", "kind": "model"},
     {"key": "assistant.effort", "group": "Rem", "label": "Default effort", "kind": "effort"},
+    # One "<provider> account" picker per provider with accounts, added below.
     {
         "key": "assistant.defaultScope",
         "group": "Rem",
@@ -314,6 +492,14 @@ SETTINGS: list[dict[str, Any]] = [
         "key": "assistant.autoHideThoughts",
         "group": "Rem",
         "label": "Hide thoughts after a reply",
+        "kind": "bool",
+    },
+    {
+        # Saved by the backend (providers.json), not the window, so a phone change
+        # applies at once; see BACKEND_SETTINGS.
+        "key": "commitMessage.stripCoAuthors",
+        "group": "Rem",
+        "label": "Remove Co-authored-by lines from commits",
         "kind": "bool",
     },
     {
@@ -402,7 +588,48 @@ SETTINGS: list[dict[str, Any]] = [
         "step": 100,
     },
 ]
+
+
+def _account_settings() -> list[dict[str, Any]]:
+    """Settings > Rem > <provider> account, for each provider that supports accounts."""
+    from gofer.core.provider_accounts import adapters
+
+    return [
+        {
+            "key": f"assistant.providerAccounts.{adapter.provider}",
+            "group": "Rem",
+            "label": f"{adapter.label} account",
+            "kind": "provider_account",
+            "provider": adapter.provider,
+        }
+        for adapter in adapters().values()
+    ]
+
+
+_effort_index = next(i for i, item in enumerate(SETTINGS) if item["key"] == "assistant.effort")
+SETTINGS[_effort_index + 1 : _effort_index + 1] = _account_settings()
 SETTING_KEYS = {item["key"]: item for item in SETTINGS}
+
+
+def _commit_settings() -> dict[str, Any]:
+    from gofer.core.provider_preferences import commit_message_preference
+
+    return {"commitMessage.stripCoAuthors": commit_message_preference()["stripCoAuthors"] is True}
+
+
+def _save_commit_settings(changes: dict[str, Any]) -> None:
+    from gofer.core.provider_preferences import save_commit_message_preference
+
+    save_commit_message_preference({"stripCoAuthors": changes["commitMessage.stripCoAuthors"]})
+
+
+# Settings the backend keeps itself: (read, save) over their mirror keys. The phone sees
+# them beside the window's settings, but a change is saved here instead of queued.
+BACKEND_SETTINGS: dict[
+    str, tuple[Callable[[], dict[str, Any]], Callable[[dict[str, Any]], None]]
+] = {
+    "commitMessage.stripCoAuthors": (_commit_settings, _save_commit_settings),
+}
 PENDING_SETTINGS = 20
 logger = logging.getLogger(__name__)
 
@@ -415,6 +642,42 @@ class Refused(Exception):
 
 def _text(value: Any, limit: int) -> str:
     return str(value or "")[:limit]
+
+
+# The phone's weekly chart is about 300 points wide; more readings than this add nothing.
+_PHONE_BURNDOWN_POINTS = 120
+
+
+def _weekly_burndown(chart: dict[str, Any]) -> dict[str, Any]:
+    """An account card's weekly chart for the phone: its readings, start, reset and pace."""
+    points = [
+        {
+            "observed_at": _text(r.get("observed_at"), 80),
+            "used_percent": float(r["used_percent"]),
+        }
+        for r in chart.get("readings") or []
+        if isinstance(r, dict)
+        and isinstance(r.get("used_percent"), int | float)
+        and not isinstance(r.get("used_percent"), bool)
+    ]
+    if len(points) > _PHONE_BURNDOWN_POINTS:
+        step = (len(points) - 1) / (_PHONE_BURNDOWN_POINTS - 1)
+        points = [points[round(i * step)] for i in range(_PHONE_BURNDOWN_POINTS)]
+    pace: dict[str, Any] = chart["pace"] if isinstance(chart.get("pace"), dict) else {}
+    count = chart.get("reading_count")
+    return {
+        "window_id": _text(chart.get("window_id"), 80),
+        "label": _text(chart.get("label"), 160),
+        "starts_at": _text(chart.get("starts_at"), 80),
+        "resets_at": _text(chart.get("resets_at"), 80),
+        "reading_count": count if isinstance(count, int) and not isinstance(count, bool) else 0,
+        "readings": points,
+        "pace": {
+            "state": _text(pace.get("state"), 20),
+            "runs_out_at": _text(pace.get("runs_out_at"), 80),
+            "text": _text(pace.get("text"), 120),
+        },
+    }
 
 
 def _draft_delta(
@@ -635,6 +898,371 @@ def _rich_message(message: dict[str, Any]) -> dict[str, Any]:
             "thread_id": _text(result.get("thread_id"), 128),
         }
     return item
+
+
+# Rem's decisions (rem_decisions.py): the changes a phone may make, and the statuses.
+DECISION_ACTIONS = frozenset(
+    {
+        "use",
+        "change",
+        "edit",
+        "replace",
+        "reject",
+        "reopen",
+        "forget",
+        "retire",
+        "scan",
+        "confirm_edit",
+        "cancel_edit",
+    }
+)
+# OK and Cancel on a change the user asked Rem for in chat; ``id`` is the edit's (E-n).
+DECISION_EDIT_ACTIONS = frozenset({"confirm_edit", "cancel_edit"})
+# queued: a request past a project's share of cards, with no card until one is settled.
+DECISION_STATUSES = frozenset(
+    {"queued", "pending", "provisional", "confirmed", "superseded", "rejected"}
+)
+# A chat card can also be withdrawn: the user forgot the question while it waited, so the
+# list no longer has it and the card itself says so.
+DECISION_CARD_STATUSES = DECISION_STATUSES | {"withdrawn"}
+DECISION_KINDS = frozenset({"fact", "record", "memory"})
+# A decision record's parts (rem_decision_records.RecordFields), as the phone sees and edits
+# them: the text sections by length, and the lists of path globs and words.
+DECISION_RECORD_TEXT = {"context": 1500, "options": 1500, "consequences": 1500, "check": 600}
+DECISION_RECORD_LISTS = ("applies_to", "forbids", "signals")
+DECISION_RECORD_ITEMS = 10
+DECISION_RECORD_ITEM = 200
+DECISION_SUPERSEDES = 5
+# The JSON text of one rem.decisions answer stays well under MAX_PARTS * CHUNK.
+DECISIONS_BUDGET = 900_000
+DECISION_CHANGED = "This changed on the desktop. Look at it again, then choose."
+# Plan with me (rem_plans): a plan's status, and how many plans one answer carries.
+DECISION_PLAN_STATUSES = frozenset({"asking", "ready", "handed_back"})
+DECISION_PLANS = 50
+
+
+def _decision_plans(value: Any) -> list[dict[str, Any]]:
+    """Each plan the phone groups questions under: its title and how many are answered.
+
+    The project goes by name, never a folder path.
+    """
+    plans: list[dict[str, Any]] = []
+    for plan in (value if isinstance(value, list) else [])[:DECISION_PLANS]:
+        if not isinstance(plan, dict) or not _text(plan.get("id"), 16):
+            continue
+        status = plan.get("status")
+        project = plan.get("project")
+        plans.append(
+            {
+                "id": _text(plan.get("id"), 16),
+                "title": _alert_text(plan.get("title"), 200),
+                "goal": _alert_text(plan.get("goal"), 300),
+                "project": _text(Path(project).name, 200) if isinstance(project, str) else "",
+                "status": status if status in DECISION_PLAN_STATUSES else "asking",
+                "answered": _count(plan.get("answered")),
+                "total": _count(plan.get("total")),
+                "waiting": _count(plan.get("waiting")),
+                "queued": _count(plan.get("queued")),
+            }
+        )
+    return plans
+
+
+def _decision_evidence(value: Any) -> list[dict[str, str]]:
+    """A recommendation's checked evidence; a file outside the project shows by name only."""
+    return [
+        {
+            "kind": _text(item.get("kind"), 20),
+            "ref": _alert_text(item.get("ref"), 500),
+            "excerpt": _text(item.get("excerpt"), 500),
+        }
+        for item in (value if isinstance(value, list) else [])[:5]
+        if isinstance(item, dict)
+    ]
+
+
+def _decision_card(value: Any) -> dict[str, Any] | None:
+    """The question a task update brings the user, bounded for the chat card, or None.
+
+    A fallback card (Raticode's own, when Rem's request couldn't be used) has no ID and
+    no recommendation: only the question, what the worker found and an unchecked answer.
+    """
+    if not isinstance(value, dict):
+        return None
+    if value.get("fallback"):
+        return {
+            "fallback": True,
+            "title": _text(value.get("title"), 160),
+            "question": _text(value.get("question"), 500),
+            "found": _alert_text(value.get("found"), 1200),
+            "candidate": _text(value.get("candidate"), 1000),
+        }
+    identity = _text(value.get("id"), 64)
+    if not identity:
+        return None
+    status = value.get("status")
+    return {
+        "id": identity,
+        "topic": _text(value.get("topic"), 80),
+        "question": _text(value.get("question"), 500),
+        "recommended": _text(value.get("recommended"), 1000),
+        "why": _text(value.get("why"), 300),
+        "evidence": _decision_evidence(value.get("evidence")),
+        "alternatives": [
+            {"answer": _text(a.get("answer"), 1000), "why_not": _text(a.get("why_not"), 300)}
+            for a in (value.get("alternatives") or [])[:3]
+            if isinstance(a, dict)
+        ],
+        "status": status if status in DECISION_CARD_STATUSES else "pending",
+        "tried": _alert_text(value.get("tried"), 1000),
+        # The decision in force this one would replace, and why its topic opened again.
+        "supersedes": _text(value.get("supersedes"), 64),
+        "reopened": _alert_text(value.get("reopened"), 300),
+        # The user's Ask again: the answer in force until this is answered, and whether a
+        # fresh project scan gave the card its recommendation.
+        "asked_again": value.get("asked_again") is True,
+        "current_answer": _text(value.get("current_answer"), 1000)
+        if value.get("asked_again") is True
+        else "",
+        "fresh": value.get("fresh") is True,
+        # A conflict's one fix: every decision it would replace, and why they conflict.
+        "supersedes_all": [
+            _text(other, 64)
+            for other in (value.get("supersedes_all") or [])[:DECISION_SUPERSEDES]
+            if isinstance(other, str) and other
+        ],
+        "conflict": _alert_text(value.get("conflict"), 600),
+        # Plan with me: the plan this question belongs to (P-n), or empty.
+        "plan": _text(value.get("plan"), 16),
+    }
+
+
+def _decision_check(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or not value.get("ran_at"):
+        return None
+    code = value.get("exit_code")
+    return {
+        "passed": value.get("passed") is True,
+        "exit_code": code if type(code) is int else None,
+        "ran_at": _text(value.get("ran_at"), 80),
+        "seconds": value.get("seconds") if isinstance(value.get("seconds"), (int, float)) else None,
+    }
+
+
+def _decision_record(value: Any) -> dict[str, Any] | None:
+    """A decision record's parts for the phone, each bounded; None for a plain decision."""
+    if not isinstance(value, dict):
+        return None
+    record: dict[str, Any] = {
+        key: _alert_text(value.get(key), limit) for key, limit in DECISION_RECORD_TEXT.items()
+    }
+    for key in DECISION_RECORD_LISTS:
+        listed = value.get(key)
+        record[key] = [
+            _text(entry, DECISION_RECORD_ITEM)
+            for entry in (listed if isinstance(listed, list) else [])
+            if isinstance(entry, str) and entry
+        ][:DECISION_RECORD_ITEMS]
+    return record
+
+
+def _decision_path_counts(value: Any) -> dict[str, Any] | None:
+    """How many tracked files on the landing branch each record path matches, or None."""
+    if not isinstance(value, dict):
+        return None
+    counted: dict[str, Any] = {"branch": _text(value.get("branch"), 200)}
+    for key in ("applies_to", "forbids"):
+        listed = value.get(key)
+        counted[key] = {
+            _text(glob, DECISION_RECORD_ITEM): count
+            for glob, count in list((listed if isinstance(listed, dict) else {}).items())[
+                :DECISION_RECORD_ITEMS
+            ]
+            if isinstance(glob, str) and glob and type(count) is int and count >= 0
+        }
+    return counted
+
+
+DECISION_EDIT_STATUSES = frozenset({"waiting", "applied", "cancelled", "replaced"})
+# The parts a change to a decision can show, and how long each side of one may be.
+DECISION_EDIT_FIELDS = frozenset(
+    {
+        "question",
+        "answer",
+        "why",
+        "context",
+        "options",
+        "consequences",
+        "check",
+        "applies_to",
+        "forbids",
+        "signals",
+    }
+)
+DECISION_EDIT_TEXT = 2200
+
+
+def _decision_edits(value: Any) -> list[dict[str, Any]]:
+    """The OK/Cancel cards for changes the user asked Rem for in chat, bounded for the phone.
+
+    Each names its edit (``E-n``) and the decision it changes, and lists each part that
+    changes with its text before and after. The project goes by name only.
+    """
+    cards: list[dict[str, Any]] = []
+    for card in (value if isinstance(value, list) else [])[:DECISION_SUPERSEDES]:
+        if not isinstance(card, dict):
+            continue
+        identity = _text(card.get("id"), 64)
+        decision = _text(card.get("decision"), 64)
+        status = card.get("status")
+        if not identity or not decision or status not in DECISION_EDIT_STATUSES:
+            continue
+        listed = card.get("changes")
+        changes = [
+            {
+                "field": change["field"],
+                "label": _text(change.get("label"), 60),
+                "before": _alert_text(change.get("before"), DECISION_EDIT_TEXT),
+                "after": _alert_text(change.get("after"), DECISION_EDIT_TEXT),
+            }
+            for change in (listed if isinstance(listed, list) else [])
+            if isinstance(change, dict) and change.get("field") in DECISION_EDIT_FIELDS
+        ][:10]
+        cards.append(
+            {
+                "id": identity,
+                "decision": decision,
+                "action": "replace" if card.get("action") == "replace" else "edit",
+                "topic": _text(card.get("topic"), 80),
+                "question": _text(card.get("question"), 500),
+                "project": _text(card.get("project_name"), 200),
+                "record": card.get("record") is True,
+                "changes": changes,
+                "said": _text(card.get("said"), 300),
+                "status": status,
+                "decided_at": _text(card.get("decided_at"), 80),
+                "result": _text(card.get("result"), 64),
+                "replaced_by": _text(card.get("replaced_by"), 64),
+            }
+        )
+    return cards
+
+
+def _decision_asked(value: Any) -> dict[str, Any] | None:
+    """Who asked a waiting question, when, and which runs wait for it; None for the rest."""
+    if not isinstance(value, dict):
+        return None
+
+    def runs(key: str) -> list[dict[str, str]]:
+        return [
+            {
+                "run_id": _text(entry.get("run_id"), 64),
+                "task_id": _text(entry.get("task_id"), 64),
+                "ticket": _text(entry.get("ticket"), 32),
+                "label": _alert_text(entry.get("label"), 160),
+            }
+            for entry in (value.get(key) or [])[:20]
+            if isinstance(entry, dict)
+        ]
+
+    by = value.get("by")
+    return {
+        "by": by if by in {"run", "chat", "plan", "scan", "you", "rem"} else "rem",
+        "label": _alert_text(value.get("label"), 160) or "Rem",
+        "ticket": _text(value.get("ticket"), 32),
+        "task_id": _text(value.get("task_id"), 64),
+        "task_title": _alert_text(value.get("task_title"), 160),
+        "at": _text(value.get("at"), 80),
+        "waiting": runs("waiting"),
+        "went_on": runs("went_on"),
+        "opens": _text(value.get("opens"), 64),
+    }
+
+
+def _decision_item(item: dict[str, Any]) -> dict[str, Any]:
+    """One entry of the phone's Decisions screen: the card plus the answer and its history."""
+    card = _decision_card({**item, "fallback": False}) or {}
+    decided_by = item.get("decided_by")
+    kind = item.get("remember_as")
+    kind = kind if kind in DECISION_KINDS else "fact" if item.get("project") else "memory"
+    record = _decision_record(item.get("record")) if kind == "record" else None
+    return {
+        **card,
+        # fact (how Rem works in a project), record (a design decision Raticode writes as a
+        # Markdown file in the project's repository) or memory (about the user).
+        "remember_as": kind,
+        "record": record,
+        # The record's file, relative to the repository; why it isn't there yet; and
+        # whether the user edited the file outside Raticode since it was written.
+        # Tracked files on the landing branch each applies_to and forbids path matches;
+        # null without a landing branch to count on.
+        "path_counts": _decision_path_counts(item.get("path_counts")) if record else None,
+        "record_path": _alert_text(item.get("record_path"), 300) if record else "",
+        "record_error": _alert_text(item.get("record_error"), 300) if record else "",
+        "edited_outside": record is not None and item.get("edited_outside") is True,
+        # A Rem run changed the file and Raticode hasn't committed the approved text back yet
+        # (it waits for a clean checkout). Only whether it's set: the hash stays here.
+        "record_restore": record is not None and bool(item.get("record_restore")),
+        "answer": _text(item.get("answer"), 1000),
+        # The project by name; empty for a decision about the user, never a folder path.
+        "project": _text(item.get("project_name") if item.get("project") else "", 200),
+        "decided_by": decided_by if decided_by in {"user", "rem"} else "",
+        "decided_at": _text(item.get("decided_at"), 80),
+        "created_at": _text(item.get("created_at"), 80),
+        "updated_at": _text(item.get("updated_at"), 80),
+        "superseded_by": _text(item.get("superseded_by"), 64),
+        "reversible": item.get("reversible") is not False,
+        # Raticode's own last run of a decided check command, and whether the decision was
+        # carried over from what Raticode did before decisions existed.
+        "last_check": _decision_check(item.get("last_check")),
+        "carried_over": (item.get("source") or {}).get("via") == "carried over",
+        # A waiting question's asked line: who asked it, when, and what waits on it.
+        "asked": _decision_asked(item.get("asked")),
+        "history": [
+            {
+                "at": _text(entry.get("at"), 80),
+                "actor": _text(entry.get("actor"), 20),
+                "action": _text(entry.get("action"), 40),
+                "note": _alert_text(entry.get("note"), 300),
+            }
+            for entry in (item.get("history") or [])[-10:]
+            if isinstance(entry, dict)
+        ],
+    }
+
+
+def _notice_decision(value: Any, clean: Callable[[Any, int], str]) -> dict[str, Any]:
+    """An alert's ``decision``: the request's ID, question and recommendation, or nothing."""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "decision": {
+            "id": _text(value.get("id"), 64),
+            "question": clean(value.get("question"), 500),
+            "recommended": clean(value.get("recommended") or value.get("candidate"), 300),
+            "fallback": value.get("fallback") is True,
+        }
+    }
+
+
+def _decision_states(rem: Any) -> dict[str, Any]:
+    """Each decision's status now, by ID, so a chat card shows Use this only while it waits.
+
+    Empty when this Rem keeps no decisions; the cards then show the status they were
+    written with.
+    """
+    decisions = getattr(rem, "decisions", None)
+    if not callable(decisions):
+        return {}
+    listed = decisions()
+    return {
+        "revision": int(listed.get("revision") or 0),
+        "status": {
+            str(i.get("id")): str(i.get("status"))
+            for i in listed.get("items") or []
+            if isinstance(i, dict)
+        },
+    }
 
 
 THREAD_STEPS = 60
@@ -999,8 +1627,28 @@ def _alert_text(value: Any, limit: int) -> str:
 
 
 def _source_notice(alert: dict[str, Any]) -> dict[str, Any]:
-    """A self-work, organization or workflow alert as a notice. None of them is in Rem's chat."""
+    """A self-work, organization, workflow or decision alert as a notice, none of them in chat."""
     reason = alert["reason"]
+    if alert.get("source") == "decision":
+        # A question of Rem's that waits for the user while no task is stopped for it (auto
+        # mode). The phone shows "Rem has a question" and opens Decisions on it.
+        question = _alert_text(alert.get("question"), 500)
+        return {
+            "id": _text(alert["id"], 128),
+            "kind": "decision",
+            "body": f"Rem has a question: {question}",
+            "created_at": _text(alert.get("at"), 80),
+            "title": _text(question, 160),
+            "needs_user": True,
+            "reason": reason,
+            "project_name": _alert_text(alert.get("project_name"), 160),
+            "decision": {
+                "id": _text(alert.get("decision_id"), 64),
+                "question": question,
+                "recommended": _alert_text(alert.get("recommended"), 300),
+                "fallback": False,
+            },
+        }
     if reason == "workflow":
         # Left by a notification node with channel: phone. The phone keeps the text
         # generic unless the user turned on Show Rem's words, and opens the run on a tap.
@@ -1073,6 +1721,20 @@ def _notice_answer(
         "more": more,
         **mark,
     }
+
+
+def _reading_fields(reading: Any) -> dict[str, Any]:
+    """An account's last weekly and 5-hour percentages used, for the phone's Account menu."""
+    if not isinstance(reading, dict):
+        return {}
+    fields: dict[str, Any] = {}
+    for window, key in (("seven_day", "week_used"), ("five_hour", "five_hour_used")):
+        value = reading.get(window)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            fields[key] = round(float(value), 1)
+    if fields and isinstance(reading.get("observed_at"), str):
+        fields["observed_at"] = reading["observed_at"][:64]
+    return fields
 
 
 def _project_scoped(op: str) -> bool:
@@ -1192,8 +1854,12 @@ class DesktopControl:
             "PRIMARY KEY(peer,thread,path));"
         )
         self.rem: Any = None
+        # Each phone's last task list summaries: (task list build, project catalog, list).
+        self._phone_task_lists: dict[str, tuple[int, Any, list[dict[str, Any]]]] = {}
         self.organizations: Any = None
         self.usage: Callable[[], dict[str, Any]] | None = None
+        # gofer.core.computers.ComputerService: this computer and its paired desktops.
+        self.computers: Any = None
         self.fetch_image: Callable[[str], dict[str, Any]] = fetch_image
         self.fetch_preview: Callable[[str], dict[str, Any]] = fetch_preview
         self.wake = WakeSetting(self)
@@ -1205,6 +1871,10 @@ class DesktopControl:
         from gofer.devices.workflows import PhoneWorkflows
 
         self.workflows = PhoneWorkflows(self)
+        from gofer.devices.phone_posts import PhonePosts
+
+        # Social posts the phone reviews; the desktop attaches its SocialService.
+        self.posts = PhonePosts()
         from gofer.devices.phone_browser import PhoneBrowser
 
         # The window's browser tabs and pages phones sent to it, in memory only.
@@ -1279,6 +1949,15 @@ class DesktopControl:
             # Answered by handle() exactly as if the read had failed there.
             return {"error": exc}
 
+    def _listed_tasks(self) -> tuple[list[dict[str, Any]], int | None]:
+        """Rem's tasks for lists, and the build they came from (None when not cached)."""
+        rem = self._need(self.rem, "Rem")
+        cached = getattr(rem, "task_list", None)
+        if cached is None:
+            return rem.store.tasks(summary=True), None
+        built = cached.tasks()
+        return built.tasks, built.token
+
     def _services(
         self,
         op: str,
@@ -1291,6 +1970,8 @@ class DesktopControl:
             return {"preview": self.fetch_preview(str(params.get("url") or ""))}
         if op == "kanban.board":
             return {"board": self._need(self.rem, "Rem").kanban.board()}
+        if op == "posts.list":
+            return self.posts.gather()
         if op == "kanban.timeline":
             scope = params.get("scope")
             if scope not in {"rem", "organization"}:
@@ -1306,6 +1987,10 @@ class DesktopControl:
             }
         if op == "selfwork.read":
             return {"view": self._need(self.rem, "Rem").self_work.view()}
+        if op == "computers.list":
+            return {"view": self._need(self.computers, "Computers").read()}
+        if op == "computers.placement":
+            return {"view": self._need(self.computers, "Computers").placement()}
         if op == "rem.draft":
             store = self._need(self.rem, "Rem").store
             with store.read() as db:
@@ -1337,12 +2022,13 @@ class DesktopControl:
             kanban = getattr(self.rem, "kanban", None)
             return {
                 "page": page,
-                "tasks": store.tasks(summary=True),
+                "tasks": self._listed_tasks()[0],
                 "threads": store.thread_ids(),
                 "roots": self._rem_config_roots(store),
                 "tickets": kanban.resolve(message_ticket_keys(page["messages"]))
                 if kanban is not None
                 else {},
+                "decisions": _decision_states(self.rem),
             }
         if op == "rem.home":
             store = self._need(self.rem, "Rem").store
@@ -1351,12 +2037,14 @@ class DesktopControl:
 
             # The newest window of the chat; the phone pages back with rem.history.
             conversation = store.conversation()
-            # The phone reads run summaries only, never traces or worker config.
-            tasks = store.tasks(summary=True)
+            # The phone reads run summaries only, never traces or worker config. The list
+            # is built again only after a write or a time-based wait comes due.
+            tasks, token = self._listed_tasks()
             kanban = getattr(self.rem, "kanban", None)
             return {
                 "conversation": conversation,
                 "tasks": tasks,
+                "tasks_token": token,
                 "threads": store.thread_ids(),
                 "roots": roots,
                 # Board tickets named in chat and on task cards, as they are now. The
@@ -1369,6 +2057,8 @@ class DesktopControl:
                 )
                 if kanban is not None
                 else {},
+                # Each decision's status now: a task update's card waits only while pending.
+                "decisions": _decision_states(self.rem),
             }
         if op == "rem.notices":
             rem = self._need(self.rem, "Rem")
@@ -1393,7 +2083,12 @@ class DesktopControl:
             from gofer.ui.rem_kanban import task_ticket_keys
 
             rem = self._need(self.rem, "Rem")
-            tasks = rem.store.tasks(summary=True)
+            # Only the task the phone opened, with its prompt; the reply is the same as
+            # before, so older phones read it as they did.
+            try:
+                tasks = [rem.store.task_detail(_text(params.get("task_id"), 128), summary=True)]
+            except KeyError:
+                tasks = []
             kanban = getattr(rem, "kanban", None)
             return {
                 "tasks": tasks,
@@ -1401,6 +2096,8 @@ class DesktopControl:
             }
         if op == "rem.memories":
             return {"memories": self._need(self.rem, "Rem").memories()}
+        if op == "rem.decisions":
+            return {"decisions": self._need(self.rem, "Rem").decisions()}
         if op == "rem.thread":
             store = self._need(self.rem, "Rem").store
             return {"thread": store.thread(_text(params.get("thread_id"), 128))}
@@ -1431,7 +2128,14 @@ class DesktopControl:
                         "Phone organization view left out the shared repository: %s",
                         type(exc).__name__,
                     )
-            return {"org": org, "repository": repository}
+            from gofer.ui.organization_accounts import provider_accounts
+
+            # The accounts a worker can run as, for the worker page's Account choice.
+            return {
+                "org": org,
+                "repository": repository,
+                "accounts": provider_accounts(manager.data_dir),
+            }
         if op == "organizations.note":
             identifier = _text(params.get("organization_id"), 100)
             note_id = _text(params.get("note_id"), 100)
@@ -1450,7 +2154,26 @@ class DesktopControl:
             )
             return {"org": org, "entry": entry}
         if op == "usage.overview":
-            return {"overview": self._need(self.usage, "Usage")()}
+            from gofer.core.usage_history import UsageRangeError
+
+            period = {
+                key: _text(params.get(name), 64) or None
+                for key, name in (
+                    ("period", "range"),
+                    ("start", "start"),
+                    ("end", "end"),
+                    ("tz", "tz"),
+                )
+            }
+            try:
+                return {"overview": self._need(self.usage, "Usage")(**period)}
+            except UsageRangeError as exc:
+                raise Refused("invalid", str(exc)) from None
+        if op == "provider.accounts":
+            from gofer.ui.rem_provider_accounts import account_menus
+
+            rem = self._need(self.rem, "Rem")
+            return {"menus": account_menus(rem._current_config(), Path(rem.data_dir))}
         if op.startswith("workflows."):
             from gofer.devices.workflows import gather
 
@@ -1577,6 +2300,73 @@ class DesktopControl:
             return {}
         return {"wake_mac": address} if address else {}
 
+    def _provider_accounts(
+        self, peer: str, thread: str, menus: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """The thread picker's Account menus, and the thread's own choices when it names one.
+
+        Each account carries its sign-in state and last usage reading; no folder, ID or
+        sign-in detail reaches the phone.
+        """
+        choices: dict[str, str] = {}
+        if thread:
+            row = self.db.execute(
+                "SELECT context FROM device_grants WHERE peer=? AND thread=?", (peer, thread)
+            ).fetchone()
+            if row is None:
+                raise Refused("not_found", "This thread is no longer shared with this phone.")
+            choices = dict(self.app._decode(peer, row[0]).get("provider_accounts") or {})
+        return {
+            "providers": [
+                {
+                    "provider": menu["provider"],
+                    "label": menu["label"][:80],
+                    "rem_setting": menu["rem_setting"][:128],
+                    "rem_setting_label": menu["rem_setting_label"][:160],
+                    "choice": choices.get(menu["provider"], ""),
+                    "accounts": [
+                        {
+                            "name": account["name"][:128],
+                            "state": account["state"][:40],
+                            "needs_sign_in": account["needs_sign_in"],
+                            **_reading_fields(account.get("last_reading")),
+                            "phone_sign_in": bool(account.get("phone_sign_in")),
+                            **_sign_in_field(account.get("sign_in")),
+                        }
+                        for account in menu["accounts"][:50]
+                    ],
+                }
+                for menu in menus[:16]
+            ],
+        }
+
+    def _account_sign_in(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Start or cancel an account's device sign-in for the phone.
+
+        The desktop runs the provider CLI's device sign-in (``codex login --device-auth``)
+        with that account's folder. The answer carries only the sign-in's state; the
+        link and one-time code follow in provider.accounts once the CLI prints them.
+        """
+        from gofer.core.provider_accounts import AccountError, get_account, sign_ins
+
+        data_dir = Path(self._need(self.rem, "Rem").data_dir)
+        name = _text(params.get("name"), 128)
+        provider = _text(params.get("provider"), 40) or None
+        try:
+            profile = get_account(name, data_dir, provider)
+            if params.get("cancel") is True:
+                sign_ins.cancel(name)
+                state = None
+            else:
+                state = sign_ins.start(name, data_dir=data_dir, device=True)
+        except AccountError as exc:
+            raise Refused("invalid", str(exc)) from None
+        return {
+            "provider": profile.subscription,
+            "name": name,
+            **_sign_in_field(state),
+        }
+
     def _need(self, service: Any, label: str) -> Any:
         if service is None:
             raise Refused("unavailable", f"{label} is not available on this desktop.")
@@ -1603,6 +2393,15 @@ class DesktopControl:
                 "swarms": self.app.remote.swarms is not None,
                 "settings": self._settings_state()[0] is not None,
                 "usage": self.usage is not None,
+                # Phones read computers.list and send computers.set only to desktops
+                # that say so here.
+                "computers": self.computers is not None,
+                # Phones read computers.placement and send computers.place only to
+                # desktops that say so here.
+                "computer_placement": self.computers is not None,
+                # Waiting Rem runs and organization tickets carry a suggestion, and phones
+                # send computers.run_there (Run there), only with desktops that say so here.
+                "run_there": self.computers is not None,
                 "media": True,
                 "file_links": True,
                 "attachment_files": True,
@@ -1611,10 +2410,19 @@ class DesktopControl:
                 "draft_deltas": True,
                 "review_retry": True,
                 "memories": True,
+                # Phones read rem.decisions and send rem.decision.change only to desktops
+                # that say so here (or in rem.home's decisions).
+                "rem_decisions": self.rem is not None,
                 # Phones send thread.manage read/unread only to desktops that say so here.
                 "thread_read": True,
                 # Phones send thread.manage delete_permanently only to desktops that say so.
                 "thread_purge": True,
+                # Phones read provider.accounts and send an account with thread.create and
+                # thread.context.update only to desktops that say so here.
+                "thread_accounts": self.rem is not None,
+                # Phones send provider.account.sign_in, and show a sign-in's link and code
+                # from provider.accounts, only to desktops that say so here.
+                "account_sign_in": self.rem is not None,
                 # Phones read rem.notices for Rem chat alerts only from desktops that say so.
                 "rem_notices": self.rem is not None,
                 # Phones send rem.notices include and mark only to desktops that say so.
@@ -1622,12 +2430,24 @@ class DesktopControl:
                 # Phones name the workflow switch in include only to desktops that say so.
                 "rem_notices_workflow": self.rem is not None,
                 "workflows": self.workflows.available(),
+                # Phones read posts.list and send posts.decide only to desktops that say so.
+                "posts": self.posts.available(),
                 # Phones read workflows.runs, every workflow's runs in one list, only
                 # from desktops that say so here.
                 "workflow_runs": self.workflows.available(),
                 # Phones list triggers and send workflows.trigger and
                 # workflows.triggers.pause only to desktops that say so here.
                 "workflow_triggers": self.workflows.available(),
+                # Phones show a trigger's approval, read workflows.trigger.changes and send
+                # workflows.trigger.approve only to desktops that say so here.
+                "workflow_trigger_approval": self.workflows.available(),
+                # Phones read workflows.failure, for Ask Rem about this failure on a
+                # run, only from desktops that say so here.
+                "workflow_failures": self.workflows.available(),
+                # Phones read workflows.tests and workflows.tests.estimate and send
+                # workflows.tests.try and workflows.tests.use_model (Try another model on
+                # a test set) only to desktops that say so here.
+                "workflow_tests": self.workflows.available(),
                 # Phones read source_control.* only from desktops that say so here;
                 # history, commit and diff came later, with their own flag.
                 "source_control": True,
@@ -1676,6 +2496,8 @@ class DesktopControl:
             return self._kanban_timeline(data["timeline"], self.projects(peer))
         if op == "selfwork.read":
             return data["view"]
+        if op in ("computers.list", "computers.placement"):
+            return data["view"]
         if op == "browser.tabs":
             return self.browser.view()
         if op == "media.image":
@@ -1707,6 +2529,8 @@ class DesktopControl:
             return self._rem_task(peer, _text(params.get("task_id"), 128), data)
         if op == "rem.memories":
             return self._rem_memories(data)
+        if op == "rem.decisions":
+            return self._rem_decisions(data)
         if op == "rem.thread":
             return self._rem_thread(_text(params.get("thread_id"), 128), data)
         if op == "organizations.list":
@@ -1724,9 +2548,21 @@ class DesktopControl:
             return log
         if op == "settings.get":
             return self._settings_view()
+        if op == "provider.accounts":
+            return self._provider_accounts(peer, _text(params.get("thread_id"), 64), data["menus"])
+        if op == "posts.list":
+            return self.posts.read(data)
         if op == "usage.overview":
             return self._usage(data)
-        if op in {"workflows.list", "workflows.read", "workflows.runs"}:
+        if op in {
+            "workflows.failure",
+            "workflows.list",
+            "workflows.read",
+            "workflows.runs",
+            "workflows.tests",
+            "workflows.tests.estimate",
+            "workflows.trigger.changes",
+        }:
             return self.workflows.read(peer, op, params, data)
         if op.startswith("source_control."):
             from gofer.devices import source_control
@@ -1762,14 +2598,22 @@ class DesktopControl:
         # Decrypt the project catalog once, not once per task.
         catalog = self.projects(peer)
         shown = _newest(self._phone_messages(peer, messages[-80:], data, catalog))
-        listed = [
-            self._task_summary(peer, task, catalog)
-            for task in sorted(
-                (task for task in data["tasks"] if retention(task)["listed"]),
-                key=lambda task: (ran_at(task), task.get("created_at") or ""),
-                reverse=True,
-            )
-        ][:100]
+        token = data.get("tasks_token")
+        kept = self._phone_task_lists.get(peer)
+        if token is not None and kept is not None and kept[:2] == (token, catalog):
+            # Same build of the task list and the same project names: nothing to redo.
+            listed = kept[2]
+        else:
+            listed = [
+                self._task_summary(peer, task, catalog)
+                for task in sorted(
+                    (task for task in data["tasks"] if retention(task)["listed"]),
+                    key=lambda task: (ran_at(task), task.get("created_at") or ""),
+                    reverse=True,
+                )
+            ][:100]
+            if token is not None:
+                self._phone_task_lists[peer] = (token, catalog, listed)
         return {
             "turn_state": _text(conversation.get("turn_state") or "idle", 40),
             # What Rem is doing while it replies, such as "Reading earlier messages".
@@ -1800,7 +2644,19 @@ class DesktopControl:
             "review_retry": True,
             # rem.run.pause and rem.run.resume work, and runs can be "paused".
             "run_pause": True,
+            # rem.run.acknowledge_all dismisses every task update at once (Dismiss all).
+            "dismiss_all": True,
             "memories": True,
+            # rem.decisions and rem.decision.change work; task updates carry their question
+            # in work.decision with live_status, and this is the decisions' revision now.
+            "decisions": True,
+            "decisions_revision": int((data.get("decisions") or {}).get("revision") or 0),
+            # Requests waiting for the user, and Rem's own auto-mode answers to confirm.
+            "decisions_waiting": sum(
+                1
+                for status in ((data.get("decisions") or {}).get("status") or {}).values()
+                if status in {"pending", "provisional"}
+            ),
             "phone_actions": True,
             "screen_context": True,
             # rem.message accepts refers_to, and messages carry what they reply to.
@@ -1823,6 +2679,7 @@ class DesktopControl:
         # Links in the conversation outlive a finished one-time task; say which still open.
         tasks = {task["id"] for task in data["tasks"]}
         threads = set(data.get("threads") or [])
+        states = data.get("decisions") or {}
         items = []
         for message in messages:
             item = self._rem_message(message)
@@ -1831,6 +2688,10 @@ class DesktopControl:
                     task_available=item["work"]["task_id"] in tasks,
                     thread_available=item["work"]["thread_id"] in threads,
                 )
+                decision = item["work"].get("decision")
+                if decision and decision.get("id") and states:
+                    # Its status now; empty once the user forgot it on the desktop.
+                    decision["live_status"] = states["status"].get(decision["id"], "")
             attached = message.get("attachments") or []
             if message.get("role") == "user" and isinstance(attached, list) and attached:
                 item["attachments"] = [
@@ -1988,6 +2849,7 @@ class DesktopControl:
                     "title": clean(work.get("title"), 160),
                     "needs_user": work.get("needs_user") is True,
                     **({"reason": reason} if reason else {}),
+                    **_notice_decision(work.get("decision"), clean),
                 }
             )
         return _notice_answer(found, int(stored["last"]), latest, sources)
@@ -2291,6 +3153,10 @@ class DesktopControl:
             if work.get("paused_by") in {"user", "priority"}:
                 # A paused card: by the user, or making way for the user's own work.
                 item["work"]["paused_by"] = work["paused_by"]
+            decision = _decision_card(work.get("decision"))
+            if decision:
+                # The question this run brings the user, with Rem's recommendation.
+                item["work"]["decision"] = decision
         started = message.get("self_work")
         if isinstance(started, dict):
             # Cards one self-work pass started share a batch; the phone shows them together.
@@ -2338,6 +3204,18 @@ class DesktopControl:
                     if isinstance(entry, dict)
                 ][:30],
             }
+            verified = report.get("verified_work")
+            if isinstance(verified, dict):
+                # "3 of 4 tickets passed review first time", a line for the card.
+                item["self_work_report"]["verified_work"] = {
+                    "line": _text(verified.get("line"), 160),
+                    **{
+                        key: verified[key]
+                        for key in ("accepted", "first_pass", "repairs", "blocked", "finished")
+                        if isinstance(verified.get(key), int)
+                        and not isinstance(verified.get(key), bool)
+                    },
+                }
         queued = message.get("queued_after")
         if message.get("role") == "user" and isinstance(queued, list):
             # A request the user queued behind these tasks; Rem got it once they succeeded.
@@ -2367,6 +3245,11 @@ class DesktopControl:
         note = phone_record(message.get("memory"))
         if note:
             item["memory"] = note
+        if message.get("role") != "user":
+            edits = _decision_edits(message.get("decision_edits"))
+            if edits:
+                # Changes the user asked for, each waiting for OK or settled.
+                item["decision_edits"] = edits
         return item
 
     @staticmethod
@@ -2401,6 +3284,10 @@ class DesktopControl:
             # A worker's sleep while it waits for something outside Raticode, or null. Older
             # phones ignore it and show waiting_reason; it also tells a phone Wake now works.
             "sleep": public_sleep(run),
+            # The question the run brings the user, with Rem's recommendation; or null.
+            "decision": _decision_card(run.get("decision_request")),
+            # A paired desktop with room for this waiting run, offered as Run there; or null.
+            "suggestion": _placement_suggestion(run.get("suggestion")),
         }
 
     def _task_summary(
@@ -2441,7 +3328,7 @@ class DesktopControl:
     def _rem_task(
         self, peer: str, identifier: str, data: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        data = data or self._services("rem.task", {})
+        data = data or self._services("rem.task", {"task_id": identifier})
         task = next((t for t in data["tasks"] if t.get("id") == identifier), None)
         if task is None:
             raise Refused("not_found", "This Rem task no longer exists.")
@@ -2558,6 +3445,12 @@ class DesktopControl:
                     "needs_review": task.get("status") == "in_review",
                     "attention": task.get("id") in attention,
                     "block_reason": _text(task.get("blockReason"), 600),
+                    # A paired desktop with room while it waits: Run there, or what to grant.
+                    "suggestion": _placement_suggestion(
+                        (runtime.get("placementSuggestions") or {}).get(task.get("id"))
+                        if runtime.get("state") == "running"
+                        else None
+                    ),
                     "evidence": _text(task.get("evidence"), 1500),
                     "due_at": _text(task.get("dueAt"), 80),
                     # The conversation as people read it: a status entry is marked as one, and
@@ -2590,6 +3483,10 @@ class DesktopControl:
             "description": _text(config.get("description"), 1500),
             "state": _text(runtime.get("state"), 20),
             "pause_reason": _text(runtime.get("pauseReason"), 300),
+            # Why a running organization's next worker waits for a computer, or "".
+            "placement_wait": _text(runtime.get("placementWait"), 600)
+            if runtime.get("state") == "running"
+            else "",
             "usage": _organization_usage(runtime),
             "pending_requests": sum(
                 r.get("status") == "pending" and time.time() - _timestamp(r.get("at")) < 24 * 3600
@@ -2607,8 +3504,19 @@ class DesktopControl:
                     "provider": _text(e.get("provider"), 80),
                     "model": _text(e.get("model"), 160),
                     "paused": e.get("paused") is True,
+                    # "" is the provider's default sign-in.
+                    "account_id": _text(e.get("account"), 16),
                 }
                 for e in employees.values()
+            ][:100],
+            # Every provider's accounts; a worker can run as one of its provider's.
+            "accounts": [
+                {
+                    "provider": _text(a.get("provider"), 80),
+                    "account_id": _text(a.get("id"), 16),
+                    "name": _text(a.get("name"), 128),
+                }
+                for a in data.get("accounts") or []
             ][:100],
             "tasks": _newest(tasks),
             "revision": int(org.get("revision") or 0),
@@ -2620,20 +3528,48 @@ class DesktopControl:
         }
 
     def _usage(self, data: dict[str, Any] | None = None) -> dict[str, Any]:
+        from gofer.core.provider_colors import clean_style
+
         overview = (data or self._services("usage.overview", {}))["overview"]
         activity = overview.get("activity") or {}
+        series = overview.get("series") or {}
         return {
             "days": int(overview.get("days") or 30),
             "observed_at": _text(overview.get("observed_at"), 80),
             "accounts": [
                 {
                     "provider": _text(a.get("provider"), 80),
-                    "label": _text(a.get("label") or a.get("provider"), 160),
-                    "status": _text(a.get("status"), 40),
+                    # Each Claude Code account is its own row, named by its account.
+                    "label": _text(
+                        f"{a.get('label') or a.get('provider')} · {a['profile']}"
+                        if a.get("profile")
+                        else a.get("label") or a.get("provider"),
+                        160,
+                    ),
+                    "status": _text(
+                        "needs sign-in" if a.get("needs_sign_in") else a.get("status"), 40
+                    ),
                     "reason": _text(a.get("reason"), 600),
                     "observed_at": _text(a.get("observed_at"), 80),
+                    # Settings > Usage cards: the account's own name, its sign-in
+                    # state and, under Rem's "choose by usage", Rem's next pick.
+                    "profile": _text(a.get("profile"), 128),
+                    "sign_in_state": _text(a.get("sign_in_state"), 40),
+                    # The phone offers Sign in on the card (provider.account.sign_in).
+                    "phone_sign_in": bool(a.get("profile") and a.get("phone_sign_in")),
+                    **(
+                        {"rem_next": {"why": _text(a["rem_next"].get("why"), 300)}}
+                        if isinstance(a.get("rem_next"), dict)
+                        else {}
+                    ),
+                    **(
+                        {"weekly_burndown": _weekly_burndown(a["weekly_burndown"])}
+                        if isinstance(a.get("weekly_burndown"), dict)
+                        else {}
+                    ),
                     "windows": [
                         {
+                            "id": _text(w.get("id"), 80),
                             "label": _text(w.get("label") or w.get("id"), 160),
                             "used_percent": w.get("used_percent")
                             if isinstance(w.get("used_percent"), int | float)
@@ -2649,20 +3585,82 @@ class DesktopControl:
                 }
                 for a in (overview.get("accounts") or [])[:40]
             ],
+            "range": {
+                key: (
+                    _text(value, 80)
+                    if isinstance(value, str)
+                    else value
+                    if isinstance(value, int)
+                    else None
+                )
+                for key, value in (overview.get("range") or {}).items()
+                if key in {"key", "label", "days", "start", "end", "start_date", "end_date"}
+            },
             "activity": {
                 "calls": int(activity.get("calls") or 0),
                 "input_tokens": activity.get("input_tokens"),
                 "output_tokens": activity.get("output_tokens"),
+                "total_tokens": activity.get("total_tokens"),
                 "providers": [
                     {
                         "provider": _text(p.get("provider"), 80),
                         "calls": int(p.get("calls") or 0),
                         "input_tokens": p.get("input_tokens"),
                         "output_tokens": p.get("output_tokens"),
+                        "total_tokens": p.get("total_tokens"),
                     }
                     for p in (activity.get("providers") or [])[:40]
                 ],
             },
+            "series": {
+                "bucket": _text(series.get("bucket"), 10),
+                "providers": [
+                    {
+                        "provider": _text(p.get("provider"), 80),
+                        "total_tokens": p.get("total_tokens"),
+                        "calls": int(p.get("calls") or 0),
+                        "style": clean_style(p.get("style")),
+                    }
+                    for p in (series.get("providers") or [])[:12]
+                ],
+                # The same tokens per provider account, for the chart's By account view.
+                "accounts": [
+                    {
+                        "key": _text(a.get("key"), 210),
+                        "provider": _text(a.get("provider"), 80),
+                        "profile": _text(a.get("profile"), 128) or None,
+                        "name": _text(a.get("name"), 128),
+                        "total_tokens": a.get("total_tokens")
+                        if isinstance(a.get("total_tokens"), int)
+                        else None,
+                        "calls": int(a.get("calls") or 0),
+                        "style": clean_style(a.get("style")),
+                    }
+                    for a in (series.get("accounts") or [])[:40]
+                ],
+                "buckets": [
+                    {
+                        "start": _text(b.get("start"), 40),
+                        "end": _text(b.get("end"), 40),
+                        "calls": int(b.get("calls") or 0),
+                        "unknown_calls": int(b.get("unknown_calls") or 0),
+                        "total_tokens": int(b.get("total_tokens") or 0),
+                        "providers": {
+                            _text(name, 80): int(tokens)
+                            for name, tokens in list((b.get("providers") or {}).items())[:12]
+                            if isinstance(tokens, int)
+                        },
+                        "accounts": {
+                            _text(key, 210): int(tokens)
+                            for key, tokens in list((b.get("accounts") or {}).items())[:40]
+                            if isinstance(tokens, int)
+                        },
+                    }
+                    for b in (series.get("buckets") or [])[-120:]
+                ],
+            },
+            "api_cost": _api_cost_view(overview.get("api_cost")),
+            "verified_work": _verified_work_view(overview.get("verified_work")),
         }
 
     # Actions ---------------------------------------------------------------
@@ -2685,6 +3683,10 @@ class DesktopControl:
             return self._rem_action(peer, op, params, request)
         if op.startswith("workflows."):
             return self.workflows.act(peer, op, params, request)
+        if op == "posts.decide":
+            return self.posts.act(params)
+        if op == "provider.account.sign_in":
+            return self._account_sign_in(params)
         if op == "organizations.control":
             manager = self._organizations_manager()
             if params.get("state") not in {"running", "paused"}:
@@ -2708,8 +3710,34 @@ class DesktopControl:
             return self._kanban_ticket(peer, params, request)
         if op == "selfwork.settings":
             return self._need(self.rem, "Rem").self_work.update_settings(dict(params))
+        if op == "computers.set":
+            from gofer.core.computers import ComputerError
+
+            try:
+                return self._need(self.computers, "Computers").set_max_threads(
+                    params.get("computer_id"), params.get("max_threads")
+                )
+            except ComputerError as exc:
+                raise Refused("invalid", str(exc)) from None
+        if op == "computers.place":
+            from gofer.core.placement_settings import PlacementError
+
+            try:
+                return self._need(self.computers, "Computers").set_placement(
+                    params.get("consumer"),
+                    params.get("strategy"),
+                    params.get("computers"),
+                    params.get("shared"),
+                )
+            except PlacementError as exc:
+                raise Refused("invalid", str(exc)) from None
+        if op == "computers.run_there":
+            return self._run_there(peer, params, request)
         if op == "selfwork.report.seen":
             return self._need(self.rem, "Rem").self_work.mark_seen(params.get("updated_at"))
+        if op == "selfwork.stop":
+            # When self-work stops; a desktop whose selfwork.read view has "stop" takes it.
+            return self._need(self.rem, "Rem").self_work.change_stop(dict(params))
         if op == "organizations.task":
             return self._organization_task(peer, params, request)
         if op == "organizations.knowledge":
@@ -2800,6 +3828,8 @@ class DesktopControl:
             return self._rem_thread(thread)
         if op.startswith("rem.memory."):
             return self._rem_memory_action(rem, op, params)
+        if op == "rem.decision.change":
+            return self._rem_decision_change(rem, params)
         if op == "rem.task.create":
             fields: dict[str, Any] = {
                 key: params[key]
@@ -2835,6 +3865,15 @@ class DesktopControl:
             rem.store.mutate_run(
                 _text(params.get("run_id"), 128), {"request_id": request}, op.rsplit(".", 1)[1]
             )
+            return self._rem_home(peer)
+        if op == "rem.run.acknowledge_all":
+            # Dismiss all: the task updates the phone showed, in one request. Runs still
+            # waiting for the user's answer and held tasks stay.
+            shown = params.get("run_ids")
+            body = {"request_id": request}
+            if isinstance(shown, list):
+                body["run_ids"] = [_text(item, 128) for item in shown[:1000] if item]
+            rem.store.dismiss_updates(body)
             return self._rem_home(peer)
         if op in {"rem.run.pause", "rem.run.resume"}:
             # Pausing keeps the run, its thread and worktree; resuming continues that thread.
@@ -2925,6 +3964,11 @@ class DesktopControl:
                     "created_at": _text(item.get("created_at"), 80),
                     "edited_at": _text(item.get("edited_at"), 80),
                     "added_by_user": item.get("added_by") == "user",
+                    # The project a memory belongs to, by name; empty for every project.
+                    "project": _text(item.get("project_name") if item.get("project") else "", 200),
+                    # When it stops applying, and whether that has passed (kept, not sent).
+                    "until": _text(item.get("until"), 80),
+                    "ended": item.get("ended") is True,
                 }
                 for item in listed.get("memories") or []
                 if isinstance(item, dict)
@@ -2940,6 +3984,9 @@ class DesktopControl:
         identity = _text(params.get("memory_id"), 64)
         if op == "rem.memory.add":
             rem.add_memory({"text": _text(params.get("text"), 2000)})
+        elif op == "rem.memory.edit" and "until" in params:
+            # A day sets the memory's end date; null (Keep) removes it so it applies again.
+            rem.edit_memory(identity, {"until": _text(params["until"], 80) or None})
         elif op == "rem.memory.edit":
             rem.edit_memory(identity, {"text": _text(params.get("text"), 2000)})
         elif op == "rem.memory.forget":
@@ -2954,6 +4001,118 @@ class DesktopControl:
         else:
             raise Refused("invalid", "Unknown Rem memory action.")
         return self._rem_memories()
+
+    def _rem_decisions(self, data: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Rem's decisions as the phone's Decisions screen shows them.
+
+        Waiting first, then those in force, then closed ones, as the desktop lists them.
+        Projects go by name. When the list is too long for one answer, the oldest closed
+        entries are left out and counted in ``more``.
+        """
+        listed = (data or self._services("rem.decisions", {}))["decisions"]
+        items: list[dict[str, Any]] = []
+        used = 0
+        source = [item for item in listed.get("items") or [] if isinstance(item, dict)]
+        for item in source:
+            entry = _decision_item(item)
+            size = len(json.dumps(entry, separators=(",", ":"), ensure_ascii=True))
+            if used + size > DECISIONS_BUDGET:
+                break
+            items.append(entry)
+            used += size
+        return {
+            # Sent back as expected_revision, so a change made elsewhere since is refused.
+            "revision": int(listed.get("revision") or 0),
+            "waiting": _count(listed.get("waiting")),
+            "provisional": _count(listed.get("provisional")),
+            "confirmed": _count(listed.get("confirmed")),
+            # Requests with no card yet, shown as "N more queued" under Waiting.
+            "queued": _count(listed.get("queued")),
+            "decisions": items,
+            "more": len(source) - len(items),
+            # Changes the user asked for in chat, still waiting for OK or Cancel.
+            "edits": _decision_edits(listed.get("edits")),
+            # Plan with me: the plans whose questions are grouped under their title.
+            "plans": _decision_plans(listed.get("plans")),
+        }
+
+    def _rem_decision_change(self, rem: Any, params: dict[str, Any]) -> dict[str, Any]:
+        """The user's change to one decision from the phone, as in the desktop's panel.
+
+        Use this, Change, Edit, Replace with…, Turn down, Ask again or Forget, on ``id``.
+        Edit and Replace with… may carry a decision record's parts (context, options,
+        consequences, check, and the applies_to, forbids and signals lists) and a note.
+        The phone sends the revision it showed; a decision that changed since is refused
+        as a conflict.
+        Scan looks for answers again in the project of decision ``id`` (the phone names no
+        folder); what it finds goes through the store like any request, so it never
+        changes a decision. Adding a decision stays on the desktop and the CLI, which name
+        projects by folder.
+        """
+        from gofer.ui.rem_decisions import DecisionRefused
+
+        action = params.get("action")
+        if action not in DECISION_ACTIONS:
+            raise Refused(
+                "invalid",
+                "Choose use, change, edit, replace, reject, reopen, forget, retire, scan, "
+                "confirm_edit or cancel_edit.",
+            )
+        identity = params.get("id")
+        if not isinstance(identity, str) or not 0 < len(identity) <= 64:
+            raise Refused("invalid", "Choose a decision.")
+        if action in DECISION_EDIT_ACTIONS:
+            # OK or Cancel on the card under Rem's reply. The desktop applies the change only
+            # while the decision is as the card showed it, so no revision is compared.
+            try:
+                changed = rem.change_decisions({"action": action, "id": identity})
+            except DecisionRefused as exc:
+                code = exc.code if exc.code in {"not_found", "conflict"} else "invalid"
+                raise Refused(code, str(exc)[:1000]) from None
+            return self._rem_decisions({"decisions": changed})
+        payload: dict[str, Any] = {"action": action, "id": identity}
+        revision = params.get("expected_revision")
+        if revision is not None:
+            if type(revision) is not int or revision < 0:
+                raise Refused("invalid", "Refresh Rem's decisions first.")
+            payload["expected_revision"] = revision
+        texts = {"answer": 1000, "question": 500, "why": 300, "reason": 300, "note": 300}
+        if action in {"edit", "replace"}:
+            # Edit and Replace with… may also rewrite a decision record's parts.
+            texts.update(DECISION_RECORD_TEXT)
+            for key in DECISION_RECORD_LISTS:
+                if key not in params:
+                    continue
+                listed = params[key]
+                if not isinstance(listed, list) or not all(isinstance(v, str) for v in listed):
+                    raise Refused("invalid", f"The {key} must be a list of text.")
+                if len(listed) > DECISION_RECORD_ITEMS or any(
+                    len(v) > DECISION_RECORD_ITEM for v in listed
+                ):
+                    raise Refused(
+                        "invalid",
+                        f"Keep {key} to {DECISION_RECORD_ITEMS} entries of at most "
+                        f"{DECISION_RECORD_ITEM} characters.",
+                    )
+                payload[key] = list(listed)
+        for key, limit in texts.items():
+            if key in params:
+                if not isinstance(params[key], str):
+                    raise Refused("invalid", f"The {key} must be text.")
+                payload[key] = params[key][:limit]
+        try:
+            if action == "scan":
+                if revision is not None and revision != rem.decisions()["revision"]:
+                    raise DecisionRefused("conflict", DECISION_CHANGED)
+                changed = rem.scan_decisions({"id": identity})
+            else:
+                changed = rem.change_decisions(payload)
+        except DecisionRefused as exc:
+            if exc.code == "conflict":
+                raise Refused("conflict", DECISION_CHANGED) from None
+            code = exc.code if exc.code in {"not_found", "unauthorized"} else "invalid"
+            raise Refused(code, str(exc)[:1000]) from None
+        return self._rem_decisions({"decisions": changed})
 
     def _rem_attachment(self, peer: str, params: dict[str, Any]) -> dict[str, Any]:
         """Offer one file attached to the user's message in Rem's chat to the phone.
@@ -3256,6 +4415,42 @@ class DesktopControl:
         manager.call("", "user", {**arguments, "organizationId": identifier})
         return self._organization(peer, identifier)
 
+    def _run_there(self, peer: str, params: dict[str, Any], request: str) -> Any:
+        """Run there: the user's pick of the paired desktop a waiting run or ticket suggests.
+
+        ``run_id`` names a Rem run, or ``organization_id`` with ``task_id`` an organization
+        ticket. The desktop checks the pick against the suggestion it holds now: a Rem run
+        is pinned there, and a ticket only gets the owner's existing fleet target there.
+        """
+        computer = _text(params.get("computer_id"), 64)
+        if not computer:
+            raise Refused("invalid", "Choose the computer the suggestion names.")
+        if params.get("run_id"):
+            from gofer.ui.rem_home_models import RemConflict
+
+            try:
+                self._need(self.rem, "Rem").run_there(
+                    _text(params.get("run_id"), 128),
+                    {"request_id": request, "computer_id": computer},
+                )
+            except RemConflict as exc:
+                raise Refused("conflict", str(exc)[:1000]) from None
+            return self._rem_home(peer)
+        identifier = _text(params.get("organization_id"), 100)
+        task = _text(params.get("task_id"), 100)
+        if not identifier or not task:
+            raise Refused("invalid", "Choose a waiting Rem task or organization ticket.")
+        self._organizations_manager().call(
+            "",
+            "user",
+            {
+                "action": "run_there",
+                "organizationId": identifier,
+                "params": {"taskId": task, "computerId": computer},
+            },
+        )
+        return self._organization(peer, identifier)
+
     def _move_ticket(
         self, peer: str, manager: Any, identifier: str, task_id: str, revision: Any, column: Any
     ) -> Any:
@@ -3300,12 +4495,23 @@ class DesktopControl:
         return self._organization(peer, identifier)
 
     def _organization_worker(self, peer: str, params: dict[str, Any]) -> Any:
-        """Holds a worker or releases its hold, whatever its permissions, as the desktop can."""
+        """Holds a worker or releases its hold, whatever its permissions, as the desktop can.
+
+        With account instead of paused, chooses the provider account the worker's turns
+        run as: one of its provider's account IDs, or "" for the default sign-in.
+        """
         manager = self._organizations_manager()
         identifier = _text(params.get("organization_id"), 100)
         employee = _text(params.get("employee_id"), 100)
         paused = params.get("paused")
-        if type(paused) is not bool:
+        account = params.get("account")
+        if "account" in params:
+            if "paused" in params or not isinstance(account, str) or len(account) > 16:
+                raise Refused("invalid", "Choose one of the worker's provider accounts.")
+            change: dict[str, Any] = {"account": account or None}
+        elif type(paused) is bool:
+            change = {"paused": paused}
+        else:
             raise Refused("invalid", "Choose hold or release.")
 
         current = manager.store.get("", identifier)
@@ -3314,9 +4520,19 @@ class DesktopControl:
         found = next((e for e in employees if e.get("id") == employee), None)
         if found is None:
             raise Refused("not_found", "This worker is no longer in the organization.")
-        if found.get("paused") is paused:
+        key, value = next(iter(change.items()))
+        if found.get(key) == value and (key != "paused" or found.get("paused") is value):
             return self._organization(peer, identifier)
         name = found.get("name") or employee
+        if key == "account":
+            reason = (
+                f"Chose an account for {name} from the phone"
+                if value
+                else f"{name} uses the default sign-in, chosen from the phone"
+            )
+        else:
+            reason = f"{'Held' if paused else 'Released'} {name} from the phone"
+        # An account that isn't one of the provider's is refused by configure.
         manager.call(
             "",
             "user",
@@ -3327,12 +4543,11 @@ class DesktopControl:
                     "config": {
                         **config,
                         "employees": [
-                            {**e, "paused": paused} if e.get("id") == employee else e
-                            for e in employees
+                            {**e, **change} if e.get("id") == employee else e for e in employees
                         ],
                     },
                     "expectedRevision": current["revision"],
-                    "reason": f"{'Held' if paused else 'Released'} {name} from the phone",
+                    "reason": reason,
                 },
             },
         )
@@ -3540,10 +4755,21 @@ class DesktopControl:
         values = dict((snapshot or {}).get("values") or {})
         for change in pending:
             values.update(change["values"])
+        for read in {read for read, _ in BACKEND_SETTINGS.values()}:
+            try:
+                values.update(read())
+            except (OSError, ValueError, KeyError):
+                logger.warning("Couldn't read a backend setting for the phone", exc_info=True)
         providers = self._providers()
         items = []
         for item in SETTINGS:
             entry = {k: v for k, v in item.items()}
+            if item["kind"] == "provider_account":
+                provider_id = entry.pop("provider")
+                entry["kind"] = "enum"
+                entry["options"] = self._account_options(provider_id, values.get(item["key"]))
+                items.append(entry)
+                continue
             if item["kind"] in {"provider", "model", "effort"}:
                 entry["kind"] = "enum"
                 provider = next(
@@ -3569,11 +4795,34 @@ class DesktopControl:
             "settings": items,
         }
 
+    def _account_names(self, provider: str) -> list[str]:
+        from gofer.core.provider_accounts import list_accounts
+
+        data_dir = getattr(self.rem, "data_dir", None)
+        try:
+            return sorted(list_accounts(Path(data_dir) if data_dir else None, provider))
+        except (OSError, ValueError):
+            return []
+
+    def _account_options(self, provider: str, current: Any) -> list[list[str]]:
+        """Settings > Rem > <provider> account: the default sign-in, Rem's pick or one account."""
+        from gofer.core.provider_accounts import account_adapter
+
+        adapter = account_adapter(provider)
+        label = adapter.label if adapter else provider
+        options = [["", "Default sign-in"], ["auto", "Choose by usage"]]
+        options += [[name, f"{label} · {name}"] for name in self._account_names(provider)]
+        if isinstance(current, str) and current and current not in {o[0] for o in options}:
+            options.append([current, f"{current} (removed)"])
+        return options[:100]
+
     def _valid_setting(self, key: str, value: Any) -> bool:
         item = SETTING_KEYS.get(key)
         if item is None:
             return False
         kind = item["kind"]
+        if kind == "provider_account":
+            return value in {"", "auto", *self._account_names(item["provider"])}
         if kind == "bool":
             return isinstance(value, bool)
         if kind == "enum":
@@ -3608,15 +4857,24 @@ class DesktopControl:
                     "invalid",
                     f"{SETTING_KEYS.get(key, {}).get('label', key)} has an unsupported value.",
                 )
+        backend = {key: value for key, value in changes.items() if key in BACKEND_SETTINGS}
+        window = {key: value for key, value in changes.items() if key not in BACKEND_SETTINGS}
         snapshot, pending = self._settings_state()
-        if snapshot is None:
+        if window and snapshot is None:
             raise Refused(
                 "unavailable", "Open Raticode on your computer once to load its settings."
             )
-        if len(pending) >= PENDING_SETTINGS:
+        if window and len(pending) >= PENDING_SETTINGS:
             raise Refused("conflict", "Earlier changes are still waiting for the desktop window.")
-        pending.append({"id": request, "values": changes})
-        self._store("pending", pending)
+        for key, value in backend.items():
+            try:
+                BACKEND_SETTINGS[key][1]({key: value})
+            except (OSError, ValueError) as exc:
+                label = SETTING_KEYS[key]["label"]
+                raise Refused("unavailable", f"Couldn't save {label} on the computer.") from exc
+        if window:
+            pending.append({"id": request, "values": window})
+            self._store("pending", pending)
         return self._settings_view()
 
     def exchange_browser(
@@ -3634,6 +4892,8 @@ class DesktopControl:
             if isinstance(settings, dict):
                 values = {}
                 for key in SETTING_KEYS:
+                    if key in BACKEND_SETTINGS:
+                        continue
                     value = _path_value(settings, key)
                     if isinstance(value, bool | int | float | str) and len(str(value)) <= 160:
                         values[key] = value

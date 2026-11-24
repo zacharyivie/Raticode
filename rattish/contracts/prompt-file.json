@@ -3,6 +3,7 @@
   "contract_version": 1,
   "node_type": "prompt-file",
   "runtime_handler": "raticode.prompt_file",
+  "catalog": {"category": "files", "summary": "Fill in a prompt template and save it as a file", "docs_path": "/docs/nodes/prompt-file"},
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",

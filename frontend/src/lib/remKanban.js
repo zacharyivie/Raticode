@@ -146,8 +146,73 @@ export function selfWorkLimitsLine(settings) {
   if (settings.daily_token_limit) parts.push(`${formatTokens(settings.daily_token_limit)} tokens a day`);
   const tokens = parts.length ? `past ${parts.join(" or ")}` : "";
   const rate = settings.rate_limit_percent ? `at ${settings.rate_limit_percent}% of a rate limit` : "";
-  if (!tokens && !rate) return "No limits: self-work starts new work whenever threads are free.";
-  return `Stops starting new work ${[tokens, rate].filter(Boolean).join(" or ")}. Running work finishes normally.`;
+  const paced = settings.allowance_mode === "pace";
+  const daily = !paced && settings.daily_allowance_percent ? `after ${settings.daily_allowance_percent}% of a weekly allowance in a day` : "";
+  const pace = paced ? `while ahead of a pace line to ${settings.pace_aim_percent || 97}% by the weekly reset` : "";
+  if (!tokens && !rate && !daily && !pace) return "No limits: self-work starts new work whenever threads are free.";
+  const verb = pace && !tokens && !rate ? "Holds new work" : "Stops starting new work";
+  return `${verb} ${[tokens, rate, daily, pace].filter(Boolean).join(" or ")}. Running work finishes normally.`;
+}
+
+// How self-work uses a weekly allowance: one choice of three (Settings > Rem > Self-work).
+export const ALLOWANCE_MODES = [["off", "Off"], ["daily", "Daily cap"], ["pace", "Pace to reset"]];
+
+/** Off, Daily cap or Pace to reset; a desktop from before the choice has only the daily cap. */
+export function allowanceMode(settings) {
+  if (!settings) return "off";
+  if (ALLOWANCE_MODES.some(([value]) => value === settings.allowance_mode)) return settings.allowance_mode;
+  return settings.daily_allowance_percent ? "daily" : "off";
+}
+
+/** Whether the desktop offers the three-way choice; older ones only take a daily percent. */
+export const hasAllowanceModes = settings => Boolean(settings && "allowance_mode" in settings);
+
+/** Pace to reset's status line, such as "Pacing work's weekly allowance: 23% used, line 24%." */
+export function allowancePaceLine(paced) {
+  if (!paced || typeof paced !== "object") return "";
+  return typeof paced.message === "string" ? paced.message : "";
+}
+
+/** A note when the rate-limit stop would halt self-work before Pace to reset reaches its aim. */
+export function paceRateWarning(settings) {
+  if (allowanceMode(settings) !== "pace") return "";
+  const rate = settings.rate_limit_percent || 0;
+  const aim = settings.pace_aim_percent || 97;
+  if (!rate || rate >= aim) return "";
+  return `Rate limit use stops self-work at ${rate}%, before the pace aim of ${aim}%.`;
+}
+
+// Self-work's account per provider (Settings > Rem > Self-work). The values match a thread's
+// Account menu: "" follows Rem's setting, "@default" is the provider's default sign-in,
+// "auto" chooses by usage and anything else names an account.
+const settingName = setting => setting === "auto" ? "Choose by usage" : setting || "Default sign-in";
+
+/** The rows to show: one per provider with accounts, each with its select options. */
+export function selfWorkAccountRows(view) {
+  const rows = Array.isArray(view?.accounts) ? view.accounts : [];
+  return rows.map(row => {
+    const names = Array.isArray(row.accounts) ? row.accounts : [];
+    const choice = typeof row.choice === "string" ? row.choice : "";
+    const options = [
+      ["", `Rem’s setting (${settingName(row.rem_setting)})`],
+      ["@default", "Default sign-in"],
+      ["auto", "Choose by usage"],
+      ...names.map(name => [name, name]),
+    ];
+    // A named account that was removed stays selectable until another choice replaces it.
+    if (!options.some(([value]) => value === choice)) options.push([choice, `${choice} (removed)`]);
+    return { provider: row.provider, label: row.label || row.provider, choice, options };
+  });
+}
+
+/** One provider's change, as Settings > Rem > Self-work saves it. */
+export const selfWorkAccountChange = (provider, choice) => ({ provider_accounts: { [provider]: choice } });
+
+// Today's use of the weekly allowance of the account self-work runs on and the daily cap,
+// from the desktop's own sentence, which names the account. Older desktops send nothing.
+export function dailyAllowanceLine(today) {
+  if (!today || typeof today !== "object") return "";
+  return typeof today.message === "string" ? today.message : "";
 }
 
 // A paused ticket or self-work item: paused by you, or making way for your own work.
@@ -182,6 +247,45 @@ export function windowDetail(window) {
   if (!window) return "";
   const end = window.end_label ? `Ends ${window.end_label}` : "";
   return [end, window.after_label].filter(Boolean).join(", ");
+}
+
+// When the self-work running now stops: the user's condition, its latest time and Rem's
+// last check. Null from a desktop without stop conditions.
+export function selfWorkStop(view) {
+  const stop = view?.stop;
+  return stop && typeof stop === "object" ? stop : null;
+}
+
+// "Last check 8:40 PM today (America/New_York): not met. REM-210 is still in review."
+export function stopJudgmentLine(stop) {
+  if (!stop?.active) return "";
+  let line = "";
+  if (stop.judging) line = "Checking the condition now…";
+  else if (stop.judgment) line = `Last check ${stop.judgment.at_label}: ${stop.judgment.met ? "met" : "not met"}.${stop.judgment.evidence ? ` ${stop.judgment.evidence}` : ""}`;
+  else if (stop.condition) line = "Not checked yet: Rem checks it after each self-work task finishes.";
+  if (stop.judge_failed) line = `${line} The last check failed; Rem tries again in 10 minutes.`.trim();
+  return line;
+}
+
+// How the last session's stop went, once self-work ended.
+export function lastStopLine(last) {
+  if (!last) return "";
+  if (last.stopped_by === "done_when") return `Stopped: “${last.condition}” was met.${last.judgment?.evidence ? ` ${last.judgment.evidence}` : ""}`;
+  if (last.stopped_by === "no_later_than") return `Stopped at its latest time${last.no_later_than_label ? `, ${last.no_later_than_label}` : ""}.`;
+  if (last.condition) return `Self-work ended before “${last.condition}” was met.`;
+  return "";
+}
+
+// What Save sends from the editor: the condition ("" clears it) and a 24-hour time the
+// backend resolves in the user's zone. An empty time keeps the current latest time when
+// keepTime is set, and clears it otherwise. day is "", today, tonight or tomorrow.
+export function stopPayload(stop, { condition, time, day, keepTime }) {
+  const payload = { condition: String(condition || "").trim().slice(0, 500) };
+  if (stop && Number.isInteger(stop.revision) && stop.revision > 0) payload.expected_revision = stop.revision;
+  const clock = String(time || "").trim();
+  if (clock) payload.no_later_than = { time: clock, ...(["today", "tonight", "tomorrow"].includes(day) ? { day } : {}) };
+  else if (!keepTime) payload.no_later_than = null;
+  return payload;
 }
 
 // A note when the switch shows a window's state rather than the saved one, such as
@@ -342,6 +446,7 @@ export const saveParticipant = (person, projects) => post("/participant", "POST"
 export const saveSelfWork = change => post("/settings", "PUT", change);
 // Ends a running self-work window now (its report is posted) or drops one that hasn't started.
 export const cancelSelfWorkWindow = windowId => post("/window", "POST", { action: "cancel", window_id: windowId });
+export const saveSelfWorkStop = change => post("/stop", "POST", change);
 export const markReportSeen = updatedAt => post("/report/seen", "POST", { updated_at: updatedAt || undefined });
 
 // Keeps one view of the board and self-work current while a surface is open.
@@ -381,6 +486,29 @@ export function waitsLine(ticket) {
   if (!left.length) return "";
   const first = left[0].title || left[0].key;
   return `Waits for: ${first}${left.length > 1 ? ` and ${left.length - 1} more` : ""}`;
+}
+
+// The card's pill for a ticket that contradicts decisions in force, e.g. "Violates D-4, D-7";
+// "" for any other ticket. Self-work won't start it until the ticket or a decision changes.
+export function violatesLine(ticket) {
+  const ids = Array.isArray(ticket?.violates_decisions) ? ticket.violates_decisions.filter(Boolean) : [];
+  if (!ids.length) return "";
+  return `Violates ${ids.slice(0, 3).join(", ")}${ids.length > 3 ? ` +${ids.length - 3}` : ""}`;
+}
+
+// The Guardrail tag a guardrail retro puts on the tickets it proposes, or "".
+export function guardrailTag(ticket) {
+  return Array.isArray(ticket?.tags) && ticket.tags.includes("Guardrail") ? "Guardrail" : "";
+}
+
+// A Rem ticket's line about the self-work objectives: the one it advances, or, while
+// objectives are open, that self-work leaves it alone. Null when there is nothing to say.
+export function objectiveLine(ticket) {
+  if (ticket?.scope !== "rem" || ["done", "cancelled"].includes(ticket.status)) return null;
+  const text = ticket.objective?.text;
+  if (text) return { off: false, short: text, detail: `Advances the self-work objective “${text}”.` };
+  if (ticket.objective_left) return { off: true, short: "Not on an objective: self-work leaves it", detail: ticket.objective_left };
+  return null;
 }
 
 // Whether the user can change what this ticket waits for from its sheet.

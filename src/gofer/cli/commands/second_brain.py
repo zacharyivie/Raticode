@@ -18,13 +18,37 @@ def run_second_brain(
     library_data_dir: Path | None,
     brain_ids: list[str] | None,
     context: dict[str, str],
+    memory_folder: bool = False,
+    report_theme_file: Path | None = None,
+    task_report_tool: bool = False,
 ) -> None:
+    from gofer.ui.report_themes import read_theme_file
     from gofer.ui.second_brain import serve_registered_brains, serve_second_brain
 
+    # The turn's report theme, for the rules tool. Without one, report_theme names the
+    # Second Brain's own theme.
+    theme_config = read_theme_file(report_theme_file) if report_theme_file is not None else None
     if library_data_dir is not None and brain_ids:
-        serve_registered_brains(library_data_dir, brain_ids, report_format, report_theme, context)
+        serve_registered_brains(
+            library_data_dir,
+            brain_ids,
+            report_format,
+            report_theme,
+            context,
+            # --root is the folder the user approved by path; its brain needs no
+            # cloud permission.
+            memory_folder=root if memory_folder else None,
+            theme_config=theme_config,
+            task_report_tool=task_report_tool,
+        )
         return
-    serve_second_brain(root, report_format, report_theme)
+    serve_second_brain(
+        root,
+        report_format,
+        report_theme,
+        theme_config=theme_config,
+        task_report_tool=task_report_tool,
+    )
 
 
 class _NotParsed(Exception):
@@ -48,6 +72,9 @@ def _parser() -> _Parser:
     parser.add_argument("--project-root", default="")
     parser.add_argument("--provider", default="")
     parser.add_argument("--model", default="")
+    parser.add_argument("--memory-folder", action="store_true")
+    parser.add_argument("--report-theme-file", type=Path, default=None)
+    parser.add_argument("--task-report-tool", action="store_true")
     return parser
 
 
@@ -81,5 +108,8 @@ def fast_main(argv: list[str]) -> int | None:
             "provider": args.provider,
             "model": args.model,
         },
+        args.memory_folder,
+        args.report_theme_file,
+        args.task_report_tool,
     )
     return 0

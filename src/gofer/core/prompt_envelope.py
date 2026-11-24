@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 import tomllib
 from pathlib import Path
 from typing import Any, Literal
@@ -247,6 +248,64 @@ def resource_index(resources: AgentResources) -> str:
     return json.dumps(entries, ensure_ascii=False)
 
 
+# Raticode's own tool servers (gofer.ui.swarm_tools) authorize each turn with a token,
+# either as the URL path or as a Bearer header. They record their loopback host here
+# so command builders can tell their URLs from user-configured MCP servers.
+_tool_server_hosts: set[str] = set()
+_tool_server_lock = threading.Lock()
+# Codex reads each Raticode server's token from one of these variables, set only
+# in that Codex process's environment, so no token reaches its command line.
+CODEX_MCP_TOKEN_ENV_PREFIX = "RATICODE_MCP_TOKEN_"
+
+
+def add_tool_server_host(host: str) -> None:
+    with _tool_server_lock:
+        _tool_server_hosts.add(host)
+
+
+def remove_tool_server_host(host: str) -> None:
+    with _tool_server_lock:
+        _tool_server_hosts.discard(host)
+
+
+def split_tool_server_url(url: str) -> tuple[str, str] | None:
+    """Split a live Raticode tool-server URL into its tokenless base URL and token."""
+    endpoint = urlsplit(url)
+    token = endpoint.path.removeprefix("/")
+    if (
+        endpoint.scheme != "http"
+        or endpoint.query
+        or endpoint.fragment
+        or not token
+        or "/" in token
+    ):
+        return None
+    with _tool_server_lock:
+        if endpoint.netloc not in _tool_server_hosts:
+            return None
+    return f"http://{endpoint.netloc}/", token
+
+
+def _codex_bearer_servers(resources: AgentResources) -> dict[str, tuple[str, str, str]]:
+    """Map enabled Raticode tool servers to (base URL, token variable, token)."""
+    servers: dict[str, tuple[str, str, str]] = {}
+    for server in resources.mcpServers:
+        if not server.enabled or server.type != "http" or server.name in servers:
+            continue
+        split = split_tool_server_url(server.url)
+        if split is not None:
+            variable = f"{CODEX_MCP_TOKEN_ENV_PREFIX}{len(servers) + 1}"
+            servers[server.name] = (split[0], variable, split[1])
+    return servers
+
+
+def codex_mcp_token_env(resources: AgentResources | None) -> dict[str, str]:
+    """Token variables for a Codex process whose arguments came from resource_cli_args."""
+    if resources is None:
+        return {}
+    return {variable: token for _, variable, token in _codex_bearer_servers(resources).values()}
+
+
 def prompt_envelope(*, instructions: str, context: str, request: str) -> str:
     # JSON quoting keeps embedded delimiters and role labels inside their data fields.
     return (
@@ -266,7 +325,10 @@ def resource_cli_args(
     working_dir: Path | None = None,
     *,
     read_only: bool = False,
+    codex_home: Path | None = None,
 ) -> list[str]:
+    """Provider arguments for the thread's tools. ``codex_home`` is the CODEX_HOME the
+    Codex turn runs with (a Codex account's folder), whose MCP servers it switches off."""
     if provider == "codex":
         args = [
             "-c",
@@ -300,7 +362,7 @@ def resource_cli_args(
                 for item in resources.skills
             )
             args += ["-c", f"skills.config=[{skills}]"]
-        inherited = _codex_mcp_names(working_dir)
+        inherited = _codex_mcp_names(working_dir, codex_home)
         # Codex splits CLI keys on dots without parsing TOML key quoting.
         # Put dotted names inside one TOML value. Multiple root overrides would
         # replace earlier CLI overrides and leave some inherited servers enabled.
@@ -310,7 +372,10 @@ def resource_cli_args(
         else:
             for name in inherited:
                 args += ["-c", f"mcp_servers.{name}.enabled=false"]
-        server_names = codex_mcp_server_names(resources, working_dir)
+        server_names = codex_mcp_server_names(resources, working_dir, codex_home)
+        # Any account on the computer can read a process's command line, so Raticode's
+        # tool servers get a tokenless URL and Codex sends the token as a Bearer header.
+        bearer = _codex_bearer_servers(resources)
         for server in resources.mcpServers:
             # A fresh name prevents Codex from merging inherited transport or credentials.
             fields = [f"enabled={str(server.enabled).lower()}"]
@@ -321,8 +386,16 @@ def resource_cli_args(
                 ]
                 if server.name in {"reports", "second_brain"}:
                     fields += ['env_vars=["RATICODE_REPORT_PDF_URL","RATICODE_REPORT_PDF_TOKEN"]']
+            elif server.name in bearer:
+                base_url, variable, _token = bearer[server.name]
+                fields += [
+                    f"url={json.dumps(base_url)}",
+                    f"bearer_token_env_var={json.dumps(variable)}",
+                ]
             else:
-                fields += [f"url={json.dumps(server.url)}"]
+                # A disabled Raticode server still keeps its token off the command line.
+                split = split_tool_server_url(server.url)
+                fields += [f"url={json.dumps(split[0] if split else server.url)}"]
             args += ["-c", f"mcp_servers.{server_names[server.name]}={{" + ",".join(fields) + "}"]
         return args
     if provider == "claude_code":
@@ -362,10 +435,10 @@ def claude_native_tools(resources: AgentResources, *, read_only: bool = False) -
 
 
 def codex_mcp_server_names(
-    resources: AgentResources, working_dir: Path | None = None
+    resources: AgentResources, working_dir: Path | None = None, codex_home: Path | None = None
 ) -> dict[str, str]:
     """Map selected servers to invocation names free of inherited configuration."""
-    inherited = set(_codex_mcp_names(working_dir))
+    inherited = set(_codex_mcp_names(working_dir, codex_home))
     occupied = inherited | {server.name for server in resources.mcpServers}
     names: dict[str, str] = {}
     for server in resources.mcpServers:
@@ -384,9 +457,13 @@ def codex_mcp_server_names(
     return names
 
 
-def _codex_mcp_names(working_dir: Path | None) -> list[str]:
-    """Disable inherited MCP entries before applying the thread's explicit selection."""
-    codex_dir = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+def _codex_mcp_names(working_dir: Path | None, codex_home: Path | None = None) -> list[str]:
+    """Disable inherited MCP entries before applying the thread's explicit selection.
+
+    ``codex_home`` is the folder the turn's Codex reads its config from: a Codex
+    account's own folder, else Raticode's own CODEX_HOME.
+    """
+    codex_dir = codex_home or Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
     configs = [codex_dir / "config.toml", Path("/etc/codex/config.toml")]
     if working_dir:
         configs += [

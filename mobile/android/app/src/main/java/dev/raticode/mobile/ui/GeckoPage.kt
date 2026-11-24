@@ -203,9 +203,9 @@ private fun GeckoStart(gecko: GeckoBrowser, open: (String) -> Unit) {
         Text("${BrowserTabs.GECKO_NAME} · ${gecko.profile.name}", Modifier.padding(horizontal = 16.dp).semantics { heading() }, style = MaterialTheme.typography.titleMedium)
         Text("Mozilla's engine, inside Raticode. Add Firefox extensions from the menu.", Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        if (gecko.bookmarks.isNotEmpty()) SectionTitle("Favorites")
+        if (gecko.bookmarks.isNotEmpty()) BrowserSectionTitle("Favorites")
         gecko.bookmarks.take(12).forEach { link -> MenuRow(link.title.ifBlank { link.url }, icon = ThreadIcons.Star, detail = BrowserRules.host(link.url)) { gecko.go(link.url) } }
-        if (gecko.history.isNotEmpty()) SectionTitle("Recent")
+        if (gecko.history.isNotEmpty()) BrowserSectionTitle("Recent")
         gecko.history.take(6).forEach { link -> MenuRow(link.title.ifBlank { link.url }, detail = BrowserRules.host(link.url)) { gecko.go(link.url) } }
         if (gecko.bookmarks.isEmpty() && gecko.history.isEmpty()) TextButton(onClick = { open("extensions") }, Modifier.padding(horizontal = 8.dp)) { Text("Find extensions") }
     }
@@ -286,11 +286,11 @@ private fun ExtensionsSheet(gecko: GeckoBrowser, onDismiss: () -> Unit) {
                     modifier = Modifier.padding(16.dp).fillMaxWidth().testTag("geckoExtensionSearch"))
             }
             results?.let { list ->
-                item { SectionTitle("From Firefox Add-ons") }
+                item { BrowserSectionTitle("From Firefox Add-ons") }
                 if (list.isEmpty()) item { Text("No extensions found.", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 items(list, key = { "add-" + it.url }) { item -> ListingRow(gecko, item) }
             }
-            item { SectionTitle("Installed") }
+            item { BrowserSectionTitle("Installed") }
             if (gecko.extensions.isEmpty()) item { Text("None yet. Search above, or tap Add to Firefox on addons.mozilla.org in this browser.", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
             items(gecko.extensions, key = { it.id }) { item -> InstalledRow(gecko, item, onDismiss) }
             if (gecko.extensions.isNotEmpty()) item { TextButton(onClick = { gecko.updateExtensions() }, Modifier.padding(horizontal = 8.dp)) { Text("Check for updates") } }
@@ -385,20 +385,20 @@ private fun GeckoSettingsSheet(gecko: GeckoBrowser, chromium: BrowserRuntime, on
     ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.testTag("geckoSettingsSheet")) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 16.dp)) {
             Text("${BrowserTabs.GECKO_NAME} settings", Modifier.padding(horizontal = 16.dp).semantics { heading() }, style = MaterialTheme.typography.titleMedium)
-            SectionTitle("Tracking protection")
+            BrowserSectionTitle("Tracking protection")
             ChoiceRow("Standard", settings.tracking == GeckoRules.TRACKING_STANDARD) { gecko.setTracking(GeckoRules.TRACKING_STANDARD) }
             ChoiceRow("Strict", settings.tracking == GeckoRules.TRACKING_STRICT) { gecko.setTracking(GeckoRules.TRACKING_STRICT) }
-            SectionTitle("Website colors")
+            BrowserSectionTitle("Website colors")
             listOf(GeckoRules.COLORS_SYSTEM to "Follow the phone", GeckoRules.COLORS_LIGHT to "Light", GeckoRules.COLORS_DARK to "Dark").forEach { (value, label) -> ChoiceRow(label, settings.colors == value) { gecko.setColors(value) } }
-            SectionTitle("Search")
+            BrowserSectionTitle("Search")
             GeckoImport.SEARCH_ENGINES.forEach { (label, template) -> ChoiceRow(label, settings.search == template) { gecko.setSearch(template) } }
-            SectionTitle("Pages")
+            BrowserSectionTitle("Pages")
             SwitchRow("Desktop sites", settings.desktopSites) { gecko.setDesktopSites(it) }
             SwitchRow("Save browsing history", settings.keepHistory) { gecko.setKeepHistory(it) }
             Box(Modifier.padding(horizontal = 16.dp)) { LockScreenTitlesRow() }
             MenuRow("Clear this profile's cookies, site data and history") { gecko.clearData(history = true); onDismiss() }
             MenuRow("Import from Firefox", detail = "Extensions, settings and bookmarks") { onImport() }
-            SectionTitle("Default browser")
+            BrowserSectionTitle("Default browser")
             Column(Modifier.padding(horizontal = 16.dp)) {
                 EngineChoice(chromium)
                 EdgeEngineChoice(chromium)

@@ -9,6 +9,7 @@ calling convention so each command reads as "make this request, render this text
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import urllib.parse
@@ -142,8 +143,22 @@ def read_json_file(current: Session, path: Path) -> Any:
         invalid(current, f"{path} is not valid JSON: {exc.msg} (line {exc.lineno})")
 
 
+def write_private_text(path: Path, text: str) -> None:
+    """Write an exported file readable only by this account (0600), never via a symlink.
+
+    Exports of settings and organizations can name MCP servers, folders and accounts,
+    and a home folder other accounts can list is common.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        if sys.platform != "win32":
+            os.fchmod(handle.fileno(), 0o600)
+        handle.write(text)
+
+
 def write_json_file(path: Path, document: Any) -> None:
-    path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    write_private_text(path, json.dumps(document, indent=2) + "\n")
 
 
 def parse_assignments(current: Session, values: list[str] | None) -> dict[str, Any]:

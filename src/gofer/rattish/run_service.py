@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
@@ -29,6 +29,9 @@ else:
     import fcntl
 
 from gofer.core.approvals import ApprovalStore, NotificationAdapter
+from gofer.rattish import run_worktrees
+from gofer.rattish.agent_sandbox import input_files_visible, run_worktree, triggered_run
+from gofer.rattish.approved_files import ApprovedFiles, check_compiled, guarding
 from gofer.rattish.artifacts import (
     CompiledArtifact,
     RattishArtifactError,
@@ -37,9 +40,25 @@ from gofer.rattish.artifacts import (
 )
 from gofer.rattish.contracts import canonical_json_bytes
 from gofer.rattish.diagnostics import RattishError
+from gofer.rattish.file_inputs import (
+    FileInputError,
+    missing_copies,
+    missing_copies_message,
+    remove_orphaned_files,
+    run_files_dir,
+    stage_file_inputs,
+    sweep_uploads,
+)
+from gofer.rattish.model_overrides import (
+    ModelOverride,
+    check_overrides,
+    compile_variant,
+    variant_record,
+)
 from gofer.rattish.preflight import PreflightRegistry, PreflightResult, run_preflight
 from gofer.rattish.provider_runtime import default_provider_subscriptions
 from gofer.rattish.result_cache import ResultCache
+from gofer.rattish.run_from import RunFromPlan, RunFromRefused, plan_run_from, reusable_count
 from gofer.rattish.run_usage import USAGE_LIMIT_CODES, RunUsageMeter
 from gofer.rattish.run_values import (
     SavedValuesUnavailable,
@@ -48,6 +67,7 @@ from gofer.rattish.run_values import (
     read_saved_values,
     remove_orphaned_values,
     saved_values_refusal,
+    withheld_input_names,
     write_saved_values,
 )
 from gofer.rattish.runtime import (
@@ -89,6 +109,10 @@ class RattishRunArtifactError(RuntimeError):
 
 class RattishResumeRefused(RuntimeError):
     """Raised with a sentence for the user when a run can't be resumed."""
+
+
+class RattishRunFromRefused(RattishResumeRefused):
+    """Raised with a sentence for the user when a run can't start from a node."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +249,14 @@ def process_start_token(pid: int) -> str | None:
     return f"{boot_id}:{fields[19]}"
 
 
+def run_started_by(document: Mapping[str, Any]) -> str:
+    """How a run started. Runs saved before this was recorded count trigger events."""
+    saved = document.get("started_by")
+    if isinstance(saved, str) and saved:
+        return saved
+    return "trigger" if document.get("trigger_event_count") else "manual"
+
+
 def effective_run_status(document: Mapping[str, Any]) -> str:
     """A saved status, with a run whose runner is gone reported as interrupted."""
     status = str(document.get("status"))
@@ -305,8 +337,8 @@ def resume_refusal(document: Mapping[str, Any], ir: Mapping[str, Any] | None) ->
     error = document.get("error") or {}
     if error.get("code") in USAGE_LIMIT_CODES:
         return (
-            "This run ended at its max-tokens or max-cost-usd limit. Raise or remove the "
-            "limit, then start a new run."
+            "This run ended at its max-tokens or max-cost-usd limit, or at what was left of "
+            "its trigger's daily limit. Raise or remove the limit, then start a new run."
         )
     if (
         error.get("kind") in _DETERMINISTIC_ERROR_KINDS
@@ -479,6 +511,9 @@ async def rerun_rattish_run(
         merged = merge_withheld_inputs(saved, inputs)
     except SavedValuesUnavailable as exc:
         raise RattishResumeRefused(str(exc)) from None
+    gone = missing_copies(None, merged, record)
+    if gone:
+        raise RattishResumeRefused(missing_copies_message(gone))
     # A rerun is started by whoever asked for it, even when it replays trigger events.
     options.setdefault("started_by", "manual")
     return await run_rattish_file(
@@ -487,6 +522,7 @@ async def rerun_rattish_run(
         workflow_inputs=merged,
         trigger_events=list(saved.trigger_events) or None,
         rerun_of=str(document["run_id"]),
+        file_inputs_from=record,
         **options,
     )
 
@@ -518,6 +554,79 @@ def _resume_claim(data_dir: Path, key: tuple[str, str]) -> Iterator[None]:
                 msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
     finally:
         os.close(descriptor)
+
+
+# Run from a node. Reads at most this many of the newest run records to find one to reuse.
+_RUN_FROM_SCAN_LIMIT = 200
+
+
+def plan_rattish_run_from(
+    compiled: CompiledArtifact,
+    node_id: str,
+    *,
+    data_dir: Path,
+    reuse_run_id: str | None = None,
+) -> RunFromPlan:
+    """The earlier run a run from ``node_id`` reuses. See ``run_from``.
+
+    Raises ``RattishRunFromRefused`` with the reason when no run fits.
+    """
+    directory = _run_path(
+        data_dir, compiled.ir["workflow"]["id"], "probe", source_path=compiled.source_path
+    ).parent
+    if reuse_run_id is not None:
+        reuse_run_id = reuse_run_id.removesuffix(".json")
+        if not _RUN_ID_PATTERN.fullmatch(reuse_run_id):
+            raise RattishRunFromRefused(f"Invalid run ID {reuse_run_id!r}.")
+        paths = [directory / f"{reuse_run_id}.json"]
+    else:
+        try:
+            paths = sorted(directory.glob("*.json"), reverse=True)[:_RUN_FROM_SCAN_LIMIT]
+        except OSError:
+            paths = []
+
+    def documents() -> Iterator[dict[str, Any]]:
+        for path in paths:
+            try:
+                document = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if isinstance(document, dict) and document.get("run_id"):
+                document["status"] = effective_run_status(document)
+                yield document
+
+    try:
+        return plan_run_from(compiled.ir, node_id, documents(), reuse_run_id=reuse_run_id)
+    except RunFromRefused as exc:
+        raise RattishRunFromRefused(str(exc)) from None
+
+
+def rattish_run_from_preview(
+    source_path: Path,
+    node_id: str,
+    *,
+    data_dir: Path | None = None,
+    reuse_run_id: str | None = None,
+) -> dict[str, Any]:
+    """What a run from ``node_id`` would reuse, without running anything.
+
+    ``needsInputs`` lists the password inputs the reused run didn't save; the run
+    asks for them again, as Resume does. ``askAgainNodes`` lists the approval gates
+    the reused run reached: none is reused, so each asks again when the run gets to it.
+    """
+    resolved_data_dir = data_dir or get_data_dir()
+    compiled = compile_rattish_file(source_path, data_dir=resolved_data_dir)
+    plan = plan_rattish_run_from(
+        compiled, node_id, data_dir=resolved_data_dir, reuse_run_id=reuse_run_id
+    )
+    return {
+        "fromNode": plan.from_node,
+        "reuseRunId": plan.source_run_id,
+        "reusedNodes": list(plan.reused_nodes),
+        "askAgainNodes": list(plan.ask_again),
+        "needsInputs": withheld_input_names(plan.source),
+        "revision": compiled.ir["source"]["source_fingerprint"],
+    }
 
 
 # Cross-process stop. The CLI, triggers (`rattish triggers start` or the app's own
@@ -642,6 +751,14 @@ async def run_rattish_file(
     resume_inputs: Mapping[str, Any] | None = None,
     rerun_of: str | None = None,
     use_result_cache: bool = True,
+    daily_max_cost_usd: float | None = None,
+    daily_max_tokens: int | None = None,
+    from_node: str | None = None,
+    reuse_run_id: str | None = None,
+    approved_files: ApprovedFiles | None = None,
+    use_worktree: bool = True,
+    file_inputs_from: Path | None = None,
+    model_overrides: Sequence[ModelOverride] | None = None,
 ) -> RattishRunResult:
     """Run one source file through the same boundary used by CLI and Studio.
 
@@ -653,6 +770,25 @@ async def run_rattish_file(
     run with trigger events counts as triggered and any other as manual.
     ``use_result_cache=False`` runs every node even when it has ``cache:``; test sets
     use it so a case always checks fresh answers.
+    ``daily_max_cost_usd`` and ``daily_max_tokens`` are what is left of a trigger's
+    daily limit: the run's cap is the smaller of these and the workflow's own limits.
+    ``from_node`` starts the run from that node, reusing an earlier run's results for
+    the nodes upstream of it (see ``run_from``): the newest run that fits, or
+    ``reuse_run_id``. It uses that run's saved inputs; ``resume_inputs`` gives its
+    password inputs again. The run records ``replayed_from``.
+    ``approved_files`` is what a trigger's user approved, for a triggered run that needs
+    approval: each covered file is checked right before it is used (``approved_files``).
+    A workflow with ``workspace: worktree`` runs in a git worktree of its own (see
+    ``run_worktrees``) unless ``use_worktree`` is False, as for test sets. Its steps read
+    the worktree's copies of the approved files, so those are checked instead.
+    File inputs are copied into the run folder before the run starts (``file_inputs``).
+    ``file_inputs_from`` is the record of the run whose saved inputs these are, as Run
+    again passes it: its copies are linked rather than checked again.
+    ``model_overrides`` runs some nodes with another provider and model, compiled from
+    an edited copy of the source held in memory (``model_overrides``); the source file
+    is never changed. The run records the variant as ``model_overrides``, and its
+    ``compiled_snapshot`` and fingerprints are the variant's. Test sets use it to try
+    another model; it can't be combined with a resume, a rerun or a triggered run.
     """
     origin: StartedBy = started_by or ("trigger" if trigger_events else "manual")
     if origin not in STARTED_BY:
@@ -661,11 +797,28 @@ async def run_rattish_file(
     started_clock = time.monotonic()
     resolved_data_dir = data_dir or get_data_dir()
     compiled = compile_rattish_file(source_path, data_dir=resolved_data_dir)
+    if approved_files is not None:
+        check_compiled(compiled.source_path, compiled.ir, "workflow", files=approved_files)
     if expected_revision and compiled.ir["source"]["source_fingerprint"] != expected_revision:
         raise RattishRunArtifactError(
             "Workflow source changed after run preparation. "
             "Review and run the saved revision again."
         )
+    model_variant: dict[str, Any] | None = None
+    if model_overrides:
+        if (
+            resume_from is not None
+            or from_node is not None
+            or rerun_of is not None
+            or approved_files is not None
+        ):
+            raise ValueError(
+                "A run with another model can't resume, rerun, start from a node or "
+                "run from a trigger."
+            )
+        checked = check_overrides(compiled.ir, model_overrides)
+        model_variant = variant_record(compiled.ir, checked)
+        compiled = compile_variant(compiled, checked, data_dir=resolved_data_dir)
     if resume_from is not None:
         if workflow_inputs or trigger_events:
             raise RattishResumeRefused("A resumed run uses the saved run's inputs only.")
@@ -684,9 +837,50 @@ async def run_rattish_file(
             workflow_inputs = merge_withheld_inputs(saved, resume_inputs)
         except SavedValuesUnavailable as exc:
             raise RattishResumeRefused(str(exc)) from None
+        gone = missing_copies(compiled.ir, workflow_inputs, earlier_record)
+        if gone:
+            raise RattishResumeRefused(missing_copies_message(gone))
+        file_inputs_from = earlier_record
         trigger_events = saved.trigger_events or None
-    elif resume_inputs:
-        raise ValueError("resume_inputs only applies to a resumed run.")
+    run_from: RunFromPlan | None = None
+    if from_node is not None:
+        if resume_from is not None or rerun_of is not None:
+            raise ValueError("A run from a node can't also resume or rerun a run.")
+        if workflow_inputs or trigger_events:
+            raise RattishRunFromRefused("A run from a node uses the reused run's inputs only.")
+        # Planned against this compile, so the source can't change in between.
+        run_from = plan_rattish_run_from(
+            compiled, from_node, data_dir=resolved_data_dir, reuse_run_id=reuse_run_id
+        )
+        earlier_record = _run_path(
+            resolved_data_dir,
+            compiled.ir["workflow"]["id"],
+            run_from.source_run_id,
+            source_path=compiled.source_path,
+        )
+        try:
+            saved = read_saved_values(earlier_record, run_from.source)
+            workflow_inputs = merge_withheld_inputs(saved, resume_inputs)
+        except SavedValuesUnavailable as exc:
+            raise RattishRunFromRefused(str(exc)) from None
+        gone = missing_copies(compiled.ir, workflow_inputs, earlier_record)
+        if gone:
+            raise RattishRunFromRefused(missing_copies_message(gone))
+        file_inputs_from = earlier_record
+        trigger_events = saved.trigger_events or None
+    elif reuse_run_id is not None:
+        raise ValueError("reuse_run_id only applies to a run from a node.")
+    if resume_inputs and resume_from is None and from_node is None:
+        raise ValueError("resume_inputs only applies to a resumed run or a run from a node.")
+    replayed: dict[str, Any] | None = (
+        {
+            "run_id": run_from.source_run_id,
+            "node_id": run_from.from_node,
+            "reused_nodes": list(run_from.reused_nodes),
+        }
+        if run_from is not None
+        else None
+    )
     resumed: dict[str, Any] | None = (
         {"run_id": str(resume_from["run_id"]), "rerun_nodes": resume_rerun_nodes(resume_from)}
         if resume_from is not None
@@ -702,9 +896,16 @@ async def run_rattish_file(
         data_dir=resolved_data_dir,
         subscriptions=runtime_subscriptions,
         handlers=runtime_handlers,
+        triggered=origin == "trigger",
+        worktree=use_worktree,
     )
     run_id = run_id or new_run_id()
-    usage = RunUsageMeter.for_ir(compiled.ir, run_id)
+    usage = RunUsageMeter.for_ir(
+        compiled.ir,
+        run_id,
+        daily_max_cost_usd=daily_max_cost_usd,
+        daily_max_tokens=daily_max_tokens,
+    )
     path = _run_path(
         resolved_data_dir,
         compiled.ir["workflow"]["id"],
@@ -737,9 +938,29 @@ async def run_rattish_file(
         live: dict[str, Any] | None = None
         input_error: RuntimeErrorInfo | None = None
         stopped = False
-        if deployment.ready:
+        worktree: dict[str, Any] | None = None
+        executed = False
+        in_worktree = use_worktree and run_worktrees.uses_worktree(compiled.ir)
+        if deployment.ready and in_worktree:
+            refused = run_worktrees.limit_message(resolved_data_dir, compiled.ir["workflow"]["id"])
+            if refused is not None:
+                input_error = RuntimeErrorInfo("workspace", "RATTISH_WORKTREE_LIMIT", refused)
+        if deployment.ready and input_error is None:
             try:
                 _prepare_workflow_inputs(compiled.ir, supplied_inputs)
+                # Each file input becomes this run's own copy, and the saved inputs
+                # record the copy's path so Resume and Run again reuse it.
+                supplied_inputs = stage_file_inputs(
+                    compiled.ir,
+                    supplied_inputs,
+                    path,
+                    data_dir=resolved_data_dir,
+                    reuse_from=file_inputs_from,
+                    base=Path(compiled.ir["source"]["project_root"]),
+                )
+                values, values_summary = plan_saved_values(
+                    compiled.ir, supplied_inputs, trigger_events
+                )
                 save_values()
                 live = _run_document(
                     run_id=run_id,
@@ -758,6 +979,8 @@ async def run_rattish_file(
                     started_by=origin,
                     saved_values=values_summary,
                     rerun_of=rerun_of,
+                    replayed=replayed,
+                    model_variant=model_variant,
                 )
                 live["events"] = live["events"][:1]
                 live["runner_pid"] = os.getpid()
@@ -796,6 +1019,8 @@ async def run_rattish_file(
                         ) from exc
 
                 stop_seen = False
+                # Stops a worktree's project setup, which runs in a thread.
+                setup_cancel = threading.Event()
 
                 def stop_wanted(*, check_marker: bool) -> bool:
                     nonlocal stop_seen
@@ -803,7 +1028,37 @@ async def run_rattish_file(
                         check_marker and run_stop_requested(path)
                     ):
                         stop_seen = True
+                        setup_cancel.set()
                     return stop_seen
+
+                def make_worktree() -> tuple[Any, RuntimeErrorInfo | None]:
+                    """Create and set up the run's worktree; the IR to run, or the error."""
+                    nonlocal worktree
+                    try:
+                        planned = run_worktrees.plan(
+                            resolved_data_dir,
+                            Path(compiled.ir["source"]["project_root"]),
+                            compiled.ir["workflow"]["id"],
+                            run_id,
+                        )
+                        run_worktrees.create(planned)
+                    except run_worktrees.RunWorktreeError as exc:
+                        return None, RuntimeErrorInfo(
+                            "workspace", "RATTISH_WORKTREE_UNAVAILABLE", str(exc)
+                        )
+                    worktree = planned.document()
+                    assert live is not None
+                    live["worktree"] = worktree
+                    _write_json_atomic(path, live)
+                    setup = run_worktrees.prepare_setup(resolved_data_dir, planned, setup_cancel)
+                    worktree["setup"] = setup
+                    if setup is not None and setup.get("status") == "failed":
+                        return None, RuntimeErrorInfo(
+                            "workspace",
+                            "RATTISH_WORKTREE_SETUP_FAILED",
+                            str(setup.get("summary") or "Project setup failed."),
+                        )
+                    return run_worktrees.relocate(compiled.ir, planned), None
 
                 async def watch_stop(scope: anyio.CancelScope) -> None:
                     # The cancel event is this process's Stop; the marker is anyone else's.
@@ -818,29 +1073,54 @@ async def run_rattish_file(
                         await anyio.sleep(0.05)
                     scope.cancel()
 
+                run_ir: Any = compiled.ir
                 async with anyio.create_task_group() as group:
                     group.start_soon(watch_stop, group.cancel_scope)
-                    if not stop_wanted(check_marker=True):
-                        execution = await execute_workflow(
-                            compiled.ir,
-                            workflow_inputs=supplied_inputs,
-                            trigger_events=trigger_events,
-                            handlers=runtime_handlers,
-                            subscriptions=runtime_subscriptions,
-                            data_dir=resolved_data_dir,
-                            notification_adapter=notification_adapter,
-                            run_id=run_id,
-                            on_node_event=publish_node_event,
-                            replay=list((resume_from or {}).get("runs") or []),
-                            replay_source=resumed["run_id"] if resumed else None,
-                            usage_meter=usage,
-                            result_cache=(
-                                ResultCache(resolved_data_dir) if use_result_cache else None
-                            ),
-                        )
+                    if in_worktree and not stop_wanted(check_marker=True):
+                        run_ir, input_error = await anyio.to_thread.run_sync(make_worktree)
+                        if stop_wanted(check_marker=True):
+                            input_error = None  # Setup ended because the run was stopped.
+                    run_files = approved_files
+                    if approved_files is not None and worktree is not None:
+                        run_files = run_worktrees.approved_in_worktree(approved_files, worktree)
+                    if input_error is None and not stop_wanted(check_marker=True):
+                        executed = True
+                        with (
+                            triggered_run(origin == "trigger"),
+                            run_worktree(worktree),
+                            guarding(run_files),
+                            input_files_visible(run_files_dir(path)),
+                        ):
+                            execution = await execute_workflow(
+                                run_ir,
+                                workflow_inputs=supplied_inputs,
+                                trigger_events=trigger_events,
+                                handlers=runtime_handlers,
+                                subscriptions=runtime_subscriptions,
+                                data_dir=resolved_data_dir,
+                                notification_adapter=notification_adapter,
+                                run_id=run_id,
+                                on_node_event=publish_node_event,
+                                replay=(
+                                    list(run_from.replay)
+                                    if run_from is not None
+                                    else list((resume_from or {}).get("runs") or [])
+                                ),
+                                replay_source=(
+                                    run_from.source_run_id
+                                    if run_from is not None
+                                    else resumed["run_id"]
+                                    if resumed
+                                    else None
+                                ),
+                                usage_meter=usage,
+                                result_cache=(
+                                    ResultCache(resolved_data_dir) if use_result_cache else None
+                                ),
+                            )
                     group.cancel_scope.cancel()
                 stopped = execution is None and stop_seen
-            except InvalidRattishWorkflowInputError as exc:
+            except (InvalidRattishWorkflowInputError, FileInputError) as exc:
                 input_error = RuntimeErrorInfo(
                     "configuration",
                     "RATTISH_WORKFLOW_INPUT_INVALID",
@@ -859,6 +1139,10 @@ async def run_rattish_file(
                         "runtime", "RATTISH_RUNTIME_UNEXPECTED", str(exc)
                     )
 
+        if worktree is not None:
+            worktree = await _finish_worktree(
+                worktree, compiled.ir["workflow"]["name"], run_id, discard=not executed
+            )
         finished_at = datetime.now(UTC).isoformat()
         status = "stopped" if stopped else _run_status(deployment, execution, input_error)
         if status == "preflight_failed":
@@ -883,7 +1167,11 @@ async def run_rattish_file(
             # Invalid inputs aren't kept: there is nothing to resume or run again.
             saved_values=None if status == "invalid_inputs" else values_summary,
             rerun_of=rerun_of,
+            replayed=replayed,
+            model_variant=model_variant,
         )
+        if worktree is not None:
+            document["worktree"] = worktree
         if live is not None:
             # Keep the observed event order and completed work even after cancellation.
             document["events"] = [
@@ -907,6 +1195,11 @@ async def run_rattish_file(
             )
             document["resumed_from"].update(
                 reused_runs=reused, not_reused_runs=max(0, reusable - reused)
+            )
+        if run_from is not None and "replayed_from" in document:
+            reused = sum(1 for record in document["runs"] if record.get("reused_from_run_id"))
+            document["replayed_from"].update(
+                reused_runs=reused, not_reused_runs=max(0, reusable_count(run_from) - reused)
             )
         path = _run_path(
             resolved_data_dir,
@@ -932,9 +1225,41 @@ async def run_rattish_file(
         await _apply_retention_after_run(
             resolved_data_dir, compiled.ir["workflow"]["id"], path, run_id
         )
-        # Saved inputs of runs deleted without delete_run_files go now.
+        # Saved inputs and files of runs deleted without delete_run_files go now.
         remove_orphaned_values(path.parent)
+        remove_orphaned_files(path.parent)
+        sweep_uploads(resolved_data_dir)
         return RattishRunResult(document, path, compiled, deployment)
+
+
+async def _finish_worktree(
+    worktree: dict[str, Any], workflow_name: str, run_id: str, *, discard: bool
+) -> dict[str, Any]:
+    """Commit what the run changed in its worktree, or clean up a worktree nothing used.
+
+    Shielded, so a stopped run still commits its changes before its record is saved.
+    """
+    from gofer.rattish import run_worktrees
+
+    def work() -> dict[str, Any]:
+        if discard:
+            # Setup failed or the run stopped first: no node ran there.
+            try:
+                run_worktrees.remove(run_worktrees.RunWorktree.from_document(worktree))
+            except run_worktrees.RunWorktreeError as exc:
+                return {**worktree, "state": "pending", "message": str(exc)}
+            return {**worktree, "state": "no_changes"}
+        return run_worktrees.finish(worktree, f"Raticode run of {workflow_name}\n\nRun {run_id}.")
+
+    result = worktree
+    with anyio.CancelScope(shield=True):
+        result = await anyio.to_thread.run_sync(work)
+    return result
+
+
+def write_run_document(path: Path, document: dict[str, Any]) -> None:
+    """Validate and save a run document in place, as the run itself does."""
+    _write_json_atomic(path, document)
 
 
 async def _apply_retention_after_run(
@@ -1032,6 +1357,8 @@ def _run_document(
     started_by: StartedBy | None = None,
     saved_values: Mapping[str, Any] | None = None,
     rerun_of: str | None = None,
+    replayed: Mapping[str, Any] | None = None,
+    model_variant: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     ir = compiled.ir
     runs = [_node_run_document(record) for record in execution.runs] if execution else []
@@ -1096,6 +1423,10 @@ def _run_document(
         document["rerun_of"] = rerun_of
     if resumed is not None:
         document["resumed_from"] = dict(resumed)
+    if replayed is not None:
+        document["replayed_from"] = dict(replayed)
+    if model_variant is not None:
+        document["model_overrides"] = [dict(item) for item in model_variant["models"]]
     return document
 
 
@@ -1155,7 +1486,20 @@ def run_artifact_path(source_path: Path, run_id: str, *, data_dir: Path | None =
 
 
 def has_live_run(source_path: Path, *, data_dir: Path | None = None, recent: int = 8) -> bool:
-    """Whether a run of this source file is going now, started from anywhere.
+    """Whether a run of this source file is going now, started from anywhere."""
+    return live_run(source_path, data_dir=data_dir, recent=recent) is not None
+
+
+@dataclass(frozen=True, slots=True)
+class LiveRun:
+    """A run of a workflow that is going now: its ID and when it started, if saved."""
+
+    run_id: str
+    started_at: datetime | None
+
+
+def live_run(source_path: Path, *, data_dir: Path | None = None, recent: int = 8) -> LiveRun | None:
+    """The longest-running run of this source file going now, started from anywhere.
 
     Run IDs sort by start time, so only the newest few records need reading.
     """
@@ -1163,15 +1507,27 @@ def has_live_run(source_path: Path, *, data_dir: Path | None = None, recent: int
         directory = run_artifact_path(source_path, "probe", data_dir=data_dir).parent
         records = sorted(directory.glob("*.json"), reverse=True)[:recent]
     except (OSError, RattishArtifactError, RattishError):
-        return False
+        return None
+    found: LiveRun | None = None
     for record in records:
         try:
             document = json.loads(record.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             continue
-        if isinstance(document, dict) and effective_run_status(document) == "running":
-            return True
-    return False
+        if not isinstance(document, dict) or effective_run_status(document) != "running":
+            continue
+        started: datetime | None = None
+        raw = document.get("started_at")
+        if isinstance(raw, str):
+            try:
+                started = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                started = None
+            if started is not None and started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
+        # Newest first, so each later match started earlier.
+        found = LiveRun(str(document.get("run_id") or record.stem), started)
+    return found
 
 
 def _run_path(

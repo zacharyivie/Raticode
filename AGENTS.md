@@ -38,6 +38,28 @@ npm test              # unit tests in one process, slow browser and git files be
 npm run test:serial   # everything in one process
 ```
 
+### Before landing on `dev`
+
+- Before fast-forwarding `dev`, run `python3 scripts/check-dev.py` from the
+  repository root or worktree. It runs `ruff check src tests`, `mypy src tests`,
+  the repository-wide test files in its `REPO_WIDE_TESTS` list (CLI parity, the
+  scripting contract, the website address and mobile download, the phone
+  protocol, no credential on the command line),
+  `scripts/check-website-docs.py` and `scripts/check-commit-messages.py`, and
+  prints one PASS or FAIL line for each. Don't land while any line says FAIL. It
+  takes about a minute.
+- Commit messages carry no `Co-Authored-By` line for an AI tool and no
+  "Generated with ..." line, even when your tool adds one by default.
+  `scripts/check-commit-messages.py` fails on them; amend or reword those
+  commits before landing.
+- It uses the checkout's `.venv`, or the main checkout's `.venv` from a git
+  worktree. Pass `--python` to choose another interpreter.
+- A test file that reads `git ls-files` (or `git grep`) or `docs/cli-parity.json`
+  checks the whole repository, so add it to `REPO_WIDE_TESTS`.
+  `tests/unit/test_check_dev.py` fails until you do.
+- It doesn't replace the full suite. Run the full suite as well for changes to
+  shared workflow execution, scheduling or CLI behavior.
+
 ### Full test runs
 
 - Parallel runs must give the same results as `python -m pytest`. Tests get their
@@ -57,8 +79,11 @@ npm run test:serial   # everything in one process
   under a 6 GB cap. The frontend run without browsers peaked at about 1.7 GB;
   nobody has measured it with real browsers yet. Inside a capped scope
   `npm test` ends with `ℹ memory_peak_mib`.
-- Unattended full runs, such as the nightly, run both suites capped. From the
-  repository root, with the project's `.venv` synced with the `dev` extra:
+- Unattended full runs, such as the nightly, start with
+  `python3 scripts/check-dev.py` (see "Before landing on `dev`" below) and report
+  its PASS/FAIL lines, so the list of repository-wide checks lives in one place.
+  Then they run both suites capped. From the repository root, with the project's
+  `.venv` synced with the `dev` extra:
 
   ```bash
   env -u FORCE_COLOR NO_COLOR=1 PYTHONPATH=src systemd-run --user --scope --quiet -p MemoryMax=6G -p MemorySwapMax=0 --setenv=PATH=$PATH .venv/bin/python -m pytest -n 8 --dist worksteal -q -p no:cacheprovider --no-header -rf tests
@@ -88,7 +113,7 @@ npm run test:serial   # everything in one process
 - The website (`website/docs/`, published from `website/` to https://raticode.dev/) is the single source of truth for Raticode documentation, for the desktop app, the CLI and Raticode Mobile. The READMEs link to the website for user-facing behavior and must not be the only place a user-visible feature is described.
 - `docs/` and `mobile/android/docs/` are git-ignored except for files that scripts, tests and release tooling read: `docs/releasing.md`, `docs/security/release-verification.md`, `docs/cli-parity.json`, `mobile/android/docs/releasing.md` and `mobile/android/docs/versioning.md`. Don't commit design notes, plans, reports, research or test evidence there; they belong in the maintainer's Second Brain, outside the repository. If a script or test starts reading a new file under `docs/`, add a `!` exception for it in `.gitignore`.
 - Any new feature, or any change that alters how an existing feature works in a way users would notice (a renamed screen or setting, new steps, a removed option, a changed limit or default), must update the matching website pages in the same branch, before it is merged to `dev`. Keep installed behavior separate from planned work, and label experimental features (Feature Preview) and unreleased ones as such.
-- Before fast-forwarding `dev`, run `python3 scripts/check-website-docs.py`. It fails when a branch with a `feat:` commit changes app code under `frontend/`, `src/gofer/` or `mobile/android/app/src/main/` without touching `website/`. If no user-facing documentation changes, add a `Docs-not-needed: <reason>` line to the commit message; the same line works in a pull request description. The `Website docs` GitHub workflow runs this check on pull requests.
+- Before fast-forwarding `dev`, run `python3 scripts/check-website-docs.py` (`scripts/check-dev.py` runs it for you). It fails when a branch with a `feat:` commit changes app code under `frontend/`, `src/gofer/` or `mobile/android/app/src/main/` without touching `website/`. If no user-facing documentation changes, add a `Docs-not-needed: <reason>` line to the commit message; the same line works in a pull request description. The `Website docs` GitHub workflow runs this check on pull requests.
 - After editing the website, run from `website/` (with `nvm use`): `npm ci`, then `npm run check` (type check, build, and internal link and anchor check). `npm run check:downloads` confirms the download links match the newest published release. When preparing a release, `npm run set-release -- X.Y.Z` moves the site to that version. The `Website docs` workflow deploys the site to GitHub Pages from `main` only after both checks pass; see `docs/releasing.md`. Check full Rattish examples with `Raticode rattish check`.
 
 ## Architecture
@@ -138,6 +163,7 @@ Node step-2:
 
 ## Development Rules
 
+- Shared words: read [GLOSSARY.md](GLOSSARY.md) before naming anything users see or anything new in code.
 - Prefer the existing module boundaries and patterns before adding new abstractions.
 - Keep CLI behavior covered by tests when changing command behavior.
 - Keep workflow parsing and execution behavior covered by unit or regression tests when changing operation, graph, executor, or scheduler logic.
@@ -151,7 +177,7 @@ Node step-2:
   flows.
 - After code changes, run `ruff check src tests --fix`.
 - After code changes, run `mypy src tests`.
-- Run targeted pytest tests for the changed area; run the full suite when touching shared workflow execution, scheduling, or CLI behavior.
+- Run targeted pytest tests for the changed area; run the full suite when touching shared workflow execution, scheduling, or CLI behavior. Before landing on `dev`, also run `python3 scripts/check-dev.py`.
 - To run any npm commands make sure you first use nvm to select the correct version of npm for the project.
 - Real-Electron tests must not open windows on the developer's desktop. Each
   `*.browser.cjs` entry script calls `runInBackgroundDisplay()` from

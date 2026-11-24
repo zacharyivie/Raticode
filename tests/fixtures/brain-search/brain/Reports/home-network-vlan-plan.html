@@ -1,0 +1,7 @@
+<html><body><h1>Home network VLAN plan</h1>
+<p>Split the home network into three VLANs on the router: trusted laptops and phones, IoT devices such as smart plugs and cameras, and a guest network.</p>
+<h2>Firewall rules</h2>
+<p>IoT devices may reach the internet but not the trusted VLAN. The trusted VLAN may open connections to IoT devices for control. The guest Wi-Fi is isolated from both.</p>
+<h2>Switch ports</h2>
+<p>The access point carries all three VLANs tagged on one trunk port. The NAS stays on the trusted VLAN.</p>
+</body></html>

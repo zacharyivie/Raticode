@@ -55,6 +55,13 @@ object ChatLinks {
         }
     }
 
+    /**
+     * [value] when it is a web address the phone may hand to a browser (http or https with a host and no user info),
+     * otherwise null. Links the computer sends outside chat, such as a post's address, go through this too, so a
+     * changed computer can't make a tap open another app's scheme, a `content:` file or a `file:` path.
+     */
+    fun web(value: String?): String? = (value?.let(::classify) as? ChatLink.Web)?.url
+
     private fun webAddress(value: String): Boolean = runCatching {
         val uri = java.net.URI(value)
         !uri.host.isNullOrBlank() && uri.rawUserInfo == null

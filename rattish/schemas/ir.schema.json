@@ -110,6 +110,7 @@
         "max_tokens": {"type": ["integer", "null"], "minimum": 1},
         "max_cost_usd": {"type": ["number", "null"], "exclusiveMinimum": 0},
         "timeout_ms": {"type": ["integer", "null"], "minimum": 1},
+        "workspace": {"enum": ["project", "worktree"]},
         "inputs": {
           "type": "array",
           "items": {"$ref": "#/$defs/workflow_input"}
@@ -127,6 +128,7 @@
         "max_tokens",
         "max_cost_usd",
         "timeout_ms",
+        "workspace",
         "inputs",
         "outputs"
       ],
@@ -138,7 +140,20 @@
         "name": {"$ref": "#/$defs/identifier"},
         "required": {"type": "boolean"},
         "schema": {"$ref": "#/$defs/schema_document"},
-        "default": {"$ref": "#/$defs/explicit_value"}
+        "default": {"$ref": "#/$defs/explicit_value"},
+        "file": {
+          "type": "object",
+          "properties": {
+            "accept": {
+              "type": "array",
+              "items": {"type": "string", "minLength": 2, "maxLength": 128},
+              "maxItems": 32
+            },
+            "max_size": {"type": "integer", "minimum": 1, "maximum": 1073741824}
+          },
+          "required": ["accept", "max_size"],
+          "additionalProperties": false
+        }
       },
       "required": ["name", "required", "schema", "default"],
       "additionalProperties": false

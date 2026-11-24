@@ -3,6 +3,7 @@
   "contract_version": 1,
   "node_type": "rem-task",
   "runtime_handler": "raticode.rem_task",
+  "catalog": {"category": "ai", "summary": "Run one of Rem's tasks and wait for its result", "docs_path": "/docs/nodes/rem-task"},
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",

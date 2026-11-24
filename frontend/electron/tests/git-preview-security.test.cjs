@@ -81,6 +81,9 @@ test("automatic reads never run filter commands from a folder's own git config",
     await git("config", "filter.planted.clean", command);
     await git("config", "filter.planted.process", command);
     await git("config", "filter.planted.required", "true");
+    // A hook named in config is replaced with `true`, which still leaves reads working.
+    await git("config", "hook.planted.event", "post-index-change");
+    await git("config", "hook.planted.command", command);
     fs.writeFileSync(path.join(root, ".git", "info", "attributes"), "*.txt filter=planted\n");
     fs.writeFileSync(path.join(root, "file.txt"), "changed\n");
     const old = new Date(Date.now() - 86_400_000);
@@ -99,10 +102,13 @@ test("only repository-scoped command settings are blanked, and git-lfs keeps wor
     "local", "filter.planted.clean\ntouch /tmp/x", "worktree", "diff.planted.textconv\nevil",
     "global", "filter.mine.clean\nmy-filter %f", "local", "filter.lfs.process\ngit-lfs filter-process",
     "local", "filter.a.b.smudge\nrun",
+    // Hooks named in config (git 2.54+): an empty command fails, so they become `true`.
+    // Raticode's own commit-msg hook arrives at command scope and is left alone.
+    "worktree", "hook.planted.command\ntouch /tmp/x", "command", "hook.raticode.command\nRaticode git hook",
   ].join("\0") + "\0";
   assert.deepEqual(parseRepositoryCommandConfig(output), [
     "-c", "filter.planted.clean=", "-c", "filter.planted.required=false", "-c", "diff.planted.textconv=",
-    "-c", "filter.a.b.smudge=", "-c", "filter.a.b.required=false",
+    "-c", "filter.a.b.smudge=", "-c", "filter.a.b.required=false", "-c", "hook.planted.command=true",
   ]);
   assert.deepEqual(parseRepositoryCommandConfig(""), []);
 });

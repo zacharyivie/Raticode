@@ -6,7 +6,7 @@ pageClass: docs-layout
 
 # Project setup for new worktrees
 
-Rem, Organizations and Swarms often give an agent its own Git worktree, so several can work on one project at once. A fresh worktree only has the files Git tracks: no installed packages, no virtual environment, no local `.env`. A project's setup file tells Raticode how to prepare each new worktree before the agent starts.
+Rem, Organizations and Swarms often give an agent its own Git worktree, so several can work on one project at once, and a workflow with [**Run in a worktree**](../workflows/rattish.md#run-in-a-worktree) on gets one for each run (from 0.6.0). A fresh worktree only has the files Git tracks: no installed packages, no virtual environment, no local `.env`. A project's setup file tells Raticode how to prepare each new worktree before the agent or workflow starts.
 
 Worktree setup is new in Raticode 0.5.5.
 
@@ -69,6 +69,7 @@ Approvals are kept in Raticode's data folder on this computer, readable only by 
 | Created by | Which worktrees | Where the result shows |
 | --- | --- | --- |
 | [Rem](../rem/home.md) | A task's temporary worktree, when another task is already changing the project | The task's status in its sheet |
+| [Raticode's project check](../rem/home.md#raticode-runs-the-project-s-check-itself) | The fresh worktree each run of the project's decided check and proving test gets (not in a released version yet). Only links and copies: the setup's commands would run files the worker committed outside the sandbox. When setup fails, isn't approved or has commands, the check runs in the task's folder instead and the proving test isn't run | The check's receipt in the review, with the reason |
 | [Organizations](../advanced/organizations.md) | Each ticket's worktree | The ticket's **Did** section and the organization's activity |
 | [Swarms](../advanced/swarms.md) | Each agent's assignment worktree, the worktree integration checks run in, and the review worktree before the first checks run in it | The attempt under **Assignment attempts and checks**, or **Results and branches** |
 

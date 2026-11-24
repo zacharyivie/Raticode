@@ -7,7 +7,7 @@ Each OS supplies a different recognizer, and Linux supplies none:
   desktop app passes its path in ``GOFER_SPEECH_HELPER``.
 * Windows: the offline recognizer behind ``System.Speech``, driven by Windows
   PowerShell, which every Windows 10 and 11 install includes.
-* Linux: nothing built in, so dictation uses Raticode's offline Vosk model.
+* Linux: nothing built in, so dictation uses Raticode's offline model (sherpa-onnx).
 
 Audio arrives from the desktop window as 16 kHz mono 16-bit PCM and is piped to the
 helper's stdin; the helper answers with one JSON object per line on stdout:

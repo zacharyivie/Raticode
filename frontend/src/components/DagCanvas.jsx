@@ -1,11 +1,15 @@
 import { autoLayoutWorkflow } from "../lib/workflowLayout.js";
 export { autoLayoutWorkflow } from "../lib/workflowLayout.js";
 import { PathNameDialog } from "./PathNameDialog.jsx";
+import AskRemButton from "./AskRemButton.jsx";
+import { timelineRowCanAskRem } from "../lib/askRemAboutFailure.js";
+import { NodePicker } from "./NodePicker.jsx";
+import { nextNodeId, nodeCatalogEntries, pickedNodePosition } from "../lib/nodeCatalog.js";
 export { PathNameDialog } from "./PathNameDialog.jsx";
 import brandCompat from "../lib/brandCompat.js";
 import { cloneJson } from "../lib/jsonValue.js";
 import { PROVIDER_PERMISSIONS } from "../lib/providerPermissions.js";
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   AlertCircle,
@@ -39,6 +43,7 @@ import {
   MoveRight,
   PencilLine,
   Play,
+  Plug,
   Plus,
   RefreshCw,
   Repeat2,
@@ -59,6 +64,7 @@ import {
 } from "lucide-react";
 
 import { apiUrl } from "../lib/api.js";
+import { useRemLibrary } from "../lib/remLibrary.js";
 import { RattishTriggersSection } from "./RattishTriggersSection.jsx";
 import { WorkflowResultCacheSection } from "./WorkflowResultCacheSection.jsx";
 import { WorkflowSecretsSection } from "./WorkflowSecretsSection.jsx";
@@ -66,6 +72,9 @@ import { DEFAULT_APP_SETTINGS, matchesCommand } from "../lib/settings.js";
 import { Dialog } from "./Dialog.jsx";
 import GraphOutline from "./GraphOutline.jsx";
 import { fallbackLines, providerLabel } from "../lib/providerFallback.js";
+import { usageLimitWaitText } from "../lib/workflowRuns.js";
+import { profileSelectOptions, profileSubscription } from "../lib/profileOptions.js";
+import { useProviderAccountList } from "../lib/useProviderAccountList.js";
 import {
   ProviderModelEffortFields,
   useProviderCapabilities,
@@ -215,6 +224,18 @@ const nodeStyles = {
     accent: "bg-blue-700",
     border: "border-blue-200",
     chip: "bg-blue-50 text-blue-700 border-blue-100",
+  },
+  read_web_page: {
+    icon: FileText,
+    accent: "bg-blue-700",
+    border: "border-blue-200",
+    chip: "bg-blue-50 text-blue-700 border-blue-100",
+  },
+  mcp_tool: {
+    icon: Plug,
+    accent: "bg-violet-700",
+    border: "border-violet-200",
+    chip: "bg-violet-50 text-violet-700 border-violet-100",
   },
   approval_gate: {
     icon: ShieldCheck,
@@ -591,6 +612,10 @@ function nodeMetaFromOperation(operation = {}, pathBasePath = "") {
       }`;
     case "http_request":
       return `${operation.method || "GET"} ${operation.url || "url"}`;
+    case "read_web_page":
+      return `read ${operation.url || "web page"}`;
+    case "mcp_tool":
+      return `${operation.server || "server"} · ${operation.tool || "tool"}`;
     case "jev":
       return `${operation.question_type === "choice" ? "choice" : "yes/no"} · ${operation.question || "question"}`;
     case "approval_gate":
@@ -1008,6 +1033,11 @@ function structuredCloneCompatible(value) {
   return cloneJson(value);
 }
 
+// The provider accounts list (sign-in states) for the inspectors' Profile menus.
+const ProviderAccountsContext = createContext({ accounts: [], providers: [] });
+
+const GRAPH_COMMAND_IDS = ["graph.selectAll", "graph.deleteSelection", "graph.zoomIn", "graph.zoomOut", "graph.fit"];
+
 export default function DagCanvas({
   active = true,
   approvalState,
@@ -1031,6 +1061,7 @@ export default function DagCanvas({
   onSettingChange,
   onResumeRunLog,
   onRerunRunLog,
+  onRunFromNode,
   onSelectRunLog,
   onStopRunLog,
   onStopWorkflow,
@@ -1044,6 +1075,8 @@ export default function DagCanvas({
   const graphActionsRef = useRef(null);
   const importInputRef = useRef(null);
   const deleteSelectedNodeRef = useRef(null);
+  const addNodeRef = useRef(null);
+  const pendingPlacementRef = useRef(null);
   const nodeDragMovedRef = useRef(false);
   const nodeDragSelectionRef = useRef([]);
   const nodeDragRef = useRef(null);
@@ -1056,6 +1089,11 @@ export default function DagCanvas({
   const [inspectorWidth, setInspectorWidth] = useState(settings.layout.graphInspectorWidth);
   const [expandedFolderNodes, setExpandedFolderNodes] = useState({});
   const [providerProfiles, setProviderProfiles] = useState([]);
+  const { accounts: accountRows, providers: accountProviders } = useProviderAccountList();
+  const providerAccounts = useMemo(
+    () => ({ accounts: accountRows, providers: accountProviders }),
+    [accountRows, accountProviders],
+  );
   const {
     capabilities: providerCapabilities,
     loading: providerCapabilitiesLoading,
@@ -1095,6 +1133,8 @@ export default function DagCanvas({
     if (!active) setGraphFullscreen(false);
   }, [active]);
   const [nodeContextMenu, setNodeContextMenu] = useState(null);
+  // Open node picker: { afterNodeId } names the node a picked node is placed after.
+  const [nodePicker, setNodePicker] = useState(null);
   const [nodeRenameDialog, setNodeRenameDialog] = useState(null);
   deleteSelectedNodeRef.current = deleteSelectedNode;
 
@@ -1120,6 +1160,7 @@ export default function DagCanvas({
   const pathBaseDir =
     workflow.sourceFormat === "rattish" && workflow.projectRoot ? workflow.projectRoot : dataDir;
   const editingDisabled = invalidWorkflow || readOnly;
+  addNodeRef.current = rattishMode && !editingDisabled && !nodePicker ? () => addNode() : null;
   const validationDiagnostics = workflowValidationDiagnostics(workflow);
   const blockingValidationErrors = validationDiagnostics.filter(
     (diagnostic) => diagnostic.severity === "error",
@@ -1314,6 +1355,20 @@ export default function DagCanvas({
     setViewport((current) => (current.x === 0 && current.y === 0 && current.scale === 1 ? fitted : current));
   }, [workflow.id, workflowNodes]);
 
+  // Place a node added from the picker next to the node it was added after. Positions live
+  // in workflow metadata, so this never changes workflow.rattish.
+  useEffect(() => {
+    const placement = pendingPlacementRef.current;
+    if (!placement || !workflowNodes.some((node) => node.id === placement.nodeId)) return;
+    pendingPlacementRef.current = null;
+    onWorkflowChange({
+      ...workflow,
+      nodes: workflowNodes.map((node) =>
+        node.id === placement.nodeId ? { ...node, x: placement.x, y: placement.y } : node,
+      ),
+    });
+  }, [onWorkflowChange, workflow, workflowNodes]);
+
   useEffect(() => {
     if (selectedNodeId && !nodesById[selectedNodeId]) {
       setSelectedNodeId(undefined);
@@ -1347,9 +1402,16 @@ export default function DagCanvas({
         deleteEdge(selectedEdgeId);
       }
     }
+    function handleGraphCommand(event) {
+      if (active && !readOnly && selectedEdgeId && event?.detail?.commandId === "graph.deleteSelection") deleteEdge(selectedEdgeId);
+    }
 
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("gofer:graph-command", handleGraphCommand);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("gofer:graph-command", handleGraphCommand);
+    };
   }, [active, deleteEdge, readOnly, selectedEdgeId, settings]);
 
   useEffect(() => {
@@ -1378,58 +1440,52 @@ export default function DagCanvas({
 
       if (editingText || canvasOverlay) return;
 
-      if (matchesCommand(event, settings, "graph.selectAll")) {
+      // Only while the graph canvas itself has focus, so Tab still moves between controls
+      // everywhere else. Shift+Tab leaves the graph as usual.
+      if (
+        matchesCommand(event, settings, "graph.addNode") &&
+        canvasRef.current &&
+        (target === canvasRef.current || canvasRef.current.contains?.(target))
+      ) {
+        if (!addNodeRef.current) return;
         event.preventDefault();
+        addNodeRef.current();
+        return;
+      }
+
+      const commandId = GRAPH_COMMAND_IDS.find((id) => (id !== "graph.deleteSelection" || selectedNodeId)
+        && matchesCommand(event, settings, id));
+      if (!commandId) return;
+      event.preventDefault();
+      runGraphCommand(commandId);
+    }
+
+    function zoomBy(factor) {
+      setViewport((current) => {
+        const rect = canvasRef.current?.getBoundingClientRect();
+        const centerX = (rect?.width || 960) / 2;
+        const centerY = (rect?.height || 640) / 2;
+        const nextScale = clamp(current.scale * factor, minZoom, maxZoom);
+        const contentX = (centerX - current.x) / current.scale;
+        const contentY = (centerY - current.y) / current.scale;
+        return {
+          scale: nextScale,
+          x: centerX - contentX * nextScale,
+          y: centerY - contentY * nextScale,
+        };
+      });
+    }
+
+    function runGraphCommand(commandId) {
+      if (commandId === "graph.selectAll") {
         setSelectedEdgeId(null);
         setSelectedNodeIds(workflowNodes.map((node) => node.id));
         setSelectedNodeId(workflowNodes.at(-1)?.id);
-        return;
       }
-
-      if (matchesCommand(event, settings, "graph.deleteSelection") && selectedNodeId) {
-        event.preventDefault();
-        deleteSelectedNodeRef.current?.();
-        return;
-      }
-
-      if (matchesCommand(event, settings, "graph.zoomIn")) {
-        event.preventDefault();
-        setViewport((current) => {
-          const rect = canvasRef.current?.getBoundingClientRect();
-          const centerX = (rect?.width || 960) / 2;
-          const centerY = (rect?.height || 640) / 2;
-          const nextScale = clamp(current.scale * 1.14, minZoom, maxZoom);
-          const contentX = (centerX - current.x) / current.scale;
-          const contentY = (centerY - current.y) / current.scale;
-          return {
-            scale: nextScale,
-            x: centerX - contentX * nextScale,
-            y: centerY - contentY * nextScale,
-          };
-        });
-        return;
-      }
-
-      if (matchesCommand(event, settings, "graph.zoomOut")) {
-        event.preventDefault();
-        setViewport((current) => {
-          const rect = canvasRef.current?.getBoundingClientRect();
-          const centerX = (rect?.width || 960) / 2;
-          const centerY = (rect?.height || 640) / 2;
-          const nextScale = clamp(current.scale * 0.88, minZoom, maxZoom);
-          const contentX = (centerX - current.x) / current.scale;
-          const contentY = (centerY - current.y) / current.scale;
-          return {
-            scale: nextScale,
-            x: centerX - contentX * nextScale,
-            y: centerY - contentY * nextScale,
-          };
-        });
-        return;
-      }
-
-      if (matchesCommand(event, settings, "graph.fit")) {
-        event.preventDefault();
+      if (commandId === "graph.deleteSelection" && selectedNodeId) deleteSelectedNodeRef.current?.();
+      if (commandId === "graph.zoomIn") zoomBy(1.14);
+      if (commandId === "graph.zoomOut") zoomBy(0.88);
+      if (commandId === "graph.fit") {
         const rect = canvasRef.current?.getBoundingClientRect();
         setViewport(
           fitViewportToNodes(workflowNodes, {
@@ -1440,8 +1496,20 @@ export default function DagCanvas({
       }
     }
 
+    // The command palette runs graph commands by name, for the graph on screen.
+    function handleGraphCommand(event) {
+      if (!active || canvasOverlay) return;
+      const commandId = event?.detail?.commandId;
+      if (commandId === "graph.addNode") addNodeRef.current?.();
+      if (GRAPH_COMMAND_IDS.includes(commandId)) runGraphCommand(commandId);
+    }
+
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("gofer:graph-command", handleGraphCommand);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("gofer:graph-command", handleGraphCommand);
+    };
   }, [active, canvasOverlay, graphFullscreen, settings, workflowNodes, selectedNodeId]);
 
   useEffect(() => {
@@ -1642,22 +1710,16 @@ export default function DagCanvas({
   }
 
   function addNode(event) {
+    if (editingDisabled) return;
     const nextNumber = nextAvailableNodeNumber(workflowNodes);
     if (rattishMode) {
-      const nodeId = `node-${nextNumber}`;
-      void Promise.resolve(onRattishMutation?.([
-        {
-          kind: "add_node",
-          node: nodeId,
-          node_type: "bash-command",
-        },
-      ])).then((document) => {
-        if (!document) return;
-        setSelectedNodeId(nodeId);
-        setSelectedNodeIds([nodeId]);
-        setSelectedEdgeId(null);
-        setInspectorCollapsed(false);
-      });
+      // Add node opens the picker; the node is added once a type is chosen.
+      const afterNodeId =
+        selectedNodeId && nodesById[selectedNodeId] && selectedNodeIds.length <= 1
+          ? selectedNodeId
+          : null;
+      setNodeContextMenu(null);
+      setNodePicker({ afterNodeId });
       return;
     }
     const nextWorkflow = addDefaultNodeToWorkflow(workflow, {
@@ -1676,6 +1738,53 @@ export default function DagCanvas({
         itemKey: `node:${newNode.id}`,
       }));
     }
+  }
+
+  function closeNodePicker() {
+    setNodePicker(null);
+    canvasRef.current?.focus?.();
+  }
+
+  // A picked node is one Rattish mutation batch: the route from the selected node first,
+  // so a Break node can find the loop before it, then the node itself. The backend refuses
+  // the whole batch if it would stop the workflow compiling.
+  function addPickedNode(nodeType) {
+    const afterNodeId = nodePicker?.afterNodeId ?? null;
+    setNodePicker(null);
+    const nodeId = nextNodeId(workflowNodes, nodeType);
+    const position = pickedNodePosition(workflowNodes, afterNodeId);
+    const afterNode = afterNodeId ? nodesById[afterNodeId] : null;
+    const canRouteOn =
+      afterNode &&
+      afterNode.type !== "break" &&
+      !afterNode.rattish?.authoredFields?.finish;
+    const mutations = [];
+    if (canRouteOn) {
+      mutations.push({
+        kind: "set_routes",
+        node: afterNodeId,
+        routes: [
+          ...workflowEdges
+            .filter((edge) => edge.from === afterNodeId)
+            .map((edge) => rattishRouteValue(edge, rattishDocument?.source)),
+          nodeId,
+        ],
+      });
+    }
+    mutations.push({ kind: "add_node", node: nodeId, node_type: nodeType });
+    // Saved to workflow metadata once the new node shows up in the graph.
+    pendingPlacementRef.current = { nodeId, ...position };
+    void Promise.resolve(onRattishMutation?.(mutations)).then((document) => {
+      canvasRef.current?.focus?.();
+      if (!document) {
+        if (pendingPlacementRef.current?.nodeId === nodeId) pendingPlacementRef.current = null;
+        return;
+      }
+      setSelectedNodeId(nodeId);
+      setSelectedNodeIds([nodeId]);
+      setSelectedEdgeId(null);
+      setInspectorCollapsed(false);
+    });
   }
 
   async function applyValidationFix(fix) {
@@ -2033,6 +2142,9 @@ export default function DagCanvas({
     // Stop the browser from starting a text selection while the node is dragged.
     event.preventDefault();
     window.getSelection?.()?.removeAllRanges();
+    // preventDefault also stops the click from focusing the graph, so focus it here:
+    // graph shortcuts such as Tab (Add node) then act on the node just selected.
+    canvasRef.current?.focus?.({ preventScroll: true });
     setNodeContextMenu(null);
     event.currentTarget.setPointerCapture(event.pointerId);
     nodeDragMovedRef.current = false;
@@ -2596,6 +2708,8 @@ export default function DagCanvas({
             <button
               className="grid h-8 w-8 place-items-center rounded-lg border border-line bg-white text-muted transition hover:border-slate-300 hover:bg-slate-50 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
               disabled={editingDisabled}
+              aria-expanded={rattishMode ? Boolean(nodePicker) : undefined}
+              aria-haspopup={rattishMode ? "dialog" : undefined}
               title="Add node"
               type="button"
               onKeyDown={(event) => {
@@ -2982,6 +3096,16 @@ export default function DagCanvas({
               onDelete={() => deleteNode(nodeContextMenu.nodeId)}
               onDuplicate={() => duplicateNode(nodeContextMenu.nodeId)}
               onRename={() => renameNode(nodeContextMenu.nodeId)}
+              onRunFromHere={
+                rattishMode && onRunFromNode
+                  ? () => {
+                      const nodeId = nodeContextMenu.nodeId;
+                      setNodeContextMenu(null);
+                      onRunFromNode(nodeId);
+                    }
+                  : null
+              }
+              runFromDisabled={Boolean(runState?.running)}
             />
           ) : null}
           {nodeRenameDialog ? (
@@ -3118,6 +3242,46 @@ export default function DagCanvas({
           ) : null}
         </div>
         </div>
+        {rattishMode && !canvasOverlay && !invalidWorkflow && !workflowNodes.length && !nodePicker ? (
+          <div
+            className="pointer-events-none absolute inset-0 z-30 grid place-items-center p-4"
+            data-graph-empty-state="true"
+          >
+            <div className="pointer-events-auto max-w-xs rounded-[10px] border border-line bg-white p-4 text-center shadow-panel">
+              <p className="text-sm font-semibold text-ink">This workflow has no nodes yet</p>
+              <p className="mt-1 text-xs text-muted">
+                Pick the first step: run code, work with files, ask AI, call the web and more.
+              </p>
+              <button
+                className="mt-3 inline-flex h-8 items-center gap-1.5 rounded-lg bg-indigo-600 px-3 text-xs font-semibold text-white transition hover:bg-indigo-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-40"
+                data-graph-empty-add-node="true"
+                disabled={editingDisabled}
+                type="button"
+                onClick={() => addNode()}
+              >
+                <Plus aria-hidden="true" size={14} />
+                Add node
+              </button>
+            </div>
+          </div>
+        ) : null}
+        {nodePicker && rattishMode ? (
+          <div className="absolute left-1/2 top-3 z-[60] -translate-x-1/2">
+            <NodePicker
+              contracts={rattishDocument?.nodeContracts ?? []}
+              label={
+                nodePicker.afterNodeId ? `Add node after ${nodePicker.afterNodeId}` : "Add node"
+              }
+              placeholder={
+                nodePicker.afterNodeId
+                  ? `Search nodes to add after ${nodePicker.afterNodeId}`
+                  : "Search nodes to add"
+              }
+              onClose={closeNodePicker}
+              onPick={addPickedNode}
+            />
+          </div>
+        ) : null}
         {canvasOverlay ? (
           <div className="absolute inset-0 z-40 grid place-items-center overflow-auto bg-slate-100/60 p-4 dark:bg-zinc-900/60" data-graph-error-overlay="true">
             {canvasOverlay}
@@ -3126,9 +3290,11 @@ export default function DagCanvas({
         </div>
       </div>
 
+        <ProviderAccountsContext.Provider value={providerAccounts}>
         {!canvasOverlay && !invalidWorkflow && rattishMode ? (
           <RattishInspector
             collapsed={inspectorCollapsed}
+            providerProfiles={providerProfiles}
             document={rattishDocument}
             edge={selectedEdge}
             node={selectedNode}
@@ -3177,6 +3343,7 @@ export default function DagCanvas({
             onApplyFix={applyValidationFix}
           />
         ) : null}
+        </ProviderAccountsContext.Provider>
       </div>
       {filePreviewPath ? (
         <TextFileDialog
@@ -3485,7 +3652,7 @@ function getNodeStatuses(nodes, runResult, logText, runNodes = {}, runEvents = [
     const status = normalizeRunStatus(nodeRun?.status);
     if (status) {
       statuses[nodeId] =
-        status === "success" && nodeRun?.data?.reused
+        status === "success" && (nodeRun?.reused || nodeRun?.data?.reused)
           ? "reused"
           : status === "success" && nodeRun?.cached
             ? "cached"
@@ -3685,6 +3852,7 @@ function ToolbarRunSelector({
                         {formatRunLabel(run)}
                       </div>
                       <div className="truncate text-[11px] text-muted">{run.id}</div>
+                      <UsageLimitWaitLine run={run} />
                     </div>
                   </button>
                   {run.status === "running" && run.stopRequested ? (
@@ -3721,6 +3889,7 @@ export function RunTimelinePanel({
   runEvents = [],
   runs = [],
   selectedRunId,
+  onAskRem,
   onReplayRun,
   onResumeRun,
   onPruneRuns,
@@ -3956,6 +4125,7 @@ export function RunTimelinePanel({
                                 {formatRunLabel(run)}
                               </div>
                               <div className="truncate text-[11px] text-muted">{run.id}</div>
+                              <UsageLimitWaitLine run={run} />
                               {run.usage?.calls ? (
                                 <div className="truncate text-[11px] text-muted">
                                   Tokens {run.usage.tokensLabel} · est. cost {run.usage.costLabel}
@@ -4188,7 +4358,14 @@ export function RunTimelinePanel({
                     <>
                       <td className="px-3 py-2 font-mono text-[11px] text-muted">
                         <div className={expanded ? "whitespace-pre-wrap" : "truncate"}>
-                          {row.cached ? (
+                          {row.reused ? (
+                            <span
+                              className="rounded border border-teal-200 bg-teal-50 px-1.5 py-0.5 font-sans text-[10px] font-semibold text-teal-700 dark:border-teal-800 dark:bg-teal-950/40 dark:text-teal-300"
+                              title="Reused this step's saved result from an earlier run: not run again, no model call, $0"
+                            >
+                              Reused
+                            </span>
+                          ) : row.cached ? (
                             <span
                               className="rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 font-sans text-[10px] font-semibold text-sky-700 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-300"
                               title="Reused a saved answer from the result cache: no model call, 0 tokens, $0"
@@ -4213,14 +4390,22 @@ export function RunTimelinePanel({
                     </>
                   ) : null}
                   <td className="px-3 py-2 font-mono text-[11px] leading-5">
+                    <div className="flex min-w-0 items-start gap-2">
                     <div
-                      className={
+                      className={`min-w-0 flex-1 ${
                         expanded
                           ? "whitespace-pre-wrap break-words"
                           : "truncate whitespace-nowrap"
-                      }
+                      }`}
                     >
                       {row.message || "-"}
+                    </div>
+                    {onAskRem && usingTimeline && timelineRowCanAskRem(row) ? (
+                      <AskRemButton
+                        label={`Ask Rem about this failure: ${row.node || "the run"}`}
+                        onAsk={() => onAskRem(row)}
+                      />
+                    ) : null}
                     </div>
                   </td>
                 </tr>
@@ -4479,6 +4664,8 @@ function parseTimelineRows(events = []) {
       message: event?.message ?? "",
       node: event?.nodeId ?? "",
       cached: event?.status === "cached",
+      // Copied from an earlier run by Resume or Run from here.
+      reused: event?.status === "reused",
       status: String(event?.status ?? "").replaceAll("_", " "),
     };
   });
@@ -4509,6 +4696,16 @@ function parseLogPayload(payload) {
 
 // Shown in place of Stop until the run ends. Its owner may be another process,
 // such as the background trigger scheduler, which stops it on its next check.
+function UsageLimitWaitLine({ run }) {
+  const text = usageLimitWaitText(run);
+  if (!text) return null;
+  return (
+    <div className="truncate text-[11px] text-amber-700 dark:text-amber-300" data-testid="run-usage-limit-wait" title={text}>
+      {text}
+    </div>
+  );
+}
+
 function StopRequestedLabel() {
   return (
     <span className="shrink-0 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-800" role="status">
@@ -4596,6 +4793,7 @@ function RunNodeInspector({ nodeRun }) {
           ["Exit code", nodeRun.exitCode ?? ""],
           ["Attempts", attempts.length || ""],
           [nodeRun.status === "success" ? "Answered by" : "Provider", providerLabel(nodeRun.provider)],
+          ["Provider app", nodeRun.providerApp ?? ""],
           ["Model calls", nodeRun.usage?.calls || ""],
           ["Tokens", nodeRun.usage?.calls || nodeRun.cached ? nodeRun.usage?.tokensLabel ?? "0" : ""],
           ["Estimated cost", nodeRun.usage?.calls || nodeRun.cached ? nodeRun.usage?.costLabel ?? "$0" : ""],
@@ -4978,7 +5176,7 @@ function WorkflowNode({
   );
 }
 
-function NodeContextMenu({ onDelete, onDuplicate, onRename, x, y }) {
+export function NodeContextMenu({ onDelete, onDuplicate, onRename, onRunFromHere = null, runFromDisabled = false, x, y }) {
   return (
     <div
       className="fixed z-[90] w-48 rounded-lg border border-line bg-white p-1 text-sm shadow-panel"
@@ -4987,6 +5185,25 @@ function NodeContextMenu({ onDelete, onDuplicate, onRename, x, y }) {
       onPointerDown={(event) => event.stopPropagation()}
       onContextMenu={(event) => event.preventDefault()}
     >
+      {onRunFromHere ? (
+        <>
+          <button
+            className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-slate-700 transition hover:bg-slate-50 hover:text-ink disabled:cursor-not-allowed disabled:text-slate-400 disabled:hover:bg-transparent"
+            type="button"
+            disabled={runFromDisabled}
+            title={
+              runFromDisabled
+                ? "Wait for the current run to finish"
+                : "Reuse the last run's results for the unchanged steps before this one, then run this step and everything after it"
+            }
+            onClick={onRunFromHere}
+          >
+            <Play size={15} />
+            Run from here
+          </button>
+          <div className="my-1 border-t border-line" />
+        </>
+      ) : null}
       <button
         className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-slate-700 transition hover:bg-slate-50 hover:text-ink"
         type="button"
@@ -5249,7 +5466,7 @@ function handleInspectorTabKeyDown(event, onChange) {
     (candidate) => candidate.getAttribute?.("role") === "tab",
   );
   const currentIndex = tabs.indexOf(event.currentTarget);
-  let nextIndex = currentIndex;
+  let nextIndex;
 
   if (["ArrowRight", "ArrowDown"].includes(event.key)) {
     nextIndex = (currentIndex + 1) % tabs.length;
@@ -5281,6 +5498,7 @@ function RattishInspector({
   onResizeKeyDown,
   onResizeStart,
   onToggleCollapsed,
+  providerProfiles = [],
   runEvents = [],
   width,
 }) {
@@ -5407,13 +5625,9 @@ function RattishInspector({
                     parseDraft={parseRattishIdentifierDraft}
                     onChange={(value) => onRenameNode?.(node.id, value)}
                   />
-                  <SelectField
-                    label="Type"
+                  <NodeTypeField
+                    contracts={document?.nodeContracts ?? []}
                     value={graphNode?.type ?? ""}
-                    options={(document?.nodeContracts ?? []).map((item) => [
-                      item.nodeType,
-                      humanizeRattishField(item.nodeType),
-                    ])}
                     onChange={(value) =>
                       onMutate?.([
                         { kind: "change_node_type", node: node.id, node_type: value },
@@ -5433,6 +5647,46 @@ function RattishInspector({
                         value={graphNode?.configuration?.[field]}
                         onChange={(value) => setNodeField("task-id", value)}
                       />
+                    ) : graphNode?.type === "mcp-tool" && field === "server" ? (
+                      <McpServerField
+                        key={field}
+                        value={graphNode?.configuration?.server}
+                        onChange={(value) => setNodeField("server", value)}
+                      />
+                    ) : graphNode?.type === "mcp-tool" && field === "tool" ? (
+                      <McpToolField
+                        key={field}
+                        configuration={graphNode?.configuration ?? {}}
+                        value={graphNode?.configuration?.tool}
+                        onChange={(value) => setNodeField("tool", value)}
+                      />
+                    ) : field === "profile" && schemaProperties.provider?.["x-rattish-role"] === "provider_id" ? (
+                      <RattishProfileField
+                        key={field}
+                        label="Profile"
+                        provider={graphNode?.configuration?.provider}
+                        providerProfiles={providerProfiles}
+                        value={graphNode?.configuration?.profile}
+                        onChange={(value) =>
+                          value ? setNodeField("profile", value) : removeNodeField("profile")
+                        }
+                      />
+                    ) : field === "fallback" && fieldSchema?.items?.properties?.profile ? (
+                      <div key={field} className="space-y-3">
+                        <RattishContractField
+                          authored={Boolean(graphNode?.authoredFields?.fallback)}
+                          field={field}
+                          schema={fieldSchema}
+                          value={graphNode?.configuration?.fallback}
+                          onChange={(value, options) => setNodeField("fallback", value, options)}
+                          onReset={() => removeNodeField("fallback")}
+                        />
+                        <RattishFallbackProfiles
+                          entries={graphNode?.configuration?.fallback}
+                          providerProfiles={providerProfiles}
+                          onChange={(entries) => setNodeField("fallback", entries)}
+                        />
+                      </div>
                     ) : (
                     <RattishContractField
                       key={field}
@@ -5688,6 +5942,22 @@ function RattishInspector({
                 a run past them. A provider that doesn&apos;t report cost ends a run that has a cost limit.
               </p>
             </InspectorSection>
+            <InspectorSection title="Workspace">
+              <ToggleField
+                checked={workflowFields.workspace?.value === "worktree"}
+                label="Run in a worktree"
+                onChange={(checked) =>
+                  checked
+                    ? setWorkflowField("workspace", "worktree", { source: true })
+                    : onMutate?.([{ kind: "remove_field", target: "workflow", field: "workspace" }])
+                }
+              />
+              <p className="text-xs leading-5 text-muted">
+                Each run gets its own git worktree of the project at its current commit, after the
+                project&apos;s approved worktree setup. Raticode commits what the run changed; review
+                it in the run&apos;s Changes tab, then land or discard it.
+              </p>
+            </InspectorSection>
             <InspectorSection title="Public interface">
               <TextareaField
                 commitOnBlur
@@ -5718,6 +5988,48 @@ function RattishInspector({
         )}
       </div>
     </aside>
+  );
+}
+
+// A step's Profile menu: the provider's profiles, each account with its sign-in state.
+function RattishProfileField({ label, onChange, provider, providerProfiles = [], value }) {
+  const accountList = useContext(ProviderAccountsContext);
+  const current = typeof value === "string" ? value : "";
+  return (
+    <SelectField
+      label={label}
+      value={current}
+      options={profileSelectOptions(providerProfiles, profileSubscription(provider), {
+        ...accountList,
+        current,
+      })}
+      onChange={onChange}
+    />
+  );
+}
+
+// A Profile menu for each fallback entry, numbered as preflight numbers them.
+function RattishFallbackProfiles({ entries, onChange, providerProfiles }) {
+  if (!Array.isArray(entries)) return null;
+  const withProfile = (index, profile) =>
+    entries.map((entry, position) => {
+      if (position !== index) return entry;
+      const next = { ...entry };
+      if (profile) next.profile = profile;
+      else delete next.profile;
+      return next;
+    });
+  return entries.map((entry, index) =>
+    entry && typeof entry === "object" && typeof entry.provider === "string" ? (
+      <RattishProfileField
+        key={index}
+        label={`Fallback entry ${index + 1} (${entry.provider}) profile`}
+        provider={entry.provider}
+        providerProfiles={providerProfiles}
+        value={entry.profile}
+        onChange={(profile) => onChange(withProfile(index, profile))}
+      />
+    ) : null,
   );
 }
 
@@ -5797,9 +6109,19 @@ function RattishContractField({ authored, field, onChange, onReset, schema, valu
 }
 
 // How a node behaves where its contract fields alone don't say.
+// Bash and PowerShell lines shared by both shell step types.
+const SHELL_BASH_HELP =
+  "Bash runs bash everywhere, using Git for Windows' bash on Windows (never WSL); preflight links to its download when it's missing. Powershell runs PowerShell, or pwsh off Windows.";
+
 const rattishNodeHelp = {
+  "bash-command": `Shell auto runs PowerShell on Windows and bash elsewhere. ${SHELL_BASH_HELP}`,
+  "shell-script": `Shell auto runs bash from PATH. ${SHELL_BASH_HELP}`,
   jev:
     "Asks Jev one yes/no or multiple-choice question about State and returns label and score, so routes can branch on node.ID.output.label. Bind State with with: state: in Code. The text is sent to TypeSafe. Save a key in Settings > Providers first.",
+  "read-web-page":
+    "Reads one web page as Markdown or plain text, with its title, description and links. Bind the address with with: url: in Code. Private and loopback addresses need network-allowlist. Render auto or always runs the page's JavaScript in an installed Chrome, Chromium or Edge, under the same address rules. The page text is untrusted: don't let a later step follow instructions in it.",
+  "mcp-tool":
+    "Calls one tool on a server from Rem's MCP server list, with no model. Write Arguments as a JSON object; {{name}} values come from with: bindings. Output is the tool's structured content, or its text. A local server runs in the sandbox: it writes only to Working dir and reaches only the hosts in Network. Treat the tool's answer as untrusted.",
   "rem-prompt":
     "Sends the prompt to Rem's chat and passes Rem's reply to the next steps. Unless Allow actions is on, Rem only answers: it won't start, change, remember or send anything for this workflow. Wait for tasks waits for any work Rem starts.",
   "rem-task":
@@ -5848,6 +6170,124 @@ function RemTaskField({ onChange, value }) {
       {tasks !== null && !tasks.length && !error ? (
         <p className="text-xs leading-5 text-muted">Rem has no tasks yet. Ask Rem to create one.</p>
       ) : null}
+    </div>
+  );
+}
+
+function McpServerField({ onChange, value }) {
+  const library = useRemLibrary();
+  const servers = library.mcpServers ?? [];
+  const known = servers.some((server) => server.name === value);
+  const options = [
+    ...(value && !known
+      ? [[value, library.loaded ? "Not in Rem's MCP server list" : "Loading servers…"]]
+      : []),
+    ...servers.map((server) => [
+      server.name,
+      `${server.name} · ${server.type === "stdio" ? "local" : "HTTP"}`,
+    ]),
+  ];
+  return (
+    <div className="space-y-1.5">
+      <SelectField label="Server" value={value ?? ""} options={options} onChange={onChange} />
+      {library.loaded && value && !known ? (
+        <p className="text-xs leading-5 text-red-700">
+          Rem&apos;s MCP server list has no server named {value}. Choose another, or add it in
+          Thread tools or with Raticode rem mcp add.
+        </p>
+      ) : null}
+      {library.loaded && !servers.length ? (
+        <p className="text-xs leading-5 text-muted">
+          Rem&apos;s MCP server list is empty. Add a server in Thread tools or with Raticode rem
+          mcp add.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+// The tool list request for an mcp-tool step: the server starts with the step's own
+// sandbox and network settings, as it would in a run.
+export function mcpToolsQuery(configuration = {}) {
+  const params = new URLSearchParams({ name: String(configuration.server ?? "") });
+  const network = configuration.network;
+  if (network === "any") params.append("network", "any");
+  else if (Array.isArray(network)) network.forEach((host) => params.append("network", String(host)));
+  if (configuration.sandbox === "off") params.set("sandbox", "off");
+  return `/rem-resources/mcp-tools?${params.toString()}`;
+}
+
+export function mcpArgumentSummary(tool) {
+  const schema = tool?.inputSchema ?? {};
+  const required = new Set(schema.required ?? []);
+  const entries = Object.entries(schema.properties ?? {});
+  if (!entries.length) return "This tool takes no arguments.";
+  const shown = entries.map(
+    ([name, item]) => `${name}${required.has(name) ? "" : "?"} (${item?.type ?? "any"})`,
+  );
+  return `Arguments: ${shown.join(", ")}`;
+}
+
+function McpToolField({ configuration, onChange, value }) {
+  const query = configuration.server ? mcpToolsQuery(configuration) : "";
+  const [listing, setListing] = useState({ query: "", tools: null, error: "" });
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    if (!query) return undefined;
+    let live = true;
+    setListing({ query, tools: null, error: "" });
+    fetch(apiUrl(query))
+      .then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || "The server's tools couldn't be listed.");
+        return payload;
+      })
+      .then((payload) => {
+        if (live) setListing({ query, tools: payload.tools ?? [], error: "" });
+      })
+      .catch((error) => {
+        if (live) setListing({ query, tools: null, error: error.message });
+      });
+    return () => {
+      live = false;
+    };
+  }, [query, attempt]);
+  const current = listing.query === query ? listing : { tools: null, error: "" };
+  if (!query || current.error) {
+    // Without a list the name is typed, so a server that won't start still saves.
+    return (
+      <div className="space-y-1.5">
+        <TextField commitOnBlur label="Tool" value={value ?? ""} onChange={onChange} />
+        {current.error ? (
+          <p className="text-xs leading-5 text-muted">
+            {current.error}{" "}
+            <button
+              className="font-medium text-indigo-700 hover:underline"
+              type="button"
+              onClick={() => setAttempt((count) => count + 1)}
+            >
+              Try again
+            </button>
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+  const tools = current.tools;
+  const selected = (tools ?? []).find((tool) => tool.name === value);
+  const options = [
+    ...(value && !selected
+      ? [[value, tools === null ? "Listing tools…" : "Not a tool on this server"]]
+      : []),
+    ...(tools ?? []).map((tool) => [tool.name, tool.title || tool.name]),
+  ];
+  return (
+    <div className="space-y-1.5">
+      <SelectField label="Tool" value={value ?? ""} options={options} onChange={onChange} />
+      {selected?.description ? (
+        <p className="text-xs leading-5 text-muted">{selected.description}</p>
+      ) : null}
+      {selected ? <p className="text-xs leading-5 text-muted">{mcpArgumentSummary(selected)}</p> : null}
     </div>
   );
 }
@@ -5963,6 +6403,7 @@ function Inspector({
 }) {
   const [workflowTab, setWorkflowTab] = useState("general");
   const [nodeTab, setNodeTab] = useState("general");
+  const accountList = useContext(ProviderAccountsContext);
   const [edgeInspectorOpen, setEdgeInspectorOpen] = useState(Boolean(edge));
   const [cronPickerOpen, setCronPickerOpen] = useState(false);
   const [draftEdge, setDraftEdge] = useState(null);
@@ -7474,7 +7915,7 @@ function Inspector({
                 <SelectField
                   label="Provider profile"
                   value={operation.profile ?? ""}
-                  options={profileSelectOptions(providerProfiles, agentConfig?.subscription)}
+                  options={profileSelectOptions(providerProfiles, agentConfig?.subscription, accountList)}
                   onChange={(value) => onOperationChange({ profile: value })}
                 />
                 <ProviderModelEffortFields
@@ -8023,7 +8464,7 @@ function Inspector({
                 <SelectField
                   label="Provider profile"
                   value={operation.profile ?? ""}
-                  options={profileSelectOptions(providerProfiles, agentConfig?.subscription)}
+                  options={profileSelectOptions(providerProfiles, agentConfig?.subscription, accountList)}
                   onChange={(value) => onOperationChange({ profile: value })}
                 />
                 <ProviderModelEffortFields
@@ -8428,6 +8869,7 @@ function AgentConfigFields({
   providerProfiles = [],
 }) {
   const agentFieldDiagnostics = (...fields) => diagnosticsForField(diagnostics, ...fields);
+  const accountList = useContext(ProviderAccountsContext);
   return (
     <>
       <ProviderModelEffortFields
@@ -8450,7 +8892,7 @@ function AgentConfigFields({
       <SelectField
         label="Provider profile"
         value={agentConfig.profile ?? ""}
-        options={profileSelectOptions(providerProfiles, agentConfig.subscription)}
+        options={profileSelectOptions(providerProfiles, agentConfig.subscription, accountList)}
         onChange={(value) => onAgentChange(agentId, { profile: value })}
       />
       <ProviderProfileEditor
@@ -8746,17 +9188,6 @@ export function profilePayloadFromDraft(draft) {
     if (Object.keys(draft[key] ?? {}).length) payload[key] = draft[key];
   }
   return payload;
-}
-
-function profileSelectOptions(providerProfiles = [], subscription) {
-  const options = [["", "None"]];
-  providerProfiles
-    .filter((profile) => !subscription || profile.subscription === subscription)
-    .forEach((profile) => {
-      const suffix = profile.model ? ` (${profile.model})` : "";
-      options.push([profile.name, `${profile.name}${suffix}`]);
-    });
-  return options;
 }
 
 function workflowDiagnosticsForDisplay(workflow) {
@@ -9364,18 +9795,88 @@ function formatApprovalRequestedAt(requestedAt) {
   return date.toLocaleString([], { dateStyle: "medium", timeStyle: "medium" });
 }
 
+function approvalReplyMode(approval) {
+  return approval?.reply === "optional" || approval?.reply === "required" ? approval.reply : "none";
+}
+
+// A gate's typed reply: shown only when the workflow asks for one.
+function ApprovalReplyField({ approval, compact = false, onChange, value }) {
+  const mode = approvalReplyMode(approval);
+  if (mode === "none") return null;
+  const label = mode === "required" ? "Reply (required)" : "Reply (optional)";
+  return (
+    <label className={`block space-y-1 font-medium text-slate-600 ${compact ? "text-[11px]" : "text-xs"}`}>
+      <span>{label}</span>
+      <textarea
+        aria-required={mode === "required"}
+        className={`w-full resize-y rounded-md border border-line bg-white text-ink outline-none transition placeholder:text-muted/70 focus:border-brand focus:ring-2 focus:ring-brand/15 ${
+          compact ? "min-h-[56px] px-2 py-1.5 text-xs" : "min-h-[70px] px-3 py-2 text-sm"
+        }`}
+        placeholder="Type your reply to the workflow"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </label>
+  );
+}
+
+// One button per option, in the order the workflow lists them, instead of Approve and Reject.
+function ApprovalOptionButtons({ approval, compact = false, disabled, onChoose }) {
+  const rejecting = new Set(approval?.rejectOptions ?? []);
+  return (
+    <div
+      aria-label="Answer options"
+      className={compact ? "grid grid-cols-2 gap-2" : "grid gap-3 sm:grid-cols-2"}
+      role="group"
+    >
+      {approval.options.map((option) => {
+        const reject = rejecting.has(option);
+        return (
+          <button
+            key={option}
+            className={
+              compact
+                ? `h-8 min-w-0 truncate rounded-md border px-2 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                    reject
+                      ? "border-red-200 bg-red-50 text-red-700 hover:bg-red-100"
+                      : "border-line bg-white text-ink hover:border-brand hover:bg-brand/5"
+                  }`
+                : `flex min-h-12 min-w-0 items-center justify-center rounded-md border px-4 py-2 text-base font-semibold shadow-sm transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                    reject
+                      ? "border-red-300 bg-red-50 text-red-700 hover:bg-red-100"
+                      : "border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
+                  }`
+            }
+            disabled={disabled}
+            title={reject ? `Answer ${option} (counts as a rejection)` : `Answer ${option}`}
+            type="button"
+            onClick={() => onChoose(option)}
+          >
+            <span className="truncate">{option}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function ApprovalDecisionOverlay({ approval, node, onDecideApproval, pendingCount = 1 }) {
   const [notes, setNotes] = useState("");
+  const [reply, setReply] = useState("");
   const [approver, setApprover] = useState(approval?.approvers?.[0] || "ui");
   const [dismissed, setDismissed] = useState(false);
   const identity = approvalIdentity(approval);
   const defaultApprover = approval?.approvers?.[0] || "ui";
   useEffect(() => {
     setNotes("");
+    setReply("");
     setApprover(defaultApprover);
     setDismissed(false);
   }, [identity, defaultApprover]);
   if (!approval || dismissed) return null;
+  const replyMissing = approvalReplyMode(approval) === "required" && !reply.trim();
+  const answer = (decision, choice = null) =>
+    onDecideApproval?.(approval, decision, notes, approver, { choice, reply });
   const nodeLabel = node?.label || node?.id || approval.nodeId;
   const requestedAt = formatApprovalRequestedAt(approval.requestedAt);
   return (
@@ -9437,26 +9938,40 @@ export function ApprovalDecisionOverlay({ approval, node, onDecideApproval, pend
               />
             </label>
           </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <button
-              className="flex h-14 items-center justify-center gap-2 rounded-md bg-emerald-600 px-4 text-base font-semibold text-white shadow-sm transition hover:bg-emerald-700"
-              title="Approve pending approval"
-              type="button"
-              onClick={() => onDecideApproval?.(approval, "approved", notes, approver)}
-            >
-              <Check size={22} />
-              Approve
-            </button>
-            <button
-              className="flex h-14 items-center justify-center gap-2 rounded-md border border-red-300 bg-red-50 px-4 text-base font-semibold text-red-700 shadow-sm transition hover:bg-red-100"
-              title="Reject pending approval"
-              type="button"
-              onClick={() => onDecideApproval?.(approval, "rejected", notes, approver)}
-            >
-              <X size={22} />
-              Reject
-            </button>
-          </div>
+          <ApprovalReplyField approval={approval} value={reply} onChange={setReply} />
+          {approval.options?.length ? (
+            <ApprovalOptionButtons
+              approval={approval}
+              disabled={replyMissing}
+              onChoose={(option) => answer("approved", option)}
+            />
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <button
+                className="flex h-14 items-center justify-center gap-2 rounded-md bg-emerald-600 px-4 text-base font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={replyMissing}
+                title="Approve pending approval"
+                type="button"
+                onClick={() => answer("approved")}
+              >
+                <Check size={22} />
+                Approve
+              </button>
+              <button
+                className="flex h-14 items-center justify-center gap-2 rounded-md border border-red-300 bg-red-50 px-4 text-base font-semibold text-red-700 shadow-sm transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={replyMissing}
+                title="Reject pending approval"
+                type="button"
+                onClick={() => answer("rejected")}
+              >
+                <X size={22} />
+                Reject
+              </button>
+            </div>
+          )}
+          {replyMissing ? (
+            <p className="text-xs text-slate-600">This workflow needs a reply before you answer.</p>
+          ) : null}
         </div>
     </Dialog>
   );
@@ -9464,15 +9979,20 @@ export function ApprovalDecisionOverlay({ approval, node, onDecideApproval, pend
 
 function ApprovalRuntimePanel({ approval, onDecideApproval }) {
   const [notes, setNotes] = useState("");
+  const [reply, setReply] = useState("");
   const [approver, setApprover] = useState(approval?.approvers?.[0] || "ui");
   const identity = approvalIdentity(approval);
   const defaultApprover = approval?.approvers?.[0] || "ui";
   useEffect(() => {
     setNotes("");
+    setReply("");
     setApprover(defaultApprover);
   }, [identity, defaultApprover]);
   if (!approval) return null;
   const decision = approval.decision;
+  const replyMissing = approvalReplyMode(approval) === "required" && !reply.trim();
+  const answer = (value, choice = null) =>
+    onDecideApproval?.(approval, value, notes, approver, { choice, reply });
   const pending = approval.status === "pending";
   return (
     <InspectorSection title="Approval status">
@@ -9508,6 +10028,20 @@ function ApprovalRuntimePanel({ approval, onDecideApproval }) {
             <>
               <span>Decision</span>
               <span className="truncate text-right">{decision.decision}</span>
+              {decision.choice ? (
+                <>
+                  <span>Choice</span>
+                  <span className="truncate text-right">{decision.choice}</span>
+                </>
+              ) : null}
+              {decision.reply ? (
+                <>
+                  <span>Reply</span>
+                  <span className="truncate text-right" title={decision.reply}>
+                    {decision.reply}
+                  </span>
+                </>
+              ) : null}
               <span>By</span>
               <span className="truncate text-right">{decision.decidedBy || "-"}</span>
               <span>Notes</span>
@@ -9529,23 +10063,35 @@ function ApprovalRuntimePanel({ approval, onDecideApproval }) {
               value={notes}
               onChange={(event) => setNotes(event.target.value)}
             />
-            <div className="flex gap-2">
-              <button
-                className="btn-primary h-8 flex-1 justify-center text-xs"
-                type="button"
-                onClick={() => onDecideApproval?.(approval, "approved", notes, approver)}
-              >
-                <Check size={14} />
-                Approve
-              </button>
-              <button
-                className="h-8 flex-1 rounded-md border border-red-200 bg-red-50 px-2 text-xs font-medium text-red-700 transition hover:bg-red-100"
-                type="button"
-                onClick={() => onDecideApproval?.(approval, "rejected", notes, approver)}
-              >
-                Reject
-              </button>
-            </div>
+            <ApprovalReplyField approval={approval} compact value={reply} onChange={setReply} />
+            {approval.options?.length ? (
+              <ApprovalOptionButtons
+                approval={approval}
+                compact
+                disabled={replyMissing}
+                onChoose={(option) => answer("approved", option)}
+              />
+            ) : (
+              <div className="flex gap-2">
+                <button
+                  className="btn-primary h-8 flex-1 justify-center text-xs disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={replyMissing}
+                  type="button"
+                  onClick={() => answer("approved")}
+                >
+                  <Check size={14} />
+                  Approve
+                </button>
+                <button
+                  className="h-8 flex-1 rounded-md border border-red-200 bg-red-50 px-2 text-xs font-medium text-red-700 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={replyMissing}
+                  type="button"
+                  onClick={() => answer("rejected")}
+                >
+                  Reject
+                </button>
+              </div>
+            )}
           </div>
         ) : null}
       </div>
@@ -10842,6 +11388,59 @@ function RuntimeReferenceField({ label, onChange, value }) {
       />
       <DraftFieldMessage id={messageId} state={state} />
     </label>
+  );
+}
+
+// The Rattish inspector's Type field opens the same picker as Add node.
+function NodeTypeField({ contracts, onChange, value }) {
+  const [open, setOpen] = useState(false);
+  const buttonRef = useRef(null);
+  const labelId = useId();
+  const current = nodeCatalogEntries(contracts).find((entry) => entry.nodeType === value);
+  function close() {
+    setOpen(false);
+    buttonRef.current?.focus?.();
+  }
+  return (
+    <div className="relative block">
+      <span className="text-xs font-medium text-muted" id={labelId}>
+        Type
+      </span>
+      <button
+        ref={buttonRef}
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        aria-labelledby={`${labelId} ${labelId}-value`}
+        className="mt-1 flex h-10 w-full items-center gap-2 rounded-lg border border-line bg-white px-3 text-left text-sm text-ink outline-none transition hover:border-slate-300 focus-visible:border-indigo-500 focus-visible:ring-2 focus-visible:ring-indigo-100"
+        data-node-type-field="true"
+        title={current?.summary || undefined}
+        type="button"
+        onClick={() => setOpen((isOpen) => !isOpen)}
+      >
+        <span className="min-w-0 flex-1 truncate" id={`${labelId}-value`}>
+          {current?.label || humanizeRattishField(value) || "Choose a type"}
+        </span>
+        <span className="shrink-0 font-mono text-[10px] text-muted">{value}</span>
+        <ChevronDown aria-hidden="true" className="shrink-0 text-muted" size={15} />
+      </button>
+      {open ? (
+        <div className="mt-1">
+          <NodePicker
+            contracts={contracts}
+            sizeClass="max-h-[22rem]"
+            currentType={value}
+            widthClass="w-full"
+            label="Change node type"
+            placeholder="Search node types"
+            onClose={close}
+            onPick={(nodeType) => {
+              close();
+              if (nodeType !== value) onChange?.(nodeType);
+            }}
+          />
+        </div>
+      ) : null}
+    </div>
   );
 }
 

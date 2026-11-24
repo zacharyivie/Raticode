@@ -8,6 +8,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
 import dev.raticode.mobile.live.LiveNotifications
+import dev.raticode.mobile.open.OpenLinkActivity
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -29,6 +30,8 @@ import dev.raticode.mobile.ui.RaticodeTheme
 
 class MainActivity : ComponentActivity() {
     private var notificationThread by mutableStateOf<String?>(null)
+    /** A web link from another app, handed over by OpenLinkActivity; opened once, then cleared. */
+    private var externalLink by mutableStateOf<String?>(null)
     /** True for a launch from the app icon; cleared once the voice setup offer is settled. */
     private var offerVoiceSetup by mutableStateOf(false)
     private val childLock by lazy { ChildLockRuntime.get(this) }
@@ -39,11 +42,14 @@ class MainActivity : ComponentActivity() {
         if (childLock.locked) return
         setIntent(intent)
         notificationThread = intent.getStringExtra(LiveNotifications.THREAD_EXTRA)
+        OpenLinkActivity.linkFrom(intent)?.let { externalLink = it }
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (childLock.locked) intent.removeExtra(LiveNotifications.THREAD_EXTRA)
         notificationThread = intent.getStringExtra(LiveNotifications.THREAD_EXTRA)
+        // Only a fresh start opens the link; a screen Android rebuilt from saved state already did.
+        if (!childLock.locked && savedInstanceState == null) externalLink = OpenLinkActivity.linkFrom(intent)
         offerVoiceSetup = !childLock.locked && (savedInstanceState?.getBoolean(VOICE_OFFER) ?: (intent.action == Intent.ACTION_MAIN && notificationThread == null))
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
@@ -60,7 +66,11 @@ class MainActivity : ComponentActivity() {
                         notificationThread = null
                         intent.removeExtra(LiveNotifications.THREAD_EXTRA)
                         intent.data = null
-                    }, offerVoiceSetup = offerVoiceSetup, consumeVoiceOffer = { offerVoiceSetup = false })
+                    }, offerVoiceSetup = offerVoiceSetup, consumeVoiceOffer = { offerVoiceSetup = false },
+                        externalLink = externalLink, consumeExternalLink = {
+                            externalLink = null
+                            intent.removeExtra(OpenLinkActivity.EXTRA_URL)
+                        })
                     if (Build.VERSION.SDK_INT >= 29) {
                         ChildLockControl(Modifier.align(Alignment.CenterEnd))
                         ChildLockRefusal()

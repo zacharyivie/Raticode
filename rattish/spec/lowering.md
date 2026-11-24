@@ -78,7 +78,8 @@ The Workflow block lowers into `workflow`:
 | `max-tokens` | `max_tokens` | Positive integer, or `null` for `none` and omission. |
 | `max-cost-usd` | `max_cost_usd` | Positive Number in US dollars, or `null` for `none` and omission. |
 | `timeout` | `timeout_ms` | Duration converted to integer milliseconds, or `null`. |
-| `inputs` | `inputs` | Canonical names, resolved schemas, required flags, and explicit defaults. |
+| `workspace` | `workspace` | `project` (the default when omitted) or `worktree`. Any other value is `RATTISH_INVALID_FIELD_VALUE`. |
+| `inputs` | `inputs` | Canonical names, resolved schemas, required flags, and explicit defaults. A file input also has `file: {accept, max_size}`: its canonical lowercase patterns and its limit in bytes (default 20 MiB). |
 | `outputs` | `outputs` | Canonical names, resolved references, and embedded schemas. |
 
 Each output reference stores its canonical root, symbol, channel, case-sensitive selector
@@ -94,6 +95,13 @@ must not count time while the background service or computer is stopped.
 
 An omitted workflow `max-runs`, `max-tokens`, `max-cost-usd` or `timeout` becomes JSON null.
 Rattish 1 imposes no hidden run, usage or time limit.
+
+`workspace` says where a run's nodes work. With `project`, they work in the project folder.
+With `worktree`, the host gives each run a git worktree of the project's repository at the
+project's current commit, runs the project's approved worktree setup there, and resolves
+`project_root`, every relative path and every absolute `working_dir` inside the repository
+against that worktree. It commits what the run changed when the run ends; the user then lands
+or discards the run's branch. A host may run test cases in the project folder regardless.
 
 ### Usage limits
 
@@ -248,8 +256,12 @@ The successful output schema has required `stdout`, `stderr`, and `exit_code` fi
 
 `python-script` and `shell-script` use the same binding delivery and environment
 precedence. Their explicit `args` retain author order. The runtime invokes the resolved
-project-relative `script_path` through `python` or `bash`, respectively. Their successful
-output adds the resolved `script_path` to the command output fields.
+project-relative `script_path` through `python` or the program `shell-script.shell`
+selects (`bash` for the default `auto`), respectively. Their successful output adds the
+resolved `script_path` to the command output fields.
+
+`bash-command.shell` and `shell-script.shell` lower to `configuration.shell` with the
+default `"auto"`.
 
 ## Runtime handlers and deployment preflight
 

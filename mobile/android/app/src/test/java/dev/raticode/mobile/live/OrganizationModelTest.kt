@@ -79,6 +79,15 @@ class OrganizationModelTest {
         assertEquals("In progress → In review", OrganizationModel.statusMove(status))
     }
 
+    @Test fun aRunningOrganizationSaysWhyItsNextWorkerWaitsForAComputer() {
+        val json = JSONObject(read("organizations-read-v2.json").toString())
+            .put("state", "running").put("placement_wait", "Waiting for a free worker: Workstation is full (2 of 2 running)")
+        val parsed = DesktopViews.parse("organizations.read:x", json) as Organization
+        assertEquals("Waiting for a free worker: Workstation is full (2 of 2 running)", parsed.placementWait)
+        // An older desktop sends no reason.
+        assertEquals("", (DesktopViews.parse("organizations.read:x", JSONObject().put("organization_id", "o")) as Organization).placementWait)
+    }
+
     @Test fun anOlderDesktopHasNoPlan() {
         val older = JSONObject(read("organizations-read-v2.json").toString()).apply { remove("v2") }
         val parsed = DesktopViews.parse("organizations.read:x", older) as Organization

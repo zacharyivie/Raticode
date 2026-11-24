@@ -57,11 +57,16 @@ internal val LocalChatLinks = staticCompositionLocalOf<ChatLinkHandler?> { null 
 
 /**
  * [mentions] are full paths the desktop found in the text (longest first); they link exactly as written.
- * [tickets] are board tickets the desktop found by key; each key shows as the pill in [inline].
+ * [tickets] are board tickets the desktop found by key; each key shows as the pill in [inline]. In a table cell
+ * ([inTable]) it shows only the key, as a link [keyWidths] wide, so the pill's title can't spill into the next column.
  */
 internal class LinkContext(val handler: ChatLinkHandler?, val source: LinkSource?, val style: TextLinkStyles, val mentions: List<String> = emptyList(),
                            val tickets: Map<String, dev.raticode.mobile.live.RemTicket> = emptyMap(),
-                           val inline: Map<String, androidx.compose.foundation.text.InlineTextContent> = emptyMap())
+                           val inline: Map<String, androidx.compose.foundation.text.InlineTextContent> = emptyMap(),
+                           val keyWidths: Map<String, Dp> = emptyMap(), val inTable: Boolean = false) {
+    /** The same links for text in a table cell. */
+    fun inTableCell() = LinkContext(handler, source, style, mentions, tickets, inline, keyWidths, inTable = true)
+}
 
 /**
  * CommonMark parsing avoids showing markup delimiters in thoughts and replies. No HTML execution.
@@ -96,9 +101,11 @@ internal fun ChatMarkdown(value: String, compact: Boolean = false, source: LinkS
     val known = LocalRemTickets.current
     val named = remember(value, known) { dev.raticode.mobile.live.TicketMentions.keys(value).filter { it in known } }
     val tickets = remember(named, known) { named.associateWith { known.getValue(it) } }
+    // Tables draw keys in their cells' text style, so the key-only link is measured in it.
+    val ticketInline = ticketInlineContent(named, tickets, tableTextStyle())
     val links = LinkContext(LocalChatLinks.current, source,
         TextLinkStyles(SpanStyle(color = color, textDecoration = TextDecoration.Underline), pressedStyle = SpanStyle(color = color, background = color.copy(alpha = .14f))),
-        mentions, tickets, ticketInlineContent(named, tickets))
+        mentions, tickets, ticketInline.content, ticketInline.keyWidths)
     val style = markdownStyle()
     Column(verticalArrangement = Arrangement.spacedBy(if (compact) style.compactSpacing else style.spacing)) { MarkdownBlocks(document, compact, links) }
 }
@@ -204,7 +211,46 @@ private fun CodeBlock(value: String, language: String) {
     }
 }
 
-/** A Markdown table that scrolls sideways; columns size to their longest cell within limits. */
+/** Text in Markdown table cells. */
+@Composable
+private fun tableTextStyle() = MaterialTheme.typography.bodyMedium
+
+/** Room a table cell's text has on each side. */
+private val TABLE_CELL_PADDING = 8.dp
+
+/**
+ * How wide each table column is: its longest cell at about 8 dp a character, within 64 to 260 dp, and never narrower than
+ * the widest ticket key link in it, which can't wrap. [rows] are each row's cells.
+ */
+internal fun tableColumnWidths(rows: List<List<TableCell>>, links: LinkContext): List<Dp> {
+    val columns = rows.maxOfOrNull { it.size } ?: 0
+    return (0 until columns).map { column ->
+        val cells = rows.mapNotNull { it.getOrNull(column) }
+        val longest = cells.maxOfOrNull(::plainLength) ?: 0
+        val keys = cells.maxOfOrNull { cell ->
+            dev.raticode.mobile.live.TicketMentions.inText(linkableText(cell), links.tickets)
+                .maxOfOrNull { (_, ticket) -> links.keyWidths[ticket.key]?.value ?: 0f } ?: 0f
+        } ?: 0f
+        maxOf((longest * 8 + 24).coerceIn(64, 260).dp, keys.dp + TABLE_CELL_PADDING * 2)
+    }
+}
+
+/** A cell's text where ticket keys become links: not code, and not inside a link. */
+private fun linkableText(node: Node): String = buildString {
+    fun visit(parent: Node) {
+        var child = parent.firstChild
+        while (child != null) {
+            when (child) { is org.commonmark.node.Text -> append(child.literal).append(' '); is Code, is Link -> {}; else -> visit(child) }
+            child = child.next
+        }
+    }
+    visit(node)
+}
+
+/**
+ * A Markdown table that scrolls sideways; columns size to their longest cell within limits, and text wraps inside them.
+ * A ticket key in a cell shows only the key, as a link, so a pill's title never draws over the next column.
+ */
 @Composable
 private fun MarkdownTable(table: TableBlock, links: LinkContext) {
     val rows = remember(table) {
@@ -224,21 +270,17 @@ private fun MarkdownTable(table: TableBlock, links: LinkContext) {
         found.toList()
     }
     val columns = rows.maxOfOrNull { it.second.size } ?: 0
-    val widths = remember(rows) {
-        (0 until columns).map { column ->
-            val longest = rows.maxOf { (_, cells) -> cells.getOrNull(column)?.let(::plainLength) ?: 0 }
-            (longest * 8 + 24).coerceIn(64, 260).dp
-        }
-    }
+    val cellLinks = links.inTableCell()
+    val widths = remember(rows, links.tickets, links.keyWidths) { tableColumnWidths(rows.map { it.second }, cellLinks) }
     val line = MaterialTheme.colorScheme.outlineVariant
     Column(Modifier.horizontalScroll(rememberScrollState()).border(1.dp, line, RoundedCornerShape(6.dp)).clip(RoundedCornerShape(6.dp))) {
         rows.forEachIndexed { index, (header, cells) ->
             Row(Modifier.background(if (header) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent)
                 .then(if (header) Modifier.semantics { heading() } else Modifier)) {
                 for (column in 0 until columns) {
-                    Text(cells.getOrNull(column)?.let { inlineMarkdown(it, links) } ?: AnnotatedString(""),
-                        Modifier.width(widths[column]).padding(horizontal = 8.dp, vertical = 6.dp),
-                        style = MaterialTheme.typography.bodyMedium, fontWeight = if (header) FontWeight.SemiBold else null, inlineContent = links.inline)
+                    Text(cells.getOrNull(column)?.let { inlineMarkdown(it, cellLinks) } ?: AnnotatedString(""),
+                        Modifier.width(widths[column]).padding(horizontal = TABLE_CELL_PADDING, vertical = 6.dp),
+                        style = tableTextStyle(), fontWeight = if (header) FontWeight.SemiBold else null, inlineContent = links.inline)
                 }
             }
             if (index < rows.lastIndex) HorizontalDivider(color = line)
@@ -284,13 +326,15 @@ internal fun inlineMarkdown(node: Node, links: LinkContext): AnnotatedString = b
         }
         append(value.substring(at))
     }
-    // A known ticket key becomes its pill; the alternate text is what Copy and TalkBack's text get.
+    // A known ticket key becomes its pill, or in a table cell just its key as a link; the alternate text is what Copy
+    // and TalkBack's text get.
     fun text(value: String) {
         var at = 0
         for ((range, ticket) in dev.raticode.mobile.live.TicketMentions.inText(value, links.tickets)) {
-            if (ticketInlineId(ticket.key) !in links.inline) continue
+            val id = if (links.inTable) ticketKeyInlineId(ticket.key) else ticketInlineId(ticket.key)
+            if (id !in links.inline) continue
             linkedText(value.substring(at, range.first))
-            appendInlineContent(ticketInlineId(ticket.key), ticket.key)
+            appendInlineContent(id, ticket.key)
             at = range.last + 1
         }
         linkedText(value.substring(at))

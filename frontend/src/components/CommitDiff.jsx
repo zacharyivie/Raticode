@@ -128,6 +128,8 @@ const CommitFileDiff = memo(function CommitFileDiff({ file, theme, editorSetting
           modifiedAriaLabel: `After: ${file.path}`,
           readOnly: true,
           domReadOnly: true,
+          // Keep the hidden textarea input, as in CodeWorkspace.
+          editContext: false,
           originalEditable: false,
           renderSideBySide: true,
           useInlineViewWhenSpaceIsLimited: false,

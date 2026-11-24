@@ -194,7 +194,7 @@ function profileExtensions(directory) {
 // prefs.js and user.js hold one user_pref("name", value); per line.
 function readPrefs(file) {
   const prefs = new Map();
-  let text = "";
+  let text;
   try { text = fs.readFileSync(file, "utf8"); } catch { return prefs; }
   const pattern = /^\s*user_pref\(\s*("(?:[^"\\]|\\.)*")\s*,\s*("(?:[^"\\]|\\.)*"|-?\d+|true|false)\s*\);/gm;
   for (const match of text.matchAll(pattern)) {

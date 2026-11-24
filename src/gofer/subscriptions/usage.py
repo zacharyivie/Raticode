@@ -15,10 +15,9 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from functools import wraps
 from typing import Any, ParamSpec
-from uuid import uuid4
 
 from gofer.core.agent import AgentResult
-from gofer.core.usage_context import provider_invocation
+from gofer.core.usage_context import provider_invocation, take_invocation_id
 
 _P = ParamSpec("_P")
 logger = logging.getLogger(__name__)
@@ -129,6 +128,14 @@ def normalize_usage(provider: str, metadata: dict[str, Any]) -> dict[str, Any]:
             "cacheCreationTokens",
             "cacheCreationInputTokens",
             "cacheWriteTokens",
+            # Codex: written input, part of input_tokens like cached_input_tokens.
+            "cache_write_input_tokens",
+            "cacheWriteInputTokens",
+        ),
+        # Anthropic's one-hour cache writes, part of cache_write_tokens and priced higher.
+        "cache_write_1h_tokens": (
+            "cache_write_1h_tokens",
+            "cacheCreationEphemeral1hInputTokens",
         ),
         "reasoning_tokens": (
             "reasoning_tokens",
@@ -146,16 +153,30 @@ def normalize_usage(provider: str, metadata: dict[str, Any]) -> dict[str, Any]:
                 result[target] = value
                 break
     for detail_key, field, target in (
+        # OpenAI: input_tokens includes both cached reads and cache writes.
         ("input_tokens_details", "cached_tokens", "cache_read_tokens"),
+        ("input_tokens_details", "cache_write_tokens", "cache_write_tokens"),
         ("prompt_tokens_details", "cached_tokens", "cache_read_tokens"),
+        ("prompt_tokens_details", "cache_write_tokens", "cache_write_tokens"),
         ("output_tokens_details", "reasoning_tokens", "reasoning_tokens"),
         ("completion_tokens_details", "reasoning_tokens", "reasoning_tokens"),
         ("cache", "read", "cache_read_tokens"),
         ("cache", "write", "cache_write_tokens"),
+        ("cache_creation", "ephemeral_1h_input_tokens", "cache_write_1h_tokens"),
     ):
         detail = metadata.get(detail_key)
         if isinstance(detail, dict) and (value := _tokens(detail.get(field))) is not None:
             result[target] = value
+    # OpenAI splits writes by lifetime; its 12-hour writes are the long, dearer kind that
+    # cache_write_1h_tokens holds for Anthropic's one-hour writes.
+    for detail_key in ("input_tokens_details", "prompt_tokens_details"):
+        detail = metadata.get(detail_key)
+        lifetimes = detail.get("cache_write_tokens_details") if isinstance(detail, dict) else None
+        if (
+            isinstance(lifetimes, dict)
+            and (value := _tokens(lifetimes.get("ttl_12h_tokens"))) is not None
+        ):
+            result["cache_write_1h_tokens"] = value
     # Anthropic, OpenCode and Cursor report disjoint input buckets. Their normalized output
     # can pass through this function again without adding cache a second time.
     disjoint = provider in {"claude_code", "anthropic_api"} and any(
@@ -205,6 +226,7 @@ def normalize_usage(provider: str, metadata: dict[str, Any]) -> dict[str, Any]:
                 result.pop(key, None)
     for key in (
         "cache",
+        "cache_creation",
         "input_tokens_details",
         "prompt_tokens_details",
         "output_tokens_details",
@@ -349,7 +371,8 @@ def track_invocation(
             or getattr(subscription, "provider", None)
             or getattr(subscription, "subscription_name", None)
         )
-        invocation_id = uuid4().hex
+        # One of Rem's own calls names its ID, so its size record joins this one.
+        invocation_id = take_invocation_id()
         result: AgentResult | None = None
         status = "failed"
         with provider_invocation(invocation_id) as invocation:

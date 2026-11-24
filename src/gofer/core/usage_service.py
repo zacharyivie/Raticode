@@ -14,8 +14,11 @@ from typing import Any
 from gofer.core.provider_capabilities import CLI_PROVIDERS
 from gofer.core.provider_profiles import load_provider_profiles
 from gofer.core.provider_usage import provider_usage_placeholder
+from gofer.core.turn_context import safe_standing_parts
+from gofer.core.usage_allowance_history import record_allowance_readings, with_weekly_burndown
 from gofer.core.usage_credentials import usage_credential_revision
-from gofer.core.usage_ledger import activity_payload, now_iso, profile_usage_identity, usage_db
+from gofer.core.usage_history import resolve_range, usage_history
+from gofer.core.usage_ledger import now_iso, profile_usage_identity, usage_db
 from gofer.utils.paths import get_data_dir
 
 REFRESH_INTERVAL_SECONDS = 60
@@ -117,9 +120,53 @@ def _with_activity(
     }
 
 
-def usage_overview(data_dir: Path | None = None, *, days: int = 30) -> dict[str, Any]:
-    if days not in {1, 7, 30, 90}:
-        raise ValueError("Usage period must be 1, 7, 30, or 90 days")
+def usage_overview(
+    data_dir: Path | None = None,
+    *,
+    days: int | None = None,
+    period: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    tz: str | None = None,
+) -> dict[str, Any]:
+    """Allowances per provider account and Raticode's own token use for one period.
+
+    ``period`` is 24h, 7d, 30d, 3mo, 6mo, 1y, 5y, all or custom (with ``start`` and
+    ``end`` dates); ``days`` is the older form. Raises UsageRangeError, a ValueError.
+    """
+    window = resolve_range(period=period, days=days, start=start, end=end, tz=tz)
+    return {
+        "scope": "device",
+        "days": window.days,
+        "observed_at": now_iso(),
+        # Each account's weekly window as a chart of its own readings, with its pace.
+        "accounts": with_weekly_burndown(allowance_accounts(data_dir), data_dir),
+        **usage_history(data_dir, window),
+        "api_cost": _api_cost(data_dir, window),
+        # How often Rem's tickets passed review on their own in this period.
+        "verified_work": _verified_work(data_dir, window),
+        # The parts of Rem's prompts that repeat every turn and sent the most text.
+        "standing_parts": safe_standing_parts(data_dir),
+    }
+
+
+def _verified_work(data_dir: Path | None, window: Any) -> dict[str, Any] | None:
+    """Usage › Verified work; None when Rem's records can't be read, so the rest still shows."""
+    from gofer.ui.rem_verified_work import verified_work
+
+    try:
+        return verified_work(data_dir, window)
+    except Exception as exc:
+        logger.warning("Could not work out verified work (%s)", type(exc).__name__)
+        return None
+
+
+def allowance_accounts(data_dir: Path | None = None) -> list[dict[str, Any]]:
+    """Each provider account's current allowance row, as Settings > Usage shows it.
+
+    Combines the last polled reading with newer windows that turns reported. A row
+    whose reading is old or past a reset time is ``stale``.
+    """
     with usage_db(data_dir) as db:
         snapshots = {
             row["id"]: json.loads(row["payload"])
@@ -182,19 +229,23 @@ def usage_overview(data_dir: Path | None = None, *, days: int = 30) -> dict[str,
         ):
             row = {**row, "status": "stale", "reason": "Refresh to update this reading."}
         accounts.append({**row, **identity})
-    return {
-        "scope": "device",
-        "days": days,
-        "observed_at": now_iso(),
-        "accounts": accounts,
-        **activity_payload(data_dir, days=days),
-    }
+    return accounts
+
+
+def _api_cost(data_dir: Path | None, window: Any) -> dict[str, Any]:
+    """The period's estimated cost at API list prices."""
+    from gofer.core.usage_cost import estimate_api_cost, period_cost_groups
+
+    root = data_dir or get_data_dir()
+    key = (str(root), window.key, window.zone_name, window.start_date, window.end_date)
+    return estimate_api_cost(period_cost_groups(root, key, window.start, window.end))
 
 
 async def refresh_usage(
     data_dir: Path | None = None,
     *,
-    days: int = 30,
+    days: int | None = None,
+    query: dict[str, Any] | None = None,
     providers: set[str] | None = None,
     min_age: float = REFRESH_INTERVAL_SECONDS,
     explicit: bool = False,
@@ -203,7 +254,8 @@ async def refresh_usage(
 
     # HTTP handlers have separate event loops; a threading guard coalesces them.
     key = _key(data_dir)
-    overview = usage_overview(data_dir, days=days)
+    period = {"days": days, **(query or {})}
+    overview = usage_overview(data_dir, **period)
     with _refresh_lock:
         if key in _refreshing:
             return {**overview, "refreshing": True}
@@ -291,6 +343,15 @@ async def refresh_usage(
                     "INSERT OR REPLACE INTO usage_snapshots VALUES (?, ?, ?)",
                     (identity["id"], json.dumps(row), now_iso()),
                 )
+                if row.get("status") == "available":
+                    # The history keeps this reading when it differs from the last one.
+                    record_allowance_readings(
+                        db,
+                        identity["provider"],
+                        identity["id"] if identity["profile"] else "",
+                        row.get("windows") or [],
+                        row.get("observed_at"),
+                    )
 
         identities = _accounts(data_dir)
         await asyncio.gather(*(refresh(identity) for identity in identities))
@@ -303,7 +364,15 @@ async def refresh_usage(
             if revisions.get(row["id"]) != row["credential_revision"]
         ]
         await asyncio.gather(*(refresh(identity) for identity in changed))
-        return usage_overview(data_dir, days=days)
+        try:
+            from gofer.core.usage_alerts import check_limit_alerts
+
+            # New readings, polled or from recent turns, may have crossed an alert level.
+            await check_limit_alerts(data_dir)
+        except Exception as exc:
+            # An alert must never fail the refresh; the reading is already saved.
+            logger.warning("Usage limit alerts failed (%s)", type(exc).__name__)
+        return usage_overview(data_dir, **period)
     finally:
         with _refresh_lock:
             _refreshing.discard(key)
@@ -385,20 +454,101 @@ def window_used_percent(window: dict[str, Any]) -> float | None:
     return None
 
 
-def stored_windows(provider: str, data_dir: Path | None = None) -> list[dict[str, Any]]:
+def latest_window_reading(
+    provider: str,
+    window_id: str,
+    data_dir: Path | None = None,
+    *,
+    profile: str = "",
+    kind: str | None = None,
+) -> dict[str, Any] | None:
+    """The newest stored reading of one window of the provider's own account, or None.
+
+    ``profile`` is a profile's usage identity (``profile_usage_identity``) to read
+    that account instead of the provider's default sign-in.
+
+    Looks at the last polled reading (Settings > Usage) and the windows recent turns
+    reported, and returns the one observed last as ``percent``, ``resets_at`` and
+    ``observed_at``, with the window's ``id``, ``label`` and ``starts_at`` ("" when the
+    provider didn't say when its period began). Readings without a percent or whose reset
+    time has passed are skipped.
+
+    ``kind`` (``5-hour`` or ``weekly``, usage_alerts.window_kind) matches windows by
+    their length instead of ``window_id``, for providers whose window IDs say nothing
+    about it (Codex's primary and secondary). The fullest one observed last wins.
+    """
+    from gofer.core.usage_alerts import window_kind
+
+    readings: list[tuple[str, dict[str, Any]]] = []
+    with usage_db(data_dir) as db:
+        row = db.execute(
+            "SELECT payload FROM usage_snapshots WHERE id=?", (profile or provider,)
+        ).fetchone()
+        if row is not None:
+            payload = json.loads(row["payload"])
+            readings.extend(
+                (str(payload.get("observed_at") or ""), window)
+                for window in payload.get("windows") or []
+            )
+        for limit in db.execute(
+            "SELECT observed_at, windows FROM usage_rate_limits WHERE provider=? AND profile=?",
+            (provider, profile),
+        ):
+            readings.extend((str(limit["observed_at"]), w) for w in json.loads(limit["windows"]))
+    best: dict[str, Any] | None = None
+    for observed, window in readings:
+        if not isinstance(window, dict):
+            continue
+        if (window_kind(window) != kind) if kind else (window.get("id") != window_id):
+            continue
+        if _age(observed) == float("inf") or _age(observed) < -60:
+            continue
+        if window.get("resets_at") and _age(window.get("resets_at")) >= 0:
+            continue
+        percent = window_used_percent(window)
+        if percent is None:
+            continue
+        stamp = datetime.fromisoformat(observed).astimezone(UTC)
+        if (
+            best is None
+            or stamp > best["observed"]
+            or (stamp == best["observed"] and percent > best["percent"])
+        ):
+            best = {"observed": stamp, "percent": percent, "window": window}
+    if best is None:
+        return None
+    found = best["window"]
+    return {
+        "percent": float(best["percent"]),
+        "resets_at": str(found.get("resets_at") or ""),
+        "observed_at": best["observed"].isoformat(),
+        "id": str(found.get("id") or ""),
+        "label": str(found.get("label") or ""),
+        "starts_at": str(found.get("starts_at") or ""),
+    }
+
+
+def stored_windows(
+    provider: str, data_dir: Path | None = None, *, profile: str = ""
+) -> list[dict[str, Any]]:
     """The provider's rate-limit windows Raticode last stored, with how full each is.
 
     Reads only what is saved: the last polled reading and the windows recent turns reported.
     A window whose reset time has passed is left out. Each item has ``label`` and ``percent``.
+    ``profile`` is an account's usage identity (``profile_usage_identity``) to read that
+    account instead of the provider's default sign-in.
     """
     windows: list[dict[str, Any]] = []
     with usage_db(data_dir) as db:
-        snapshot = db.execute("SELECT payload FROM usage_snapshots WHERE id=?", (provider,))
+        snapshot = db.execute(
+            "SELECT payload FROM usage_snapshots WHERE id=?", (profile or provider,)
+        )
         row = snapshot.fetchone()
         if row is not None:
             windows.extend(json.loads(row["payload"]).get("windows") or [])
         for limit in db.execute(
-            "SELECT windows FROM usage_rate_limits WHERE provider=? AND profile=''", (provider,)
+            "SELECT windows FROM usage_rate_limits WHERE provider=? AND profile=?",
+            (provider, profile),
         ):
             windows.extend(json.loads(limit["windows"]))
     found: dict[str, dict[str, Any]] = {}

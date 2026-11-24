@@ -62,6 +62,26 @@ class BackgroundParityTest {
         approval.put("action_digest", "not-a-digest")
         assertThrows(IllegalArgumentException::class.java) { IncomingValidation.validate(event("approval.snapshot", approvals)) }
 
+        // A workflow gate with option buttons and a typed reply.
+        val choices = JSONObject().put("approval_id", UUID.randomUUID().toString()).put("action_digest", "b".repeat(64))
+            .put("source", "workflow").put("title", "Release").put("summary", "Which channel?").put("requested_at", "now").put("instruction_required", false)
+            .put("options", JSONArray().put("Stable").put("Beta")).put("reply", "required")
+        val choiceSnapshot = JSONObject().put("remote_allowed", true).put("approvals", JSONArray().put(choices))
+        IncomingValidation.validate(event("approval.snapshot", choiceSnapshot))
+        for (bad in listOf<(JSONObject) -> Unit>(
+            { it.put("options", JSONArray().put("Only")) },
+            { it.put("options", JSONArray().apply { repeat(9) { n -> put("Option $n") } }) },
+            { it.put("options", JSONArray().put("Same").put("Same")) },
+            { it.put("options", JSONArray().put("Stable").put("")) },
+            { it.put("reply", "maybe") },
+            { it.put("command", "sh") },
+        )) {
+            val copy = JSONObject(choices.toString()).also(bad)
+            assertThrows(IllegalArgumentException::class.java) {
+                IncomingValidation.validate(event("approval.snapshot", JSONObject().put("remote_allowed", true).put("approvals", JSONArray().put(copy))))
+            }
+        }
+
         val swarm = JSONObject().put("swarm_id", UUID.randomUUID().toString()).put("title", "Previews").put("status", "paused")
             .put("detail", "Add previews").put("progress", 40)
             .put("messages", JSONArray().put(JSONObject().put("sender", "Lead").put("body", "Started").put("created_at", "now")))

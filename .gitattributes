@@ -1,0 +1,4 @@
+# Bash reads a carriage return as part of the command, so shell scripts and the
+# starter workflows (whose steps are bash) keep LF line endings on Windows checkouts.
+*.sh text eol=lf
+rattish/starters/** text eol=lf

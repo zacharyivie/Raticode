@@ -10,6 +10,20 @@ if sys.argv[1:2] == ["slot"]:
 
     raise SystemExit(_slot_main(sys.argv[2:]))
 
+if sys.argv[1:2] == ["git-hook"]:
+    # Git runs this before every commit while Settings > Rem > Remove Co-authored-by
+    # lines is on (gofer.core.commit_attribution); it must not load the full CLI.
+    from gofer.utils.commit_trailers import hook_main as _git_hook_main
+
+    raise SystemExit(_git_hook_main(sys.argv[2:]))
+
+if sys.argv[1:2] == ["_pdf-text"]:
+    # Second Brain reads each PDF in a child process it can stop (gofer.ui.brain_pdf).
+    # The packaged app starts itself with this argument; the child loads only pypdf.
+    from gofer.ui.brain_pdf import child_main as _pdf_text_main
+
+    raise SystemExit(_pdf_text_main(sys.argv[2:]))
+
 if sys.argv[1:3] == ["ui", "second-brain"]:
     # Rem starts this MCP server for every provider turn. Serve it without building
     # the full command tree; help and unusual arguments fall through to Typer below.
@@ -38,6 +52,7 @@ from gofer.cli.commands import (
     runner,
     schedule,
     schema,
+    social,
     swarm,
     system,
     tickets,
@@ -77,9 +92,11 @@ workflows.register(rattish.app, rattish_triggers.app)
 app.add_typer(org.app, name="org")
 app.add_typer(swarm.app, name="swarm")
 app.add_typer(brain.app, name="brain")
+app.add_typer(social.app, name="social")
 app.add_typer(system.usage_app, name="usage")
 app.add_typer(system.projects_app, name="projects")
 app.add_typer(system.devices_app, name="devices")
+app.add_typer(system.computers_app, name="computers")
 app.add_typer(system.threads_app, name="threads")
 system.register_provider_commands(provider.app)
 provider.app.add_typer(jev.app, name="jev")
@@ -135,6 +152,9 @@ def second_brain(
     project_root: str = typer.Option("", "--project-root"),
     provider: str = typer.Option("", "--provider"),
     model: str = typer.Option("", "--model"),
+    memory_folder: bool = typer.Option(False, "--memory-folder"),
+    report_theme_file: Path | None = typer.Option(None, "--report-theme-file"),
+    task_report_tool: bool = typer.Option(False, "--task-report-tool"),
 ) -> None:
     """Serve the native Rem knowledge tools over MCP stdio."""
     from gofer.cli.commands.second_brain import run_second_brain
@@ -151,6 +171,9 @@ def second_brain(
             "provider": provider,
             "model": model,
         },
+        memory_folder,
+        report_theme_file,
+        task_report_tool,
     )
 
 
@@ -165,7 +188,7 @@ _DATA_DIR_OPTION = typer.Option(
     "--data-dir",
     help=(
         "Raticode app data directory for global settings, schedules, registries, and app "
-        "state. Defaults to GOFER_DATA_DIR or the standard data folder."
+        "state. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard data folder."
     ),
 )
 _HEADLESS_OPTION = typer.Option(
@@ -215,6 +238,16 @@ def _serve(
     ):
         typer.echo("--token-file, --rem-settings and --secrets-dir need --headless.", err=True)
         raise typer.Exit(2)
+    # Some backend modules find the data folder through GOFER_DATA_DIR rather than the
+    # folder passed to serve(), so --data-dir must set it or their files land in the
+    # standard folder. RATICODE_DATA_DIR is honored too, as the CLI's clients do.
+    import os
+
+    from gofer.cli.client import resolve_data_dir
+    from gofer.utils.paths import DATA_DIR_ENV
+
+    data_dir = resolve_data_dir(data_dir).absolute()
+    os.environ[DATA_DIR_ENV] = str(data_dir)
     try:
         serve(
             host=host,
@@ -272,11 +305,17 @@ def browser(
 def reports(
     root: Path = typer.Option(..., "--root"),
     report_format: str = typer.Option("html", "--report-format"),
+    report_theme_file: Path | None = typer.Option(None, "--report-theme-file"),
 ) -> None:
     """Serve native report output tools over MCP stdio."""
     from gofer.ui.report_outputs import serve_reports
+    from gofer.ui.report_themes import read_theme_file
 
-    serve_reports(root, report_format)
+    serve_reports(
+        root,
+        report_format,
+        read_theme_file(report_theme_file) if report_theme_file is not None else None,
+    )
 
 
 @app.command("licenses")

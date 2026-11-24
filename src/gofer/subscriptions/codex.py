@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from gofer.core.codex_sandbox import credential_guard, step_denied_paths
 from gofer.core.provider_capabilities import resolve_provider_executable
 from gofer.core.provider_permissions import provider_permission_args
 from gofer.core.provider_profiles import ResolvedProviderSettings
@@ -47,7 +48,9 @@ class CodexSubscription(Subscription):
         for path in extra_paths or []:
             cmd += ["--add-dir", str(path)]
         cmd.append(prompt)
-        return cmd
+        # Workflow steps' commands can't read or write Raticode's credential folders,
+        # nor the secrets and sign-in folders unattended Claude Code steps can't see.
+        return credential_guard(cmd, extra_denied=step_denied_paths())
 
     def is_available(self) -> bool:
         return resolve_provider_executable("codex") is not None

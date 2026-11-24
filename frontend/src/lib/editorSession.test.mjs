@@ -122,3 +122,14 @@ test('workflow recovery drafts remain available after extension migration', () =
   saveWorkflowDraft('/project/workflow.rattish', { dirty: false }, storage);
   assert.equal(loadWorkflowDraft('/project/workflow.rad', storage), null);
 });
+test('files another app opened stay offline documents after a restart, and only while their tab is open', () => {
+  const storage = memory();
+  saveEditorSession({ paths: ['/home/u/Downloads/page.html', '/project/report.html'], activePath: '/home/u/Downloads/page.html', externalPaths: ['/home/u/Downloads/page.html', '/home/u/Downloads/closed.html'] }, storage);
+  assert.deepEqual(JSON.parse(storage.getItem(EDITOR_SESSION_KEY)).externalPaths, ['/home/u/Downloads/page.html']);
+  assert.deepEqual(loadEditorSession(storage).externalPaths, ['/home/u/Downloads/page.html']);
+  // A tampered or older entry can't mark a tab that isn't open, and a missing list restores none.
+  storage.setItem(EDITOR_SESSION_KEY, JSON.stringify({ version: 2, paths: ['/project/report.html'], externalPaths: ['/elsewhere.html', 42] }));
+  assert.deepEqual(loadEditorSession(storage).externalPaths, []);
+  storage.setItem(EDITOR_SESSION_KEY, JSON.stringify({ version: 2, paths: ['/project/report.html'] }));
+  assert.deepEqual(loadEditorSession(storage).externalPaths, []);
+});

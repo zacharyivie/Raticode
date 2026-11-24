@@ -103,6 +103,50 @@ def test_mcp_servers_validate_names_and_update_in_place(tmp_path: Path) -> None:
     assert rem_library.remove_mcp_server(tmp_path, "docs") is False
 
 
+def test_local_servers_name_environment_variables_for_workflow_steps(tmp_path: Path) -> None:
+    rem_library.save_mcp_server(
+        tmp_path,
+        {
+            "name": "github",
+            "type": "stdio",
+            "command": "npx",
+            "env": [" GITHUB_TOKEN ", "GH_HOST", "GITHUB_TOKEN", ""],
+        },
+    )
+    (server,) = rem_library.snapshot(tmp_path)["mcpServers"]
+    assert server["env"] == ["GITHUB_TOKEN", "GH_HOST"]
+    stored = json.loads(rem_library.library_path(tmp_path).read_text(encoding="utf-8"))
+    assert stored["mcpServers"][0]["env"] == ["GITHUB_TOKEN", "GH_HOST"]
+
+    for names, message in (
+        (["1TOKEN"], "isn't an environment variable name"),
+        (["A=B"], "isn't an environment variable name"),
+        (["GOFER_API_TOKEN"], "Raticode's own variable"),
+        ([f"V{i}" for i in range(51)], "at most 50"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            rem_library.save_mcp_server(
+                tmp_path, {"name": "x", "type": "stdio", "command": "x", "env": names}
+            )
+    with pytest.raises(ValueError, match="Only a local program"):
+        rem_library.save_mcp_server(
+            tmp_path, {"name": "docs", "url": "https://example.com/mcp", "env": ["TOKEN"]}
+        )
+
+    # A server without names keeps the file readable by versions without the field.
+    rem_library.save_mcp_server(tmp_path, {"name": "docs", "url": "https://example.com/mcp"})
+    stored = json.loads(rem_library.library_path(tmp_path).read_text(encoding="utf-8"))
+    assert "env" not in stored["mcpServers"][1]
+
+    # Rem threads keep starting servers through their provider, without the names.
+    workflow = {"remResources": {"mcpServers": [{"name": "github", "library": True}]}}
+    resolved = rem_library.with_library_resources(workflow, tmp_path)
+    assert resolved is not None
+    (linked,) = resolved["remResources"]["mcpServers"]
+    assert "env" not in linked
+    AgentResources.model_validate(resolved["remResources"])
+
+
 def test_library_links_resolve_to_current_definitions_for_every_turn(tmp_path: Path) -> None:
     rem_library.save_mcp_server(tmp_path, {"name": "docs", "url": "https://new.example/mcp"})
     workflow: dict[str, Any] = {
@@ -184,6 +228,76 @@ def test_cli_registers_servers_and_skills_for_agents(tmp_path: Path) -> None:
     assert runner.invoke(app, ["rem", "mcp", "remove", "github", *data]).exit_code == 0
 
 
+def test_agent_turns_add_new_servers_but_cant_replace_or_remove_trusted_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = CliRunner()
+    data = ["--data-dir", str(tmp_path)]
+    added = runner.invoke(app, ["rem", "mcp", "add", "github", *data, "--", "github-mcp", "stdio"])
+    assert added.exit_code == 0, added.output
+    skill = tmp_path / "triage-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: triage\ndescription: d\n---\n", encoding="utf-8")
+    assert runner.invoke(app, ["rem", "skill", "add", str(skill), *data]).exit_code == 0
+    monkeypatch.setenv("RATICODE_AGENT_SESSION", "1")
+
+    # A new server stays off until the user turns it on in Thread tools.
+    new = runner.invoke(app, ["rem", "mcp", "add", "notes", *data, "--", "notes-mcp"])
+    assert new.exit_code == 0, new.output
+    swapped = runner.invoke(
+        app, ["rem", "mcp", "add", "github", "--replace", *data, "--", "/bin/sh", "-c", "x"]
+    )
+    removed = runner.invoke(app, ["rem", "mcp", "remove", "github", *data])
+    unregistered = runner.invoke(app, ["rem", "skill", "remove", str(skill), *data])
+
+    for result in (swapped, removed, unregistered):
+        assert result.exit_code == 5, result.output
+        assert "agent turn" in result.output
+    library = rem_library.load_library(tmp_path)
+    servers = {server.name: server for server in library.mcpServers}
+    assert servers["github"].command == "github-mcp"
+    assert [item.path for item in library.skills] == [str(skill.resolve())]
+
+
+def test_cli_names_environment_variables_for_a_local_server(tmp_path: Path) -> None:
+    runner = CliRunner()
+    data = ["--data-dir", str(tmp_path)]
+    result = runner.invoke(
+        app,
+        [
+            "rem", "mcp", "add", "github", "--env", "GITHUB_TOKEN", "--env", "GH_HOST", *data,
+            "--", "npx", "-y", "@scope/server-github",
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    listing = json.loads(
+        runner.invoke(app, ["rem", "mcp", "list", "--format", "json", *data]).output
+    )
+    assert listing[0]["env"] == ["GITHUB_TOKEN", "GH_HOST"]
+    assert listing[0]["args"] == ["-y", "@scope/server-github"]
+    table = runner.invoke(app, ["rem", "mcp", "list", *data], env={"COLUMNS": "200"}).output
+    assert "env: GITHUB_TOKEN, GH_HOST" in table
+
+    refused = runner.invoke(
+        app, ["rem", "mcp", "add", "docs", "--url", "https://x.dev/mcp", "--env", "T", *data]
+    )
+    assert refused.exit_code == 1
+    assert "--env is for a local program" in refused.output
+    refused = runner.invoke(
+        app, ["rem", "mcp", "add", "bad", "--env", "NOT-A-NAME", *data, "--", "srv"]
+    )
+    assert refused.exit_code == 1
+    assert "isn't an environment variable name" in " ".join(refused.output.split())
+
+    # --replace replaces the whole definition, names included.
+    result = runner.invoke(app, ["rem", "mcp", "add", "github", "--replace", *data, "--", "npx"])
+    assert result.exit_code == 0, result.output
+    listing = json.loads(
+        runner.invoke(app, ["rem", "mcp", "list", "--format", "json", *data]).output
+    )
+    assert listing[0]["env"] == []
+
+
 @pytest.fixture
 def api(tmp_path: Path) -> Iterator[GoferUiServer]:
     server = GoferUiServer(("127.0.0.1", 0), tmp_path / "app", api_token="rem-library-test")
@@ -232,5 +346,14 @@ def test_ui_endpoint_reads_and_edits_the_library(api: GoferUiServer, tmp_path: P
     status, payload = call(api, {"action": "save_mcp", "server": {**server, "name": "swarm"}})
     assert status == 400
     assert payload["error"] == "swarm is reserved for a built-in Raticode connection"
+    local = {"name": "gh", "type": "stdio", "command": "npx", "env": ["GITHUB_TOKEN"]}
+    status, payload = call(api, {"action": "save_mcp", "server": local})
+    assert status == 200
+    assert payload["mcpServers"][1]["env"] == ["GITHUB_TOKEN"]
+    status, payload = call(api, {"action": "save_mcp", "server": {**local, "env": ["9X"]}})
+    assert status == 400
+    assert payload["error"].startswith("'9X' isn't an environment variable name")
+    status, payload = call(api, {"action": "remove_mcp", "name": "gh"})
+    assert status == 200
     status, payload = call(api, {"action": "remove_mcp", "name": "docs"})
     assert (status, payload["mcpServers"]) == (200, [])

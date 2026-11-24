@@ -25,6 +25,16 @@ from gofer.rattish.lexer import (
 AST_SCHEMA_ID = "urn:raticode:rattish:schema:ast-1.json"
 
 _IDENTIFIER = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*\Z")
+
+
+def _identifier_suggestion(text: str) -> tuple[str, ...]:
+    """Suggest the hyphenated spelling of a name written with underscores or spaces."""
+    candidate = re.sub(r"[\s_]+", "-", text.strip()).strip("-")
+    if candidate != text and _IDENTIFIER.fullmatch(candidate):
+        return (f"Did you mean {candidate!r}? Rattish names use hyphens, not underscores.",)
+    return ()
+
+
 _IDENTIFIER_SEGMENT = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*|[0-9]+")
 _JSON_MEMBER_SEGMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:-[A-Za-z0-9_]+)*|[0-9]+")
 _INTEGER = re.compile(r"-?(?:0|[1-9][0-9]*)\Z")
@@ -214,6 +224,7 @@ class RattishParser:
                 view.line,
                 view.content_index,
                 len(view.line.text),
+                suggestions=("Start the file with the line 'Rattish: 1'.",),
             )
         assert match is not None
         version = int(match.group(2))
@@ -303,12 +314,14 @@ class RattishParser:
             view.content,
         )
         if match is None:
+            named = re.fullmatch(r"(?i)Node[ \t]+(.+?)\s*:\s*(?:#.*)?", view.content)
             self._raise(
                 "RATTISH_UNEXPECTED_DECLARATION",
                 "Expected a Node declaration.",
                 view.line,
                 view.content_index,
                 len(view.line.text),
+                suggestions=_identifier_suggestion(named.group(1)) if named else (),
             )
         assert match is not None
         name_start = view.content_index + match.start(2)
@@ -381,6 +394,7 @@ class RattishParser:
                 view.content_index,
                 view.content_index + colon,
                 phase="lexer",
+                suggestions=_identifier_suggestion(key_text),
             )
         key_start = view.content_index + view.content.index(key_text)
         key_end = key_start + len(key_text)
@@ -973,6 +987,7 @@ class RattishParser:
                     start_index,
                     start_index + len(text),
                     phase="lexer",
+                    suggestions=_identifier_suggestion(text),
                 )
             return {
                 "kind": "identifier_value",
@@ -1278,6 +1293,7 @@ class RattishParser:
         end_index: int,
         *,
         phase: Literal["lexer", "parser"] = "parser",
+        suggestions: tuple[str, ...] = (),
     ) -> Never:
         diagnostic = RattishDiagnostic(
             code=code,
@@ -1286,6 +1302,7 @@ class RattishParser:
             message=message,
             file=self.source_id,
             span=SourceSpan(line.position(start_index), line.position(end_index)),
+            suggestions=suggestions,
         )
         raise RattishParseError([diagnostic])
 

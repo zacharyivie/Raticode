@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { coverCutouts, deviceBounds, sameBounds } from "../lib/geckoView.js";
 import { useBrowserHost } from "../lib/browserHost.js";
+import { PromptBar, RemChip } from "./BrowserPanels.jsx";
 
 const POSITION_CHECK_MS = 200;
 const BUTTON = "h-8 rounded-md border border-line bg-white px-3 text-xs font-semibold text-ink transition hover:bg-slate-50";
@@ -14,6 +15,10 @@ function openOverlays(rect, doc = document, view = window) {
     const box = element.getBoundingClientRect();
     return box.width > 0 && box.height > 0 && box.right > rect.left && box.left < rect.right && box.bottom > rect.top && box.top < rect.bottom;
   });
+}
+
+function hostOf(url) {
+  try { return new URL(url).host; } catch { return ""; }
 }
 
 function cleanError(cause) {
@@ -66,6 +71,8 @@ export default function GeckoBrowser({ active, tabId = "", initialUrl = "", pend
   const [error, setError] = useState("");
   const [starting, setStarting] = useState(false);
   const [restartNote, setRestartNote] = useState("");
+  // The user's Gecko tabs shared with Rem, each with its pending approvals.
+  const [sharedTabs, setSharedTabs] = useState([]);
 
   async function open(url) {
     setStarting(true);
@@ -90,6 +97,21 @@ export default function GeckoBrowser({ active, tabId = "", initialUrl = "", pend
       .catch((cause) => { if (!cancelled) setError(cleanError(cause)); });
     return () => { cancelled = true; unsubscribe?.(); };
   }, [bridge]);
+
+  useEffect(() => {
+    if (!bridge?.gecko) return undefined;
+    let cancelled = false;
+    const take = (tabs) => { if (!cancelled && Array.isArray(tabs)) setSharedTabs(tabs); };
+    const unsubscribe = bridge.onGeckoShared?.(take);
+    void bridge.gecko("shared-tabs").then(take).catch(() => {});
+    return () => { cancelled = true; unsubscribe?.(); };
+  }, [bridge]);
+
+  function sharedAction(id, command, options = {}) {
+    void bridge.gecko("shared-action", { ...options, id, command })
+      .then((tabs) => { if (Array.isArray(tabs)) setSharedTabs(tabs); })
+      .catch((cause) => setError(cleanError(cause)));
+  }
 
   // Firefox starts when the Gecko tab is first looked at, not when Raticode restores it.
   const ready = Boolean(status?.available && status?.supported);
@@ -225,6 +247,26 @@ export default function GeckoBrowser({ active, tabId = "", initialUrl = "", pend
 
   return (
     <section aria-label="Raticode (gecko) browser" data-testid="gecko-browser" className="flex min-h-0 flex-1 flex-col bg-white">
+      {sharedTabs.map((tab) => {
+        const label = tab.agent?.label || "Rem";
+        const request = (tab.prompts || []).find((item) => item?.kind === "rem-confirm");
+        return (
+          <div key={tab.id} data-testid="gecko-shared-tab">
+            {request ? <PromptBar prompt={request} onRespond={(response) => sharedAction(tab.id, "respond", { requestId: request.requestId, response })} /> : null}
+            <div className="flex items-center gap-2 border-b border-line bg-slate-50 px-3 py-1 text-xs text-ink">
+              <span className="min-w-0 flex-1 truncate" title={tab.url}>
+                {label} can use your Gecko tab <strong className="font-semibold">{tab.title || hostOf(tab.url) || tab.url}</strong>. It asks you before submitting or running scripts.
+              </span>
+              <RemChip
+                agent={tab.agent}
+                onPause={(paused) => sharedAction(tab.id, "pause", { paused })}
+                onStop={() => sharedAction(tab.id, "stop")}
+                onTakeOver={() => sharedAction(tab.id, "stop")}
+              />
+            </div>
+          </div>
+        );
+      })}
       <div ref={slotRef} data-testid="gecko-slot" className="relative flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
         {message ? <p role="status" className="max-w-md text-sm text-ink">{message}</p> : null}
         {status?.needsRestart && !restartNote ? <button type="button" className={BUTTON} onClick={() => void restartApp()}>Restart Raticode</button> : null}

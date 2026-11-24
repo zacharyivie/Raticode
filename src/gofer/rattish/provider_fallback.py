@@ -13,6 +13,11 @@ Task failures, structured-output repair failures and usage-limit (budget) stops 
 fall back. Handlers record the reason in ``details["availability"]`` of a ``provider``
 error; :func:`fallback_reason` is the only place that decides whether a failure may
 switch providers.
+
+Once one sign-in of a provider hits a ``rate_limit`` in a step, the step never moves to
+another subscription sign-in of that provider (another account, or the default sign-in):
+:func:`skips_account` decides it. Another provider and an API-key profile stay allowed,
+and the other reasons still switch accounts.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
+    from gofer.core.provider_profiles import ProviderProfile
     from gofer.rattish.runtime import RuntimeErrorInfo
 
 AvailabilityReason = Literal["rate_limit", "overloaded", "signed_out", "not_installed"]
@@ -126,9 +132,110 @@ def provider_label(summary: Mapping[str, Any]) -> str:
 
 
 def switch_message(switch: Mapping[str, Any]) -> str:
-    """One line saying which provider a step left, which it moved to, and why."""
+    """One line saying which provider a step left, which it moved to, and why.
+
+    A skipped entry (``skipped: true``) says which entry the step passed over instead.
+    """
+    if switch.get("skipped"):
+        return f"Skipped {provider_label(switch['to'])}: {SKIPPED_ACCOUNT_TEXT}."
     reason = REASON_LABELS.get(str(switch["reason"]), str(switch["reason"]))
     return (
         f"Switched from {provider_label(switch['from'])} to {provider_label(switch['to'])}: "
         f"{reason}."
     )
+
+
+def switched(fallbacks: Any) -> bool:
+    """Whether a run record's ``fallbacks`` include a real switch, not only skips."""
+    return any(isinstance(item, Mapping) and not item.get("skipped") for item in fallbacks or ())
+
+
+# Why a step passes over another account of a provider that hit its usage limit.
+SKIPPED_ACCOUNT_TEXT = (
+    "Raticode doesn't move work to another account of the same provider at a usage limit"
+)
+# Profile variables that pay with an API key or a cloud platform instead of a plan's
+# sign-in. Every other sign-in variable of an account provider (its ``other_auth_env``,
+# such as CLAUDE_CODE_OAUTH_TOKEN) is a plan sign-in of its own.
+_API_KEY_ENV: dict[str, frozenset[str]] = {
+    "claude_code": frozenset(
+        {
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+        }
+    ),
+    "codex": frozenset({"OPENAI_API_KEY", "CODEX_API_KEY"}),
+    "grok": frozenset({"XAI_API_KEY", "GROK_CODE_XAI_API_KEY"}),
+}
+
+
+def sign_in(choice: Mapping[str, Any], profiles: Mapping[str, ProviderProfile]) -> tuple[str, bool]:
+    """Which sign-in of its provider a choice uses, and whether it pays with an API key.
+
+    The identity is ``default`` for the provider's own sign-in, ``account:<id>`` for an
+    account profile, and ``profile:<name>`` for a profile with a sign-in of its own (a
+    token, another config folder, or an API key). A missing profile counts as its own.
+    """
+    from gofer.core.provider_accounts import account_adapter
+    from gofer.core.provider_profiles import DIRECT_API_SUBSCRIPTIONS
+    from gofer.rattish.provider_runtime import runtime_subscription_id
+
+    try:
+        subscription: str = runtime_subscription_id(str(choice["provider_id"]))
+    except ValueError:
+        subscription = str(choice["provider_id"])
+    if subscription in DIRECT_API_SUBSCRIPTIONS:
+        return f"profile:{choice.get('profile') or ''}", True
+    name = choice.get("profile")
+    if not name:
+        return "default", False
+    profile = profiles.get(str(name))
+    if profile is None:
+        return f"profile:{name}", False
+    if profile.account_id:
+        return f"account:{profile.account_id}", False
+    variables = {*profile.env, *profile.secret_refs}
+    if (
+        profile.api_key_env
+        or profile.api_key_secret
+        or variables & _API_KEY_ENV.get(subscription, frozenset())
+    ):
+        return f"profile:{name}", True
+    adapter = account_adapter(subscription)
+    if adapter is not None and variables & {adapter.folder_env, *adapter.other_auth_env}:
+        return f"profile:{name}", False
+    return "default", False
+
+
+def skips_account(
+    choice: Mapping[str, Any],
+    profiles: Mapping[str, ProviderProfile],
+    limited: Mapping[str, set[str]],
+) -> bool:
+    """Whether a step passes over this entry because its provider hit a usage limit.
+
+    ``limited`` maps each provider ID to the sign-ins that hit a ``rate_limit`` earlier in
+    the step. Another plan sign-in of such a provider is skipped; the same sign-in (with
+    another model, say) and an API-key profile are not.
+    """
+    tried = limited.get(str(choice["provider_id"]))
+    if not tried:
+        return False
+    identity, api_key = sign_in(choice, profiles)
+    return not api_key and identity not in tried
+
+
+def skip_record(after: Mapping[str, Any], choice: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``fallbacks`` entry for a skipped account: ``from`` is the entry that failed."""
+    target = choice_summary(choice)
+    name = target["profile"] or f"{target['provider']} default sign-in"
+    return {
+        "from": choice_summary(after),
+        "to": target,
+        "reason": "rate_limit",
+        "skipped": True,
+        "message": f"skipped {name}: {SKIPPED_ACCOUNT_TEXT}",
+    }

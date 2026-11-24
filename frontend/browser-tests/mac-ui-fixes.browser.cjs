@@ -29,7 +29,9 @@ app.whenReady().then(async () => {
   const frontend = path.resolve(__dirname, "..");
   process.chdir(frontend);
   const { createServer } = await import("vite");
-  server = await createServer({ root: frontend, cacheDir: testViteCacheDir("mac-ui"), configFile: false, server: { host: "127.0.0.1", port: 0 }, plugins: [
+  // Same Monaco bundling fixes as vite.config.js (DOMPurify, language workers).
+  const { monacoPatches } = await import("../dev/monaco-patches.js");
+  server = await createServer({ root: frontend, cacheDir: testViteCacheDir("mac-ui"), configFile: false, optimizeDeps: { rolldownOptions: { plugins: [monacoPatches()] } }, server: { host: "127.0.0.1", port: 0 }, plugins: [monacoPatches(),
     (await import("@vitejs/plugin-react")).default(), { name: "mac-ui-fixture", configureServer(dev) { dev.middlewares.use(async (req, res, next) => {
       if (req.url === "/page") { res.setHeader("Content-Type", "text/html"); res.end("<html><title>Find fixture</title><body>needle one<br>needle two<br>other text</body></html>"); return; }
       if (req.url !== "/") return next();
@@ -122,7 +124,7 @@ app.whenReady().then(async () => {
   // Type-aware worker operates on the real file URI and diagnoses an incompatible assignment.
   assert.ok(await evaluate(async () => {
     const model = window.monacoFixture.editor.getEditors()[0].getModel(); model.setValue('const bad: number = "text";');
-    const factory = await window.monacoFixture.languages.typescript.getTypeScriptWorker();
+    const factory = await window.typeScriptWorkerFixture();
     const worker = await factory(model.uri);
     return (await worker.getSemanticDiagnostics(model.uri.toString())).some(error => error.code === 2322);
   }));

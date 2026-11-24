@@ -102,6 +102,7 @@ export default function SwarmWorkspace({ rootPath, swarmId, onSelect, onClose, d
             {run?.cleanup?.error ? <p className="text-xs text-muted">Retained work is still available. Cleanup error: {run.cleanup.error} {!archiveId ? <button type="button" className={buttonClass} disabled={busy} onClick={() => void mutate("/control", { action: "cleanup" })}>Retry cleanup</button> : null}</p> : null}
             {confirmStop && active && !archiveId ? <div role="alertdialog" aria-label="Stop this run" className="swarm-confirm"><p><strong>Stop this run?</strong> Running agents are cancelled. Unfinished work is archived and the run’s worktrees are removed; the review branch stays. A stopped run can’t be resumed. Use Pause to keep it resumable.</p><div className="flex flex-wrap gap-2"><button type="button" className={buttonClass} onClick={() => setConfirmStop(false)}>Keep running</button><button type="button" className={`${buttonClass} swarm-danger-button`} disabled={busy} onClick={async () => { if (await mutate("/control", { action: "stop" })) setConfirmStop(false); }}>Stop and clean up</button></div></div> : null}
             {run?.pauseReason ? <p role="status" className="mt-3 text-xs leading-5 text-muted">Paused: {run.pauseReason}</p> : null}
+            {!archiveId ? <RunWaiting run={run} /> : null}
             {run?.replanRequired && !archiveId && run.state === "paused" ? <ReplanForm busy={busy} onAction={payload => mutate("/execution", payload)} /> : null}
             {!archiveId && !active ? <details className="swarm-new-run" open={!run || undefined}><summary>Start a new run</summary><form className="swarm-start-form" onSubmit={event => { event.preventDefault(); setReviewing(true); }}><div className="flex items-center justify-between gap-3"><label className="text-xs font-semibold" htmlFor="swarm-task">Task</label>{run ? <button type="button" className="text-xs text-muted hover:text-ink" onClick={event => { event.currentTarget.closest("details").open = false; }}>Cancel</button> : null}</div><textarea id="swarm-task" required rows={2} value={task} onChange={event => setTask(event.target.value)} placeholder="Describe the task…" className={fieldClass} />{reviewing ? <LaunchReview swarm={swarm} busy={busy} onCancel={() => setReviewing(false)} onStart={async confirmFullAccess => { if (await mutate("/start", { task, expectedConfigurationHash: swarm.configurationHash, confirmFullAccess })) { setTask(""); setReviewing(false); } }} /> : <div className="flex justify-end"><button type="submit" disabled={busy || !task.trim()} className={primaryClass}><Play size={13} />Review and start…</button></div>}</form></details> : null}
           </section>
@@ -557,6 +558,12 @@ function SwarmAgentActivity({ run, agents, selectedAgentId, compact = false }) {
   </div></div>;
 }
 
+
+// A running run whose next turn waits for a free worker on this computer.
+export function RunWaiting({ run }) {
+  if (run?.state !== "running" || !run.waitReason) return null;
+  return <p role="status" className="mt-3 text-xs leading-5 text-muted">{run.waitReason}</p>;
+}
 
 export function SwarmDigest({ run, agents }) {
   if (!run) return null;

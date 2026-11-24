@@ -48,11 +48,21 @@ def list_brains(
                 str(b.get("name")),
                 str(b.get("state")),
                 str((b.get("index") or {}).get("documents", "")),
-                str(b.get("root")),
+                str(b.get("root") or ""),
             ]
             for b in data
         ]
-        return table(rows, ["ID", "NAME", "STATE", "DOCS", "FOLDER"]) or "No brains registered."
+        listing = table(rows, ["ID", "NAME", "STATE", "DOCS", "FOLDER"])
+        if not listing:
+            return "No brains registered."
+        if any(b.get("state") == "private" for b in data):
+            # Only an agent token without --private-brains sees this state.
+            listing += (
+                "\n\nPrivate brains keep Allow cloud processing off, so this agent token "
+                "can't read them. Turn it on in the brain's Brain settings, or use a token "
+                "created with `Raticode tokens create --private-brains`."
+            )
+        return listing
 
     finish(current, lambda b, _o: call(b, "snapshot").get("brains", []), text)
 
@@ -86,7 +96,13 @@ def list_documents(
 
 @app.command("search")
 def search_brain(
-    query: str = typer.Argument(...),
+    query: str = typer.Argument(
+        ...,
+        help=(
+            'Words, "phrases", -exclusions and field clauses such as tag:design, '
+            "type:report or modified:2026-11..2026-11-14, as in the Library's search box."
+        ),
+    ),
     brain_ids: list[str] = typer.Option(..., "--brain", help="Brain ID; repeat to search several."),
     mode: str = typer.Option(
         "exact", "--mode", help="exact (words), semantic (meaning) or hybrid."
@@ -97,7 +113,14 @@ def search_brain(
     token_file: opts.TokenFile = None,
     data_dir: opts.DataDir = None,
 ) -> None:
-    """Search notes and documents. Each hit names a document and a block."""
+    """Search notes and documents with the Library's query syntax; hits name a document and block.
+
+    Plain words rank by relevance. Quoted phrases must appear and -word leaves documents
+    out. type:, tag:, author:, domain:, project:, folder:, in:, state:, origin: and brain:
+    narrow the hits, and modified:, added:, published:, captured: and generated: take a
+    date or a range. A query with only fields lists matching documents, newest first. An
+    unknown field, a bad date or an unclosed quote is an error that names the fix.
+    """
     current = session("brain search", output, endpoint, token_file, data_dir)
 
     def fetch(backend: Backend, out: Output) -> dict[str, Any]:

@@ -327,6 +327,10 @@ class Employee(BaseModel):
     reportsTo: str | None = None
     instructions: str = Field(default="", max_length=100_000)
     provider: str = "codex"
+    # The provider account this worker's turns run as: an account ID from Settings >
+    # Providers for this provider, or None for the provider's default sign-in. The ID
+    # survives renaming the account. organization_accounts.py checks and resolves it.
+    account: str | None = Field(default=None, pattern=r"^[0-9a-f]{16}$")
     model: str = "cli-default"
     effort: str | None = None
     permissionMode: str = "workspace-write"
@@ -557,6 +561,8 @@ class OrganizationConfig(BaseModel):
                 raise ValueError("Employee workspace grants must be absolute paths")
         validate_plan(self, ids)
         self.remSecondBrain.pop("grantId", None)
+        # Runs find the folder's library brain each time; that mark is never stored.
+        self.remSecondBrain.pop("memoryFolder", None)
         return self
 
 
@@ -957,6 +963,15 @@ class OrganizationStore:
         with self.connect() as db:
             rows = db.execute("SELECT * FROM organizations ORDER BY rowid").fetchall()
         return [self.get("", row["id"]) for row in rows]
+
+    def names(self) -> list[dict[str, str]]:
+        """Each organization's ID and name, without its tickets."""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id, json_extract(config, '$.name') AS name FROM organizations "
+                "ORDER BY rowid"
+            ).fetchall()
+        return [{"id": row["id"], "name": str(row["name"] or "")} for row in rows]
 
     def summaries(self) -> list[dict[str, Any]]:
         with self.connect() as db:
@@ -1378,6 +1393,20 @@ class OrganizationStore:
                 for eid, previous in old_employees.items()
                 if eid not in new_employees
                 or any(previous.get(key) != new_employees[eid].get(key) for key in permissions)
+            }
+            # Only holding a worker keeps its run's claim here: the manager stops that run
+            # like a pause (OrganizationManager.stop_revoked), so the run isn't charged and
+            # the ticket waits in To do for the worker to come back.
+            affected -= {
+                eid
+                for eid, previous in old_employees.items()
+                if eid in new_employees
+                and not previous.get("paused")
+                and new_employees[eid].get("paused")
+                and all(
+                    previous.get(key) == new_employees[eid].get(key)
+                    for key in permissions - {"paused"}
+                )
             }
             disruptive = restored_from is not None or any(
                 current["config"].get(key) != validated.get(key)

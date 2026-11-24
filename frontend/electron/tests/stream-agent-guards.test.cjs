@@ -1,5 +1,6 @@
 // Rem's browser tools where a streamed browser has to keep Raticode's rules:
-// same-origin frames in snapshots, page dialogs, screenshots of a tab that
+// same-origin frames in snapshots, pages with frames loading promptly while
+// Rem's site rules are on, page dialogs, screenshots of a tab that
 // was never on screen, pop-ups, redirects to a site Rem may not visit, and
 // Rem's downloads, which are refused by default. Runs in Chrome, Microsoft
 // Edge and Firefox. stream-agent-actions.test.cjs covers the other actions.
@@ -65,9 +66,6 @@ const BROWSERS = [
     skip: FIREFOX_PATH ? false : "Firefox is not installed",
     engine: (dataDir) => createFirefoxEngine({ dataDir }),
     contents: (engine, kind) => new FirefoxContents({ engine, kind, nativeImage: fakeImage }),
-    // A known Firefox gap, found by this test on November 7, 2026: Rem's
-    // snapshot doesn't reach into same-origin frames.
-    knownGaps: ["same-origin frame"],
   },
 ];
 
@@ -99,6 +97,8 @@ async function startSite() {
     if (request.url === "/file.txt") { response.setHeader("Content-Type", "text/plain"); response.end("downloaded"); return; }
     response.setHeader("Content-Type", "text/html");
     if (request.url === "/two") { response.end("<title>Two</title><p>second page</p>"); return; }
+    if (request.url === "/nested") { response.end("<title>Nested</title><iframe id=outer src='/outer'></iframe>"); return; }
+    if (request.url === "/outer") { response.end("<iframe id=inner src='/frame'></iframe>"); return; }
     if (request.url === "/frame") { response.end("<button style='width:120px;height:40px' onclick=\"parent.document.getElementById('out').textContent='framed:'+event.isTrusted\">Inside</button>"); return; }
     response.end(PAGE);
   });
@@ -149,7 +149,15 @@ for (const browser of BROWSERS) {
       try { await run(); results[action] = "ok"; } catch (error) { results[action] = error.message.replace(/\s+/g, " ").slice(0, 300); }
     };
     try {
+      // Every request of a guarded tab waits for Raticode, its frames'
+      // included; one nobody answers keeps the page from finishing loading.
+      const openStarted = Date.now();
       const opened = await call("open", { url: `${base}/` });
+      const openSeconds = (Date.now() - openStarted) / 1000;
+      // A request left unanswered keeps the page loading until the 30-second navigation
+      // timeout. The first open also starts the browser, which took a CI runner 18.3 s
+      // for Edge, so anything well under the timeout counts as loaded.
+      assert.ok(openSeconds < 25, `opening a page with a frame took ${openSeconds.toFixed(1)} s`);
       const page = tabs[0].contents;
       const out = () => page.evaluateIn("test", "document.getElementById('out').textContent");
       assert.equal(opened.title, "Parity");
@@ -169,6 +177,20 @@ for (const browser of BROWSERS) {
         ({ snapshot } = await call("snapshot"));
         await call("click", { ref: ref("Inside") });
         await waitFor(async () => (await out()) === "framed:true", `out was ${await out()}`, 4000);
+      });
+      await check("frames inside frames load", async () => {
+        const started = Date.now();
+        const count = tabs.length;
+        try {
+          const nested = await call("open", { url: `${base}/nested` });
+          const seconds = (Date.now() - started) / 1000;
+          assert.equal(nested.title, "Nested");
+          assert.ok(seconds < 5, `opening a page with nested frames took ${seconds.toFixed(1)} s`);
+          const inner = await tabs[count].contents.evaluateIn("test", "document.getElementById('outer').contentDocument.getElementById('inner').contentDocument.querySelector('button')?.textContent || ''");
+          assert.equal(inner, "Inside");
+        } finally {
+          tabs[count]?.contents.close();
+        }
       });
       await check("screenshot", async () => {
         const shot = await call("screenshot");

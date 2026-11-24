@@ -3,6 +3,392 @@
 This file records the major user-facing changes in Raticode. Releases through
 version 0.1.3 used an earlier product name.
 
+## 0.6.0 - 2026-11-24
+
+Changes since the `v0.5.5` tag. Raticode Mobile 0.36.0 ships alongside it from
+its own `mobile-v0.36.0` tag.
+
+### Added
+
+- Several accounts for Claude Code, Codex and Grok. Each account is the app's
+  own configuration folder, signed in once with the app's own login, and all
+  stay signed in together. Add, rename, sign in, copy your setup and remove
+  them under each app in **Settings > Providers** or with
+  `Raticode provider account`. Raticode never reads or stores a sign-in, and
+  never switches accounts by itself when one hits a limit.
+- Choose the account for each kind of work: Rem's setting per provider
+  (default sign-in, one account, or **Choose by usage**, which picks the
+  account with the most room left), a thread's own **Account** menu under the
+  model picker on the computer and the phone, and a separate choice for
+  self-work. Grok accounts are compared by their monthly credits.
+- Sign a Codex or Grok account in from the phone with a link and a one-time
+  code, or with `Raticode provider account login --device-auth`. Claude Code
+  accounts still sign in on the computer.
+- **Settings > Usage** opens with a card per account: 5-hour and weekly
+  meters, reset countdowns, sign-in state, a weekly pace chart that says
+  whether the allowance lasts until the reset, and a **Rem uses next** badge.
+  The phone's Usage page shows the same cards.
+- Limit alerts on the computer and the phone when an account reaches 80% or
+  95% of its 5-hour or weekly window, once per level per window. Change or
+  turn them off in **Settings > Usage** or with `Raticode usage alerts`.
+- **Tokens in Raticode** draws a stacked chart of tokens over time, by
+  provider or by account, in each provider's brand color. Periods are 24h,
+  7d, 30d, 3mo, 6mo, 1Y, 5Y, All or custom dates, on the computer, the phone
+  and with `Raticode usage show --range`.
+- **Cost at API prices** estimates what the period's tokens would have cost
+  at each provider's public API list price, split into uncached input, cache
+  reads, cache writes and output, with a dated price list. Models without a
+  list price show as unknown, never $0.
+- **Posts** (experimental and untested, so it may change; a Feature Preview,
+  off by default, marked **Experimental** in the app and on the phone): Rem,
+  tasks and workflows propose social posts, and nothing goes out until you
+  approve the exact text. Raticode publishes to Discord, X, LinkedIn, a Facebook Page and
+  YouTube at the scheduled time, and gives you drafts to paste for Patreon,
+  Buy Me a Coffee and TikTok. It has templates, suggested posting times, and
+  review and approval from the phone. X connects with the four API keys from
+  X's developer console by default (no callback address), or with an OAuth 2.0
+  token.
+- Rem can drive Raticode (gecko) as well as Raticode (chromium), once you turn
+  on **Let Rem use Raticode (gecko)** in Settings > Browser. Rem's Gecko tabs
+  open in the background in their own signed-out container. While the setting
+  is on, Firefox stops filling saved passwords as pages load, in your own
+  Gecko tabs too; pick a saved login from the field's dropdown instead. You
+  can share a Gecko tab with Rem, and Rem can now scroll and play, pause or
+  seek media in every browser.
+- Raticode can be your default web browser, on the computer and the phone.
+  Links from other apps open in Raticode (chromium) or Raticode (gecko), as you
+  choose in Settings. The phone also opens web pages, PDFs, pictures, video,
+  sound, Markdown and text from other apps in a read-only viewer with no
+  scripts.
+- Rem's chat answers questions about Second Brain notes, a project's Git
+  status, a task's runs, a board ticket and recent workflow runs itself,
+  without starting a worker. A failed reply offers your message back to
+  resend.
+- **Make it a workflow** on a repeating Rem task that has passed twice drafts
+  and tests a workflow that does the same job, compares the cost per run, and
+  **Switch over** adds a trigger with the task's schedule and pauses the task.
+  **Resume schedule** undoes it.
+- Self-work **Objectives**: a checklist of session-wide goals in Rem's side
+  pane that you can edit. While one is open, self-work only starts tickets
+  that advance it and researches new ones when nothing on the board relates.
+  Each research round starts from the last round's report and the commits
+  since.
+- A **Weekly allowance per day** cap for self-work in Settings > Rem: once
+  self-work has used that share of the weekly allowance today, no new work
+  starts until midnight. It counts per account.
+- **Dismiss all** clears every Rem task update in one click, on the computer,
+  the phone and with `Raticode rem runs acknowledge-all`. Questions and tasks
+  on hold stay.
+- **Settings > Rem > Commit messages > Remove Co-authored-by lines** (off by
+  default) removes those lines from commits Raticode, its agents and the
+  Source Control box make. Agents' own commits need Git 2.54 or later.
+- **Ctrl+Shift+P** opens a command palette with every command and its key,
+  and **Ctrl+P** quick-opens files, workflows, Rem threads and Settings
+  sections (Cmd on a Mac).
+- **Ask Rem** on a failed run, a Run Timeline row, a Problems entry or text
+  selected in the terminal puts a short summary in Rem's message box without
+  sending it. The phone's failed run cards offer it too.
+- Workflow agent steps on Claude Code run in the same operating-system sandbox
+  as Rem's unattended work. Shell writes stay in the step's working folder,
+  its extra paths and a scratch folder for the run; credential folders are
+  hidden; and the shell reaches only the hosts in the step's new `network`
+  field (none by default, or `any`). Codex steps keep `workspace-write`, and
+  triggered runs refuse a Codex profile with full access.
+- Steps that can't be sandboxed (providers without one, native Windows, or
+  the new `sandbox: off`) show **Runs unsandboxed** in preflight and the
+  Triggers section, and adding a trigger asks you to confirm. Extra paths
+  outside the project and `network: any` show as **Widens its sandbox**.
+  Preflight stops a workflow whose steps need hosts their `network` field
+  doesn't list, with the lines to add.
+- Triggers run only a workflow version you approved. A trigger covers the
+  workflow and the prompts, scripts, child workflows and MCP servers it uses.
+  When any of them changes, triggered starts are skipped until you check
+  **Review changes** and choose **Approve this version**, on the computer,
+  the phone or with `Raticode rattish triggers approve`. Each covered file is
+  checked again right before a triggered run uses it.
+- Daily spending limits for triggered runs, per trigger and for the whole
+  computer, on estimated cost, tokens or both. Runs you start yourself never
+  count.
+- Each trigger has a **Time limit**, 6 hours unless you change it, set to
+  any length or none in the trigger's form or with
+  `Raticode rattish triggers update ID --max-run-time 2h|none`. A triggered
+  run that reaches it is stopped and its history entry shows as failed. The
+  phone shows each trigger's limit.
+- A triggered run stopped by a provider's usage limit waits for the limit to
+  reset, then resumes without running the steps that passed again, up to 6
+  waits. Its history entry, **Workflow runs** and the phone show **Waiting for
+  usage limit**. Credit and spend-cap errors still fail at once. Turn it off
+  per trigger with **Wait for a usage limit to reset** or
+  `Raticode rattish triggers update ID --usage-limit fail`.
+- Run a workflow from any app with a keyboard shortcut: **Add shortcut…** in
+  a workflow's menu. A workflow with a text input opens a small Run sheet
+  filled from the clipboard. Shortcuts run only the version you approved.
+- Workflows can run in their own git worktree each time (`workspace:
+  worktree`, **Run in a worktree**). The run page's **Changes** tab shows the
+  patch, with **Land** and **Discard**. Agent steps in such a run can commit
+  only to the run's branch.
+- File inputs: choose a file on the computer, pass one from the CLI, or share
+  one from the phone. Raticode copies it into the run folder and deletes it
+  with the run.
+- Deleting a workflow also removes its run worktrees waiting to be landed and
+  their branches, and says how many first.
+- Share a link, text or a file from any phone app into a workflow's Run sheet.
+- **Run from here** in the Studio's node menu (and `--from` in the CLI) runs
+  a workflow again from one step, reusing the unchanged steps before it.
+  Approval steps ask again.
+- Approval steps can offer named answers (2 to 8 options) and ask for a typed
+  reply, on the computer, the phone and the CLI.
+- A `read-web-page` node reads one web page as Markdown or plain text, with
+  its title, links and final address. It refuses private and loopback
+  addresses unless `network-allowlist` lists them, and with `render: auto` or
+  `always` runs the page's JavaScript in an installed Chrome, Chromium or Edge
+  under the same address check.
+- An `mcp-tool` node calls one tool on a server from Rem's MCP server list
+  without a model. Local servers run in the step's sandbox, get only the
+  environment variables named for them, and keep a package cache that tool
+  calls can't change. Approvals warn when a server's package isn't pinned to
+  an exact version. `Raticode rem mcp tools` lists a server's tools.
+- A **Summarize a link** starter summarizes a link you share from the phone or
+  copy for a shortcut and sends the summary to your phone.
+- **Try another model** on a workflow's test set, on the computer, the phone
+  or with `Raticode rattish test --model`, compares both models case by case
+  with their costs before you switch. **Use this model** (or `--use-model`)
+  writes the new model into the step, and triggers ask for approval again.
+- Preflight fails a retired Anthropic or OpenAI model and warns about one
+  with a retirement date, naming the replacement. The Triggers section shows
+  the same.
+- Shell steps take `shell: bash`, and the starters use it, so they run on
+  Windows with Git for Windows' bash.
+- **Add node** opens a searchable picker of every node type, grouped by what
+  it does, with descriptions and docs links. Tab on the graph opens it too.
+- Rattish errors suggest the right name for a misspelled field, node type,
+  provider or route target, and starters list what they need. The phone's
+  Run button says what is missing.
+- On the phone, the pairing QR scanner is rebuilt on Android's current camera
+  library, with a close button and support for light-on-dark codes.
+- Decisions: Rem brings each question with one recommended answer, remembers
+  what you decide per project and never asks the same thing twice. Answer,
+  change, ask again, forget or retire decisions in Rem's side pane or on the
+  phone, open one to see who decided it, why, its evidence and its history,
+  and ask Rem in chat to change one, which happens only after you press OK on
+  a card showing the before and after.
+- Design decisions can live as short records in a project's
+  `.raticode/decisions` folder. Rem's checks fail work that breaks one, and
+  self-work can't save, pull or start a ticket that would.
+- Rem finds each project's check command and landing branch in its own files.
+  Raticode then runs the decided check itself, in a sandbox with no network or
+  credentials, on a fresh copy of the commit that lands, and runs a task's
+  named proving test on the code before and after the change. Reviewers trust
+  those runs over the worker's word.
+- **Settings › Computers** lists every computer Rem can run work on, with its
+  **Worker limit** (0 is Auto), its load and what its workers are doing, on
+  the computer and the phone. **Where work runs** sets, for Rem and each
+  organization, **Fill one computer, then the next**, **Spread evenly** or
+  **Only computers I pick**. Every start waits, with the reason, when a
+  computer is full, short of memory or busy, and your own Rem tasks go first.
+  Waiting work suggests a paired desktop with room, and runs there only when
+  you pick **Run there**.
+- Self-work: **Pace to reset** starts new work only while an account is under
+  a line that ends at the aim you set (1% to 100%) at the weekly reset; tell
+  Rem when self-work is done, such as "stop when REM-205 to REM-212 are
+  complete, but no later than midnight"; a guardrail retro proposes Guardrail
+  tickets for failures that keep coming back and tracks whether its fixes held;
+  and research proposes at most two careful refactors of a project's busiest
+  files.
+- Ask Rem to plan something with you: it asks its questions a few at a time
+  and gives the work back as small tickets.
+- Reviews list findings on two axes, the task and the project's standards, and
+  only blockers and one should-fix send work back. **Usage** shows how often
+  tickets pass review the first time, why failed tasks failed, how big each
+  part of Rem's own prompts is, and how much of them came from the provider's
+  cache.
+- Rem's memories can have an end date and can belong to one project.
+- Second Brain documents can carry a short summary that Rem reads first. Rem's
+  search understands the Library's query syntax, pages through results, lifts
+  recent documents a little, lists dated report series newest first, and can
+  leave a folder out or list it after other results.
+- Brain backups never rotate out the last good copy, keep one copy per recent
+  week and month, work on FAT32 and exFAT drives, and stop at once when two
+  file names differ only by letter case.
+- Each organization worker can run as one of its provider's accounts, and
+  workflow agent steps show which profiles are accounts and whether they are
+  signed in. Worker runs and workflow steps record the version of the provider
+  app they started with.
+- Posts can sign in to YouTube, LinkedIn, Facebook Pages and X in your own
+  browser, with no redirect website. X connects with the four API keys from its
+  developer console by default.
+
+### Changed
+
+- **Settings > Providers** shows each coding app as one short row with its
+  status and accounts, and folds local model servers and classification
+  models under **For workflows only**. Each app's models are one checklist,
+  **Show in model menus**, with search, which keeps the models you already
+  hid. Opening Settings reuses provider checks from the last 5 minutes.
+  Each account is one line with its name, status, plan and email and a ⋯
+  menu for its other actions, each provider says which account Rem's work
+  and self-work use with a **Change** link, and an app whose saved location
+  is wrong keeps its own row with **App location** open to fix it.
+- Offline dictation uses NVIDIA's Nemotron 3.5 model through sherpa-onnx,
+  replacing Vosk, and handles languages other than English. Download it
+  (about 475 MB) from **Settings > Devices > Speech recognition**. Raticode
+  deletes the old Vosk model on the first start after the update, and nothing
+  downloads on its own, so Linux dictation needs the new download.
+- On Wayland, Raticode adds its dictation and screen shortcuts to KDE Plasma
+  or through the desktop's shortcut portal by itself, instead of asking you
+  to bind a command.
+- When the computer changes networks, paired phones and computers keep
+  reaching it without a restart. Settings > Devices shows the new address.
+- Triggers saved before 0.6.0 get the 6-hour **Time limit**, so a triggered
+  run that runs longer is now stopped. Set a longer limit or none with
+  `Raticode rattish triggers update ID --max-run-time`.
+- A start skipped or queued because the workflow is already running names
+  that run and how long it has been running.
+- Triggers saved before 0.6.0 approve their workflow as it is the first time
+  0.6.0 checks them, so they keep running. Any later change needs **Approve
+  this version**, unless you turn on the trigger's **Run edits without
+  approval**.
+- Unattended Claude Code runs (self-work, reviews and workflow agent steps)
+  no longer load a project's own Claude Code settings, whose hooks ran
+  outside the sandbox. They get the project's `CLAUDE.md` files as
+  instructions instead.
+- Local HTML previews run offline: they load nothing from the internet until
+  you choose **Load remote content** for that file, and only a link you click
+  leaves the preview.
+- Rem's browser actions return once the page's main document has loaded,
+  plus about 2 seconds, instead of waiting up to 30 seconds for every part.
+- A workflow step that hits a usage limit no longer falls back to another
+  account of the same provider; another provider or an API-key profile still
+  works.
+- The `anthropic-api` provider's default model is now `claude-sonnet-5-5`
+  instead of the retired `claude-3-5-sonnet-latest`.
+- With Auto mode on, tickets block only for what you must do yourself, and
+  work filed under the wrong project moves to the right one and restarts.
+- Organizations: a result sent back three times in a row waits for your own
+  review, holding a worker mid-run parks its ticket instead of blocking it,
+  and turning Auto mode off withdraws its open ticket requests.
+- Excel `.xlsx` files are read with python-calamine, and a workbook that would
+  inflate past 64 MB is refused before it is read.
+- A workflow's run list and the clean-up after each run stay fast with
+  thousands of kept runs, and Usage and Rem's task list stay fast as history
+  grows.
+- The setting for how many workers a computer runs at once is now called
+  **Worker limit** everywhere and lives in **Settings › Computers**. Swarm
+  turns and organization workers count toward it, and organizations show their
+  real **Workers at once** cap instead of a fixed 8.
+- Rem's chat lists only open tasks, tasks finished in the last day and recent
+  threads, and looks the rest up when it needs them, so each reply sends far
+  less. Its fixed rules travel as the system prompt, and its one-shot Claude
+  Code calls use the five-minute cache.
+
+### Fixed
+
+- A workflow field whose text starts and ends with placeholders, such as
+  `"{{link}}: {{reason}}"`, no longer fails the step as one invalid
+  placeholder.
+- Adding a field in the Studio no longer runs it into the next line, and a
+  graph edit that turns a one-line route into a list keeps the file valid.
+- Rem's Firefox tabs finish loading pages that contain frames.
+- Ticket keys in Rem's chat tables show as a short link and stay inside their
+  column, on the computer and the phone.
+- On the phone, an address typed into a reopened Gecko tab is no longer
+  replaced by the page the tab restored.
+- Sandbox scratch folders left by stopped turns and crashed runs are removed.
+- No agent can read or change the folders where Raticode keeps sign-ins and
+  secrets: Claude Code and Codex deny them, and on Linux other providers and
+  unsandboxed turns run in a bubblewrap mask that hides them. Agent tokens
+  can't list provider accounts, and Claude Code's test-queue hook is no
+  longer a file in the data folder another agent could rewrite.
+- Raticode's own git commands no longer run hooks a repository's settings
+  name, and a workflow step can't get its changes committed onto main by
+  pointing its worktree there.
+- Local HTML previews could read any file on the computer; now they read only
+  their own folder. They also can't reach the internet through WebRTC or a
+  script-opened page.
+- Rem reads only page text a person could see, and page text, titles and
+  dialog messages reach Rem marked as page content with a marker a page can't
+  fake.
+- Raticode's tool-server tokens no longer appear on Codex's command line.
+- A run can no longer create `config.toml`, `.env` or `rules` in its own Codex
+  account folder for later runs of that account to load, and agent tokens
+  can't read the older Claude accounts address either.
+- Rem, tasks, workflows and the CLI can attach post media only from a project
+  open in Raticode, a file's type comes from its contents, and PNG and WebP
+  pictures lose their location data like JPEGs.
+- A web-page file from another app can't reopen itself, or a file beside it,
+  with scripts on through its own links, and a preview's link to a folder
+  asks before opening it as a project.
+- Triggered runs that overlap can no longer pass a daily spending limit
+  together: a running run counts as its whole cap until it finishes.
+- With **Choose by usage**, self-work stops when every signed-in account is
+  full instead of moving its runs to the default sign-in.
+- The phone listener stays on the Wi-Fi address phones saved while the
+  computer still has it, such as when Ethernet or a VPN takes over.
+- Two dictations no longer decode on the offline model at the same time, and
+  a model download that was interrupted no longer leaves about 1.2 GB behind.
+- Account sign-ins stop when Raticode closes, and web page reading treats
+  IPv6 forms that carry a private IPv4 address as private.
+- On the phone, a refused request no longer hides approvals with options for
+  the rest of the session, and the file viewer won't show Raticode's own
+  cached files.
+- The desktop app moves to Electron 45.4.1 and the phone's browser to the
+  Firefox 160.0.1 engine, both for their newer browser security fixes.
+- Private brains stay private when a cloud thread, task or organization opens
+  their folder, and agent tokens can't read a brain with **Allow cloud
+  processing** off.
+- Copilot gets every prompt through its input instead of the command line,
+  where other accounts on the computer could read it.
+- A PDF that hangs or uses too much memory can no longer stall Second Brain
+  indexing, and re-indexing keeps notes Rem saves while it runs.
+- Raticode (gecko) closes Firefox when Rem's control connection fails or
+  drops, so its control port is never left open.
+- Project checks and workflow tool servers can no longer reach the system
+  message bus or the name-lookup sockets, and a Facebook sign-in's callback
+  can't be taken by another program listening on `[::1]`.
+- A worker can't hide a commit from the decision check by making it without
+  `git commit`, and a record file such a commit adds is never read in as your
+  decision.
+- Raticode's own check and proving test never run a worker's committed files
+  outside the sandbox: a check copy makes only the worktree setup's links and
+  copies, and the proving test uses the project's Python on both sides and
+  refuses work that commits files under `.venv`. Stop also ends a check that
+  runs again after the review.
+- An organization ticket that runs through a swarm gives its worker to the
+  swarm's turns instead of waiting for itself forever, and a swarm turn whose
+  wait can't be saved gives its worker back.
+- A private brain inside another brain's folder stays private, backups no
+  longer fail when a file is saved or removed while they run, names that
+  differ only in how accents are written count as twins, and site-local IPv6
+  addresses count as local for web page reading.
+- The packaged command line tool starts the background scheduler again
+  (`Raticode schedule start` had reported success while it exited at once),
+  and `schedule stop` never signals a process group or a program that reused
+  the scheduler's old process ID.
+- On Windows, checking whether a run, approval, backend or scheduler is still
+  running no longer ends that process.
+- After a backend crash the command line no longer sends the owner token to
+  whatever program took the old port. A second headless backend on the same
+  data folder is refused instead of taking over the first one's token, and a
+  headless backend never prints the owner token.
+- `serve --data-dir` keeps every setting in that folder, and `serve` and
+  `tokens` honor `RATICODE_DATA_DIR`.
+- Agent turns can't rotate or move a trigger's webhook, raise its budget,
+  resume every trigger, or replace or remove MCP servers and skills you
+  already trust (exit 5); adding new ones still works.
+- Command line exports are readable only by you and never write through a
+  symlink, and `rattish export` moves only the bundle it asked for. Provider
+  sign-ins no longer get the Raticode API token or Jev key from your shell,
+  and `agent create` and `edit` refuse a credential in `--env`.
+- The older `workflow create --name` writes the name as plain text and never
+  replaces an existing workflow file, and `workflow rm` names the log and
+  agent-memory folders it deletes.
+- On the phone, post links open only web addresses (a `file:` link crashed
+  the app), **Run a workflow** refuses Raticode's own files, sign-in codes
+  are marked sensitive on the clipboard, update checks keep running when the
+  phone's clock is behind, and bad values from the computer or far-off dates
+  no longer crash the Computers page, the Usage chart, the memory end-date
+  picker or the ticket dialogs.
+
 ## 0.5.5 - 2026-11-15
 
 Changes since the `v0.5.4` tag. Raticode Mobile 0.35.0 ships alongside it from

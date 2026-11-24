@@ -260,6 +260,23 @@ class DeviceListener:
                 self._connection, host, port, limit=MAX_FRAME + 4
             )
 
+    async def move(self, host: str, port: int) -> None:
+        """Listen on ``host`` instead of the main address, on the same port.
+
+        The new address is bound before the old one closes, so a failure leaves the
+        listener as it was. Sessions that already arrived keep running: when the old
+        address is really gone they end on their own, and a phone that signs in
+        again replaces them (``_supersede``).
+        """
+        if self.server is None:
+            raise PairingError("listener_not_started")
+        if host in self.extra:
+            raise PairingError("listener_address_in_use")
+        server = await asyncio.start_server(self._connection, host, port, limit=MAX_FRAME + 4)
+        previous, self.server = self.server, server
+        # Stop accepting only; waiting for the old server would wait on its sessions.
+        previous.close()
+
     async def remove_host(self, host: str) -> None:
         """Stop accepting on ``host`` and end the sessions that arrived through it."""
         server = self.extra.pop(host, None)

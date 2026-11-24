@@ -27,7 +27,7 @@ export const EMPTY_FILTERS = Object.freeze({
   authors: [], domains: [], projects: [],
   dateField: "modified", from: "", to: "", includeUnknownDates: false,
   reading: [], origins: [], extraction: [], citations: [],
-  includeGenerated: true,
+  includeGenerated: true, leftOut: false,
 });
 
 const FIELD_ALIASES = { type: "types", tag: "tags", author: "authors", domain: "domains", project: "projects", folder: "folder", in: "collection", state: "reading", origin: "origins", brain: "brains", modified: "date", added: "date", published: "date", captured: "date", generated: "date" };
@@ -39,6 +39,54 @@ export const readingLabel = id => label(READING_STATES, id);
 export const originLabel = id => label(ORIGINS, id);
 export const extractionLabel = id => label(EXTRACTION_STATES, id);
 export const citationFilterLabel = id => label(CITATION_FILTERS, id);
+
+// Folder rules, stored in the brain's settings as folderRules: { "Archive": "leave-out" }.
+// A rule covers its subfolders unless they have their own. brain_folders.py mirrors this.
+export const FOLDER_RULES = [["normal", "Search normally"], ["list-after", "List after other results"], ["leave-out", "Leave out of search"]];
+export const folderRuleLabel = id => label(FOLDER_RULES, id);
+const parentFolder = path => { const text = String(path || ""); const end = text.lastIndexOf("/"); return end < 0 ? "" : text.slice(0, end); };
+// The nearest rule for a folder: its own, else its closest parent's, as { folder, rule }.
+export function ruleForFolder(folder, rules = {}) {
+  const parts = String(folder || "").split("/").filter(Boolean);
+  for (let end = parts.length; end > 0; end -= 1) {
+    const candidate = parts.slice(0, end).join("/");
+    if (rules?.[candidate]) return { folder: candidate, rule: rules[candidate] };
+  }
+  return null;
+}
+// The rule a document follows, or null when its folder is searched normally.
+export function folderRuleFor(path, rules) {
+  const found = ruleForFolder(parentFolder(path), rules);
+  return found && found.rule !== "normal" ? found : null;
+}
+// Sets a folder's rule, storing it only where it differs from what the folder inherits.
+export function withFolderRule(rules = {}, folder, rule) {
+  const next = { ...rules };
+  delete next[folder];
+  if (rule !== (ruleForFolder(folder, next)?.rule || "normal")) next[folder] = rule;
+  return next;
+}
+// Why a document is left out of search: { folder } for a folder rule, { folder: "" } when
+// it was left out in Edit metadata, or null. Missing files aren't counted as left out.
+export function leftOutBy(doc, rules) {
+  if (!doc || doc.missing) return null;
+  const found = folderRuleFor(doc.path, rules);
+  if (found?.rule === "leave-out") return { folder: found.folder };
+  return doc.excluded && !doc.excludedBy ? { folder: "" } : null;
+}
+// The folder whose rule lists this document after other results, or "".
+export function loweredBy(doc, rules) {
+  const found = folderRuleFor(doc?.path, rules);
+  return found?.rule === "list-after" ? found.folder : "";
+}
+// Every folder in a brain with its file count (subfolders included) and depth, parents first.
+export function folderTree(documents, rules = {}) {
+  const counts = new Map();
+  const add = (folder, count) => { const parts = folder.split("/").filter(Boolean); for (let end = 1; end <= parts.length; end += 1) { const key = parts.slice(0, end).join("/"); counts.set(key, (counts.get(key) || 0) + count); } };
+  for (const doc of documents) if (!doc.missing) add(parentFolder(doc.path), 1);
+  for (const folder of Object.keys(rules || {})) add(folder, 0);
+  return [...counts].sort(([a], [b]) => a.localeCompare(b)).map(([path, count]) => ({ path, count, name: path.split("/").pop(), depth: path.split("/").length - 1 }));
+}
 
 // Accepts YYYY, YYYY-MM or YYYY-MM-DD and returns an inclusive ISO day range.
 export function parseDateBound(value, end = false) {
@@ -58,6 +106,8 @@ export function parseDateBound(value, end = false) {
 
 // Text syntax: words, "phrases", -exclusions, OR, and field:value clauses.
 // Invalid clauses are reported with their position and are never silently dropped.
+// parse_query in src/gofer/ui/brain_queries.py mirrors this for Rem's search; both run
+// tests/fixtures/brain-query-syntax.json.
 export function parseQuery(text = "") {
   const result = { terms: [], phrases: [], exclude: [], any: false, filters: {}, date: null, clauses: [], errors: [] };
   const source = String(text);
@@ -71,7 +121,8 @@ export function parseQuery(text = "") {
     if (!field && !negated && bare === "OR") { result.any = true; continue; }
     if (field) {
       const key = FIELD_ALIASES[field.toLowerCase()];
-      if (!key) { result.errors.push({ start, end, text: raw, message: `“${field}:” is not a search field. Try ${QUERY_FIELDS.slice(0, 5).join(":, ")}:.` }); continue; }
+      if (!key) { result.errors.push({ start, end, text: raw, message: `“${field}:” is not a search field. Use one of ${QUERY_FIELDS.map(name => `${name}:`).join(", ")}` }); continue; }
+      if (negated) { result.errors.push({ start, end, text: raw, message: `“-${field}:” can't exclude a field. Remove the minus sign.` }); continue; }
       if (!value) { result.errors.push({ start, end, text: raw, message: `Add a value after “${field}:”.` }); continue; }
       if (key === "date") {
         const [from, to = from] = value.split("..");
@@ -83,7 +134,7 @@ export function parseQuery(text = "") {
       } else {
         result.filters[key] = [...(result.filters[key] || []), value.toLowerCase()];
       }
-      result.clauses.push({ start, end, field: key, value, negated: Boolean(negated) });
+      result.clauses.push({ start, end, field: key, value, negated: false });
       continue;
     }
     if (!value) continue;
@@ -112,7 +163,7 @@ export function queryText(text, filters = EMPTY_FILTERS) {
 
 export function activeFilterCount(filters = EMPTY_FILTERS) {
   return ["types", "tags", "authors", "domains", "projects", "reading", "origins", "extraction", "citations"].reduce((total, key) => total + (filters[key]?.length || 0), 0)
-    + (filters.folder ? 1 : 0) + (filters.collection ? 1 : 0) + (filters.from || filters.to ? 1 : 0) + (filters.brains?.length ? 1 : 0) + (filters.includeGenerated === false ? 1 : 0);
+    + (filters.folder ? 1 : 0) + (filters.collection ? 1 : 0) + (filters.from || filters.to ? 1 : 0) + (filters.brains?.length ? 1 : 0) + (filters.includeGenerated === false ? 1 : 0) + (filters.leftOut ? 1 : 0);
 }
 
 const within = (date, from, to) => Boolean(date) && (!from || date >= from) && (!to || date.slice(0, 10) <= to);
@@ -138,6 +189,8 @@ export function matchesFilters(doc, filters = EMPTY_FILTERS, parsed = parseQuery
   const merged = { ...filters };
   for (const [key, values] of Object.entries(parsed.filters)) merged[key] = Array.isArray(values) ? [...(filters[key] || []), ...values] : values;
   const inSet = (values, value) => !values?.length || values.some(item => lower(item) === lower(value));
+  // Files left out of search are listed only under the Left out filter, which shows only them.
+  if (Boolean(merged.leftOut) !== Boolean(leftOutBy(doc, library.folderRules?.[doc.brainId]))) return false;
   if (merged.brains?.length && !merged.brains.some(value => lower(value) === lower(doc.brainId) || lower(value) === lower(library.brainNames?.[doc.brainId]))) return false;
   if (merged.folder) {
     const folder = lower(merged.folder).replace(/\/+$/, "");
@@ -212,8 +265,9 @@ export function searchLibrary(documents, { text = "", filters = EMPTY_FILTERS, m
     results.push({ doc, score, matchKind, passages: passages.slice(0, 3), passageCount: passages.length });
   }
   const by = {
-    // Reports marked as replaced by a newer one rank after every current match.
-    relevance: (a, b) => isReplaced(a.doc) - isReplaced(b.doc) || b.score - a.score || lower(a.doc.title).localeCompare(lower(b.doc.title)),
+    // Reports marked as replaced by a newer one rank after every current match; files in a
+    // folder listed after other results come after current matches and before replaced ones.
+    relevance: (a, b) => isReplaced(a.doc) - isReplaced(b.doc) || isLowered(a.doc, library) - isLowered(b.doc, library) || b.score - a.score || lower(a.doc.title).localeCompare(lower(b.doc.title)),
     title: (a, b) => lower(a.doc.title).localeCompare(lower(b.doc.title)),
     modified: (a, b) => (b.doc.dates?.modified || "").localeCompare(a.doc.dates?.modified || ""),
     added: (a, b) => (b.doc.dates?.added || "").localeCompare(a.doc.dates?.added || ""),
@@ -223,10 +277,43 @@ export function searchLibrary(documents, { text = "", filters = EMPTY_FILTERS, m
   return { parsed, results: results.sort(by[sort] || by.relevance) };
 }
 
+// Reports whose saved files are editions of one dated series become one row: the newest
+// edition, with the older ones listed under it. Rows keep the list's order; a series sits
+// where its first report was. Groups the user marked "Not a series" stay separate.
+export function reportSeriesRows(reports, documents, series = []) {
+  const docByPath = new Map(documents.map(doc => [`${doc.brainId}\u0000${doc.path}`, doc]));
+  const place = new Map();
+  for (const group of series) {
+    if (group.notSeries) continue;
+    group.editions.forEach((edition, rank) => place.set(edition.docId, { group, rank, date: edition.date }));
+  }
+  const rows = [];
+  const bySeries = new Map();
+  for (const report of reports) {
+    const doc = docByPath.get(`${report.brainId}\u0000${report.artifactPath}`);
+    const found = doc ? place.get(doc.id) : undefined;
+    if (!found) { rows.push({ report, editions: [] }); continue; }
+    const entry = { report, rank: found.rank, date: found.date };
+    const row = bySeries.get(found.group.id);
+    if (row) { row.editions.push(entry); continue; }
+    const created = { report, series: found.group, editions: [entry] };
+    bySeries.set(found.group.id, created);
+    rows.push(created);
+  }
+  return rows.map(row => {
+    if (!row.series) return row;
+    if (row.editions.length < 2) return { report: row.report, editions: [] };
+    const editions = [...row.editions].sort((a, b) => a.rank - b.rank);
+    return { report: editions[0].report, series: row.series, date: editions[0].date, editions: editions.slice(1) };
+  });
+}
+
 export const isReplaced = doc => Number(Boolean(doc?.replacedBy?.docId));
-// Keeps the order of current results and moves replaced reports after them.
-export function demoteReplaced(results) {
-  return [...results].sort((a, b) => isReplaced(a.doc) - isReplaced(b.doc));
+export const isLowered = (doc, library = {}) => Number(Boolean(loweredBy(doc, library.folderRules?.[doc?.brainId])));
+// Keeps the order of current results and moves replaced reports after them, with files in a
+// folder listed after other results between the two.
+export function demoteReplaced(results, library = {}) {
+  return [...results].sort((a, b) => isReplaced(a.doc) - isReplaced(b.doc) || isLowered(a.doc, library) - isLowered(b.doc, library));
 }
 // The chain of newer reports after doc, ending at the one still current.
 export function newerReports(doc, documents) {
@@ -289,6 +376,7 @@ export function describeQuery({ text = "", filters = EMPTY_FILTERS, mode = "exac
   if (filters.extraction?.length) parts.push(`extraction is ${filters.extraction.map(extractionLabel).map(lower).join(" or ")}`);
   if (filters.citations?.length) parts.push(filters.citations.map(citationFilterLabel).map(lower).join(" and "));
   if (filters.includeGenerated === false) parts.push("excluding generated reports and summaries");
+  if (filters.leftOut) parts.push("left out of search");
   return parts.length ? `Documents in ${scope} where ${parts.join(", and ")}.` : `All documents in ${scope}.`;
 }
 
@@ -319,10 +407,30 @@ export function formatTime(iso) {
   return iso && !Number.isNaN(date.getTime()) ? date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "Unknown";
 }
 
+// Passages before a document's first heading sit under this placeholder heading.
+export const UNTITLED_SECTION = "Document";
+
+// The section a passage sits in, or "" when it comes before any heading.
+export const sectionName = block => (block?.heading && block.heading !== UNTITLED_SECTION ? block.heading : "");
+
+// A passage that is the heading itself (HTML h1-h4): the reader shows it as the heading.
+export const isHeadingPassage = block => Boolean(sectionName(block)) && block.text === block.heading;
+
+// IDs of passages that open a section: the first one, and each whose heading or page
+// differs from the passage before it. The reader names a section once, not per passage.
+export function sectionStarts(blocks = []) {
+  const starts = new Set();
+  blocks.forEach((block, index) => {
+    const previous = blocks[index - 1];
+    if (!previous || previous.heading !== block.heading || previous.page !== block.page) starts.add(block.id);
+  });
+  return starts;
+}
+
 export function formatCitation(doc, block, style = "short") {
   const author = doc.author || "Unknown author";
   const year = doc.dates?.published?.slice(0, 4) || "n.d.";
-  const locator = block ? (doc.type === "pdf" ? `p. ${block.page ?? "?"}` : `§ ${block.heading}`) : "";
+  const locator = block ? (doc.type === "pdf" ? `p. ${block.page ?? "?"}` : sectionName(block) ? `§ ${block.heading}` : "") : "";
   if (style === "short") return `${author}, ${year}${locator ? `, ${locator}` : ""}`;
   return `${author} (${year}). ${doc.title}.${doc.source?.url ? ` ${doc.source.url}` : ""}${locator ? ` ${locator}.` : ""}`;
 }
@@ -349,7 +457,7 @@ export function wordDiff(before = "", after = "") {
 }
 
 export const HEALTH_KINDS = [
-  ["link", "Dead links"], ["metadata", "Missing metadata"], ["extraction", "Extraction problems"], ["duplicate", "Exact duplicates"], ["citation", "Ambiguous citations"], ["family", "Replaced reports"], ["review", "Check-by dates"], ["permissions", "Folder access"],
+  ["link", "Dead links"], ["metadata", "Missing metadata"], ["extraction", "Extraction problems"], ["duplicate", "Exact duplicates"], ["citation", "Ambiguous citations"], ["family", "Replaced reports"], ["review", "Check-by dates"], ["permissions", "Folder access"], ["twins", "Case-only twins"], ["backup", "Backups"],
 ];
 
 // Why a link shows in the dead-link list. Only absolute links inside the brain are repaired
@@ -384,4 +492,21 @@ export function webSourceUrl(value) {
     const url = new URL(String(value || ""));
     return ["http:", "https:"].includes(url.protocol) ? url.href : "";
   } catch { return ""; }
+}
+
+export const SUMMARY_MAX = 600;
+
+// What the store shows right after Edit metadata saves a summary; the library then
+// stores it the same way (an empty or file-identical summary removes the edit).
+export function summaryPatch(current, summary) {
+  const fromFile = current.summarySource === "metadata" ? { summary: current.fileSummary || "", summarySource: current.fileSummarySource || "" } : { summary: current.summary || "", summarySource: current.summarySource || "" };
+  if (summary === (current.summary || "")) return {};
+  if (!summary || summary === fromFile.summary) return current.summarySource === "metadata" ? { ...fromFile, fileSummary: undefined, fileSummarySource: undefined } : {};
+  return { summary, summarySource: "metadata", ...(fromFile.summary ? { fileSummary: fromFile.summary, fileSummarySource: fromFile.summarySource } : {}) };
+}
+
+// A report's summary is its saved file's: a PDF's comes from the HTML source kept beside it.
+export function reportSummary(report, documents) {
+  const paths = [report.artifactPath, `${report.artifactPath}.html`];
+  return documents.find(doc => doc.brainId === report.brainId && paths.includes(doc.path) && doc.summary)?.summary || "";
 }

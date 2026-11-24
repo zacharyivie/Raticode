@@ -1,3 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Voice mode needs Android 12; see xml-v31. -->
-<shortcuts xmlns:android="http://schemas.android.com/apk/res/android" />
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- Run a workflow: the three workflows most recently run from a share appear as direct-share targets (WorkflowShareStore). -->
+  <share-target android:targetClass="dev.raticode.mobile.share.WorkflowShareActivity">
+    <data android:mimeType="text/plain" />
+    <data android:mimeType="*/*" />
+    <category android:name="dev.raticode.mobile.category.RUN_WORKFLOW" />
+  </share-target>
+</shortcuts>

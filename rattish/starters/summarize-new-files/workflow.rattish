@@ -23,6 +23,7 @@ workflow:
 
 node collect:
   type: bash-command
+  shell: bash
   command: |
     if [ ! -d "$FOLDER" ]; then
       echo "The folder $FOLDER does not exist." >&2
@@ -60,6 +61,7 @@ node collect:
 
 node nothing-new:
   type: bash-command
+  shell: bash
   command: echo "No new files in $FOLDER."
   with:
     folder: input.folder
@@ -85,6 +87,7 @@ node summarize:
 
 node save-digest:
   type: bash-command
+  shell: bash
   command: |
     mkdir -p "$SUMMARIES_FOLDER" || exit 1
     digest="$SUMMARIES_FOLDER/$(date +%Y-%m-%d-%H%M%S).md"

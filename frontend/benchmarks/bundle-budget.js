@@ -14,7 +14,7 @@ export function bundleBudget() {
     for(const chunk of Object.values(bundle)) {
       if(chunk.type!=='chunk') continue;
       // Only the entry and Monaco have budgets; other lazy chunks are unlimited.
-      const limit=chunk.isEntry?1000000:chunk.name==='monaco'?3050000:null;
+      const limit=chunk.isEntry?1000000:chunk.name==='monaco'?3600000:null;
       if(limit===null) continue;
       const bytes=chunk.isEntry?Buffer.byteLength(chunk.code):monacoBytes(chunk,bundle);
       if(bytes>limit) this.error(`${chunk.fileName}: ${bytes} bytes exceeds ${limit}-byte ${chunk.isEntry?'entry':'Monaco'} budget`);

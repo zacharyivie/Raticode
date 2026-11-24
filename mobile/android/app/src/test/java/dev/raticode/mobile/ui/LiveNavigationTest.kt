@@ -26,6 +26,12 @@ class LiveNavigationTest {
         assertEquals("8b0c6f2e-thread", LiveNavigation.initialThread("8b0c6f2e-thread"))
     }
 
+    @Test fun aQuestionAlertOpensRemNotAThread() {
+        val target = dev.raticode.mobile.live.RemAlertRules.decisionTarget("D-12")
+        assertEquals("Rem", LiveNavigation.initialPage(target))
+        assertNull(LiveNavigation.initialThread(target))
+    }
+
     @Test fun backReturnsToRemAndThenLeaves() {
         assertNull(LiveNavigation.back("Rem", "Rem"))
         assertEquals("Rem", LiveNavigation.back("Swarms", "Swarms"))
@@ -81,7 +87,7 @@ class LiveNavigationTest {
     }
 
     @Test fun moreKeepsItsOldOrderWithNewerPagesAfter() {
-        assertEquals(listOf("Voice", "Workflows", "Approvals", "Settings", "Usage", "SourceControl", "Explorer", "Developer", "Browser", "Kanban"),
+        assertEquals(listOf("Voice", "Workflows", "Approvals", "Settings", "Usage", "SourceControl", "Explorer", "Developer", "Browser", "Kanban", "Posts"),
             LiveNavigation.omitted(LiveNavigation.DEFAULT).map { it.page })
     }
 

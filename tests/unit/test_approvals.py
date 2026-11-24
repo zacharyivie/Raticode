@@ -304,3 +304,57 @@ def test_a_timeout_never_replaces_a_decision_made_after_the_read(tmp_path) -> No
     saved = store.get("flow", "run-1", "gate")
     assert saved is not None and saved.decision is not None
     assert saved.decision.decision == "approved"
+
+
+def test_a_pending_request_is_listed_when_the_folder_listing_misses_its_file(
+    tmp_path, monkeypatch
+) -> None:
+    """A waiting gate replaces its file several times a second. On btrfs a folder
+    listing taken during a replace can leave the file out; its lock file still names it."""
+    from pathlib import Path
+
+    from gofer.core.approvals import ApprovalRequest, ApprovalStore
+
+    store = ApprovalStore(tmp_path)
+    store.create_or_update(ApprovalRequest("flow", "run-1", "gate", "Ship it?"))
+    store.mark_waiting("flow", "run-1", "gate")
+    real_glob = Path.glob
+
+    def listing_mid_replace(self: Path, pattern: str, *args, **kwargs):
+        # What a listing taken while the file is being replaced returns.
+        return [p for p in real_glob(self, pattern, *args, **kwargs) if p.name != "gate.json"]
+
+    monkeypatch.setattr(Path, "glob", listing_mid_replace)
+    assert [(r.run_id, r.node_id, r.status) for r in store.list_pending("flow")] == [
+        ("run-1", "gate", "pending")
+    ]
+
+
+def test_a_request_is_listed_every_time_while_its_gate_keeps_rewriting_it(tmp_path) -> None:
+    """The real race: the waiter's rewrites must never hide the request from a listing."""
+    import threading
+    import time
+
+    from gofer.core.approvals import ApprovalRequest, ApprovalStore
+
+    store = ApprovalStore(tmp_path)
+    store.create_or_update(ApprovalRequest("flow", "run-1", "gate", "Ship it?"))
+    stop = threading.Event()
+
+    def waiter() -> None:
+        while not stop.is_set():
+            store.mark_waiting("flow", "run-1", "gate")
+
+    thread = threading.Thread(target=waiter)
+    thread.start()
+    misses = listings = 0
+    try:
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            listings += 1
+            if len(store.list_pending("flow")) != 1:
+                misses += 1
+    finally:
+        stop.set()
+        thread.join()
+    assert listings and misses == 0, f"{misses} of {listings} listings missed the request"

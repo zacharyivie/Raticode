@@ -6,7 +6,7 @@
   "properties": {
     "$schema": {"type": "string"},
     "code": {"type": "string", "pattern": "^RATTISH_[A-Z0-9_]+$"},
-    "severity": {"enum": ["error", "warning"]},
+    "severity": {"enum": ["error", "warning", "info"]},
     "phase": {
       "enum": ["lexer", "parser", "semantic", "lowering", "preflight", "runtime", "export"]
     },

@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import AsyncGenerator, Callable, Iterator
@@ -24,19 +25,29 @@ from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from gofer.core.placement_eligibility import Start
+from gofer.core.placement_engine import Placement
+from gofer.core.placement_reader import PlacementReader, Snapshot
+from gofer.core.placement_settings import organization_consumer
+from gofer.core.placement_suggestion import suggest
 from gofer.core.usage_ledger import organization_ticket_usage, record_invocation
+from gofer.core.worker_claims import ORGANIZATIONS, THIS_COMPUTER, waiting_reason
+from gofer.core.worker_claims import Claim as WorkerClaim
 from gofer.subscriptions.usage import normalize_usage
 from gofer.ui import organization_landing, worktree_setup
 from gofer.ui import organization_repository as repository
+from gofer.ui.organization_accounts import check_accounts, pick_worker_account, provider_accounts
 from gofer.ui.organization_auto import (
     AUTO_ACTOR,
     INSTRUCTED_ACTOR,
     auto_on,
     needs_review,
+    queued_for_ticket,
     rem_will_reopen,
     review_pass,
     set_auto_mode,
     waits_on_rem,
+    withdraw,
 )
 from gofer.ui.organization_backlog import apply_pulls, plan_pulls
 from gofer.ui.organization_consent import approve_all, rebased, seen_fields
@@ -45,6 +56,7 @@ from gofer.ui.organization_execution import (
     OrganizationExecution,
     authorize_workflow,
     reservation,
+    runs_on_fleet,
     target_for,
     validate_execution,
 )
@@ -83,12 +95,15 @@ from gofer.ui.organization_packages import (
     zip_package,
 )
 from gofer.ui.organization_recovery import (
+    MAX_SEND_BACKS,
     RETRY_SECONDS,
+    count_send_back,
     finished_well,
     results_to_review,
     retry_note,
     review_marker,
     schedule_retry,
+    send_backs_spent,
     temporary,
     waiting_ready,
 )
@@ -501,19 +516,40 @@ def drop_checkin(task: dict[str, Any]) -> None:
     )
 
 
+AUTO_MODE_BRIEF = (
+    "Auto mode is on: the user doesn't review or sign off on tickets. Never block a ticket "
+    "to wait for their approval, review, confirmation or a hand check, and never add a "
+    "check asking for it. Keep Blocked for work that is impossible without them: missing "
+    "credentials or an account, a payment, or an action only they can take. Record what "
+    "you couldn't verify in your comment and move the ticket on. "
+)
+
+
 def checkin_brief(
-    roots: list[str], review: list[str] | None = None, results: list[str] | None = None
+    roots: list[str],
+    review: list[str] | None = None,
+    results: list[str] | None = None,
+    *,
+    auto: bool = False,
 ) -> str:
     first = (
         "Start with your blocked tickets: "
         + "; ".join(review)
         + ". For each, check from its conversation and runs whether it is still blocked. "
-        "If you can get it going, do so and say what changed. If it needs the user or "
-        "something outside your projects, leave it blocked and comment exactly what is "
-        "needed, once. "
+        "If you can get it going, do so and say what changed. "
+        + (
+            "If it truly needs the user (credentials, an account, a payment or an action "
+            "only they can take), leave it blocked and comment exactly what is needed, once. "
+            if auto
+            else "If it needs the user or "
+            "something outside your projects, leave it blocked and comment exactly what is "
+            "needed, once. "
+        )
         if review
         else ""
     )
+    if auto:
+        first = AUTO_MODE_BRIEF + first
     if results:
         first += (
             "You are the reviewer of these results: "
@@ -642,7 +678,7 @@ def heartbeat_due(
                 if checkin["status"] != "in_progress":
                     checkin.update(
                         pulledAt=checkin.get("pulledAt") or now(),
-                        description=checkin_brief(allowed, keys, result_keys),
+                        description=checkin_brief(allowed, keys, result_keys, auto=auto_on(org)),
                         revision=checkin["revision"] + 1,
                     )
         return "waiting"
@@ -691,7 +727,7 @@ def heartbeat_due(
             acceptedRevision=None,
             revision=previous["revision"] + 1,
             workspacePath=allowed[0],
-            description=checkin_brief(allowed, keys, result_keys),
+            description=checkin_brief(allowed, keys, result_keys, auto=auto_on(org)),
             pulledAt=now() if urgent else None,
         )
         return outcome
@@ -701,7 +737,7 @@ def heartbeat_due(
             assignee=eid,
             heartbeat=True,
             workspacePath=allowed[0],
-            description=checkin_brief(allowed, keys, result_keys),
+            description=checkin_brief(allowed, keys, result_keys, auto=auto_on(org)),
             pulledAt=now() if urgent else None,
         ).model_dump()
     )
@@ -800,6 +836,34 @@ def resume_waiting(org: dict[str, Any], instant: datetime | None = None) -> None
                 else "The organization started again; it runs next.",
             }
         )
+
+
+RUN_THERE_USER_ONLY = "Only you can send a ticket to another computer, with Run there on the ticket"
+
+
+def _clear_placement_wait(org: dict[str, Any]) -> dict[str, Any]:
+    org["runtime"].pop("placementWait", None)
+    org["runtime"].pop("placementSuggestions", None)
+    return {}
+
+
+def organization_start(config: dict[str, Any], task: dict[str, Any], root: str | None) -> Start:
+    """What one ticket's start needs from a computer, for placement.
+
+    Its worker's provider, the project it works in, and the owner's execution targets,
+    since a paired desktop takes an organization's work only through a fleet target
+    the owner made for that worker there.
+    """
+    employee: dict[str, Any] = next(
+        (e for e in config["employees"] if e["id"] == task["assignee"]), {}
+    )
+    return Start(
+        provider=employee.get("provider"),
+        project_root=root or None,
+        worker_id=task["assignee"],
+        worker_name=employee.get("name") or task["assignee"],
+        targets=tuple(config.get("executionTargets") or ()),
+    )
 
 
 def employee_may_unblock(task: dict[str, Any]) -> bool:
@@ -1120,8 +1184,12 @@ class OrganizationManager:
         self._active_roots: dict[str, str] = {}
         # Which ticket each live run belongs to, even after its claim is cleared.
         self._active_tasks: dict[str, str] = {}
+        # Live runs that only poll a job a paired desktop runs; they hold no worker here.
+        self._fleet_runs: set[str] = set()
         self._cancel_reasons: dict[str, str] = {}
         self._dispatch_cursor = 0
+        # Each start is placed on a computer; the UI server sets placement.computers.
+        self.placement = PlacementReader(data_dir)
         self._secret_values: dict[str, list[str]] = {}
         # Rem's review step for organizations in Auto mode: (prompt, cancel) -> decision.
         # The UI server wires Rem's own model (organization_auto.rem_reviewer); tests use fakes.
@@ -1235,11 +1303,24 @@ class OrganizationManager:
             self._http.close()
 
     def stop_revoked(self, oid: str, result: dict[str, Any]) -> None:
-        """Stop runs whose claim a saved change revoked."""
+        """Stop runs whose claim a saved change revoked, and runs of workers now held.
+
+        A held worker's run stops like a pause: it isn't charged and its ticket waits in
+        To do until the worker is back.
+        """
         valid_claims = {t["claim"] for t in result["runtime"]["tasks"] if t["claim"]}
+        held = {e["id"] for e in result["config"]["employees"] if e.get("paused")}
+        held_claims = {
+            t["claim"] for t in result["runtime"]["tasks"] if t["claim"] and t["assignee"] in held
+        }
         with self._lock:
             for claim_id, (active_oid, cancel, _) in self._active.items():
-                if active_oid == oid and claim_id not in valid_claims:
+                if active_oid != oid:
+                    continue
+                if claim_id in held_claims:
+                    self._cancel_reasons.setdefault(claim_id, "held")
+                    cancel.set()
+                elif claim_id not in valid_claims:
                     cancel.set()
 
     def cancel(self, oid: str, reason: str = "cancelled") -> None:
@@ -1749,6 +1830,20 @@ class OrganizationManager:
         result["runtime"].pop("requests", None)
         return result
 
+    def running_workers(self) -> int:
+        """Organization workers running on this computer now.
+
+        The computer's reading counts worker claims. A run that only polls a job on a
+        paired desktop isn't one: that desktop counts its worker.
+        """
+        # No lock: paired desktops read this while the device service holds its own.
+        fleet = set(self._fleet_runs)
+        return sum(
+            1
+            for turn_id, (_, _, thread) in list(self._active.items())
+            if thread.is_alive() and turn_id not in fleet
+        )
+
     def call(
         self,
         project: str,
@@ -1802,6 +1897,7 @@ class OrganizationManager:
             "self_work_projects": {"employeeId", "projects", "expectedRevision"},
             "request_approve_all": {"requestIds"},
             "auto_mode": {"enabled"},
+            "run_there": {"taskId", "computerId"},
         }
         # Check privilege before inspecting configuration payloads from employees.
         if employee_id and action in CONFIG_ACTIONS:
@@ -1851,7 +1947,11 @@ class OrganizationManager:
             refresh = params.get("refresh", False)
             if not isinstance(refresh, bool):
                 raise ValueError("refresh must be a boolean")
-            return provider_capabilities_payload(refresh=refresh)
+            # Each provider's accounts too, by ID, for employees[].account.
+            return {
+                **provider_capabilities_payload(refresh=refresh),
+                "accounts": provider_accounts(self.data_dir),
+            }
         if action in {"import_github", "import_github_preview"}:
             if employee_id:
                 raise ValueError("Employees cannot import organization packages")
@@ -1956,7 +2056,7 @@ class OrganizationManager:
             return self.public(
                 self.store.create(
                     project,
-                    params["config"],
+                    check_accounts({}, params["config"], self.data_dir),
                     actor,
                     params.get("reason", "Created organization"),
                     follow=user_follow,
@@ -1998,6 +2098,12 @@ class OrganizationManager:
                     "Only the user can turn Auto mode on or off, in the organization's settings"
                 )
             return set_auto_mode(self, project, org, params)
+        if action == "run_there":
+            # The user's own pick of a suggested desktop; never Rem, Auto mode, a consent
+            # request or a worker, so nothing goes to another computer unpicked.
+            if actor != "user" or consented:
+                raise ValueError(RUN_THERE_USER_ONLY)
+            return self._run_there(project, org, params)
         if action == "land":
             # The user's own Accept; never Rem, Auto mode, a consent request or a worker.
             if actor != "user" or consented:
@@ -2191,7 +2297,7 @@ class OrganizationManager:
                     result = self.store.configure(
                         project,
                         oid,
-                        params["config"],
+                        check_accounts(org["config"], params["config"], self.data_dir),
                         params.get("expectedRevision", -1),
                         actor,
                         params.get("reason", ""),
@@ -2409,6 +2515,16 @@ class OrganizationManager:
                         raise ValueError("Only the assignee or their manager can change this task")
                     if action in {"approve", "review"} and task["status"] == "cancelled":
                         raise ValueError("Cancelled work must be reopened first")
+                    if action in {"approve", "review", "reopen"}:
+                        # Decided on the ticket itself, so Auto mode's request for it is moot
+                        # and mustn't wait in Needs you as a second copy.
+                        for waiting in (current["runtime"].get("consentRequests") or {}).values():
+                            if (
+                                waiting.get("status") == "pending"
+                                and queued_for_ticket(waiting)
+                                and (waiting.get("params") or {}).get("taskId") == task["id"]
+                            ):
+                                withdraw(waiting, "Decided on the ticket itself.")
                     if action == "approve":
                         task["approvedRevision"] = task.get("planRevision", 1)
                     elif action == "review":
@@ -2419,6 +2535,16 @@ class OrganizationManager:
                             raise ValueError("Choose accept, revise or reject")
                         if not str(params.get("body", "")).strip():
                             raise ValueError("Review needs a reason")
+                        if (
+                            decision != "accept"
+                            and (employee_id or actor == AUTO_ACTOR)
+                            and send_backs_spent(current, task)
+                        ):
+                            raise ValueError(
+                                f"Reviewers sent this result back {MAX_SEND_BACKS} times in a "
+                                "row already, so the user reviews it now. Accept it, or leave "
+                                "it for the user."
+                            )
                         task["comments"].append(
                             {
                                 "actor": actor,
@@ -2427,6 +2553,10 @@ class OrganizationManager:
                                 "decision": decision,
                             }
                         )
+                        if limit_note := count_send_back(current["runtime"], task, actor, decision):
+                            task["comments"].append(
+                                {"actor": "system", "at": now(), "body": limit_note}
+                            )
                         task["acceptedAt"] = now() if decision == "accept" else None
                         if decision != "accept":
                             supersede_claims(current, task["id"], actor)
@@ -2472,9 +2602,12 @@ class OrganizationManager:
                             pulledAt=None,
                             selfWork=bool(employee_id and (self_run or task.get("selfWork"))),
                         )
-                        # Only the user's reopen grants a fresh run allowance.
+                        # Only the user's reopen grants a fresh run allowance, and lets
+                        # reviewers send the result back again.
                         if actor == "user" and task["turns"] >= current["config"]["maxTaskTurns"]:
                             task["turns"] = 0
+                        if actor == "user":
+                            (current["runtime"].get("sendBacks") or {}).pop(task["id"], None)
                     else:
                         changes = params.get("changes", {})
                         if not isinstance(changes, dict) or set(changes) - TASK_EDIT_FIELDS:
@@ -3320,6 +3453,8 @@ class OrganizationManager:
     def dispatch(self) -> None:
         if not self.enabled:
             return
+        # Outside the lock: the registry reads paired desktops under the device lock.
+        self.placement.refresh()
         with self.store.connect() as db:
             rows = db.execute("SELECT project, id FROM organizations").fetchall()
         if rows:
@@ -3356,12 +3491,21 @@ class OrganizationManager:
             project_identity(root)
         with self._lock:
             # Shared project writes are serialized unless each task has its own worktree.
-            if self._closed.is_set() or len(self._active) >= 8:
+            if self._closed.is_set():
                 return
             chosen: dict[str, Any] = {}
+            # Set below, once this pass has something it could start.
+            placed: Placement | None = None
+            snapshot: Snapshot | None = None
+            hold: str | None = None
+            held = False
 
             def claim(org: dict[str, Any]) -> dict[str, Any]:
                 runtime, config = org["runtime"], org["config"]
+                # Kept only while a start waits for a computer; set again below if so.
+                waited = runtime.pop("placementWait", None)
+                # Paired desktops offered to waiting tickets, by ticket ID; set again below.
+                suggested = runtime.pop("placementSuggestions", None) or {}
                 self._unblock(org)
                 for task in runtime["tasks"]:
                     claim_id = task["claim"]
@@ -3375,6 +3519,7 @@ class OrganizationManager:
                             attempt.update(status="interrupted", finishedAt=now())
                         self._active.pop(claim_id, None)
                         self._active_roots.pop(claim_id, None)
+                        self._fleet_runs.discard(claim_id)
                 if runtime["state"] != "running":
                     return {}
                 schedule_routines(org, datetime.now(UTC))
@@ -3468,12 +3613,18 @@ class OrganizationManager:
                         level - min(1.0, waited) - (1.0 if fits else 0.0),
                     )
 
+                # Set once a ticket that needs a worker here waits for room. Later
+                # tickets that run on a paired desktop can still start: they take no
+                # worker here.
+                local_held = False
                 for task in sorted(runtime["tasks"], key=rank):
                     if (
                         task["status"] != "todo"
                         or task["claim"]
                         or task["assignee"] not in employees
                     ):
+                        continue
+                    if local_held and not runs_on_fleet(org, task):
                         continue
                     if task["approvalRequired"] and task["approvedRevision"] is None:
                         continue
@@ -3551,11 +3702,41 @@ class OrganizationManager:
                     ):
                         self._block(task, "Authorize the workflow preview before launch")
                         continue
+                    # Its worker runs on a paired desktop, which counts it under its own
+                    # limit, so it neither waits for room here nor takes a worker here.
+                    fleet = runs_on_fleet(org, task)
                     if task["turns"] + reserved > config["maxTaskTurns"]:
                         self._block(
                             task,
                             "This task's run limit is too small for the runs it reserves",
                         )
+                        continue
+                    if held and not fleet:
+                        # No computer has room for this organization: claim nothing, and
+                        # show why. The first pass without a reading waits silently.
+                        reason = hold
+                        if snapshot is not None:
+                            # Placed again for this ticket's worker, provider and project,
+                            # so each paired desktop says why this ticket can't run there,
+                            # unless the user's own Rem task is what it waits for.
+                            reason = (
+                                snapshot.yielding(self.placement.claims)
+                                or snapshot.place(
+                                    start=organization_start(config, task, working_root)
+                                ).reason
+                            )
+                        if reason or waited:
+                            runtime["placementWait"] = reason or waited
+                        offer = (
+                            self._suggestion(snapshot, config, task, working_root)
+                            if snapshot is not None
+                            else suggested.get(task["id"])
+                        )
+                        if offer:
+                            # "<computer> has room: Run there"; nothing starts there unpicked.
+                            runtime.setdefault("placementSuggestions", {})[task["id"]] = offer
+                        # Keep looking, but only for tickets that run on a paired desktop.
+                        local_held = True
                         continue
                     # A monthly limit is temporary: wait for capacity instead of blocking.
                     if any(
@@ -3613,6 +3794,9 @@ class OrganizationManager:
                         if focus
                         else None,
                     }
+                    if placed is not None and not fleet:
+                        # Where this run started and why, decided now, for review.
+                        runtime["attempts"][task["claim"]]["placement"] = placed.record(now())
                     if not task.get("heartbeat"):
                         # Real work came up, so check-ins go back to their usual pace.
                         runtime.setdefault("quietCheckins", {}).pop(task["assignee"], None)
@@ -3634,6 +3818,7 @@ class OrganizationManager:
                             default=None,
                         ),
                         month=month,
+                        fleet=fleet,
                         working_root=working_root,
                         root_key=root_key,
                         isolated=isolated,
@@ -3663,7 +3848,7 @@ class OrganizationManager:
             org = self._pull_backlog(project, oid, org, instant)
             runtime = org["runtime"]
             # Avoid activity noise on every scheduler tick: only claim when something can move.
-            if not (
+            movable = (
                 any(
                     task_reason(org, t, instant) in DISPATCH_REASONS
                     or (
@@ -3706,15 +3891,50 @@ class OrganizationManager:
                     and datetime.fromisoformat(r["nextAt"]) <= instant
                     for r in runtime.get("routines", {}).values()
                 )
-            ):
+            )
+            if not movable:
+                if runtime.get("placementWait"):
+                    # Nothing waits to start anymore, so neither does it wait for a computer.
+                    self.store.mutate(project, oid, "system", "dispatch", _clear_placement_wait)
                 return
-            self.store.mutate(project, oid, "system", "dispatch", claim)
+            running = sum(active_oid == oid for active_oid, _, _ in self._active.values())
+            worker: WorkerClaim | None = None
+            # At its own maxConcurrency it starts nothing anyway, so no computer is asked.
+            if running < org["config"]["maxConcurrency"]:
+                # The worker is claimed before a ticket is, so a ticket never moves to
+                # In progress for a worker another start took first.
+                held, placed, hold, worker, snapshot = self._place(oid)
+            try:
+                self.store.mutate(project, oid, "system", "dispatch", claim)
+            except BaseException:
+                if worker:
+                    worker.release()
+                raise
             if not chosen:
+                if worker:
+                    worker.release()
                 return
+            if chosen.get("fleet") and worker:
+                # The paired desktop running it counts its worker; this computer doesn't.
+                worker.release()
+                worker = None
+            if worker:
+                # Settings › Computers lists the worker by organization and worker name.
+                worker.describe(
+                    f"{chosen['org']['config'].get('name') or 'Organization'}"
+                    f" · {chosen['employee'].get('name') or 'worker'}"
+                )
+                # A ticket that runs through a swarm gives it back once the swarm starts
+                # (OrganizationExecution.swarm): each swarm turn takes its own worker.
+                chosen["worker"] = worker
             cancel = threading.Event()
             turn_id = chosen["task"]["claim"]
+            if chosen.get("fleet"):
+                self._fleet_runs.add(turn_id)
+            # The worker's thread holds the claim and releases it when it ends.
+            target = worker.wrap(self._run) if worker else self._run
             thread = threading.Thread(
-                target=self._run,
+                target=target,
                 args=(chosen, cancel),
                 daemon=True,
                 name=f"employee-{turn_id[:8]}",
@@ -3727,7 +3947,129 @@ class OrganizationManager:
                 self._wake.set()
             except Exception as exc:
                 chosen["setup_error"] = str(exc)
-                self._run(chosen, cancel)
+                target(chosen, cancel)
+
+    @staticmethod
+    def _suggestion(
+        snapshot: Snapshot, config: dict[str, Any], task: dict[str, Any], root: str | None
+    ) -> dict[str, Any] | None:
+        """The paired desktop offered to a ticket waiting for room, or None.
+
+        With a fleet execution target the owner already made there for its worker and
+        project, it offers Run there; without one it says what to grant and offers no
+        pick (gofer.core.placement_suggestion).
+        """
+        found = suggest(snapshot, organization_start(config, task, root))
+        return found.public() if found is not None else None
+
+    def _run_there(
+        self, project: str, org: dict[str, Any], params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Point a waiting ticket at the owner's fleet target on its suggested desktop.
+
+        The pick only sets ``execution`` to a target the owner already made on that
+        desktop for the ticket's worker; ``validate_execution`` still applies, and
+        nothing is granted. Without such a target it is refused with what to grant.
+        """
+        task_id, computer = params.get("taskId"), params.get("computerId")
+        if not isinstance(task_id, str) or not isinstance(computer, str) or not computer:
+            raise ValueError("Choose a ticket and the computer its suggestion names")
+
+        def pick(current: dict[str, Any]) -> dict[str, Any]:
+            runtime, config = current["runtime"], current["config"]
+            task = next((t for t in runtime["tasks"] if t["id"] == task_id), None)
+            if task is None:
+                raise ValueError("Ticket not found")
+            if "expectedRevision" in params and task["revision"] != params["expectedRevision"]:
+                raise OrganizationConflict("Task changed. Read it before updating.")
+            if task["claim"] or task["status"] != "todo":
+                raise OrganizationConflict(
+                    "Only a ticket waiting to start can be sent to another computer"
+                )
+            if task.get("execution"):
+                raise OrganizationConflict("This ticket already runs through an execution target")
+            offer = (runtime.get("placementSuggestions") or {}).get(task_id)
+            if not isinstance(offer, dict) or offer.get("computer_id") != computer:
+                raise OrganizationConflict("No paired desktop has room for this ticket now")
+            if not offer.get("pick"):
+                raise ValueError(str(offer.get("grant") or "No execution target is granted there"))
+            target = next(
+                (
+                    t
+                    for t in config.get("executionTargets") or []
+                    if t.get("id") == offer.get("target_id")
+                ),
+                None,
+            )
+            if (
+                target is None
+                or target.get("kind") != "fleet"
+                or target.get("deviceId") != computer
+                or task["assignee"] not in (target.get("employees") or [])
+            ):
+                raise ValueError(
+                    "The execution target for this ticket's worker on that computer is gone; "
+                    "grant one again in the organization's settings"
+                )
+            task["execution"] = {"targetId": target["id"]}
+            validate_execution(current, task)
+            task["revision"] += 1
+            runtime["placementSuggestions"].pop(task_id, None)
+            return {
+                "taskId": task_id,
+                "targetId": target["id"],
+                "computerId": computer,
+                "chosenBy": "user",
+            }
+
+        self.store.mutate(project, org["id"], "user", "run_there", pick)
+        self._wake.set()
+        return self.public(self.store.get(project, org["id"]))
+
+    def _place(
+        self, oid: str
+    ) -> tuple[bool, Placement | None, str | None, WorkerClaim | None, Snapshot | None]:
+        """This organization's next start: whether it waits, its computer, why, its worker,
+        and the snapshot it was placed on.
+
+        Called with ``self._lock`` held. Every consumer's workers on this computer are
+        counted live from the worker claims, and the worker is claimed here under
+        their one lock, so a Rem or phone start on another thread can't take the
+        same last worker. The caller releases the claim when no ticket starts, or when
+        the ticket only sends its work to a paired desktop (``runs_on_fleet``): that
+        desktop counts the worker, so it isn't counted here too.
+        Organization workers run only on this computer for now, so paired desktops
+        stay unusable and the computer claimed is the same for every ticket. When it
+        waits, the claim places the snapshot again for its own ticket
+        (``organization_start``), so each paired desktop gives that ticket's reason:
+        its worker, provider, project and the owner's execution targets. Without the
+        registry (tests, or before the UI server sets it) nothing is placed, only
+        ``maxConcurrency`` limits the starts, and the worker is still counted. While
+        it waits the reason is the engine's, or None on a first pass that is still
+        waiting for the computers' reading.
+
+        The user's own Rem runs go first: while one waits for a worker on a computer
+        this organization could use, it claims no worker there, and the reason names
+        that run. Workers already running keep running. A computer short of memory
+        with a worker running takes no new one either, and the reason is "Waiting for
+        free memory (…)", as on a Rem task.
+        """
+        claims = self.placement.claims
+        if self.placement.computers is None:
+            # No limit to check, but a waiting user start still goes first.
+            worker = claims.claim(THIS_COMPUTER, ORGANIZATIONS, sys.maxsize)
+            if worker is None:
+                titles = claims.waiting([THIS_COMPUTER])
+                reason = waiting_reason(titles) if titles else claims.held_back(THIS_COMPUTER)
+                return True, None, reason, None, None
+            return False, None, None, worker, None
+        snapshot = self.placement.registry_snapshot(organization_consumer(oid))
+        if snapshot is None:
+            return True, None, self.placement.wait_reason(), None, None
+        placed, worker = snapshot.claim(snapshot.place(), claims, ORGANIZATIONS)
+        if worker is None:
+            return True, None, snapshot.yielding(claims) or placed.reason, None, snapshot
+        return False, placed, None, worker, snapshot
 
     def _pull_backlog(
         self, project: str, oid: str, org: dict[str, Any], instant: datetime
@@ -3851,6 +4193,18 @@ class OrganizationManager:
                     )
             if org["config"].get("blockGitPush", True):
                 workspace_note += "git push is blocked in this run. Leave publishing to the user.\n"
+            account: dict[str, Any] = {}
+            if not task.get("execution"):
+                # The worker's own account, or the default sign-in when it has none or it
+                # was removed or signed out since. The run records which, and why.
+                account = pick_worker_account(employee, self.data_dir)
+                provenance["account"] = account
+                if account["accountId"] and not account["name"]:
+                    log.warning(
+                        "ORGANIZATION_ACCOUNT_FALLBACK organization=%s employee=%s",
+                        oid,
+                        employee["id"],
+                    )
             run_root = str(Path(run_root).resolve())
             if run_root not in workspace_paths:
                 workspace_paths = sorted({*workspace_paths, run_root})
@@ -3930,6 +4284,7 @@ class OrganizationManager:
                         + workspace_note
                         + mini_rem_brief(assigned_roots)
                         + run_brief(schedule)
+                        + (AUTO_MODE_BRIEF + "\n" if auto_on(org) else "")
                         + f"Persistent memory: {employee['memory']}\n"
                         "Working memory: "
                         + org["runtime"].get("employeeMemory", {}).get(employee["id"], "")
@@ -4050,6 +4405,18 @@ class OrganizationManager:
                                 data_dir=runtime_dir,
                                 working_dir=Path(run_root),
                                 cancel_event=cancel,
+                                # Which brains are private is in Raticode's data folder.
+                                library_data_dir=self.data_dir,
+                                **(
+                                    {
+                                        "provider_profile": account["name"],
+                                        # Accounts live in Raticode's data folder, not
+                                        # the worker's runtime folder.
+                                        "account_data_dir": self.data_dir,
+                                    }
+                                    if account.get("name")
+                                    else {}
+                                ),
                             )
                         ) as direct:
                             async for item in direct:
@@ -4171,7 +4538,7 @@ class OrganizationManager:
             # Delegated executions may have external effects, so they stay blocked for review.
             paused = (
                 cancelled
-                and cancel_reason in {"paused", "hours", "restart"}
+                and cancel_reason in {"paused", "hours", "restart", "held"}
                 and not task.get("execution")
             )
 
@@ -4279,7 +4646,32 @@ class OrganizationManager:
                             + " Its status was kept.",
                         }
                     )
-                if paused and existing["status"] == "in_progress":
+                if paused and cancel_reason == "held" and existing["status"] == "in_progress":
+                    # Holding a worker is not a failure either. A check-in closes (the next
+                    # one takes its place); other work goes back to To do, first in line
+                    # for when the worker is back, and the stopped run isn't charged.
+                    if is_heartbeat(existing):
+                        existing.update(status="cancelled", cancellation="acknowledged")
+                    else:
+                        existing.update(
+                            status="todo",
+                            turns=max(0, existing["turns"] - used),
+                            pulledAt=existing.get("pulledAt")
+                            or (attempt["startedAt"] if attempt else now()),
+                        )
+                    existing["comments"].append(
+                        {
+                            "actor": "system",
+                            "at": now(),
+                            "body": f"{employee['name']} was held before this run finished. "
+                            + (
+                                "The next check-in takes its place."
+                                if is_heartbeat(existing)
+                                else "It runs again, first in line, when they're back."
+                            ),
+                        }
+                    )
+                elif paused and existing["status"] == "in_progress":
                     # Pausing is not a failure: the task waits, blocked, for the next Start or
                     # for hours to open, then goes back to To do by itself, and the
                     # interrupted run doesn't count against its run limit.
@@ -4438,6 +4830,9 @@ class OrganizationManager:
                     record_invocation(
                         invocation_id=f"organization:{turn_id}",
                         provider=employee["provider"] if execution_kind is None else execution_kind,
+                        # Counted against the worker's account, so its usage and limits
+                        # show there.
+                        profile=(provenance.get("account") or {}).get("name") or None,
                         model=employee["model"] if execution_kind is None else None,
                         metadata=usage,
                         run_id=turn_id,
@@ -4456,4 +4851,5 @@ class OrganizationManager:
                     self._active_tasks.pop(turn_id, None)
                     self._active.pop(turn_id, None)
                     self._active_roots.pop(turn_id, None)
+                    self._fleet_runs.discard(turn_id)
                 self._wake.set()

@@ -94,8 +94,10 @@ class LiveClient(app: Application,
     var threadResources by mutableStateOf<Map<String, List<Resource>>>(emptyMap()); private set
     var remoteControl by mutableStateOf(false); private set
     @Volatile private var remoteAllowed = false
+    /** [options] replace Approve and Reject when set; [reply] is "none", "optional" or "required". */
     data class Approval(val id: String, val digest: String, val source: String, val title: String, val summary: String,
-                        val requestedAt: String, val instructionRequired: Boolean)
+                        val requestedAt: String, val instructionRequired: Boolean,
+                        val options: List<String> = emptyList(), val reply: String = "none")
     var approvals by mutableStateOf<List<Approval>>(emptyList()); private set
     var approvalsLoaded by mutableStateOf(false); private set
     private val seenApprovals = mutableSetOf<String>()
@@ -124,6 +126,18 @@ class LiveClient(app: Application,
      */
     var threadPurgeSync by mutableStateOf(false); private set
     @Volatile private var threadPurgeAllowed = false
+    /** The desktop answers `provider.accounts` and takes an `account` with thread creation and settings. */
+    @Volatile private var threadAccountsAllowed = false
+    /** The thread picker's Account menus and the open thread's choices; null until the desktop answers. */
+    var threadAccounts by mutableStateOf<ThreadAccounts.View?>(null); private set
+    var threadAccountsSync by mutableStateOf(false); private set
+    /** The desktop takes `provider.account.sign_in`: Codex and Grok accounts sign in from this phone with a link and a code. */
+    @Volatile private var accountSignInAllowed = false
+    var accountSignInSync by mutableStateOf(false); private set
+    /** Sign-ins this phone started, by account name, with the desktop's latest state (link, code, result). */
+    var accountSignIns by mutableStateOf<Map<String, ThreadAccounts.SignIn>>(emptyMap()); private set
+    private val signInNames = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private var nextSignInPoll = 0L
     /** Latest desktop results by screen key; held in memory only. */
     var desktopViews by mutableStateOf<Map<String, Any>>(emptyMap()); private set
     /** Rem chat search: the words, and what the desktop (or this phone, offline) found for them. */
@@ -206,6 +220,8 @@ class LiveClient(app: Application,
     /** The desktop takes `rem.run.pause` and `rem.run.resume` (RunPause). */
     var runPause by mutableStateOf(false); private set
     @Volatile private var runPauseAllowed = false
+    /** The desktop answers `rem.decisions` and takes `rem.decision.change` (RemDecisions). */
+    @Volatile private var decisionsAllowed = false
     /**
      * Rem's reply as it is written, read as small `rem.draft` deltas while Rem replies (a desktop with `draft_deltas`).
      * Deltas are reads, not pushed events, so no fragment is stored in either side's durable outbox or journal.
@@ -259,6 +275,17 @@ class LiveClient(app: Application,
     /** The desktop lists triggers and lets the phone turn them on and off and pause them all; null until its overview says. */
     var workflowTriggers by mutableStateOf<Boolean?>(null); private set
     @Volatile private var workflowTriggersAllowed = false
+    /** The desktop shows each trigger's approval and takes workflows.trigger.changes and .approve; null until it says. */
+    var workflowTriggerApproval by mutableStateOf<Boolean?>(null); private set
+    @Volatile private var workflowTriggerApprovalAllowed = false
+    /** The desktop answers `workflows.failure` for Ask Rem about this failure; null until its overview says. */
+    var workflowFailures by mutableStateOf<Boolean?>(null); private set
+    @Volatile private var workflowFailuresAllowed = false
+    /** The desktop takes Try another model on a workflow's tests; null until its overview says. */
+    var workflowTests by mutableStateOf<Boolean?>(null); private set
+    @Volatile private var workflowTestsAllowed = false
+    /** The Ask Rem about this failure read in progress or just answered; the Workflows page takes it up. */
+    var runFailure by mutableStateOf<RunFailureRead?>(null); private set
     /** Whether this desktop shows its projects' Git status to the phone: null until its overview arrives this session. */
     var sourceControl by mutableStateOf<Boolean?>(null); private set
     @Volatile private var sourceControlAllowed = false
@@ -282,6 +309,20 @@ class LiveClient(app: Application,
     /** The desktop shows its browser tabs to the phone's browser and opens pages sent to it; null until it says. */
     var desktopBrowser by mutableStateOf<Boolean?>(null); private set
     @Volatile private var browserAllowed = false
+    /** The desktop shares its Posts dashboard (posts.list, posts.decide); null until it says. */
+    var desktopPosts by mutableStateOf<Boolean?>(null); private set
+    /** Whether the desktop lists its computers; null until its overview answers. */
+    var desktopComputers by mutableStateOf<Boolean?>(null); private set
+    @Volatile private var postsAllowed = false
+    /** The desktop answers `computers.list` and takes `computers.set`; an older one would refuse them. */
+    @Volatile private var computersAllowed = false
+    /** Whether the desktop says where Rem and organizations run; null until its overview answers. */
+    var desktopComputerPlacement by mutableStateOf<Boolean?>(null); private set
+    /** The desktop answers `computers.placement` and takes `computers.place`; an older one would refuse them. */
+    @Volatile private var placementAllowed = false
+    /** Whether the desktop takes Run there (`computers.run_there`), from its overview. */
+    var desktopRunThere by mutableStateOf(false); private set
+    @Volatile private var runThereAllowed = false
     /** Whether this desktop takes the five-section Organizations actions: null until its overview arrives this session. */
     var organizationsV2 by mutableStateOf<Boolean?>(null); private set
     @Volatile private var organizationsV2Allowed = false
@@ -334,6 +375,9 @@ class LiveClient(app: Application,
     private val linkFiles = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val linkDownloads = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private var nextApprovals = 0L
+    // Desktops before option buttons refuse include_choices; after one does, ask without it.
+    private var approvalChoices = true
+    private val choiceRequests = mutableSetOf<String>()
     private var nextSwarms = 0L
     private var nextHistory = 0L
     private var activeThread: String? = null
@@ -660,6 +704,8 @@ class LiveClient(app: Application,
         linkFiles.clear(); linkDownloads.clear(); awaitingLink = null; awaitingExplorer = null; explorerWaiting = null; mediaRequested.clear(); mediaDownloads.clear(); attachmentAuto.clear(); attachmentWaiting.clear()
         main.post { attachmentFetches = emptyMap() }
         alertReplies.clear(); RemNotifications.clear(getApplication())
+        // Run a workflow's remembered inputs and direct-share shortcuts name the old desktop's workflows.
+        dev.raticode.mobile.share.WorkflowShareStore.clear(getApplication()); main.post { dev.raticode.mobile.share.WorkflowShareInbox.clear() }
         progressRuns = emptyList(); progressFresh = 0; TaskNotification.clear(getApplication())
         publish(); main.post { connected = false; cantConnect = false; linkFetch = null; mediaPreviews = emptyMap() }; publishStatus("Local pairing deleted. Also revoke this phone on desktop.")
     } }
@@ -672,10 +718,12 @@ class LiveClient(app: Application,
             if (DeviceRoutes.dropTailnetRequests(next)) { store.save(next); saved = next }
         }
         // This desktop may be older than the last one; ask what it supports before polling workflows again.
-        workflowsAllowed = false; workflowRunsAllowed = false; workflowTriggersAllowed = false; noticesAllowed = false; noticesFilterAllowed = false; noticesWorkflowAllowed = false; sourceControlAllowed = false; sourceHistoryAllowed = false; attachmentsAllowed = false
+        workflowsAllowed = false; workflowRunsAllowed = false; workflowTriggersAllowed = false; workflowTriggerApprovalAllowed = false; workflowFailuresAllowed = false; workflowTestsAllowed = false; noticesAllowed = false; noticesFilterAllowed = false; noticesWorkflowAllowed = false; sourceControlAllowed = false; sourceHistoryAllowed = false; attachmentsAllowed = false
         explorerAllowed = false; explorerKnown = false
-        developerLogAllowed = false; organizationsV2Allowed = false; organizationsV2Known = false; organizationScheduleAllowed = false; organizationBacklogPullAllowed = false; organizationRequestsAllowed = false; organizationAutoModeAllowed = false; logRequest = null; browserAllowed = false
+        developerLogAllowed = false; organizationsV2Allowed = false; organizationsV2Known = false; organizationScheduleAllowed = false; organizationBacklogPullAllowed = false; organizationRequestsAllowed = false; organizationAutoModeAllowed = false; logRequest = null; browserAllowed = false; postsAllowed = false; computersAllowed = false; placementAllowed = false; runThereAllowed = false
         kanbanAllowed = false; kanbanParticipantsAllowed = false; kanbanCommentsAllowed = false; kanbanKnown = false; nextSelfWork = 0
+        // A new connection may reach an updated desktop: ask for approvals with options again.
+        approvalChoices = true
         JSONObject(saved.toString()).let { next ->
             // An open still waiting for its answer is asked again once the desktop says it takes it.
             val explorerDropped = FileExplorer.dropQueued(next)
@@ -735,8 +783,8 @@ class LiveClient(app: Application,
         check(!stopped)
         activeCandidate = null
         connection = candidate; reconnect = true; failures = 0; mediaChecked = false
-        main.post { connected = true; cantConnect = false; route = candidate.route; workflows = null; workflowRuns = null; workflowTriggers = null; sourceControl = null; sourceControlHistory = null; fileExplorer = null
-            developerLogSupported = null; organizationsV2 = null; organizationSchedule = null; organizationBacklogPull = null; organizationRequests = null; organizationAutoMode = null; organizationRequestResults = null; desktopBrowser = null; kanban = null; kanbanParticipants = null; kanbanComments = null }
+        main.post { connected = true; cantConnect = false; route = candidate.route; workflows = null; workflowRuns = null; workflowTriggers = null; workflowTriggerApproval = null; workflowFailures = null; workflowTests = null; runFailure = null; sourceControl = null; sourceControlHistory = null; fileExplorer = null
+            developerLogSupported = null; organizationsV2 = null; organizationSchedule = null; organizationBacklogPull = null; organizationRequests = null; organizationAutoMode = null; organizationRequestResults = null; desktopBrowser = null; desktopPosts = null; kanban = null; kanbanParticipants = null; kanbanComments = null }
         notePhone("info", "Connected to desktop over ${candidate.route}")
         publish()
         val pending = saved.optJSONArray("outbox") ?: JSONArray()
@@ -744,12 +792,12 @@ class LiveClient(app: Application,
         requestSync()
         pumpUpload()
     }
-    private fun queue(type: String, thread: String?, payload: JSONObject, onCommitted: () -> Unit = {}) {
+    private fun queue(type: String, thread: String?, payload: JSONObject, onCommitted: () -> Unit = {}, requestId: String? = null) {
         check(!locked && !stopped)
-        commits.afterCommit { commitQueued(type, thread, payload, onCommitted) }
+        commits.afterCommit { commitQueued(type, thread, payload, onCommitted, requestId) }
     }
-    private fun commitQueued(type: String, thread: String?, payload: JSONObject, onCommitted: () -> Unit) {
-        val (next, event) = LiveJournal.prepare(saved, type, thread, payload)
+    private fun commitQueued(type: String, thread: String?, payload: JSONObject, onCommitted: () -> Unit, requestId: String? = null) {
+        val (next, event) = LiveJournal.prepare(saved, type, thread, payload, requestId)
         transfers.expire(next)
         store.save(next); saved = next; publish()
         main.post(onCommitted)
@@ -974,7 +1022,8 @@ class LiveClient(app: Application,
         json.optString("created_at"), json.optString("kind"), json.optString("title"), json.optInt("files"), json.optBoolean("unavailable"))
     fun createThread(template: String, title: String = "New thread", project: String? = null,
                      provider: String? = null, model: String? = null, effort: String = "",
-                     permission: String? = null, firstMessage: String = "", draftText: String = "", onCommitted: () -> Unit = {}) {
+                     permission: String? = null, firstMessage: String = "", draftText: String = "", account: String? = null,
+                     onCommitted: () -> Unit = {}) {
         if (title.isBlank() || title.length > 160 || firstMessage.length > 4000 || draftText.length > 4000) return
         if (creatingThread) return
         creatingThread = true
@@ -990,6 +1039,8 @@ class LiveClient(app: Application,
                 if (provider != null && model != null) {
                     payload.put("project_id", project ?: JSONObject.NULL).put("provider", provider).put("model", model).put("effort", effort)
                     if (!permission.isNullOrBlank()) payload.put("permission_mode", permission)
+                    // An older desktop would refuse the unknown field, so only ones that say so get it.
+                    if (!account.isNullOrBlank() && threadAccountsAllowed) payload.put("account", account)
                 }
                 val (next, event) = LiveJournal.prepare(saved, "thread.create", null, payload)
                 // Commit the first-message intent with creation. Its authenticated reply atomically
@@ -1054,7 +1105,7 @@ class LiveClient(app: Application,
     fun loadEarlier(thread: String) { enqueue { historyBefore[thread]?.takeIf { it > 0 }?.let { requestHistory(thread, it) } } }
     fun updateModel(thread: String, provider: String, model: String) = updateContext(thread, provider, model, threadContexts[thread]?.project, threadContexts[thread]?.effort.orEmpty())
     fun updateContext(thread: String, provider: String, model: String, project: String?, effort: String, expectedRevision: Long? = null, permission: String? = null,
-                      resources: List<String>? = null) { enqueue {
+                      resources: List<String>? = null, account: String? = null) { enqueue {
         val list = saved.optJSONArray("threads") ?: JSONArray()
         val source = (0 until list.length()).map { list.getJSONObject(it) }.firstOrNull { it.optString("thread_id") == thread } ?: return@enqueue
         val payload = JSONObject().put("expected_revision", expectedRevision ?: source.optLong("revision", 1)).put("provider", provider).put("model", model)
@@ -1062,26 +1113,40 @@ class LiveClient(app: Application,
         if (permission != null) payload.put("permission_mode", permission)
         // Only an explicit choice changes resources; the desktop ignores the copied list otherwise.
         if (resources != null) payload.put("resource_ids", JSONArray(resources.distinct().take(32))).put("set_resources", true)
+        if (account != null) {
+            if (!threadAccountsAllowed) { main.post { requestError = ThreadAccounts.UPDATE_DESKTOP }; return@enqueue }
+            payload.put("account", account)
+        }
         queue("thread.context.update", thread, payload)
+        // The answer's thread snapshot doesn't carry the choice; read the menu again after it.
+        if (account != null) queueDesktop("desktop.read", ThreadAccounts.OP, ThreadAccounts.params(thread))
     } }
     /** Rem's thoughts and tools refresh about every second while the open thread runs. */
     private fun pollLive(now: Long) {
+        // A waiting sign-in's code and result come from the Account menu read.
+        if (now >= nextSignInPoll && accountSignIns.values.any { it.waiting }) {
+            nextSignInPoll = now + 3000
+            val params = ThreadAccounts.params(threadAccounts?.thread)
+            if (threadAccountsAllowed && desktopAllowed && connection != null && !pendingDesktop(ThreadAccounts.OP, params))
+                queueDesktop("desktop.read", ThreadAccounts.OP, params)
+        }
         if (now >= nextHistory) {
             nextHistory = now + 1000
             activeThread?.takeIf(::running)?.let { requestHistory(it, null) }
         }
         if (remoteAllowed && now >= nextApprovals && !pendingRead("approval.request")) {
             nextApprovals = now + 15000
-            queue("approval.request", null, JSONObject())
+            requestApprovals()
         }
         // Voice mode and the share screen wait on Rem's chat whichever screen the app shows.
         val remWaiting = voiceActive || shareActive
         val screen = if (remWaiting) "rem.home" to JSONObject() else desktopScreen
         if (screen != null && desktopAllowed && now >= nextDesktop && !pendingDesktop(screen.first, screen.second)
-            && (workflowsAllowed || !Workflows.isWorkflowOp(screen.first)) && (workflowRunsAllowed || screen.first != Workflows.RUNS) && (sourceControlAllowed || !SourceControl.isOp(screen.first))
+            && (workflowsAllowed || !Workflows.isWorkflowOp(screen.first)) && (workflowRunsAllowed || screen.first != Workflows.RUNS) && (workflowTriggerApprovalAllowed || screen.first != Workflows.CHANGES) && (workflowTestsAllowed || screen.first !in Workflows.TEST_READS) && (sourceControlAllowed || !SourceControl.isOp(screen.first))
             && (sourceHistoryAllowed || screen.first !in SourceControl.LATER) && (explorerAllowed || !FileExplorer.isOp(screen.first))
             && (developerLogAllowed || screen.first != DeveloperLog.OP) && (organizationsV2Allowed || screen.first != OrganizationModel.NOTE)
             && (browserAllowed || screen.first != DesktopBrowser.TABS) && (kanbanAllowed || !Kanban.isOp(screen.first))
+            && (postsAllowed || screen.first !in Posts.READS) && !Computers.blocked(screen.first, computersAllowed) && !Computers.placementBlocked(screen.first, placementAllowed)
             && (kanbanCommentsAllowed || screen.first != Kanban.TIMELINE)) {
             // Git status runs on every open project, so it refreshes less often; Refresh asks at once.
             // The log follows new entries every two seconds while it is open.
@@ -1152,7 +1217,56 @@ class LiveClient(app: Application,
     fun refreshDesktop() { enqueue { nextDesktop = 0 } }
     /** Asks the desktop again what it supports, such as after updating it. */
     fun checkDesktopFeatures() { enqueue { if (desktopAllowed && connection != null) { mediaChecked = true; queueDesktop("desktop.read", "overview", JSONObject()) } } }
+    /**
+     * Starts [name]'s sign-in on the desktop, which runs the provider's device sign-in for that account. Its link and
+     * one-time code come with the next Account menu reads, which repeat every few seconds until it finishes.
+     */
+    fun signInAccount(provider: String, name: String) {
+        if (!desktopAllowed) { requestError = DESKTOP_OFF; return }
+        if (!accountSignInAllowed) { requestError = ThreadAccounts.SIGN_IN_UPDATE_DESKTOP; return }
+        signInNames.add(name)
+        accountSignIns = accountSignIns + (name to ThreadAccounts.SignIn("waiting"))
+        desktopAction(ThreadAccounts.SIGN_IN, ThreadAccounts.signInParams(provider, name))
+        enqueue { nextSignInPoll = android.os.SystemClock.elapsedRealtime() + 1500 }
+    }
+    /** Stops [name]'s sign-in on the desktop and closes it here. */
+    fun cancelAccountSignIn(provider: String, name: String) {
+        dismissAccountSignIn(name)
+        if (desktopAllowed && accountSignInAllowed) desktopAction(ThreadAccounts.SIGN_IN, ThreadAccounts.signInParams(provider, name, cancel = true))
+    }
+    /** Closes a finished sign-in's panel; the desktop keeps nothing more for it. */
+    fun dismissAccountSignIn(name: String) { signInNames.remove(name); accountSignIns = accountSignIns - name }
+    private fun noteSignIns(states: Map<String, ThreadAccounts.SignIn>) {
+        val mine = states.filterKeys { it in signInNames }
+        if (mine.isEmpty()) return
+        // Signed in: the open screen (Usage, the Account menu) reads its new state again.
+        if (mine.values.any { it.done }) nextDesktop = 0
+        main.post { accountSignIns = accountSignIns + mine.filterKeys { it in signInNames } }
+    }
+    /** Reads the Account menus, with [thread]'s own choices when it names a shared thread. Older desktops aren't asked. */
+    fun readThreadAccounts(thread: String?) { enqueue {
+        if (!threadAccountsAllowed || !desktopAllowed || connection == null) return@enqueue
+        val params = ThreadAccounts.params(thread)
+        if (!pendingDesktop(ThreadAccounts.OP, params)) queueDesktop("desktop.read", ThreadAccounts.OP, params)
+    } }
     fun dismissWorkflowNotice() { workflowNotice = null }
+    /**
+     * Ask Rem about this failure on a run: reads what the desktop attaches for it once. The Workflows page puts the answer in
+     * Rem's message box as a file; nothing is sent until the user sends it.
+     */
+    fun askRemAboutRun(workflowId: String, runId: String, nodeId: String? = null) {
+        val params = Workflows.failureParams(workflowId, runId, nodeId)
+        val key = Workflows.failureKey(params)
+        if (!connected || !desktopAllowed) { runFailure = RunFailureRead(key, error = "Not connected. Ask again once your computer is back."); return }
+        // An older desktop would refuse the unknown read; say what's needed instead.
+        if (!workflowFailuresAllowed) { runFailure = RunFailureRead(key, error = Workflows.UPDATE_FAILURE); return }
+        runFailure = RunFailureRead(key)
+        enqueue {
+            if (connection == null || !desktopAllowed) { main.post { runFailure = RunFailureRead(key, error = "Not connected. Ask again once your computer is back.") }; return@enqueue }
+            queueDesktop("desktop.read", Workflows.FAILURE, params)
+        }
+    }
+    fun clearRunFailure() { runFailure = null }
     fun desktopAction(op: String, params: JSONObject) {
         require(op in DesktopViews.ACTIONS)
         // Only a desktop that reports this extension receives these events.
@@ -1160,8 +1274,15 @@ class LiveClient(app: Application,
         // An older desktop would reject the unknown op and close the session.
         if (Workflows.isWorkflowOp(op) && !workflowsAllowed) { requestError = Workflows.UPDATE_DESKTOP; return }
         if (op == DesktopBrowser.OPEN && !browserAllowed) { requestError = DesktopBrowser.UPDATE_DESKTOP; return }
+        if (op in Posts.ACTIONS && !postsAllowed) { requestError = Posts.UPDATE_DESKTOP; return }
+        if (Computers.blocked(op, computersAllowed)) { requestError = Computers.UPDATE_DESKTOP; return }
+        if (Computers.placementBlocked(op, placementAllowed)) { requestError = Computers.UPDATE_PLACEMENT; return }
+        if (RunThere.blocked(op, runThereAllowed)) { requestError = RunThere.UPDATE_DESKTOP; return }
         if ((op == RunPause.PAUSE || op == RunPause.RESUME) && !runPauseAllowed) { requestError = RunPause.UPDATE_DESKTOP; return }
+        if (op == RemDecisions.CHANGE && !decisionsAllowed) { requestError = RemDecisions.UPDATE_DESKTOP; return }
         if ((op == Workflows.TRIGGER || op == Workflows.PAUSE) && !workflowTriggersAllowed) { requestError = Workflows.UPDATE_TRIGGERS; return }
+        if (op == Workflows.APPROVE && !workflowTriggerApprovalAllowed) { requestError = Workflows.UPDATE_APPROVAL; return }
+        if (op in Workflows.TEST_ACTIONS && !workflowTestsAllowed) { requestError = Workflows.UPDATE_TESTS; return }
         val copy = JSONObject(params.toString())
         if (Kanban.isOp(op)) {
             // Tapped before this session's overview answered: it goes once the desktop says it takes it.
@@ -1743,6 +1864,19 @@ class LiveClient(app: Application,
         if (key.startsWith(ChatImages.KEY) && !payload.getBoolean("ok")) {
             desktopRequests.remove(request); desktopParts.drop(request); receiveImage(key.removePrefix(ChatImages.KEY), null); return
         }
+        if (key.startsWith(Workflows.FAILURE + ":")) {
+            if (!payload.getBoolean("ok")) {
+                desktopRequests.remove(request); desktopParts.drop(request)
+                val detail = payload.optString("detail").ifBlank { "Your computer couldn't read this run." }
+                main.post { runFailure?.takeIf { it.key == key }?.let { runFailure = it.copy(error = detail) } }
+                return
+            }
+            val body = desktopParts.add(request, payload) ?: return
+            desktopRequests.remove(request)
+            val failure = Workflows.parseFailure(body)
+            main.post { runFailure?.takeIf { it.key == key }?.let { runFailure = it.copy(failure = failure) } }
+            return
+        }
         if (key == RemSearch.SEARCH || key == RemSearch.HISTORY) {
             if (!payload.getBoolean("ok")) { desktopRequests.remove(request); desktopParts.drop(request); receiveRemSearch(key, request, null, payload.optString("code"), payload.optString("detail")); return }
             val body = desktopParts.add(request, payload) ?: return
@@ -1753,6 +1887,8 @@ class LiveClient(app: Application,
             val detail = payload.optString("detail").ifBlank { "The desktop could not complete this request." }
             notePhone(if (action) "warn" else "info", "Desktop answered ${payload.optString("op")} with ${payload.optString("code").ifBlank { "an error" }}: $detail")
             main.post { desktopErrors = desktopErrors + (key to detail); if (action) { desktopBusy = desktopBusy - key; requestError = detail } }
+            // A decision that changed on the desktop since the phone showed it: read the open screen again, list or chat.
+            if (action && key == RemDecisions.READ && payload.optString("code") == "conflict") nextDesktop = 0
             return
         }
         val body = desktopParts.add(request, payload) ?: return
@@ -1765,6 +1901,20 @@ class LiveClient(app: Application,
         if (key.startsWith(ChatImages.KEY)) { receiveImage(key.removePrefix(ChatImages.KEY), body); return }
         if (key.startsWith(ChatPreviews.KEY)) { receivePreview(key.removePrefix(ChatPreviews.KEY), body); pumpPreviews(); return }
         if (key == "rem.draft") { applyDraft(DesktopViews.parse(key, body) as RemDraftDelta); return }
+        if (key.startsWith(ThreadAccounts.OP + ":")) {
+            val view = ThreadAccounts.parse(key, body)
+            noteSignIns(ThreadAccounts.signIns(view))
+            main.post { threadAccounts = view }
+            return
+        }
+        if (key.startsWith(ThreadAccounts.SIGN_IN_KEY)) {
+            // Started or cancelled: the answer is that account's sign-in; the code follows in the next menu read.
+            val name = key.removePrefix(ThreadAccounts.SIGN_IN_KEY)
+            ThreadAccounts.parseSignIn(body.optJSONObject("sign_in"))?.let { noteSignIns(mapOf(name to it)) }
+            nextSignInPoll = 0
+            main.post { desktopBusy = desktopBusy - key; desktopErrors = desktopErrors - key }
+            return
+        }
         // A run, stop or resume answer is a short status line; the screen refreshes on the next read.
         if (action && key.startsWith(Workflows.READ + ":") && !Workflows.isView(body)) {
             nextDesktop = 0
@@ -1794,8 +1944,15 @@ class LiveClient(app: Application,
         val view = DesktopViews.parse(key, body)
         when (view) {
             is DesktopOverview -> {
-                mediaAllowed = view.media; fileLinksAllowed = view.fileLinks; workflowsAllowed = view.workflows; workflowRunsAllowed = view.workflowRuns; workflowTriggersAllowed = view.workflowTriggers; richAllowed = view.richResults
+                mediaAllowed = view.media; fileLinksAllowed = view.fileLinks; workflowsAllowed = view.workflows; workflowRunsAllowed = view.workflowRuns; workflowTriggersAllowed = view.workflowTriggers; workflowTriggerApprovalAllowed = view.workflowTriggerApproval; workflowFailuresAllowed = view.workflowFailures; workflowTestsAllowed = view.workflowTests; richAllowed = view.richResults
                 draftAllowed = view.draftDeltas; reviewRetryAllowed = view.reviewRetry; threadReadAllowed = view.threadRead; threadPurgeAllowed = view.threadPurge; runPauseAllowed = view.runPause
+                decisionsAllowed = view.remDecisions
+                threadAccountsAllowed = view.threadAccounts
+                accountSignInAllowed = view.threadAccounts && view.accountSignIn
+                val signInFromPhone = accountSignInAllowed
+                main.post { accountSignInSync = signInFromPhone }
+                val accountMenus = view.threadAccounts
+                main.post { threadAccountsSync = accountMenus; if (!accountMenus) threadAccounts = null }
                 if (noticesFilterAllowed && !view.remNoticesFilter) dropQueuedNoticeFilters(state)
                 else if (noticesWorkflowAllowed && !view.remNoticesWorkflow) dropQueuedNoticeFilters(state, workflowOnly = true)
                 WakeOnLan.remember(state, view.wakeMac)
@@ -1808,6 +1965,18 @@ class LiveClient(app: Application,
                 organizationRequestsAllowed = view.organizationsV2 && view.organizationRequests
                 organizationAutoModeAllowed = view.organizationsV2 && view.organizationAutoMode
                 browserAllowed = view.browser
+                postsAllowed = view.posts
+                val posts = view.posts
+                main.post { desktopPosts = posts }
+                computersAllowed = view.computers
+                val listsComputers = view.computers
+                main.post { desktopComputers = listsComputers }
+                placementAllowed = view.computerPlacement
+                val placesWork = view.computerPlacement
+                main.post { desktopComputerPlacement = placesWork }
+                runThereAllowed = view.runThere
+                val runsThere = view.runThere
+                main.post { desktopRunThere = runsThere }
                 kanbanAllowed = view.kanban; kanbanParticipantsAllowed = view.kanban && view.kanbanParticipants; kanbanKnown = true; nextSelfWork = 0
                 kanbanCommentsAllowed = view.kanban && view.kanbanComments
                 val board = view.kanban
@@ -1832,8 +2001,8 @@ class LiveClient(app: Application,
                 }
                 val supported = view.workflows; val reading = view.threadRead; val purging = view.threadPurge; val alerts = view.remNotices; val alertFilter = view.remNoticesFilter; val alertWorkflow = view.remNoticesFilter && view.remNoticesWorkflow; val git = view.sourceControl; val gitHistory = view.sourceControlHistory
                 val files = view.fileExplorer
-                val allRuns = view.workflowRuns; val triggerSwitches = view.workflowTriggers
-                main.post { workflows = supported; workflowRuns = allRuns; workflowTriggers = triggerSwitches; threadReadSync = reading; threadPurgeSync = purging; remAlerts = alerts; remAlertFilter = alertFilter; remAlertWorkflow = alertWorkflow; sourceControl = git; sourceControlHistory = gitHistory; fileExplorer = files }
+                val allRuns = view.workflowRuns; val triggerSwitches = view.workflowTriggers; val triggerApproval = view.workflowTriggerApproval; val failures = view.workflowFailures; val tests = view.workflowTests
+                main.post { workflows = supported; workflowRuns = allRuns; workflowTriggers = triggerSwitches; workflowTriggerApproval = triggerApproval; workflowFailures = failures; workflowTests = tests; threadReadSync = reading; threadPurgeSync = purging; remAlerts = alerts; remAlertFilter = alertFilter; remAlertWorkflow = alertWorkflow; sourceControl = git; sourceControlHistory = gitHistory; fileExplorer = files }
                 explorerWaiting?.let { waiting ->
                     explorerWaiting = null
                     // Runs as a later command, after this event's save.
@@ -1843,7 +2012,7 @@ class LiveClient(app: Application,
             }
             is RemHome -> {
                 remFiles = view.filesThread; if (view.media) mediaAllowed = true; if (view.fileLinks) fileLinksAllowed = true; if (view.richResults) richAllowed = true
-                if (view.draftDeltas) draftAllowed = true; if (view.reviewRetry) reviewRetryAllowed = true; if (view.runPause) runPauseAllowed = true
+                if (view.draftDeltas) draftAllowed = true; if (view.reviewRetry) reviewRetryAllowed = true; if (view.runPause) runPauseAllowed = true; if (view.decisions) decisionsAllowed = true
                 tidyAllowed = view.voiceTidy; if (view.attachmentFiles) attachmentsAllowed = true
                 homeReplying = view.turnState == "replying"
                 if (!homeReplying && replyDraft.text.isNotEmpty()) { replyDraft = RemRich.Draft(); main.post { remDraft = "" } }
@@ -1976,10 +2145,19 @@ class LiveClient(app: Application,
             }
         }
     }
-    fun refreshApprovals() { enqueue { nextApprovals = 0; if (!remoteAllowed && connection != null && !pendingRead("approval.request")) queue("approval.request", null, JSONObject()) } }
-    fun resolveApproval(approval: Approval, approve: Boolean, instruction: String = "") { enqueue {
+    fun refreshApprovals() { enqueue { nextApprovals = 0; if (!remoteAllowed && connection != null && !pendingRead("approval.request")) requestApprovals() } }
+    /** Asks for option buttons too, unless this desktop refused that request before. */
+    private fun requestApprovals() {
+        if (!approvalChoices) { queue("approval.request", null, JSONObject()); return }
+        val request = java.util.UUID.randomUUID().toString()
+        choiceRequests += request
+        queue("approval.request", null, JSONObject().put("include_choices", true), requestId = request)
+    }
+    /** [choice] answers a gate with options; the desktop sets approve or reject from it. */
+    fun resolveApproval(approval: Approval, approve: Boolean, instruction: String = "", choice: String? = null) { enqueue {
         val payload = JSONObject().put("approval_id", approval.id).put("action_digest", approval.digest)
             .put("decision", if (approve) "approve" else "deny")
+        if (choice != null) { require(choice in approval.options); payload.put("choice", choice) }
         if (instruction.isNotBlank()) payload.put("instruction", instruction.trim().take(2000))
         queue("approval.resolve", null, payload)
     } }
@@ -2047,14 +2225,14 @@ class LiveClient(app: Application,
                     val full = desktopAllowed
                     // Without desktop control the phone can't learn the setting changed, so it keeps nothing.
                     if (!full) WakeOnLan.remember(next, null)
-                    if (!full) { kanbanAllowed = false; kanbanParticipantsAllowed = false; mediaAllowed = false; fileLinksAllowed = false; attachmentsAllowed = false; workflowsAllowed = false; workflowRunsAllowed = false; workflowTriggersAllowed = false; sourceControlAllowed = false; sourceHistoryAllowed = false; explorerAllowed = false; richAllowed = false; mediaChecked = false; remFiles = null; imageQueue.clear(); previewQueue.clear(); browserAllowed = false
-                        draftAllowed = false; reviewRetryAllowed = false; runPauseAllowed = false; homeReplying = false; replyDraft = RemRich.Draft(); threadReadAllowed = false; threadPurgeAllowed = false; noticesAllowed = false; noticesFilterAllowed = false; noticesWorkflowAllowed = false
+                    if (!full) { kanbanAllowed = false; kanbanParticipantsAllowed = false; mediaAllowed = false; fileLinksAllowed = false; attachmentsAllowed = false; workflowsAllowed = false; workflowRunsAllowed = false; workflowTriggersAllowed = false; workflowTriggerApprovalAllowed = false; workflowTestsAllowed = false; sourceControlAllowed = false; sourceHistoryAllowed = false; explorerAllowed = false; richAllowed = false; mediaChecked = false; remFiles = null; imageQueue.clear(); previewQueue.clear(); browserAllowed = false; postsAllowed = false; computersAllowed = false; placementAllowed = false; runThereAllowed = false
+                        draftAllowed = false; reviewRetryAllowed = false; runPauseAllowed = false; decisionsAllowed = false; homeReplying = false; replyDraft = RemRich.Draft(); threadReadAllowed = false; threadPurgeAllowed = false; noticesAllowed = false; noticesFilterAllowed = false; noticesWorkflowAllowed = false
                         tidyAllowed = false }
                     main.post {
                         remReady = info.getBoolean("rem_ready"); remoteControl = allowed; desktopControl = full
                         if (!allowed) approvals = emptyList()
-                        if (!full) { desktopViews = emptyMap(); desktopBusy = emptySet(); desktopDigests.clear(); mediaProxy = false; fileLinks = false; attachmentFiles = false; workflows = null; workflowRuns = null; workflowTriggers = null; sourceControl = null; sourceControlHistory = null; fileExplorer = null; workflowNotice = null
-                            richResults = false; previews = emptyMap(); previewRequested.clear(); reviewRetry = false; runPause = false; remDraft = ""; threadReadSync = false; threadPurgeSync = false; remAlerts = null; remAlertFilter = null; remAlertWorkflow = null; desktopBrowser = null
+                        if (!full) { desktopViews = emptyMap(); desktopBusy = emptySet(); desktopDigests.clear(); mediaProxy = false; fileLinks = false; attachmentFiles = false; workflows = null; workflowRuns = null; workflowTriggers = null; workflowTriggerApproval = null; workflowFailures = null; workflowTests = null; runFailure = null; sourceControl = null; sourceControlHistory = null; fileExplorer = null; workflowNotice = null
+                            richResults = false; previews = emptyMap(); previewRequested.clear(); reviewRetry = false; runPause = false; remDraft = ""; threadReadSync = false; threadPurgeSync = false; remAlerts = null; remAlertFilter = null; remAlertWorkflow = null; desktopBrowser = null; desktopPosts = null
                             remSearch = RemSearchState(); remEarlier = emptyList(); remEarlierCount = null; remEarlierTickets = emptyMap(); remHistoryBusy = false; remHistoryError = "" }
                     }
                 }
@@ -2097,6 +2275,9 @@ class LiveClient(app: Application,
                 next.put("messages", local); LiveHistory.makeRoom(next, thread); local = next.getJSONArray("messages")
             }
             "chat.accepted", "request.status", "error" -> {
+                // Only an older desktop's "unsupported" means it can't send approvals with options;
+                // a locked phone or another refusal must not hide those approvals for the whole process.
+                if (type == "error" && choiceRequests.remove(request)) { if (payload.optString("code") == "unsupported") approvalChoices = false; nextApprovals = 0 }
                 for (i in 0 until local.length()) if (local.getJSONObject(i).getString("id") == request)
                     local.getJSONObject(i).put("state", when(type) { "chat.accepted" -> "Accepted by desktop"; "error" -> "Desktop rejected request"; else -> payload.optString("status", "Desktop status received") }).put("detail", payload.optString("detail"))
             }
@@ -2117,8 +2298,10 @@ class LiveClient(app: Application,
             "approval.snapshot" -> {
                 val list = payload.getJSONArray("approvals")
                 val parsed = (0 until list.length()).map { list.getJSONObject(it) }.map { a ->
+                    val options = a.optJSONArray("options")?.let { o -> (0 until o.length()).map(o::getString) }.orEmpty()
                     Approval(a.getString("approval_id"), a.getString("action_digest"), a.getString("source"), a.getString("title"),
-                        a.getString("summary"), a.getString("requested_at"), a.getBoolean("instruction_required"))
+                        a.getString("summary"), a.getString("requested_at"), a.getBoolean("instruction_required"),
+                        options, a.optString("reply", "none"))
                 }
                 val fresh = parsed.any { seenApprovals.add(it.id) }
                 if (fresh) LiveNotifications.showApproval(getApplication())

@@ -17,6 +17,8 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -388,6 +390,7 @@ private fun OverviewTab(client: LiveClient, org: Organization, plan: OrgPlan, na
         if (steps.isNotEmpty() && !plan.archived) item { GetStartedCard(steps, nav) }
         plan.autoHalt?.let { halt -> item { AutoHaltCard(halt) } }
         if (plan.autoHalt == null && org.pauseReason.isNotBlank() && org.state != "running") item { Note(org.pauseReason.let { if (it.startsWith("Paused")) it else "Paused: $it" }) }
+        if (org.state == "running" && org.placementWait.isNotBlank()) item { Note(org.placementWait) }
         // Requests Rem's Auto mode review decides are shown but don't count as needing you.
         val needsCount = needs.count { !(it is OrganizationModel.NeedsYou.Request && it.request.reviewedByRem) }
         item { SectionTitle("Needs you${if (needsCount > 0) " · $needsCount" else ""}") }
@@ -489,13 +492,15 @@ private fun AutoModeCard(client: LiveClient, org: Organization, plan: OrgPlan, b
     if (enabled == null || client.organizationAutoMode == false) { Note(AutoMode.UPDATE_DESKTOP, Modifier.testTag("orgAutoModeUpdate")); return }
     var confirming by remember(org.id) { mutableStateOf(false) }
     OrgCard(null, Modifier.testTag("orgAutoMode"), stripe = if (enabled) orgColors(OrgTone.ACCENT).first else null) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            IconBadge(ThreadIcons.Sparkles, if (enabled) OrgTone.ACCENT else OrgTone.IDLE, 32.dp)
             Text("Rem decides requests", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
             Switch(checked = enabled, enabled = client.organizationAutoMode == true && !busy, modifier = Modifier.testTag("orgAutoModeSwitch")
                 .semantics { contentDescription = if (enabled) "Auto mode on" else "Auto mode off" },
                 onCheckedChange = { on -> if (on) confirming = true else client.desktopAction(AutoMode.OP, AutoMode.params(org.id, plan.revision, false)) })
         }
-        Text(if (enabled) AutoMode.ON else AutoMode.OFF, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // The first sentence says what the switch does; the rest is a tap away.
+        SummaryText(if (enabled) AutoMode.ON else AutoMode.OFF, tag = "orgAutoModeText")
     }
     if (confirming) AlertDialog(onDismissRequest = { confirming = false }, title = { Text("Turn on Auto mode?") },
         text = { Text(AutoMode.CONFIRM, Modifier.testTag("orgAutoModeConfirmText")) },
@@ -543,14 +548,15 @@ private fun BacklogPullsCard(client: LiveClient, org: Organization, plan: OrgPla
     if (enabled == null) { Note(BacklogPulls.UPDATE_DESKTOP, Modifier.testTag("orgBacklogPullsUpdate")); return }
     val editable = client.organizationBacklogPull != false
     OrgCard(null, Modifier.testTag("orgBacklogPulls")) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            IconBadge(ThreadIcons.Kanban, if (enabled) OrgTone.RUN else OrgTone.IDLE, 32.dp)
             Text("Workers pull from Backlog", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
             Switch(checked = enabled, enabled = editable && !busy, modifier = Modifier.testTag("orgBacklogPullsSwitch")
                 .semantics { contentDescription = if (enabled) "Backlog pulls on" else "Backlog pulls off" },
                 onCheckedChange = { client.desktopAction(BacklogPulls.OP, BacklogPulls.params(org.id, plan.revision, it)) })
         }
-        Text(if (enabled) BacklogPulls.ON else BacklogPulls.OFF, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(BacklogPulls.KEPT, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        SummaryText(if (enabled) BacklogPulls.ON else BacklogPulls.OFF, tag = "orgBacklogPullsText")
+        InfoChip("What stays in Backlog", BacklogPulls.KEPT, tag = "orgBacklogKept")
         if (!editable) Note(BacklogPulls.UPDATE_DESKTOP)
     }
 }
@@ -994,52 +1000,56 @@ private fun TicketPage(client: LiveClient, org: Organization, plan: OrgPlan, tas
         DetailHeader(task?.title ?: "Ticket", nav, task?.let { OrganizationModel.key(it) }.orEmpty())
         if (task == null) { Note("This ticket is no longer on the board.", Modifier.padding(20.dp)); return@Column }
         val column = OrganizationModel.columnOf(task.status)
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp).testTag("orgTicketPage"), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Pill(if (task.status == "cancelled") "Cancelled" else if (task.status == "blocked") "Blocked" else OrganizationModel.COLUMN_LABELS[column].orEmpty(),
+        val extras = task.extras
+        fun act(action: String, extra: JSONObject.() -> Unit = {}) = client.desktopAction("organizations.task", JSONObject().put("organization_id", org.id)
+            .put("action", action).put("task_id", task.id).put("expected_revision", task.revision).apply(extra))
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp).testTag("orgTicketPage"), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            // The states that matter most, in color, then where the ticket is on the board.
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                StatusChip(if (task.status == "cancelled") "Cancelled" else if (task.status == "blocked") "Blocked" else OrganizationModel.COLUMN_LABELS[column].orEmpty(),
                     if (task.status == "blocked") OrgTone.BAD else columnTone(column ?: "todo"))
-                if (task.running) Pill("Running", OrgTone.RUN)
-                Pill(task.priority.replaceFirstChar { it.uppercase() }, if (task.priority == "critical") OrgTone.BAD else OrgTone.IDLE)
-                if (task.dueAt.isNotBlank()) Pill("Due ${whenText(task.dueAt)}", OrgTone.IDLE)
+                if (task.running) StatusChip("Running", OrgTone.RUN, icon = ThreadIcons.Running)
+                if (task.priority in setOf("critical", "high")) StatusChip(task.priority.replaceFirstChar { it.uppercase() },
+                    if (task.priority == "critical") OrgTone.BAD else OrgTone.WAIT, icon = ThreadIcons.Flag)
+                if (task.needsApproval && task.status != "done") StatusChip("Plan needs approval", OrgTone.WAIT, icon = ThreadIcons.Approvals)
+                if (task.needsReview) StatusChip("Ready for review", OrgTone.WAIT, icon = ThreadIcons.Eye)
             }
-            OrganizationModel.flag(task).takeIf { it.isNotBlank() }?.let { Text(it, color = orgColors(OrgTone.BAD).first, style = MaterialTheme.typography.bodyMedium) }
+            if (task.status != "cancelled") StageStrip(if (task.status == "blocked") "blocked" else column, Kanban.COLUMN_LABELS)
+            if (task.running) LinearProgressIndicator(Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).semantics { contentDescription = "Running" },
+                color = orgColors(OrgTone.RUN).first)
+            OrganizationModel.flag(task).takeIf { it.isNotBlank() }?.let { Callout(it, OrgTone.BAD, icon = ThreadIcons.Failed) }
             if (column == "todo" || column == "backlog") OrganizationModel.startHint(task, org).takeIf { it.isNotBlank() }?.let {
-                Text(it, style = MaterialTheme.typography.bodyMedium, color = startHintColor(task, org), modifier = Modifier.testTag("orgStartHint"))
+                Callout(it, when (OrganizationModel.startTone(task, org)) { "you" -> OrgTone.WAIT; "run" -> OrgTone.RUN; else -> OrgTone.IDLE },
+                    Modifier.testTag("orgStartHint"), icon = ThreadIcons.Queued)
             }
-            // The actions this ticket allows now.
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                fun act(action: String, extra: JSONObject.() -> Unit = {}) = client.desktopAction("organizations.task", JSONObject().put("organization_id", org.id)
-                    .put("action", action).put("task_id", task.id).put("expected_revision", task.revision).apply(extra))
-                if (task.needsApproval && task.status != "done") Button(onClick = { act("approve") }, enabled = !busy) { Text("Approve plan") }
-                if (task.needsReview && !task.running) Button(onClick = { dialog = "accept" }, enabled = !busy, modifier = Modifier.testTag("orgAccept")) { Text("Accept") }
-                if (task.needsReview && !task.running) OutlinedButton(onClick = { dialog = "revise" }, enabled = !busy) { Text("Request changes") }
-                if (column in setOf("backlog", "todo") && task.status != "blocked" && !task.running)
-                    OutlinedButton(onClick = { moveTicket(client, org, task, "running") }, enabled = !busy) { Text("Start next") }
-                if (task.status != "cancelled") OutlinedButton(onClick = { moving = true }, enabled = !busy, modifier = Modifier.testTag("orgMoveTicket")) { Text("Move") }
-                if (!task.running && task.status in setOf("done", "cancelled", "blocked")) OutlinedButton(onClick = { act("reopen") }, enabled = !busy) { Text("Reopen") }
-                OutlinedButton(onClick = { dialog = "comment" }, enabled = !busy) { Text("Comment") }
-                if (task.status !in setOf("done", "cancelled")) TextButton(onClick = { dialog = "cancel" }, enabled = !busy,
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Cancel ticket") }
+            // A paired desktop with room while this ticket waits; nothing goes there until the user taps Run there.
+            task.suggestion?.takeIf { task.status == "todo" && !task.running }?.let { offer ->
+                val pick = RunThere.forTicket(org.id, task.id, offer, client.desktopRunThere)
+                Row(Modifier.fillMaxWidth().testTag("orgRunThere"), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(if (pick != null) offer.lead else offer.text, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                    if (pick != null) Button(onClick = { client.desktopAction(RunThere.OP, pick) }, enabled = !busy) { Text(RunThere.LABEL) }
+                }
             }
-            val extras = task.extras
-            if (!extras?.doneWhen.isNullOrBlank() || task.description.isNotBlank()) SettingsGroup("Why") {
-                extras?.doneWhen?.takeIf { it.isNotBlank() }?.let { Text("Done when", style = MaterialTheme.typography.labelMedium); Text(it, style = MaterialTheme.typography.bodyMedium) }
+            // Its facts as tiles; the linked ones open their page.
+            val project = plan.projects.firstOrNull { it.id == extras?.projectId }
+            val epic = plan.epics.firstOrNull { it.id == extras?.epicId }
+            val milestone = plan.milestones.firstOrNull { it.id == epic?.milestoneId }
+            val worker = org.employees.firstOrNull { it.id == extras?.assigneeId }
+            FactGrid(buildList {
+                add(Fact(ThreadIcons.User, "Assigned to", worker?.name ?: task.assignee.ifBlank { "Nobody" }, tag = "orgFactAssignee",
+                    onClickLabel = worker?.let { "Open ${it.name}" }, onClick = worker?.let { w -> { nav.push("worker:${w.id}") } }))
+                add(Fact(ThreadIcons.Flag, "Priority", task.priority.replaceFirstChar { it.uppercase() },
+                    when (task.priority) { "critical" -> OrgTone.BAD; "high" -> OrgTone.WAIT; else -> null }))
+                if (task.dueAt.isNotBlank()) add(Fact(ThreadIcons.Recent, "Due", whenText(task.dueAt), OrgTone.WAIT))
+                project?.let { p -> add(Fact(ThreadIcons.Folder, "Project", p.name, tag = "orgFactProject", onClickLabel = "Open ${p.name}", onClick = { nav.push("project:${p.id}") })) }
+                milestone?.let { m -> add(Fact(ThreadIcons.Flag, "Milestone", m.title, onClickLabel = "Open its project", onClick = { nav.push("project:${m.projectId}") })) }
+                epic?.let { e -> add(Fact(ThreadIcons.Kanban, "Epic", e.title, onClickLabel = "Open ${e.title}", onClick = { nav.push("epic:${e.id}") })) }
+            })
+            if (project == null && epic == null && worker == null) InfoChip("Not linked yet", "Not linked to a project or epic, and nobody is assigned.", tag = "orgNotLinked")
+            if (!extras?.doneWhen.isNullOrBlank() || task.description.isNotBlank()) DetailCard("Why", icon = ThreadIcons.Lightbulb, tone = OrgTone.ACCENT) {
+                extras?.doneWhen?.takeIf { it.isNotBlank() }?.let { Callout(it, OrgTone.DONE, icon = ThreadIcons.Succeeded, title = "Done when") }
                 // A long description folds like a long message, as the desktop keeps Details folded.
                 if (task.description.isNotBlank()) FoldableText(toggleColor = MaterialTheme.colorScheme.primary) { ChatMarkdown(task.description, compact = true) }
-            }
-            SettingsGroup("Part of") {
-                val project = plan.projects.firstOrNull { it.id == extras?.projectId }
-                val epic = plan.epics.firstOrNull { it.id == extras?.epicId }
-                val milestone = plan.milestones.firstOrNull { it.id == epic?.milestoneId }
-                val worker = org.employees.firstOrNull { it.id == extras?.assigneeId }
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    project?.let { p -> AssistChip(onClick = { nav.push("project:${p.id}") }, label = { Text(p.name) },
-                        leadingIcon = { Box(Modifier.size(8.dp).clip(CircleShape).background(hex(OrganizationModel.projectColor(plan, p.id)))) }) }
-                    milestone?.let { m -> AssistChip(onClick = { nav.push("project:${m.projectId}") }, label = { Text("Milestone: ${m.title}") }) }
-                    epic?.let { e -> AssistChip(onClick = { nav.push("epic:${e.id}") }, label = { Text("Epic: ${e.title}") }) }
-                    worker?.let { w -> AssistChip(onClick = { nav.push("worker:${w.id}") }, label = { Text(w.name) }, leadingIcon = { Avatar(w.name, w.id, 18.dp) }) }
-                }
-                if (project == null && epic == null && worker == null) Note("Not linked to a project or epic, and nobody is assigned.")
             }
             if (extras != null && extras.claims.isNotEmpty()) SettingsGroup("Evidence") {
                 extras.claims.forEach { claim ->
@@ -1083,10 +1093,13 @@ private fun TicketPage(client: LiveClient, org: Organization, plan: OrgPlan, tas
                 Note("The newest comments; the whole conversation and run history are on your computer.")
             }
         }
+        OrgTicketActions(task, column, busy, onAct = { act(it) }, onDialog = { dialog = it }, onStart = { moveTicket(client, org, task, "running") }, onMove = { moving = true })
     }
     if (moving && task != null) MoveSheet(client, org, task, busy) { moving = false }
     if (dialog == "accept" && task != null) AcceptDialog(client, org, task, { dialog = null }) { dialog = null }
-    dialog?.takeIf { it in setOf("revise", "comment", "cancel") }?.let { kind ->
+    // Like the sheets above, only while the ticket is still listed: one the computer removed closes the dialog instead
+    // of ending the app at Confirm.
+    dialog?.takeIf { it in setOf("revise", "comment", "cancel") && task != null }?.let { kind ->
         var body by rememberSaveable(kind) { mutableStateOf("") }
         AlertDialog(onDismissRequest = { dialog = null }, title = { Text(when (kind) { "revise" -> "Request changes"; "comment" -> "Comment"; else -> "Cancel this ticket?" }) },
             text = {
@@ -1104,6 +1117,49 @@ private fun TicketPage(client: LiveClient, org: Organization, plan: OrgPlan, tas
                 client.desktopAction("organizations.task", p); dialog = null
             }) { Text(when (kind) { "cancel" -> "Cancel ticket"; "revise" -> "Send back"; else -> "Send" }) } },
             dismissButton = { TextButton(onClick = { dialog = null }) { Text(if (kind == "cancel") "Keep" else "Close") } })
+    }
+}
+
+/** One action an organization ticket allows now. [destructive] actions never take a pinned slot. */
+internal data class TicketAction(val label: String, val tag: String, val destructive: Boolean = false, val run: () -> Unit)
+
+/**
+ * The actions an organization ticket allows now, in the order they matter: answering what waits on the user first, then
+ * starting or moving it. [ActionBar] pins the first two; the rest, and Cancel, are under More.
+ */
+internal fun orgTicketActions(task: OrganizationTask, column: String?, onAct: (String) -> Unit, onDialog: (String) -> Unit, onStart: () -> Unit,
+                              onMove: () -> Unit): List<TicketAction> = buildList {
+    if (task.needsApproval && task.status != "done") add(TicketAction("Approve plan", "orgApprovePlan") { onAct("approve") })
+    if (task.needsReview && !task.running) add(TicketAction("Accept", "orgAccept") { onDialog("accept") })
+    if (task.needsReview && !task.running) add(TicketAction("Request changes", "orgRevise") { onDialog("revise") })
+    if (column in setOf("backlog", "todo") && task.status != "blocked" && !task.running) add(TicketAction("Start next", "orgStartNext", run = onStart))
+    if (!task.running && task.status in setOf("done", "cancelled", "blocked")) add(TicketAction("Reopen", "orgReopen") { onAct("reopen") })
+    if (task.status != "cancelled") add(TicketAction("Move", "orgMoveTicket", run = onMove))
+    add(TicketAction("Comment", "orgComment") { onDialog("comment") })
+    if (task.status !in setOf("done", "cancelled")) add(TicketAction("Cancel ticket", "orgCancelTicket", destructive = true) { onDialog("cancel") })
+}
+
+@Composable
+private fun OrgTicketActions(task: OrganizationTask, column: String?, busy: Boolean, onAct: (String) -> Unit, onDialog: (String) -> Unit, onStart: () -> Unit, onMove: () -> Unit) {
+    val all = orgTicketActions(task, column, onAct, onDialog, onStart, onMove)
+    val pinned = all.filter { !it.destructive }.take(2)
+    val rest = all - pinned.toSet()
+    var open by remember { mutableStateOf(false) }
+    ActionBar {
+        pinned.forEachIndexed { i, a ->
+            val mod = Modifier.weight(1f).heightIn(min = 48.dp).testTag(a.tag)
+            if (i == 0) Button(onClick = a.run, enabled = !busy, modifier = mod) { Text(a.label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+            else OutlinedButton(onClick = a.run, enabled = !busy, modifier = mod) { Text(a.label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+        }
+        if (rest.isNotEmpty()) Box {
+            IconButton(onClick = { open = true }, enabled = !busy, modifier = Modifier.testTag("orgTicketMore")) { Icon(ThreadIcons.More, "More actions") }
+            DropdownMenu(open, { open = false }) {
+                rest.forEach { a ->
+                    DropdownMenuItem(text = { Text(a.label, color = if (a.destructive) MaterialTheme.colorScheme.error else Color.Unspecified) },
+                        onClick = { open = false; a.run() }, modifier = Modifier.testTag(a.tag))
+                }
+            }
+        }
     }
 }
 
@@ -1218,6 +1274,7 @@ private fun WorkerPage(client: LiveClient, org: Organization, plan: OrgPlan, emp
     val e = org.employees.firstOrNull { it.id == employeeId }
     var ask by remember { mutableStateOf(false) }
     var hold by remember { mutableStateOf<Boolean?>(null) }
+    var pickAccount by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
         DetailHeader(e?.name ?: "Worker", nav, "WORKER")
         if (e == null) { Note("This worker is no longer in the organization.", Modifier.padding(20.dp)); return@Column }
@@ -1237,36 +1294,54 @@ private fun WorkerPage(client: LiveClient, org: Organization, plan: OrgPlan, emp
                     modifier = Modifier.testTag("orgRelease")) { Text("Release hold") }
                 else OutlinedButton(onClick = { hold = true }, enabled = !busy && client.organizationsV2 != false, modifier = Modifier.testTag("orgHold")) { Text("Hold") }
             }
-            if (e.paused && worker?.fullAccess == true) Note("This worker runs without a sandbox. Releasing its hold lets it work with full access, as it would from your computer.")
+            if (e.paused && worker?.fullAccess == true) Callout("This worker runs without a sandbox. Releasing its hold lets it work with full access, as it would from your computer.",
+                OrgTone.BAD, icon = ThreadIcons.Lock, title = "Full access")
             worker?.persona?.takeIf { it.isNotBlank() }?.let { SettingsGroup("Persona") { ClampedText(it, 6, style = MaterialTheme.typography.bodyMedium) } }
             if (!worker?.responsibilities.isNullOrEmpty()) SettingsGroup("Responsibilities") {
-                worker!!.responsibilities.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall) }
+                worker!!.responsibilities.forEach { r ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+                        Icon(ThreadIcons.Check, null, Modifier.padding(top = 2.dp).size(14.dp), tint = orgColors(OrgTone.ACCENT).first)
+                        Text(r, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    }
+                }
             }
-            SettingsGroup("Reporting") {
-                val manager = org.employees.firstOrNull { it.id == e.reportsTo }
-                Text("Reports to ${manager?.name ?: "you"}", style = MaterialTheme.typography.bodyMedium)
-                val reports = org.employees.filter { it.reportsTo == e.id }
-                if (reports.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            // Model, account, access and check-ins as tiles; the account tile opens its picker.
+            val accounts = OrganizationModel.workerAccounts(org, e)
+            val manager = org.employees.firstOrNull { it.id == e.reportsTo }
+            FactGrid(buildList {
+                add(Fact(ThreadIcons.Computer, "Model", listOf(e.provider, e.model, worker?.effort.orEmpty()).filter { it.isNotBlank() }.joinToString(" · ").ifBlank { "Organization default" },
+                    tag = "orgWorkerModel"))
+                if (accounts != null && (accounts.isNotEmpty() || e.accountId.isNotBlank())) add(Fact(ThreadIcons.User, "Account", OrganizationModel.accountLabel(org, e),
+                    tag = "orgWorkerAccount", onClickLabel = "Change account", onClick = if (busy) null else ({ pickAccount = true })))
+                worker?.let { w -> add(Fact(ThreadIcons.Lock, "Access", w.permission, if (w.fullAccess) OrgTone.BAD else null, "orgWorkerAccess")) }
+                worker?.takeIf { it.heartbeatSeconds > 0 }?.let { w -> add(Fact(ThreadIcons.Recent, "Checks in", "Every ${w.heartbeatSeconds / 60} min",
+                    if (w.stalled.isNotBlank()) OrgTone.BAD else null)) }
+                add(Fact(ThreadIcons.Organizations, "Reports to", manager?.name ?: "You", onClickLabel = manager?.let { "Open ${it.name}" },
+                    onClick = manager?.let { m -> { nav.push("worker:${m.id}") } }))
+            })
+            worker?.stalled?.takeIf { it.isNotBlank() }?.let { Callout(it, OrgTone.BAD, icon = ThreadIcons.Failed, title = "Check-ins stopped") }
+            worker?.let { w ->
+                DetailCard("Tickets it can change", icon = ThreadIcons.Kanban) {
+                    when {
+                        w.ticketAccess == null -> Text("As its tools allow, in every project", style = MaterialTheme.typography.bodySmall)
+                        w.ticketAccess.isEmpty() -> Text("Can't create or change tickets", style = MaterialTheme.typography.bodySmall)
+                        else -> w.ticketAccess.forEach { (project, allowed) ->
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(if (project == "*") "Every project" else plan.projects.firstOrNull { it.id == project }?.name ?: project, Modifier.weight(1f),
+                                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(allowed.joinToString(", ").ifBlank { "nothing" }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+            }
+            val reports = org.employees.filter { it.reportsTo == e.id }
+            if (reports.isNotEmpty()) DetailCard("Reports to them", icon = ThreadIcons.User) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     reports.forEach { r -> AssistChip(onClick = { nav.push("worker:${r.id}") }, label = { Text(r.name) }, leadingIcon = { Avatar(r.name, r.id, 18.dp) }) }
                 }
             }
-            SettingsGroup("Model and access") {
-                Text(listOf(e.provider, e.model, worker?.effort.orEmpty()).filter { it.isNotBlank() }.joinToString(" · ").ifBlank { "Organization default" },
-                    style = MaterialTheme.typography.bodyMedium)
-                worker?.let { w ->
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { Pill(w.permission, if (w.fullAccess) OrgTone.BAD else OrgTone.IDLE) }
-                    Text(when {
-                        w.ticketAccess == null -> "Tickets: as its tools allow, in every project"
-                        w.ticketAccess.isEmpty() -> "Tickets: can't create or change tickets"
-                        else -> "Tickets: " + w.ticketAccess.joinToString("; ") { (project, allowed) ->
-                            "${if (project == "*") "every project" else plan.projects.firstOrNull { it.id == project }?.name ?: project}: ${allowed.joinToString(", ").ifBlank { "nothing" }}"
-                        }
-                    }, style = MaterialTheme.typography.bodySmall)
-                    if (w.heartbeatSeconds > 0) Text("Checks in every ${w.heartbeatSeconds / 60} min", style = MaterialTheme.typography.bodySmall)
-                    if (w.stalled.isNotBlank()) Text("Check-ins stopped: ${w.stalled}", style = MaterialTheme.typography.bodySmall, color = orgColors(OrgTone.BAD).first)
-                }
-                Note("Change a worker's model, access and persona in Organizations on your computer.")
-            }
+            InfoChip("Change model or access", "Change a worker's model, access and persona in Organizations on your computer.", tag = "orgWorkerChangeInfo")
             val mine = org.tasks.filter { it.extras?.assigneeId == e.id && OrganizationModel.columnOf(it.status).let { c -> c != null && c != "done" } }
             SettingsGroup("Open tickets · ${mine.size}") {
                 if (mine.isEmpty()) Note("Nothing assigned.")
@@ -1283,6 +1358,27 @@ private fun WorkerPage(client: LiveClient, org: Organization, plan: OrgPlan, emp
                 client.desktopAction("organizations.task", JSONObject().put("organization_id", org.id).put("action", "wake").put("employee_id", e.id).put("body", message.trim()))
                 ask = false
             }) { Text("Send") } }, dismissButton = { TextButton(onClick = { ask = false }) { Text("Cancel") } })
+    }
+    if (pickAccount && e != null) {
+        val choices = listOf("" to OrganizationModel.DEFAULT_SIGN_IN) + OrganizationModel.workerAccounts(org, e).orEmpty().map { it.id to it.name }
+        AlertDialog(onDismissRequest = { pickAccount = false }, title = { Text("${e.name}'s account") },
+            text = {
+                Column(Modifier.selectableGroup()) {
+                    Text("Its runs use this account and count toward its usage and limits. A removed or signed-out account falls back to the default sign-in.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    choices.forEach { (id, label) ->
+                        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("orgWorkerAccount:${id.ifBlank { "default" }}")
+                            .selectable(e.accountId == id, role = Role.RadioButton) {
+                                if (e.accountId != id) client.desktopAction(OrganizationModel.WORKER, OrganizationModel.accountParams(org.id, e.id, id))
+                                pickAccount = false
+                            }, verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(e.accountId == id, null)
+                            Text(label, Modifier.padding(start = 12.dp), style = MaterialTheme.typography.bodyLarge)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { pickAccount = false }) { Text("Close") } })
     }
     hold?.let { paused ->
         AlertDialog(onDismissRequest = { hold = null }, title = { Text(if (paused) "Hold ${e?.name}?" else "Release ${e?.name}'s hold?") },

@@ -50,6 +50,7 @@ DELEGATED = {
     "_dispatch_rattish_triggers",
     "_dispatch_rattish_secrets",
     "_dispatch_worktree_setup",
+    "_dispatch_workflow_shortcuts",
 }
 
 
@@ -477,6 +478,7 @@ def backend_routes(server_source: str | None = None) -> set[str]:
         | _trigger_routes(tree)
         | _trigger_routes(tree, "_dispatch_worktree_setup", "/api/worktree-setup")
         | _trigger_routes(tree, "_dispatch_rattish_secrets", "/api/rattish/secrets")
+        | _trigger_routes(tree, "_dispatch_workflow_shortcuts", "/api/workflow-shortcuts")
         | _action_routes(tree)
     )
     return routes if server_source is not None else _expand_body_actions(routes)

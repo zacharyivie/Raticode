@@ -84,6 +84,8 @@ class ProviderProfile(BaseModel):
     provider_options: dict[str, Any] = Field(default_factory=dict)
     # A local model server (see DEFAULT_LOCAL_MODEL_BASE_URL). Only on openai_api.
     local: bool = False
+    # An account of a CLI provider (provider_accounts.py): the ID names its own folder.
+    account_id: str | None = None
 
     @field_validator("name")
     @classmethod
@@ -114,6 +116,7 @@ class ResolvedProviderSettings(BaseModel):
     organization: str | None = None
     provider_options: dict[str, Any] = Field(default_factory=dict)
     local: bool = False
+    account_id: str | None = None
 
 
 def profile_store_path(data_dir: Path | None = None) -> Path:
@@ -362,6 +365,14 @@ def resolve_provider_settings(
             f"Provider profile '{profile.name}' uses subscription '{profile.subscription}', "
             f"but agent is configured for '{agent_subscription}'"
         )
+    env = dict(profile.env) if profile else {}
+    if profile is not None and profile.account_id:
+        from gofer.core.provider_accounts import account_config_dir, require_adapter
+
+        # The account's own folder: the CLI keeps and renews its sign-in there. Its
+        # other sign-in variables (OPENAI_API_KEY for Codex) are dropped from the child.
+        adapter = require_adapter(profile.subscription)
+        env.update(adapter.folder_overrides(account_config_dir(profile, data_dir)))
     return ResolvedProviderSettings(
         profile_name=profile.name if profile else selected_profile_name,
         subscription=subscription,
@@ -377,7 +388,7 @@ def resolve_provider_settings(
         extra_args=list(profile.extra_args) if profile else [],
         tools=list(profile.tools) if profile else [],
         mcp_servers=list(profile.mcp_servers) if profile else [],
-        env=dict(profile.env) if profile else {},
+        env=env,
         secret_refs=dict(profile.secret_refs) if profile else {},
         api_base_url=(
             profile.api_base_url
@@ -389,10 +400,31 @@ def resolve_provider_settings(
         organization=profile.organization if profile else None,
         provider_options=dict(profile.provider_options) if profile else {},
         local=bool(profile and profile.local),
+        account_id=profile.account_id if profile else None,
     )
 
 
 def validate_provider_settings(settings: ResolvedProviderSettings) -> None:
+    if settings.account_id is not None:
+        from gofer.core.provider_accounts import ACCOUNT_ID_PATTERN, account_adapter
+
+        adapter = account_adapter(settings.subscription)
+        if adapter is None:
+            raise ValueError(f"'{settings.subscription}' profiles can't be accounts")
+        if not ACCOUNT_ID_PATTERN.fullmatch(settings.account_id):
+            raise ValueError(f"Invalid {adapter.label} account ID")
+        # The folder is the account. Another sign-in would label someone else's use as it.
+        overridden = sorted(
+            name
+            for name in {*settings.secret_refs, *settings.env}
+            if name in adapter.other_auth_env
+            or (name == adapter.folder_env and name in settings.secret_refs)
+        )
+        if overridden:
+            raise ValueError(
+                f"A {adapter.label} account signs in through its own folder; remove "
+                + ", ".join(overridden)
+            )
     if settings.local:
         _validate_local_server(settings)
     if settings.subscription == "antigravity" and settings.effort not in (
@@ -478,6 +510,15 @@ def validate_provider_settings(settings: ResolvedProviderSettings) -> None:
 
 
 def validate_provider_profile(profile: ProviderProfile) -> None:
+    if profile.account_id:
+        from gofer.core.provider_accounts import account_adapter
+
+        adapter = account_adapter(profile.subscription)
+        if adapter is not None and adapter.folder_env in profile.env:
+            raise ValueError(
+                f"A {adapter.label} account uses the folder Raticode made for it; "
+                f"remove {adapter.folder_env}"
+            )
     validate_provider_settings(
         ResolvedProviderSettings(
             profile_name=profile.name,
@@ -498,6 +539,7 @@ def validate_provider_profile(profile: ProviderProfile) -> None:
             organization=profile.organization,
             provider_options=dict(profile.provider_options),
             local=profile.local,
+            account_id=profile.account_id,
         )
     )
 

@@ -3,6 +3,7 @@
   "contract_version": 1,
   "node_type": "common-llm-task",
   "runtime_handler": "raticode.common_llm_task",
+  "catalog": {"category": "ai", "summary": "Review, summarize, extract and more with a ready-made prompt", "docs_path": "/docs/nodes/common-llm-task"},
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",

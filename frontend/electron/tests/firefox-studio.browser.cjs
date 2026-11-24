@@ -9,6 +9,7 @@ const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
 const { app } = require("electron");
+const { checkSlowFramePage, createSlowFramePages } = require("./slow-frame-page.cjs");
 const { findFirefox } = require("../firefox-engine.cjs");
 const { writePrefs } = require("../firefox-profile.cjs");
 const { zip } = require("./zip-fixture.cjs");
@@ -48,7 +49,9 @@ const api = http.createServer((_request, response) => {
   response.setHeader("Access-Control-Allow-Origin", "*");
   response.end(JSON.stringify({ workflows: [], providers: [], runs: [], queue: [], entries: [] }));
 });
+const slowPages = createSlowFramePages();
 const site = http.createServer((request, response) => {
+  if (slowPages.serve(request, response)) return;
   response.setHeader("Content-Type", "text/html");
   if (request.url === "/font") {
     response.end("<p id=p>text</p><script>document.title = 'font:' + getComputedStyle(document.getElementById('p')).fontSize</script>");
@@ -199,6 +202,8 @@ async function run() {
   assert.equal(await page("document.activeElement.id"), "user-field");
   await call("close");
   await waitFor(() => (async () => (await firefoxViews()) === before)(), "Closing Rem's tab did not remove it");
+  // A frame that never finishes doesn't hold up Rem's actions.
+  await checkSlowFramePage(call, base, "Firefox");
 
   if (process.platform === "linux") assert.ok(firefoxPids().length >= 1, "Firefox should run from Raticode's own profile");
   assert.ok(fs.statSync(path.join(profile, "firefox-profile")).isDirectory(), "Firefox uses a profile inside Raticode's data folder");
@@ -206,6 +211,7 @@ async function run() {
   clearTimeout(timer);
   console.log("Firefox in the studio passed.");
   api.close();
+  slowPages.stop();
   site.close();
   // A normal quit stops Firefox; the runner confirms none is left.
   setTimeout(() => app.exit(0), 15000).unref();

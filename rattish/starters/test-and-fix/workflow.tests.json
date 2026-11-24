@@ -20,8 +20,8 @@
       },
       "checks": [
         {"type": "text", "label": "The tests pass in the end", "target": "nodes.run-tests.stdout", "contains": "::tests:: passed"},
-        {"type": "command", "label": "greet.sh is fixed", "command": "sh .raticode/test-and-fix/logs/test-scratch/greeting/greet.sh Ada | grep -qx 'Hello, Ada!'"},
-        {"type": "command", "label": "The test file is unchanged", "command": "cmp -s .raticode/test-and-fix/fixtures/greeting/test-greet.sh .raticode/test-and-fix/logs/test-scratch/greeting/test-greet.sh"},
+        {"type": "command", "shell": "bash", "label": "greet.sh is fixed", "command": "sh .raticode/test-and-fix/logs/test-scratch/greeting/greet.sh Ada | grep -qx 'Hello, Ada!'"},
+        {"type": "command", "shell": "bash", "label": "The test file is unchanged", "command": "cmp -s .raticode/test-and-fix/fixtures/greeting/test-greet.sh .raticode/test-and-fix/logs/test-scratch/greeting/test-greet.sh"},
         {"type": "judge", "label": "Explains the fix", "target": "nodes.fix", "criteria": "Says it corrected the misspelled greeting (Helo to Hello) in greet.sh."}
       ]
     }

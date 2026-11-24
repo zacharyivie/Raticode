@@ -8,6 +8,14 @@ a program, and a judge check asks a model.
 
 Results are saved per workflow with the source fingerprint of the revision they tested,
 so a later run can be compared case by case with the last result of another revision.
+
+Try another model runs the cases with other models on some nodes (``model_overrides``)
+and saves that result with its ``variant``. The source isn't changed. The current
+model's side comes from the newest finished result of the same revision and test set
+when one covers the cases; otherwise each case runs with the current model first, as a
+plain result of its own. The candidate's result names it in ``baselineId`` and gets a
+side-by-side ``modelComparison``. Estimates and the revision comparison only use results
+with the same variant, so a tried model never counts as the workflow's own.
 """
 
 from __future__ import annotations
@@ -22,7 +30,7 @@ import re
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -30,12 +38,20 @@ from typing import Any, cast
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 
 from gofer.core.approvals import NotificationAdapter
+from gofer.rattish import shells
 from gofer.rattish.artifacts import (
     RattishArtifactError,
     compile_rattish_file,
     rattish_asset_root,
 )
 from gofer.rattish.diagnostics import RattishError
+from gofer.rattish.model_overrides import (
+    ModelOverride,
+    ModelOverrideError,
+    check_overrides,
+    compile_variant,
+    variant_record,
+)
 from gofer.rattish.run_service import (
     RattishRunArtifactError,
     new_run_id,
@@ -43,7 +59,7 @@ from gofer.rattish.run_service import (
     process_start_token,
     run_rattish_file,
 )
-from gofer.rattish.runtime import NodeHandlerRegistry, _shell_command_args
+from gofer.rattish.runtime import NodeHandlerRegistry
 from gofer.rattish.storage import registered_source_root
 from gofer.subscriptions.base import Subscription
 from gofer.utils.atomic_output import atomic_binary_output, mkdir_without_links
@@ -388,14 +404,53 @@ def result_summary(document: Mapping[str, Any]) -> dict[str, Any]:
         "finishedAt": document.get("finishedAt"),
         "totals": document.get("totals"),
         "cases": {str(case.get("id")): case.get("status") for case in document.get("cases") or []},
+        "variant": document.get("variant"),
+        "baselineId": document.get("baselineId"),
     }
+
+
+def latest_result(history: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    """The result to show first: the newest, but a try rather than the current-model
+    result it ran for itself, which is saved with a later ID."""
+    trials = {str(item.get("id")) for item in history}
+    for document in history:
+        if document.get("trialId") and str(document["trialId"]) in trials:
+            continue
+        return document
+    return None
+
+
+def result_variant_key(document: Mapping[str, Any]) -> str | None:
+    """The tried models' key for a Try another model result, None for the workflow's own."""
+    variant = document.get("variant")
+    if isinstance(variant, Mapping) and variant.get("key"):
+        return str(variant["key"])
+    return None
+
+
+def variant_label(variant: Mapping[str, Any] | None) -> str:
+    """``draft: codex gpt-5.5`` for each tried node, joined; empty for the workflow's own."""
+    if not variant:
+        return ""
+    return ", ".join(
+        f"{item.get('node')}: {item.get('provider')} {item.get('model')}"
+        for item in variant.get("models") or []
+    )
 
 
 def previous_revision_result(
     history: Sequence[Mapping[str, Any]], current: Mapping[str, Any]
 ) -> Mapping[str, Any] | None:
-    """The newest finished result of another revision, saved before ``current``."""
+    """The newest finished result of another revision, saved before ``current``.
+
+    Only results with the same tried models count, so a Try another model result is
+    compared with earlier tries of those models and the workflow's own results with
+    its own.
+    """
+    key = result_variant_key(current)
     for document in history:
+        if result_variant_key(document) != key:
+            continue
         if document.get("id") == current.get("id"):
             continue
         if str(document.get("id", "")) > str(current.get("id", "")):
@@ -469,13 +524,15 @@ def estimate_test_set(
     *,
     case_ids: Sequence[str] | None = None,
     skip_judge: bool = False,
+    variant_key: str | None = None,
 ) -> dict[str, Any]:
     """Expected model calls and dollars for running the selected cases.
 
     Model calls come from the compiled workflow and the judge checks. Dollars come from
     saved results: a case's own last measured cost when there is one, otherwise the
     average measured cost per model call. Providers that report no dollar cost (for
-    example subscription CLIs such as Codex) leave the cost unknown.
+    example subscription CLIs such as Codex) leave the cost unknown. Only results run
+    with the same tried models (``variant_key``, None for the workflow's own) count.
     """
     nodes = list(ir.get("nodes") or [])
     model_nodes = [node for node in nodes if (node.get("resolutions") or {}).get("provider")]
@@ -495,6 +552,8 @@ def estimate_test_set(
     total_calls = 0
     for document in history:
         if document.get("status") not in FINISHED_STATUSES:
+            continue
+        if result_variant_key(document) != variant_key:
             continue
         for case in document.get("cases") or []:
             usage = case.get("usage") or {}
@@ -636,6 +695,19 @@ class PreparedTestRun:
     cases: list[Mapping[str, Any]]
     estimate: dict[str, Any]
     skip_judge: bool
+    # Try another model: the checked overrides, what the result saves about them, the
+    # current model's estimate, and its finished result when one can be reused.
+    models: tuple[ModelOverride, ...] = ()
+    variant: dict[str, Any] | None = None
+    current_estimate: dict[str, Any] | None = None
+    baseline: dict[str, Any] | None = None
+
+    @property
+    def cost_estimate(self) -> dict[str, Any]:
+        """What the run will cost in all: both models for a try, else the estimate."""
+        if self.variant is None:
+            return self.estimate
+        return trial_estimate(self)
 
 
 def prepare_test_run(
@@ -647,8 +719,14 @@ def prepare_test_run(
     data_dir: Path | None = None,
     workflow_id: str | None = None,
     project_root: Path | None = None,
+    models: Sequence[ModelOverride] = (),
 ) -> PreparedTestRun:
-    """Compile the workflow, load the test set and estimate cost; runs nothing."""
+    """Compile the workflow, load the test set and estimate cost; runs nothing.
+
+    With ``models`` the run tries those models (see the module docstring): they are
+    checked and compiled into a variant here, so a bad model is refused before any
+    case runs, and both models' expected costs are worked out.
+    """
     resolved_data_dir = (data_dir or get_data_dir()).expanduser().resolve()
     compiled = compile_rattish_file(
         source_path,
@@ -666,7 +744,7 @@ def prepare_test_run(
     estimate = estimate_test_set(
         compiled.ir, test_set, history, case_ids=case_ids, skip_judge=skip_judge
     )
-    return PreparedTestRun(
+    prepared = PreparedTestRun(
         source_path=compiled.source_path,
         data_dir=resolved_data_dir,
         ir=compiled.ir,
@@ -678,6 +756,113 @@ def prepare_test_run(
         estimate=estimate,
         skip_judge=skip_judge,
     )
+    if not models:
+        return prepared
+    try:
+        checked = check_overrides(compiled.ir, models)
+        variant_ir = compile_variant(compiled, checked, data_dir=resolved_data_dir).ir
+    except ModelOverrideError as exc:
+        raise WorkflowTestError(str(exc)) from exc
+    variant = variant_record(compiled.ir, checked)
+    candidate = estimate_test_set(
+        variant_ir,
+        test_set,
+        history,
+        case_ids=case_ids,
+        skip_judge=skip_judge,
+        variant_key=variant["key"],
+    )
+    baseline = reusable_baseline(
+        history,
+        revision=str(compiled.ir["source"]["source_fingerprint"]),
+        test_set=test_set,
+        case_ids=[str(case["id"]) for case in cases],
+        skip_judge=skip_judge,
+    )
+    return replace(
+        prepared,
+        estimate=candidate,
+        models=tuple(checked),
+        variant=variant,
+        current_estimate=estimate,
+        baseline=baseline,
+    )
+
+
+def reusable_baseline(
+    history: Sequence[Mapping[str, Any]],
+    *,
+    revision: str,
+    test_set: Mapping[str, Any],
+    case_ids: Sequence[str],
+    skip_judge: bool,
+) -> dict[str, Any] | None:
+    """The newest finished result of the workflow's own models that a try can compare with.
+
+    It must have tested this revision with this test set and judge setting, and have
+    run every selected case, so reusing it costs nothing and compares like with like.
+    """
+    fingerprint = _fingerprint(test_set)
+    for document in history:
+        if (
+            document.get("status") not in FINISHED_STATUSES
+            or result_variant_key(document) is not None
+            or document.get("revision") != revision
+            or document.get("testSetFingerprint") != fingerprint
+            or bool(document.get("skipJudge")) != skip_judge
+        ):
+            continue
+        ran = {
+            str(case.get("id"))
+            for case in document.get("cases") or []
+            if case.get("status") in {"passed", "failed", "error"}
+        }
+        if all(case_id in ran for case_id in case_ids):
+            return dict(document)
+    return None
+
+
+def trial_estimate(prepared: PreparedTestRun) -> dict[str, Any]:
+    """Both sides of a try: the current model (free when reused) and the candidate."""
+    candidate = prepared.estimate
+    current = prepared.current_estimate or {"totals": {}, "summary": ""}
+    reused = prepared.baseline is not None
+    current_cost = 0.0 if reused else current["totals"].get("costUsd")
+    current_complete = True if reused else bool(current["totals"].get("costComplete"))
+    candidate_cost = candidate["totals"].get("costUsd")
+    known = [cost for cost in (current_cost, candidate_cost) if cost is not None]
+    if reused:
+        assert prepared.baseline is not None
+        current_summary = (
+            f"Reuses result {prepared.baseline.get('id')} from "
+            f"{prepared.baseline.get('startedAt')}: $0."
+        )
+    else:
+        current_summary = str(current.get("summary") or "")
+    totals = {
+        "cases": candidate["totals"].get("cases", 0),
+        "costUsd": sum(known) if known else None,
+        "costComplete": current_complete and bool(candidate["totals"].get("costComplete")),
+    }
+    return {
+        "current": {
+            "reused": reused,
+            "baselineId": prepared.baseline.get("id") if prepared.baseline else None,
+            "totals": {**current["totals"], "costUsd": current_cost},
+            "summary": current_summary,
+        },
+        "candidate": {
+            "variant": prepared.variant,
+            "totals": candidate["totals"],
+            "summary": candidate["summary"],
+            "cases": candidate["cases"],
+        },
+        "totals": totals,
+        "summary": (
+            f"Current model: {current_summary} "
+            f"Candidate ({variant_label(prepared.variant)}): {candidate['summary']}"
+        ),
+    }
 
 
 def enforce_cost_limit(estimate: Mapping[str, Any], max_cost_usd: float | None) -> None:
@@ -706,7 +891,13 @@ async def run_test_set(
     notification_adapter: NotificationAdapter | None = None,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """Run every selected case, check it, and save the result as it goes."""
+    """Run every selected case, check it, and save the result as it goes.
+
+    For Try another model (``prepared.variant``) the returned and published result is
+    the candidate's, with ``modelComparison`` filled in. When no earlier result can be
+    reused, each case runs with the current model just before the candidate, into a
+    plain result of its own that the candidate names in ``baselineId``.
+    """
     from gofer.rattish.provider_runtime import default_provider_subscriptions
 
     result_id = result_id or new_run_id()
@@ -718,7 +909,111 @@ async def run_test_set(
     except (OSError, UnicodeError):
         source_text = ""
     started_clock = time.monotonic()
-    document: dict[str, Any] = {
+    trial = prepared.variant is not None
+    baseline: dict[str, Any] | None = prepared.baseline
+    run_baseline = trial and baseline is None
+    document = _result_document(prepared, result_id, revision, source_text)
+    if trial:
+        document["variant"] = prepared.variant
+        document["trialEstimate"] = trial_estimate(prepared)
+    if run_baseline:
+        baseline = _result_document(
+            replace(
+                prepared,
+                estimate=prepared.current_estimate or prepared.estimate,
+                models=(),
+                variant=None,
+            ),
+            new_run_id(),
+            revision,
+            source_text,
+        )
+        baseline["trialId"] = result_id
+    if baseline is not None:
+        document["baselineId"] = baseline["id"]
+    owned = [document] + ([baseline] if run_baseline and baseline is not None else [])
+
+    def publish() -> None:
+        if run_baseline and baseline is not None:
+            _publish(prepared.directory, baseline, None)
+        view = None
+        if on_progress is not None and baseline is not None:
+            view = lambda item: {  # noqa: E731
+                **item,
+                "modelComparison": model_comparison(item, baseline, reused=not run_baseline),
+            }
+        _publish(prepared.directory, document, on_progress, view)
+
+    with _active_results_lock:
+        _active_results.update(str(item["id"]) for item in owned)
+    try:
+        publish()
+        for index, case in enumerate(prepared.cases):
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            if run_baseline and baseline is not None:
+                baseline["cases"][index]["status"] = "running"
+                publish()
+                baseline["cases"][index] = await _run_case(
+                    replace(prepared, models=(), variant=None),
+                    case,
+                    providers,
+                    handlers,
+                    cancel_event,
+                    revision,
+                    notification_adapter=notification_adapter,
+                )
+                baseline["durationMs"] = round((time.monotonic() - started_clock) * 1000)
+                publish()
+                if baseline["cases"][index].get("sourceChanged"):
+                    break
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+            document["cases"][index]["status"] = "running"
+            publish()
+            document["cases"][index] = await _run_case(
+                prepared,
+                case,
+                providers,
+                handlers,
+                cancel_event,
+                revision,
+                notification_adapter=notification_adapter,
+            )
+            document["durationMs"] = round((time.monotonic() - started_clock) * 1000)
+            publish()
+            if document["cases"][index].get("sourceChanged"):
+                break
+        stopped = cancel_event is not None and cancel_event.is_set()
+        for item in owned:
+            _settle(item, stopped)
+    except BaseException:
+        for item in owned:
+            item["status"] = "error"
+        raise
+    finally:
+        for item in owned:
+            item["finishedAt"] = _now()
+            item["durationMs"] = round((time.monotonic() - started_clock) * 1000)
+            item["totals"] = item["totals"] or _totals(item["cases"])
+        try:
+            publish()
+        finally:
+            with _active_results_lock:
+                _active_results.difference_update(str(item["id"]) for item in owned)
+    if baseline is not None:
+        return {
+            **document,
+            "modelComparison": model_comparison(document, baseline, reused=not run_baseline),
+        }
+    return document
+
+
+def _result_document(
+    prepared: PreparedTestRun, result_id: str, revision: str, source_text: str
+) -> dict[str, Any]:
+    ir = prepared.ir
+    return {
         "testResultVersion": TEST_RESULT_VERSION,
         "id": result_id,
         "status": "running",
@@ -739,63 +1034,142 @@ async def run_test_set(
         "cases": [_pending_case(case) for case in prepared.cases],
         "totals": {},
     }
-    with _active_results_lock:
-        _active_results.add(result_id)
-    try:
-        _publish(prepared.directory, document, on_progress)
-        for index, case in enumerate(prepared.cases):
-            if cancel_event is not None and cancel_event.is_set():
-                break
-            document["cases"][index]["status"] = "running"
-            _publish(prepared.directory, document, on_progress)
-            document["cases"][index] = await _run_case(
-                prepared,
-                case,
-                providers,
-                handlers,
-                cancel_event,
-                revision,
-                notification_adapter=notification_adapter,
-            )
-            document["durationMs"] = round((time.monotonic() - started_clock) * 1000)
-            _publish(prepared.directory, document, on_progress)
-            if document["cases"][index].get("sourceChanged"):
-                break
-        for case_document in document["cases"]:
-            if case_document["status"] in {"pending", "running"}:
-                case_document["status"] = "skipped"
-                case_document["message"] = case_document.get("message") or "Not run."
-        stopped = cancel_event is not None and cancel_event.is_set()
-        document["totals"] = _totals(document["cases"])
-        document["status"] = (
-            "stopped"
-            if stopped
-            else "passed"
-            if document["totals"]["passed"] == len(document["cases"])
-            else "failed"
+
+
+def _settle(document: dict[str, Any], stopped: bool) -> None:
+    for case_document in document["cases"]:
+        if case_document["status"] in {"pending", "running"}:
+            case_document["status"] = "skipped"
+            case_document["message"] = case_document.get("message") or "Not run."
+    document["totals"] = _totals(document["cases"])
+    document["status"] = (
+        "stopped"
+        if stopped
+        else "passed"
+        if document["totals"]["passed"] == len(document["cases"])
+        else "failed"
+    )
+
+
+def model_comparison(
+    candidate: Mapping[str, Any], baseline: Mapping[str, Any], *, reused: bool
+) -> dict[str, Any]:
+    """Each case side by side: pass/fail, run cost and time, current model then candidate.
+
+    Costs are the workflow's own model calls; judge checks use their own model for
+    both sides, so their cost is left out of the comparison.
+    """
+    before = {str(case.get("id")): case for case in baseline.get("cases") or []}
+    rows = []
+    counts = {"fixed": 0, "broke": 0, "same": 0, "changed": 0, "pending": 0}
+    sides: dict[str, dict[str, Any]] = {
+        "current": {"passed": 0, "cases": 0, "costUsd": 0.0, "costComplete": True, "durationMs": 0},
+        "candidate": {
+            "passed": 0,
+            "cases": 0,
+            "costUsd": 0.0,
+            "costComplete": True,
+            "durationMs": 0,
+        },
+    }
+    for case in candidate.get("cases") or []:
+        case_id = str(case.get("id"))
+        old = before.get(case_id) or {}
+        current = _side(old)
+        tried = _side(case)
+        for name, side in (("current", current), ("candidate", tried)):
+            if side["status"] in {None, "pending", "running", "skipped"}:
+                continue
+            total = sides[name]
+            total["cases"] += 1
+            total["passed"] += 1 if side["status"] == "passed" else 0
+            total["durationMs"] += int(side["durationMs"] or 0)
+            if isinstance(side["costUsd"], (int, float)):
+                total["costUsd"] += float(side["costUsd"])
+            else:
+                total["costComplete"] = False
+        settled = {"passed", "failed", "error"}
+        if current["status"] not in settled or tried["status"] not in settled:
+            change = "pending"
+        elif current["status"] == tried["status"]:
+            change = "same"
+        elif tried["status"] == "passed":
+            change = "fixed"
+        elif current["status"] == "passed":
+            change = "broke"
+        else:
+            change = "changed"
+        counts[change] += 1
+        rows.append(
+            {
+                "id": case_id,
+                "name": case.get("name") or case_id,
+                "current": current,
+                "candidate": tried,
+                "change": change,
+            }
         )
-    except BaseException:
-        document["status"] = "error"
-        raise
-    finally:
-        document["finishedAt"] = _now()
-        document["durationMs"] = round((time.monotonic() - started_clock) * 1000)
-        document["totals"] = document["totals"] or _totals(document["cases"])
-        try:
-            _publish(prepared.directory, document, on_progress)
-        finally:
-            with _active_results_lock:
-                _active_results.discard(result_id)
-    return document
+    return {
+        "baselineId": baseline.get("id"),
+        "baselineStartedAt": baseline.get("startedAt"),
+        "baselineStatus": baseline.get("status"),
+        "baselineReused": reused,
+        "variant": candidate.get("variant"),
+        "cases": rows,
+        "summary": counts,
+        "totals": sides,
+        "sentence": _comparison_sentence(sides, counts),
+    }
+
+
+def _side(case: Mapping[str, Any]) -> dict[str, Any]:
+    usage = case.get("usage") or {}
+    return {
+        "status": case.get("status"),
+        "costUsd": usage.get("costUsd"),
+        "modelCalls": usage.get("modelCalls"),
+        "durationMs": case.get("durationMs"),
+        "runId": case.get("runId"),
+        "message": case.get("message"),
+    }
+
+
+def _comparison_sentence(sides: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int]) -> str:
+    current, candidate = sides["current"], sides["candidate"]
+    if not candidate["cases"]:
+        return "The candidate hasn't finished a case yet."
+
+    def cost(side: Mapping[str, Any]) -> str:
+        text = format_usd(float(side["costUsd"]))
+        return text if side["costComplete"] else f"at least {text}"
+
+    parts = [
+        f"Current model passed {current['passed']}/{current['cases']} for {cost(current)}; "
+        f"the candidate passed {candidate['passed']}/{candidate['cases']} for {cost(candidate)}."
+    ]
+    changes = [f"{counts[key]} {key}" for key in ("fixed", "broke", "changed") if counts[key]]
+    if changes:
+        parts.append(f"Cases: {', '.join(changes)}.")
+    return " ".join(parts)
 
 
 def with_comparison(
     document: Mapping[str, Any], history: Sequence[Mapping[str, Any]]
 ) -> dict[str, Any]:
-    """The result plus its comparison with the last result of another revision."""
+    """The result plus its comparison with the last result of another revision.
+
+    A Try another model result also gets ``modelComparison`` with its baseline.
+    """
     payload = dict(document)
     previous = previous_revision_result(history, document)
     payload["comparison"] = compare_results(document, previous) if previous is not None else None
+    baseline_id = document.get("baselineId")
+    if result_variant_key(document) is not None and baseline_id:
+        baseline = next((item for item in history if item.get("id") == baseline_id), None)
+        if baseline is not None:
+            payload["modelComparison"] = model_comparison(
+                document, baseline, reused=baseline.get("trialId") != document.get("id")
+            )
     return payload
 
 
@@ -847,12 +1221,15 @@ async def _run_case(
             expected_revision=revision,
             # A test case checks fresh answers, never ones saved by an earlier run.
             use_result_cache=False,
+            # Cases run in the project folder, where their prepare-command set things up.
+            use_worktree=False,
+            model_overrides=prepared.models or None,
         )
     except RattishRunArtifactError as exc:
         document.update(status="error", message=str(exc))
         document["sourceChanged"] = "changed after run preparation" in str(exc)
         return _finish_case(document, started, run_meter, judge_meter)
-    except (RattishError, RattishArtifactError, OSError) as exc:
+    except (RattishError, RattishArtifactError, ModelOverrideError, OSError) as exc:
         document.update(status="error", message=str(exc))
         return _finish_case(document, started, run_meter, judge_meter)
     run_document = run.document
@@ -985,6 +1362,8 @@ async def _evaluate_check(
             status, message = "skipped", "Model judgment was skipped for this run."
         else:
             status, message = await _judge_check(check, value, context)
+    except shells.ShellUnavailableError as exc:
+        status, message = "error", str(exc)
     except Exception as exc:  # A broken check must not end the whole test run.
         status, message = "error", f"{type(exc).__name__}: {exc}"
     return {**result, "status": status, "message": message}
@@ -1054,7 +1433,7 @@ async def _command_check(
     project_root = Path(str(context.prepared.ir["source"]["project_root"]))
     stdin = b"" if value is _MISSING else value_text(value).encode("utf-8")
     returncode, stdout, stderr = await run_subprocess(
-        _shell_command_args(str(check["command"])),
+        shells.command_args(shells.configured_shell(check), str(check["command"])),
         cwd=project_root,
         env={
             "RATICODE_TEST_CASE": str(context.case["id"]),
@@ -1191,6 +1570,7 @@ def _publish(
     directory: Path,
     document: dict[str, Any],
     on_progress: Callable[[dict[str, Any]], None] | None,
+    view: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> None:
     try:
         mkdir_without_links(directory)
@@ -1199,7 +1579,8 @@ def _publish(
     except OSError as exc:
         raise WorkflowTestError(f"Could not save the test result in {directory}: {exc}") from exc
     if on_progress is not None:
-        on_progress(json.loads(json.dumps(document, default=str)))
+        shown = view(document) if view is not None else document
+        on_progress(json.loads(json.dumps(shown, default=str)))
 
 
 def _fingerprint(value: Any) -> str:

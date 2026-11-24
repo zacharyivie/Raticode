@@ -82,4 +82,33 @@ class SelfWorkSettingsUiTest {
         compose.waitForIdle()
         assertTrue(linked == 1)
     }
+
+    @Test fun dailyCapStepsAndSavesOnceTheTapsStop() {
+        val json = JSONObject("""{"settings":{"enabled":true,"max_threads":1,"auto_pull_backlog":false,"idle_minutes":15,"revision":7,"daily_allowance_percent":10},
+            "limits":{"max_threads_min":1,"max_threads_max":16,"daily_allowance_percent_max":100},
+            "state":{"mode":"waiting","active_threads":0,"thread_limit":1,"board_enabled":true,"detail":"",
+              "daily_allowance":{"cap_percent":10,"used_percent":4,"available":true,
+                "message":"Used today: about 4% of 10% of the Claude Code weekly allowance. Resets at midnight."}}}""")
+        val sent = mutableListOf<JSONObject>()
+        compose.setContent {
+            RaticodeTheme {
+                Surface(color = MaterialTheme.colorScheme.background) {
+                    SelfWorkBody(DesktopViews.parse(Kanban.SELF_WORK, json) as SelfWorkView, null, busy = false, connected = true, error = null, showSettings = true,
+                        onSettings = {}, projectsEnabled = true, onProjects = {}, onTicket = {}, onSeen = {}) { sent += it }
+                }
+            }
+        }
+        compose.onNodeWithTag("selfWork").performScrollToNode(hasTestTag("selfWorkDailyCap"))
+        compose.onNodeWithTag("selfWorkDailyCapValue").assertTextEquals("10%")
+        compose.onNodeWithText("Used today: about 4% of 10%", substring = true).assertExists()
+        // Two quick taps become one change, sent with the revision the page showed.
+        compose.onNodeWithTag("selfWorkDailyCapMore").performClick()
+        compose.onNodeWithTag("selfWorkDailyCapMore").performClick()
+        compose.onNodeWithTag("selfWorkDailyCapValue").assertTextEquals("12%")
+        compose.mainClock.advanceTimeBy(1000)
+        compose.waitForIdle()
+        assertEquals(1, sent.size)
+        assertEquals(12, sent[0].getInt("daily_allowance_percent"))
+        assertEquals(7L, sent[0].getLong("expected_revision"))
+    }
 }

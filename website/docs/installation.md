@@ -74,18 +74,18 @@ The full error is in the app log under **Settings > Developer**.
 AppImage (use the exact file name you downloaded):
 
 ```bash
-chmod +x ./Raticode-0.5.5-x86_64.AppImage
-./Raticode-0.5.5-x86_64.AppImage
+chmod +x ./Raticode-0.6.0-x86_64.AppImage
+./Raticode-0.6.0-x86_64.AppImage
 ```
 
 Distribution packages:
 
 ```bash
 # Debian or Ubuntu
-sudo apt install ./Raticode-0.5.5-amd64.deb
+sudo apt install ./Raticode-0.6.0-amd64.deb
 
 # Fedora
-sudo dnf install ./Raticode-0.5.5-x86_64.rpm
+sudo dnf install ./Raticode-0.6.0-x86_64.rpm
 ```
 
 Change the version in the file name for another release. The AppImage, `.deb` and `.rpm` builds update themselves.
@@ -169,18 +169,18 @@ Each release has a checksum file per platform: `checksums-linux.txt`, `checksums
 sha256sum --check --ignore-missing checksums-linux.txt
 
 # macOS: compare the result with the file's line in checksums-macos.txt
-shasum -a 256 Raticode-0.5.5-arm64.dmg
+shasum -a 256 Raticode-0.6.0-arm64.dmg
 ```
 
 ```powershell
 # Windows: compare the result with the file's line in checksums-windows.txt
-(Get-FileHash .\Raticode-Setup-0.5.5.exe).Hash.ToLower()
+(Get-FileHash .\Raticode-Setup-0.6.0.exe).Hash.ToLower()
 ```
 
 Release files also carry GitHub build provenance, which shows they were built by Raticode's release workflow from the repository's source. With the [GitHub CLI](https://cli.github.com/) signed in:
 
 ```bash
-gh attestation verify ./Raticode-0.5.5-x86_64.AppImage --repo zacharyivie/Raticode
+gh attestation verify ./Raticode-0.6.0-x86_64.AppImage --repo zacharyivie/Raticode
 ```
 
 ## Updates and backups

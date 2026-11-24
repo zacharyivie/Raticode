@@ -3,6 +3,7 @@
   "contract_version": 1,
   "node_type": "read-file",
   "runtime_handler": "raticode.read_file",
+  "catalog": {"category": "files", "summary": "Read a text file and pass on its content", "docs_path": "/docs/nodes/read-file"},
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",

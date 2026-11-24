@@ -156,7 +156,7 @@ internal fun BrowserAppPage(client: LiveClient, browser: BrowserRuntime, app: Br
                         else "Pages open as tabs in ${app.name}, which keeps them, and their sound, while you switch back to Raticode with Android's Recents.",
                         Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     InsideRaticode(app.name, { browser.setEngine(BrowserRules.ENGINE_GECKO) }) { browser.setEngine(BrowserRules.ENGINE_RATICODE) }
-                    SectionTitle("Your ${app.name}")
+                    BrowserSectionTitle("Your ${app.name}")
                     app.signIn?.let { signIn -> MenuRow(signIn.label, detail = signIn.detail, icon = ThreadIcons.Lock) { openUrl(signIn.url) } }
                     MenuRow("${app.name}'s app settings", detail = "Android's settings for ${current.edition.name}: notifications, permissions, storage and default browser") {
                         if (!app.appSettings(context, current)) say("Android didn't open ${current.edition.name}'s app settings.")
@@ -170,7 +170,7 @@ internal fun BrowserAppPage(client: LiveClient, browser: BrowserRuntime, app: Br
                         saved.linksInApp, browser::setLinksInApp)
                 }
                 if (client.paired) {
-                    SectionTitle(computerTitle(computer))
+                    BrowserSectionTitle(computerTitle(computer))
                     ComputerTabs(browser, client, computer, limit = 8, open = { url -> openUrl(url) })
                 }
                 Text(buildString {

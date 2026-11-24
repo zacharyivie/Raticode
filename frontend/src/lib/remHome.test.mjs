@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { changesActiveWork, checkGroups, conversationMessages, criteriaSummary, finishedRunNotifications, latestWorkMessageIds, describeSchedule, draftTitle, draftToRequest, formatClock, formatWhen, groupTasks, messageStamp, messagesByDay, newTaskDraft, plainMarkdown, statusLine, taskActivity, taskMessages, taskRecap, taskToDraft, validateDraft, workStatus, prerequisites, afterChoices, afterEditable, startsWhen, runSleep, sleepBudget, canRetryPrerequisite, selfWorkReportItems } from "./remHome.js";
+import { changesActiveWork, checkGroups, dismissibleUpdates, conversationMessages, criteriaSummary, finishedRunNotifications, latestWorkMessageIds, describeSchedule, draftTitle, draftToRequest, formatClock, formatWhen, groupTasks, messageStamp, messagesByDay, newTaskDraft, plainMarkdown, statusLine, taskActivity, taskMessages, taskRecap, taskToDraft, validateDraft, workStatus, prerequisites, afterChoices, afterEditable, startsWhen, runSleep, sleepBudget, canRetryPrerequisite, selfWorkReportItems, usdText, workflowDraftSummary, reviewNotes } from "./remHome.js";
 
 const NOW = new Date(2026, 9, 7, 10, 0); // Wednesday, 7 October 2026, 10:00 local
 const at = (days, hour, minute = 0) => new Date(2026, 9, 7 + days, hour, minute).toISOString();
@@ -230,6 +230,20 @@ test("check groups stay quiet until a review looked at a check", () => {
   assert.deepEqual(checkGroups([{ result: "pass" }, { result: "fail", evidence: "Broke." }]).failed.map(item => [item.key, item.title]), [["check-1", "Check 2"]]);
 });
 
+test("review notes read as the finding with its severity, axis and file", () => {
+  const notes = reviewNotes([
+    { axis: "standards", severity: "note", file: "src/app.py", explanation: "Name the **helper** for what it returns." },
+    { axis: "spec", severity: "should_fix", file: "", explanation: "Mention the limit in the docs." },
+    { axis: "spec", severity: "note", explanation: "  " },
+    null,
+  ]);
+  assert.deepEqual(notes.map(item => [item.title, item.reason]), [
+    ["Name the helper for what it returns.", "Note · standards · src/app.py"],
+    ["Mention the limit in the docs.", "Should fix · task"],
+  ]);
+  for (const empty of [undefined, null, "x", []]) assert.deepEqual(reviewNotes(empty), []);
+});
+
 test("one-line recaps stay fast on long replies full of unclosed markup", () => {
   // Unbounded patterns rescanned to the end from every "[" or "**", so these took
   // two to three seconds each and froze the task list while it rendered.
@@ -425,4 +439,52 @@ test("a self-work report lists what each task did and opens the task, or its thr
   ]);
   assert.deepEqual(selfWorkReportItems({ ...message, kind: "task_update" }), []);
   assert.deepEqual(selfWorkReportItems({ ...message, self_work_report: undefined }), []);
+});
+
+test("a workflow draft card compares the task's average cost with the test run", () => {
+  assert.equal(workflowDraftSummary(null), null);
+  assert.equal(workflowDraftSummary({ status: "drafting" }), null);
+  const ready = workflowDraftSummary({
+    status: "ready", source_title: "Morning digest", workflow_path: "/p/.raticode/digest/workflow.rattish",
+    task_cost: { runs: 4, runs_with_cost: 3, average_usd: 0.42 }, test_cost: { cost_usd: 0.004, model_calls: 1 },
+  });
+  assert.equal(ready.title, "Workflow draft ready");
+  assert.equal(ready.costs.task, "$0.42 a run on average (3 of its last 4 runs)");
+  assert.equal(ready.costs.workflow, "$0.004 for its test run");
+  assert.equal(ready.saving, "About $0.42 less per run with the workflow.");
+  assert.equal(ready.canSwitch, true);
+  assert.equal(ready.switched, false);
+  const free = workflowDraftSummary({ status: "ready", task_cost: { runs: 2, runs_with_cost: 0, average_usd: null }, test_cost: { cost_usd: 0, model_calls: 0 }, switch: { active: true } });
+  assert.equal(free.costs.task, "Unknown: its provider didn't report what its runs cost");
+  assert.equal(free.costs.workflow, "$0.00 for its test run, with no model calls");
+  assert.equal(free.saving, "");
+  assert.equal(free.switched, true);
+  assert.equal(workflowDraftSummary({ status: "ready", task_cost: { runs: 2, runs_with_cost: 2, average_usd: 0.1 } }).costs.workflow, "Not tested yet");
+  const skipped = workflowDraftSummary({ status: "not_worth_it", reason: "Every run picks new sources.", source_title: "Research" });
+  assert.equal(skipped.title, "Switching won't save much");
+  assert.deepEqual(skipped.lines, ["Every run picks new sources.", "“Research” needs judgment every run, so it keeps running as a Rem task."]);
+  assert.equal(usdText(1.5), "$1.50");
+  assert.equal(usdText(null), "");
+});
+
+test("Dismiss all clears updates and keeps questions, holds and other work", () => {
+  const update = (id, state, extra = {}) => ({ id, last_run: { id: `run-${id}`, state, needs_user: false, ...extra } });
+  const tasks = [
+    update("failed", "failed"),
+    update("blocked", "blocked"),
+    update("unclear", "outcome_unknown", { needs_user: undefined }),
+    update("question", "blocked", { needs_user: true }),
+    update("seen", "failed", { acknowledged: true }),
+    update("done", "succeeded"),
+    { ...update("running", "failed"), active_run: { id: "now", state: "executing" } },
+    { id: "held", dependency: { state: "held", reason: "Audit failed" } },
+    { ...update("deleted", "failed"), deleted_at: "2026-11-16T00:00:00Z" },
+  ];
+  assert.deepEqual(dismissibleUpdates(tasks, NOW).map(task => task.id), ["failed", "blocked", "unclear"]);
+  // Everything it leaves in the Needs you group still needs the user.
+  const left = tasks.map(task => (dismissibleUpdates([task], NOW).length ? { ...task, last_run: { ...task.last_run, acknowledged: true } } : task));
+  const attention = groupTasks(left, NOW).find(group => group.id === "attention");
+  assert.deepEqual(attention.items.map(item => item.task.id), ["question", "held"]);
+  assert.equal(attention.label, "Needs you");
+  assert.deepEqual(dismissibleUpdates([], NOW), []);
 });

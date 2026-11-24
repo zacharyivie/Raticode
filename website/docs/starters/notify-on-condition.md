@@ -16,6 +16,8 @@ Starter workflows are new in Raticode 0.5.5.
 Raticode rattish create --from notify-on-condition --project .
 ```
 
+On Windows, its shell steps run in Git for Windows' bash (`shell: bash`), so install [Git for Windows](https://git-scm.com/downloads/win) first. Until you do, **Start from** says **Needs Git for Windows** and preflight stops the run with a link to the download. Windows support for starters is new in Raticode 0.6.0.
+
 ## Inputs
 
 | Input | Type | Default | Meaning |

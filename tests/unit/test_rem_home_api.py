@@ -636,3 +636,99 @@ def test_a_screenshot_message_fits_the_body_limit_and_is_kept_in_memory(api):
         body={"request_id": "screen-2", "body": "x", "screen_image": {"name": "x", "data": "!!"}},
     )
     assert bad.status == 400 and "isn't readable" in bad.json()["error"]
+
+
+def test_dismiss_all_dismisses_only_updates_and_changes_no_task(api):
+    request, service = api
+
+    def task_with_run(title: str, **run_fields: Any) -> tuple[dict[str, Any], str]:
+        created = request(
+            "POST",
+            "/api/rem/tasks",
+            body={
+                "request_id": f"create-{title}",
+                "title": title,
+                "type": "errand",
+                "prompt": "Check",
+                "schedule": {"kind": "daily", "local_time": "09:00", "timezone": "UTC"},
+            },
+        ).json()["task"]
+        run = request(
+            "POST", f"/api/rem/tasks/{created['id']}/run", body={"request_id": f"run-{title}"}
+        ).json()["run"]
+        if run_fields:
+            force_run(service, run["id"], **run_fields)
+        return created, run["id"]
+
+    _, failed = task_with_run("Failed", state="failed")
+    _, blocked = task_with_run("Couldn't finish", state="blocked", needs_user=False)
+    _, unclear = task_with_run("Unclear", state="outcome_unknown")
+    _, question = task_with_run("Question", state="blocked", needs_user=True)
+    _, seen = task_with_run("Seen", state="failed", acknowledged=True)
+    _, done = task_with_run("Done", state="succeeded")
+    _, going = task_with_run("Going")
+    _, later = task_with_run("Arrived later", state="failed")
+    before = {t["id"]: t for t in request("GET", "/api/rem/tasks").json()["tasks"]}
+
+    shown = [failed, blocked, unclear, question, seen, done, going]
+    body = {"request_id": "dismiss-all", "run_ids": shown}
+    response = request("POST", "/api/rem/runs/acknowledge", body=body)
+    assert response.status == 200, response.json()
+    result = response.json()
+    assert sorted(item["run_id"] for item in result["dismissed"]) == sorted(
+        [failed, blocked, unclear]
+    )
+    assert result["count"] == 3 and result["needs_you"] == 1
+    # The same request again is answered from its receipt, not applied twice.
+    assert request("POST", "/api/rem/runs/acknowledge", body=body).json() == result
+
+    after = {t["id"]: t for t in request("GET", "/api/rem/tasks").json()["tasks"]}
+    runs = {task["last_run"]["id"]: task["last_run"] for task in after.values() if task["last_run"]}
+    assert {r for r, run in runs.items() if run.get("acknowledged")} == {
+        failed,
+        blocked,
+        unclear,
+        seen,
+    }
+    # A question still waiting for the user, and an update that arrived after the user
+    # pressed the button, keep showing; running and finished work is untouched.
+    assert runs[question]["state"] == "blocked" and not runs[question].get("acknowledged")
+    assert runs[later]["state"] == "failed" and not runs[later].get("acknowledged")
+    assert runs[going]["state"] == "queued" and runs[done]["state"] == "succeeded"
+    for identity, task in before.items():
+        # Tasks keep their revision, schedule and state; only run acknowledgements changed.
+        assert after[identity]["revision"] == task["revision"]
+        assert after[identity]["schedule"] == task["schedule"]
+        assert after[identity]["state"] == task["state"]
+        assert after[identity]["last_run"]["state"] == task["last_run"]["state"]
+
+    # Without run_ids, every update left is dismissed; the question still stays.
+    rest = request("POST", "/api/rem/runs/acknowledge", body={"request_id": "dismiss-rest"})
+    assert [item["run_id"] for item in rest.json()["dismissed"]] == [later]
+    assert rest.json()["needs_you"] == 1
+    bad = request("POST", "/api/rem/runs/acknowledge", body={"request_id": "bad", "run_ids": "all"})
+    assert bad.status == 400
+
+
+def test_attention_matches_the_apps_needs_you_group():
+    from gofer.ui.rem_home_store import attention
+
+    failed = {"id": "r", "state": "failed", "needs_user": False}
+    assert attention({"last_run": failed}) == "update"
+    # Older runs saved without needs_user are updates, as the apps count them.
+    assert attention({"last_run": {"id": "r", "state": "outcome_unknown"}}) == "update"
+    assert attention({"last_run": {**failed, "state": "blocked", "needs_user": True}}) == (
+        "needs_you"
+    )
+    assert attention({"last_run": {**failed, "acknowledged": True}}) is None
+    assert attention({"last_run": failed, "deleted_at": "2026-11-16T00:00:00Z"}) is None
+    # Running work wins over the last run's update.
+    assert attention({"last_run": failed, "active_run": {"state": "executing"}}) is None
+    # A task held because a task it waits for failed needs the user; one still waiting
+    # isn't in the group; a paused one shows its last run again.
+    assert attention({"dependency": {"state": "held"}, "last_run": failed}) == "needs_you"
+    assert attention({"dependency": {"state": "waiting"}}) is None
+    assert (
+        attention({"dependency": {"state": "held"}, "state": "paused", "last_run": failed})
+        == "update"
+    )

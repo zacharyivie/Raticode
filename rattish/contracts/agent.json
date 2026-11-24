@@ -3,6 +3,7 @@
   "contract_version": 1,
   "node_type": "agent",
   "runtime_handler": "raticode.agent",
+  "catalog": {"category": "ai", "summary": "Ask an AI provider to do a task you describe", "docs_path": "/docs/nodes/agent"},
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
@@ -29,6 +30,21 @@
       "output_schema": {"type": ["object", "null"]},
       "output_schema_path": {"type": ["string", "null"], "x-rattish-type": "Path"},
       "repair_attempts": {"type": "integer", "minimum": 0, "maximum": 3},
+      "sandbox": {"enum": ["on", "off"]},
+      "network": {
+        "anyOf": [
+          {"const": "any"},
+          {"type": "null"},
+          {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^(localhost|(\\*\\.)?[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+)$"
+            },
+            "uniqueItems": true
+          }
+        ]
+      },
       "fallback": {
         "type": "array",
         "maxItems": 4,
@@ -73,6 +89,8 @@
     "output_schema": null,
     "output_schema_path": null,
     "repair_attempts": 0,
+    "sandbox": "on",
+    "network": [],
     "fallback": []
   },
   "computed_defaults": {
@@ -143,6 +161,31 @@
       "id": "working-dir-available",
       "severity": "error",
       "description": "The working directory must exist and be accessible."
+    },
+    {
+      "id": "sandbox-available",
+      "severity": "error",
+      "description": "The step's operating-system sandbox must be able to start with its provider, profile and network setting."
+    },
+    {
+      "id": "network-declared",
+      "severity": "error",
+      "description": "Hosts the agent's shell needs must be listed in the step's network field."
+    },
+    {
+      "id": "runs-unsandboxed",
+      "severity": "warning",
+      "description": "Steps on a provider without a sandbox, on native Windows or with sandbox: off run unsandboxed."
+    },
+    {
+      "id": "extra-paths-allowed",
+      "severity": "error",
+      "description": "An extra path can't be, hold or sit inside a folder where Raticode or your home folder keeps credentials."
+    },
+    {
+      "id": "sandbox-widened",
+      "severity": "warning",
+      "description": "Extra paths outside the project and network: any let the step's shell reach more than its project."
     }
   ],
   "static_diagnostics": [
@@ -166,6 +209,13 @@
       "rule": "suspected_plaintext_secret",
       "fields": ["env"],
       "description": "Warn about credential-shaped plaintext environment entries without rejecting the source."
+    },
+    {
+      "code": "RATTISH_AGENT_SANDBOX_OFF",
+      "severity": "warning",
+      "rule": "sandbox_off",
+      "fields": ["sandbox"],
+      "description": "Warn when an agent step turns off its operating-system sandbox."
     }
   ]
 }

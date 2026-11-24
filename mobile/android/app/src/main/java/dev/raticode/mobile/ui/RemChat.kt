@@ -456,6 +456,10 @@ private fun RemMessageRow(client: LiveClient, home: RemHome, row: MessageRow, on
                 val body = remember(message.body, message.result) { RemRich.bodyWithoutCardLinks(message.body, message.result) }
                 if (body.isNotBlank()) FoldableText(startOpen = newest, toggleColor = MaterialTheme.colorScheme.primary, onFolded = onFolded, reveal = reveal) { SelectionContainer { ChatMarkdown(body, source = source, mentions = message.fileMentions) } }
                 RemDetails(message.details, source, message.fileMentions)
+                // From Usage › Verified work, on the card only: the report's text, which Rem reads back, leaves it out.
+                message.selfWorkReport?.verifiedLine?.takeIf { it.isNotBlank() }?.let {
+                    Text(it, style = MaterialTheme.typography.titleSmall, modifier = Modifier.testTag("remSelfWorkVerified"))
+                }
                 message.selfWorkReport?.takeIf { it.items.isNotEmpty() }?.let { SelfWorkReportList(it, onTask, onThread) }
                 message.result?.let { RemResultCard(client, it, message.id, onThread) }
                 message.files.forEach { file ->
@@ -465,6 +469,10 @@ private fun RemMessageRow(client: LiveClient, home: RemHome, row: MessageRow, on
                     else OfferedFile(client, file, onSave, onOpen)
                 }
                 message.work?.let { work -> WorkCard(home, work, onTask, onThread, live) }
+                // The question this update brings, with Rem's recommendation and Use this while it waits.
+                message.work?.decision?.let { RemDecisionChatCard(client, home, it) }
+                // A change to a decision the user asked for, with its before and after; only OK applies it.
+                message.decisionEdits.forEach { RemDecisionEditCard(client, home, it) }
                 PhoneActionCards(message.phoneActions, colors.muted, rememberPhoneActionOpener(), rememberContactPicker())
                 RemMemoryNoteView(client, message)
                 RemResultActions(client, home, message, live)

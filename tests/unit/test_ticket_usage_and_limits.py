@@ -274,8 +274,8 @@ class MeteredFake(Fake):
 
 @pytest.fixture
 def metered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(rem_home_module, "memory_available_bytes", lambda: 8 * 1024**3)
-    monkeypatch.setattr(rem_home_module, "swap_blocked", lambda: None)
+    # New workers wait while this computer is short of memory; keep tests host-independent.
+    monkeypatch.setattr("gofer.core.command_slots.memory_hold", lambda: None)
     monkeypatch.setattr(rem_home_module, "validate_artifacts", lambda run: None)
     fake = MeteredFake()
     data = tmp_path / "rem-data"

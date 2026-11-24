@@ -1,5 +1,6 @@
 {
   "$schema": "../schemas/node-contract.schema.json", "contract_version": 1, "node_type": "local-search", "runtime_handler": "raticode.local_search",
+  "catalog": {"category": "files", "summary": "Find the best-matching passages in a local index", "docs_path": "/docs/nodes/local-search"},
   "configuration_schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "properties": {
     "index_path": {"type": "string", "x-rattish-type": "Path"}, "query": {"type": "string"}, "top_k": {"type": "integer", "minimum": 1},
     "score_threshold": {"type": "number", "minimum": -1, "maximum": 1}, "include_snippets": {"type": "boolean"}, "include_file_metadata": {"type": "boolean"},

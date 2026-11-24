@@ -39,6 +39,20 @@ The Rem button drafts a message from the change. It doesn't replace reading the 
 
 Set up messages in **Settings > Rem > Commit messages**: the template, the provider and model that write them, and **Auto commit changes**. The default template is a `fix`, `feat`, `test` or `chore` subject followed by one to eight short change bullets.
 
+### Remove Co-authored-by lines
+
+**Settings > Rem > Commit messages > Remove Co-authored-by lines** is off by default. Turn it on and Raticode deletes every line that starts with `Co-authored-by:` (any capitalization, any co-author) just before each commit is made. The rest of the message stays exactly as written, apart from blank lines the removal leaves at the end. A model never does this step. It's a small Python check that gives the same result every time.
+
+It covers:
+
+- commits from the Source Control commit box, and **Auto commit changes**
+- `git commit` and `git merge` that Rem, its task workers, organization employees, swarm agents and workflow steps run in their own shell
+- commits Raticode makes itself when it lands a ticket or keeps a workflow run's or Rem task's worktree changes
+
+Agents' own commits need Git 2.54 or later, which can run hooks named in Git settings. With an older Git, Settings says so, and only the commits from the other two items are checked. Raticode passes the hook to Claude Code in a second form that survives Claude Code's sandbox, and to Codex in the form its shell settings keep. Cursor, Copilot, OpenCode, Grok and Antigravity get the hook too, but commits from their shells haven't been tested yet. Commits you make yourself in a terminal outside Raticode aren't checked. The setting reaches a thread or task when it starts, so one already running keeps the choice it started with. Git doesn't run the check for `git commit --no-verify`, `cherry-pick`, `rebase` or `revert`, which copy messages from commits that already exist. A message made only of `Co-authored-by:` lines is left empty, and Git refuses to commit it.
+
+The same switch is on the phone under **Desktop settings › Rem**.
+
 ## History
 
 **History** draws the branch graph with branch and tag labels and their ahead and behind counts.

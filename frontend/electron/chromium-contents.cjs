@@ -138,6 +138,9 @@ class ChromiumContents extends EventEmitter {
     this.url = "about:blank";
     this.title = "";
     this.loading = true;
+    // True from the start of a main-frame navigation until the new document
+    // fires DOMContentLoaded. See isLoadingMainFrame().
+    this.documentLoading = true;
     this.focused = false;
     this.muted = false;
     this.pageZoom = 1;
@@ -225,6 +228,10 @@ class ChromiumContents extends EventEmitter {
   getURL() { return this.url; }
   getTitle() { return this.title; }
   isLoading() { return this.loading; }
+  // As Electron's method of the same name, but true only until the main
+  // document's DOM is ready (Page.domContentEventFired), so a frame or image
+  // that never finishes doesn't keep it true.
+  isLoadingMainFrame() { return this.loading && this.documentLoading; }
   isFocused() { return this.focused; }
   getType() { return this.engine; }
   focus() { this.emit("stream-focus"); }
@@ -269,6 +276,7 @@ class ChromiumContents extends EventEmitter {
     // Report loading at once, as Electron does, so callers that wait for the
     // page to settle do not return before Chrome announces the navigation.
     this.loading = true;
+    this.documentLoading = true;
     let result;
     try {
       result = await this.command("Page.navigate", { url: target });
@@ -277,7 +285,7 @@ class ChromiumContents extends EventEmitter {
       this.loading = false;
       this.emit("did-fail-load", {}, -2, error.message, target, true);
       this.emit("did-stop-loading");
-      throw new Error(`${this.name} could not open ${target}: ${error.message}`);
+      throw new Error(`${this.name} could not open ${target}: ${error.message}`, { cause: error });
     }
     if (result.isDownload) {
       waiter.cancel();
@@ -320,6 +328,7 @@ class ChromiumContents extends EventEmitter {
     }
     await this.alive();
     this.loading = true;
+    this.documentLoading = true;
     await this.command("Page.reload", { ignoreCache }).catch((error) => this.log("warn", `${this.name} reload failed: ${error.message}`));
   }
 
@@ -330,6 +339,7 @@ class ChromiumContents extends EventEmitter {
       const entry = this.history.entries[target];
       if (!entry || target === this.history.index) return;
       this.loading = true;
+      this.documentLoading = true;
       void this.alive()
         .then(() => this.command("Page.navigateToHistoryEntry", { entryId: entry.id }))
         .then(() => this.refreshHistory())
@@ -473,6 +483,7 @@ class ChromiumContents extends EventEmitter {
     this.dead = false;
     this.lastError = "";
     this.loading = true;
+    this.documentLoading = true;
     this.guardInstalled = false;
     this.emit("did-start-loading");
     this.ready = this.start();
@@ -570,12 +581,14 @@ class ChromiumContents extends EventEmitter {
       case "Page.frameStartedNavigating": {
         if (!main) break;
         const sameDocument = /sameDocument/i.test(String(params.navigationType || ""));
+        if (!sameDocument) this.documentLoading = true;
         this.emit("did-start-navigation", { isMainFrame: true, isSameDocument: sameDocument, url: params.url }, params.url);
         break;
       }
       case "Page.frameStartedLoading":
         if (!main) break;
         this.loading = true;
+        this.documentLoading = true;
         this.lastError = "";
         this.emit("did-start-loading");
         break;
@@ -584,6 +597,8 @@ class ChromiumContents extends EventEmitter {
         if (frame.id) this.frames.add(frame.id);
         if (frame.parentId || frame.id !== this.mainFrameId) break;
         this.loaderId = frame.loaderId || this.loaderId;
+        // A new document committed; its DOM is not ready yet.
+        this.documentLoading = true;
         this.worlds.clear();
         // Chrome's own error and warning pages, such as "Your connection is
         // not private", which can let the reader past a certificate error.
@@ -605,7 +620,9 @@ class ChromiumContents extends EventEmitter {
         void this.refreshHistory().then(() => this.refreshState());
         this.emit("did-navigate-in-page", {}, this.url, true);
         break;
+      // Chrome sends this for the tab's main frame only.
       case "Page.domContentEventFired":
+        this.documentLoading = false;
         void this.refreshState();
         break;
       case "Page.loadEventFired":
@@ -642,6 +659,8 @@ class ChromiumContents extends EventEmitter {
         this.scheduleStateRefresh();
         break;
       case "Browser.downloadWillBegin":
+        // A navigation that became a download leaves the current page in place.
+        this.documentLoading = false;
         this.emit("stream-download-begin", { url: params.url, filename: params.suggestedFilename || "", navigation: params.guid || "" });
         break;
       case "Browser.downloadProgress":
@@ -657,6 +676,7 @@ class ChromiumContents extends EventEmitter {
 
   finishLoading() {
     this.loading = false;
+    this.documentLoading = false;
     void this.evaluateIn(STATE_WORLD, pageMenu.WATCH).catch(() => {});
     void this.refreshHistory().then(() => this.refreshState()).finally(() => {
       this.emit("did-stop-loading");

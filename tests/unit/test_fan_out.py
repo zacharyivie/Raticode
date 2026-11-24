@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import sys
 import threading
-import types
 from collections.abc import Callable, Iterator
+from datetime import datetime
 from pathlib import Path
 
 import anyio
@@ -26,6 +26,7 @@ from gofer.core.provider_profiles import ResolvedProviderSettings
 from gofer.core.resources import ResourceLimitError, ResourceLimits
 from gofer.core.workflow import AgenticWorkflow, WorkflowConfig
 from tests.conftest import FakeSubscription, envelope_request
+from tests.helpers.xlsx_files import write_xlsx
 
 # ── _load_tabular ─────────────────────────────────────────────────────────────
 
@@ -80,48 +81,23 @@ def test_load_tabular_xlsx_missing_optional_dependency(
 ) -> None:
     f = tmp_path / "data.xlsx"
     f.write_text("")
-    monkeypatch.setitem(sys.modules, "openpyxl", None)
+    monkeypatch.setitem(sys.modules, "python_calamine", None)
 
-    with pytest.raises(ImportError, match="openpyxl is required"):
+    with pytest.raises(ImportError, match="python-calamine is required"):
         _load_tabular(f)
 
 
-def test_load_tabular_xlsx_converts_headers_and_values(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    f = tmp_path / "data.xlsx"
-    f.write_text("")
-    closed = False
-
-    class Worksheet:
-        def iter_rows(self, values_only: bool = False) -> Iterator[tuple[object, ...]]:
-            assert values_only is True
-            return iter(
-                [
-                    ("name", 2, None),
-                    ("alice", 30, True),
-                    ("bob", None, False),
-                ]
-            )
-
-    class Workbook:
-        active = Worksheet()
-
-        def close(self) -> None:
-            nonlocal closed
-            closed = True
-
-    def load_workbook(path: Path, read_only: bool, data_only: bool) -> Workbook:
-        assert path == f
-        assert read_only is True
-        assert data_only is True
-        return Workbook()
-
-    monkeypatch.setitem(
-        sys.modules,
-        "openpyxl",
-        types.SimpleNamespace(load_workbook=load_workbook),
+def test_load_tabular_xlsx_converts_headers_and_values(tmp_path: Path) -> None:
+    pytest.importorskip("python_calamine")
+    f = write_xlsx(
+        tmp_path / "data.xlsx",
+        [
+            [
+                ["name", 2, None, "when"],
+                ["alice", 30, True, ("xml", '<c r="{ref}" s="1"><v>46197</v></c>')],
+                ["bob", None, False, None],
+            ]
+        ],
     )
 
     rows = _load_tabular(f)
@@ -131,16 +107,25 @@ def test_load_tabular_xlsx_converts_headers_and_values(
             "name": "alice",
             "2": 30,
             "None": True,
-            "_row": '{"name": "alice", "2": 30, "None": true}',
+            "when": datetime(2026, 6, 24),
+            "_row": '{"name": "alice", "2": 30, "None": true, "when": "2026-06-24 00:00:00"}',
         },
         {
             "name": "bob",
             "2": None,
             "None": False,
-            "_row": '{"name": "bob", "2": null, "None": false}',
+            "when": None,
+            "_row": '{"name": "bob", "2": null, "None": false, "when": null}',
         },
     ]
-    assert closed is True
+
+
+def test_load_tabular_xlsx_stops_at_the_item_limit(tmp_path: Path) -> None:
+    pytest.importorskip("python_calamine")
+    f = write_xlsx(tmp_path / "data.xlsx", [[["n"], [1], [2], [3]]])
+
+    with pytest.raises(ResourceLimitError, match="exceeded limit 2 items"):
+        _load_tabular(f, max_items=2)
 
 
 def test_load_tabular_jsonl_stops_at_limit_before_parsing_extra_row(

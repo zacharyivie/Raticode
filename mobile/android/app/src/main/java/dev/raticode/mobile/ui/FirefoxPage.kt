@@ -160,7 +160,7 @@ internal fun FirefoxPage(client: LiveClient, browser: BrowserRuntime, onBack: ((
                         else "Pages open as tabs in Firefox, which keeps them, and their sound, while you switch to Raticode and back.",
                         Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     InsideRaticode(found.build.name, { browser.setEngine(BrowserRules.ENGINE_GECKO) }) { browser.setEngine(BrowserRules.ENGINE_RATICODE) }
-                    SectionTitle("Your Firefox")
+                    BrowserSectionTitle("Your Firefox")
                     FirefoxApps.SCREENS.forEach { item ->
                         MenuRow(item.label, detail = item.detail, icon = if (item == FirefoxApps.SIGN_IN) ThreadIcons.Lock else null) { screen(item.host) }
                     }
@@ -170,7 +170,7 @@ internal fun FirefoxPage(client: LiveClient, browser: BrowserRuntime, onBack: ((
                         saved.linksInApp, browser::setLinksInApp)
                 }
                 if (client.paired) {
-                    SectionTitle(computerTitle(computer))
+                    BrowserSectionTitle(computerTitle(computer))
                     ComputerTabs(browser, client, computer, limit = 8, open = { url -> openUrl(url) })
                 }
                 Text(buildString {

@@ -9,14 +9,33 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.triggers.cron import CronTrigger
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
 from gofer.core.provider_capabilities import ProviderId
+from gofer.ui.rem_decisions import (
+    DecisionAnswer,
+    DecisionConflict,
+    DecisionEdit,
+    DecisionRequest,
+)
+from gofer.ui.rem_objectives import ObjectivesRequest
+from gofer.ui.rem_plans import PlanRequest
 from gofer.ui.rem_projects import ProjectOpen
 
 WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 ACTIVE = {"queued", "executing", "verifying", "repairing", "cancelling"}
 NEEDS_ATTENTION = {"blocked", "failed", "outcome_unknown"}
+# A develop task's first acceptance check when none were given (the guardrail retro reads a
+# review that failed it as a catch-all cause).
+DEVELOP_ACCEPTANCE_CHECK = "Implement the requested behavior and demonstrate it works"
 
 
 def now() -> str:
@@ -106,8 +125,15 @@ class Recipe(BaseModel):
     provider: ProviderId | None = None
     model: str | None = Field(default=None, min_length=1, max_length=256)
     effort: str | None = Field(default=None, max_length=256)
+    # The account this task runs as, chosen by the user. It wins over Rem's own
+    # choice (Settings > Rem > <provider> account). Only for providers with accounts.
+    provider_profile: str | None = Field(default=None, min_length=1, max_length=128)
     execution_mode: Literal["work", "conversation"] = "work"
     conversation_turns: int = Field(default=1, ge=1, le=12, strict=True)
+    # The computer the user pinned this task to, by its ID in the computer registry
+    # (Settings > Computers, `computers list`). Placement uses only that computer. A
+    # paired desktop runs only research and conversation tasks (rem_remote_tasks).
+    computer: str | None = Field(default=None, min_length=1, max_length=128)
     schedule: Schedule = Field(default_factory=Schedule)
     acceptance_criteria: list[Criterion] = Field(default_factory=list, max_length=40)
     # The user asked to be sent the file this task finds or makes. Only a run started
@@ -183,7 +209,7 @@ class Recipe(BaseModel):
                         "Run relevant regression tests and required project checks",
                     ],
                     "develop": [
-                        "Implement the requested behavior and demonstrate it works",
+                        DEVELOP_ACCEPTANCE_CHECK,
                         "Pass relevant regression tests and required project checks",
                     ],
                     "errand": [
@@ -213,6 +239,9 @@ def worker_config(config: dict[str, Any], recipe: dict[str, Any]) -> dict[str, A
         selected.update(model=recipe["model"], effort="")
     if recipe.get("effort") is not None:
         selected["effort"] = recipe["effort"]
+    if recipe.get("provider_profile"):
+        # The task's own account choice always wins over Rem's setting.
+        selected["task_account"] = recipe["provider_profile"]
     return selected
 
 
@@ -278,6 +307,11 @@ def _worktree_skills(resources: dict[str, Any]) -> list[tuple[str, str]]:
     return found
 
 
+def worktree_skills(resources: dict[str, Any]) -> list[tuple[str, str]]:
+    """Name and description of each enabled skill about the project's worktree process."""
+    return _worktree_skills(resources)
+
+
 def worktree_skill(resources: dict[str, Any]) -> str | None:
     """Name of an enabled skill that sets the project's own worktree process.
 
@@ -286,28 +320,6 @@ def worktree_skill(resources: dict[str, Any]) -> str | None:
     """
     skills = _worktree_skills(resources)
     return skills[0][0] if skills else None
-
-
-# A skill that says its branches end up on a local ``dev`` branch, such as
-# "rebases onto dev and fast-forwards dev". A general worktree skill (for example one
-# that only creates isolated worktrees) doesn't, so Rem's landing check stays off for it.
-_LANDS_ON_DEV = re.compile(
-    r"\b(?:fast-forward\w*|merg\w*|land\w*|rebas\w*|integrat\w*)\b[^.\n]{0,60}?\bdev\b",
-    re.IGNORECASE,
-)
-
-
-def landing_skill(resources: dict[str, Any]) -> str | None:
-    """Name of an enabled worktree skill whose description says changes land on dev.
-
-    Only such a skill turns on the check that a writer task's branch reached local
-    ``dev``; a repository that merely has a ``dev`` branch and some worktree skill
-    keeps working as before.
-    """
-    for name, description in _worktree_skills(resources):
-        if _LANDS_ON_DEV.search(description):
-            return name
-    return None
 
 
 def completion_recap(summary: str) -> str:
@@ -458,19 +470,43 @@ class WorkerReply(BaseModel):
     )
     needs_user: bool = Field(default=False, strict=True)
     user_question: str = Field(default="", max_length=4000)
+    # Required with needs_user: the question as a typed request with one recommended
+    # answer and evidence Raticode checks (rem_decisions). No bare questions reach the user.
+    decision_request: DecisionRequest | None = None
+    # Decisions that can't all hold, each with one recommended fix the user decides.
+    decision_conflicts: list[DecisionConflict] = Field(default_factory=list, max_length=3)
+    # The card Raticode built itself when Rem's request failed twice (rem_decisions).
+    _fallback: dict[str, Any] | None = PrivateAttr(default=None)
 
     @model_validator(mode="after")
     def validate_attention(self) -> WorkerReply:
         if self.needs_user and not self.user_question.strip():
-            raise ValueError("User attention needs a concrete question")
+            if self.decision_request is None:
+                raise ValueError("User attention needs a concrete question")
+            self.user_question = self.decision_request.question
+        if self.needs_user and self.decision_request is None:
+            raise ValueError(
+                "A question for the user needs decision_request with one recommended answer "
+                "and evidence"
+            )
         return self
 
 
 class ConversationDecision(WorkerReply):
-    """Private completion decision in addition to Rem's conversational reply."""
+    """Private completion decision in addition to Rem's conversational reply.
+
+    A question here is only a proposal: Rem's answer to the worker (_answer_worker) is
+    where a question must carry its recommendation, so a verdict isn't rejected for it.
+    """
 
     criteria: list[dict[str, Any]] = Field(max_length=40)
     summary: str = Field(min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_attention(self) -> ConversationDecision:
+        if self.needs_user and not (self.user_question.strip() or self.decision_request):
+            raise ValueError("User attention needs a concrete question")
+        return self
 
     @field_validator("summary")
     @classmethod
@@ -478,6 +514,18 @@ class ConversationDecision(WorkerReply):
         if not value.strip():
             raise ValueError("A conversation needs a summary")
         return value
+
+
+class NewMemory(BaseModel):
+    """A fact to save with the end Rem proposes for it, when it is tied to a date or event.
+
+    ``until`` is the last day it applies (``YYYY-MM-DD`` in the user's timezone) or an
+    ISO instant with a timezone. Raticode checks it when saving and drops an unusable one.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(min_length=1, max_length=2000)
+    until: str | None = Field(default=None, max_length=80)
 
 
 class MemoryChange(BaseModel):
@@ -575,14 +623,26 @@ class SelfWorkRequest(BaseModel):
     ``enable``/``disable`` flip the Settings > Rem switch. ``schedule`` adds a window: from
     ``start`` (now when absent) until ``end``, or ``until`` the tasks running now finish.
     ``stop_at`` ends the self-work running now at ``end``. ``cancel_schedule`` drops the
-    windows. ``report`` posts what self-work did in its current or last period. The thread
-    limit, backlog pulling, auto-approval and Rem's projects never change here. The backend
-    applies it and writes the result into the reply.
+    windows. ``report`` posts what self-work did in its current or last period.
+    ``stop_when`` sets the self-work running now to stop when ``done_when`` (the user's
+    condition, judged by Rem against real records) is met, or at ``no_later_than`` at the
+    latest; ``enable`` and ``schedule`` may carry them too. ``clear_stop`` clears the
+    condition, the latest time or both (``clear``). The thread limit, backlog pulling,
+    auto-approval and Rem's projects never change here. The backend applies it and writes
+    the result into the reply.
     """
 
     model_config = ConfigDict(extra="forbid")
     action: Literal[
-        "enable", "disable", "status", "schedule", "stop_at", "cancel_schedule", "report"
+        "enable",
+        "disable",
+        "status",
+        "schedule",
+        "stop_at",
+        "cancel_schedule",
+        "report",
+        "stop_when",
+        "clear_stop",
     ]
     start: ClockTime | None = None
     end: ClockTime | None = None
@@ -591,9 +651,25 @@ class SelfWorkRequest(BaseModel):
     after_end: Literal["restore", "on", "off"] = "restore"
     # Inside the window, still wait for 15 minutes without a prompt before starting.
     wait_for_idle: bool = Field(default=False, strict=True)
+    # The user's stop condition in their words, e.g. "REM-205 to REM-212 are done".
+    done_when: str | None = Field(default=None, max_length=500)
+    # The time self-work stops by whatever the condition says ("but no later than midnight").
+    no_later_than: ClockTime | None = None
+    # What clear_stop clears.
+    clear: Literal["condition", "no_later_than", "both"] | None = None
+    # The user's exact words asking to change or clear a stop condition, or move the latest
+    # time later; Raticode checks they are in the user's message before loosening it.
+    user_words: str = Field(default="", max_length=300)
 
     @model_validator(mode="after")
     def complete(self) -> SelfWorkRequest:
+        stops = self.done_when is not None or self.no_later_than is not None
+        if self.action == "stop_when" and not stops:
+            raise ValueError("stop_when needs done_when or no_later_than")
+        if stops and self.action not in {"stop_when", "enable", "schedule"}:
+            raise ValueError("Only stop_when, enable and schedule take done_when or no_later_than")
+        if self.clear is not None and self.action != "clear_stop":
+            raise ValueError("Only clear_stop takes clear")
         if self.action == "schedule" and not (self.end or self.until):
             raise ValueError("A self-work window needs an end time or until")
         if self.action == "schedule" and self.end and self.until:
@@ -636,7 +712,7 @@ class Decision(BaseModel):
     model_config = ConfigDict(extra="forbid")
     reply: str = Field(min_length=1, max_length=4000)
     tasks: list[Recipe] = Field(default_factory=list, max_length=5)
-    memories: list[str] = Field(default_factory=list, max_length=10)
+    memories: list[str | NewMemory] = Field(default_factory=list, max_length=10)
     memory_changes: list[MemoryChange] = Field(default_factory=list, max_length=10)
     controls: list[TaskControl] = Field(default_factory=list, max_length=5)
     # Absolute paths of existing files the user asked Rem to send.
@@ -658,8 +734,19 @@ class Decision(BaseModel):
     tickets: list[TicketRequest] = Field(default_factory=list, max_length=10)
     # Turning self-work on or off, or asking whether it is on (rem_self_work).
     self_work: SelfWorkRequest | None = None
+    # Setting or changing the self-work objectives because the user said so (rem_objectives).
+    objectives: ObjectivesRequest | None = None
     # Organizations requests the user told Rem to approve in this message.
     org_approvals: list[OrganizationApproval] = Field(default_factory=list, max_length=5)
+    # Questions Rem brings the user, each with one recommended answer (rem_decisions).
+    decision_requests: list[DecisionRequest] = Field(default_factory=list, max_length=3)
+    # The user's answers, in this message, to requests waiting for them (rem_decisions).
+    decision_answers: list[DecisionAnswer] = Field(default_factory=list, max_length=5)
+    # Changes to decisions in force the user asked for in this message. Never applied by
+    # Rem: each becomes an OK/Cancel card with the before and after (rem_decisions).
+    decision_edits: list[DecisionEdit] = Field(default_factory=list, max_length=3)
+    # Plan with me: questions to grill the user with, only when they asked (rem_plans).
+    plan: PlanRequest | None = None
 
     @model_validator(mode="after")
     def suggested_criteria(self) -> Decision:
@@ -677,6 +764,7 @@ class TaskUpdate(BaseModel):
     summary: str = Field(min_length=1, max_length=700)
     needs_user: bool = Field(default=False, strict=True)
     user_question: str = Field(default="", max_length=500)
+    decision_request: DecisionRequest | None = None
     details: str = Field(default="", max_length=6000)
     suggestions: list[Annotated[str, Field(max_length=SUGGESTION_CHARS)]] = Field(
         default_factory=list, max_length=10
@@ -691,6 +779,11 @@ class TaskUpdate(BaseModel):
     def require_question(self) -> TaskUpdate:
         if not self.summary.strip() or (self.needs_user and not self.user_question.strip()):
             raise ValueError("A task update needs a summary and any required question")
+        if self.needs_user and self.decision_request is None:
+            raise ValueError(
+                "A question for the user needs decision_request with one recommended answer "
+                "and evidence"
+            )
         return self
 
 

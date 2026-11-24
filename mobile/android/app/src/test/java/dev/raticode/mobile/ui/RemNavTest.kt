@@ -32,6 +32,19 @@ class RemNavTest {
         assertEquals(RemNav(), RemNav(memories = true).back())
     }
 
+    @Test fun decisionsCoverTheChatAndCloseFirst() {
+        assertFalse(RemNav(decisions = true).chatShown)
+        assertEquals(RemNav(), RemNav(decisions = true).back())
+        assertEquals(RemNav(tasks = true), RemNav(tasks = true, decisions = true).back())
+    }
+
+    @Test fun aTaskOpenedFromDecisionsReturnsToThem() {
+        val nav = RemNav(decisions = true, taskId = "t1", threadId = "th1")
+        assertEquals(RemNav(decisions = true, taskId = "t1"), nav.back())
+        assertEquals(RemNav(decisions = true), nav.back().back())
+        assertEquals(RemNav(), nav.back().back().back())
+    }
+
     @Test fun backAtTheChatStaysOnTheChat() {
         assertEquals(RemNav(), RemNav().back())
     }

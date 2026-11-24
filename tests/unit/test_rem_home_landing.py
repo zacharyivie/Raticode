@@ -1,4 +1,5 @@
-"""Rem writer tasks under a worktree skill only succeed once their branch is on dev."""
+"""Rem writer tasks under a worktree skill succeed only once their branch is on the
+project's decided integration branch (``branch.integration``); there is no built-in one."""
 
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ from gofer.ui.rem_home_landing import (
     landing_opted_out,
     unlanded_branches,
 )
-from gofer.ui.rem_home_models import landing_skill, worktree_skill
+from gofer.ui.rem_home_models import worktree_skill
 from tests.unit.test_rem_home import home, recipe, wait_run  # noqa: F401
 from tests.unit.test_rem_thread_parity import skill, thread_defaults
 
@@ -57,20 +58,25 @@ def feature(project: Path, tmp_path: Path, name: str) -> tuple[Path, list[str]]:
 
 def test_a_committed_branch_that_never_reached_dev_is_reported(tmp_path: Path):
     project = repository(tmp_path)
-    before = branch_tips(project)
+    before = branch_tips(project, "dev")
     assert before is not None and "dev" in before
     folder, commands = feature(project, tmp_path, "fix/thing")
-    found = unlanded_branches(project, before, commands)
+    found = unlanded_branches(project, before, commands, integration="dev")
     assert found == [
         {"branch": "fix/thing", "worktree": str(folder), "commits": 1, "uncommitted": False}
     ]
-    feedback = landing_feedback(found)
+    feedback = landing_feedback(found, "dev")
     assert "fix/thing" in feedback and "1 commit(s) not on dev" in feedback
     assert "merge --ff-only" in feedback and "Don't push" in feedback
 
     # Fast-forwarding dev where it is checked out lands it.
     git(tmp_path / "dev-home", "merge", "-q", "--ff-only", "fix/thing")
-    assert unlanded_branches(project, before, commands) == []
+    assert unlanded_branches(project, before, commands, integration="dev") == []
+    # Against another project's integration branch the same branch is checked there.
+    git(project, "branch", "main", "test")
+    found = unlanded_branches(project, before, commands, integration="main")
+    assert [f["branch"] for f in found] == ["fix/thing"]
+    assert "not on main" in landing_feedback(found, "main")
 
 
 def test_uncommitted_changes_on_the_runs_branch_are_not_landed(tmp_path: Path):
@@ -80,9 +86,11 @@ def test_uncommitted_changes_on_the_runs_branch_are_not_landed(tmp_path: Path):
     folder = tmp_path / "wt" / "half-done"
     git(project, "worktree", "add", "-q", "-b", "half-done", str(folder), "dev")
     (folder / "README.md").write_text("edited\n")
-    found = unlanded_branches(project, before, [f"git worktree add -b half-done {folder} dev"])
+    found = unlanded_branches(
+        project, before, [f"git worktree add -b half-done {folder} dev"], integration="dev"
+    )
     assert found and found[0]["uncommitted"] and not found[0]["commits"]
-    assert "uncommitted changes" in landing_feedback(found)
+    assert "uncommitted changes" in landing_feedback(found, "dev")
 
 
 def test_other_tasks_branches_and_the_users_checkout_are_not_this_runs(tmp_path: Path):
@@ -92,19 +100,25 @@ def test_other_tasks_branches_and_the_users_checkout_are_not_this_runs(tmp_path:
     # Another task commits on its own branch while this run only reads it.
     folder, _ = feature(project, tmp_path, "someone-else")
     reads = [f"git -C {folder} log --oneline -3", "git branch -vv", "git diff dev someone-else"]
-    assert unlanded_branches(project, before, reads) == []
+    assert unlanded_branches(project, before, reads, integration="dev") == []
     # The user's own checkout moving is never a task's unlanded work.
     (project / "notes.txt").write_text("user\n")
     git(project, "add", "notes.txt")
     git(project, "commit", "-qm", "user work")
-    assert unlanded_branches(project, before, [f"cd {project} && git commit -am x"]) == []
+    assert (
+        unlanded_branches(project, before, [f"cd {project} && git commit -am x"], integration="dev")
+        == []
+    )
     # A branch that already existed and didn't move isn't this run's either.
     later = branch_tips(project)
     assert later is not None
-    assert unlanded_branches(project, later, [f"git -C {folder} commit --amend"]) == []
+    assert (
+        unlanded_branches(project, later, [f"git -C {folder} commit --amend"], integration="dev")
+        == []
+    )
 
 
-def test_projects_without_a_dev_branch_or_git_are_skipped(tmp_path: Path):
+def test_projects_without_the_integration_branch_or_git_are_skipped(tmp_path: Path):
     plain = tmp_path / "plain"
     plain.mkdir()
     assert branch_tips(plain) is None
@@ -112,7 +126,8 @@ def test_projects_without_a_dev_branch_or_git_are_skipped(tmp_path: Path):
     (plain / "a").write_text("a")
     git(plain, "add", "-A")
     git(plain, "commit", "-qm", "init")
-    assert branch_tips(plain) is None
+    assert branch_tips(plain, "dev") is None
+    assert branch_tips(plain, "main") == {"main": git(plain, "rev-parse", "HEAD")}
 
 
 @pytest.mark.parametrize(
@@ -124,7 +139,13 @@ def test_projects_without_a_dev_branch_or_git_are_skipped(tmp_path: Path):
     ],
 )
 def test_tasks_can_say_their_work_stays_off_dev(prompt: str):
-    assert landing_opted_out(prompt)
+    assert landing_opted_out(prompt, "dev")
+
+
+def test_opting_out_names_the_projects_own_branch():
+    assert landing_opted_out("Do not merge it into main.", "main")
+    assert not landing_opted_out("Do not merge it into main.", "dev")
+    assert landing_opted_out("Don't land it on the integration branch yet.")
 
 
 @pytest.mark.parametrize(
@@ -136,30 +157,28 @@ def test_tasks_can_say_their_work_stays_off_dev(prompt: str):
     ],
 )
 def test_ordinary_task_wording_still_lands(prompt: str):
-    assert not landing_opted_out(prompt)
+    assert not landing_opted_out(prompt, "dev")
 
 
 @pytest.mark.parametrize(
-    ("description", "lands"),
+    "description",
     [
-        (
-            "Creates or reuses a git worktree off dev, implements and commits there, then "
-            "rebases onto dev and fast-forwards dev.",
-            True,
-        ),
-        ("Make each change on a worktree branch and merge it into dev.", True),
-        # Common general-purpose worktree skills say nothing about landing on dev.
-        ("Use when starting feature work: creates isolated git worktrees.", False),
-        ("Creates a git worktree off dev for each change.", False),
+        "Creates or reuses a git worktree off dev, then rebases onto dev and fast-forwards dev.",
+        "Use when starting feature work: creates isolated git worktrees.",
     ],
 )
-def test_only_a_skill_that_lands_on_dev_turns_the_landing_check_on(
-    tmp_path: Path, description: str, lands: bool
+def test_any_worktree_skill_keeps_rem_from_making_its_own_worktree(
+    tmp_path: Path, description: str
 ):
     resources = {"skills": [skill(tmp_path, "using-git-worktrees", description)]}
-    # Either way the skill still keeps Rem from making its own worktree.
     assert worktree_skill(resources) == "using-git-worktrees"
-    assert landing_skill(resources) == ("using-git-worktrees" if lands else None)
+
+
+def decide_branch(home: RemHome, project: Path, branch: str = "dev") -> None:  # noqa: F811
+    """The user's confirmed landing branch for the project."""
+    home.change_decisions(
+        {"action": "add", "topic": "branch.integration", "answer": branch, "project": str(project)}
+    )
 
 
 def shell(command: str) -> dict[str, Any]:
@@ -237,6 +256,7 @@ def test_rem_sends_an_unlanded_branch_back_and_succeeds_once_it_lands(
 ):
     project = repository(tmp_path)
     home.configure({"provider": "claude_code", "resources": thread_defaults(tmp_path)})
+    decide_branch(home, project)
     source, turns = worker_source(project, tmp_path, land_on_repair=True)
     home.source = source
     task = home.create_task({"request_id": "land", **recipe(project)})["task"]
@@ -246,6 +266,7 @@ def test_rem_sends_an_unlanded_branch_back_and_succeeds_once_it_lands(
     first = turns[0]["agent_instructions"]
     assert "with one exception: landing" in first
     assert "isn't finished until its branch has landed" in first
+    assert "local dev, the project's recorded decision" in first
     assert "don't wait for a separate go-ahead" in first
     repair = turns[1]["messages"][-1]["body"]
     assert "hasn't landed on local dev" in repair and "fix/rem-change" in repair
@@ -258,6 +279,7 @@ def test_rem_never_reports_success_for_work_that_stays_off_dev(
 ):
     project = repository(tmp_path)
     home.configure({"provider": "claude_code", "resources": thread_defaults(tmp_path)})
+    decide_branch(home, project)
     source, turns = worker_source(project, tmp_path, land_on_repair=False)
     home.source = source
     task = home.create_task({"request_id": "stuck", **recipe(project)})["task"]
@@ -273,6 +295,7 @@ def test_an_opted_out_task_keeps_its_branch_and_still_succeeds(
 ):
     project = repository(tmp_path)
     home.configure({"provider": "claude_code", "resources": thread_defaults(tmp_path)})
+    decide_branch(home, project)
     source, turns = worker_source(project, tmp_path, land_on_repair=False)
     home.source = source
     prompt = "Build a prototype for the user to try. Do not merge it into dev."
@@ -303,6 +326,112 @@ def test_a_general_worktree_skill_never_holds_a_task_for_dev(
     first = turns[0]["agent_instructions"]
     assert "with one exception: landing" in first
     assert "isn't finished until its branch has landed" not in first
+
+
+def test_a_projects_first_task_finds_its_landing_branch_and_waits_for_the_user(
+    home: RemHome,  # noqa: F811
+    tmp_path: Path,
+):
+    """No built-in dev: the scan recommends one, and until the user confirms, no landing."""
+    project = repository(tmp_path)
+    home.configure({"provider": "claude_code", "resources": thread_defaults(tmp_path)})
+    source, turns = worker_source(project, tmp_path, land_on_repair=False)
+    home.source = source
+    task = home.create_task({"request_id": "first", **recipe(project)})["task"]
+    run = wait_run(home, task["id"], {"succeeded", "blocked"}, timeout=20)
+    assert run["state"] == "succeeded", run
+    assert len(turns) == 1
+    assert run["landing_branch"] is None
+    assert "isn't finished until its branch has landed" not in turns[0]["agent_instructions"]
+    waiting = [
+        i for i in home.decisions(str(project))["items"] if i["topic"] == "branch.integration"
+    ]
+    assert [(i["status"], i["recommended"]) for i in waiting] == [("pending", "dev")]
+    # The evidence is the enabled skill's own words, checked against the branch's commit.
+    assert waiting[0]["evidence"][0]["kind"] == "commit"
+    assert "fast-forwards dev" in waiting[0]["evidence"][0]["excerpt"]
+
+
+def test_with_auto_mode_rem_decides_the_landing_branch_itself_and_holds_work_to_it(
+    home: RemHome,  # noqa: F811
+    tmp_path: Path,
+):
+    project = repository(tmp_path)
+    with home.store.connect() as db:
+        home.store.set_setting(db, "self_work", {"enabled": True, "auto_approve_proposals": True})
+    home.configure({"provider": "claude_code", "resources": thread_defaults(tmp_path)})
+    source, turns = worker_source(project, tmp_path, land_on_repair=True)
+    home.source = source
+    task = home.create_task({"request_id": "auto", **recipe(project)})["task"]
+    run = wait_run(home, task["id"], {"succeeded", "blocked"}, timeout=20)
+    assert run["state"] == "succeeded", run
+    assert run["landing_branch"] == "dev"
+    assert len(turns) == 2
+    decided = [
+        i for i in home.decisions(str(project))["items"] if i["topic"] == "branch.integration"
+    ]
+    assert [(i["status"], i["answer"], i["decided_by"]) for i in decided] == [
+        ("provisional", "dev", "rem")
+    ]
+
+
+def test_a_project_that_lands_on_main_is_held_to_main(
+    home: RemHome,  # noqa: F811
+    tmp_path: Path,
+):
+    project = tmp_path / "repo"
+    project.mkdir()
+    git(project, "init", "-q", "-b", "main")
+    (project / "README.md").write_text("hello\n")
+    git(project, "add", "-A")
+    git(project, "commit", "-qm", "init")
+    git(project, "checkout", "-q", "-b", "test")
+    git(project, "worktree", "add", "-q", str(tmp_path / "dev-home"), "main")
+    git(project, "branch", "dev", "main")
+    home.configure({"provider": "claude_code", "resources": thread_defaults(tmp_path)})
+    decide_branch(home, project, "main")
+    source, turns = worker_source(project, tmp_path, land_on_repair=False)
+    home.source = source
+    task = home.create_task({"request_id": "main", **recipe(project)})["task"]
+    run = wait_run(home, task["id"], {"succeeded", "blocked"}, timeout=30)
+    assert run["state"] == "blocked", run
+    assert run["landing_branch"] == "main"
+    assert "local main, the project's recorded decision" in turns[0]["agent_instructions"]
+    assert "hasn't landed on local main" in turns[1]["messages"][-1]["body"]
+
+
+def test_projects_that_already_landed_on_dev_carry_it_over_as_confirmed(
+    home: RemHome,  # noqa: F811
+    tmp_path: Path,
+):
+    """Existing projects behave as before: their earlier landings become the decision."""
+    project = repository(tmp_path)
+    other = tmp_path / "gone"
+    with home.store.connect() as db:
+        for number, root in enumerate([project, project, other]):
+            db.execute(
+                "INSERT INTO runs(id, task, occurrence, state, body) VALUES (?, ?, ?, ?, ?)",
+                (
+                    f"old-{number}",
+                    "t",
+                    f"old-{number}",
+                    "succeeded",
+                    json.dumps({"recipe": {"project_dir": str(root)}, "branch_tips": {"dev": "x"}}),
+                ),
+            )
+        home.store.set_setting(db, "rem_decision_migrations", {})
+    assert home._carry_over_landing() == [str(project)]
+    items = home.decisions(str(project))["items"]
+    assert [(i["topic"], i["status"], i["answer"]) for i in items] == [
+        ("branch.integration", "confirmed", "dev")
+    ]
+    assert items[0]["source"] == {"via": "carried over"}
+    assert "2 earlier tasks" in items[0]["history"][0]["note"]
+    assert home.integration_branch(str(project)) == "dev"
+    # Once only: a decision the user forgets later isn't brought back.
+    home.change_decisions({"action": "forget", "id": items[0]["id"]})
+    assert home._carry_over_landing() == []
+    assert home.integration_branch(str(project)) is None
 
 
 def test_backend_git_in_agent_folders_runs_no_repository_programs(tmp_path, monkeypatch) -> None:

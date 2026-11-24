@@ -7,6 +7,7 @@ import http.client
 import json
 import os
 import stat
+import sys
 import threading
 import time
 from pathlib import Path
@@ -65,6 +66,49 @@ def test_get_data_dir_honors_gofer_data_dir(tmp_path, monkeypatch) -> None:
     assert get_data_dir() == tmp_path / "chosen"
     monkeypatch.setenv("GOFER_DATA_DIR", "  ")
     assert get_data_dir().name == "gofer"
+
+
+def test_serve_data_dir_reaches_modules_that_read_gofer_data_dir(tmp_path, monkeypatch) -> None:
+    # providers.json and other files are found through GOFER_DATA_DIR, not the folder
+    # passed to serve(); before the fix they landed in the standard folder.
+    from gofer.core.provider_preferences import save_voice_tidy_preference
+    from gofer.ui import server as ui
+
+    # setenv, not delenv: serve sets GOFER_DATA_DIR, and only setenv restores it after.
+    monkeypatch.setenv("GOFER_DATA_DIR", "")
+    monkeypatch.setenv("RATICODE_DATA_DIR", "")
+    seen: dict[str, Any] = {}
+
+    def fake_serve(**kwargs: Any) -> None:
+        seen.update(kwargs)
+        save_voice_tidy_preference({"enabled": False})
+
+    monkeypatch.setattr(ui, "serve", fake_serve)
+    chosen = tmp_path / "chosen"
+    result = _invoke("serve", "--headless", "--port", "0", "--data-dir", str(chosen))
+
+    assert result.exit_code == 0, result.output
+    assert seen["data_dir"] == chosen
+    assert (chosen / "providers.json").is_file()
+    assert get_data_dir() == chosen
+
+
+def test_serve_and_tokens_use_the_clients_data_dir_variable(tmp_path, monkeypatch) -> None:
+    from gofer.ui import server as ui
+
+    monkeypatch.setenv("GOFER_DATA_DIR", "")
+    monkeypatch.setenv("RATICODE_DATA_DIR", str(tmp_path / "shared"))
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(ui, "serve", lambda **kwargs: seen.update(kwargs))
+
+    served = _invoke("serve", "--headless", "--port", "0")
+    created = _invoke("tokens", "create", "ci", "--output", str(tmp_path / "ci.token"))
+
+    assert served.exit_code == 0, served.output
+    assert created.exit_code == 0, created.output
+    assert seen["data_dir"] == tmp_path / "shared"
+    # The token store is where the backend and the CLI's clients both look.
+    assert (tmp_path / "shared" / "headless" / "agent-tokens.json").is_file()
 
 
 def test_cli_uses_gofer_data_dir_without_data_dir_flag(tmp_path, monkeypatch) -> None:
@@ -415,6 +459,25 @@ def test_headless_without_rem_settings_names_the_file(tmp_path, headless_serve) 
     assert str(data_dir / "headless" / "rem-settings.json") in server.rem_home.context_hint
 
 
+def test_a_second_headless_backend_on_the_same_folder_is_refused(tmp_path, headless_serve) -> None:
+    from gofer.ui.server import serve
+
+    data_dir = tmp_path / "data"
+    first = headless_serve(data_dir)
+    token = (data_dir / "headless" / "owner-token").read_text(encoding="utf-8")
+    endpoint = (data_dir / "headless" / "endpoint.json").read_text(encoding="utf-8")
+
+    with pytest.raises(headless.HeadlessError, match="already running"):
+        serve(host="127.0.0.1", port=0, data_dir=data_dir, headless=True)
+
+    # The first backend's published token and address are untouched.
+    assert (data_dir / "headless" / "owner-token").read_text(encoding="utf-8") == token
+    assert (data_dir / "headless" / "endpoint.json").read_text(encoding="utf-8") == endpoint
+    assert first.api_token == token.strip()
+    # Another folder is fine.
+    headless_serve(tmp_path / "other")
+
+
 def test_headless_token_file_input(tmp_path, headless_serve) -> None:
     data_dir = tmp_path / "data"
     secret = tmp_path / "mounted-token"
@@ -732,6 +795,40 @@ def test_legacy_workflow_writers_work_offline_after_the_backend_stops(tmp_path) 
     assert "Offline name" in renamed.stdout
 
 
+def test_private_brains_opt_in_is_stored_with_the_tokens_hash(tmp_path) -> None:
+    data_dir = tmp_path / "data"
+    for name, extra in (("ci", ()), ("local", ("--private-brains",))):
+        created = _invoke(
+            "tokens",
+            "create",
+            name,
+            "--output",
+            str(tmp_path / f"{name}.token"),
+            "--data-dir",
+            str(data_dir),
+            *extra,
+        )
+        assert created.exit_code == 0, created.output
+    stored = json.loads((data_dir / "headless" / "agent-tokens.json").read_text("utf-8"))
+    assert {item["name"]: item.get("private_brains") for item in stored["tokens"]} == {
+        "ci": None,
+        "local": True,
+    }
+    listed = json.loads(
+        _invoke("tokens", "list", "--format", "json", "--data-dir", str(data_dir)).stdout
+    )
+    assert {item["name"]: item["privateBrains"] for item in listed} == {
+        "ci": False,
+        "local": True,
+    }
+    store = headless.AgentTokenStore(data_dir)
+    local = (tmp_path / "local.token").read_text("utf-8").strip()
+    closed = (tmp_path / "ci.token").read_text("utf-8").strip()
+    assert store.grant(local) == headless.AgentGrant("local", private_brains=True)
+    assert store.grant(closed) == headless.AgentGrant("ci", private_brains=False)
+    assert store.match(closed) == "ci"
+
+
 def test_agent_tokens_cannot_read_rems_config_through_run_or_thread_details(
     tmp_path, headless_serve
 ) -> None:
@@ -772,3 +869,59 @@ def test_agent_tokens_cannot_read_rems_config_through_run_or_thread_details(
         assert "hidden-mcp-key" not in text and "grant-secret-id" not in text
         status, payload = _request(server, "GET", path, owner)
         assert status == 200 and "hidden-mcp-key" in json.dumps(payload)
+
+
+def test_headless_ready_line_never_carries_the_owner_token(tmp_path) -> None:
+    # A headless backend started from a shell the desktop app opened inherits
+    # GOFER_UI_EMIT_READY_TOKEN=1; its stdout goes to a terminal or the journal.
+    from types import SimpleNamespace
+
+    from gofer.ui.server import ready_payload
+
+    server: Any = SimpleNamespace(
+        server_address=("127.0.0.1", 8765),
+        data_dir=tmp_path,
+        gofer_cli_path=None,
+        emit_ready_token=True,
+        api_token="owner-secret",
+        headless=True,
+    )
+    assert "apiToken" not in ready_payload(server)
+    server.headless = False
+    assert ready_payload(server)["apiToken"] == "owner-secret"
+
+
+_RACE = """
+import sys, time
+from pathlib import Path
+from gofer.ui.headless import AgentTokenStore
+store = AgentTokenStore(Path(sys.argv[1]))
+start = float(sys.argv[3])
+while time.time() < start:
+    pass
+if sys.argv[2] == "revoke":
+    assert store.revoke("victim")
+else:
+    store.create(sys.argv[2])
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="forks Python processes")
+def test_a_revoke_racing_creates_in_other_processes_sticks(tmp_path) -> None:
+    import subprocess
+
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
+    for trial in range(3):
+        data = tmp_path / f"trial-{trial}"
+        store = headless.AgentTokenStore(data)
+        store.create("victim")
+        start = f"{time.time() + 1.0:.3f}"
+        names = [f"t{index}" for index in range(6)]
+        processes = [
+            subprocess.Popen([sys.executable, "-c", _RACE, str(data), action, start], env=env)
+            for action in ["revoke", *names]
+        ]
+        assert [process.wait(timeout=60) for process in processes] == [0] * len(processes)
+        listed = {token.name for token in headless.AgentTokenStore(data).list()}
+        # Before the lock, the revoke was often written over and "victim" kept working.
+        assert listed == set(names), listed

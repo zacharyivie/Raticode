@@ -260,3 +260,98 @@ def test_approvals_and_swarms_need_desktop_opt_in(application, tmp_path):
     assert ("control", "pause") in swarms.calls and ("message", "Focus on tests") in swarms.calls
     remote.enable(peer, False)
     assert send("swarm.control", {"swarm_id": wire, "action": "stop"})["type"] == "error"
+
+
+def test_phone_sees_approval_options_only_when_it_asks(application, tmp_path):
+    app, peer = application
+    remote = app.remote
+    remote.data_dir = tmp_path / "data"
+    decided: list[tuple[Any, ...]] = []
+    remote.decide_workflow = lambda *args, **kwargs: decided.append((args, kwargs))
+    store = ApprovalStore(remote.data_dir)
+    store.create_or_update(
+        ApprovalRequest(workflow_id="deploy", run_id="run1", node_id="plain", message="Ship it?")
+    )
+    store.create_or_update(
+        ApprovalRequest(
+            workflow_id="deploy",
+            run_id="run1",
+            node_id="channel",
+            message="Which channel?",
+            options=["Stable", "Beta", "Cancel"],
+            reject_options=["Cancel"],
+            reply_mode="optional",
+        )
+    )
+    store.create_or_update(
+        ApprovalRequest(
+            workflow_id="deploy",
+            run_id="run1",
+            node_id="why",
+            message="Why ship today?",
+            reply_mode="required",
+        )
+    )
+    remote.enable(peer, True)
+    sequence = iter(range(10, 100))
+
+    def send(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+        response: dict[str, Any] = app.handle(peer, request(kind, next(sequence), payload))[-1]
+        return response
+
+    # An older phone rejects unknown fields: it gets plain items only, without the gates
+    # it couldn't answer, and the snapshot still matches the strict schema.
+    old = send("approval.request", {})["payload"]["approvals"]
+    assert [item["summary"] for item in old] == ["Ship it?"]
+    assert "options" not in old[0] and "reply" not in old[0]
+
+    new = {
+        item["summary"]: item
+        for item in send("approval.request", {"include_choices": True})["payload"]["approvals"]
+    }
+    assert set(new) == {"Ship it?", "Which channel?", "Why ship today?"}
+    channel = new["Which channel?"]
+    assert channel["options"] == ["Stable", "Beta", "Cancel"]
+    assert channel["reply"] == "optional"
+    assert new["Why ship today?"]["reply"] == "required"
+    assert "options" not in new["Ship it?"] and "reply" not in new["Ship it?"]
+    # Plain gates keep the digest an older phone was given.
+    assert new["Ship it?"]["action_digest"] == old[0]["action_digest"]
+
+    unanswered = send(
+        "approval.resolve",
+        {
+            "approval_id": channel["approval_id"],
+            "action_digest": channel["action_digest"],
+            "decision": "approve",
+        },
+    )
+    assert unanswered["type"] == "error" and decided == []
+    after = send(
+        "approval.resolve",
+        {
+            "approval_id": channel["approval_id"],
+            "action_digest": channel["action_digest"],
+            "decision": "approve",
+            "choice": "Beta",
+            "instruction": "Internal testers only",
+        },
+    )
+    # The snapshot after an answer keeps this phone's choice of fields.
+    assert any("options" in item for item in after["payload"]["approvals"])
+    args, kwargs = decided[0]
+    assert args[:3] == ("deploy", "run1", "channel")
+    assert kwargs["choice"] == "Beta"
+    assert kwargs["reply"] == "Internal testers only" and kwargs["notes"] == ""
+
+    plain = new["Ship it?"]
+    send(
+        "approval.resolve",
+        {
+            "approval_id": plain["approval_id"],
+            "action_digest": plain["action_digest"],
+            "decision": "approve",
+            "instruction": "Looks good",
+        },
+    )
+    assert decided[1][1]["notes"] == "Looks good" and decided[1][1]["reply"] == ""

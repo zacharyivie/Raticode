@@ -3,6 +3,7 @@
   "contract_version": 1,
   "node_type": "rem-prompt",
   "runtime_handler": "raticode.rem_prompt",
+  "catalog": {"category": "ai", "summary": "Ask Rem something and use its reply", "docs_path": "/docs/nodes/rem-prompt"},
   "configuration_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",

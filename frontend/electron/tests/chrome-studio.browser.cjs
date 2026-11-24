@@ -10,6 +10,7 @@ const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
 const { app } = require("electron");
+const { checkSlowFramePage, createSlowFramePages } = require("./slow-frame-page.cjs");
 const { CHROME, findBrowser } = require("../chromium-engine.cjs");
 
 // A Chrome for Testing build that Playwright downloaded stands in for Chrome
@@ -52,7 +53,9 @@ const api = http.createServer((_request, response) => {
   response.setHeader("Access-Control-Allow-Origin", "*");
   response.end(JSON.stringify({ workflows: [], providers: [], runs: [], queue: [], entries: [] }));
 });
+const slowPages = createSlowFramePages();
 const site = http.createServer((request, response) => {
+  if (slowPages.serve(request, response)) return;
   response.setHeader("Content-Type", "text/html");
   if (request.url === "/rem") {
     response.end("<title>Rem page</title><label>Query <input id=q></label><button onclick=\"document.title='done:'+document.getElementById('q').value\">Run</button>");
@@ -163,6 +166,8 @@ async function run() {
   assert.equal(await page("document.activeElement.id"), "user-field");
   await call("close");
   await waitFor(() => (async () => (await chromeViews()) === before)(), "Closing Rem's tab did not remove it");
+  // A frame that never finishes doesn't hold up Rem's actions.
+  await checkSlowFramePage(call, base, "Chrome");
 
   if (process.platform === "linux") assert.ok(chromePids().length >= 1, "Chrome should run from Raticode's own profile");
   assert.ok(fs.statSync(path.join(profile, "chrome-profile")).isDirectory(), "Chrome uses a profile inside Raticode's data folder");
@@ -172,6 +177,7 @@ async function run() {
   clearTimeout(timer);
   console.log("Chrome in the studio passed.");
   api.close();
+  slowPages.stop();
   site.close();
   // A normal quit stops Chrome; the runner confirms none is left.
   setTimeout(() => app.exit(0), 15000).unref();

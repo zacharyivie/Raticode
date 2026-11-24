@@ -56,6 +56,7 @@ export function useProviderCapabilities(projectRoot = "") {
 }
 
 export function ProviderModelEffortFields({
+  account = null,
   allowInheritedModel = false,
   capabilities = [],
   className = "",
@@ -166,6 +167,7 @@ export function ProviderModelEffortFields({
         onModelChange={updateModel}
         onProviderChange={updateProvider}
       />
+      {account?.menu ? <AccountPicker account={account} disabled={disabled} providerName={selectedProvider?.displayName ?? selectedProvider?.id ?? "Provider"} /> : null}
       <ProviderAuthentication key={selectedProvider?.id} provider={selectedProvider} disabled={disabled} />
       {discoveryMessage ? (
         <div className="flex items-center justify-between gap-3 rounded-[10px] border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
@@ -391,6 +393,77 @@ function ModelPicker({
   );
 }
 
+/**
+ * The thread's account of the selected provider: Rem's setting, the default sign-in or
+ * one account. Accounts that need sign-in are listed but can't be picked; each has a
+ * Sign in link instead.
+ */
+function AccountPicker({ account, disabled, providerName }) {
+  const { menu, onChange, onSignIn, warning } = account;
+  const pickerRef = useRef(null);
+  const triggerRef = useRef(null);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return undefined;
+    window.requestAnimationFrame(() => {
+      pickerRef.current?.querySelector('[data-picker-menu="account"] [role="option"]:not(:disabled)')?.focus();
+    });
+    function handlePointerDown(event) {
+      if (!pickerRef.current?.contains(event.target)) setOpen(false);
+    }
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [open]);
+  function close() {
+    setOpen(false);
+    window.requestAnimationFrame(() => triggerRef.current?.focus());
+  }
+  return (
+    <div ref={pickerRef} className="relative w-full min-w-0" data-account-picker
+      onKeyDown={(event) => { if (event.key === "Escape" && open) { event.preventDefault(); close(); } }}>
+      <button
+        ref={triggerRef}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        aria-label={`${providerName} account: ${menu.label}`}
+        className="model-picker-account flex h-7 w-full min-w-0 items-center gap-1.5 rounded-full border border-line bg-slate-50 px-3 text-left text-[11px] text-ink transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+        data-model-picker-part="account"
+        disabled={disabled}
+        style={open ? activePickerStyle : undefined}
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="shrink-0 text-muted">Account</span>
+        <span className="min-w-0 flex-1 truncate font-semibold" data-picker-label>{menu.label}</span>
+        <ChevronDown aria-hidden="true" className="shrink-0 text-muted" size={12} />
+      </button>
+      {open ? (
+        <PickerMenu label={`${providerName} account`} menu="account">
+          {menu.options.map((option) => (
+            <div key={option.id || "rem-setting"} className="flex items-center gap-1">
+              <div className="min-w-0 flex-1">
+                <PickerOption
+                  active={option.id === menu.choice}
+                  disabled={option.disabled}
+                  label={option.label}
+                  meta={option.meta}
+                  onSelect={() => { onChange(option.id); close(); }}
+                />
+              </div>
+              {option.needsSignIn && onSignIn ? (
+                <button type="button" className="shrink-0 rounded px-2 py-1 text-[11px] font-semibold text-brand hover:underline"
+                  aria-label={`Sign in to ${option.label}`}
+                  onClick={() => { setOpen(false); onSignIn(option.id); }}>Sign in</button>
+              ) : null}
+            </div>
+          ))}
+        </PickerMenu>
+      ) : null}
+      {warning ? <p role="status" className="mt-1 text-[11px] leading-4 text-amber-800 dark:text-amber-200" data-account-warning>{warning}</p> : null}
+    </div>
+  );
+}
+
 function PickerMenu({ children, label, menu }) {
   return (
     <div
@@ -543,7 +616,7 @@ export function useProviderSignIn(providerId) {
   return { pending, starting, error, authenticate };
 }
 
-export function ProviderAuthentication({ provider, disabled = false, alwaysShow = false }) {
+export function ProviderAuthentication({ provider, disabled = false }) {
   const { pending, starting, error, authenticate } = useProviderSignIn(provider?.id);
   if (provider?.discoveryStatus === "access_denied") return <div className="space-y-2 rounded-xl border border-line bg-white px-3 py-2 text-xs">
     <p className="text-muted">{provider.error || "This account does not have access to the provider's model catalog."}</p>
@@ -552,7 +625,7 @@ export function ProviderAuthentication({ provider, disabled = false, alwaysShow 
       <button type="button" disabled={disabled} className="font-semibold text-brand disabled:opacity-60" onClick={() => window.dispatchEvent(new CustomEvent("raticode:providers-changed", { detail: { refresh: true } }))}>Refresh providers</button>
     </div>
   </div>;
-  if (!provider || (!alwaysShow && provider.discoveryStatus !== "unauthenticated")) return null;
+  if (!provider || provider.discoveryStatus !== "unauthenticated") return null;
   if (!provider.supportsBrowserLogin) return provider.discoveryStatus === "unauthenticated"
     ? <div className="space-y-2 text-xs text-muted"><p>{provider.id === "antigravity" ? "Run agy in a terminal to sign in to Antigravity, then refresh providers." : <>Sign in through {provider.displayName || provider.id}&apos;s CLI setup, then refresh providers.</>}</p>
       <button type="button" disabled={disabled} className="font-semibold text-brand" onClick={() => window.dispatchEvent(new CustomEvent("raticode:providers-changed", { detail: { refresh: true } }))}>Refresh providers</button></div> : null;

@@ -476,6 +476,23 @@ def test_cli_restores_the_newest_copy_and_keeps_the_old_file(tmp_path: Path) -> 
     assert "rem restore-db" in backups.notice_text(backups.pending_notices(tmp_path)[0])
 
 
+def test_cli_restore_is_refused_inside_an_agent_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store_with(tmp_path, "saved")
+    backups.snapshot(tmp_path)
+    store_with(tmp_path, "after the copy")
+    settle(tmp_path)
+    monkeypatch.setenv("RATICODE_AGENT_SESSION", "1")
+
+    assert _cli("--list", "--data-dir", str(tmp_path)).exit_code == 0
+    result = _cli("--force", "--data-dir", str(tmp_path))
+
+    assert result.exit_code == 5, result.output
+    assert "agent turn" in result.output
+    assert bodies(RemHomeStore(tmp_path)) == ["saved", "after the copy"]
+
+
 def test_cli_restores_a_named_copy(tmp_path: Path) -> None:
     store_with(tmp_path, "first")
     first = backups.snapshot(tmp_path, moment=datetime(2026, 11, 12, tzinfo=UTC))

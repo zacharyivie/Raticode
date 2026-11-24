@@ -1003,6 +1003,17 @@ def test_grok_billing_units_and_unknown_usage():
     ]
     assert windows[0]["label"] == "Weekly credits"
     assert windows[0]["remaining"] == 57.5
+    # Without a period start there's none to record; with one, it's kept for the daily cap.
+    assert "starts_at" not in windows[0]
+    started = usage.normalize_grok_billing(
+        {
+            "config": {
+                "creditUsagePercent": 10,
+                "currentPeriod": {"start": "2099-10-01T00:00:00Z", "end": "2099-11-01"},
+            }
+        }
+    )
+    assert started[0]["starts_at"] == "2099-10-01T00:00:00+00:00"
     assert (windows[1]["used"], windows[1]["limit"], windows[1]["remaining"]) == (5, 20, 15)
     assert windows[2]["remaining"] == 12.5
     # A period without a published percentage is unknown usage, never zero.

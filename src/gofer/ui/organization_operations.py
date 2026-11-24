@@ -26,6 +26,7 @@ from gofer.ui.organization_store import (
     ticket_prefix,
 )
 from gofer.utils.atomic_output import open_binary_input
+from gofer.utils.instants import aware_instant
 
 
 class Routine(BaseModel):
@@ -380,12 +381,16 @@ def diagnostics(org: dict[str, Any]) -> dict[str, Any]:
         project_identity(root)[0].startswith("git:") for root in roots
     )
     available = max(1, sum(not e["paused"] for e in config["employees"]))
-    effective = min(8, config["maxConcurrency"], available, 8 if isolated else max(1, len(roots)))
+    # The organization's own cap; dispatch has no fixed ceiling above maxConcurrency.
+    effective = min(config["maxConcurrency"], available)
+    if not isolated:
+        effective = min(effective, max(1, len(roots)))
     note = (
-        f"Up to {effective} at once: each employee runs one task at a time"
+        f"Up to {effective} at once: each worker runs one task at a time"
         + ("" if isolated else ", and tasks in the same project folder take turns")
-        + (f"; {available} employees are available" if available < config["maxConcurrency"] else "")
-        + "."
+        + (f"; {available} workers are available" if available < config["maxConcurrency"] else "")
+        + ". Each start also needs a free worker under its computer's Worker limit"
+        " (Settings › Computers)."
     )
     runtime = org["runtime"]
     heartbeats = {
@@ -428,7 +433,6 @@ def diagnostics(org: dict[str, Any]) -> dict[str, Any]:
         "effectiveConcurrency": effective,
         "concurrencyNote": note,
         "isolation": config.get("workspaceIsolation", "worktree"),
-        "serviceConcurrency": 8,
         "taskReasons": reasons,
         "budgetWarnings": warnings,
         "attention": [
@@ -642,8 +646,19 @@ def rehearse(org: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
                 created["dueAt"] = due
             occurrences += 1
             due = next_occurrence(routine, max(at, datetime.fromisoformat(due)))
-    concurrency = min(8, draft["config"]["maxConcurrency"])
+    concurrency = draft["config"]["maxConcurrency"]
     slots = [0.0] * concurrency
+    # Like dispatch, tasks take turns on a project folder only when it has no own worktrees.
+    isolation: dict[str, bool] = {}
+
+    def shared(root: str) -> bool:
+        if root not in isolation:
+            isolation[root] = not (
+                draft["config"].get("workspaceIsolation", "worktree") == "worktree"
+                and project_identity(root)[0].startswith("git:")
+            )
+        return isolation[root]
+
     roots: dict[str, float] = {}
     employees: dict[str, float] = {}
     finished = {
@@ -671,7 +686,7 @@ def rehearse(org: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
                 root = workspace(draft, task)
                 start = max(
                     slots[slot],
-                    roots.get(root, 0),
+                    roots.get(root, 0) if shared(root) else 0,
                     employees.get(task["assignee"], 0),
                     (candidate_time - at).total_seconds(),
                     max((finished[d] for d in dependencies), default=0),
@@ -680,7 +695,9 @@ def rehearse(org: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
                     row["reason"] = "Outside rehearsal horizon"
                 else:
                     row.update(startSeconds=start, finishSeconds=start + duration)
-                    slots[slot] = roots[root] = employees[task["assignee"]] = start + duration
+                    slots[slot] = employees[task["assignee"]] = start + duration
+                    if shared(root):
+                        roots[root] = start + duration
                     task["status"] = "in_review" if task.get("reviewRequired") else "done"
                     if task["status"] == "done":
                         finished[task["id"]] = start + duration
@@ -695,7 +712,8 @@ def rehearse(org: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
                         account["turns"] = account.get("turns", 0) + 1
             elif reason == "Running":
                 root = workspace(draft, task)
-                roots[root] = duration
+                if shared(root):
+                    roots[root] = duration
                 employees[task["assignee"]] = duration
             result.append(row)
             pending.remove(task)
@@ -906,10 +924,8 @@ def operation(
             if not isinstance(body, str) or not body.strip() or len(body) > 100_000:
                 raise ValueError("Memory needs bounded text")
             expires = params.get("expiresAt")
-            if expires and datetime.fromisoformat(expires).tzinfo is None:
-                raise ValueError("Memory expiry needs a timezone")
-            if expires and employee_id and datetime.fromisoformat(expires) <= datetime.now(UTC):
-                raise ValueError("Choose a memory expiry in the future")
+            if expires:
+                aware_instant(expires, "Memory expiry", future=bool(employee_id))
             mid = str(uuid4())
             entry = {
                 "id": mid,

@@ -433,3 +433,7 @@ def test_turning_it_off_mid_session_stops_approving_and_keeps_what_it_approved(b
     before = ticket(home, "Voice control")
     assert before["ticket_id"] == kept["id"]
     assert before["auto_approved"] is True and before["status"] == "backlog"
+
+
+# A proposal that contradicts a decision is never saved: see
+# test_self_work_decision_guards.py.

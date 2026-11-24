@@ -303,7 +303,8 @@ def test_collection_identity_and_folder_boundaries_survive_renames(library, tmp_
         {"time": {"field": "unknown"}},
         {"match": "unknown"},
         {"includeOutputs": "yes"},
-        {"query": "unknown-field:value"},
+        {"query": "unknown:value"},
+        {"query": "-tag:draft"},
         {"types": ["script"]},
     ],
 )

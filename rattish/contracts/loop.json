@@ -1,5 +1,6 @@
 {
   "$schema": "../schemas/node-contract.schema.json", "contract_version": 1, "node_type": "loop", "runtime_handler": "raticode.loop",
+  "catalog": {"category": "flow", "summary": "Run the next steps once for each item", "docs_path": "/docs/nodes/loop"},
   "configuration_schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "properties": {"source": {"type": "object", "x-rattish-variant-discriminator": "type", "x-rattish-variant-defaults": {
     "count": {"count": 1, "max_concurrency": 1, "fail_fast": false},
     "tabular": {"max_concurrency": 1, "fail_fast": false},

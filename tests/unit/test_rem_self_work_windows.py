@@ -524,7 +524,13 @@ def test_turning_self_work_off_reports_once_and_an_empty_period_gets_one_line(bo
     assert "Here's what self-work did from" in reply
     again = reports(home)[-1]
     assert again["id"] != report["id"]
-    assert again["self_work_report"]["items"] == report["self_work_report"]["items"]
+
+    # A research pass started in Beta's freed thread can finish after the first report,
+    # which changes only its own line, so compare the tickets' lines.
+    def tickets(posted: dict[str, Any]) -> list[dict[str, Any]]:
+        return [i for i in posted["self_work_report"]["items"] if i["kind"] != "research"]
+
+    assert tickets(again) == tickets(report)
 
 
 def test_a_report_on_request_while_on_covers_the_period_so_far(board):

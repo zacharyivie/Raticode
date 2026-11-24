@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -235,6 +236,83 @@ def test_task_lifecycle_controls_revisions_and_wait(backend):
     assert missing["error"]["http"] == 404
 
 
+def test_tasks_create_pins_a_task_to_a_computer_and_refuses_a_develop_task_elsewhere(backend):
+    service, project, _ = backend
+    desktop = "c70c43e6-38b4-4c64-8c20-61397f412d22"
+    pinned = cli(
+        "rem",
+        "tasks",
+        "create",
+        "--title",
+        "Find the slowdown",
+        "--type",
+        "research",
+        "--prompt",
+        "Why did startup slow down?",
+        "--project",
+        str(project),
+        "--computer",
+        desktop,
+        "--request-id",
+        "pin-1",
+    )["data"]["task"]
+    assert pinned["computer"] == desktop
+    refused = cli(
+        "rem",
+        "tasks",
+        "create",
+        "--title",
+        "Fix it",
+        "--type",
+        "develop",
+        "--prompt",
+        "Fix the bug",
+        "--project",
+        str(project),
+        "--computer",
+        desktop,
+        "--request-id",
+        "pin-2",
+        code=2,
+    )
+    assert refused["error"]["http"] == 400
+    assert (
+        "Only research and conversation tasks can run on another computer"
+        in (refused["error"]["message"])
+    )
+
+
+def test_acknowledge_all_dismisses_every_update_but_keeps_questions(backend):
+    from tests.unit.test_rem_home import force_run
+
+    service, _, _ = backend
+    runs = {}
+    for title in ("Failed", "Question"):
+        created = cli(
+            "rem",
+            "tasks",
+            "create",
+            "--title",
+            title,
+            "--type",
+            "errand",
+            "--prompt",
+            "Check",
+            "--schedule",
+            '{"kind": "daily", "local_time": "09:00", "timezone": "UTC"}',
+        )["data"]["task"]
+        runs[title] = cli("rem", "tasks", "run", created["id"])["data"]["run"]["id"]
+    force_run(service, runs["Failed"], state="failed", needs_user=False)
+    force_run(service, runs["Question"], state="blocked", needs_user=True)
+    text = cli("rem", "runs", "acknowledge-all", "--output", "text").stdout
+    assert "Dismissed 1 task update. 1 still needs you." in text
+    assert cli("rem", "runs", "show", runs["Failed"])["data"]["acknowledged"] is True
+    assert not cli("rem", "runs", "show", runs["Question"])["data"].get("acknowledged")
+    again = cli("rem", "runs", "acknowledge-all")
+    assert again["command"] == "rem runs acknowledge-all"
+    assert again["data"]["count"] == 0 and again["data"]["needs_you"] == 1
+
+
 def test_tasks_can_wait_for_other_tasks(backend):
     service, _, _ = backend
     later = '{"kind": "once", "timezone": "UTC", "at": "2099-01-01T09:00:00+00:00"}'
@@ -333,6 +411,23 @@ def test_memories(backend):
     cli("rem", "memories", "forget", memory["id"])
     assert cli("rem", "memories", "list")["data"]["memories"] == []
     assert cli("rem", "memories", "forget", memory["id"], code=3)["error"]["code"] == "not_found"
+
+
+def test_memories_take_an_end_date_and_keep_removes_it(backend):
+    added = cli("rem", "memories", "add", "In Oslo for the summit", "--until", "2099-06-30")
+    (memory,) = added["data"]["memories"]
+    assert memory["until"].startswith("2099-06-30T23:59:59") and memory["ended"] is False
+    edited = cli("rem", "memories", "edit", memory["id"], "--until", "2099-07-01T09:00:00+02:00")
+    assert edited["data"]["memories"][0]["until"] == "2099-07-01T09:00:00+02:00"
+    kept = cli("rem", "memories", "edit", memory["id"], "--keep")["data"]["memories"][0]
+    assert "until" not in kept
+    # A date and time without a timezone is refused, as for organization memories.
+    refused = cli("rem", "memories", "edit", memory["id"], "--until", "2099-07-01T09:00", code=2)
+    assert "needs a timezone" in refused["error"]["message"]
+    both = cli("rem", "memories", "edit", memory["id"], "--until", "2099-07-01", "--keep", code=2)
+    assert both["error"]["code"] == "invalid_input"
+    text = cli("rem", "memories", "add", "Trip", "--until", "2099-01-01", "--output", "text")
+    assert "(until 2099-01-01)" in text.stdout
 
 
 def test_notices_start_from_now_then_report_what_needs_you(backend):
@@ -449,8 +544,18 @@ def test_settings_export_apply_round_trip_and_agent_guard(backend, tmp_path, mon
     assert shown["context_ready"] is True
     assert shown["config"]["projects"][0]["root"] == str(project)
     target = tmp_path / "rem.json"
+    target.write_text("old", encoding="utf-8")
+    target.chmod(0o644)
     exported = runner.invoke(app, ["rem", "settings", "export", "--file", str(target)])
     assert exported.exit_code == 0, exported.stderr
+    if sys.platform != "win32":
+        # It can name MCP servers and folders: only this account may read it.
+        assert target.stat().st_mode & 0o777 == 0o600
+        linked = tmp_path / "linked.json"
+        linked.symlink_to(tmp_path / "elsewhere.json")
+        refused = runner.invoke(app, ["rem", "settings", "export", "--file", str(linked)])
+        assert refused.exit_code != 0
+        assert not (tmp_path / "elsewhere.json").exists()
     config = json.loads(target.read_text())
     config["model"] = "gpt-test"
     target.write_text(json.dumps(config))
@@ -577,6 +682,30 @@ def test_tickets_wait_for_other_tickets(backend):
     assert "Notice: REM-2 “Webhooks” was cancelled" in notice
 
 
+def test_tickets_show_which_decisions_a_ticket_violates(backend):
+    service, project, _ = backend
+    reason = "Violates decisions: D-4 (How are workflows written?): it mentions “toml workflows”."
+    with service.store.connect() as db:
+        ticket = new_ticket(
+            db,
+            title="Support TOML workflows",
+            status="blocked",
+            project_dir=str(project),
+        )
+        ticket["block_reason"] = reason
+        ticket["violates_decisions"] = {"ids": ["D-4"], "reason": reason, "from": "todo"}
+        put_ticket(db, ticket)
+        put_ticket(db, new_ticket(db, title="Docs", status="todo", project_dir=str(project)))
+    listed = cli("tickets", "list", "--output", "text").stdout
+    assert "Support TOML workflows (violates D-4)" in listed
+    assert "Docs (violates" not in listed
+    shown = cli("tickets", "show", "REM-1", "--output", "text").stdout
+    assert reason in shown
+    data = cli("tickets", "show", "REM-1")["data"]["ticket"]
+    assert data["violates_decisions"] == ["D-4"] and data["violation_reason"] == reason
+    assert cli("tickets", "show", "REM-2")["data"]["ticket"]["violates_decisions"] == []
+
+
 def test_proposals_need_the_user_and_agents_cannot_decide_or_finish(backend, tmp_path, monkeypatch):
     service, project, sent = backend
     proposal = _proposal(service, project)
@@ -637,8 +766,12 @@ def test_selfwork_status_set_export_apply_and_report(backend, tmp_path):
         "2000000",
         "--rate-limit-percent",
         "80",
+        "--daily-allowance-percent",
+        "11",
     )["data"]
     assert changed["settings"]["max_threads"] == 2
+    assert changed["settings"]["daily_allowance_percent"] == 11
+    assert changed["state"]["daily_allowance"]["cap_percent"] == 11
     exported = runner.invoke(app, ["selfwork", "export"])
     settings = json.loads(exported.stdout)
     assert settings == {
@@ -648,7 +781,12 @@ def test_selfwork_status_set_export_apply_and_report(backend, tmp_path):
         "session_token_limit": 500_000,
         "daily_token_limit": 2_000_000,
         "rate_limit_percent": 80,
+        "daily_allowance_percent": 11,
+        "allowance_mode": "daily",
+        "pace_aim_percent": 97,
+        "pace_lead_hours": 3,
         "auto_approve_proposals": False,
+        "provider_accounts": {},
     }
     settings["max_threads"] = 3
     target = tmp_path / "self-work.json"
@@ -659,6 +797,47 @@ def test_selfwork_status_set_export_apply_and_report(backend, tmp_path):
     assert cli("selfwork", "apply", "--file", str(target), code=2)
     report = cli("selfwork", "report", "--mark-seen")
     assert report["command"] == "selfwork report"
+    # Pace to reset replaces the daily cap: one choice, with its aim and finish.
+    revision = applied["settings"]["revision"]
+    paced = cli(
+        "selfwork",
+        "set",
+        "--expected-revision",
+        str(revision),
+        "--allowance-mode",
+        "pace",
+        "--pace-aim",
+        "50",
+        "--pace-lead",
+        "4",
+    )["data"]
+    assert paced["settings"]["allowance_mode"] == "pace"
+    assert paced["settings"]["daily_allowance_percent"] == 0
+    # Any aim from 1 to 100: half the week is fine.
+    assert paced["settings"]["pace_aim_percent"] == 50
+    assert paced["settings"]["pace_lead_hours"] == 4
+    assert paced["state"]["allowance_pace"]["mode"] == "pace"
+    status = runner.invoke(app, ["selfwork", "status", "--output", "text"])
+    assert "allowance_mode=pace" in status.stdout
+    both = cli(
+        "selfwork",
+        "set",
+        "--expected-revision",
+        str(paced["settings"]["revision"]),
+        "--daily-allowance-percent",
+        "10",
+        code=2,
+    )
+    assert "can't both be on" in both["error"]["message"]
+    assert cli(
+        "selfwork",
+        "set",
+        "--expected-revision",
+        str(paced["settings"]["revision"]),
+        "--allowance-mode",
+        "weekly",
+        code=2,
+    )
 
 
 def test_selfwork_auto_approval_needs_the_users_confirmation(backend, tmp_path, monkeypatch):
@@ -728,3 +907,161 @@ def test_unreachable_backend_exits_6(tmp_path, monkeypatch):
     result = runner.invoke(app, ["selfwork", "status"])
     assert result.exit_code == 6
     assert json.loads(result.stdout)["error"]["code"] == "unreachable"
+
+
+def test_task_create_names_its_threads_provider_model_and_account(backend):
+    """`--account` is the thread picker's Account menu for a task: it wins over Rem's setting."""
+    created = cli(
+        "rem",
+        "tasks",
+        "create",
+        "--title",
+        "On work",
+        "--type",
+        "reminder",
+        "--prompt",
+        "Check in",
+        "--schedule",
+        '{"kind": "daily", "local_time": "09:00", "timezone": "UTC"}',
+        "--provider",
+        "claude_code",
+        "--model",
+        "fable",
+        "--account",
+        "work",
+    )["data"]["task"]
+    assert created["provider"] == "claude_code"
+    assert created["model"] == "fable"
+    assert created["provider_profile"] == "work"
+
+
+def test_decisions_show_and_paths_print_each_record_paths_file_count(backend):
+    import subprocess as sp
+
+    service, project, _ = backend
+    env = {
+        "GIT_AUTHOR_NAME": "T",
+        "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "T",
+        "GIT_COMMITTER_EMAIL": "t@example.invalid",
+        "PATH": __import__("os").environ["PATH"],
+    }
+    (project / "docs").mkdir()
+    (project / "docs" / "releasing.md").write_text("# Releasing\n")
+    (project / "secrets").mkdir()
+    for name in ("a", "b", "c"):
+        (project / "secrets" / name).write_text(name)
+    for args in (["init", "-q", "-b", "dev"], ["add", "-A"], ["commit", "-q", "-m", "start"]):
+        sp.run(["git", "-C", str(project), *args], check=True, capture_output=True, env=env)
+    cli("rem", "decisions", "add", "branch.integration", "dev", "--project", str(project))
+    cli(
+        "rem",
+        "decisions",
+        "add",
+        "adr:release",
+        "dev to stage",
+        "--project",
+        str(project),
+        "--record",
+        "--question",
+        "How does work reach a release?",
+        "--applies-to",
+        "github/workflows/**",
+        "--applies-to",
+        "docs/releasing.md",
+        "--forbids",
+        "secrets/**",
+    )
+    listed = cli("rem", "decisions", "list")["data"]["items"]
+    record_id = next(i["id"] for i in listed if i.get("remember_as") == "record")
+    shown = cli("rem", "decisions", "show", record_id, "--output", "text").stdout
+    assert "Applies to: github/workflows/** (matches no files), docs/releasing.md (1 file)" in shown
+    assert "Never: secrets/** (matches 3 files that exist now)" in shown
+    assert "Paths counted on dev at " in shown
+    counted = cli(
+        "rem",
+        "decisions",
+        "paths",
+        "--id",
+        record_id,
+        "--applies-to",
+        ".github/workflows/**",
+        "--forbids",
+        "docs/**",
+        "--output",
+        "text",
+    ).stdout
+    assert "Applies to: .github/workflows/** (matches no files)" in counted
+    assert "Never: docs/** (matches 1 file that exists now)" in counted
+    data = cli("rem", "decisions", "paths", "--project", str(project), "--applies-to", "docs/**")
+    assert data["data"]["path_counts"]["applies_to"] == {"docs/**": 1}
+    refused = runner.invoke(app, ["rem", "decisions", "paths", "--applies-to", "docs/**"])
+    assert "Give --project or --id." in str(refused.exception)
+
+
+def test_decisions_retire_keeps_a_written_record_and_says_what_happened_to_its_file(backend):
+    import subprocess as sp
+
+    service, project, _ = backend
+    env = {
+        "GIT_AUTHOR_NAME": "T",
+        "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "T",
+        "GIT_COMMITTER_EMAIL": "t@example.invalid",
+        "PATH": __import__("os").environ["PATH"],
+    }
+    (project / "README.md").write_text("# App\n")
+    for args in (["init", "-q", "-b", "dev"], ["add", "-A"], ["commit", "-q", "-m", "start"]):
+        sp.run(["git", "-C", str(project), *args], check=True, capture_output=True, env=env)
+    cli("rem", "decisions", "add", "branch.integration", "dev", "--project", str(project))
+    cli(
+        "rem",
+        "decisions",
+        "add",
+        "adr:db",
+        "SQLite",
+        "--project",
+        str(project),
+        "--record",
+        "--question",
+        "Which database?",
+    )
+    listed = cli("rem", "decisions", "list")["data"]["items"]
+    record = next(i for i in listed if i.get("remember_as") == "record")
+    fact = next(i for i in listed if i["topic"] == "branch.integration")
+    assert record["record_path"]
+    refused = runner.invoke(app, ["rem", "decisions", "retire", fact["id"]])
+    assert refused.exit_code != 0
+    assert "forget this one instead" in (refused.stdout + str(refused.exception))
+    shown = cli("rem", "decisions", "retire", record["id"], "--output", "text").stdout
+    assert shown.startswith(f"Retired {record['id']}: workers stop getting it")
+    assert "status: rejected" in shown
+    assert f"{record['id']}  retired: Which database?" in shown
+    items = cli("rem", "decisions", "list")["data"]["items"]
+    assert len(items) == len(listed)
+    retired = next(i for i in items if i["id"] == record["id"])
+    assert retired["status"] == "rejected" and retired["retired_at"]
+    text = sp.run(
+        ["git", "-C", str(project), "show", f"dev:{record['record_path']}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "status: rejected" in text
+
+
+def test_a_decision_notice_line_names_the_question_its_id_project_and_recommendation() -> None:
+    from gofer.cli.commands.rem_api import _notice_line
+
+    notice = {
+        "kind": "decision",
+        "reason": "needs_you",
+        "body": "Rem has a question: Which branch?",
+        "project_name": "Raticode",
+        "decision": {"id": "D-12", "question": "Which branch?", "recommended": "dev"},
+    }
+    assert _notice_line(notice) == (
+        "needs_you: Rem has a question: Which branch? (D-12, Raticode; Rem recommends dev)"
+    )
+    bare = {**notice, "project_name": "", "decision": {"id": "D-3", "recommended": ""}}
+    assert _notice_line(bare) == "needs_you: Rem has a question: Which branch? (D-3)"
