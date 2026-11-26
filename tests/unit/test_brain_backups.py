@@ -421,9 +421,12 @@ def test_backup_restores_over_a_brain_whose_folder_is_gone(library, tmp_path):
     assert snapshot["brains"][0]["state"] == "available"
     notes = doc_at(library, after, "notes.md")
     assert not notes.get("missing")
-    # Re-scanned: the same record now describes the restored file.
+    # Re-scanned: the same record now describes the restored file. Its identity is
+    # compared with the restored file itself, because a filesystem may give the new
+    # file the inode number the deleted one had.
     assert notes["id"] == old_notes["id"]
-    assert notes["fileIdentity"] != old_notes["fileIdentity"]
+    info = (tmp_path / "restored/notes.md").stat()
+    assert notes["fileIdentity"] == f"{info.st_dev}:{info.st_ino}"
     assert (tmp_path / "restored/notes.md").read_text().startswith("# Notes")
 
 
