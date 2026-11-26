@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import functools
 import hashlib
 import json
 import os
@@ -57,10 +56,11 @@ from gofer.rattish.model_overrides import (
 )
 from gofer.rattish.preflight import PreflightRegistry, PreflightResult, run_preflight
 from gofer.rattish.provider_runtime import default_provider_subscriptions
-from gofer.rattish.result_cache import ResultCache
+from gofer.rattish.result_cache import ResultCache, RunPaths, stable_run_paths
 from gofer.rattish.run_from import RunFromPlan, RunFromRefused, plan_run_from, reusable_count
 from gofer.rattish.run_usage import USAGE_LIMIT_CODES, RunUsageMeter
 from gofer.rattish.run_values import (
+    SavedRunValues,
     SavedValuesUnavailable,
     merge_withheld_inputs,
     plan_saved_values,
@@ -82,6 +82,7 @@ from gofer.rattish.storage import (
     registered_source_root,
     workflow_owned_directory,
 )
+from gofer.rattish.workflow_id import validate_workflow_id
 from gofer.rattish.workflow_runtime import (
     NodeRunRecord,
     WorkflowExecutionResult,
@@ -90,6 +91,8 @@ from gofer.rattish.workflow_runtime import (
 from gofer.subscriptions.base import Subscription
 from gofer.utils.atomic_output import atomic_binary_output, unlink_without_links
 from gofer.utils.paths import get_data_dir
+from gofer.utils.pids import process_start_token as pids_start_token
+from gofer.utils.pids import windows_process_state as _windows_process_state
 
 RUN_ARTIFACT_VERSION = 1
 _active_rattish_ids: set[str] = set()
@@ -136,70 +139,8 @@ def is_rattish_run_active(run_id: str) -> bool:
         return run_id in _active_rattish_ids
 
 
+# On Windows the process is only queried: os.kill terminates it whatever the signal.
 _WINDOWS = sys.platform == "win32"
-# Enough to read a process's exit code and times, and granted for most processes,
-# including elevated ones the same user started.
-_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-_STILL_ACTIVE = 259
-
-
-@functools.cache
-def _kernel32() -> Any:
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined, unused-ignore]
-    # Handles are pointer-sized; the default int result type would cut them in half.
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
-    filetime = ctypes.POINTER(wintypes.FILETIME)
-    kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE, filetime, filetime, filetime, filetime]
-    kernel32.GetProcessTimes.restype = wintypes.BOOL
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel32.CloseHandle.restype = wintypes.BOOL
-    return kernel32
-
-
-def _windows_process_state(pid: int) -> tuple[bool, str | None]:
-    """Whether a Windows process is going, and a token for when it started.
-
-    Only queries the process. ``os.kill`` must never be used for this on Windows,
-    where any signal number terminates the target.
-    """
-    if not _WINDOWS or pid <= 0 or pid > 0xFFFFFFFF:
-        return False, None
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = _kernel32()
-    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-    if not handle:
-        # No such process, or one this user may not query, which a runner never is.
-        return False, None
-    try:
-        code = wintypes.DWORD()
-        # A process that exited with code 259 reads as going while another
-        # program still holds a handle to it; Raticode runners never exit so.
-        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-            return False, None
-        if code.value != _STILL_ACTIVE:
-            return False, None
-        created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
-        if not kernel32.GetProcessTimes(
-            handle,
-            ctypes.byref(created),
-            ctypes.byref(exited),
-            ctypes.byref(kernel),
-            ctypes.byref(user),
-        ):
-            return True, None
-        # Creation time in 100 ns steps since 1601, the same for the life of
-        # the process and different for any later process given its PID.
-        return True, f"win:{(created.dwHighDateTime << 32) | created.dwLowDateTime}"
-    finally:
-        kernel32.CloseHandle(handle)
 
 
 def process_is_running(pid: int, start_token: object = None) -> bool:
@@ -229,24 +170,12 @@ def process_start_token(pid: int) -> str | None:
     """Something that tells this process apart from a later one given the same PID.
 
     A PID is reused once its process ends, often right after a restart, so a run
-    record only names a live runner when this matches too. Linux and Windows;
-    elsewhere the PID check stands alone.
+    record only names a live runner when this matches too. Where the start time
+    can't be read, the PID check stands alone.
     """
     if _WINDOWS:
         return _windows_process_state(pid)[1]
-    if not sys.platform.startswith("linux"):
-        return None
-    try:
-        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
-        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    # Field 22, the start time in clock ticks since boot, comes after the
-    # parenthesized command name, which may itself contain spaces or brackets.
-    fields = stat[stat.rfind(")") + 2 :].split()
-    if len(fields) < 20 or not boot_id:
-        return None
-    return f"{boot_id}:{fields[19]}"
+    return pids_start_token(pid)
 
 
 def run_started_by(document: Mapping[str, Any]) -> str:
@@ -686,8 +615,6 @@ def request_run_stop(record: Path) -> bool:
 
 def rattish_run_directory(data_dir: Path, workflow_id: str) -> Path:
     """Where a workflow's run records are saved, found by workflow ID alone."""
-    from gofer.core.workflow import validate_workflow_id
-
     safe_id = validate_workflow_id(workflow_id)
     base = data_dir.expanduser().resolve()
     directory = workflow_owned_directory(safe_id, base, "logs")
@@ -749,6 +676,7 @@ async def run_rattish_file(
     resume_from: Mapping[str, Any] | None = None,
     started_by: StartedBy | None = None,
     resume_inputs: Mapping[str, Any] | None = None,
+    resume_values: SavedRunValues | None = None,
     rerun_of: str | None = None,
     use_result_cache: bool = True,
     daily_max_cost_usd: float | None = None,
@@ -763,7 +691,10 @@ async def run_rattish_file(
     """Run one source file through the same boundary used by CLI and Studio.
 
     Use ``resume_rattish_run`` to pass ``resume_from``, the saved run to resume, and
-    ``resume_inputs``, the password inputs that run didn't save. ``rerun_rattish_run``
+    ``resume_inputs``, the password inputs that run didn't save. ``resume_values`` is
+    that run's saved values when the caller already read and checked them, as a
+    triggered resume does; without it they are read from beside the run's record.
+    ``rerun_rattish_run``
     passes ``rerun_of``. Every run saves its inputs and trigger events beside its
     record (see ``run_values``) so it can be resumed or run again.
     ``started_by`` records how the run started (see ``STARTED_BY``); without it, a
@@ -833,7 +764,11 @@ async def run_rattish_file(
             source_path=compiled.source_path,
         )
         try:
-            saved = read_saved_values(earlier_record, resume_from)
+            saved = (
+                resume_values
+                if resume_values is not None
+                else read_saved_values(earlier_record, resume_from)
+            )
             workflow_inputs = merge_withheld_inputs(saved, resume_inputs)
         except SavedValuesUnavailable as exc:
             raise RattishResumeRefused(str(exc)) from None
@@ -872,6 +807,8 @@ async def run_rattish_file(
         raise ValueError("reuse_run_id only applies to a run from a node.")
     if resume_inputs and resume_from is None and from_node is None:
         raise ValueError("resume_inputs only applies to a resumed run or a run from a node.")
+    if resume_values is not None and resume_from is None:
+        raise ValueError("resume_values only applies to a resumed run.")
     replayed: dict[str, Any] | None = (
         {
             "run_id": run_from.source_run_id,
@@ -950,7 +887,7 @@ async def run_rattish_file(
                 _prepare_workflow_inputs(compiled.ir, supplied_inputs)
                 # Each file input becomes this run's own copy, and the saved inputs
                 # record the copy's path so Resume and Run again reuse it.
-                supplied_inputs = stage_file_inputs(
+                staged = stage_file_inputs(
                     compiled.ir,
                     supplied_inputs,
                     path,
@@ -958,6 +895,7 @@ async def run_rattish_file(
                     reuse_from=file_inputs_from,
                     base=Path(compiled.ir["source"]["project_root"]),
                 )
+                supplied_inputs = staged.inputs
                 values, values_summary = plan_saved_values(
                     compiled.ir, supplied_inputs, trigger_events
                 )
@@ -1090,6 +1028,9 @@ async def run_rattish_file(
                             run_worktree(worktree),
                             guarding(run_files),
                             input_files_visible(run_files_dir(path)),
+                            # A cached step's key names files by contents and a worktree
+                            # by its project, not by this run's folders.
+                            stable_run_paths(RunPaths.for_run(staged.contents, worktree)),
                         ):
                             execution = await execute_workflow(
                                 run_ir,

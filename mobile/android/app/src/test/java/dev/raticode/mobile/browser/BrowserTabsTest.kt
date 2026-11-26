@@ -68,10 +68,10 @@ class BrowserTabsTest {
         // Back to a Chromium tab: showing the default is stored as nothing, so the page follows the default again.
         assertNull(BrowserRules.showing(onGecko, chromium).showing)
         // External apps can't hold tabs, so they're never "shown" this way.
-        assertEquals(onGecko, BrowserRules.showing(onGecko, BrowserRules.ENGINE_FIREFOX))
+        assertEquals(onGecko, BrowserRules.showing(onGecko, Firefox.ENGINE))
         // Choosing a default browser shows it, whatever tab was on screen.
-        val firefox = BrowserRules.withEngine(onGecko, BrowserRules.ENGINE_FIREFOX)
-        assertEquals(BrowserRules.ENGINE_FIREFOX, firefox.engine); assertNull(firefox.showing); assertEquals(BrowserRules.ENGINE_FIREFOX, BrowserRules.pageEngine(firefox))
+        val firefox = BrowserRules.withEngine(onGecko, Firefox.ENGINE)
+        assertEquals(Firefox.ENGINE, firefox.engine); assertNull(firefox.showing); assertEquals(Firefox.ENGINE, BrowserRules.pageEngine(firefox))
         assertEquals(chromium, BrowserRules.withEngine(onGecko, "netscape").engine)
     }
 
@@ -79,10 +79,10 @@ class BrowserTabsTest {
         assertEquals(gecko, BrowserRules.newTabEngine(BrowserRules.Saved(engine = gecko)))
         assertEquals(chromium, BrowserRules.newTabEngine(BrowserRules.Saved(engine = chromium, showing = gecko)))
         // With Firefox or Chrome as the default, a new tab inside Raticode opens in the built-in browser on screen.
-        assertEquals(gecko, BrowserRules.newTabEngine(BrowserRules.Saved(engine = BrowserRules.ENGINE_FIREFOX, showing = gecko)))
+        assertEquals(gecko, BrowserRules.newTabEngine(BrowserRules.Saved(engine = Firefox.ENGINE, showing = gecko)))
         assertEquals(chromium, BrowserRules.newTabEngine(BrowserRules.Saved(engine = ChromeApps.ENGINE)))
         assertTrue(BrowserRules.inApp(chromium)); assertTrue(BrowserRules.inApp(gecko))
-        assertFalse(BrowserRules.inApp(BrowserRules.ENGINE_EDGE)); assertFalse(BrowserRules.inApp(null))
+        assertFalse(BrowserRules.inApp(MicrosoftEdge.ENGINE)); assertFalse(BrowserRules.inApp(null))
     }
 
     @Test fun theBrowserOnScreenIsSavedAndOlderSavesKeepTheirChoice() {
@@ -91,9 +91,9 @@ class BrowserTabsTest {
             val old = BrowserRules.decode("""{"v":1,"tabs":[],"engine":"$engine"}""")
             assertEquals(engine, old.engine); assertNull(old.showing); assertEquals(engine, BrowserRules.pageEngine(old))
         }
-        val saved = BrowserRules.Saved(engine = BrowserRules.ENGINE_EDGE, showing = gecko)
+        val saved = BrowserRules.Saved(engine = MicrosoftEdge.ENGINE, showing = gecko)
         val read = BrowserRules.decode(BrowserRules.encode(saved))
-        assertEquals(BrowserRules.ENGINE_EDGE, read.engine); assertEquals(gecko, read.showing); assertEquals(gecko, BrowserRules.pageEngine(read))
+        assertEquals(MicrosoftEdge.ENGINE, read.engine); assertEquals(gecko, read.showing); assertEquals(gecko, BrowserRules.pageEngine(read))
         // Showing the default isn't written; odd values read as nothing.
         assertFalse(JSONObject(BrowserRules.encode(BrowserRules.Saved(engine = gecko, showing = gecko))).has("showing"))
         assertFalse(JSONObject(BrowserRules.encode(BrowserRules.Saved())).has("showing"))

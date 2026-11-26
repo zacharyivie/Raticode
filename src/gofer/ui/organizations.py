@@ -33,6 +33,7 @@ from gofer.core.placement_suggestion import suggest
 from gofer.core.usage_ledger import organization_ticket_usage, record_invocation
 from gofer.core.worker_claims import ORGANIZATIONS, THIS_COMPUTER, waiting_reason
 from gofer.core.worker_claims import Claim as WorkerClaim
+from gofer.rattish.triggers import cron_with_day_names
 from gofer.subscriptions.usage import normalize_usage
 from gofer.ui import organization_landing, worktree_setup
 from gofer.ui import organization_repository as repository
@@ -97,6 +98,7 @@ from gofer.ui.organization_packages import (
 from gofer.ui.organization_recovery import (
     MAX_SEND_BACKS,
     RETRY_SECONDS,
+    blocked_spell,
     count_send_back,
     finished_well,
     results_to_review,
@@ -154,11 +156,7 @@ from gofer.ui.rem_ticket_activity import (
 )
 from gofer.ui.swarm_tools import TOOL_FAILURE_HINT, SwarmToolServer
 from gofer.utils.atomic_output import atomic_binary_output, open_binary_input
-from gofer.utils.process import (
-    NO_REPOSITORY_PROGRAMS,
-    build_subprocess_env,
-    untrusted_repository_git_env,
-)
+from gofer.utils.process import run_repository_git
 
 log = logging.getLogger(__name__)
 HELP = """Organizations are persistent companies using the Agent Companies v1 draft format.
@@ -215,7 +213,8 @@ cost, so prefer token or run limits for Codex employees. maxChildTasksPerTurn (d
 and maxDelegationDepth (default 3) bound the tasks employees create for each other.
 Isolation: workspaceIsolation=worktree (default) runs each task on its own git branch in a
 separate worktree; checkout edits the project folder and requires a clean checkout.
-blockGitPush (default true) makes git push fail inside employee runs.
+blockGitPush (default true) makes git push fail inside employee runs and the swarms they
+delegate to.
 - task_create: params includes title, description, assignee, optional parentId, project,
   goal, priority, approvalRequired, recurring and intervalSeconds. Returns the new task.
 - task_update: params.taskId, expectedRevision and changes. Editable fields: title,
@@ -374,21 +373,8 @@ DISPATCH_REASONS = {
 def _dirty(root: str) -> bool:
     """Whether a Git checkout has uncommitted changes. Unknown counts as dirty."""
     try:
-        result = subprocess.run(
-            [
-                "git",
-                *NO_REPOSITORY_PROGRAMS,
-                "-C",
-                root,
-                "status",
-                "--porcelain",
-                "--untracked-files=normal",
-            ],
-            env=untrusted_repository_git_env(root, build_subprocess_env()),
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
+        result = run_repository_git(
+            root, "status", "--porcelain", "--untracked-files=normal", timeout=30
         )
     except (OSError, subprocess.SubprocessError):
         return True
@@ -398,16 +384,12 @@ def _dirty(root: str) -> bool:
 def _worktree_state(root: str) -> dict[str, Any]:
     """The worktree's commit after a run and whether it left uncommitted changes."""
     try:
-        head = subprocess.run(
-            ["git", "-C", root, "rev-parse", "HEAD"],
-            env=build_subprocess_env(),
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=True,
-        ).stdout.strip()
+        result = run_repository_git(root, "rev-parse", "HEAD", timeout=30)
     except (OSError, subprocess.SubprocessError):
         return {}
+    if result.returncode:
+        return {}
+    head = result.stdout.strip()
     return {"headCommit": head, "uncommittedChanges": _dirty(root)}
 
 
@@ -440,12 +422,21 @@ def write_run_input(path: Path, content: bytes) -> None:
         handle.write(content)
 
 
+def _named_cron(routine: dict[str, Any]) -> str:
+    """A routine's cron text with day names, so 1-5 and mon-fri count as the same days."""
+    text = str(routine.get("cron") or "")
+    try:
+        return cron_with_day_names(text)
+    except ValueError:
+        return text
+
+
 def more_often(previous: dict[str, Any], routine: dict[str, Any]) -> bool:
     """Whether a routine edit schedules work sooner or keeps more of it."""
     old, new = previous.get("intervalSeconds") or 0, routine.get("intervalSeconds") or 0
     return bool(
         (new and (not old or new < old))
-        or (routine.get("cron") and routine.get("cron") != previous.get("cron"))
+        or (routine.get("cron") and _named_cron(routine) != _named_cron(previous))
         or (routine.get("overlap") == "queue" and previous.get("overlap") != "queue")
         or (routine.get("missed") == "coalesce" and previous.get("missed") == "skip")
     )
@@ -568,19 +559,6 @@ def checkin_brief(
     )
 
 
-def block_marker(task: dict[str, Any]) -> str:
-    """One blocked spell of a ticket: its reason and when it was blocked."""
-    at = next(
-        (
-            str(c.get("at") or "")
-            for c in reversed(task.get("comments") or [])
-            if c.get("kind") == "status" and c.get("to") == "blocked"
-        ),
-        "",
-    )
-    return f"{task.get('blockReason') or ''}|{at}"
-
-
 def blocked_for_review(org: dict[str, Any], eid: str) -> list[dict[str, Any]]:
     """A worker's blocked tickets it hasn't looked at since they were blocked.
 
@@ -598,7 +576,7 @@ def blocked_for_review(org: dict[str, Any], eid: str) -> list[dict[str, Any]]:
         and not t["claim"]
         and not is_heartbeat(t)
         and t.get("blockReason") not in {"dependencies", *WAITING_REASONS}
-        and reviews.get(t["id"]) != block_marker(t)
+        and reviews.get(t["id"]) != blocked_spell(t)
         and (not bounded or within_self_work(org, eid, task_root(org["config"], t)))
     ]
 
@@ -657,7 +635,7 @@ def heartbeat_due(
         # Recorded when a check-in will look at them, never when heartbeats are stalled.
         reviews = runtime.setdefault("blockReviews", {})
         for task in review or []:
-            reviews[task["id"]] = block_marker(task)
+            reviews[task["id"]] = blocked_spell(task)
         blocked_now = {t["id"] for t in runtime["tasks"] if t["status"] == "blocked"}
         for stale in set(reviews) - blocked_now:
             reviews.pop(stale)

@@ -107,7 +107,7 @@ def test_triggers_get_a_six_hour_time_limit_unless_changed(data_dir: Path, sourc
 
     assert store.update(trigger_id, label="Nightly").max_run_seconds == 6 * 3600
     assert store.update(trigger_id, max_run_seconds=120).max_run_seconds == 120
-    assert store.update(trigger_id, max_run_seconds=None).max_run_seconds is None
+    assert store.update(trigger_id, max_run_seconds=None, actor="user").max_run_seconds is None
     assert store.get(trigger_id).max_run_seconds is None
     assert _cron(store, source, max_run_seconds=0)
     with pytest.raises(TriggerError, match="whole number"):

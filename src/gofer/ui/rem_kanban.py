@@ -600,6 +600,8 @@ def ticket_view(
         "key": f"REM-{ticket['number']}",
         "title": ticket["title"],
         "description": ticket["description"][:4000],
+        # Its finish line: one review check per line.
+        "done_when": str(ticket.get("done_when") or "")[:1000],
         "status": ticket["status"],
         "priority": ticket["priority"],
         "assignee_id": "rem",
@@ -608,6 +610,10 @@ def ticket_view(
         # Self-work approved it on its own; the user hasn't looked at it.
         "auto_approved": auto_approved(ticket),
         "proposal_reason": (ticket.get("proposal") or {}).get("reason", ""),
+        # The paired desktop whose self-work pass proposed it (Run there), or "".
+        "proposed_on": str(
+            ((ticket.get("proposal") or {}).get("computer") or {}).get("name") or ""
+        ),
         "duplicate_of": ticket.get("duplicate_of") or "",
         "created_by": ticket.get("created_by", ""),
         "created_at": ticket["created_at"],
@@ -672,6 +678,7 @@ def organization_ticket_view(
         "key": f"{ticket_prefix(org['config'])}-{number}" if number else "",
         "title": task["title"],
         "description": task.get("description", "")[:4000],
+        "done_when": str(task.get("doneWhen") or "")[:1000],
         "status": task["status"],
         "priority": task.get("priority", "medium"),
         "assignee_id": assignee,
@@ -679,6 +686,7 @@ def organization_ticket_view(
         "proposed": False,
         "auto_approved": False,
         "proposal_reason": "",
+        "proposed_on": "",
         "duplicate_of": "",
         "created_by": "",
         "created_at": task.get("createdAt", ""),

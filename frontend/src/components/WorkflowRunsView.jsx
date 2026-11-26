@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { RefreshCw, X } from "lucide-react";
-import { RunStatus } from "./RunSummary.jsx";
+import { RunErrorReason, RunStatus } from "./RunSummary.jsx";
 import AskRemButton from "./AskRemButton.jsx";
 import { runCanAskRem } from "../lib/askRemAboutFailure.js";
 import { STATUS_FILTERS, TIME_RANGES, fetchAllWorkflowRuns, formatDuration, sinceLabel, startedByLabel, usageCells } from "../lib/allWorkflowRuns.js";
@@ -180,12 +180,13 @@ export default function WorkflowRunsView({ request = null, onAskRem, onOpenRun, 
                 <span className="block truncate text-[11px] text-muted">{run.projectName}</span>
               </th>
               <td className="px-3 py-2">{startedByLabel(run.startedBy)}</td>
-              <td className="px-3 py-2" title={run.error || undefined}>
+              <td className="max-w-[22rem] px-3 py-2">
                 <RunStatus status={run.status} />
                 {run.awaitingApproval ? <span className="ml-1.5 text-amber-700 dark:text-amber-300">· needs approval</span> : null}
                 {run.usageLimitWait ? <span className="ml-1.5 text-amber-700 dark:text-amber-300" data-testid="run-usage-limit-wait">· {usageLimitWaitText(run)}</span> : null}
                 {switchedProvider(run.fallbacks) ? <span className="ml-1.5 text-muted" data-testid="run-provider-switch" title={run.fallbacks.map(item => item.line).join("\n")}>· switched provider</span> : null}
                 {onAskRem && runCanAskRem(run.status) ? <AskRemButton className="ml-2 align-middle" label={`Ask Rem about this failure in run ${run.id} of ${run.workflowName}`} onAsk={() => onAskRem(run)} /> : null}
+                <RunErrorReason className="mt-0.5" status={run.status} error={run.error} expandable />
               </td>
               <td className="whitespace-nowrap px-3 py-2 text-muted" title={run.startedAt ? new Date(run.startedAt).toLocaleString() : undefined}>{formatRunAge(run.startedAt)}</td>
               <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">{formatDuration(run.durationSeconds, running)}</td>

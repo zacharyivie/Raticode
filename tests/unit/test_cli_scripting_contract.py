@@ -25,24 +25,6 @@ ROOT = Path(__file__).resolve().parents[2]
 DOCS = ROOT / "website" / "docs"
 runner = CliRunner()
 
-SIMPLE_TOML = """
-[workflow]
-id = "simple"
-name = "Simple"
-
-[[nodes]]
-id = "hello"
-type = "bash_command"
-command = "echo hello"
-"""
-
-RATTISH = """Rattish: 1
-Workflow:
-  name: Demo flow
-Node echo:
-  type: bash-command
-  command: printf ok
-"""
 
 CLIENT_ENV = (
     "RATICODE_URL",
@@ -80,17 +62,6 @@ def _commands() -> list[tuple[str, Any]]:
     return found
 
 
-def _rattish_workflow(tmp_path: Path) -> tuple[Path, str, Path]:
-    from gofer.rattish.workspaces import create_registered_workflow
-
-    data_dir = tmp_path / "app-data"
-    project = tmp_path / "project"
-    project.mkdir()
-    workflow = create_registered_workflow(project, "Demo flow", registry_dir=data_dir)
-    workflow.entrypoint.write_text(RATTISH, encoding="utf-8")
-    return data_dir, workflow.workflow_id, workflow.entrypoint
-
-
 # --- --format json on record commands ---------------------------------------------------
 
 
@@ -108,58 +79,6 @@ def test_every_list_and_status_command_accepts_format_json() -> None:
 
 def test_every_visible_command_has_help_text() -> None:
     assert [path for path, command in _commands() if not command.hidden and not command.help] == []
-
-
-def test_agent_list_prints_json(tmp_path: Path) -> None:
-    empty = _invoke("agent", "list", "--format", "json", "--data-dir", str(tmp_path))
-    assert empty.exit_code == 0, empty.output
-    assert json.loads(empty.stdout) == []
-
-    created = _invoke(
-        "agent",
-        "create",
-        "--name",
-        "Json Agent",
-        "--subscription",
-        "codex",
-        "--working-dir",
-        str(tmp_path),
-        "--prompt",
-        "hello",
-        "--data-dir",
-        str(tmp_path),
-    )
-    assert created.exit_code == 0, created.output
-    listed = _invoke("agent", "list", "--format", "json", "--data-dir", str(tmp_path))
-    assert listed.exit_code == 0, listed.output
-    [agent] = json.loads(listed.stdout)
-    assert agent["agentId"] == "json-agent"
-    assert agent["subscription"] == "codex"
-    assert agent["workingDir"] == str(tmp_path)
-
-
-def test_watch_list_prints_json(tmp_path: Path) -> None:
-    empty = _invoke("watch", "list", "--format", "json", "--data-dir", str(tmp_path))
-    assert empty.exit_code == 0, empty.output
-    assert json.loads(empty.stdout) == []
-
-    (tmp_path / "watched.toml").write_text(
-        SIMPLE_TOML + '\n[workflow.watch]\npath = "inputs"\nglob = "*.txt"\nrecursive = true\n'
-    )
-    listed = _invoke("watch", "list", "--format", "json", "--data-dir", str(tmp_path))
-    assert listed.exit_code == 0, listed.output
-    assert json.loads(listed.stdout) == [
-        {
-            "id": "simple",
-            "workflowPath": str(tmp_path / "watched.toml"),
-            "path": "inputs",
-            "glob": "*.txt",
-            "mode": "batch",
-            "maxConcurrency": 1,
-            "recursive": True,
-            "debounceSeconds": 1.0,
-        }
-    ]
 
 
 def test_workflow_approvals_prints_json(tmp_path: Path) -> None:
@@ -243,42 +162,6 @@ def test_doctor_reports_the_organizations_preview_switch(
     assert preview()["detail"]["enabled"] is True
 
 
-# --- Legacy groups refuse Rattish workflows -----------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("command", "hint"),
-    [
-        (["agent", "list", "--workflow", "ID"], "rattish inspect-ir"),
-        (["runner", "queue", "ID"], "rattish run"),
-        (["schedule", "add", "SOURCE"], "rattish triggers add cron"),
-    ],
-)
-def test_legacy_groups_point_rattish_workflows_at_rattish(
-    tmp_path: Path, command: list[str], hint: str
-) -> None:
-    data_dir, workflow_id, source = _rattish_workflow(tmp_path)
-    args = [{"ID": workflow_id, "SOURCE": str(source)}.get(item, item) for item in command]
-    if command[0] == "schedule":
-        args += ["--db", str(tmp_path / "schedules.db")]
-    else:
-        args += ["--data-dir", str(data_dir)]
-    result = _invoke(*args)
-    assert result.exit_code == 2, result.output
-    assert result.stdout == ""
-    assert "is a Rattish workflow" in result.stderr
-    assert f"Raticode {command[0]} {command[1]} only works with legacy TOML" in result.stderr
-    assert hint in result.stderr
-    assert source.read_text(encoding="utf-8") == RATTISH
-    assert not (tmp_path / "schedules.db").exists()
-
-
-def test_legacy_groups_still_report_missing_toml_workflows(tmp_path: Path) -> None:
-    result = _invoke("agent", "list", "--workflow", "missing", "--data-dir", str(tmp_path))
-    assert result.exit_code == 1
-    assert "not found" in result.output
-
-
 # --- Completion ------------------------------------------------------------------------
 
 
@@ -352,7 +235,7 @@ def test_docs_name_the_commands_the_audit_found_missing() -> None:
         "rem skill path",
         "rem skill remove",
         "triggers enable ID` / `disable ID",
-        "`approvals`, `approve` and `reject`",
+        "`workflow approvals`, `approve` and `reject`",
     ):
         assert command in text, command
 

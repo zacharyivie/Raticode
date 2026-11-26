@@ -28,6 +28,7 @@ from zoneinfo import ZoneInfo
 
 from gofer.ui import rem_self_work_daily as daily
 from gofer.ui import rem_self_work_pace as pacing
+from gofer.utils.instants import stored_instant
 
 AFTER = " Running work finishes normally."
 # Daily counts of accounts self-work didn't use for this long are dropped.
@@ -96,7 +97,7 @@ def track(
             zone,
         )
         last = updated.get("last") or {}
-        seen = daily._instant(last.get("busy_until") or last.get("observed_at"))
+        seen = stored_instant(last.get("busy_until") or last.get("observed_at"), naive_as_utc=False)
         if key not in busy and (seen is None or clock - seen > FORGET_AFTER):
             accounts.pop(key, None)
             continue

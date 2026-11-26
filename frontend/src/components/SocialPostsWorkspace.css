@@ -2,7 +2,6 @@
 .sp { position: relative; container: oh sp / inline-size; }
 .sp .grow { flex: 1; }
 .sp-top h1 { display: inline-flex; align-items: center; gap: 6px; flex: none; overflow: visible; }
-.sp-preview { font-size: 11px; font-weight: 650; color: var(--review); background: var(--review-soft); border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
 .sp-paused { color: var(--review) !important; border-color: var(--review) !important; }
 .sp-viewseg button { display: inline-flex; align-items: center; gap: 5px; }
 .sp-attn { display: inline-grid; place-items: center; color: var(--review); }
@@ -46,7 +45,8 @@
 .sp-chips { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: 0; padding: 0; }
 .sp-chip { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 7px; }
 .sp .sp-chip-btn { display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--line) !important; background: var(--panel) !important; font-size: 12px; font-weight: 550; color: var(--muted); white-space: nowrap; }
-.sp .sp-chip-btn:hover:not(:disabled) { border-color: var(--line-strong) !important; color: var(--ink); }
+.sp .sp-chip-btn:hover:not(:disabled, [aria-disabled="true"]) { border-color: var(--line-strong) !important; color: var(--ink); }
+.sp .sp-chip-btn[aria-disabled="true"] { cursor: default; }
 .sp .sp-chip-btn[aria-pressed="true"], .sp .sp-chip-btn[aria-checked="true"] { border-color: var(--accent) !important; background: var(--soft) !important; color: var(--accent); font-weight: 650; }
 .sp .sp-chip-btn[aria-checked="true"]::before { content: "✓"; font-size: 11px; }
 .sp .sp-chip-btn .n { font-variant-numeric: tabular-nums; color: var(--faint); }
@@ -378,7 +378,6 @@ select.sp-input { padding-right: 6px; }
   .sp-lanes { grid-auto-flow: row; grid-auto-columns: auto; overflow: visible; }
   .sp-hide-narrow { display: none; }
   .sp-show-narrow { display: inline; }
-  .sp-top .sp-preview { display: none; }
   .sp-overlay { padding: 0; }
   .sp-editor { border-radius: 0; height: 100%; }
   .sp-acc-grid { grid-template-columns: minmax(0, 1fr); }

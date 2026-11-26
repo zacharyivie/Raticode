@@ -63,7 +63,7 @@ Fields for this node only. The [shared node fields](./index.md#shared-node-field
 | `memory` | `none`, `run`, `all` | `"none"` | Provider memory scope. |
 | `tools` | list of string | `[]` | Selected provider tools. |
 | `mcp-servers` | list of string | `[]` | Names of MCP servers the provider already has set up. On Claude Code each name allows that server's tools (`--allowedTools mcp__<name>`). |
-| `env` | object | `{}` | Additional string environment values. |
+| `env` | object | `{}` | Additional string environment values. Unquoted names are read lowercased, so quote a name whose case matters: `"DEBUG": "1"`, not `DEBUG: "1"`. |
 | `extra-paths` | list of string | `[]` | Additional authored resource paths. |
 | `output-schema` | object or null | Not set | Inline successful-output JSON Schema. |
 | `output-schema-path` | string or null | Not set | File containing the successful-output schema. |

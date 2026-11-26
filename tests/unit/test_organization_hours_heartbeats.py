@@ -13,6 +13,7 @@ import pytest
 
 from gofer.ui.organization_hours import OperatingHours, describe, is_open, next_change, widens
 from gofer.ui.organizations import OrganizationManager
+from tests.helpers.organizations import act, as_worker, assign_lead, company
 
 NY = "America/New_York"
 
@@ -104,56 +105,6 @@ async def quick(**options: Any) -> Any:
 
 def start(tmp_path: Path, stream: Any = quick) -> OrganizationManager:
     return OrganizationManager(tmp_path / "data", stream=stream, start_runtime=False)
-
-
-def company(manager: OrganizationManager, root: Path, **config: Any) -> Any:
-    employees = config.pop(
-        "employees",
-        [
-            {"id": "lead", "name": "Avery Lane"},
-            {"id": "mira", "name": "Mira Santos", "reportsTo": "lead"},
-        ],
-    )
-    return manager.call(
-        str(root),
-        "user",
-        {
-            "action": "create",
-            "params": {
-                "config": {
-                    "name": "Studio",
-                    "slug": "studio",
-                    "employees": employees,
-                    "projects": [{"id": "desktop", "name": "Desktop"}],
-                    **config,
-                }
-            },
-        },
-    )
-
-
-def act(
-    manager: OrganizationManager,
-    org: dict[str, Any],
-    action: str,
-    actor: str = "user",
-    **params: Any,
-) -> Any:
-    return manager.call(
-        org["projectRoot"], actor, {"organizationId": org["id"], "action": action, "params": params}
-    )
-
-
-def as_worker(manager: OrganizationManager, org: dict[str, Any], action: str, **params: Any) -> Any:
-    state = manager.store.get("", org["id"])
-    return manager.call(
-        org["projectRoot"],
-        "employee:mira",
-        {"organizationId": org["id"], "action": action, "params": params},
-        employee_id="mira",
-        bound_org=org["id"],
-        generation=state["runtime"]["generation"],
-    )
 
 
 def read(manager: OrganizationManager, org: dict[str, Any]) -> Any:
@@ -372,18 +323,6 @@ def due_now(manager: OrganizationManager, org: dict[str, Any], eid: str = "lead"
         return {"probe": True}
 
     manager.store.mutate("", org["id"], "test", "probe", change)
-
-
-def assign_lead(manager: OrganizationManager, org: dict[str, Any]) -> None:
-    """Check-ins are self-work, so they need an assigned project."""
-    act(
-        manager,
-        org,
-        "self_work_projects",
-        employeeId="lead",
-        projects=[org["projectRoot"]],
-        expectedRevision=0,
-    )
 
 
 def checkins(manager: OrganizationManager, org: dict[str, Any]) -> list[str]:

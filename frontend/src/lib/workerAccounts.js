@@ -40,10 +40,3 @@ export function accountAfterProviderChange(accounts, provider, current) {
   if (!current) return null;
   return providerAccounts(accounts, provider).some(account => account.account_id === current) ? current : null;
 }
-
-/** The account's name for a worker's facts, or the default sign-in. */
-export function workerAccountLabel(accounts, employee) {
-  if (!employee?.account) return "Default sign-in";
-  const found = providerAccounts(accounts, employee.provider).find(account => account.account_id === employee.account);
-  return found ? found.name : "Removed account (runs on the default sign-in)";
-}

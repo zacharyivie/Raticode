@@ -31,7 +31,6 @@ from gofer.devices.desktop_control import Refused
 
 READS = frozenset({"workflows.tests", "workflows.tests.estimate"})
 ACTIONS = frozenset({"workflows.tests.try", "workflows.tests.use_model"})
-NO_TESTS = "This workflow has no test set yet. Add cases on your computer."
 CONFIRM_TRY = "Check the expected cost on your phone before trying the model."
 STALE = "The workflow changed since this try. Try the model again."
 STILL_RUNNING = "Wait for the try to finish."

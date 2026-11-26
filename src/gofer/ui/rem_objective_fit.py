@@ -6,8 +6,11 @@ can still start it by moving it to In progress. With no open objectives nothing 
 
 A ticket advances an objective when:
 
-- its ``objective_id`` names an open objective. Research proposals and backlog rankings set it,
-  and so does this check; or
+- its ``objective_id`` names an open objective and neither has changed since. Research
+  proposals, backlog rankings, this check and a start set it through link(), which stores the
+  ticket's fingerprint and the objective's own hash with it (``objective_link``); an edited
+  ticket or a reworded objective is judged again. Links stored before they carried hashes get
+  them the first time self-work sees them (stamp()); or
 - Rem's tool-free model judged it against the open objectives as they are now (the ``key``)
   and the ticket as it is now (its fingerprint), and named an open objective.
 
@@ -28,6 +31,8 @@ from gofer.ui import rem_objectives as objectives_store
 from gofer.ui.rem_home_store import encode
 
 FIELD = "objective_fit"
+# Kept with ``objective_id``: what the ticket and its objective read when it was linked.
+LINK = "objective_link"
 # Tickets one check judges; the rest wait for the next check.
 CHECK_TICKETS = 60
 CHECK_PREFIX = "You are Rem, checking which tickets advance your self-work objectives"
@@ -111,6 +116,56 @@ def objectives_key(objectives: dict[str, Any]) -> str:
     return hashlib.sha256(body.encode()).hexdigest()[:16]
 
 
+def objective_hash(item: dict[str, Any]) -> str:
+    """Changes when one objective is reworded or its finish line changes."""
+    body = encode([str(item["text"]), str(item.get("done_when") or "")])
+    return hashlib.sha256(body.encode()).hexdigest()[:16]
+
+
+def _open_item(objectives: dict[str, Any], identity: Any) -> dict[str, Any] | None:
+    serves = objectives_store.served(objectives, identity)
+    if serves is None:
+        return None
+    return next(i for i in objectives_store.open_items(objectives) if i["id"] == serves["id"])
+
+
+def link(
+    ticket: dict[str, Any], objectives: dict[str, Any], identity: Any
+) -> dict[str, Any] | None:
+    """Link ``ticket`` to the open objective ``identity`` names, as both read now.
+
+    Returns the objective served, or None (and changes nothing) when none is open by that id.
+    """
+    item = _open_item(objectives, identity)
+    if item is None:
+        return None
+    ticket["objective_id"] = item["id"]
+    ticket[LINK] = {"fingerprint": ticket_fingerprint(ticket), "objective": objective_hash(item)}
+    return {"id": item["id"], "text": item["text"]}
+
+
+def linked(ticket: dict[str, Any], objectives: dict[str, Any]) -> dict[str, Any] | None:
+    """The open objective ``objective_id`` names while neither it nor the ticket has changed."""
+    item = _open_item(objectives, ticket.get("objective_id"))
+    if item is None:
+        return None
+    stamp = ticket.get(LINK)
+    if isinstance(stamp, dict) and (
+        stamp.get("fingerprint") != ticket_fingerprint(ticket)
+        or stamp.get("objective") != objective_hash(item)
+    ):
+        return None
+    # A link stored before links carried hashes counts until stamp() gives it some.
+    return {"id": item["id"], "text": item["text"]}
+
+
+def stamp(ticket: dict[str, Any], objectives: dict[str, Any]) -> bool:
+    """Give a link stored without hashes the ones it has now; True when it changed."""
+    if isinstance(ticket.get(LINK), dict):
+        return False
+    return link(ticket, objectives, ticket.get("objective_id")) is not None
+
+
 def judge(
     ticket: dict[str, Any], objectives: dict[str, Any]
 ) -> tuple[Fit, dict[str, Any] | None, str]:
@@ -122,8 +177,9 @@ def judge(
     key = objectives_key(objectives)
     if not key:
         return "free", None, ""
-    if serves := objectives_store.served(objectives, ticket.get("objective_id")):
+    if serves := linked(ticket, objectives):
         return "related", serves, ""
+    # An edited ticket or a reworded objective drops its link: judged again below.
     record = ticket.get(FIELD) or {}
     if record.get("key") != key or record.get("fingerprint") != ticket_fingerprint(ticket):
         return "unknown", None, ""
@@ -135,7 +191,11 @@ def judge(
 def record(
     ticket: dict[str, Any], objectives: dict[str, Any], objective: str, reason: str, at: str
 ) -> dict[str, Any] | None:
-    """Store a judgment on ``ticket``; returns the objective it serves, if any."""
+    """Store a judgment on ``ticket``; returns the objective it serves, if any.
+
+    A ticket that serves one is linked to it afresh; one that serves none loses its link to an
+    open objective.
+    """
     serves = objectives_store.served(objectives, objective)
     ticket[FIELD] = {
         "key": objectives_key(objectives),
@@ -144,8 +204,11 @@ def record(
         "reason": reason.strip()[:REASON_MAX],
         "at": at,
     }
-    if serves and not objectives_store.served(objectives, ticket.get("objective_id")):
-        ticket["objective_id"] = serves["id"]
+    if serves:
+        link(ticket, objectives, serves["id"])
+    elif objectives_store.served(objectives, ticket.get("objective_id")):
+        ticket.pop("objective_id")
+        ticket.pop(LINK, None)
     return serves
 
 

@@ -1,0 +1,24 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000142",
+  "id": "10000000-0000-4000-8000-000000000142",
+  "sequence": 142,
+  "type": "desktop.action",
+  "payload": {
+    "op": "rem.task.create",
+    "params": {
+      "title": "Weekly release check",
+      "type": "maintain",
+      "prompt": "Check for failed workflow runs",
+      "project_id": "00000000-0000-4000-8000-000000000201",
+      "schedule": {
+        "kind": "weekly",
+        "local_time": "09:00",
+        "weekdays": [
+          "monday"
+        ]
+      }
+    }
+  }
+}

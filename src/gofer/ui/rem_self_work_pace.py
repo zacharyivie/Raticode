@@ -40,6 +40,8 @@ from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any
 
+from gofer.utils.instants import stored_instant
+
 MODE_SETTING = "allowance_mode"
 OFF, DAILY, PACE = "off", "daily", "pace"
 MODES = (OFF, DAILY, PACE)
@@ -106,16 +108,10 @@ class Plan:
         return self.starts == 0
 
 
-def _instant(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
-    if not value:
-        return None
-    try:
-        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    return stamp.astimezone(UTC) if stamp.tzinfo else stamp.replace(tzinfo=UTC)
+def _in_utc(value: Any) -> datetime | None:
+    """A saved time in UTC, so the times this module hands on read the same everywhere."""
+    stamp = stored_instant(value)
+    return stamp.astimezone(UTC) if stamp else None
 
 
 # Settings --------------------------------------------------------------------------------
@@ -230,10 +226,10 @@ def peak(window: Window, history: Sequence[Mapping[str, Any]], clock: datetime) 
     """
     highest = window.percent
     for row in history:
-        seen = _instant(row.get("observed_at"))
+        seen = _in_utc(row.get("observed_at"))
         if seen is None or not clock - PEAK_OVER <= seen <= clock:
             continue
-        if not same_reset(_instant(row.get("resets_at")), window.resets_at):
+        if not same_reset(_in_utc(row.get("resets_at")), window.resets_at):
             continue
         highest = max(highest, float(row.get("used_percent") or 0.0))
     return highest
@@ -539,11 +535,11 @@ def read_windows(
         if not isinstance(window, dict) or not window.get("id"):
             continue
         kind = _kind(window)
-        seen = _instant(observed)
+        seen = _in_utc(observed)
         percent = window_used_percent(window)
         if kind is None or seen is None or percent is None or seen > clock + timedelta(minutes=1):
             continue
-        resets = _instant(window.get("resets_at"))
+        resets = _in_utc(window.get("resets_at"))
         if resets is not None and resets <= clock:
             continue
         period = WEEK
@@ -558,7 +554,7 @@ def read_windows(
             percent=float(percent),
             observed_at=seen,
             resets_at=resets,
-            starts_at=_instant(window.get("starts_at")),
+            starts_at=_in_utc(window.get("starts_at")),
             period=period,
         )
         kept = newest.get(found.id)

@@ -10,7 +10,6 @@ from __future__ import annotations
 import io
 import json
 import re
-import time
 from pathlib import Path
 from typing import Any
 
@@ -23,20 +22,12 @@ from gofer.ui.chat import build_chat_prompt
 from gofer.ui.rem_home import RemHome
 from gofer.ui.report_outputs import serve_reports
 from gofer.ui.report_themes import report_theme_rules
+from tests.helpers.brain_library import wait_idle
 from tests.unit.test_rem_home import home, recipe  # noqa: F401 - the home fixture
 from tests.unit.test_swarm_tools import request
 
 THEME = {"format": "html", "theme": "blueprint"}
 SERVE_STDIO = second_brain.serve_stdio
-
-
-def wait_idle(library: BrainLibrary) -> None:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if all(task["state"] != "running" for task in library.snapshot()["tasks"]):
-            return
-        time.sleep(0.02)
-    pytest.fail("Second Brain tasks did not finish")
 
 
 def stdio_replies(monkeypatch: pytest.MonkeyPatch, serve: Any) -> list[dict[str, Any]]:

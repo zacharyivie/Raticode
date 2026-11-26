@@ -116,7 +116,9 @@ async def test_grok_permission_uses_canonical_session_identity_and_offered_once(
     handler = grok_mcp_permission_handler("session", grants)
     grants["raticode-run"].add("untrusted_later_mutation")
     identity: dict[str, Any] = {
-        "version": 1, "namespace": "mcp", "name": "raticode-run__swarm_action"
+        "version": 1,
+        "namespace": "mcp",
+        "name": "raticode-run__swarm_action",
     }
     params: dict[str, Any] = {
         "sessionId": "session",

@@ -6,7 +6,6 @@ import hashlib
 import json
 import sqlite3
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -21,21 +20,16 @@ from gofer.ui.brain_graph import (
     windows,
 )
 from gofer.ui.brain_library import BrainLibrary
+from tests.helpers.brain_library import wait_idle
+
+# Building the graph after a scan takes longer than other library tasks.
+GRAPH_TIMEOUT = 20
 
 REPO = "/work/Raticode/Raticode"
 
 
 def html(title: str, body: str, meta: str = "") -> str:
     return f"<html><head><title>{title}</title>{meta}</head><body><p>{body}</p></body></html>"
-
-
-def wait_tasks(library: BrainLibrary) -> None:
-    deadline = time.monotonic() + 20
-    while time.monotonic() < deadline:
-        if all(task["state"] != "running" for task in library.snapshot()["tasks"]):
-            return
-        time.sleep(0.02)
-    pytest.fail("Second Brain task did not finish")
 
 
 @pytest.fixture
@@ -129,7 +123,7 @@ def build_brain(library: BrainLibrary, tmp_path: Path) -> tuple[dict[str, Any], 
         ),
     )
     brain = library.open({"root": str(root)})
-    wait_tasks(library)
+    wait_idle(library, timeout=GRAPH_TIMEOUT)
     return library.brain(brain["id"]), root
 
 
@@ -274,7 +268,7 @@ def test_combined_search_fuses_document_ranks(library, tmp_path, monkeypatch):
     write(root, "b.md", "# B\n\nsomething unrelated in words.\n")
     write(root, "c.md", "# C\n\nalpha and the meaning we want.\n")
     brain = library.open({"root": str(root)})
-    wait_tasks(library)
+    wait_idle(library, timeout=GRAPH_TIMEOUT)
     current = library.brain(brain["id"])
     current["settings"]["semantic"] = True
     library.put_brain(current)
@@ -307,7 +301,7 @@ def topic_brain(library: BrainLibrary, tmp_path: Path) -> dict[str, Any]:
         write(root, f"cook/c{index}.md", f"# Cooking {index}\n\n{cooking} variant{index}\n")
         write(root, f"search/s{index}.md", f"# Search {index}\n\n{vectors} variant{index}\n")
     brain = library.open({"root": str(root)})
-    wait_tasks(library)
+    wait_idle(library, timeout=GRAPH_TIMEOUT)
     return brain
 
 
@@ -492,7 +486,7 @@ def cited_brain(library: BrainLibrary, tmp_path: Path, name: str = "brain") -> d
         "## Signing\n\nRelease builds are notarized. Shared closing line.\n",
     )
     brain = library.open({"root": str(root)})
-    wait_tasks(library)
+    wait_idle(library, timeout=GRAPH_TIMEOUT)
     current = library.brain(brain["id"])
     current["settings"].update(allowCloud=True)
     library.put_brain(current)

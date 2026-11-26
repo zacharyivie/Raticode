@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000214",
+  "id": "10000000-0000-4000-8000-000000000214",
+  "sequence": 214,
+  "type": "desktop.action",
+  "payload": {
+    "op": "organizations.auto_mode",
+    "params": {
+      "organization_id": "org1",
+      "expected_revision": 5,
+      "enabled": true,
+      "confirm": true
+    }
+  }
+}

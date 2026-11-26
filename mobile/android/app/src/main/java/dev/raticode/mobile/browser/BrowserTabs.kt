@@ -17,8 +17,6 @@ object BrowserTabs {
     /** The name people see for a browser value, as on the desktop: "Raticode (chromium)", "Raticode (gecko)", "Firefox"... */
     fun name(engine: String?): String = when (engine) {
         GECKO -> GECKO_NAME
-        BrowserRules.ENGINE_FIREFOX -> "Firefox"
-        BrowserRules.ENGINE_EDGE -> "Edge"
         else -> engine?.let(BrowserApps::byEngine)?.name ?: CHROMIUM_NAME
     }
 

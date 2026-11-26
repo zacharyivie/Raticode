@@ -15,7 +15,6 @@ from pathlib import Path
 import typer.main
 
 import gofer
-from gofer.cli.commands import agent as agent_cmd
 from gofer.cli.commands.second_brain import fast_main, option_names
 from gofer.cli.main import app
 
@@ -120,9 +119,3 @@ def test_second_brain_short_path_leaves_help_and_bad_arguments_to_typer(
     assert fast_main(["--root", str(tmp_path), "--thread-id", "-x"]) is None
     # No prefix matching: Click would reject "--repo", so the short path must too.
     assert fast_main(["--root", str(tmp_path), "--repo", "html"]) is None
-
-
-def test_agent_subscription_choices_match_the_runtimes() -> None:
-    from gofer.cli.commands._subscriptions import cli_subscriptions
-
-    assert list(agent_cmd._SUBSCRIPTION_CHOICES) == list(cli_subscriptions())

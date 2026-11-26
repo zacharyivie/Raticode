@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000276",
+  "id": "10000000-0000-4000-8000-000000000276",
+  "sequence": 276,
+  "type": "desktop.action",
+  "payload": {
+    "op": "selfwork.settings",
+    "params": {
+      "provider_accounts": {
+        "claude_code": "work",
+        "codex": ""
+      },
+      "expected_revision": 6
+    }
+  }
+}

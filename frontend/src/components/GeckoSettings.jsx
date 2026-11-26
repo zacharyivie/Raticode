@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ipcErrorMessage } from "../lib/ipcError.js";
 
 // Settings > Browser > Raticode (gecko). Gecko's own settings, bookmarks,
 // extensions and Mozilla account are inside the Raticode (gecko) tab; these are the things that have to
@@ -6,10 +7,6 @@ import { useEffect, useState } from "react";
 
 const BUTTON = "h-7 rounded-md border border-line bg-white px-2.5 text-[11px] font-semibold text-ink transition hover:bg-slate-50 disabled:cursor-default disabled:opacity-50";
 const FIELD = "h-8 w-full rounded-md border border-line bg-white px-2 text-xs text-ink outline-none focus:border-brand";
-
-function cleanError(cause) {
-  return String(cause?.message || cause || "That didn't work.").replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
-}
 
 export default function GeckoSettings() {
   const gecko = window.goferBrowser?.gecko;
@@ -30,7 +27,7 @@ export default function GeckoSettings() {
     try {
       return await work();
     } catch (cause) {
-      setError(cleanError(cause));
+      setError(ipcErrorMessage(cause));
       return null;
     } finally {
       setBusy(false);
@@ -39,11 +36,11 @@ export default function GeckoSettings() {
 
   useEffect(() => {
     if (!gecko) return;
-    void gecko("status").then(setStatus).catch((cause) => setError(cleanError(cause)));
+    void gecko("status").then(setStatus).catch((cause) => setError(ipcErrorMessage(cause)));
     void gecko("import-sources").then((found) => {
       setSources(found);
       if (found.sources[0]) setSource(found.sources[0].path);
-    }).catch((cause) => setError(cleanError(cause)));
+    }).catch((cause) => setError(ipcErrorMessage(cause)));
   }, [gecko]);
 
   useEffect(() => {
@@ -54,7 +51,7 @@ export default function GeckoSettings() {
       setDetails(found);
       setChosen({});
       setExtensionIds(found.extensions.map((item) => item.id));
-    }).catch((cause) => { if (!cancelled) setError(cleanError(cause)); });
+    }).catch((cause) => { if (!cancelled) setError(ipcErrorMessage(cause)); });
     return () => { cancelled = true; };
   }, [gecko, source]);
 

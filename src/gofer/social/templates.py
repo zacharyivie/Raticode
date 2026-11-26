@@ -17,7 +17,6 @@ from gofer.social.models import MAX_TEMPLATE_NAME, MAX_TEXT, MAX_TITLE, MAX_VARI
 # A blank: a letter, then up to 39 letters, digits, spaces, '_' or '-'. "{}" and "{ x}"
 # are left alone, so code samples keep their braces.
 BLANK = re.compile(r"\{([A-Za-z][\w \-]{0,39})\}")
-STARTER_PREFIX = "starter-"
 
 STARTERS: tuple[dict[str, Any], ...] = (
     {

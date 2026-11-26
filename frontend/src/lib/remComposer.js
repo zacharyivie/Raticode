@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { readChatAttachments } from "./chatAttachments.js";
+import { getChatDraft, REM_CHAT_DRAFT_KEY, setChatDraft } from "./chatDrafts.js";
 import { readFileAttachments } from "./fileAttachments.js";
 import { focusRemComposer } from "./remHomeStore.js";
 
@@ -8,6 +9,7 @@ import { focusRemComposer } from "./remHomeStore.js";
 // the sidebar, and out of App's chunk because only Rem's view needs it.
 // replyTo is the preview of the message being replied to, sent as refers_to.
 // screen is a screenshot for this one message (screenContext.js), kept only in memory.
+// The draft's text is also saved on this computer (chatDrafts.js) so it survives a restart.
 const emptyComposer = () => ({ draft: "", attachments: [], error: "", replyTo: null, screen: null });
 let composer = emptyComposer();
 let appliedRequest = 0;
@@ -17,10 +19,19 @@ function subscribe(listener) { listeners.add(listener); return () => listeners.d
 export const getRemComposer = () => composer;
 export function useRemComposerState() { return useSyncExternalStore(subscribe, getRemComposer, getRemComposer); }
 export function updateRemComposer(next) {
+  const previousDraft = composer.draft;
   composer = { ...composer, ...(typeof next === "function" ? next(composer) : next) };
+  if (composer.draft !== previousDraft) setChatDraft(REM_CHAT_DRAFT_KEY, composer.draft);
   for (const listener of listeners) listener();
 }
 export function resetRemComposer() { appliedRequest = 0; updateRemComposer(emptyComposer()); }
+
+// When Rem's chat loads after a restart, the composer starts empty; bring back the saved text.
+export function restoreRemComposerDraft() {
+  if (composer.draft) return;
+  const saved = getChatDraft(REM_CHAT_DRAFT_KEY);
+  if (saved) updateRemComposer({ draft: saved });
+}
 
 export function attachToRemComposer(files) {
   updateRemComposer(current => {

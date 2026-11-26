@@ -23,10 +23,10 @@ Raticode rattish docs --format json
 
 - Commands that print records, such as lists and status, accept `--format json`. Older `--json` flags still work as a short form, and the `rem` lists also accept `--format table`.
 - There are two JSON shapes:
-  - Commands that work on files in the data folder, such as `rattish list` or `runner list`, print the bare data.
+  - Commands that work on files in the data folder, such as `rattish list` or `workflow list`, print the bare data.
   - Commands that talk to a running backend print an envelope with the data under `data`. See [Output and exit codes](#output-and-exit-codes).
 - Data goes to stdout. Errors and warnings go to stderr, so `Raticode … --format json | jq` never gets an error message as input.
-- Exit codes: 0 is success and 1 is failure. 2 means the command was used wrongly: an unknown option or format, invalid input, or a Rattish workflow given to a command that only reads [legacy TOML workflows](#legacy-toml-commands).
+- Exit codes: 0 is success and 1 is failure. 2 means the command was used wrongly: an unknown option or format, or invalid input.
 - The data folder is `GOFER_DATA_DIR` when set (the desktop app sets it when you pick a custom folder). Otherwise it's the standard folder, such as `~/.local/share/gofer` on Linux. Most commands also take `--data-dir`.
 
 ## Rattish commands
@@ -44,6 +44,7 @@ Raticode rattish docs --format json
 | `Raticode rattish test PATH` | Run the workflow's [test set](../workflows/tests.md) and check each case. `--estimate` prints the expected cost only. `--model NODE=PROVIDER:MODEL` [tries another model](../workflows/tests.md#try-another-model) beside the current one; `--use-model NODE=PROVIDER:MODEL` writes that model into the workflow and runs nothing | **Yes**, once per case |
 | `Raticode rattish prune PATH` | Preview old runs that the workflow's [retention settings](../studio/runs.md#old-runs) no longer keep. `--apply` deletes them | No |
 | `Raticode rattish cache show\|clear PATH` | Show or clear the saved answers of nodes with [`cache:`](../nodes/common-llm-task.md#result-cache). `--workflow-id ID` names the workflow by ID; `clear --all` clears every workflow | No |
+| `Raticode rattish convert FILE.toml --project DIR` | [Convert an old TOML workflow](../workflows/rattish.md#convert-a-toml-workflow) to `workflow.rattish` and register it. `--output FILE` only writes the file. New in 0.6.1 | No |
 | `Raticode rattish triggers add cron\|file\|webhook PATH ...` | Start the workflow on a schedule, file change, or local webhook. See [Triggers](../workflows/triggers.md) | Later, when it fires |
 | `Raticode rattish triggers budget` | Show or set the [daily limit](../workflows/triggers.md#daily-limit) for all triggered runs on this computer | No |
 | `Raticode rattish shortcuts list\|approve\|remove` | Manage [workflow shortcuts](./shortcuts.md#run-a-workflow-from-any-app) that run a workflow from any app | Later, when you press the key |
@@ -51,7 +52,7 @@ Raticode rattish docs --format json
 
 - `PATH` is the source file. For a registered workflow, use the exact path `create` returned.
 - Run `--help` on a command for its current options. Most take `--data-dir`.
-- Only `format` and `test --use-model` edit their target, `prune --apply` deletes run records and `cache clear` deletes saved answers. Only `run` and `test` execute nodes. A run can write files, call providers and contact services, as the source says.
+- Only `format` and `test --use-model` edit their target (`convert` writes a new file and leaves the `.toml` alone), `prune --apply` deletes run records and `cache clear` deletes saved answers. Only `run` and `test` execute nodes. A run can write files, call providers and contact services, as the source says.
 
 ## Inputs and limits
 
@@ -82,38 +83,52 @@ Raticode doctor --json
 - `edit` replaces only the values you pass. `rm` asks first unless you add `--yes`.
 - Sign in to native provider CLIs separately.
 - A profile never overrides a Rattish node's explicit provider, model or effort.
-- `doctor` checks installation health and reports whether the [Organizations Feature Preview](./headless.md#turn-on-organizations) is on in this environment. Its legacy workflow option doesn't replace `Raticode rattish preflight`.
+- `doctor` checks installation health and reports whether the [Organizations Feature Preview](./headless.md#turn-on-organizations) is on in this environment. To check one workflow, use `Raticode rattish preflight`.
 
 ## Other command families
 
 | Family | Guide |
 | --- | --- |
 | `Raticode rattish triggers` | [Triggers](../workflows/triggers.md) |
-| `Raticode schedule` | [Schedules](../workflows/schedules.md) |
-| `Raticode watch` | [File watchers](../workflows/watchers.md) |
-| `Raticode runner` | [Runner queue](../workflows/runner-queue.md) |
 | `Raticode workflow run PATH` | Runs a `.rattish` file, a workflow folder or a registered ID. `--dry-run` runs preflight only. `Raticode workflow resume --run-id ID` resumes a run |
 | `Raticode rem` | [Rem from the CLI](./cli-rem.md) for chat, tasks, memories, alerts and settings. [Tools, skills and MCP](../rem/resources.md#add-skills-and-mcp-servers-from-the-cli) for the skill and MCP library |
 | `Raticode tickets`, `Raticode selfwork` | [Tickets and self-work from the CLI](./cli-rem.md#tickets) |
 | `Raticode rattish start`, `stop`, `resume`, `runs`, `logs`, `approve` and the other "(Backend)" commands; `Raticode org`, `Raticode swarm`, `Raticode brain`, `Raticode usage`, `Raticode projects`, `Raticode devices`, `Raticode threads`; `Raticode provider list`, `models`, `status` and `set` | [Workflows, Organizations and more from the CLI](./cli-headless.md): runs, approvals and trigger files through the backend, Organizations, swarms, Second Brain, providers, usage and live threads, with settings as files |
-| `Raticode schema` | Prints where the Rattish docs, contracts and schemas are installed. `--legacy-toml` prints the old TOML authoring contract |
+| `Raticode schema` | Prints where the Rattish docs, contracts and schemas are installed. |
 | `Raticode serve --headless` | Runs the backend with no desktop window. See [Headless backend](./headless.md) |
 | `Raticode tokens` | Creates, lists and revokes limited agent tokens. See [Agent tokens](./headless.md#agent-tokens) |
 | `Raticode licenses --output DIR` | Exports the third-party notices bundled with this build |
 | `Raticode ui serve` | Runs the backend the desktop app starts (port 8765 by default), the same as `Raticode serve`. It writes no token file and Rem waits for a window, so use `Raticode serve --headless` for scripts and servers |
 
-## Legacy TOML commands
+## Converting old TOML workflows
 
-Raticode workflows used to be TOML files. Some commands still read only that format, and their help starts with `[Legacy TOML]`. New workflows belong in `workflow.rattish`.
+Raticode workflows used to be TOML files in the data folder. From 0.6.1, Raticode reads only Rattish. To keep an old workflow, convert it with `Raticode rattish convert`; see [Convert a TOML workflow](../workflows/rattish.md#convert-a-toml-workflow). The `.toml` file stays as it was.
 
-### `workflow` commands that accept Rattish
+These commands and options are gone from 0.6.1, with what to use instead:
+
+| Removed | Use instead |
+| --- | --- |
+| `Raticode schedule`, `workflow set-schedule`, `clear-schedule` | `Raticode rattish triggers add cron` ([Triggers](../workflows/triggers.md#cron-schedules)) |
+| `Raticode watch`, `workflow set-watch`, `clear-watch` | `Raticode rattish triggers add file` ([Triggers](../workflows/triggers.md#file-changes)) |
+| `workflow trigger` | `Raticode rattish triggers add webhook`, or `Raticode rattish run` |
+| `Raticode runner` (the runner queue) | `Raticode rattish run` on the computer that should run it, or `Raticode rattish start` through the [backend](./cli-headless.md#workflows) |
+| `Raticode agent` | An `agent` node in the workflow ([agent](../nodes/agent.md)) |
+| `workflow create`, `build`, `recipe` | `Raticode rattish create`, with `--from` for a [starter](../starters/index.md) |
+| `workflow show`, `edit`, `set-info`, `add-node`, `add-edge`, `add-agent`, `rm-node`, `rm-edge` | Edit `workflow.rattish`, then `Raticode rattish check`. `Raticode rattish inspect-ir PATH --pretty` shows the compiled workflow |
+| `workflow secrets` | `Raticode rattish preflight` and `Raticode rattish secrets` |
+| `workflow stop` | `Raticode rattish stop`, or **Stop** in the app's Runs |
+| `workflow history`, `diff`, `restore` | Git in the project folder that holds `workflow.rattish` |
+| `workflow preview-import` | `Raticode rattish import --preview` for a `.raticode` bundle |
+| `schema --legacy-toml`, `doctor WORKFLOW` | `Raticode rattish docs` and `Raticode rattish preflight` |
+
+### `workflow` commands
 
 These take a Rattish workflow ID, folder or `.rattish` file:
 
-| Command | With a Rattish workflow |
+| Command | What it does |
 | --- | --- |
 | `run`, `resume` | Runs or resumes it, like `Raticode rattish run` |
-| `list` | Lists Rattish and TOML workflows |
+| `list` | Lists registered Rattish workflows |
 | `validate` | Runs `Raticode rattish check` |
 | `plan` | Runs `Raticode rattish preflight` |
 | `logs list`, `logs show`, `logs latest`, `logs prune`, `usage` | Reads its run history |
@@ -122,7 +137,7 @@ These take a Rattish workflow ID, folder or `.rattish` file:
 
 ### Approval gates
 
-`approvals`, `approve` and `reject` work with approval gates of legacy TOML workflows. For a Rattish workflow's gates, use `Raticode rattish approvals`, `approve` and `reject` through the [backend](./cli-headless.md#workflows).
+`workflow approvals`, `approve` and `reject` list and decide approval gates on this computer. Through a running backend, use `Raticode rattish approvals`, `approve` and `reject` (see [the backend commands](./cli-headless.md#workflows)).
 
 - Only you can decide a gate. Inside a Rem or worker turn, `workflow approve` and `reject` refuse with exit 5 and change nothing, so a workflow can't approve its own gate.
 - `--by` isn't your name. It picks which of the gate's listed approvers you decide as. It's refused when the gate lists no approvers or the name isn't on the list.
@@ -130,35 +145,9 @@ These take a Rattish workflow ID, folder or `.rattish` file:
 
 ### Remove, rename and duplicate
 
-`rm`, `rename` and `duplicate` also work with TOML workflows.
-
-- When a [headless backend](./headless.md) is running for the same data folder, they ask it to make the change. Only the backend writes the workflow files, and it updates schedules and continuous runs right away.
+- When a [headless backend](./headless.md) is running for the same data folder, `rm`, `rename` and `duplicate` ask it to make the change, so only the backend writes the workflow files.
 - Inside a Rem or worker turn, that request needs an [agent token](./headless.md#agent-tokens). Without one it fails with exit 5 and the files stay unchanged.
-- With no headless backend running, they change the files themselves, as before. The desktop app's own backend doesn't publish its address, so with only the app open they also change the files themselves.
-
-### TOML-only commands
-
-These `workflow` commands work only with TOML workflows: `show`, `edit`, `build`, `create`, `recipe`, `set-info`, `add-node`, `add-edge`, `add-agent`, `rm-node`, `rm-edge`, `set-schedule`, `clear-schedule`, `set-watch`, `clear-watch`, `trigger`, `secrets`, `stop`, `history`, `diff`, `restore`, `preview-import`.
-
-Given a Rattish workflow, they change nothing, exit with code 2 and print the Rattish command to use instead, such as `Raticode rattish inspect-ir` for `show` or `Raticode rattish triggers add cron` for `set-schedule`.
-
-The `Raticode agent`, `Raticode schedule`, `Raticode watch` and `Raticode runner` groups are legacy too. Use [triggers](../workflows/triggers.md) for schedules and file watching, and read the guides above before using the others.
-
-| Given a Rattish workflow | Result |
-| --- | --- |
-| `agent list --workflow` | Exit 2, points to `Raticode rattish inspect-ir` |
-| `runner queue` | Exit 2, points to `Raticode rattish run` or `Raticode rattish start` |
-| `schedule add` | Exit 2, points to `Raticode rattish triggers add cron` |
-| `watch` | Reads only TOML workflows in the data folder and ignores Rattish ones |
-
-`agent list`, `watch list`, `runner list` and `workflow approvals` accept `--format json`.
-
-### Secrets on the command line
-
-Other accounts can read command lines, so:
-
-- `Raticode workflow trigger` reads a webhook token from `--token-file PATH` (a file only you can read) or `RATICODE_WEBHOOK_TOKEN`. The old `--token` option still works but is deprecated and prints a warning.
-- `workflow add-node --notification-smtp-password` expects a secret reference such as `secret:SMTP_PASSWORD`, and warns when given a password.
+- With no headless backend running, they change the files themselves. The desktop app's own backend doesn't publish its address, so with only the app open they also change the files themselves.
 
 ## Talk to a running backend
 
@@ -207,6 +196,7 @@ File safety:
 
 - A token file must belong to you and be readable only by you (`chmod 600`).
 - `endpoint.json` must not be writable by anyone else, since it decides where the token goes.
+- Before sending the owner token to the address in `endpoint.json`, the CLI asks the backend to prove it holds that token, with a fresh random challenge each time. If another program is using that port, or the token isn't this backend's, the token isn't sent and the command fails with exit 6 (error code `unreachable`).
 - The CLI refuses either file otherwise. On Windows the CLI doesn't check these permissions; see [Headless backend](./headless.md#find-the-endpoint-and-token).
 
 Inside a Rem worker or another provider turn that Raticode started (where `RATICODE_AGENT_SESSION` is set):

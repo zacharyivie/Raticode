@@ -139,14 +139,6 @@ class TlsJsonRecords {
         } catch (error: Exception) { failed = true; body = null; throw error }
     }
 
-    fun endOfStream() {
-        if (failed || body != null || header.position() != 0) {
-            failed = true
-            body = null
-            error("Truncated record")
-        }
-    }
-
     companion object {
         const val MAX_RECORD_BYTES = 65536
         fun encode(json: ByteArray): ByteArray {

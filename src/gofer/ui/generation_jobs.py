@@ -64,6 +64,9 @@ def _validate_stored_job(job: Any, path: Path) -> dict[str, Any]:
 
 
 def git(root: Path, *args: str, input_text: str | None = None) -> str:
+    # Not run_repository_git: this file serves the user's own Commit button, where the
+    # repository's hooks and signing run on purpose. That is the exception
+    # tests/unit/test_git_repository_programs.py allows for this file's git commands.
     result = subprocess.run(
         ["git", "-c", "core.fsmonitor=false", "-C", str(root), *args],
         env=build_subprocess_env(),

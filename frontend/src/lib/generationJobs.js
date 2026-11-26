@@ -1,12 +1,7 @@
-import { apiUrl } from "./api.js";
+import { apiJson } from "./api.js";
 
-export async function generationRequest(path, body) {
-  const response = await fetch(apiUrl(path), body === undefined ? undefined : {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-  });
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.error || "Could not load Rem generation jobs.");
-  return result;
+export function generationRequest(path, body) {
+  return apiJson(path, { method: body === undefined ? undefined : "POST", body, failure: "Could not load Rem generation jobs." });
 }
 export async function startGenerationJob(kind, request, selection) {
   if (request.projectRoot) await window.goferDesktop?.workspace?.trustProjectRoot?.(request.projectRoot);

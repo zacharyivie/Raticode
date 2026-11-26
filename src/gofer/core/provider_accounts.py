@@ -361,13 +361,6 @@ def account_config_dir(profile: ProviderProfile, data_dir: Path | None = None) -
     return _private_dir(account_dir(profile.subscription, str(profile.account_id), data_dir))
 
 
-def account_environment(
-    profile: ProviderProfile, data_dir: Path | None = None, base: dict[str, str] | None = None
-) -> dict[str, str]:
-    folder = account_config_dir(profile, data_dir)
-    return require_adapter(profile.subscription).environment(folder, base)
-
-
 def copy_setup(source: Path, target: Path, allowlist: Iterable[str]) -> list[str]:
     """Copy the allowlisted setup items; symlinks are skipped, nothing else is read."""
     copied: list[str] = []

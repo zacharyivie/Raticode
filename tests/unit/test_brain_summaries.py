@@ -8,7 +8,6 @@ paragraph under a summary heading. A summary is never a passage, so it can't be 
 from __future__ import annotations
 
 import re
-import time
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +23,7 @@ from gofer.ui.brain_summaries import (
     with_summary,
 )
 from gofer.ui.report_outputs import ReportTools, save_report
+from tests.helpers.brain_library import wait_idle
 
 SECTION = "## Short answer\n\nThe section paragraph answers the question.\n"
 
@@ -165,15 +165,6 @@ def test_local_second_brain_save_note_writes_the_summary(tmp_path: Path) -> None
 
 
 # Library: stored beside the passages, returned to Rem, never cited
-
-
-def wait_idle(library: BrainLibrary) -> None:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if all(task["state"] != "running" for task in library.snapshot()["tasks"]):
-            return
-        time.sleep(0.02)
-    pytest.fail("Second Brain tasks did not finish")
 
 
 @pytest.fixture

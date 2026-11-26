@@ -6,6 +6,7 @@ import { fuseResults } from "../lib/secondBrainGraph.js";
 import { Chip, DraftInput, Empty, Menu, Pill, Popover, Segmented, TypeIcon, Highlight, BrainMark, askRem } from "./SecondBrainParts.jsx";
 import { brainRequest } from "../lib/secondBrainApi.js";
 import SecondBrainReader from "./SecondBrainReader.jsx";
+import { useRovingChoice } from "../lib/useRovingChoice.js";
 
 const toggle = (list = [], value) => list.includes(value) ? list.filter(item => item !== value) : [...list, value];
 
@@ -236,6 +237,9 @@ function ResultItem({ result, active, selected, multiBrain, brainOf, collections
   </li>;
 }
 
+// On narrow windows the results and the reader take turns; this switch picks one.
+const PANES = ["results", "reader"];
+
 export default function SearchView({ brain }) {
   const store = useSecondBrain();
   const view = viewFor(store);
@@ -294,6 +298,7 @@ export default function SearchView({ brain }) {
   const leftOutCount = useMemo(() => scopedLibrary.documents.filter(doc => leftOutBy(doc, scopedLibrary.folderRules?.[doc.brainId])).length, [scopedLibrary]);
   const [activeIndex, setActiveIndex] = useState(0);
   const [pane, setPane] = useState("results");
+  const paneTab = useRovingChoice({ keys: PANES, selected: pane, onSelect: setPane, orientation: "horizontal" });
   const [resultsHidden, setResultsHidden] = useState(false);
   const listRef = useRef(null);
   useEffect(() => { setActiveIndex(0); }, [search]);
@@ -320,13 +325,13 @@ export default function SearchView({ brain }) {
     {semantic.error && semantic.key === searchKey ? <p role="alert" className="sb-inline-note" data-tone="warning">{semantic.error}</p> : null}
     <QueryBar brain={brain} store={store} search={search} library={library} brainNames={brainNames} />
     <div className="sb-pane-switch" role="tablist" aria-label="Results and reader">
-      <button type="button" role="tab" aria-selected={pane === "results"} onClick={() => setPane("results")}>Results · {results.length}</button>
-      <button type="button" role="tab" aria-selected={pane === "reader"} onClick={() => setPane("reader")}>Reader{view.tabs.length ? ` · ${view.tabs.length}` : ""}</button>
+      <button type="button" role="tab" aria-selected={pane === "results"} onClick={() => setPane("results")} {...paneTab("results")}>Results · {results.length}</button>
+      <button type="button" role="tab" aria-selected={pane === "reader"} onClick={() => setPane("reader")} {...paneTab("reader")}>Reader{view.tabs.length ? ` · ${view.tabs.length}` : ""}</button>
     </div>
     <div className="sb-split" data-results-hidden={resultsHidden || undefined}>
       <section className="sb-results" aria-label="Search results">
         <div className="sb-results-head">
-          <p><strong>{results.length} document{results.length === 1 ? "" : "s"}</strong>{passageTotal ? ` · ${passageTotal} passage${passageTotal === 1 ? "" : "s"}` : ""}{brain.index.state === "updating" ? <span className="sb-asof" title={`Index updating. ${brain.index.pending} documents are waiting for extraction.`}> · as of {new Date(brain.index.asOf).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span> : null}</p>
+          <p><strong>{results.length} document{results.length === 1 ? "" : "s"}</strong>{passageTotal ? ` · ${passageTotal} passage${passageTotal === 1 ? "" : "s"}` : ""}{store.passagesLoading && search.text.trim() ? <span className="sb-asof" role="status"> · Loading passages…</span> : null}{brain.index.state === "updating" ? <span className="sb-asof" title={`Index updating. ${brain.index.pending} documents are waiting for extraction.`}> · as of {new Date(brain.index.asOf).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span> : null}</p>
           <label className="sb-sort"><ListFilter size={13} aria-hidden="true" /><span className="sb-sr-only">Sort by</span><select aria-label="Sort results" value={search.sort} onChange={event => updateSearch({ sort: event.target.value })}>{SORTS.map(([id, text]) => <option key={id} value={id}>{text}</option>)}</select></label>
           <button type="button" className="sb-icon-button sb-hide-results" aria-label="Hide results" title="Hide results" onClick={() => setResultsHidden(true)}><PanelLeft size={15} /></button>
         </div>

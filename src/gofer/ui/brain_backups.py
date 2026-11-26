@@ -23,6 +23,7 @@ from typing import Any
 from gofer.ui.brain_documents import checked_archive
 from gofer.utils.atomic_output import atomic_binary_output
 from gofer.utils.drive_format import write_error_message
+from gofer.utils.instants import stored_instant
 
 FREQUENCIES = ("daily", "weekly")
 MAX_KEEP = 60
@@ -333,14 +334,6 @@ def due_key(settings: dict[str, Any], moment: datetime) -> str | None:
     return moment.date().isoformat()
 
 
-def _parse(value: Any) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(str(value))
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-
-
 def backup_warning(brain: dict[str, Any], moment: datetime) -> str:
     """Why the settings page should warn about backups, or an empty string."""
     status = brain.get("backupStatus") or {}
@@ -351,13 +344,13 @@ def backup_warning(brain: dict[str, Any], moment: datetime) -> str:
             "The last backup was much smaller than the last full backup, "
             "so no older copies were removed."
         )
-    verified = _parse((status.get("lastVerified") or {}).get("at"))
+    verified = stored_instant((status.get("lastVerified") or {}).get("at"))
     if verified is not None:
         age = moment - verified
         if age <= STALE_AFTER:
             return ""
         return f"No verified backup in {age.days} days."
-    since = _parse(status.get("enabledAt"))
+    since = stored_instant(status.get("enabledAt"))
     if settings["enabled"] and since is not None and moment - since > STALE_AFTER:
         return f"No verified backup since backups were turned on {(moment - since).days} days ago."
     return ""

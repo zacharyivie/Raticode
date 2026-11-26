@@ -433,7 +433,7 @@ def test_turns_name_their_account_and_no_tool_reads_any_account_folder(data_dir:
     rules = claude_account_deny_rules(data_dir)
     root = str((data_dir / "claude-accounts").resolve())
     assert f"Read(/{root}/**)" in rules and f"Edit(/{root}/**)" in rules
-    assert "claude-accounts" in claude_sandbox.DATA_SECRETS
+    assert "claude-accounts" in claude_sandbox.data_secrets(data_dir)
     assert session_key("claude_code", "work") != session_key("claude_code", "home")
     assert session_key("claude_code", None) == "claude_code"
 

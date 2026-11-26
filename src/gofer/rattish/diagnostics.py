@@ -5,7 +5,6 @@ from __future__ import annotations
 import difflib
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Literal
 
 DIAGNOSTIC_SCHEMA_ID = "urn:raticode:rattish:schema:diagnostic-1.json"
@@ -130,8 +129,3 @@ def did_you_mean(name: str, candidates: Iterable[str]) -> tuple[str, ...]:
         return (f"Did you mean {matches[0]!r}?",)
     listed = ", ".join(repr(match) for match in matches[:-1])
     return (f"Did you mean {listed} or {matches[-1]!r}?",)
-
-
-def path_label(path: Path | str) -> str:
-    """Return the portable source label used by diagnostics."""
-    return str(path).replace("\\", "/")

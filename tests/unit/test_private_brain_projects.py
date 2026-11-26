@@ -362,3 +362,41 @@ async def test_turning_cloud_processing_off_refuses_the_next_turn(
             )
     finally:
         close(server)
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude_code"])
+def test_a_one_shot_chat_request_refuses_a_project_holding_a_private_brain(
+    monkeypatch, library, data_dir, tmp_path, provider
+) -> None:
+    # POST /api/chat with no conversationId used to run its own copy of the provider
+    # setup, which never looked for private brains and started the CLI in the project.
+    project = tmp_path / "project"
+    register(library, project / "journal", cloud=False)
+    started: list[list[str]] = []
+
+    async def must_not_start(command: list[str], **_kwargs: Any):
+        started.append(command)
+        yield {"type": "chunk", "stream": "stdout", "text": "done", "returncode": None}
+        yield {"type": "exit", "stream": None, "text": "", "returncode": 0}
+
+    async def old_copy(command: list[str], **_kwargs: Any) -> tuple[int, str, str]:
+        started.append(command)
+        return 0, "done", ""
+
+    monkeypatch.setattr(chat, "resolve_provider_executable", lambda _: sys.executable)
+    monkeypatch.setattr(chat, "stream_subprocess", must_not_start)
+    monkeypatch.setattr(chat, "run_subprocess", old_copy)
+    result = harness._request(
+        data_dir,
+        "POST",
+        "/api/chat",
+        body={
+            "provider": provider,
+            "model": "cli-default",
+            "messages": [{"role": "user", "body": "tidy the notes"}],
+            "workflow": {"projectRoot": str(project)},
+        },
+    )
+    assert result.status == 400, result.text()
+    assert "journal" in result.text() and "Allow cloud processing" in result.text()
+    assert started == []

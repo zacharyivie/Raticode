@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000183",
+  "id": "10000000-0000-4000-8000-000000000183",
+  "sequence": 183,
+  "type": "desktop.read",
+  "payload": {
+    "op": "selfwork.read",
+    "params": {}
+  }
+}

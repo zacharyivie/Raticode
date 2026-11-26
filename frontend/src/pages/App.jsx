@@ -1,89 +1,63 @@
-import { runFocusedEdit, rememberEditingTarget } from "../lib/focusedEditing.js";
+import { hasEditingTarget, runFocusedEdit, rememberEditingTarget } from "../lib/focusedEditing.js";
+import { EMPTY_GRAPH_HISTORY, graphEditLabel, pushGraphHistoryEntry } from "../lib/graphEditHistory.js";
 import { textEditorSessions, flushCodeDrafts } from "../lib/codeEditorSessions.js";
-import { startGenerationJob } from "../lib/generationJobs.js";
-import { generateReportTheme, reportThemeContext, normalizeReportThemes } from "../lib/reportThemes.js";
-import { applyPhoneSettings, orderDeviceMessages } from "../lib/deviceMessages.js";
+import { flushChatDrafts } from "../lib/chatDrafts.js";
+import { reportThemeContext, normalizeReportThemes } from "../lib/reportThemes.js";
+import { applyPhoneSettings } from "../lib/deviceMessages.js";
 import { phoneLockNotice } from "../lib/phoneLocks.js";
 import { controlledEngine, webBrowserEngine } from "../lib/browserEngines.js";
 import { browserTabOpening, viewedBrowserMedia, withBrowserTabEngines } from "../lib/browserTabs.js";
 import { externalOpenPlan } from "../lib/externalOpens.js";
-import { fetchChatTurn } from "../lib/chatTransport.js";
-import { previousRemModelSelection, remModelSelection, remModelSwitchBanner } from "../lib/remModelSelection.js";
-import { accountChangeWarning, accountMenu, accountSwitchLabel, DEFAULT_SIGN_IN, threadAccountChoice, turnAccount, withThreadAccount } from "../lib/threadAccounts.js";
-import { signInProviderAccount, useProviderAccountList } from "../lib/useProviderAccountList.js";
-import { pathKey, samePath, pathWithin, uniquePaths, pathValue, withPathValue, replacePathPrefix, pathMatchesChange } from "../lib/workspacePaths.js";
-import { ARCHIVE_GIT_LIMIT, archiveRetentionDays, expiredArchivedThreads, cachedThreadScopes, organizeThreads, threadIndexEntry } from "../lib/threadActivity.js";
+import { pathKey, samePath, pathWithin, pathValue, withPathValue, replacePathPrefix, pathMatchesChange } from "../lib/workspacePaths.js";
 import { loadEditorSession, saveEditorSession, loadWorkflowDraft, saveWorkflowDraft } from "../lib/editorSession.js";
-import { askRemWebPageAttachment } from "../lib/browserAskRem.js";
 import brandCompat from "../lib/brandCompat.js";
-import { createConversationCache } from "../lib/conversationCache.js";
-import { loadConversationMessages } from "../lib/conversationStorage.js";
-import { conversationRepository, pageStart } from "../lib/conversationRepository.js";
-import ThreadSearch from "../components/ThreadSearch.jsx";
-import UpdateReminderBanner from "../components/UpdateReminderBanner.jsx";
-import { ThreadList as ThreadListView, ThreadSections as ThreadSectionsView } from "../components/ThreadSections.jsx";
-import { threadActionPatch } from "../lib/threadSelection.js";
-import ThreadHistoryMatch from "../components/ThreadHistoryMatch.jsx";
-import { createConversationArchiveScheduler } from "../lib/conversationArchive.js";
 import { startPolling, shareCancellable } from "../lib/refresh.js";
 import { createRecentProjectValidator, startWorkspacePolling } from "../lib/projectRefresh.js";
 import { trackPointerDrag } from "../lib/paneResize.js";
 import { equalJson } from "../lib/jsonValue.js";
-import { providerPermissionDefault, providerPermissionOptions } from "../lib/providerPermissions.js";
-import { generateConventionalCommit } from "../lib/commit-message.js";
-import RemToolsMenu from "../components/RemToolsMenu.jsx";
-import { ThreadContextSent } from "../components/ContextSent.jsx";
+import { menuTrigger, PopupMenu } from "../components/PopupMenu.jsx";
 import { browserChromeShortcutAction } from "../lib/browserShortcuts.js";
-import { DEFAULT_REM_RESOURCES, remResourceError, snapshotRemResources } from "../lib/remResources.js";
-import { copyForkAttachments, forkThreadHistory, isForkableMessage } from "../lib/forkThread.js";
-import { lazy, Suspense, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { snapshotRemResources } from "../lib/remResources.js";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
-  ArrowLeft,
   Bot,
   Check,
   ChevronDown,
   ChevronRight,
-  ChevronUp,
   Code2,
   Copy,
   Download,
   FileArchive,
-  FileDiff,
   FolderOpen,
-  GitBranch,
   Globe2,
   History,
-  Info,
   Loader2,
   Moon,
   MoreVertical,
-  Paperclip,
   Plus,
   PencilLine,
   RefreshCw,
-  Redo2,
-  Search,
   Settings as SettingsIcon,
   ShieldAlert,
   Sun,
-  Smartphone,
-  Undo2,
   Upload,
-  UserRound,
   Waypoints,
   X,
 } from "lucide-react";
 import { autoLayoutWorkflow } from "../lib/workflowLayout.js";
-import { adoptRemProjects, connectRemHome, onRemOpenedProjects, remThreadWasCleared, setRemHomeContext, sendManagedRemInstruction } from "../lib/remHomeStore.js";
+import { adoptRemProjects, connectRemHome, onRemOpenedProjects, setRemHomeContext } from "../lib/remHomeStore.js";
+import { setBackgroundNotices } from "../lib/backgroundNotices.js";
 const DagCanvas = lazy(() => import("../components/DagCanvas.jsx"));
 const RunPreviewDialog = lazy(() => import("../components/RunPreviewDialog.jsx"));
-const WorkflowHistoryDialog = lazy(() => import("../components/WorkflowDialogs.jsx").then(module => ({ default: module.WorkflowHistoryDialog })));
 const ExportWorkflowDialog = lazy(() => import("../components/WorkflowDialogs.jsx").then(module => ({ default: module.ExportWorkflowDialog })));
 const WorkflowListItem = lazy(() => import("../components/WorkflowListItem.jsx"));
-const ChatSources = lazy(() => import("../components/ChatSources.jsx"));
 import { Dialog } from "../components/Dialog.jsx";
+import { useConfirm } from "../components/ConfirmDialog.jsx";
 import SavedInputsPrompt from "../components/SavedInputsPrompt.jsx";
+import { ConvertTomlWorkflowDialog, LegacyTomlNotice } from "../components/LegacyTomlWorkflows.jsx";
+import ProjectFolderField from "../components/ProjectFolderField.jsx";
+import { convertTomlWorkflow, legacyTomlFilesFromPayload } from "../lib/legacyToml.js";
 import BrowserMediaBar from "../components/BrowserMediaBar.jsx";
 const KanbanWorkspace = lazy(() => import("../components/KanbanWorkspace.jsx"));
 const SocialPostsWorkspace = lazy(() => import("../components/SocialPostsWorkspace.jsx"));
@@ -99,8 +73,6 @@ const CodeWorkspace = lazy(() => import("../components/CodeWorkspace.jsx"));
 const BrowserWindowHost = lazy(() => import("../components/BrowserWindowHost.jsx"));
 import { applyCodeFilesystemChange } from "../lib/codeEditorSessions.js";
 import { resolveMarkdownFileLinkTarget, markdownFileLinkTarget } from "../lib/fileLinks.js";
-import MarkdownContent from "../components/MarkdownContent.jsx";
-import ChatComposer, { MessageAttachments } from "../components/ChatComposer.jsx";
 const SettingsPopover = lazy(() => import("../components/SettingsPopover.jsx"));
 const CommandPalette = lazy(() => import("../components/CommandPalette.jsx"));
 import { commandSlotSettings, defaultSettingsSnapshot, normalizeAppSettings } from "../lib/settings.js";
@@ -108,12 +80,11 @@ import { SCREEN_COMMAND_ID, screenFromCapture, setScreenContextEnabled, setScree
 import { ANYWHERE_COMMAND_ID, VOICE_COMMAND_ID, onVoicePhase, pickRemComposer, requestAnywhereDictation, requestVoiceDictation, setAnywhereStatus, setDictationAutoSend, setDictationMode, setVoiceBinding, stopAnywhereDictation, voiceShortcutLabel } from "../lib/voiceShortcut.js";
 import { BROWSER_CONTENT, EDITOR_CONTENT, WORKFLOW_RUNS_CONTENT, initialMainContent, pluginAvailable, pluginEnabled, pluginHasPane, resolveMainContent, resolvePluginActivity, withPluginPreview } from "../lib/plugins.js";
 import RaticodeMark from "../components/RaticodeMark.jsx";
-import RatFaceIcon from "../components/RatFaceIcon.jsx";
 import { createPortal } from "react-dom";
 import { createRemHost, RemSlot } from "../components/RemSlot.jsx";
 import UnifiedBottomPanel from "../components/UnifiedBottomPanel.jsx";
 import { listedRattishWorkflows, useWorkflowRunRegistry } from "../lib/useWorkflowRunRegistry.js";
-import { initialWorkflowParameters, normalizeWorkflowFilesystemAccess } from "../lib/workflowRunSetup.js";
+import { initialWorkflowParameters } from "../lib/workflowRunSetup.js";
 import { exactWorkflowRunStopPath, workflowListStatus, workflowRunProblems, workflowRunSummary } from "../lib/workflowRuns.js";
 import { askRemAboutDiagnostic, askRemAboutRunFailure, shownRunId } from "../lib/askRemAboutFailure.js";
 import { pendingRunWorktreeCount, runWorktreeDeleteNote, workflowFolderLabel } from "../lib/workflowFolder.js";
@@ -122,22 +93,11 @@ import { requestShortcutReview } from "../lib/workflowShortcuts.js";
 import { WORKFLOW_RUNS_EVENT, openWorkflowRuns, reviewRecord } from "../lib/allWorkflowRuns.js";
 import { PALETTE_COMMAND_ID, QUICK_OPEN_COMMAND_ID, actionPaletteItems, keybindingPaletteItems, loadRecentIds, paletteGivesWay, quickOpenItems, rememberRecentId } from "../lib/commandPalette.js";
 import { PAUSED_TEXT, triggersApi } from "../lib/rattishTriggers.js";
-import {
-  ProviderModelEffortFields,
-  useProviderCapabilities,
-} from "../components/ProviderModelEffortFields.jsx";
 import { apiUrl } from "../lib/api.js";
-import {
-  chatMessageForRequest,
-  clipboardAttachmentFiles,
-  largePasteFile,
-  readChatAttachments,
-  CHAT_IMAGE_WARNING_MS,
-  isChatImage,
-  providerSupportsChatImages,
-  transferContainsFiles,
-  uploadChatAttachments,
-} from "../lib/chatAttachments.js";
+import { useRovingChoice } from "../lib/useRovingChoice.js";
+import { ChatPane } from "../components/ChatPane.jsx";
+import { archiveAllConversations, chatThreadIndex, deletePhoneThread, loadAllChatThreads, loadChatThread, reportArchiveError } from "../lib/chatThreads.js";
+import { assistantMarkdownSourcePath, loadProjectLabels, mergeRecentProjects, PROJECT_LABELS_STORAGE_KEY, projectNameFromPath } from "../lib/projects.js";
 import {
   DEFAULT_APP_SETTINGS,
   followRenamedAccount,
@@ -153,7 +113,6 @@ import {
 } from "../lib/settings.js";
 
 const RETENTION_STORAGE_KEY = "gofer.retentionSettings";
-const PROJECT_LABELS_STORAGE_KEY = "gofer.projectLabels";
 const RECENT_PROJECTS_STORAGE_KEY = "gofer.recentProjects";
 export const RECENT_FILES_STORAGE_KEY = "gofer.recentFiles";
 const LAST_WORKTREE_STORAGE_KEY = "gofer.lastWorktreeByProject";
@@ -202,11 +161,6 @@ function loadRetentionSettings() {
   }
 }
 
-function isBundleFile(file) {
-  const name = file?.name?.toLowerCase?.() ?? "";
-  return name.endsWith(".zip") || name.endsWith(".gof");
-}
-
 function isRaticodeFile(file) {
   return brandCompat.isWorkflowBundle(file);
 }
@@ -221,81 +175,8 @@ async function fileToBase64(file) {
   return window.btoa(binary);
 }
 
-function formatBundleImportPreview(plan) {
-  const manifest = plan.manifest ?? {};
-  const promptPaths = (manifest.includedPaths ?? [])
-    .filter((item) => item.kind === "prompt" || item.kind === "prompt_template")
-    .map((item) => `${item.path}${item.kind === "prompt_template" ? " (template)" : ""}`);
-  const lines = [
-    `Import bundle "${plan.workflowName}" as ${plan.workflowId}?`,
-    "",
-    "Files to create:",
-    ...previewLines(plan.filesToCreate),
-    "",
-    "Files to overwrite:",
-    ...previewLines(plan.filesToOverwrite),
-    "",
-    "Agents and providers:",
-    ...previewProviderLines(manifest.providerAssumptions),
-    "",
-    "Prompts:",
-    ...previewLines(promptPaths),
-    "",
-    "Triggers:",
-    ...previewTriggerLines(manifest.triggers),
-  ];
-  if (plan.conflicts?.length) {
-    lines.push("", "Conflicts:", ...plan.conflicts.map((item) => `- ${item.path}: ${item.action}`));
-  }
-  if (plan.requiredSecrets?.length) {
-    lines.push("", "Required secrets:", ...plan.requiredSecrets.map((item) => `- ${item.name}`));
-  }
-  if (plan.externalRequirements?.length) {
-    lines.push(
-      "",
-      "External requirements:",
-      ...plan.externalRequirements.map((item) => `- ${item.path}: ${item.reason}`),
-    );
-  }
-  return lines.join("\n");
-}
-
-function previewLines(items = []) {
-  return items.length ? items.map((item) => `- ${item}`) : ["- None"];
-}
-
-function previewProviderLines(items = []) {
-  if (!items.length) return ["- None"];
-  return items.map((item) => {
-    const details = [item.subscription, item.profile && `profile ${item.profile}`, item.model].filter(
-      Boolean,
-    );
-    return `- ${item.agentId}: ${details.join(", ")}`;
-  });
-}
-
-function previewTriggerLines(items = []) {
-  if (!items.length) return ["- None"];
-  return items.map((item) => {
-    if (item.type === "schedule") {
-      return `- schedule: ${item.cron} (${item.timezone})`;
-    }
-    if (item.type === "watch") {
-      return `- watch: ${item.path} ${item.glob} (${item.mode})`;
-    }
-    if (item.type === "webhook") {
-      const details = [item.source, item.enabled === "true" ? "enabled" : "disabled"];
-      if (item.tokenEnv) details.push(`secret ${item.tokenEnv}`);
-      if (item.fanoutPath) details.push(`fanout ${item.fanoutPath}`);
-      return `- webhook ${item.id}: ${details.join(", ")}`;
-    }
-    return `- ${item.type ?? "trigger"}`;
-  });
-}
-
 export function workflowBundleFilename(workflow) {
-  const extension = workflow?.sourceFormat === "rattish" ? ".raticode" : ".gof.zip";
-  return `${workflow?.id || "workflow"}${extension}`;
+  return `${workflow?.id || "workflow"}.raticode`;
 }
 
 export function workflowBundlePath(directory, workflow) {
@@ -307,9 +188,7 @@ export function workflowBundlePath(directory, workflow) {
 }
 
 export function workflowExportEndpoint(workflow) {
-  return workflow?.sourceFormat === "rattish"
-    ? `/rattish/workflows/${encodeURIComponent(workflow.id)}/export`
-    : `/workflows/${encodeURIComponent(workflow.id)}/export`;
+  return `/rattish/workflows/${encodeURIComponent(workflow.id)}/export`;
 }
 
 export async function withProjectOpenTimeout(operation, timeoutMs = 30000) {
@@ -355,6 +234,7 @@ export async function discoverProjectWorkflows(projectRoot, { signal, onResolved
 
 export default function App() {
   const deviceSyncContext = useRef({});
+  const [confirmAction, confirmDialog] = useConfirm();
   useEffect(() => {
     // The sync engine loads after startup; it is not needed to render the app.
     let stop = null;
@@ -410,6 +290,8 @@ export default function App() {
   const [phoneLocks, setPhoneLocks] = useState([]);
   const [settingsCategory, setSettingsCategory] = useState("general");
   const [settingsBrowserSection, setSettingsBrowserSection] = useState("");
+  // Selectors for one setting Settings scrolls to when it opens, such as Rem's provider.
+  const [settingsReveal, setSettingsReveal] = useState(null);
   useEffect(() => {
     const openProviders = () => { setSettingsCategory("providers"); setSettingsOpen(true); };
     // Firefox and Chrome tabs open Settings > Browser for that browser's settings.
@@ -439,7 +321,9 @@ export default function App() {
     () => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false,
   );
   const [workflows, setWorkflows] = useState([]);
-  const [promptAgentIds, setPromptAgentIds] = useState([]);
+  const [legacyTomlFiles, setLegacyTomlFiles] = useState([]);
+  // The TOML file being converted to Rattish, and how its conversion went.
+  const [tomlConversion, setTomlConversion] = useState(null);
   const [activeWorkflowId, setActiveWorkflowId] = useState(initialStudioSession.workflowId || undefined);
   const activeWorkflowIdRef = useRef(activeWorkflowId);
   activeWorkflowIdRef.current = activeWorkflowId;
@@ -485,10 +369,12 @@ export default function App() {
       state: { current: null }, metadataTimer: { current: null }, metadataPending: { current: false },
       analysisTimer: { current: null }, analysisRequest: { current: 0 },
       writes: { current: Promise.resolve() }, metadataSaving: { current: null },
+      graphHistory: { current: EMPTY_GRAPH_HISTORY },
     });
     const session = documentSessionsRef.current.get(workflowId);
     return {
       documentWritesRef: session.writes,
+      graphHistoryRef: session.graphHistory,
       rattishMetadataSavingRef: session.metadataSaving,
       rattishEditorStateRef: session.state,
       rattishMetadataSaveTimerRef: session.metadataTimer,
@@ -508,6 +394,9 @@ export default function App() {
     };
   }, [workflows]);
   const { rattishEditorStateRef, setRattishEditorState } = documentSession(activeWorkflowId);
+  // Undo and Redo stacks live in each workflow's document session; this redraws their buttons.
+  const [, setGraphHistoryVersion] = useState(0);
+  const graphHistoryChanged = useCallback(() => setGraphHistoryVersion(version => version + 1), []);
   const rattishEditorState = rattishSessions[activeWorkflowId] ?? null;
   const [workflowTabs, setWorkflowTabs] = useState(initialEditorSession?.workflowTabs || {});
   const [requestedSidebarActivity, setSidebarActivity] = useState(initialEditorSession?.activity || (initialStudioSession.view === "code" ? "files" : settings.general.initialActivity || "workflows"));
@@ -594,6 +483,7 @@ export default function App() {
 
   // Task supervision keeps updating threads even while another workspace is open.
   useEffect(() => connectRemHome(), []);
+  useEffect(() => setBackgroundNotices(settings.general.backgroundNotices), [settings.general.backgroundNotices]);
 
   const [lifecyclePrompt, setLifecyclePrompt] = useState(null);
   const [workflowClosePrompt, setWorkflowClosePrompt] = useState(null);
@@ -688,21 +578,11 @@ export default function App() {
     saving: false,
     workflow: null,
   });
-  const [historyState, setHistoryState] = useState({
-    diff: null,
-    error: "",
-    loading: false,
-    open: false,
-    revisions: [],
-  });
-  const [dirtyWorkflowsById, setDirtyWorkflowsById] = useState({});
-  const [saveStatesByWorkflowId, setSaveStatesByWorkflowId] = useState({});
   const [topBarNotice, setTopBarNotice] = useState({ type: "", message: "" });
   // Password inputs a Rattish run didn't save, asked for again before Resume or Run again.
   const [savedInputsPrompt, setSavedInputsPrompt] = useState(null);
   const [updateNotice, setUpdateNotice] = useState({ type: "", message: "" });
   const [runPreview, setRunPreview] = useState(null);
-  const [queueState, setQueueState] = useState({ runners: [], runs: [], error: "" });
   const [retentionSettings, setRetentionSettings] = useState(loadRetentionSettings);
   const [updateState, setUpdateState] = useState({
     available: false,
@@ -763,10 +643,6 @@ export default function App() {
     error: "",
     loading: false,
   });
-  const workflowRevisionsRef = useRef(new Map());
-  const dirtyWorkflowsRef = useRef(new Map());
-  const saveTimersRef = useRef(new Map());
-  const inFlightSavesRef = useRef(new Map());
   const deletedWorkflowIdsRef = useRef(new Set());
   const logRequestRef = useRef(0);
   const logListRequestRef = useRef(0);
@@ -807,7 +683,6 @@ export default function App() {
   const theme = resolvedTheme(settings, systemDark);
   const workflowPaneWidth = settings.layout.workflowPaneWidth;
   const chatPaneWidth = settings.layout.assistantPaneWidth;
-  const executionMode = settings.general.executionMode;
   const activeWorkflow = workflows.find(item => item.id === activeWorkflowId);
   const browsingWorkspace = activeWorkspaceForProject(workflows, undefined, activeProjectRoot) ?? projectWorkspace(activeProjectRoot);
   const swarmProjectRoot = browsingWorkspace?.projectRoot || activeProjectRoot || "";
@@ -820,7 +695,9 @@ export default function App() {
   // Rem's chat looks the same in the main area and in the side pane.
   const remHomeProps = {
     onOpenLink: href => void openMarkdownFileLink(href),
-    onOpenSettings: () => { setSettingsCategory("assistant"); setSettingsOpen(true); },
+    // target, when given, is { selectors } for the Settings › Rem control to show.
+    onOpenSettings: (target) => { setSettingsCategory("assistant"); setSettingsReveal(Array.isArray(target?.selectors) ? target.selectors : null); setSettingsOpen(true); },
+    remProvider: { provider: settings.assistant.provider, chatProvider: settings.assistant.chatProvider },
     projectOptions: mergeRecentProjects(activeProjectRoot ? [activeProjectRoot] : [], recentProjectRoots),
     avatar: { enabled: settings.assistant.avatarEnabled, animated: settings.assistant.avatarAnimated, reducedMotion: settings.appearance.reducedMotion },
   };
@@ -1360,6 +1237,13 @@ export default function App() {
   useEffect(() => {
     const targets = workflows.filter(item => item.sourceFormat === "rattish" &&
       (item.id === activeWorkflowId || codeOpenPaths.includes(item.sourcePath) || Object.values(workflowTabs).some(tab => tab.workflowId === item.id)));
+    // A workflow's Undo and Redo end when it closes.
+    const openIds = new Set(targets.map(target => target.id));
+    for (const [id, session] of documentSessionsRef.current) {
+      if (openIds.has(id) || session.graphHistory.current === EMPTY_GRAPH_HISTORY) continue;
+      session.graphHistory.current = EMPTY_GRAPH_HISTORY;
+      graphHistoryChanged();
+    }
     for (const target of targets) {
       const session = documentSession(target.id);
       if (session.rattishEditorStateRef.current) continue;
@@ -1376,7 +1260,7 @@ export default function App() {
           if (document.dirty) scheduleRattishAnalysisRef.current(document.source, target.sourcePath);
         }).catch(error => session.setRattishEditorState({ document: null, error: error.message, loading: false, saving: false }));
     }
-  }, [activeWorkflowId, workflows, codeOpenPaths, workflowTabs, documentSession]);
+  }, [activeWorkflowId, workflows, codeOpenPaths, workflowTabs, documentSession, graphHistoryChanged]);
 
   // Leaving a swarm or organization closes it, so its sidebar row is no longer
   // marked open.
@@ -1670,7 +1554,10 @@ export default function App() {
         // outside the open project is opened only after the user agrees, and
         // isn't added to recent projects.
         const outside = options.fromLink && !(activeProjectRootRef.current && pathWithin(folder, activeProjectRootRef.current));
-        if (outside && !window.confirm(`Open "${folder}" as a project?\n\nA link points to this folder, which is outside the open project. Opening it lets Raticode and Rem work in it.`)) return;
+        if (outside && !await confirmAction({
+          message: `Open "${folder}" as a project?\n\nA link points to this folder, which is outside the open project. Opening it lets Raticode and Rem work in it.`,
+          confirmLabel: "Open project",
+        })) return;
         await openProjectAtPath(folder, { rememberProject: !outside });
         setStudioView("code");
         setSidebarActivity("files");
@@ -2183,6 +2070,8 @@ export default function App() {
     return savedDocument;
   }
 
+  // Resolves to the saved document, or to { error } when the edit wasn't saved so an
+  // inspector field can show why next to the text it kept.
   async function mutateActiveRattish(mutations, targetWorkflow = activeWorkflow) {
     if (targetWorkflow?.sourceFormat !== "rattish" || !mutations?.length) return null;
     return queueWorkflowDocumentWrite(targetWorkflow, async () => {
@@ -2210,14 +2099,67 @@ export default function App() {
         }
         const savedDocument = acceptWorkflowWrite(targetWorkflow, currentDocument, payload.document);
         if (!savedDocument) {
-          setTopBarNotice({ type: "error", message: "Graph changes were saved. Your newer source edits are still unsaved." });
-          return null;
+          const message = "Graph changes were saved. Your newer source edits are still unsaved.";
+          setTopBarNotice({ type: "error", message });
+          return { error: message };
         }
+        const history = session.graphHistoryRef.current;
+        session.graphHistoryRef.current = {
+          undo: pushGraphHistoryEntry(history.undo, { label: graphEditLabel(mutations), sourceBefore: currentDocument.source, revisionAfter: savedDocument.savedRevision }),
+          redo: [],
+        };
+        graphHistoryChanged();
         setTopBarNotice({ type: "success", message: "Updated workflow.rattish" });
         void loadWorkflows({ silent: true });
         return savedDocument;
       } catch (error) {
-        setTopBarNotice({ type: "error", message: error instanceof Error ? error.message : "Unable to edit workflow.rattish" });
+        const message = error instanceof Error ? error.message : "Unable to edit workflow.rattish";
+        setTopBarNotice({ type: "error", message });
+        return { error: message };
+      }
+    });
+  }
+
+  // Undo ("undo") or Redo ("redo") the newest graph edit by saving the text from before
+  // it. It applies only while workflow.rattish is still at the revision that edit saved,
+  // so a change from the code view, Rem or another program is never overwritten.
+  function stepGraphHistory(target, direction) {
+    if (target?.sourceFormat !== "rattish") return Promise.resolve(null);
+    return queueWorkflowDocumentWrite(target, async () => {
+      const session = documentSession(target.id);
+      const [from, to] = direction === "redo" ? ["redo", "undo"] : ["undo", "redo"];
+      const entry = session.graphHistoryRef.current[from].at(-1);
+      if (!entry) return null;
+      function refuse() {
+        session.graphHistoryRef.current = EMPTY_GRAPH_HISTORY;
+        graphHistoryChanged();
+        setTopBarNotice({ type: "error", message: `workflow.rattish changed since that edit, so it can't be ${from === "undo" ? "undone" : "redone"} here.` });
+        return null;
+      }
+      const currentDocument = session.rattishEditorStateRef.current?.document;
+      if (!currentDocument || currentDocument.dirty || currentDocument.savedRevision !== entry.revisionAfter) return refuse();
+      try {
+        const response = await fetch(apiUrl(`/workflows/${encodeURIComponent(target.id)}/document/save`), {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ source: entry.sourceBefore, expectedRevision: currentDocument.savedRevision }),
+        });
+        const payload = await response.json();
+        if (response.status === 409) return refuse();
+        if (!response.ok) throw new Error(payload.error || `Unable to ${from} ${entry.label}`);
+        const history = session.graphHistoryRef.current;
+        session.graphHistoryRef.current = {
+          [from]: history[from].slice(0, -1),
+          [to]: pushGraphHistoryEntry(history[to], { label: entry.label, sourceBefore: currentDocument.source, revisionAfter: payload.document.savedRevision }),
+        };
+        graphHistoryChanged();
+        const savedDocument = acceptWorkflowWrite(target, currentDocument, payload.document);
+        setTopBarNotice(savedDocument
+          ? { type: "success", message: `${from === "undo" ? "Undid" : "Redid"} ${entry.label}` }
+          : { type: "error", message: "Graph changes were saved. Your newer source edits are still unsaved." });
+        void loadWorkflows({ silent: true });
+        return savedDocument;
+      } catch (error) {
+        setTopBarNotice({ type: "error", message: error instanceof Error ? error.message : `Unable to ${from} ${entry.label}` });
         return null;
       }
     });
@@ -2324,7 +2266,7 @@ export default function App() {
       }, controller.signal);
       if (pathKey(projectRoot) !== pathKey(activeProjectRootRef.current) || projectGeneration !== projectOpenRequestRef.current || requestId !== workflowLoadRequestRef.current) return;
       const payloadDataDir = payload.dataDir ?? "";
-      setPromptAgentIds(payload.promptAgentIds ?? []);
+      setLegacyTomlFiles(legacyTomlFilesFromPayload(payload));
       const nextWorkflows = listedRattishWorkflows(payload)
         .filter((workflow) => !deletedWorkflowIdsRef.current.has(workflow.id))
         .map((workflow) => summarizeWorkflow(workflow, payloadDataDir));
@@ -2335,15 +2277,7 @@ export default function App() {
             ? summarizeWorkflow(mergeSavedWorkflow(localWorkflow, workflow), payloadDataDir)
             : workflow;
         });
-        const mergedWorkflows = silent
-          ? [...dirtyWorkflowsRef.current.keys()].reduce((workflowsToMerge, workflowId) => {
-              if (deletedWorkflowIdsRef.current.has(workflowId)) return workflowsToMerge;
-              const localDirtyWorkflow = current.find((workflow) => workflow.id === workflowId);
-              return localDirtyWorkflow
-                ? preserveLocalWorkflow(workflowsToMerge, localDirtyWorkflow, payloadDataDir)
-                : workflowsToMerge;
-            }, refreshedWorkflows)
-          : refreshedWorkflows;
+        const mergedWorkflows = refreshedWorkflows;
 
         return silent && equalJson(current, mergedWorkflows)
           ? current
@@ -2398,28 +2332,6 @@ export default function App() {
     }
   }, []);
 
-  const loadQueue = useCallback(async ({ silent = false } = {}) => {
-    try {
-      const response = await fetch(apiUrl("/queue"));
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.error || `Queue API returned ${response.status}`);
-      }
-      setQueueState({
-        runners: payload.runners ?? [],
-        runs: payload.runs ?? [],
-        error: "",
-      });
-    } catch (error) {
-      if (!silent) {
-        setQueueState((current) => ({
-          ...current,
-          error: error instanceof Error ? error.message : "Unable to load runners",
-        }));
-      }
-    }
-  }, []);
-
   useEffect(() => {
     loadWorkflows();
   }, [loadWorkflows]);
@@ -2437,20 +2349,16 @@ export default function App() {
 
   useEffect(() => {
     loadDoctor();
-    loadQueue();
-  }, [loadDoctor, loadQueue]);
+  }, [loadDoctor]);
 
   useEffect(() => {
     const projectRoot = activeProjectRoot || activeWorkflow?.projectRoot || "";
     return startWorkspacePolling({
-      refreshLive: () => Promise.allSettled([
-        loadWorkflows({ silent: true }),
-        loadQueue({ silent: true }),
-      ]),
+      refreshLive: () => Promise.allSettled([loadWorkflows({ silent: true })]),
       discover: () => loadWorkflows({ discoverProject: Boolean(projectRoot), projectRoot, silent: true }),
       doctor: () => loadDoctor({ silent: true }),
     });
-  }, [activeProjectRoot, activeWorkflow?.projectRoot, loadDoctor, loadQueue, loadWorkflows]);
+  }, [activeProjectRoot, activeWorkflow?.projectRoot, loadDoctor, loadWorkflows]);
 
   const loadRetentionSettingsForWorkflow = useCallback(async (workflowId) => {
     if (!workflowId) return;
@@ -2502,6 +2410,7 @@ export default function App() {
   }, []);
 
   useEffect(() => window.goferDesktop?.onPrepareLifecycle?.(async request => {
+    flushChatDrafts();
     const dirty = [...textEditorSessions].filter(([, session]) => session.content !== session.savedContent);
     if (!dirty.length) return true;
     return new Promise(resolve => setLifecyclePrompt({ ...request, paths: dirty.map(([path]) => path), resolve }));
@@ -2559,13 +2468,6 @@ export default function App() {
     }
   }, [checkForUpdates, settings.general.checkForUpdates]);
 
-  const dismissUpdateReminder = useCallback(() => {
-    setUpdateState((current) => ({ ...current, reminder: null }));
-    window.goferUpdates?.dismissReminder?.().then((nextState) => {
-      if (nextState) setUpdateState((current) => ({ ...current, ...nextState }));
-    }).catch(() => {});
-  }, []);
-
   async function applyUpdate(update) {
     if (!window.goferUpdates) return;
     try {
@@ -2610,9 +2512,7 @@ export default function App() {
       setLogState((current) => ({ ...current, loading: true, error: "" }));
     }
     try {
-      const response = await fetch(
-        apiUrl(`/workflows/${encodeURIComponent(workflowId)}/logs/latest`),
-      );
+      const response = await fetch(workflowLogUrls(workflowId).latest);
       const payload = await response.json();
       if (!response.ok) {
         throw new Error(payload.error || `Workflow API returned ${response.status}`);
@@ -2720,14 +2620,8 @@ export default function App() {
       }));
     }
     try {
-      const params = new URLSearchParams({
-        tailBytes: String(RUN_LOG_TAIL_BYTES),
-        details: silent ? "0" : "1",
-      });
       const response = await fetch(
-        apiUrl(
-          `/workflows/${encodeURIComponent(workflowId)}/logs/${encodeURIComponent(runId)}?${params}`,
-        ),
+        workflowLogUrls(workflowId, runId, { details: !silent }).selected,
       );
       const payload = await response.json();
       if (!response.ok) {
@@ -2862,178 +2756,12 @@ export default function App() {
     pinnedRun,
   ]);
 
-  useEffect(() => {
-    const saveTimers = saveTimersRef.current;
-    let pendingEditsPreserved = false;
-
-    function preservePendingEdits() {
-      if (pendingEditsPreserved) return;
-      pendingEditsPreserved = true;
-      for (const { workflow } of dirtyWorkflowsRef.current.values()) {
-        void fetch(apiUrl(`/workflows/${encodeURIComponent(workflow.id)}`), {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(workflowPayloadForSave(workflow)),
-          keepalive: true,
-        }).catch(() => {});
-      }
-    }
-
-    window.addEventListener("beforeunload", preservePendingEdits);
-    window.addEventListener("pagehide", preservePendingEdits);
-    return () => {
-      window.removeEventListener("beforeunload", preservePendingEdits);
-      window.removeEventListener("pagehide", preservePendingEdits);
-      for (const timerId of saveTimers.values()) {
-        window.clearTimeout(timerId);
-      }
-      saveTimers.clear();
-    };
-  }, []);
-
-  const usedAgentIds = useMemo(() => {
-    return [
-      ...new Set(
-        [
-          ...promptAgentIds,
-          ...workflows.flatMap((workflow) => [
-            ...Object.keys(workflow.agents ?? {}),
-            ...(workflow.nodes ?? [])
-              .map((node) => node.operation?.agent_id)
-              .filter(Boolean),
-          ]),
-        ],
-      ),
-    ];
-  }, [promptAgentIds, workflows]);
-
-  function updateActiveWorkflow(nextWorkflow) {
-    const summarizedWorkflow = summarizeWorkflow(nextWorkflow, dataDir);
-    setWorkflows((current) =>
-      current.map((workflow) =>
-        workflow.id === summarizedWorkflow.id ? summarizedWorkflow : workflow,
-      ),
-    );
-    const revision = (workflowRevisionsRef.current.get(summarizedWorkflow.id) ?? 0) + 1;
-    workflowRevisionsRef.current.set(summarizedWorkflow.id, revision);
-    dirtyWorkflowsRef.current.set(summarizedWorkflow.id, {
-      revision,
-      workflow: summarizedWorkflow,
-    });
-    setDirtyWorkflowsById((current) => ({
-      ...current,
-      [summarizedWorkflow.id]: { revision },
-    }));
-    setSaveStatesByWorkflowId((current) => ({
-      ...current,
-      [summarizedWorkflow.id]: { status: "saving", error: "" },
-    }));
-
-    const previousTimerId = saveTimersRef.current.get(summarizedWorkflow.id);
-    if (previousTimerId) window.clearTimeout(previousTimerId);
-    const timerId = window.setTimeout(() => {
-      saveTimersRef.current.delete(summarizedWorkflow.id);
-      void saveWorkflow(summarizedWorkflow, revision);
-    }, 650);
-    saveTimersRef.current.set(summarizedWorkflow.id, timerId);
-  }
-
-  async function saveWorkflow(workflow, revision) {
-    const workflowId = workflow.id;
-    const pendingSave = inFlightSavesRef.current.get(workflowId);
-    if (pendingSave) {
-      try {
-        await pendingSave;
-      } catch {
-        // A newer revision is still allowed to save after an older request fails.
-      }
-    }
-
-    if (dirtyWorkflowsRef.current.get(workflowId)?.revision !== revision) {
-      return undefined;
-    }
-    if (deletedWorkflowIdsRef.current.has(workflowId)) return undefined;
-
-    setSaveStatesByWorkflowId((current) => ({
-      ...current,
-      [workflowId]: { status: "saving", error: "" },
-    }));
-    const saveRequest = persistWorkflow(workflow);
-    inFlightSavesRef.current.set(workflowId, saveRequest);
-    try {
-      const savedWorkflow = await saveRequest;
-
-      if (dirtyWorkflowsRef.current.get(workflowId)?.revision === revision) {
-        setWorkflows((current) =>
-          current.map((candidate) =>
-            candidate.id === savedWorkflow.id
-              ? summarizeWorkflow(mergeSavedWorkflow(candidate, savedWorkflow), dataDir)
-              : candidate,
-          ),
-        );
-        dirtyWorkflowsRef.current.delete(workflowId);
-        setDirtyWorkflowsById((current) => withoutKey(current, workflowId));
-        setSaveStatesByWorkflowId((current) => ({
-          ...current,
-          [workflowId]: { status: "saved", error: "" },
-        }));
-        return savedWorkflow;
-      }
-      return undefined;
-    } catch (error) {
-      if (dirtyWorkflowsRef.current.get(workflowId)?.revision === revision) {
-        setSaveStatesByWorkflowId((current) => ({
-          ...current,
-          [workflowId]: {
-            status: "error",
-            error: error instanceof Error ? error.message : "Unable to save workflow",
-          },
-        }));
-      }
-      return undefined;
-    } finally {
-      if (inFlightSavesRef.current.get(workflowId) === saveRequest) {
-        inFlightSavesRef.current.delete(workflowId);
-      }
-    }
-  }
-
-  function retryWorkflowSave(workflowId) {
-    const dirtyWorkflow = dirtyWorkflowsRef.current.get(workflowId);
-    if (!dirtyWorkflow) return;
-    void saveWorkflow(dirtyWorkflow.workflow, dirtyWorkflow.revision);
-  }
-
-  async function persistWorkflow(workflow) {
-    const response = await fetch(
-      apiUrl(`/workflows/${encodeURIComponent(workflow.id)}`),
-      {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(workflowPayloadForSave(workflow)),
-      },
-    );
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(payload.error || `Workflow API returned ${response.status}`);
-    }
-    return payload.workflow;
-  }
-
   // presetParameters fills Run dialog fields, such as a file input from the file tree's
   // "Run workflow with this file".
   async function runWorkflowNow(workflow, presetParameters = null) {
     if (runStatesRef.current[workflow.id]?.running) return;
     const preset = presetParameters && typeof presetParameters === "object" && !("nativeEvent" in presetParameters) ? presetParameters : {};
     const workflowToRun = summarizeWorkflow(workflow, dataDir);
-    const dirtyWorkflow = dirtyWorkflowsRef.current.get(workflowToRun.id);
-    const pendingTimerId = saveTimersRef.current.get(workflowToRun.id);
-    if (pendingTimerId) {
-      window.clearTimeout(pendingTimerId);
-      saveTimersRef.current.delete(workflowToRun.id);
-    }
     setRunState({ running: true, workflowId: workflowToRun.id, error: "", result: null });
     if (!pinnedRun && activeWorkflowIdRef.current === workflowToRun.id) setLogState((current) => ({
       ...current,
@@ -3041,85 +2769,25 @@ export default function App() {
       error: "",
       selectedRunId: null,
     }));
-    if (dirtyWorkflow) {
-      setSaveStatesByWorkflowId((current) => ({
-        ...current,
-        [workflowToRun.id]: { status: "saving", error: "" },
-      }));
-    }
 
     try {
-      let savedWorkflow;
-      if (workflowToRun.sourceFormat === "rattish") {
-        const session = documentSession(workflowToRun.id);
-        await followSavedRattishDocument(session, async () => {
-          const response = await fetch(apiUrl(`/workflows/${encodeURIComponent(workflowToRun.id)}/document`));
-          const payload = await response.json();
-          if (!response.ok || !payload.document) throw new Error(payload.error || "Unable to load workflow.rattish before running.");
-          return payload.document;
-        });
-        if (session.rattishEditorStateRef.current?.document?.dirty) {
-          const savedDocument = await saveWorkflowDocument(workflowToRun);
-          if (!savedDocument) {
-            throw new Error("Save workflow.rattish before running the workflow.");
-          }
-        }
-        savedWorkflow = { ...workflowToRun, expectedSourceRevision: documentSession(workflowToRun.id).rattishEditorStateRef.current?.document?.savedRevision };
-      } else {
-        savedWorkflow = dirtyWorkflow
-          ? await saveWorkflow(dirtyWorkflow.workflow, dirtyWorkflow.revision)
-          : await persistWorkflow(workflowToRun);
-      }
-      if (!savedWorkflow) {
-        throw new Error("Unable to save workflow before running");
-      }
-      if (
-        workflowToRun.sourceFormat !== "rattish" &&
-        (!dirtyWorkflow ||
-          dirtyWorkflowsRef.current.get(workflowToRun.id)?.revision === dirtyWorkflow.revision)
-      ) {
-        setWorkflows((current) =>
-          current.map((candidate) =>
-            candidate.id === savedWorkflow.id
-              ? summarizeWorkflow(mergeSavedWorkflow(candidate, savedWorkflow), dataDir)
-              : candidate,
-          ),
-        );
-        if (dirtyWorkflow) {
-          dirtyWorkflowsRef.current.delete(workflowToRun.id);
-          setDirtyWorkflowsById((current) => withoutKey(current, workflowToRun.id));
-          setSaveStatesByWorkflowId((current) => ({
-            ...current,
-            [workflowToRun.id]: { status: "saved", error: "" },
-          }));
+      const session = documentSession(workflowToRun.id);
+      await followSavedRattishDocument(session, async () => {
+        const response = await fetch(apiUrl(`/workflows/${encodeURIComponent(workflowToRun.id)}/document`));
+        const payload = await response.json();
+        if (!response.ok || !payload.document) throw new Error(payload.error || "Unable to load workflow.rattish before running.");
+        return payload.document;
+      });
+      if (session.rattishEditorStateRef.current?.document?.dirty) {
+        const savedDocument = await saveWorkflowDocument(workflowToRun);
+        if (!savedDocument) {
+          throw new Error("Save workflow.rattish before running the workflow.");
         }
       }
-      const externalAccessWarnings = agentExternalAccessWarnings(savedWorkflow);
-      if (externalAccessWarnings.length > 0) {
-        const confirmed = window.confirm(
-          [
-            "Agent filesystem access outside working_dir:",
-            "",
-            ...externalAccessWarnings.map((warning) => `- ${warning}`),
-            "",
-            "Run this workflow?",
-          ].join("\n"),
-        );
-        if (!confirmed) {
-          setRunState({
-            running: false,
-            workflowId: savedWorkflow.id,
-            error: "",
-            result: null,
-          });
-          setLogState((current) => ({ ...current, loading: false }));
-          return;
-        }
-      }
+      const savedWorkflow = { ...workflowToRun, expectedSourceRevision: documentSession(workflowToRun.id).rattishEditorStateRef.current?.document?.savedRevision };
 
-      const triggerContext = buildRunPreviewTriggerContext(savedWorkflow);
       const initialParameters = initialWorkflowParameters(savedWorkflow);
-      const previewRequest = workflowPlanRequest(savedWorkflow.id, triggerContext, initialParameters);
+      const previewRequest = workflowPlanRequest(savedWorkflow.id, {}, initialParameters);
       const previewResponse = await fetch(previewRequest.url, previewRequest.options);
       const previewPayload = await previewResponse.json();
       if (!previewResponse.ok) {
@@ -3133,7 +2801,6 @@ export default function App() {
           inputs: previewPayload.plan?.inputs ?? savedWorkflow.inputs,
         },
         plan: previewPayload.plan,
-        triggerContext,
         parameters: { ...initialParameters, ...preset },
       });
     } catch (error) {
@@ -3160,35 +2827,9 @@ export default function App() {
       selectedRunId: null,
     }));
     try {
-      if (executionMode === "remote") {
-        const response = await fetch(apiUrl(`/workflows/${encodeURIComponent(workflow.id)}/queue`), {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            trigger: "ui",
-            parameters:
-              Object.keys(parameters ?? {}).length > 0
-                ? { triggerContext, workflowInputs: parameters }
-                : { triggerContext },
-          }),
-        });
-        const payload = await response.json();
-        if (!response.ok) {
-          throw new Error(payload.error || `Queue API returned ${response.status}`);
-        }
-        setRunState({ running: false, workflowId: workflow.id, error: "", result: payload.run });
-        setLogState((current) => ({ ...current, loading: false }));
-        setTopBarNotice({
-          type: "success",
-          message: `Queued ${workflow.name} for remote execution`,
-        });
-        loadQueue({ silent: true });
-        return;
-      }
       const runRequest = workflowRunRequest(workflow.id, {
-        ...(workflow.sourceFormat === "rattish" ? { background: true, expectedRevision: workflow.expectedSourceRevision } : {}),
+        background: true,
+        expectedRevision: workflow.expectedSourceRevision,
         dryRun: false,
         triggerContext,
         parameters,
@@ -3206,25 +2847,6 @@ export default function App() {
         setLogState(current => ({ ...current, loading: false }));
         return;
       }
-      const nextRunStatus =
-        payload.run?.status === "stopped"
-          ? "Stopped"
-          : payload.run?.success
-            ? "Success"
-            : "Error";
-      const nextRunTag =
-        payload.run?.status === "stopped" ? "stopped" : payload.run?.success ? "success" : "error";
-      setWorkflows((current) =>
-        current.map((candidate) =>
-          candidate.id === workflow.id
-            ? {
-                ...candidate,
-                status: nextRunStatus,
-                tags: [nextRunTag, ...(candidate.tags ?? []).slice(1)],
-              }
-            : candidate,
-        ),
-      );
       if (!pinnedRunRef.current && activeWorkflowIdRef.current === workflow.id) setLogState({
         loading: false,
         error: "",
@@ -3399,7 +3021,7 @@ export default function App() {
       const plan = previewPayload.plan ?? {};
       setRunState({ running: false, workflowId, error: "", result: null });
       const confirmation = runFromConfirmation(plan);
-      if (confirmation && !window.confirm(confirmation)) return;
+      if (confirmation && !await confirmAction({ message: confirmation, confirmLabel: "Run from here" })) return;
       const inputs = await askForSavedInputs("Run from here", workflowId, plan.needsInputs);
       if (!inputs) return;
       setRunState({ running: true, workflowId, error: "", result: null });
@@ -3436,7 +3058,10 @@ export default function App() {
     // Rattish runs resume as a new background run; steps cut off mid-run start over.
     const resume = logState.runs?.find((run) => run.id === runId)?.resume;
     const rerun = resume?.rerunNodes ?? [];
-    if (resume && rerun.length && !window.confirm(`Resume this run? These steps run again: ${rerun.join(", ")}.`)) return;
+    if (resume && rerun.length && !await confirmAction({
+      message: `Resume this run? These steps run again: ${rerun.join(", ")}.`,
+      confirmLabel: "Resume run",
+    })) return;
     // Password inputs the run didn't save; its other inputs and trigger events are reused.
     const inputs = resume ? await askForSavedInputs("Resume", workflowId, resume.needsInputs) : {};
     if (!inputs) return;
@@ -3486,46 +3111,6 @@ export default function App() {
     }
   }
 
-  async function replayWorkflowTriggerLog(workflowId, runId, triggerId = null) {
-    if (!workflowId || !runId) return;
-
-    setRunState({ running: true, workflowId, error: "", result: null, resumingRunId: runId });
-    setLogState((current) => ({ ...current, loading: true, error: "" }));
-    try {
-      const request = workflowReplayTriggerRequest(workflowId, runId, triggerId);
-      const response = await fetch(request.url, request.options);
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.error || `Workflow API returned ${response.status}`);
-      }
-      const runPayload = payload.trigger?.run ?? payload.run ?? {};
-      setRunState({ running: false, workflowId, error: "", result: runPayload });
-      setLogState({
-        loading: false,
-        error: "",
-        text: runPayload.logText ?? "",
-        path: runPayload.logPath ?? null,
-        nodeOutputs: runPayload.nodeOutputs ?? null,
-        nodeOutputsTruncated: Boolean(runPayload.nodeOutputsTruncated),
-        nodeOutputsMaxBytes: runPayload.nodeOutputsMaxBytes ?? null,
-        usageSummary: runPayload.usageSummary ?? runPayload.usage ?? null,
-        runEvents: runPayload.runEvents ?? [],
-        runNodes: runPayload.runNodes ?? {},
-        runs: logState.runs,
-        selectedRunId: null,
-        worktree: runPayload.worktree ?? null,
-      });
-      setTopBarNotice({ type: "success", message: "Webhook payload replayed" });
-      loadWorkflows({ silent: true });
-      loadRunLogs(workflowId);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to replay webhook payload";
-      setRunState({ running: false, workflowId, error: message, result: null });
-      setLogState((current) => ({ ...current, loading: false, error: message }));
-      loadRunLogs(workflowId, { silent: true });
-    }
-  }
-
   async function pruneWorkflowRunLogs(workflowId, options = {}) {
     if (!workflowId) return;
     const dryRun = options.dryRun !== false;
@@ -3563,6 +3148,30 @@ export default function App() {
     }
   }
 
+  async function convertLegacyTomlWorkflow(file, projectRoot) {
+    setTomlConversion({ file, saving: true, error: "", result: null });
+    try {
+      const result = await convertTomlWorkflow({ path: file.path, projectRoot });
+      const converted = summarizeWorkflow(result.workflow, dataDir);
+      deletedWorkflowIdsRef.current.delete(converted.id);
+      setWorkflows((current) => [
+        ...current.filter((candidate) => candidate.id !== converted.id),
+        converted,
+      ]);
+      setRecentProjectRoots((current) => rememberRecentProject(current, projectRoot));
+      openWorkflowGraph(converted);
+      setTomlConversion({ file, saving: false, error: "", result });
+      void loadWorkflows({ silent: true });
+    } catch (error) {
+      setTomlConversion({
+        file,
+        saving: false,
+        error: error instanceof Error ? error.message : "Unable to convert the workflow",
+        result: null,
+      });
+    }
+  }
+
   async function createWorkflow(name, options = {}) {
     setCreateState({ saving: true, error: "" });
     try {
@@ -3573,7 +3182,6 @@ export default function App() {
         },
         body: JSON.stringify({
           name,
-          template: options.template || undefined,
           starter: options.starter || undefined,
           projectRoot: options.projectRoot,
           projectGrantId: options.projectGrantId || undefined,
@@ -3600,46 +3208,42 @@ export default function App() {
 
   async function validateWorkflow(workflow) {
     try {
-      if (workflow?.sourceFormat === "rattish") {
-        const session = documentSession(workflow.id);
-        let document = session.rattishEditorStateRef.current?.document;
-        if (!document) {
-          const response = await fetch(apiUrl(`/workflows/${encodeURIComponent(workflow.id)}/document`));
-          const payload = await response.json();
-          if (!response.ok) throw new Error(payload.error || `Editor API returned ${response.status}`);
-          document = session.rattishEditorStateRef.current?.document;
-          if (!document) {
-            const draft = loadWorkflowDraft(workflow.sourcePath);
-            document = draft ? { ...payload.document, source: draft.source, savedRevision: draft.savedRevision, savedSource: draft.savedSource, dirty: true } : payload.document;
-            session.setRattishEditorState({ document, error: "", loading: false, saving: false });
-          }
-        }
-        const source = document.source;
-        const requestId = ++session.rattishAnalysisRequestRef.current;
-        window.clearTimeout(session.rattishAnalysisTimerRef.current);
-        const response = await fetch(apiUrl(`/workflows/${encodeURIComponent(workflow.id)}/document/analyze`), {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ source }),
-        });
+      if (workflow?.sourceFormat !== "rattish") return;
+      const session = documentSession(workflow.id);
+      let document = session.rattishEditorStateRef.current?.document;
+      if (!document) {
+        const response = await fetch(apiUrl(`/workflows/${encodeURIComponent(workflow.id)}/document`));
         const payload = await response.json();
-        if (requestId !== session.rattishAnalysisRequestRef.current || session.rattishEditorStateRef.current?.document?.source !== source) return;
-        if (!response.ok) throw new Error(payload.error || `Analysis returned ${response.status}`);
-        session.setRattishEditorState(mergeRattishAnalysisState(session.rattishEditorStateRef.current, payload.document, source));
-        const diagnostics = [...(payload.document.diagnostics ?? []), ...(payload.document.preflight?.diagnostics ?? [])];
-        const errors = diagnostics.filter(item => item.severity === "error");
-        const warnings = diagnostics.filter(item => item.severity === "warning");
-        if (errors.length) {
-          setTopBarNotice({ type: "error", message: `${errors.length} validation error${errors.length === 1 ? "" : "s"}: ${errors[0].message}` });
-        } else if (!payload.document.runnable) {
-          setTopBarNotice({ type: "error", message: "Workflow is not runnable. Review Problems and add a runnable node if the graph is empty." });
-        } else if (warnings.length) {
-          setTopBarNotice({ type: "warning", message: `Workflow is valid with ${warnings.length} warning${warnings.length === 1 ? "" : "s"}. Review Problems.` });
-        } else {
-          setTopBarNotice({ type: "success", message: "Workflow is valid" });
+        if (!response.ok) throw new Error(payload.error || `Editor API returned ${response.status}`);
+        document = session.rattishEditorStateRef.current?.document;
+        if (!document) {
+          const draft = loadWorkflowDraft(workflow.sourcePath);
+          document = draft ? { ...payload.document, source: draft.source, savedRevision: draft.savedRevision, savedSource: draft.savedSource, dirty: true } : payload.document;
+          session.setRattishEditorState({ document, error: "", loading: false, saving: false });
         }
-        return;
       }
-      await persistWorkflow(summarizeWorkflow(workflow, dataDir));
-      setTopBarNotice({ type: "success", message: "Workflow is valid" });
+      const source = document.source;
+      const requestId = ++session.rattishAnalysisRequestRef.current;
+      window.clearTimeout(session.rattishAnalysisTimerRef.current);
+      const response = await fetch(apiUrl(`/workflows/${encodeURIComponent(workflow.id)}/document/analyze`), {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ source }),
+      });
+      const payload = await response.json();
+      if (requestId !== session.rattishAnalysisRequestRef.current || session.rattishEditorStateRef.current?.document?.source !== source) return;
+      if (!response.ok) throw new Error(payload.error || `Analysis returned ${response.status}`);
+      session.setRattishEditorState(mergeRattishAnalysisState(session.rattishEditorStateRef.current, payload.document, source));
+      const diagnostics = [...(payload.document.diagnostics ?? []), ...(payload.document.preflight?.diagnostics ?? [])];
+      const errors = diagnostics.filter(item => item.severity === "error");
+      const warnings = diagnostics.filter(item => item.severity === "warning");
+      if (errors.length) {
+        setTopBarNotice({ type: "error", message: `${errors.length} validation error${errors.length === 1 ? "" : "s"}: ${errors[0].message}` });
+      } else if (!payload.document.runnable) {
+        setTopBarNotice({ type: "error", message: "Workflow is not runnable. Review Problems and add a runnable node if the graph is empty." });
+      } else if (warnings.length) {
+        setTopBarNotice({ type: "warning", message: `Workflow is valid with ${warnings.length} warning${warnings.length === 1 ? "" : "s"}. Review Problems.` });
+      } else {
+        setTopBarNotice({ type: "success", message: "Workflow is valid" });
+      }
     } catch (error) {
       setTopBarNotice({
         type: "error",
@@ -3648,216 +3252,68 @@ export default function App() {
     }
   }
 
-  async function loadWorkflowHistory(workflowId) {
-    setHistoryState((current) => ({ ...current, error: "", loading: true }));
-    try {
-      const response = await fetch(apiUrl(`/workflows/${encodeURIComponent(workflowId)}/history`));
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.error || `Workflow API returned ${response.status}`);
-      }
-      setHistoryState((current) => ({
-        ...current,
-        error: "",
-        loading: false,
-        revisions: payload.revisions ?? [],
-      }));
-    } catch (error) {
-      setHistoryState((current) => ({
-        ...current,
-        error: error instanceof Error ? error.message : "Unable to load workflow history",
-        loading: false,
-      }));
-    }
-  }
-
-  async function openWorkflowHistory(workflow) {
-    if (!workflow?.id) return;
-    setHistoryState({
-      diff: null,
-      error: "",
-      loading: true,
-      open: true,
-      revisions: [],
-    });
-    await loadWorkflowHistory(workflow.id);
-  }
-
-  async function previewWorkflowRevision(workflowId, revisionId) {
-    setHistoryState((current) => ({ ...current, error: "" }));
-    try {
-      const response = await fetch(
-        apiUrl(
-          `/workflows/${encodeURIComponent(workflowId)}/history/${encodeURIComponent(revisionId)}/diff`,
-        ),
-      );
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.error || `Workflow API returned ${response.status}`);
-      }
-      setHistoryState((current) => ({ ...current, diff: payload }));
-    } catch (error) {
-      setHistoryState((current) => ({
-        ...current,
-        error: error instanceof Error ? error.message : "Unable to load revision diff",
-      }));
-    }
-  }
-
-  async function restoreWorkflowRevision(workflowId, revisionId, { asCopy = false } = {}) {
-    const action = asCopy ? "restore this revision as a copy" : "restore this revision";
-    if (!window.confirm(`Are you sure you want to ${action}?`)) return;
-    setHistoryState((current) => ({ ...current, error: "", loading: true }));
-    try {
-      const response = await fetch(
-        apiUrl(
-          `/workflows/${encodeURIComponent(workflowId)}/history/${encodeURIComponent(revisionId)}/restore`,
-        ),
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ asCopy }),
-        },
-      );
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.error || `Workflow API returned ${response.status}`);
-      }
-      const restored = summarizeWorkflow(payload.workflow, dataDir);
-      deletedWorkflowIdsRef.current.delete(restored.id);
-      setWorkflows((current) => {
-        const withoutRestored = current.filter((candidate) => candidate.id !== restored.id);
-        return [...withoutRestored, restored];
-      });
-      openWorkflowGraph(restored);
-      setHistoryState((current) => ({ ...current, loading: false, open: false }));
-      setTopBarNotice({
-        type: "success",
-        message: asCopy ? `Restored ${restored.name} as a copy` : `Restored ${restored.name}`,
-      });
-      loadWorkflows({ silent: true });
-    } catch (error) {
-      setHistoryState((current) => ({
-        ...current,
-        error: error instanceof Error ? error.message : "Unable to restore workflow revision",
-        loading: false,
-      }));
-    }
-  }
-
   async function importWorkflow(file, options = {}) {
     if (!file) return false;
     try {
-      if (isRaticodeFile(file)) {
-        let projectRoot = options.projectRoot?.trim()
-          || activeWorkflow?.projectRoot
-          || activeProjectRoot;
-        if (!projectRoot) {
-          projectRoot = await window.goferDesktop?.workspace?.selectPath?.({
-            directoryOnly: true,
-          });
-        }
-        if (!projectRoot) {
-          throw new Error("Choose a project folder for the imported workflow.");
-        }
-        const bundlePath = await window.goferDesktop?.grantDroppedPath?.(file);
-        const bundleRequest = bundlePath
-          ? {
-            bundlePath,
-            grantId: window.goferDesktop?.workspace?.pathGrantForApi?.(bundlePath) || undefined,
-          }
-          : { bundleContent: await fileToBase64(file), filename: file.name };
-        const previewResponse = await fetch(apiUrl("/rattish/workflows/import/preview"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(bundleRequest),
-        });
-        const previewPayload = await previewResponse.json();
-        if (!previewResponse.ok) {
-          throw new Error(previewPayload.error || `Workflow API returned ${previewResponse.status}`);
-        }
-        const preview = previewPayload.bundle;
-        if (!window.confirm(
-          `Import "${preview.workflowName}" into ${projectNameFromPath(projectRoot)}?\n\n`
-          + `${preview.files.length} workflow file${preview.files.length === 1 ? "" : "s"} will be added under .raticode.`,
-        )) return false;
-        const projectGrantId = window.goferDesktop?.workspace?.pathGrantForApi?.(projectRoot) || undefined;
-        const importResponse = await fetch(apiUrl("/rattish/workflows/import"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...bundleRequest, projectRoot, projectGrantId }),
-        });
-        const importPayload = await importResponse.json();
-        if (!importResponse.ok) {
-          throw new Error(importPayload.error || `Workflow API returned ${importResponse.status}`);
-        }
-        const imported = summarizeWorkflow(importPayload.workflow, dataDir);
-        deletedWorkflowIdsRef.current.delete(imported.id);
-        setWorkflows((current) => [
-          ...current.filter((candidate) => candidate.id !== imported.id),
-          imported,
-        ]);
-        setActiveProjectRoot(projectRoot);
-        setRecentProjectRoots((current) => rememberRecentProject(current, projectRoot));
-        openWorkflowGraph(imported);
-        setStudioView("graph");
-        setTopBarNotice({ type: "success", message: `Imported ${imported.name}` });
-        return true;
+      if (!isRaticodeFile(file)) {
+        throw new Error(/\.toml$/i.test(file.name ?? "")
+          ? "Raticode no longer runs TOML workflows. Import takes a .raticode workflow bundle."
+          : "Choose a .raticode workflow bundle to import.");
       }
-      if (isBundleFile(file)) {
-        const bundleContent = await fileToBase64(file);
-        const previewResponse = await fetch(apiUrl("/workflows/import/preview"), {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ bundleContent, filename: file.name }),
+      let projectRoot = options.projectRoot?.trim()
+        || activeWorkflow?.projectRoot
+        || activeProjectRoot;
+      if (!projectRoot) {
+        projectRoot = await window.goferDesktop?.workspace?.selectPath?.({
+          directoryOnly: true,
         });
-        const previewPayload = await previewResponse.json();
-        if (!previewResponse.ok) {
-          throw new Error(previewPayload.error || `Workflow API returned ${previewResponse.status}`);
-        }
-        const plan = previewPayload.import;
-        if (!window.confirm(formatBundleImportPreview(plan))) {
-          return;
-        }
-        const importResponse = await fetch(apiUrl("/workflows/import"), {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ bundleContent, filename: file.name }),
-        });
-        const importPayload = await importResponse.json();
-        if (!importResponse.ok) {
-          throw new Error(importPayload.error || `Workflow API returned ${importResponse.status}`);
-        }
-        const imported = importPayload.import;
-        deletedWorkflowIdsRef.current.delete(imported.workflowId);
-        await loadWorkflows({ silent: true });
-        setActiveWorkflowId(imported.workflowId);
-        setTopBarNotice({ type: "success", message: `Imported ${imported.workflowName}` });
-        return true;
       }
-
-      const content = await file.text();
-      const response = await fetch(apiUrl("/workflows/import"), {
+      if (!projectRoot) {
+        throw new Error("Choose a project folder for the imported workflow.");
+      }
+      const bundlePath = await window.goferDesktop?.grantDroppedPath?.(file);
+      const bundleRequest = bundlePath
+        ? {
+          bundlePath,
+          grantId: window.goferDesktop?.workspace?.pathGrantForApi?.(bundlePath) || undefined,
+        }
+        : { bundleContent: await fileToBase64(file), filename: file.name };
+      const previewResponse = await fetch(apiUrl("/rattish/workflows/import/preview"), {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ content, filename: file.name }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(bundleRequest),
       });
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.error || `Workflow API returned ${response.status}`);
+      const previewPayload = await previewResponse.json();
+      if (!previewResponse.ok) {
+        throw new Error(previewPayload.error || `Workflow API returned ${previewResponse.status}`);
       }
-
-      const nextWorkflow = summarizeWorkflow(payload.workflow, dataDir);
-      deletedWorkflowIdsRef.current.delete(nextWorkflow.id);
-      setWorkflows((current) => [...current, nextWorkflow]);
-      openWorkflowGraph(nextWorkflow);
-      setTopBarNotice({ type: "success", message: `Imported ${nextWorkflow.name}` });
+      const preview = previewPayload.bundle;
+      if (!await confirmAction({
+        message: `Import "${preview.workflowName}" into ${projectNameFromPath(projectRoot)}?\n\n`
+          + `${preview.files.length} workflow file${preview.files.length === 1 ? "" : "s"} will be added under .raticode.`,
+        confirmLabel: "Import workflow",
+      })) return false;
+      const projectGrantId = window.goferDesktop?.workspace?.pathGrantForApi?.(projectRoot) || undefined;
+      const importResponse = await fetch(apiUrl("/rattish/workflows/import"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...bundleRequest, projectRoot, projectGrantId }),
+      });
+      const importPayload = await importResponse.json();
+      if (!importResponse.ok) {
+        throw new Error(importPayload.error || `Workflow API returned ${importResponse.status}`);
+      }
+      const imported = summarizeWorkflow(importPayload.workflow, dataDir);
+      deletedWorkflowIdsRef.current.delete(imported.id);
+      setWorkflows((current) => [
+        ...current.filter((candidate) => candidate.id !== imported.id),
+        imported,
+      ]);
+      setActiveProjectRoot(projectRoot);
+      setRecentProjectRoots((current) => rememberRecentProject(current, projectRoot));
+      openWorkflowGraph(imported);
+      setStudioView("graph");
+      setTopBarNotice({ type: "success", message: `Imported ${imported.name}` });
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to import workflow";
@@ -3888,7 +3344,7 @@ export default function App() {
 
   async function exportWorkflow(workflow) {
     if (!workflow) return;
-    const defaultDirectory = workflow.sourceFormat === "rattish" ? workflow.projectRoot : dataDir;
+    const defaultDirectory = workflow.projectRoot || dataDir;
     setExportDialog({
       directory: defaultDirectory || "",
       error: "",
@@ -3929,7 +3385,7 @@ export default function App() {
     if (!workflow || !directory.trim()) return;
     setExportDialog((current) => ({ ...current, error: "", saving: true }));
     try {
-      if (workflow.sourceFormat === "rattish" && workflow.projectRoot) {
+      if (workflow.projectRoot) {
         await discoverProjectWorkflows(workflow.projectRoot);
       }
       const outputPath = workflowBundlePath(directory, workflow);
@@ -3968,24 +3424,17 @@ export default function App() {
     const detail = folder
       ? `\n\nThis deletes workflow.rattish and workflow.metadata.json in ${folder}. Other files in that folder stay.`
       : "";
-    const pendingWorktrees = workflow.sourceFormat === "rattish"
-      ? await pendingRunWorktreeCount(workflow.id, { url: apiUrl })
-      : 0;
+    const pendingWorktrees = await pendingRunWorktreeCount(workflow.id, { url: apiUrl });
     const worktreeDetail = runWorktreeDeleteNote(pendingWorktrees);
-    if (!window.confirm(`Delete workflow "${workflow.name}"?${detail}${worktreeDetail}`)) return;
+    if (!await confirmAction({
+      message: `Delete workflow "${workflow.name}"?${detail}${worktreeDetail}`,
+      confirmLabel: "Delete workflow",
+      danger: true,
+    })) return;
 
     try {
       setCreateState({ saving: false, error: "" });
       deletedWorkflowIdsRef.current.add(workflow.id);
-      const pendingTimerId = saveTimersRef.current.get(workflow.id);
-      if (pendingTimerId) {
-        window.clearTimeout(pendingTimerId);
-        saveTimersRef.current.delete(workflow.id);
-      }
-      dirtyWorkflowsRef.current.delete(workflow.id);
-      workflowRevisionsRef.current.delete(workflow.id);
-      setDirtyWorkflowsById((current) => withoutKey(current, workflow.id));
-      setSaveStatesByWorkflowId((current) => withoutKey(current, workflow.id));
       setRunState((current) =>
         current.workflowId === workflow.id
           ? { running: false, error: "", result: null }
@@ -4011,18 +3460,9 @@ export default function App() {
           : current,
       );
 
-      const pendingSave = inFlightSavesRef.current.get(workflow.id);
-      if (pendingSave) {
-        try {
-          await pendingSave;
-        } catch {
-          // Deletion still proceeds after a failed save.
-        }
-      }
-
       const response = await fetch(
         apiUrl(
-          `/workflows/${encodeURIComponent(workflow.id)}?sourceFormat=${encodeURIComponent(workflow.sourceFormat || "toml")}`,
+          `/workflows/${encodeURIComponent(workflow.id)}`,
         ),
         {
           method: "DELETE",
@@ -4033,7 +3473,6 @@ export default function App() {
         throw new Error(payload.error || `Workflow API returned ${response.status}`);
       }
 
-      const remainingWorkflows = workflows.filter((candidate) => candidate.id !== workflow.id);
       closeCodeFiles([workflow.sourcePath, ...Object.entries(workflowTabs).filter(([, tab]) => tab.workflowId === workflow.id).map(([path]) => path)]);
       saveWorkflowDraft(workflow.sourcePath, { dirty: false });
       const deletedSession = documentSessionsRef.current.get(workflow.id);
@@ -4056,7 +3495,7 @@ export default function App() {
       }
       setWorkflows((current) => current.filter((candidate) => candidate.id !== workflow.id));
       setActiveWorkflowId((currentId) =>
-        currentId === workflow.id ? remainingWorkflows[0]?.id : currentId,
+        nextActiveWorkflowIdAfterDelete(workflows, currentId, workflow.id),
       );
       const removedWorktrees = Number(payload.runWorktreesRemoved) || 0;
       setTopBarNotice({
@@ -4079,19 +3518,14 @@ export default function App() {
     if (!nextName || nextName.trim() === workflow.name) return;
 
     try {
-      const dirtyWorkflow = dirtyWorkflowsRef.current.get(workflow.id);
-      if (dirtyWorkflow) {
-        const savedWorkflow = await saveWorkflow(dirtyWorkflow.workflow, dirtyWorkflow.revision);
-        if (!savedWorkflow) return;
-      }
       // An open editor must take the new source itself, or its next save
       // would conflict with the renamed file.
-      if (workflow.sourceFormat === "rattish" && documentSession(workflow.id).rattishEditorStateRef.current?.document) {
+      if (documentSession(workflow.id).rattishEditorStateRef.current?.document) {
         const renamedDocument = await mutateActiveRattish(
           [{ kind: "set_field", target: "workflow", field: "name", value: nextName.trim() }],
           workflow,
         );
-        if (!renamedDocument) return;
+        if (!renamedDocument || renamedDocument.error) return;
       }
 
       const response = await fetch(
@@ -4132,12 +3566,6 @@ export default function App() {
     if (!workflow) return;
 
     try {
-      const dirtyWorkflow = dirtyWorkflowsRef.current.get(workflow.id);
-      if (dirtyWorkflow) {
-        const savedWorkflow = await saveWorkflow(dirtyWorkflow.workflow, dirtyWorkflow.revision);
-        if (!savedWorkflow) return;
-      }
-
       const response = await fetch(
         apiUrl(`/workflows/${encodeURIComponent(workflow.id)}/duplicate`),
         {
@@ -4173,12 +3601,12 @@ export default function App() {
       const result = await choose({ currentPath: dataDir });
       if (!result?.dataDir) return;
       setDataDir(result.dataDir);
-      setTopBarNotice({ type: "success", message: "Application data directory changed" });
+      setTopBarNotice({ type: "success", message: "Data folder changed" });
       await loadWorkflows();
     } catch (error) {
       setTopBarNotice({
         type: "error",
-        message: error instanceof Error ? error.message : "Unable to change the application data directory",
+        message: error instanceof Error ? error.message : "Unable to change the data folder",
       });
     }
   }
@@ -4201,9 +3629,8 @@ export default function App() {
   const panelWorkflowId = pinnedRun?.workflowId || (activeWorkflow?.sourceFormat === "project"
     ? ""
     : activeWorkflow?.id ?? "");
-  // Rattish runs can't be resumed yet, so their timeline offers no resume actions.
-  const panelWorkflowResumable = panelWorkflowId
-    && workflows.find(item => item.id === panelWorkflowId)?.sourceFormat !== "rattish";
+  // Each run says whether it can resume; the timeline disables Resume for one that can't.
+  const panelWorkflowResumable = Boolean(panelWorkflowId);
   const panelProjectRoot = activeProjectRoot || "";
   // Ask Rem about this failure: the run's summary, or a source problem, goes in Rem's
   // message box as a file. Nothing is sent until the person sends it.
@@ -4248,7 +3675,6 @@ export default function App() {
     if (!target) { setTopBarNotice({ type: "error", message: "This workflow is unavailable. Reopen its project to review the run." }); return; }
     openWorkflowGraph(target);
     if (record.status === "submitting") return;
-    if (record.queueRun) { runRegistry.review(record.key); return; }
     setPinnedRun(record);
     if (await loadRunLog(record.workflowId, record.runId)) runRegistry.review(record.key);
     window.dispatchEvent(new CustomEvent("gofer:toggle-bottom-panel", { detail: { tab: "timeline" } }));
@@ -4293,15 +3719,13 @@ export default function App() {
     const document = state?.document;
     const reviewingRun = pinnedRun?.workflowId === target.id;
     const snapshot = reviewingRun && logState.workflowId === target.id && logState.selectedRunId === pinnedRun.runId ? logState.graphSnapshot : null;
-    const currentSourceMatchesRun = target.sourceFormat !== "rattish" || Boolean(
+    const currentSourceMatchesRun = Boolean(
       document && !document.dirty && logState.workflowId === target.id
       && logState.graphSnapshot?.sourceFingerprint === document.sourceRevision,
     );
     const graphRunState = runStatesById[target.id] || { running: false, error: "", result: null };
     return <WorkflowGraphPane
       active={active} visible={visible} workflow={target}
-      saveState={saveStatesByWorkflowId[target.id] || (dirtyWorkflowsById[target.id] ? { status: "saving", error: "" } : undefined)}
-      onRetrySave={() => retryWorkflowSave(target.id)}
       onSource={() => editWorkflowFile(target)}
       onReveal={() => selectRecentProject(target.projectRoot)}
     >{toolbarTarget => <>
@@ -4312,10 +3736,10 @@ export default function App() {
       {state?.loading ? <div className="p-4" role="status">Loading workflow…</div> : null}
       {state?.error ? <div className="p-3 text-red-700" role="alert">{state.error}<button type="button" onClick={() => reloadActiveRattishDocument(target.sourcePath, target)}>Retry</button></div> : null}
       <Suspense fallback={<p role="status" className="p-4 text-sm">Loading graph...</p>}><DagCanvas
-        dataDir={dataDir} settings={settings} usedAgentIds={usedAgentIds}
+        dataDir={dataDir} settings={settings}
         workflow={snapshot ? autoLayoutWorkflow({ ...target, ...snapshot }) : rattishGraphWorkflow(target, document)} rattishDocument={snapshot ? null : document}
         active={active}
-        readOnly={reviewingRun || (target.sourceFormat === "rattish" && !rattishGraphIsValid(document))}
+        readOnly={reviewingRun || !rattishGraphIsValid(document)}
         toolbarTarget={toolbarTarget}
         canvasOverlay={document && !rattishGraphIsValid(document) && !reviewingRun ? (
           <div className="w-full max-w-md rounded-xl bg-white p-6 text-center text-ink shadow-panel" role="alert">
@@ -4345,7 +3769,6 @@ export default function App() {
         onResumeRunLog={(runId, options) => resumeWorkflowRunLog(target.id, runId, options)}
         onRerunRunLog={(runId) => rerunWorkflowRunLog(target.id, runId)}
         onRunFromNode={(nodeId) => runWorkflowFromNode(target, nodeId)}
-        onReplayRunLog={(runId, triggerId) => replayWorkflowTriggerLog(target.id, runId, triggerId)}
         onSettingChange={changeSetting} onImportWorkflow={importWorkflow}
         onExportWorkflow={() => exportWorkflow(target)} onRunWorkflow={() => runWorkflowNow(target)}
         onValidateWorkflow={() => validateWorkflow(target)} onStopWorkflow={() => stopExactWorkflowRun(target)}
@@ -4353,7 +3776,10 @@ export default function App() {
           decideApproval(target, approval, decision, notes, by, answer)
         }
         onRattishMutation={(mutations) => mutateActiveRattish(mutations, target)}
-        onWorkflowChange={(next) => target.sourceFormat === "rattish" ? updateRattishGraphMetadata(next, target) : updateActiveWorkflow(next)}
+        graphHistory={snapshot ? null : documentSession(target.id).graphHistoryRef.current}
+        onGraphUndo={() => stepGraphHistory(target, "undo")}
+        onGraphRedo={() => stepGraphHistory(target, "redo")}
+        onWorkflowChange={(next) => updateRattishGraphMetadata(next, target)}
       /></Suspense>
     </>}</WorkflowGraphPane>;
   }
@@ -4376,6 +3802,14 @@ export default function App() {
   }
 
   function runGlobalMenuAction(action) {
+    // With the graph in front and no text field (the one focused before the menu opened),
+    // Edit > Undo and Redo step through graph edits.
+    if ((action === "edit.undo" || action === "edit.redo") && graphShownNow() && !hasEditingTarget()) {
+      const direction = action === "edit.undo" ? "undo" : "redo";
+      if (documentSession(activeWorkflow.id).graphHistoryRef.current[direction].length) void stepGraphHistory(activeWorkflow, direction);
+      else setTopBarNotice({ type: "info", message: `Nothing to ${direction} in this graph.` });
+      return;
+    }
     if (["edit.undo", "edit.redo", "edit.cut", "edit.copy", "edit.paste", "selection.selectAll"].includes(action)) {
       if (runFocusedEdit(action)) return;
     }
@@ -4463,10 +3897,15 @@ export default function App() {
     return { workflow: activeWorkflow };
   }
 
+  function graphShownNow() {
+    return mainContent === EDITOR_CONTENT && studioView === "graph" && Boolean(activeWorkflow);
+  }
+
   function paletteCommandItems() {
     const runnable = shortcutRunnableWorkflow();
     const codeOpen = mainContent === EDITOR_CONTENT && studioView === "code" && Boolean(activeCodePath) && !workflowTabs[activeCodePath];
-    const graphShown = mainContent === EDITOR_CONTENT && studioView === "graph" && Boolean(activeWorkflow);
+    const graphShown = graphShownNow();
+    const graphHistory = graphShown ? documentSession(activeWorkflow.id).graphHistoryRef.current : EMPTY_GRAPH_HISTORY;
     const keyed = keybindingPaletteItems(settings).map((item) => {
       const { commandId, scope } = item;
       if (commandId === "workflow.run") {
@@ -4483,6 +3922,11 @@ export default function App() {
         return { ...item, disabled: true, disabledReason: "Open a file in the code editor first." };
       }
       if (scope === "graph" && !graphShown) return { ...item, disabled: true, disabledReason: "Show a workflow's graph first." };
+      if (commandId === "graph.undo" || commandId === "graph.redo") {
+        const entry = graphHistory[commandId === "graph.undo" ? "undo" : "redo"].at(-1);
+        const verb = commandId === "graph.undo" ? "Undo" : "Redo";
+        return entry ? { ...item, detail: `${verb} ${entry.label}` } : { ...item, disabled: true, disabledReason: `Nothing to ${verb.toLowerCase()} in this graph.` };
+      }
       return item;
     });
     const actions = actionPaletteItems({ triggersPaused: paletteTriggersPaused }).filter((item) => (
@@ -4534,14 +3978,20 @@ export default function App() {
       }).catch((error) => setTopBarNotice({ type: "error", message: `Unable to change triggers: ${error?.message || "unknown error"}` }));
       return;
     }
-    if (action === "open.browser") { showBrowserContent(); closeCompactPane(); return; }
-    if (action === "open.organizations") { setSidebarActivity("organizations"); setProjectPaneVisible(true); return; }
-    if (action === "open.posts" || action === "open.second-brain") {
-      const target = action.slice("open.".length);
+    if (!action?.startsWith("open.")) return;
+    const target = action.slice("open.".length);
+    if (target === "browser") { showBrowserContent(); closeCompactPane(); return; }
+    if (target === "posts" || target === "second-brain") {
       setSidebarActivity(target);
       showMainContent(target);
       closeCompactPane();
+      return;
     }
+    // Plugins with a side pane show it, and open what their rail button opens.
+    setSidebarActivity(target);
+    setProjectPaneVisible(true);
+    if (target === "rem" || target === "kanban") showMainContent(target);
+    if (target === "files") showEditorContent();
   }
 
   return (
@@ -4633,20 +4083,13 @@ export default function App() {
         theme={theme}
         updateState={updateState}
         updateNotice={updateNotice}
-        workflow={activeWorkflow}
         view={studioView}
         onApplyUpdate={() => applyUpdate(updateState)}
         onCheckForUpdates={() => checkForUpdates()}
-        onOpenHistory={() => activeWorkflow && openWorkflowHistory(activeWorkflow)}
         onSelectProject={selectRecentProject}
         onToggleSettings={() => setSettingsOpen((current) => !current)}
         onToggleTheme={() => changeSetting("appearance.theme", theme === "dark" ? "light" : "dark")}
         onMenuAction={runGlobalMenuAction}
-      />
-      <UpdateReminderBanner
-        updateState={updateState}
-        onUpdate={() => { dismissUpdateReminder(); applyUpdate(updateState); }}
-        onDismiss={dismissUpdateReminder}
       />
       <div className="studio-panes flex h-full min-h-0 min-w-0 flex-1 overflow-hidden" data-project-side={settings.layout.projectPaneSide} data-assistant-side={settings.layout.assistantPaneSide}>
       {<WorkflowSidebar
@@ -4672,6 +4115,8 @@ export default function App() {
           setCreateState({ saving: false, error: "" });
           setCreateDialogOpen(true);
         }}
+        legacyTomlFiles={legacyTomlFiles}
+        onConvertLegacyToml={(file) => setTomlConversion({ file, saving: false, error: "", result: null })}
         onDeleteWorkflow={deleteWorkflow}
         onDuplicateWorkflow={duplicateWorkflow}
         onAddWorkflowShortcut={typeof window !== "undefined" && window.goferDesktop?.workflowShortcuts ? setShortcutWorkflow : null}
@@ -4842,6 +4287,7 @@ export default function App() {
               settings={settings}
               onViewedPathsChange={setViewedBrowserPaths}
               onHiddenApprovalChange={setHiddenBrowserApproval}
+              onShowApproval={(path) => { showBrowserContent(); setActiveBrowserPath(path); }}
               onActivePathChange={setActiveBrowserPath}
               onOpenPathsChange={setBrowserOpenPaths}
               onClosePath={(path) => closeBrowserTabs([path])}
@@ -4896,9 +4342,6 @@ export default function App() {
             onPruneRuns: panelWorkflowId
               ? (options) => pruneWorkflowRunLogs(panelWorkflowId, options)
               : undefined,
-            onReplayRun: panelWorkflowId
-              ? (runId, triggerId) => replayWorkflowTriggerLog(panelWorkflowId, runId, triggerId)
-              : undefined,
             onResumeRun: panelWorkflowResumable
               ? (runId, options) => resumeWorkflowRunLog(panelWorkflowId, runId, options)
               : undefined,
@@ -4948,12 +4391,13 @@ export default function App() {
         <SettingsPopover
           initialCategory={settingsCategory}
           initialBrowserSection={settingsBrowserSection}
+          initialReveal={settingsReveal}
           dataDir={dataDir}
           open
           settings={settings}
           onChange={changeSetting}
           onChooseDataDirectory={chooseApplicationDataDirectory}
-          onClose={() => { setSettingsOpen(false); setSettingsCategory("general"); setSettingsBrowserSection(""); }}
+          onClose={() => { setSettingsOpen(false); setSettingsCategory("general"); setSettingsBrowserSection(""); setSettingsReveal(null); }}
           onResetAll={async () => {
             try { await window.goferDesktop?.rem?.configure?.("reset", true); setSettings(defaultSettingsSnapshot()); }
             catch (error) { reportArchiveError(error); }
@@ -5028,11 +4472,8 @@ export default function App() {
           onCancel={() => setRunPreview(null)}
           initialParameters={runPreview.parameters}
           onRun={(parameters) =>
-            executeWorkflowRun(runPreview.workflow, runPreview.triggerContext, parameters)
+            executeWorkflowRun(runPreview.workflow, {}, parameters)
           }
-          executionMode={executionMode}
-          onExecutionModeChange={(mode) => changeSetting("general.executionMode", mode)}
-          queueState={queueState}
         /></Suspense>
       ) : null}
       {savedInputsPrompt ? (
@@ -5057,6 +4498,17 @@ export default function App() {
         onCreate={createWorkflow}
         onImport={importWorkflowFromDialog}
       />
+      {tomlConversion ? (
+        <ConvertTomlWorkflowDialog
+          defaultProjectRoot={panelProjectRoot}
+          error={tomlConversion.error}
+          file={tomlConversion.file}
+          result={tomlConversion.result}
+          saving={tomlConversion.saving}
+          onClose={() => setTomlConversion(null)}
+          onConvert={convertLegacyTomlWorkflow}
+        />
+      ) : null}
 
       {exportDialog.workflow ? <Suspense fallback={null}><ExportWorkflowDialog
         directory={exportDialog.directory}
@@ -5074,22 +4526,8 @@ export default function App() {
         onExport={confirmExportWorkflow}
       /></Suspense> : null}
 
-      {historyState.open && activeWorkflow ? <Suspense fallback={null}>
-        <WorkflowHistoryDialog
-          diff={historyState.diff}
-          error={historyState.error}
-          loading={historyState.loading}
-          revisions={historyState.revisions}
-          workflow={activeWorkflow}
-          onClose={() => setHistoryState((current) => ({ ...current, open: false }))}
-          onRefresh={() => loadWorkflowHistory(activeWorkflow.id)}
-          onPreview={(revisionId) => previewWorkflowRevision(activeWorkflow.id, revisionId)}
-          onRestore={(revisionId, options) =>
-            restoreWorkflowRevision(activeWorkflow.id, revisionId, options)
-          }
-        />
-      </Suspense> : null}
       <TextZoomBar value={textZoom} />
+      {confirmDialog}
     </main>
   );
 }
@@ -5262,34 +4700,8 @@ function startPaneResize(event, { max, min, onResize, width }) {
   });
 }
 
-export function summarizeWorkflow(workflow, dataDir = "") {
-  if (workflow.invalid) {
-    return {
-      ...workflow,
-      agents: workflow.agents ?? {},
-      nodes: workflow.nodes ?? [],
-      edges: workflow.edges ?? [],
-      description: workflow.description || `Invalid ${workflow.sourceFormat === "rattish" ? "Rattish" : "workflow TOML"}: ${workflow.validationError}`,
-      status: "Error",
-      tags: ["error", "invalid"],
-    };
-  }
-  const agentCount = agentIdsForWorkflow(workflow).length;
-  const operationTypes = [...new Set((workflow.nodes ?? []).map((node) => node.type))].sort();
-  const status = workflow.status ?? "Ready";
-  const watchPath = workflow.watch?.path
-    ? resolveDisplayPath(workflow.watch.path, dataDir)
-    : "";
-  return {
-    ...workflow,
-    description: `${workflow.nodes.length} nodes, ${workflow.edges.length} edges, ${agentCount} agents.${
-      workflow.schedule ? ` Scheduled with ${workflow.schedule.cron_expression}.` : ""
-    }${workflow.watch ? ` Watching ${watchPath}.` : ""
-    }${Object.values(workflow.webhooks ?? {}).some((config) => config?.enabled) ? " API trigger enabled." : ""
-    }`,
-    status,
-    tags: [status.toLowerCase(), ...operationTypes.slice(0, 2)],
-  };
+export function summarizeWorkflow(workflow) {
+  return { ...workflow, status: workflow.invalid ? "Error" : workflow.status ?? "Ready" };
 }
 
 export function rattishGraphWorkflow(workflow, document) {
@@ -5304,26 +4716,11 @@ export function rattishGraphWorkflow(workflow, document) {
   const positions = document.metadata?.canvas?.nodes ?? {};
   const nodes = (document.graph.nodes ?? []).map((node) => {
     const type = String(node.type || "unknown").replaceAll("-", "_");
-    const execution = node.execution ?? {};
     return {
       id: node.id,
       label: node.label || node.id,
       type,
       operation: { type, ...(node.configuration ?? {}) },
-      settings: {
-        allowFailure: Boolean(execution.allow_fail),
-        awaitAllInputs: true,
-        failFast: false,
-        forEach: "",
-        maxConcurrency: execution.max_concurrency ?? 1,
-        pipeOutput: false,
-        retryCount: execution.retry_count ?? 0,
-        retryDelaySeconds: (execution.retry_delay_ms ?? 0) / 1000,
-        timeoutSeconds:
-          execution.timeout_ms === null || execution.timeout_ms === undefined
-            ? ""
-            : execution.timeout_ms / 1000,
-      },
       x: positions[node.id]?.x ?? 0,
       y: positions[node.id]?.y ?? 0,
       rattishStatus: node.status,
@@ -5334,15 +4731,6 @@ export function rattishGraphWorkflow(workflow, document) {
     id: edge.id,
     from: edge.from,
     to: edge.to,
-    condition: edge.mode === "when" ? "output_field" : "always",
-    displayLabel:
-      edge.mode === "when"
-        ? edge.predicateSource
-          ? `when ${edge.predicateSource}`
-          : "when"
-        : edge.mode === "unconditional"
-          ? "always"
-          : edge.mode,
     mode: edge.mode,
     predicate: edge.predicate,
     predicateSource: edge.predicateSource,
@@ -5391,17 +4779,6 @@ export function rattishGraphWorkflow(workflow, document) {
   };
 }
 
-function agentIdsForWorkflow(workflow) {
-  return [
-    ...new Set(
-      (workflow.nodes ?? [])
-        .filter((node) => node.type === "agent")
-        .map((node) => node.operation?.agent_id)
-        .filter(Boolean),
-    ),
-  ];
-}
-
 export function mergeSavedWorkflow(localWorkflow, savedWorkflow) {
   const localNodesById = Object.fromEntries(
     (localWorkflow.nodes ?? []).map((node) => [node.id, node]),
@@ -5424,45 +4801,6 @@ export function workflowRunAnnouncement(result) {
   if (result.status === "queued") return "Workflow run queued.";
   if (result.status === "running") return "Workflow run started.";
   return `Workflow run completed: ${result.status ?? (result.success ? "success" : "error")}`;
-}
-
-export function preserveLocalWorkflow(remoteWorkflows, localWorkflow, dataDir = "") {
-  const foundWorkflow = remoteWorkflows.some((workflow) => workflow.id === localWorkflow.id);
-  if (!foundWorkflow) {
-    return [...remoteWorkflows, localWorkflow];
-  }
-  return remoteWorkflows.map((workflow) =>
-    workflow.id === localWorkflow.id
-      ? summarizeWorkflow({
-          ...localWorkflow,
-          sourcePath: workflow.sourcePath ?? localWorkflow.sourcePath,
-          sourceFormat: workflow.sourceFormat ?? localWorkflow.sourceFormat,
-          status: workflow.status ?? localWorkflow.status,
-          updatedAt: workflow.updatedAt ?? localWorkflow.updatedAt,
-          projectRoot: workflow.projectRoot ?? localWorkflow.projectRoot,
-          projectName: workflow.projectRoot
-            ? projectNameFromPath(workflow.projectRoot)
-            : localWorkflow.projectName,
-          workflowRoot: workflow.workflowRoot ?? localWorkflow.workflowRoot,
-        }, dataDir)
-      : workflow,
-  );
-}
-
-export function workflowPayloadForSave(workflow) {
-  const { parameters, ...canonicalWorkflow } = workflow;
-  return {
-    ...canonicalWorkflow,
-    inputs: workflow.inputs ?? parameters ?? {},
-    filesystemAccess: normalizeWorkflowFilesystemAccess(workflow.filesystemAccess),
-    nodes: (workflow.nodes ?? []).map((node) => ({
-      ...node,
-      x: node.x ?? 0,
-      y: node.y ?? 0,
-    })),
-    edges: workflow.edges ?? [],
-    agents: workflow.agents ?? {},
-  };
 }
 
 export function workflowPlanRequest(workflowId, triggerContext = {}, parameters = {}) {
@@ -5579,67 +4917,21 @@ export function workflowResumeRequest(
   };
 }
 
-export function workflowReplayTriggerRequest(workflowId, runId, triggerId = null) {
-  const encodedWorkflowId = encodeURIComponent(workflowId);
-  const encodedTriggerId = encodeURIComponent(triggerId || "default");
-  return {
-    url: apiUrl(
-      `/workflows/${encodedWorkflowId}/webhooks/${encodedTriggerId}/replay`,
-    ),
-    options: {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ runId }),
-    },
-  };
-}
-
-export function workflowLogUrls(workflowId, runId = null) {
+// A run's log comes as its tail; `details` adds node outputs and run events.
+export function workflowLogUrls(workflowId, runId = null, { details = false } = {}) {
   const encodedWorkflowId = encodeURIComponent(workflowId);
   const selectedParams = new URLSearchParams({
     tailBytes: String(RUN_LOG_TAIL_BYTES),
-    details: "0",
+    details: details ? "1" : "0",
   });
   return {
     latest: apiUrl(`/workflows/${encodedWorkflowId}/logs/latest`),
-    runs: apiUrl(`/workflows/${encodedWorkflowId}/logs`),
     selected: runId
       ? `${apiUrl(
           `/workflows/${encodedWorkflowId}/logs/${encodeURIComponent(runId)}`,
         )}?${selectedParams}`
       : null,
   };
-}
-
-export function chatStreamRequestBody({ effort, provider, model, messages, workflow, permissionMode, conversationId, turnId, resetSession, forkedFrom, machine, providerAccounts, claudeAccount, threadAccount }) {
-  // The thread's own account (the picker's Account menu) wins; otherwise Rem's setting
-  // for the provider, or "auto" to let Rem pick one per thread. claudeAccount is the
-  // first, Claude-only form of Rem's setting.
-  const account = turnAccount({ provider, threadAccount, providerAccounts, claudeAccount });
-  return {
-    // A paired desktop that runs this thread instead of this computer.
-    ...(machine ? { machine } : {}),
-    provider,
-    model,
-    // Another desktop has its own accounts, so a remote turn never names one.
-    ...(account && !machine ? { providerProfile: account } : {}),
-    ...(conversationId && turnId ? { conversationId, turnId } : {}),
-    ...(resetSession === true ? { resetSession: true } : {}),
-    // Lets the backend copy the parent's provider session instead of re-sending history.
-    ...(forkedFrom ? { forkedFrom } : {}),
-    ...(effort ? { effort } : {}),
-    ...(permissionMode ? { permissionMode } : {}),
-    messages,
-    workflow,
-  };
-}
-
-export function workflowIdsAfterDelete(workflows, deletedWorkflowId) {
-  return workflows
-    .filter((workflow) => workflow.id !== deletedWorkflowId)
-    .map((workflow) => workflow.id);
 }
 
 export function nextActiveWorkflowIdAfterDelete(workflows, activeWorkflowId, deletedWorkflowId) {
@@ -5716,10 +5008,10 @@ export function useResponsivePanes(layout = {}) {
   };
 }
 
-export function WorkflowGraphPane({ workflow, active, visible, saveState, onRetrySave, onSource, onReveal, children }) {
+export function WorkflowGraphPane({ workflow, active, visible, onSource, onReveal, children }) {
   const [toolbarTarget, setToolbarTarget] = useState(null);
   return <section className="flex min-h-0 flex-1 flex-col overflow-hidden" aria-label={`${workflow.name} graph`} data-graph-active={active} data-graph-visible={visible}>
-    <TopBar workflow={workflow} view="graph" saveState={saveState} onGraphToolbarTargetChange={setToolbarTarget} onRetrySave={onRetrySave} />
+    <TopBar workflow={workflow} view="graph" onGraphToolbarTargetChange={setToolbarTarget} />
     <div className="flex min-w-0 shrink-0 items-center gap-3 border-b border-line px-3 py-1.5 text-xs [&>button]:shrink-0 [&>button]:whitespace-nowrap">
       <span className="min-w-0 flex-1 truncate text-muted" title={workflow.sourcePath}>{workflow.sourcePath}</span>
       <button className="rounded-md px-1.5 py-0.5 text-slate-600 transition hover:bg-slate-100 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500" type="button" onClick={onSource}>Source</button>
@@ -5765,6 +5057,8 @@ export function WorkflowSidebar({
   onCloseCodeFile,
   onCodeFilesystemChange,
   onCreate,
+  legacyTomlFiles = [],
+  onConvertLegacyToml,
   onOpenProject,
   onAddWorkflowShortcut,
   onDeleteWorkflow,
@@ -5783,6 +5077,7 @@ export function WorkflowSidebar({
 }) {
   const [collapsedGroups, setCollapsedGroups] = useState({});
   const [projectMenu, setProjectMenu] = useState(null);
+  const projectMenuTriggerRef = useRef(null);
   const [copiedProjectRoot, setCopiedProjectRoot] = useState("");
   const [projectLabels, setProjectLabels] = useState(loadProjectLabels);
   const [renamingProjectRoot, setRenamingProjectRoot] = useState("");
@@ -5846,6 +5141,7 @@ export function WorkflowSidebar({
   function showProjectMenu(event, group) {
     event.preventDefault();
     event.stopPropagation();
+    projectMenuTriggerRef.current = menuTrigger(event);
     setProjectMenu({
       ...projectMenuPosition(event.clientX, event.clientY),
       name: group.name,
@@ -5989,6 +5285,7 @@ export function WorkflowSidebar({
                   <History aria-hidden="true" size={14} />
                   All workflow runs
                 </button>
+                <LegacyTomlNotice files={legacyTomlFiles} onConvert={onConvertLegacyToml} />
               </div>
             }
             workflowsContent={workflowGroups.length ? (
@@ -6056,6 +5353,7 @@ export function WorkflowSidebar({
                     onClick={(event) => {
                       const bounds = event.currentTarget.getBoundingClientRect();
                       event.stopPropagation();
+                      projectMenuTriggerRef.current = menuTrigger(event);
                       setProjectMenu({
                         ...projectMenuPosition(bounds.right, bounds.bottom),
                         name,
@@ -6115,11 +5413,14 @@ export function WorkflowSidebar({
           />
         </Suspense>
         {projectMenu ? (
-          <div
+          <PopupMenu
             aria-label={`${projectMenu.name} project actions`}
             className="fixed z-[80] w-52 rounded-lg border border-line bg-white p-1 shadow-panel"
-            role="menu"
             style={{ left: projectMenu.x, top: projectMenu.y }}
+            onClose={(options) => {
+              setProjectMenu(null);
+              if (options?.restoreFocus) projectMenuTriggerRef.current?.focus?.();
+            }}
             onPointerDown={(event) => event.stopPropagation()}
           >
             <button
@@ -6150,7 +5451,7 @@ export function WorkflowSidebar({
             <p className="truncate px-2.5 pb-1.5 pt-1 font-mono text-[10px] text-muted" title={projectMenu.root}>
               {projectMenu.root}
             </p>
-          </div>
+          </PopupMenu>
         ) : null}
       </div>
     </aside>
@@ -6188,14 +5489,6 @@ export function groupWorkflowsByProject(workflows, projectLabels = {}) {
   }
   return [...groups.values()].sort((left, right) =>
     left.name.localeCompare(right.name) || left.root.localeCompare(right.root));
-}
-
-export function isOpenProjectShortcut(event) {
-  return !event.repeat
-    && !event.altKey
-    && !event.shiftKey
-    && (event.ctrlKey || event.metaKey)
-    && String(event.key ?? "").toLowerCase() === "o";
 }
 
 export function nextCodeFileOpenState(openPaths, previewPath, path, preview) {
@@ -6372,10 +5665,6 @@ export function saveStudioSession(session, storage = globalThis.window?.localSto
   return normalized;
 }
 
-export function mergeRecentProjects(current = [], additions = []) {
-  return uniquePaths([...current, ...additions].map((root) => String(root).trim()).filter(Boolean));
-}
-
 export function rememberRecentProject(current = [], projectRoot = "") {
   const root = String(projectRoot).trim();
   return root ? [root, ...current.filter((candidate) => !samePath(candidate, root))] : current;
@@ -6411,60 +5700,10 @@ export function activeWorkspaceForProject(workflows = [], activeWorkflowId, acti
   return matchedWorkflow ?? projectWorkflow ?? (projectRoot ? projectWorkspace(projectRoot) : undefined);
 }
 
-export function activeWorkspaceForView(
-  workflows = [],
-  activeWorkflowId,
-  activeProjectRoot = "",
-  view = "graph",
-) {
-  if (view === "graph") {
-    return workflows.find((workflow) => workflow.id === activeWorkflowId) ?? workflows[0];
-  }
-  return activeWorkspaceForProject(workflows, activeWorkflowId, activeProjectRoot)
-    ?? projectWorkspace("");
-}
-
-export function codeWorkspaceAvailable(workflow) {
-  return Boolean(String(workflow?.projectRoot ?? "").trim());
-}
-
-export function scopeChatThreadToProject(
-  thread,
-  projectRoot,
-  _workflows = [],
-  _preferredWorkflowId = null,
-  projectName = "",
-) {
-  // Retain the call signature while ignoring historical workflow selection.
-  void _workflows;
-  void _preferredWorkflowId;
-  const root = String(projectRoot ?? "").trim();
-  return {
-    ...thread,
-    projectRoot: root,
-    scopeMode: "project",
-    ...(!samePath(thread.projectRoot, root) ? { projectBranch: undefined } : {}),
-    projectName: String(projectName || (root ? projectNameFromPath(root) : "No project")),
-    selectedWorkflowId: null,
-  };
-}
-
 // `hidden` holds web pages another app opened with Raticode: Rem isn't told about them.
 export function editorFileReferences(paths = [], workflowTabs = {}, hidden = new Set()) {
   return [...new Set(paths.map((path) => workflowTabs[path]?.sourcePath || path)
     .filter((path) => path && !hidden.has(path) && !/^(workflow-graph:|raticode-browser:|browser:|raticode-commit-diff:|raticode-terminal:)/.test(path)))];
-}
-
-export function chatWorkflowContextForThread(thread, workflows = [], openFiles = []) {
-  const projectRoot = String(thread?.projectRoot ?? "").trim();
-  return {
-    projectName: String(thread?.projectName || (projectRoot ? projectNameFromPath(projectRoot) : "No project")),
-    projectRoot,
-    selectedWorkflowId: null,
-    openFiles: [...new Set(openFiles)],
-    workflows: workflows.filter((workflow) => projectRoot && samePath(workflow?.projectRoot, projectRoot))
-      .map(({ id, name, sourcePath }) => ({ id, name, sourcePath })),
-  };
 }
 
 export function rattishGraphIsValid(document) {
@@ -6496,40 +5735,11 @@ export function mergeRattishAnalysisState(currentState, analyzedDocument, source
   };
 }
 
-export function loadProjectLabels() {
-  if (typeof window === "undefined") return {};
-  try {
-    const parsed = JSON.parse(window.localStorage?.getItem(PROJECT_LABELS_STORAGE_KEY) ?? "{}");
-    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") return {};
-    return Object.fromEntries(
-      Object.entries(parsed).filter(
-        ([root, label]) => root.trim() && typeof label === "string" && label.trim(),
-      ),
-    );
-  } catch {
-    return {};
-  }
-}
-
-function projectNameFromPath(pathValue) {
-  const parts = String(pathValue).replaceAll("\\", "/").split("/").filter(Boolean);
-  return parts.at(-1) || "Unregistered";
-}
-
-export function assistantMarkdownSourcePath(projectRoot) {
-  const root = String(projectRoot ?? "").replace(/[\\/]+$/, "");
-  if (!root) return "";
-  const separator = root.includes("\\") && !root.includes("/") ? "\\" : "/";
-  return `${root}${separator}.raticode-assistant.md`;
-}
-
 export function TopBar({
   activeCodePath = "",
-  saveState,
   workflow,
   view = "graph",
   onGraphToolbarTargetChange,
-  onRetrySave,
 }) {
   const label = !workflow || (view === "code" && !activeCodePath)
     ? null
@@ -6538,7 +5748,6 @@ export function TopBar({
     return <header className="studio-topbar min-w-0 shrink-0 border-b border-line bg-white px-3 py-2">
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
         <h2 className="min-w-0 flex-1 truncate text-sm font-semibold text-ink" title={label?.fullPath}>{workflow.name}</h2>
-        <WorkflowSaveStatus saveState={saveState} onRetry={onRetrySave} />
       </div>
       <div
         className="mt-1.5 flex min-w-0 items-center [&>[data-toolbar]]:min-w-0 [&>[data-toolbar]]:max-w-full [&>[data-toolbar]]:flex-wrap [&_[data-toolbar-row=secondary]]:flex-wrap"
@@ -6582,7 +5791,6 @@ export function TopBar({
         ) : null}
       </div>
       <div className="flex shrink-0 items-center gap-2">
-        {view === "graph" && workflow ? <WorkflowSaveStatus saveState={saveState} onRetry={onRetrySave} /> : null}
         {view === "graph" && workflow ? (
           <>
             <div
@@ -6640,11 +5848,9 @@ export function GlobalToolbar({
   theme,
   updateState,
   updateNotice,
-  workflow,
   view = "graph",
   onApplyUpdate,
   onCheckForUpdates,
-  onOpenHistory,
   onSelectProject,
   onToggleSettings,
   onToggleTheme,
@@ -6692,9 +5898,6 @@ export function GlobalToolbar({
         ) : null}
         <button aria-label="Open settings" aria-expanded={settingsOpen} className={`${buttonClass} ${settingsOpen ? "bg-slate-100 text-ink" : ""}`} title={`Settings (${formatKeybinding(settingBinding(settings, "settings.open"))})`} type="button" onClick={onToggleSettings}>
           <SettingsIcon size={16} />
-        </button>
-        <button className={`${buttonClass} disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted`} disabled={!workflow} title={workflow ? "Workflow history" : "Workflow history is available after you create a workflow"} type="button" onClick={onOpenHistory}>
-          <History size={16} />
         </button>
         <button className={buttonClass} title={theme === "dark" ? "Light mode" : "Dark mode"} type="button" onClick={onToggleTheme}>
           {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
@@ -6995,13 +6198,6 @@ function RecentProjectsMenuItem({ recentProjectRoots, onSelect }) {
   );
 }
 
-export function topBarProjectName(workflow) {
-  const projectName = String(workflow?.projectName ?? "").trim();
-  if (projectName) return projectName;
-  const projectRoot = String(workflow?.projectRoot ?? "").trim();
-  return projectRoot ? projectNameFromPath(projectRoot) : "Unfiled project";
-}
-
 export function topBarLabelParts(workflow, view = "graph", activeCodePath = "") {
   if (view === "code") {
     return splitTopBarPath(activeCodePath, "No file open");
@@ -7033,60 +6229,6 @@ function splitTopBarPath(path, fallbackName) {
     path: fullPath.slice(0, separatorIndex),
     separator: fullPath[separatorIndex],
   };
-}
-
-function WorkflowSaveStatus({ saveState, onRetry }) {
-  if (!saveState?.status) return null;
-
-  if (saveState.status === "error") {
-    return (
-      <div
-        aria-atomic="true"
-        aria-live="assertive"
-        className="inline-flex h-9 items-center gap-2 rounded-lg bg-red-50 px-3 text-xs font-medium text-red-800 dark:bg-red-950/40 dark:text-red-200"
-        role="alert"
-        title={saveState.error || "Unable to save workflow"}
-      >
-        <AlertCircle aria-hidden="true" size={15} />
-        <span>Couldn&apos;t save</span>
-        {saveState.error ? (
-          <span className="max-w-32 truncate text-red-700 dark:text-red-300">
-            {saveState.error}
-          </span>
-        ) : null}
-        <span aria-hidden="true">—</span>
-        <button
-          className="font-semibold underline underline-offset-2 hover:no-underline"
-          type="button"
-          onClick={onRetry}
-        >
-          Retry
-        </button>
-      </div>
-    );
-  }
-
-  return (
-    <div
-      aria-atomic="true"
-      aria-busy={saveState.status === "saving" || undefined}
-      aria-live="polite"
-      className="inline-flex h-9 items-center gap-2 px-2 text-xs font-medium text-muted"
-      role="status"
-    >
-      {saveState.status === "saving" ? (
-        <>
-          <Loader2 aria-hidden="true" size={15} className="animate-spin" />
-          Saving…
-        </>
-      ) : (
-        <>
-          <Check aria-hidden="true" size={15} />
-          Saved
-        </>
-      )}
-    </div>
-  );
 }
 
 // Rem's chat in the side pane, used in place of threads when Settings > Layout
@@ -7161,3182 +6303,7 @@ function updateButtonTitle(updateState) {
   return "Download, install, and restart Raticode";
 }
 
-export function ChatPane({
-  onShowRem,
-  swarmProjectPaths = [],
-  activeWorkflowId,
-  activeProjectRoot,
-  assistantDefaults = {},
-  archiveRetention = "never",
-  memorySettings = DEFAULT_APP_SETTINGS.memory,
-  agentBrowser = DEFAULT_APP_SETTINGS.browser.agentBrowser,
-  audioInputDeviceId = "default",
-  composerFocusRequest = 0,
-  onNewThreadResourcesChange,
-  onOpenMarkdownLink,
-  onOpenFile,
-  onResponseComplete,
-  onResizeKeyDown,
-  onResizeStart,
-  recentProjectRoots = [],
-  width,
-  workflow,
-  workflows = [],
-  openFiles = [],
-}) {
-  const prospectiveProjectRoot = String(activeProjectRoot ?? workflow?.projectRoot ?? "").trim();
-  const chatScrollRef = useRef(null);
-  const chatPinnedToBottomRef = useRef(true);
-  const renderedConversationRef = useRef({ threadId: null, textKey: "" });
-  const conversationMenuRef = useRef(null);
-  const threadInfoRef = useRef(null);
-  const dragDepthRef = useRef(0);
-  const scopeMenuRef = useRef(null);
-  const [draft, setDraft] = useState("");
-  const draftsByThreadRef = useRef({});
-  const [attachments, setAttachments] = useState([]);
-  const [attachmentError, setAttachmentError] = useState("");
-  const [attachmentWarning, setAttachmentWarning] = useState(null);
-  const [contextSendThread, setContextSendThread] = useState(null);
-  const [pendingRemContext, setPendingRemContext] = useState(null);
-  const [contextFocusRequest, setContextFocusRequest] = useState(0);
-  const [draggingFiles, setDraggingFiles] = useState(false);
-  const [providerId, setProviderId] = useState(assistantDefaults.provider || "codex");
-  const [permissionsByProvider, setPermissionsByProvider] = useState({});
-  // The new thread's Account menu choices, one per provider, until it starts.
-  const [draftAccounts, setDraftAccounts] = useState({});
-  const { accounts: providerAccountList } = useProviderAccountList();
-  const [accountSignInError, setAccountSignInError] = useState("");
-  const [machines, setMachines] = useState([]);
-  const [draftMachine, setDraftMachine] = useState("");
-  useEffect(() => {
-    const update = event => setMachines(Array.isArray(event.detail) ? event.detail : []);
-    window.addEventListener("gofer:device-machines", update);
-    return () => window.removeEventListener("gofer:device-machines", update);
-  }, []);
-  const [model, setModel] = useState(assistantDefaults.model || "");
-  const [effort, setEffort] = useState(assistantDefaults.effort || "");
-  const {
-    capabilities: providers,
-    error: providerDiscoveryError,
-    loading: providersLoading,
-    refresh: refreshProviders,
-  } = useProviderCapabilities(prospectiveProjectRoot);
-  const providerCapability = providers.find(item => item.id === providerId);
-  const supportsImages = providerSupportsChatImages(providerId, providerCapability, model);
-  useEffect(() => {
-    if (!attachmentWarning) return undefined;
-    const timer = window.setTimeout(() => setAttachmentWarning(null), CHAT_IMAGE_WARNING_MS);
-    return () => window.clearTimeout(timer);
-  }, [attachmentWarning]);
-  useEffect(() => {
-    if (supportsImages || !attachments.some(isChatImage)) return;
-    setAttachments(current => current.filter(item => !isChatImage(item)));
-    setAttachmentWarning({ text: `${providerCapability?.displayName || providerId} can't accept images with this selection.` });
-  }, [supportsImages, attachments, providerId, providerCapability?.displayName]);
-  const permissionOptions = providerPermissionOptions(providerId, providerCapability);
-  const [threads, setThreads] = useState([]);
-  const [renamingThread, setRenamingThread] = useState(null);
-  const [launchedThreadId, setLaunchedThreadId] = useState(null);
-  const forkInProgressRef = useRef(false);
-  const [forkStatus, setForkStatus] = useState("");
-  useEffect(() => {
-    if (!launchedThreadId) return;
-    const timer = window.setTimeout(() => setLaunchedThreadId(null), 1200);
-    return () => window.clearTimeout(timer);
-  }, [launchedThreadId]);
-  const [activeThreadId, setActiveThreadId] = useState(null);
-  const [messagesByThread, setMessagesByThread] = useState({});
-  const conversationCacheRef = useRef(null);
-  const repository = conversationRepository();
-  const chatStorageErrorsRef = useRef({});
-  const [historyState, setHistoryState] = useState({ threadId: null, loading: false, hasMore: false, before: Infinity, error: "" });
-  const historyRequestRef = useRef(0);
-  const historyLoadingRef = useRef(false);
-  const prependScrollRef = useRef(null);
-  const [threadSearchOpen, setThreadSearchOpen] = useState(false);
-  const [searchTarget, setSearchTarget] = useState(null);
-  const activeSearchTarget = searchTarget?.threadId === activeThreadId ? searchTarget : null;
-  const threadSearchButtonRef = useRef(null);
-  const reportStorageFailure = (id, error) => {
-    const message = `Conversation could not be saved: ${error instanceof Error ? error.message : String(error)}`;
-    chatStorageErrorsRef.current[id] = message;
-    setChatStateByThread((current) => ({ ...current, [id]: { ...current[id], error: message } }));
-    return false;
-  };
-  if (!conversationCacheRef.current) conversationCacheRef.current = createConversationCache({
-    load: (id) => repository.durable ? [] : loadChatMessages(chatStorageKeyFor(id)),
-    save: (id, history, previous, persisted) => {
-      const saved = () => {
-        delete chatStorageErrorsRef.current[id];
-        archiveThreadFromStorage(id, () => repository.all(id));
-        return true;
-      };
-      try {
-        const result = repository.save(id, history, previous, persisted);
-        return result?.then ? result.then(saved).catch(error => reportStorageFailure(id, error)) : saved();
-      } catch (error) { return reportStorageFailure(id, error); }
-    },
-    changed: setMessagesByThread,
-  });
-  useEffect(() => { persistChatThreads(threads); }, [threads]);
-  useEffect(() => {
-    const receive = ({ detail }) => {
-      const { messages, running, activeTurn, completed } = detail;
-      let { metadata } = detail;
-      if (remThreadWasCleared(metadata.id)) return;
-      if (!chatAbortControllersRef.current[metadata.id] && typeof running === "boolean") {
-        // A turn started elsewhere, or a Rem task that finished while this window
-        // wasn't watching, ends unread unless it is open here.
-        if (!running && (completed || deviceRunningThreadsRef.current.has(metadata.id))) {
-          metadata = { ...metadata, ...threadReadPatch(activeThreadIdRef.current !== metadata.id), archived: false };
-        }
-        if (running) deviceRunningThreadsRef.current.add(metadata.id);
-        else deviceRunningThreadsRef.current.delete(metadata.id);
-      }
-      setThreads(current => current.some(t => t.id === metadata.id)
-        ? current.map(t => t.id === metadata.id ? metadata : t) : [metadata, ...current]);
-      // Read on the phone: the finished-reply marker here goes too.
-      if (metadata.unread === false) {
-        setChatStateByThread(current => current[metadata.id]?.hasNewResponse
-          ? { ...current, [metadata.id]: { ...current[metadata.id], hasNewResponse: false } } : current);
-      }
-      if (activeThreadIdRef.current === metadata.id) {
-        setProviderId(metadata.provider || "codex");
-        setModel(metadata.model || "");
-      }
-      if (messages.length) conversationCacheRef.current.hydrate(metadata.id, messages, { recent: true, device: true, authoritative: Boolean(metadata.managedRunId) });
-      if (!chatAbortControllersRef.current[metadata.id] && typeof running === "boolean") {
-        if (activeTurn && (!activeChatTurnsRef.current[metadata.id] || activeChatTurnsRef.current[metadata.id].remote)) activeChatTurnsRef.current[metadata.id] = { turnId: activeTurn, ready: true, remote: true };
-        else if (activeChatTurnsRef.current[metadata.id]?.remote) delete activeChatTurnsRef.current[metadata.id];
-        setChatStateByThread(current => ({ ...current, [metadata.id]: { ...current[metadata.id], deviceRunning: running, ...(metadata.managedRunId && !running ? { sending: false } : {}) } }));
-      }
-    };
-    const removed = ({ detail: { id } }) => {
-      deletedChatThreadIdsRef.current.add(id);
-      chatAbortControllersRef.current[id]?.abort();
-      delete activeChatTurnsRef.current[id];
-      conversationCacheRef.current.remove(id);
-      setThreads(current => current.filter(t => t.id !== id));
-      setChatStateByThread(current => { const next = { ...current }; delete next[id]; return next; });
-      if (activeThreadIdRef.current === id) { activeThreadIdRef.current = null; setActiveThreadId(null); }
-    };
-    window.addEventListener("gofer:device-thread-sync", receive);
-    window.addEventListener("gofer:device-thread-deleted", removed);
-    return () => {
-      window.removeEventListener("gofer:device-thread-sync", receive);
-      window.removeEventListener("gofer:device-thread-deleted", removed);
-    };
-  }, []);
-  const deviceRunningThreadsRef = useRef(new Set());
-  const archiveClearingRef = useRef(false);
-  const clearArchivedThreadsRef = useRef(null);
-  const [chatStateByThread, setChatStateByThread] = useState({});
-  const [chatAnnouncementByThread, setChatAnnouncementByThread] = useState({});
-  const [backgroundChatAnnouncement, setBackgroundChatAnnouncement] = useState("");
-  const [liveTurnByThread, setLiveTurnByThread] = useState({});
-  const [expandedThoughtGroups, setExpandedThoughtGroups] = useState({});
-  const [lazyThoughts, setLazyThoughts] = useState({});
-  const [conversationMenuOpen, setConversationMenuOpen] = useState(false);
-  const [threadInfoOpen, setThreadInfoOpen] = useState(false);
-  const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
-  const [resourcesOpen, setResourcesOpen] = useState(false);
-  const [newThreadResources, setNewThreadResources] = useState(null);
-  const homeResources = newThreadResources ?? assistantDefaults.resources ?? DEFAULT_REM_RESOURCES;
-  const defaultGlobalScope = assistantDefaults.defaultScope === "global";
-  const [homeProjectRoot, setHomeProjectRoot] = useState(defaultGlobalScope ? "" : prospectiveProjectRoot);
-  const chatAbortControllersRef = useRef({});
-  const activeChatTurnsRef = useRef({});
-  const steeringRequestsRef = useRef({});
-  const [, setSteeringByThread] = useState({});
-  const [steeringBusy, setSteeringBusy] = useState({});
-  const [steeringErrors, setSteeringErrors] = useState({});
-
-  function recordSteering(threadId, receipt) {
-    if (!receipt?.requestId || receipt.conversationId !== threadId) return;
-    setSteeringByThread(current => {
-      const receipts = current[threadId] || [];
-      const previous = receipts.find(item => item.requestId === receipt.requestId);
-      // A slow HTTP acceptance response must not overwrite a terminal stream receipt.
-      if (previous && previous.status !== "interrupting" && receipt.status === "interrupting") return current;
-      return { ...current, [threadId]: previous ? receipts.map(item => item.requestId === receipt.requestId ? receipt : item) : [...receipts, receipt] };
-    });
-  }
-
-  async function recoverSteering(threadId) {
-    try {
-      const response = await fetch(apiUrl(`/chat/steering?conversationId=${encodeURIComponent(threadId)}`));
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "Could not recover steering receipts");
-      for (const receipt of payload.receipts || []) recordSteering(threadId, receipt);
-    } catch (error) {
-      setSteeringErrors(current => ({ ...current, [threadId]: error.message }));
-    }
-  }
-
-  useEffect(() => {
-    if (activeThreadId) void recoverSteering(activeThreadId);
-    // Recovery is scoped to the selected conversation, never an automatic replay.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeThreadId]);
-  const deletedChatThreadIdsRef = useRef(new Set());
-  const activeThreadIdRef = useRef(null);
-  const activeThread = threads.find((thread) => thread.id === activeThreadId);
-  const savedPermission = (activeThread ? activeThread.permissionsByProvider || {} : permissionsByProvider)[providerId];
-  const permissionMode = permissionOptions.some(([id]) => id === savedPermission)
-    ? savedPermission : providerPermissionDefault(providerId, providerCapability);
-  const requiresPermissionChoice = ["grok", "antigravity"].includes(providerId) && permissionMode !== "cli-managed";
-  function selectPermission(value) {
-    const next = { ...(activeThread ? activeThread.permissionsByProvider || {} : permissionsByProvider), [providerId]: value };
-    if (activeThread) updateThreadConfig({ permissionsByProvider: next });
-    else setPermissionsByProvider(next);
-  }
-
-  const projectLabels = loadProjectLabels();
-  const scopedProjectRoot = String(
-    activeThread?.projectRoot ?? homeProjectRoot ?? prospectiveProjectRoot,
-  ).trim();
-  const globalScope = activeThread ? activeThread.scopeMode === "global" : homeProjectRoot === "" && defaultGlobalScope;
-  const scopedProjectName = (globalScope ? "Global" : "") || pathValue(projectLabels, scopedProjectRoot)?.trim()
-    || activeThread?.projectName
-    || (scopedProjectRoot ? projectNameFromPath(scopedProjectRoot) : "No project");
-  const [scopeWorktrees, setScopeWorktrees] = useState([]);
-  const [scopeAvailableRoots, setScopeAvailableRoots] = useState([]);
-  const [scopeLoading, setScopeLoading] = useState(false);
-  const scopeRoots = mergeRecentProjects(
-    [scopedProjectRoot, prospectiveProjectRoot].filter(Boolean),
-    mergeRecentProjects(
-      recentProjectRoots,
-      workflows.map((item) => item.projectRoot).filter(Boolean),
-    ),
-  );
-  const scopeRootsKey = JSON.stringify(scopeRoots);
-  useEffect(() => {
-    if (!scopeMenuOpen) return;
-    let cancelled = false;
-    setScopeWorktrees([]);
-    setScopeAvailableRoots([]);
-    setScopeLoading(true);
-    const roots = JSON.parse(scopeRootsKey);
-    const workspace = window.goferDesktop?.workspace;
-    const folderChecks = new Map();
-    const isAvailableFolder = root => {
-      if (!folderChecks.has(root)) {
-        folderChecks.set(root, workspace?.getPathInfo
-          ? Promise.resolve().then(() => workspace.getPathInfo(root))
-            .then(info => Boolean(info?.isDirectory)).catch(() => false)
-          : Promise.resolve(true));
-      }
-      return folderChecks.get(root);
-    };
-    Promise.allSettled(roots.map(async root => {
-      if (!(await isAvailableFolder(root))) return { missing: true };
-      return workspace?.gitWorktrees?.(root);
-    }))
-      .then(async results => {
-        const worktrees = results.flatMap(result => result.status === "fulfilled"
-          ? (result.value?.worktrees || []).filter(item => item.path && !item.missing && !item.prunable)
-          : []);
-        const available = await Promise.all(worktrees.map(item => isAvailableFolder(item.path)));
-        if (cancelled) return;
-        // Saved roots and Git worktree records can outlive their folders.
-        setScopeAvailableRoots(roots.filter((_, index) => {
-          const result = results[index];
-          return result.status === "fulfilled" && !result.value?.missing && !result.value?.error;
-        }));
-        setScopeWorktrees(worktrees.filter((_, index) => available[index]));
-        setScopeLoading(false);
-      });
-    return () => { cancelled = true; };
-  }, [scopeMenuOpen, scopeRootsKey]);
-  const scopeProjects = mergeRecentProjects(scopeAvailableRoots, scopeWorktrees.map(item => item.path)).map(root => {
-    const worktree = scopeWorktrees.find(item => item.path === root);
-    return {
-      root,
-      name: pathValue(projectLabels, root)?.trim() || projectNameFromPath(root),
-      branch: worktree?.branch,
-    };
-  });
-  const messages = useMemo(
-    () =>
-      activeThreadId
-        ? messagesByThread[activeThreadId] ?? []
-        : [],
-    [activeThreadId, messagesByThread],
-  );
-  const threadChatState = chatStateByThread[activeThreadId] || {};
-  const chatState = { ...threadChatState, sending: Boolean(threadChatState.sending || threadChatState.deviceRunning), error: threadChatState.error || "" };
-  const chatAnnouncement = activeThreadId
-    ? chatAnnouncementByThread[activeThreadId] ?? ""
-    : "";
-  const liveTurn = activeThreadId ? liveTurnByThread[activeThreadId] : null;
-  // The picker's Account menu: this thread's account of the selected provider. A thread
-  // that a paired desktop runs uses that desktop's accounts, so it has no menu here.
-  const accountChoice = threadAccountChoice(activeThread ?? { accountsByProvider: draftAccounts }, providerId);
-  const remAccountSetting = turnAccount({ provider: providerId, providerAccounts: assistantDefaults.providerAccounts, claudeAccount: assistantDefaults.claudeAccount }) || "";
-  const threadAccountMenu = (activeThread ? activeThread.machine : draftMachine) ? null
-    : accountMenu({ provider: providerId, accounts: providerAccountList, remSetting: remAccountSetting, choice: accountChoice });
-  const lastSentSelection = messages.findLast(message => message.role === "user")?.remModelSelection;
-  const effectiveAccount = choice => choice === DEFAULT_SIGN_IN ? "" : choice || remAccountSetting;
-  // Changing the account of a started thread starts a new provider session, as switching providers does.
-  const accountWarning = threadAccountMenu && lastSentSelection?.provider === providerId
-    && effectiveAccount(lastSentSelection.account || "") !== effectiveAccount(accountChoice)
-    ? accountChangeWarning(providerCapability?.displayName || providerId, accountSwitchLabel(accountChoice, remAccountSetting)) : "";
-  const visibleMessages = useMemo(() => {
-    const start = historyState.threadId === activeThreadId && historyState.firstMessageId
-      ? messages.findIndex(message => message.id === historyState.firstMessageId) : -1;
-    const emptyThreadOpened = historyState.threadId === activeThreadId && !historyState.loading && !historyState.firstMessageId;
-    return repository.durable ? messages.slice(start >= 0 ? start : emptyThreadOpened ? 0 : pageStart(messages)) : messages;
-  }, [messages, historyState.threadId, historyState.firstMessageId, historyState.loading, activeThreadId, repository.durable]);
-  const thoughtStubs = historyState.threadId === activeThreadId ? historyState.thoughts : undefined;
-  const chatItems = useMemo(() => {
-    // Earlier thoughts stay in storage until someone expands their placeholder.
-    const ordered = orderDeviceMessages(visibleMessages);
-    const shown = new Set(ordered.map(message => message.id));
-    const stubs = new Map((thoughtStubs || []).filter(stub => !stub.ids.some(id => shown.has(id))).map(stub => [stub.anchorId, stub]));
-    return buildChatItems(stubs.size ? ordered.flatMap(message => stubs.has(message.id) ? [{ id: stubs.get(message.id).id, kind: "thought", lazy: stubs.get(message.id) }, message] : message) : ordered);
-  }, [visibleMessages, thoughtStubs]);
-  const conversationItems = useMemo(() => {
-    const items = chatState.sending ? withLiveReply(chatItems) : chatItems;
-    if (!liveTurn || items.some((item) => item.message?.id === liveTurn.id)) return items;
-    return [...items, { type: "message", message: liveTurn }];
-  }, [chatItems, liveTurn, chatState.sending]);
-  const latestUserMessageId = useMemo(
-    () => messages.findLast((message) => message.role === "user")?.id ?? null,
-    [messages],
-  );
-  // Immutable references are layout revisions; do not copy entire bodies into a key.
-  const conversationTextKey = useMemo(() => ({ messages, changes: liveTurn?.changes, id: liveTurn?.id }),
-    [messages, liveTurn?.changes, liveTurn?.id]);
-
-  const loadHistoryPage = useCallback(async (threadId, before) => {
-    if (historyLoadingRef.current) return;
-    historyLoadingRef.current = true;
-    const generation = ++historyRequestRef.current;
-    setHistoryState(current => ({ ...current, threadId, loading: true, error: "" }));
-    try {
-      const page = await repository.page(threadId, before);
-      if (generation !== historyRequestRef.current || deletedChatThreadIdsRef.current.has(threadId)) return;
-      if (before !== Infinity && chatScrollRef.current) {
-        const scroll = chatScrollRef.current;
-        const viewportTop = scroll.getBoundingClientRect().top;
-        const element = [...scroll.querySelectorAll("[data-history-anchor]")].find(node => node.getBoundingClientRect().bottom > viewportTop);
-        prependScrollRef.current = { threadId, top: scroll.scrollTop, height: scroll.scrollHeight, id: element?.dataset.historyAnchor, offset: element?.getBoundingClientRect().top };
-        chatPinnedToBottomRef.current = false;
-      }
-      conversationCacheRef.current.hydrate(threadId, page.messages, { recent: before === Infinity });
-      setHistoryState(current => ({ threadId, loading: false, hasMore: page.hasMore, before: page.before, firstMessageId: page.messages[0]?.id, error: "",
-        thoughts: [...page.thoughts, ...(before === Infinity ? [] : current.thoughts || [])] }));
-    } catch (error) {
-      if (generation === historyRequestRef.current) setHistoryState(current => ({ ...current, loading: false, error: error.message || "History could not be loaded." }));
-    } finally { if (generation === historyRequestRef.current) historyLoadingRef.current = false; }
-  }, [repository]);
-
-  useEffect(() => {
-    activeThreadIdRef.current = activeThreadId;
-  }, [activeThreadId]);
-
-  useLayoutEffect(() => {
-    if (activeSearchTarget) { chatPinnedToBottomRef.current = false; return; }
-    const previous = renderedConversationRef.current;
-    const threadChanged = previous.threadId !== activeThreadId;
-    const textChanged = previous.textKey !== conversationTextKey;
-    renderedConversationRef.current = {
-      threadId: activeThreadId,
-      textKey: conversationTextKey,
-    };
-
-    if (!activeThreadId) {
-      if (threadChanged && chatScrollRef.current) chatScrollRef.current.scrollTop = 0;
-      return;
-    }
-    if (prependScrollRef.current?.threadId === activeThreadId && chatScrollRef.current) {
-      const anchor = prependScrollRef.current;
-      const element = [...chatScrollRef.current.querySelectorAll("[data-history-anchor]")].find(node => node.dataset.historyAnchor === anchor.id);
-      chatScrollRef.current.scrollTop = element
-        ? chatScrollRef.current.scrollTop + element.getBoundingClientRect().top - anchor.offset
-        : anchor.top + chatScrollRef.current.scrollHeight - anchor.height;
-      prependScrollRef.current = null;
-      return;
-    }
-    if (threadChanged) chatPinnedToBottomRef.current = true;
-    if (threadChanged || (textChanged && chatPinnedToBottomRef.current)) {
-      scrollConversationToBottom(chatScrollRef.current);
-    }
-  }, [activeThreadId, conversationTextKey, activeSearchTarget]);
-
-  useEffect(() => {
-    if (!activeThreadId) setHomeProjectRoot(defaultGlobalScope ? "" : prospectiveProjectRoot);
-  }, [activeThreadId, prospectiveProjectRoot, defaultGlobalScope]);
-
-  useEffect(() => {
-    const current = providers.find((provider) => provider.id === providerId);
-    const nextProvider = current;
-    if (!nextProvider?.available || nextProvider.discoveryStatus !== "ready" || chatState.sending) return;
-    const nextModel =
-      nextProvider.models?.find((item) => item.id === model) ??
-      nextProvider.models?.find((item) => item.id === nextProvider.defaultModel) ??
-      nextProvider.models?.[0];
-    if (!nextModel) return;
-    if (!model) {
-      setModel(nextModel.id);
-      if (!effort && nextProvider.defaultEffortOverride) setEffort(nextModel.defaultEffort ?? "");
-    }
-    if (effort && !nextModel.efforts?.some((item) => item.id === effort)) {
-      setEffort(nextModel.defaultEffort ?? "");
-    }
-  }, [effort, model, providerId, providers, chatState.sending]);
-
-  useEffect(() => {
-    if (!activeThreadId) {
-      historyRequestRef.current += 1;
-      historyLoadingRef.current = false;
-      setHistoryState({ threadId: null, loading: false, hasMore: false, before: Infinity, error: "" });
-      setDraft(draftsByThreadRef.current[activeThreadId || "new-thread"] || "");
-      setAttachments([]);
-      setAttachmentError("");
-      dragDepthRef.current = 0;
-      setDraggingFiles(false);
-      setConversationMenuOpen(false);
-      setScopeMenuOpen(false);
-      return;
-    }
-
-    historyRequestRef.current += 1;
-    historyLoadingRef.current = false;
-    prependScrollRef.current = null;
-    setHistoryState({ threadId: activeThreadId, loading: repository.durable, hasMore: false, before: Infinity, error: "" });
-    if (repository.durable) void loadHistoryPage(activeThreadId, Infinity);
-    if (repository.durable && !chatAbortControllersRef.current[activeThreadId]) conversationCacheRef.current.trim(activeThreadId);
-    conversationCacheRef.current.get(activeThreadId);
-    conversationCacheRef.current.activate([activeThreadId, ...Object.keys(chatAbortControllersRef.current)]);
-    setDraft(draftsByThreadRef.current[activeThreadId || "new-thread"] || "");
-    setAttachments([]);
-    setAttachmentError("");
-    dragDepthRef.current = 0;
-    setDraggingFiles(false);
-    setExpandedThoughtGroups({});
-    setLazyThoughts({});
-    setConversationMenuOpen(false);
-    setScopeMenuOpen(false);
-  }, [activeThreadId, loadHistoryPage, repository.durable]);
-
-  useEffect(() => {
-    conversationCacheRef.current.activate([
-      activeThreadId,
-      ...Object.keys(chatStateByThread).filter((id) => (chatStateByThread[id]?.sending || chatStateByThread[id]?.deviceRunning)),
-    ]);
-  }, [activeThreadId, chatStateByThread]);
-
-
-  function closeThreadSearch() {
-    setThreadSearchOpen(false);
-    threadSearchButtonRef.current?.focus();
-  }
-
-  function addAttachments(files) {
-    const incoming = Array.from(files || []);
-    if (!supportsImages && incoming.some(isChatImage)) {
-      setAttachmentWarning({ text: `${providerCapability?.displayName || providerId} can't accept images with this selection.` });
-    }
-    const result = readChatAttachments(incoming.filter(file => supportsImages || !isChatImage(file)), attachments);
-    setAttachments(result.attachments);
-    setAttachmentError(result.error);
-  }
-
-  function handleFileDragEnter(event) {
-    if (!transferContainsFiles(event.dataTransfer)) return;
-    event.preventDefault();
-    dragDepthRef.current += 1;
-    setDraggingFiles(true);
-  }
-
-  function handleFileDragOver(event) {
-    if (!transferContainsFiles(event.dataTransfer)) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
-  }
-
-  function handleFileDragLeave(event) {
-    if (!transferContainsFiles(event.dataTransfer)) return;
-    event.preventDefault();
-    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
-    if (!dragDepthRef.current) setDraggingFiles(false);
-  }
-
-  function handleFileDrop(event) {
-    if (!transferContainsFiles(event.dataTransfer)) return;
-    event.preventDefault();
-    dragDepthRef.current = 0;
-    setDraggingFiles(false);
-    addAttachments(event.dataTransfer.files);
-  }
-
-  // Loaded on mount so a paste can check for copied files synchronously.
-  const fileAttachmentsRef = useRef(null);
-  useEffect(() => { void import("../lib/fileAttachments.js").then(module => { fileAttachmentsRef.current = module; }); }, []);
-  function attachFilePaths(paths) {
-    import("../lib/fileAttachments.js").then(({ readFileAttachments }) => readFileAttachments(paths))
-      .then(files => addAttachmentsRef.current(files), error => setAttachmentError(error.message || "Could not attach the file."));
-  }
-  const addAttachmentsRef = useRef(addAttachments);
-  addAttachmentsRef.current = addAttachments;
-  const attachFilePathsRef = useRef(attachFilePaths);
-  attachFilePathsRef.current = attachFilePaths;
-  useEffect(() => {
-    const receive = event => {
-      const { paths = [], files = [], draft = "" } = event.detail || {};
-      if (paths.length) attachFilePathsRef.current(paths);
-      if (files.length) addAttachmentsRef.current(files);
-      if (files.length && draft) setDraft(current => (current.trim() ? current : draft));
-    };
-    window.addEventListener("gofer:rem-thread-attach-files", receive);
-    return () => window.removeEventListener("gofer:rem-thread-attach-files", receive);
-  }, []);
-
-  function handleClipboardPaste(event) {
-    const files = clipboardAttachmentFiles(event.clipboardData);
-    const pastedText = event.clipboardData?.getData?.("text/plain") || "";
-    // Files copied in Raticode paste as attachments instead of their paths.
-    const copiedPaths = files.length ? [] : fileAttachmentsRef.current?.copiedFilePaths(pastedText) || [];
-    if (copiedPaths.length) {
-      event.preventDefault();
-      attachFilePaths(copiedPaths);
-      return;
-    }
-    if (chatState.sending && !files.length) return;
-    const textFile = largePasteFile(pastedText);
-    if (!files.length && !textFile) return;
-    event.preventDefault();
-    addAttachments(textFile ? [...files, textFile] : files);
-  }
-
-  const openMarkdownLinkRef = useRef(onOpenMarkdownLink);
-  openMarkdownLinkRef.current = onOpenMarkdownLink;
-  const openScopedMarkdownLink = useCallback((href) => {
-    openMarkdownLinkRef.current?.(href, scopedProjectRoot);
-  }, [scopedProjectRoot]);
-
-  const openFileRef = useRef(onOpenFile);
-  openFileRef.current = onOpenFile;
-  const openScopedFile = useCallback(path => {
-    openFileRef.current?.(path, scopedProjectRoot);
-  }, [scopedProjectRoot]);
-  const toggleThoughtGroup = useCallback(async (id, replyId, expanded, lazy) => {
-    setExpandedThoughtGroups(current => ({ ...current, [id]: { replyId, expanded: !expanded } }));
-    if (!lazy) return;
-    const threadId = activeThreadIdRef.current;
-    const loaded = value => activeThreadIdRef.current === threadId && setLazyThoughts(current => ({ ...current, [lazy.id]: value }));
-    loaded({});
-    try { loaded({ thoughts: buildChatItems(await repository.thoughts(threadId, lazy.ids))[0]?.thoughts || [] }); }
-    catch (error) { loaded({ error: error.message || "Thoughts could not be loaded." }); }
-  }, [repository]);
-
-  // Thread info closes on a click outside it, on Escape, and when another thread opens.
-  useEffect(() => { setThreadInfoOpen(false); }, [activeThreadId]);
-  useEffect(() => {
-    if (!threadInfoOpen) return undefined;
-    function handlePointerDown(event) {
-      if (!threadInfoRef.current?.contains(event.target)) setThreadInfoOpen(false);
-    }
-    function handleKeyDown(event) {
-      if (event.key === "Escape") setThreadInfoOpen(false);
-    }
-    window.addEventListener("pointerdown", handlePointerDown);
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", handlePointerDown);
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [threadInfoOpen]);
-
-  useEffect(() => {
-    if (!conversationMenuOpen || renamingThread) return undefined;
-
-    function handlePointerDown(event) {
-      if (conversationMenuRef.current?.contains(event.target)) return;
-      setConversationMenuOpen(false);
-    }
-
-    window.addEventListener("pointerdown", handlePointerDown);
-    return () => window.removeEventListener("pointerdown", handlePointerDown);
-  }, [conversationMenuOpen, renamingThread]);
-
-  useEffect(() => {
-    if (!scopeMenuOpen) return undefined;
-
-    function handlePointerDown(event) {
-      if (scopeMenuRef.current?.contains(event.target)) return;
-      setScopeMenuOpen(false);
-    }
-
-    function handleKeyDown(event) {
-      if (event.key === "Escape") setScopeMenuOpen(false);
-    }
-
-    window.addEventListener("pointerdown", handlePointerDown);
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", handlePointerDown);
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [scopeMenuOpen]);
-
-  async function sendMessage(editedMessage = null, options = {}) {
-    const sourceMessages = options.targetThread
-      ? conversationCacheRef.current.get(options.targetThread.id)
-      : messages;
-    const editedMessageIndex = editedMessage
-      ? sourceMessages.findIndex((message) => message.id === editedMessage.id && message.role === "user")
-      : -1;
-    const originalMessage = editedMessageIndex >= 0 ? sourceMessages[editedMessageIndex] : null;
-    const text = originalMessage ? String(editedMessage.body ?? "").trim() : options.text ?? draft.trim();
-    const selectedAttachments = originalMessage ? editedMessage.attachments ?? originalMessage.attachments ?? [] : options.targetThread ? [] : attachments;
-    const hasMessageAttachments = Boolean(
-      originalMessage?.attachments?.length || selectedAttachments.length,
-    );
-    const historyBlocked = activeThreadId && historyState.threadId === activeThreadId
-      && (historyLoadingRef.current || historyState.error);
-    if ((!text && !hasMessageAttachments) || (!options.targetThread && (chatState.sending || historyBlocked))) return;
-    const managedThread = options.targetThread ?? activeThread;
-    if (managedThread?.managedRunId) {
-      try {
-        if (hasMessageAttachments) throw new Error("Include file paths in this managed task's instruction.");
-        await sendManagedRemInstruction(managedThread.id, text);
-        if (!options.targetThread) setDraft("");
-      } catch (error) {
-        setChatStateByThread(current => ({ ...current, [managedThread.id]: {
-          ...current[managedThread.id], error: error.message,
-        } }));
-      }
-      return;
-    }
-    if (!options.targetThread && requiresPermissionChoice) return;
-    const turnResources = snapshotRemResources(options.targetThread?.resources ?? activeThread?.resources ?? homeResources);
-    const resourceError = remResourceError(turnResources);
-    if (resourceError) { setAttachmentError(resourceError); return; }
-    returnToLatestMessages();
-    const clientTurnStartedAt = Date.now();
-    const turnSummaryId = uniqueClientId();
-    const targetThread = options.targetThread ?? activeThread ?? createThread(scopedProjectRoot, { background: options.background, global: globalScope });
-    const targetThreadId = targetThread.id;
-    if (options.background && !activeThread && !options.targetThread) {
-      setLaunchedThreadId(targetThreadId);
-      setBackgroundChatAnnouncement("Thread started in the background.");
-    }
-    const workflowContext = chatWorkflowContextForThread(targetThread, workflows, openFiles);
-    const turnProvider = targetThread.provider || providerId;
-    const turnModel = targetThread.model ?? model;
-    const turnEffort = targetThread.effort ?? effort;
-    const turnCapability = providers.find(item => item.id === turnProvider);
-    const requestedPermission = targetThread.permissionsByProvider?.[turnProvider];
-    const turnPermission = providerPermissionOptions(turnProvider, turnCapability).some(([id]) => id === requestedPermission)
-      ? requestedPermission : providerPermissionDefault(turnProvider, turnCapability);
-    setChatStateByThread((current) => ({
-      ...current,
-      [targetThreadId]: { sending: true, error: "", hasNewResponse: false },
-    }));
-    setLiveTurnByThread((current) => ({
-      ...current,
-      [targetThreadId]: {
-        id: turnSummaryId,
-        role: "assistant",
-        kind: "turn-summary",
-        running: true,
-        startedAt: clientTurnStartedAt,
-        changes: null,
-      },
-    }));
-    let messageAttachments;
-    let previousSelection;
-    try {
-      messageAttachments = await uploadChatAttachments(selectedAttachments, targetThreadId);
-      if (options.targetThread || activeThread) {
-        previousSelection = await previousRemModelSelection(repository, targetThreadId, sourceMessages, originalMessage?.id);
-      }
-    } catch (error) {
-      setLiveTurnByThread((current) => ({ ...current, [targetThreadId]: null }));
-      setChatStateByThread((current) => ({
-        ...current,
-        [targetThreadId]: {
-          sending: false,
-          error: error instanceof Error ? error.message : "The message could not be prepared.",
-          hasNewResponse: false,
-        },
-      }));
-      return;
-    }
-    const titleSource = text || `Attached ${messageAttachments.map((item) => item.name).join(", ")}`;
-    const targetThreadTitle =
-      targetThread.title && (targetThread.titleCustomized || targetThread.title !== "New thread")
-        ? targetThread.title
-        : threadTitleFromMessage(titleSource);
-    deletedChatThreadIdsRef.current.delete(targetThreadId);
-
-    const turnThreadAccount = targetThread.machine ? "" : threadAccountChoice(targetThread, turnProvider);
-    const selection = remModelSelection(turnProvider, turnModel, turnEffort, turnCapability, turnThreadAccount);
-    const userMessage = {
-      ...(originalMessage ?? { id: uniqueClientId(), role: "user" }),
-      body: text,
-      attachments: messageAttachments,
-      remModelSelection: selection,
-      modelSwitchBanner: remModelSwitchBanner(previousSelection, selection, turnCapability?.displayName),
-    };
-    const nextMessages = originalMessage
-      ? [...sourceMessages.slice(0, editedMessageIndex), userMessage]
-      : [...sourceMessages, userMessage];
-    updateThreadMessages(targetThreadId, nextMessages);
-    // Continuing an archived thread brings it back into the thread list.
-    setThreads(current => bumpChatThread(current, targetThreadId, undefined, { archived: false, unread: false }));
-    updateThreadTitleFromMessage(targetThreadId, titleSource);
-    if (!options.targetThread && !originalMessage) {
-      setDraft("");
-      delete draftsByThreadRef.current[activeThreadId || "new-thread"];
-      setAttachments([]);
-    }
-    if (originalMessage) setExpandedThoughtGroups({});
-    if (!options.background) setBackgroundChatAnnouncement("");
-    setChatAnnouncementByThread((current) => ({ ...current, [targetThreadId]: "" }));
-    let contextBoundaryId = userMessage.id;
-    const thoughtGroupId = uniqueClientId();
-    // Web pages Rem reads become source cards under its reply.
-    const sourceTools = import("../lib/chatSources.js").catch(() => null);
-    function attachTurnSources(body) {
-      void sourceTools.then(tools => tools && updateThreadMessages(targetThreadId, current => {
-        const index = current.findLastIndex(message => message.kind === "final" && message.body === body);
-        const sources = index < 0 ? [] : tools.collectTurnSources(current.filter(message => message.groupId === thoughtGroupId), body);
-        return sources.length ? current.with(index, { ...current[index], sources }) : current;
-      }));
-    }
-    let turnSummaryReceived = false;
-    let resumeAvailable = false;
-    function appendAssistantMessage(body, kind = "final", extra = {}) {
-      if (deletedChatThreadIdsRef.current.has(targetThreadId)) return;
-      const assistantMessageId = uniqueClientId();
-      updateThreadMessages(targetThreadId, (current) => {
-        const previous = current.at(-1);
-        if (kind === "thought" && extra.deltaStreamId &&
-            previous?.kind === "thought" && previous.groupId === extra.groupId &&
-            previous.deltaStreamId === extra.deltaStreamId) {
-          return [...current.slice(0, -1), { ...previous, body: previous.body + body }];
-        }
-        const currentMessages = kind === "final"
-          ? removeTrailingDuplicateOutputThought(current, body, thoughtGroupId)
-          : current;
-        return [
-          ...currentMessages,
-          {
-            id: assistantMessageId,
-            role: "assistant",
-            kind,
-            body,
-            ...extra,
-          },
-        ];
-      });
-    }
-
-    function appendTurnSummary(event) {
-      if (!event?.completedAt && event?.durationMs == null && !event?.changes) return;
-      turnSummaryReceived = true;
-      appendAssistantMessage("", "turn-summary", {
-        id: turnSummaryId,
-        completedAt: event.completedAt,
-        durationMs: event.durationMs,
-        changes: event.changes,
-      });
-    }
-
-    const abortController = new AbortController();
-    const activeTurn = { turnId: uniqueClientId(), generation: 0, ready: false };
-    activeChatTurnsRef.current[targetThreadId] = activeTurn;
-    chatAbortControllersRef.current[targetThreadId] = abortController;
-    try {
-      if (assistantDefaults.swarmAccessEnabled !== false && workflowContext.projectRoot) {
-        await window.goferDesktop?.workspace?.trustProjectRoot?.(workflowContext.projectRoot);
-      }
-      if (memorySettings.secondBrainEnabled) await window.goferDesktop?.workspace?.trustProjectRoot?.(memorySettings.secondBrainRoot);
-      const requestMessages = await repository.context(targetThreadId, nextMessages, Boolean(originalMessage));
-      if (activeTurn.stopRequested) throw new DOMException("Rem stopped", "AbortError");
-      const threadProjects = [];
-      for (const root of mergeRecentProjects(targetThread.projectRoot ? [targetThread.projectRoot] : [], scopeRoots)) {
-        const workspace = window.goferDesktop?.workspace;
-        if (workspace?.getPathInfo && !(await workspace.getPathInfo(root))?.isDirectory) continue;
-        await workspace?.trustProjectRoot?.(root);
-        threadProjects.push({ root, name: pathValue(projectLabels, root)?.trim() || projectNameFromPath(root), grantId: workspace?.pathGrantForApi?.(root) });
-      }
-      let selectedBrainConfig = { enabled: memorySettings.secondBrainEnabled, root: memorySettings.secondBrainRoot, format: memorySettings.secondBrainFormat, grantId: window.goferDesktop?.workspace?.pathGrantForApi?.(memorySettings.secondBrainRoot) };
-      if (selectedBrainConfig.enabled) {
-        const { threadBrainConfig } = await import("../lib/secondBrainApi.js");
-        selectedBrainConfig = await threadBrainConfig(turnResources, selectedBrainConfig);
-      }
-      if (activeTurn.stopRequested) throw new DOMException("Rem stopped", "AbortError");
-      const response = await fetchChatTurn(chatStreamRequestBody({
-          conversationId: targetThreadId,
-          resetSession: Boolean(originalMessage),
-          forkedFrom: targetThread.forkedFromThreadId,
-          turnId: activeTurn.turnId,
-          permissionMode: turnPermission,
-          machine: targetThread.machine,
-          provider: turnProvider,
-          model: turnModel,
-          effort: turnEffort || undefined,
-          providerAccounts: assistantDefaults.providerAccounts || undefined,
-          threadAccount: turnThreadAccount || undefined,
-          messages: requestMessages
-            // Narration and tool steps stay visible but are not re-sent; final replies are.
-            .filter((message) => !["turn-summary", "error", "thought"].includes(message.kind))
-            .map(chatMessageForRequest),
-          workflow: {
-            ...workflowContext,
-            remThreads: { global: targetThread.scopeMode === "global", projects: threadProjects, spawned: Boolean(targetThread.parentThreadId) },
-            remSwarmAccess: {
-              enabled: assistantDefaults.swarmAccessEnabled !== false,
-              grantId: window.goferDesktop?.workspace?.pathGrantForApi?.(workflowContext.projectRoot),
-              ...(assistantDefaults.swarmAccessEnabled !== false ? {
-                workspaceGrants: Object.fromEntries(uniquePaths(swarmProjectPaths).flatMap(path => {
-                  const grant = window.goferDesktop?.workspace?.pathGrantForApi?.(path);
-                  return grant ? [[path, grant]] : [];
-                })),
-              } : {}),
-            },
-            remReportTheme: reportThemeContext(memorySettings),
-            remSecondBrain: selectedBrainConfig,
-            remResources: turnResources,
-            remBrowser: { target: agentBrowser },
-            remStreamText: true,
-            id: `workflow-assistant:${targetThreadId}`,
-            chatThreadId: targetThreadId,
-            // Names this thread when its tests wait behind another thread's.
-            chatThreadTitle: targetThreadTitle,
-          },
-        }), { signal: abortController.signal });
-      if (!response.ok) {
-        const payload = await response.json();
-        throw new Error(payload.error || `Chat API returned ${response.status}`);
-      }
-      if (!response.body) {
-        throw new Error("Chat API did not provide a response stream");
-      }
-
-      let finalReceived = false;
-      const decoder = new TextDecoder();
-      const reader = response.body.getReader();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (value || done) {
-          buffer += value ? decoder.decode(value, { stream: !done }) : decoder.decode();
-          if (done && buffer && !buffer.endsWith("\n")) buffer += "\n";
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
-          conversationCacheRef.current.batch(() => {
-            for (const line of lines) {
-              const event = parseChatStreamEvent(line);
-              if (!event) continue;
-              if (event.turnId && event.turnId !== activeTurn.turnId) continue;
-              if (event.type === "turn") {
-                if (event.generation < activeTurn.generation) continue;
-                activeTurn.generation = event.generation;
-                activeTurn.ready = true;
-                if (activeTurn.stopRequested) void stopAssistant(targetThreadId);
-                continue;
-              }
-              if (event.type === "steering") {
-                recordSteering(targetThreadId, event.receipt);
-                continue;
-              }
-              if (event.generation != null && event.generation !== activeTurn.generation) continue;
-              if (event.type === "interrupted") {
-                activeTurn.generation += 1;
-                const transcript = Array.isArray(event.messages) ? event.messages : [];
-                const start = transcript.findLastIndex(message => message.role === "system");
-                const additions = transcript.slice(start < 0 ? transcript.length : start)
-                  .map(message => ({ ...message, id: uniqueClientId(), kind: message.role === "system" ? "continuation-context" : undefined,
-                    ...(message.role === "user" ? { remModelSelection: selection } : {}),
-                  }));
-                if (event.partial?.changes) appendAssistantMessage("", "turn-summary", {
-                  changes: event.partial.changes, completedAt: event.partial.completedAt, durationMs: event.partial.durationMs,
-                });
-                if (additions.length) {
-                  updateThreadMessages(targetThreadId, current => [...current, ...additions]);
-                  contextBoundaryId = additions.at(-1).id;
-                  void repository.checkpoint(targetThreadId, transcript, contextBoundaryId)
-                    .catch(error => reportStorageFailure(targetThreadId, error));
-                }
-                continue;
-              }
-              if (event.type === "stopped") throw new DOMException("Rem stopped", "AbortError");
-
-              if (event.type === "project-scope") {
-                setThreads(current => current.map(thread => thread.id === targetThreadId
-                  ? scopeChatThreadToProject(thread, event.projectRoot, workflows, null, event.projectName) : thread));
-                continue;
-              }
-              if (event.type === "new-thread") {
-                remContextActionsRef.current.spawnThread(event, targetThread);
-                continue;
-              }
-              if (event.type === "thought") {
-                const deltaStreamId = typeof event.deltaStreamId === "string" ? event.deltaStreamId : "";
-                const thought = deltaStreamId ? String(event.text ?? "") : String(event.text ?? "").trim();
-                if (!thought) continue;
-                appendAssistantMessage(thought, "thought", {
-                  groupId: thoughtGroupId,
-                  deltaStreamId: deltaStreamId || undefined,
-                  trace: event.trace && typeof event.trace === "object" ? event.trace : undefined,
-              });
-            } else if (event.type === "recovery") {
-              const body = event.partial?.body ?? "";
-              if (body.trim()) appendAssistantMessage(body, "final", { interrupted: true });
-              if (event.partial?.changes) appendAssistantMessage("", "turn-summary", {
-                id: uniqueClientId(), changes: event.partial.changes,
-                completedAt: event.partial.completedAt, durationMs: event.partial.durationMs,
-              });
-              appendAssistantMessage(event.message || "Rem is resuming the interrupted response.", "system", { role: "system" });
-              setChatAnnouncementByThread(current => ({ ...current, [targetThreadId]: event.message }));
-            } else if (event.type === "compaction") {
-              const compactedMessages = Array.isArray(event.messages)
-                ? event.messages
-                : null;
-              if (compactedMessages) {
-                void repository.checkpoint(targetThreadId, compactedMessages, contextBoundaryId)
-                  .catch(error => reportStorageFailure(targetThreadId, error));
-                appendAssistantMessage(event.message || "Rem context compacted. Earlier messages are saved.", "system", { role: "system" });
-              } else {
-                appendAssistantMessage(
-                  event.message || "Compacting Rem context",
-                  "system",
-                  { role: "system" },
-                );
-              }
-            } else if (event.type === "final") {
-              finalReceived = true;
-              const body = event.message?.body ?? "";
-              if (body.trim()) {
-                appendAssistantMessage(body, "final");
-                attachTurnSources(body);
-              }
-              appendTurnSummary(event);
-              setLiveTurnByThread((current) => ({ ...current, [targetThreadId]: null }));
-            } else if (event.type === "changes") {
-              setLiveTurnByThread((current) => ({
-                ...current,
-                [targetThreadId]: {
-                  ...(current[targetThreadId] ?? {}),
-                  id: turnSummaryId,
-                  role: "assistant",
-                  kind: "turn-summary",
-                  running: true,
-                  startedAt: current[targetThreadId]?.startedAt ?? clientTurnStartedAt,
-                  changes: event.changes,
-                },
-              }));
-            } else if (event.type === "error") {
-              resumeAvailable = event.resumeAvailable === true;
-              const body = event.message?.body ?? "";
-              if (body.trim()) appendAssistantMessage(body, "final", { interrupted: true });
-              appendTurnSummary(event);
-              setLiveTurnByThread((current) => ({ ...current, [targetThreadId]: null }));
-              throw new Error(event.error || "Rem failed");
-            }
-          }
-          });
-        }
-        if (done) break;
-      }
-
-      if (!finalReceived) {
-        throw new Error("Rem stream ended without a final response");
-      }
-      if (deletedChatThreadIdsRef.current.has(targetThreadId)) return;
-      setChatStateByThread((current) => ({
-        ...current,
-        [targetThreadId]: {
-          sending: false,
-          error: chatStorageErrorsRef.current[targetThreadId] || "",
-          hasNewResponse: activeThreadIdRef.current !== targetThreadId,
-        },
-      }));
-      if (activeThreadIdRef.current !== targetThreadId) {
-        setBackgroundChatAnnouncement(`Rem response complete in ${targetThreadTitle}.`);
-      }
-      setChatAnnouncementByThread((current) => ({
-        ...current,
-        [targetThreadId]: "Rem response complete.",
-      }));
-      void onResponseComplete?.(workflowContext.projectRoot);
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") {
-        if (deletedChatThreadIdsRef.current.has(targetThreadId)) return;
-        appendAssistantMessage("Rem stopped.", "final");
-        if (!turnSummaryReceived) {
-          appendTurnSummary({
-            completedAt: new Date().toISOString(),
-            durationMs: Date.now() - clientTurnStartedAt,
-          });
-        }
-        setChatStateByThread((current) => ({
-          ...current,
-          [targetThreadId]: { sending: false, error: chatStorageErrorsRef.current[targetThreadId] || "", hasNewResponse: false },
-        }));
-        setLiveTurnByThread((current) => ({ ...current, [targetThreadId]: null }));
-        setChatAnnouncementByThread((current) => ({
-          ...current,
-          [targetThreadId]: "Rem stopped.",
-        }));
-        return;
-      }
-      if (deletedChatThreadIdsRef.current.has(targetThreadId)) return;
-      setLiveTurnByThread((current) => ({ ...current, [targetThreadId]: null }));
-      if (!turnSummaryReceived) {
-        appendTurnSummary({
-          completedAt: new Date().toISOString(),
-          durationMs: Date.now() - clientTurnStartedAt,
-        });
-      }
-      appendAssistantMessage(error instanceof Error ? error.message : "Unable to send message", "error", { role: "system", resumeAvailable });
-      setChatStateByThread((current) => ({
-        ...current,
-        [targetThreadId]: {
-          sending: false,
-          hasNewResponse: false,
-          error: chatStorageErrorsRef.current[targetThreadId] || "",
-        },
-      }));
-    } finally {
-      if (chatAbortControllersRef.current[targetThreadId] === abortController) {
-        if (!deletedChatThreadIdsRef.current.has(targetThreadId)) {
-          setThreads(current => bumpChatThread(current, targetThreadId, undefined,
-            { ...threadReadPatch(activeThreadIdRef.current !== targetThreadId), archived: false }));
-        }
-        delete chatAbortControllersRef.current[targetThreadId];
-        delete activeChatTurnsRef.current[targetThreadId];
-        void recoverSteering(targetThreadId);
-      }
-    }
-  }
-
-  async function steerAssistant() {
-    const threadId = activeThreadId;
-    const turn = activeChatTurnsRef.current[threadId];
-    if (!turn || (!draft.trim() && !attachments.length) || steeringRequestsRef.current[threadId]?.pending) return;
-    const text = draft;
-    const selectedAttachments = attachments;
-    if (activeThread?.managedRunId) {
-      setSteeringBusy(current => ({ ...current, [threadId]: true }));
-      try {
-        if (selectedAttachments.length) throw new Error("Include file paths in this managed task's instruction.");
-        await sendManagedRemInstruction(threadId, text);
-        setDraft(current => current === text ? "" : current);
-        setSteeringErrors(current => ({ ...current, [threadId]: "" }));
-      } catch (error) {
-        setSteeringErrors(current => ({ ...current, [threadId]: error.message }));
-      } finally {
-        setSteeringBusy(current => ({ ...current, [threadId]: false }));
-      }
-      return;
-    }
-    const resources = snapshotRemResources(activeThread?.resources ?? homeResources);
-    const resourceError = remResourceError(resources);
-    if (resourceError) { setSteeringErrors(current => ({ ...current, [threadId]: resourceError })); return; }
-    const attachmentKey = JSON.stringify(selectedAttachments.map(item => item.id));
-    const previous = steeringRequestsRef.current[threadId];
-    const request = previous?.text === text && previous.turnId === turn.turnId && previous.attachmentKey === attachmentKey && JSON.stringify(previous.resources) === JSON.stringify(resources)
-      ? { ...previous }
-      : { conversationId: threadId, turnId: turn.turnId, requestId: uniqueClientId(), text, attachmentKey, resources };
-    steeringRequestsRef.current[threadId] = { ...request, pending: true };
-    setSteeringBusy(current => ({ ...current, [threadId]: true }));
-    setSteeringErrors(current => ({ ...current, [threadId]: "" }));
-    try {
-      if (!request.attachments) request.attachments = await uploadChatAttachments(selectedAttachments, threadId);
-      steeringRequestsRef.current[threadId] = { ...request, pending: true };
-      const response = await fetch(apiUrl("/chat/steer"), {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request),
-      });
-      const payload = await response.json();
-      if (!response.ok || !payload.receipt) throw new Error(payload.error || "Steering was not confirmed. Retry to check the same instruction.");
-      recordSteering(threadId, payload.receipt);
-      setThreads(current => bumpChatThread(current, threadId));
-      if (draftsByThreadRef.current[threadId] === text) delete draftsByThreadRef.current[threadId];
-      if (activeThreadIdRef.current === threadId) setDraft(current => current === text ? "" : current);
-      if (activeThreadIdRef.current === threadId) {
-        const submitted = new Set(selectedAttachments.map(item => item.id));
-        setAttachments(current => current.filter(item => !submitted.has(item.id)));
-      }
-      delete steeringRequestsRef.current[threadId];
-    } catch (error) {
-      setSteeringErrors(current => ({ ...current, [threadId]: error.message }));
-    } finally {
-      if (steeringRequestsRef.current[threadId]) steeringRequestsRef.current[threadId].pending = false;
-      setSteeringBusy(current => ({ ...current, [threadId]: false }));
-    }
-  }
-
-  async function stopAssistant(threadId) {
-    const turn = activeChatTurnsRef.current[threadId];
-    if (!turn) return;
-    turn.stopRequested = true;
-    if (!turn.ready) return;
-    try {
-      const response = await fetch(apiUrl("/chat/stop"), {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversationId: threadId, turnId: turn.turnId }),
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "Could not stop Rem");
-    } catch (error) {
-      setSteeringErrors(current => ({ ...current, [threadId]: error.message }));
-    }
-  }
-
-  async function toggleAssistantChanges(threadId, messageId, changeSetId, redo) {
-    if (!threadId || !changeSetId) return;
-    const updateChangeState = (patch) => {
-      updateThreadMessages(threadId, (current) => current.map((message) =>
-        message.id === messageId
-          ? { ...message, changes: { ...message.changes, ...patch } }
-          : message
-      ));
-    };
-    const action = redo ? "redo" : "undo";
-    updateChangeState({ changing: true, changeError: "" });
-    try {
-      const response = await fetch(apiUrl(`/chat/changes/${action}`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ changeSetId }),
-      });
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.error || `${redo ? "Redo" : "Undo"} API returned ${response.status}`);
-      }
-      updateChangeState({ changing: false, undone: Boolean(payload.undone), changeError: "" });
-      setChatAnnouncementByThread((current) => ({
-        ...current,
-        [threadId]: redo
-          ? "Rem changes reapplied."
-          : "Rem changes undone.",
-      }));
-    } catch (error) {
-      updateChangeState({
-        changing: false,
-        changeError: error instanceof Error
-          ? error.message
-          : `The changes could not be ${redo ? "reapplied" : "undone"}.`,
-      });
-    }
-  }
-
-  function updateThreadMessages(threadId, nextValue) {
-    if (deletedChatThreadIdsRef.current.has(threadId)) return;
-    conversationCacheRef.current.update(threadId, nextValue);
-  }
-
-  const messageActionsRef = useRef(null);
-  messageActionsRef.current = { editUserMessage, toggleAssistantChanges, forkThread, activeThreadId };
-  const forkMessageAction = useCallback(id => messageActionsRef.current.forkThread(id), []);
-  const editMessageAction = useCallback((id, body, attachments) => messageActionsRef.current.editUserMessage(id, body, attachments), []);
-  const undoMessageAction = useCallback((message) => {
-    const actions = messageActionsRef.current;
-    return actions.toggleAssistantChanges(actions.activeThreadId, message.id, message.changes?.id, Boolean(message.changes?.undone));
-  }, []);
-
-  function editUserMessage(messageId, body, attachments) {
-    if (!activeThreadId || chatState.sending) return;
-    void sendMessage({ id: messageId, body, attachments });
-  }
-
-  async function forkThread(messageId) {
-    if (!activeThread || forkInProgressRef.current) return;
-    forkInProgressRef.current = true;
-    setForkStatus("Forking thread…");
-    const parent = structuredClone(activeThread);
-    // Include unloaded pages and the latest in-memory updates from a running turn.
-    const snapshot = structuredClone(conversationCacheRef.current.get(parent.id));
-    try {
-      const saved = await repository.all(parent.id);
-      const history = new Map(saved.map(message => [message.id, message]));
-      for (const message of snapshot) history.set(message.id, message);
-      const fork = forkThreadHistory(parent, [...history.values()], messageId, uniqueClientId());
-      await copyForkAttachments(parent.id, fork.thread.id, fork.messages);
-      await repository.save(fork.thread.id, fork.messages);
-      persistChatThreads([fork.thread]);
-      setThreads(current => [fork.thread, ...current]);
-      conversationCacheRef.current.hydrate(fork.thread.id, fork.messages);
-      if (activeThreadIdRef.current === parent.id) {
-        openThread(fork.thread.id);
-        setContextFocusRequest(current => current + 1);
-      }
-      const selectedMessage = fork.messages.at(-1);
-      if (selectedMessage.role === "user") {
-        setForkStatus("Thread forked. Sending your message to Rem.");
-        void sendMessage(selectedMessage, { targetThread: fork.thread });
-      } else {
-        setForkStatus("Thread forked. Continue from here.");
-      }
-    } catch (error) {
-      setForkStatus(`Could not fork thread: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      forkInProgressRef.current = false;
-    }
-  }
-
-  function createThread(projectRoot = scopedProjectRoot, options = {}) {
-    const now = new Date().toISOString();
-    const root = String(projectRoot ?? "").trim();
-    const thread = scopeChatThreadToProject(
-      {
-        id: options.id || uniqueClientId(),
-        title: "New thread",
-        provider: providerId, model, effort,
-        resources: snapshotRemResources(homeResources),
-        permissionsByProvider: { ...permissionsByProvider, [providerId]: permissionMode },
-        ...(Object.keys(draftAccounts).length ? { accountsByProvider: { ...draftAccounts } } : {}),
-        ...(draftMachine && !options.parent ? { machine: draftMachine } : {}),
-        createdAt: now,
-        updatedAt: now,
-      },
-      root,
-      workflows,
-      activeWorkflowId,
-      pathValue(projectLabels, root)?.trim() || (root ? projectNameFromPath(root) : "No project"),
-    );
-    if (options.global || (!root && globalScope && !options.parent)) {
-      thread.scopeMode = "global";
-      thread.projectName = "Global";
-    }
-    if (options.parent) {
-      Object.assign(thread, { provider: options.parent.provider, model: options.parent.model, effort: options.parent.effort,
-        resources: snapshotRemResources(options.parent.resources), permissionsByProvider: { ...options.parent.permissionsByProvider }, parentThreadId: options.parent.id });
-      if (options.parent.accountsByProvider) thread.accountsByProvider = { ...options.parent.accountsByProvider };
-      else delete thread.accountsByProvider;
-    }
-    setThreads(current => [thread, ...current.filter(item => item.id !== thread.id)]);
-    if (!options.background) {
-      activeThreadIdRef.current = thread.id;
-      setActiveThreadId(thread.id);
-      setDraft("");
-    }
-    setScopeMenuOpen(false);
-    return thread;
-  }
-
-  // Context events and deferred sends use the current thread settings and draft.
-  const remContextActionsRef = useRef(null);
-  const spawnedThreadsRef = useRef(new Set());
-  function spawnThread(event, parent) {
-    if (spawnedThreadsRef.current.has(event.threadId) || loadChatThread(event.threadId)) return;
-    spawnedThreadsRef.current.add(event.threadId);
-    const thread = createThread(event.projectRoot, { id: event.threadId, background: true, parent });
-    void sendMessage(null, { targetThread: thread, text: event.message });
-  }
-  remContextActionsRef.current = { createThread, sendMessage, spawnThread, openThread };
-  // Thread links in Rem's conversation open the linked worker thread here.
-  useEffect(() => {
-    const receive = event => { if (event.detail?.threadId) remContextActionsRef.current.openThread(event.detail.threadId); };
-    window.addEventListener("gofer:rem-open-thread", receive);
-    return () => window.removeEventListener("gofer:rem-open-thread", receive);
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-    const receive = async (event) => {
-      const context = event.detail || {};
-      let root = context.projectRoot;
-      if (!root && context.path && !context.webPage) {
-        const candidates = [...recentProjectRoots, ...workflows.map(item => item.projectRoot)].filter(item => typeof item === "string" && pathWithin(context.path, item));
-        root = candidates.sort((a, b) => b.length - a.length)[0];
-        if (!root) {
-          try { root = (await window.goferDesktop?.workspace?.gitStatus?.(context.path.replace(/[/\\][^/\\]+$/, "")))?.root; } catch { /* Non-Git files still carry their exact path. */ }
-        }
-      }
-      // Scope the thread to the brains it was opened from; the rest start off.
-      let brains = [];
-      if (context.secondBrainIds?.length) {
-        const { brainRequest } = await import("../lib/secondBrainApi.js");
-        brains = await brainRequest().then(library => library.brains, () => []);
-      }
-      if (!active) return;
-      const thread = remContextActionsRef.current.createThread(root || "");
-      if (context.secondBrainIds?.length) {
-        thread.resources = { ...thread.resources, secondBrains: undefined, disabledSecondBrains: brains.map(brain => brain.id).filter(id => !context.secondBrainIds.includes(id)) };
-        setThreads(current => current.map(item => item.id === thread.id ? thread : item));
-      }
-      // A shared tab needs the Browser tool, and is bound to this new thread.
-      if (context.browserSessionId) {
-        thread.resources = { ...thread.resources, browser: true };
-        setThreads(current => current.map(item => item.id === thread.id ? thread : item));
-        try { await window.goferBrowser?.shareWithRem?.(context.browserSessionId, thread.id, "Rem"); }
-        catch (error) { setPendingRemContext({ threadId: thread.id, attachments: [], error: `Could not share the tab: ${error.message}`, draft: context.draft || "", send: false }); return; }
-      }
-      // The tab in front of Raticode (gecko)'s window, found as it's shared.
-      if (context.geckoShare) {
-        thread.resources = { ...thread.resources, browser: true };
-        setThreads(current => current.map(item => item.id === thread.id ? thread : item));
-        try {
-          const sharedTab = await window.goferBrowser?.gecko?.("share-with-rem", { threadId: thread.id, label: "Rem" });
-          context.path = sharedTab?.url || "";
-          context.title = sharedTab?.title || "";
-          context.draft = `I shared the Raticode (gecko) tab “${context.title || context.path}” with you. Use it to `;
-        } catch (error) {
-          setPendingRemContext({ threadId: thread.id, attachments: [], error: `Could not share the Gecko tab: ${String(error?.message || error).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "")}`, draft: "", send: false });
-          return;
-        }
-      }
-      const body = context.webPage
-        ? askRemWebPageAttachment({ url: context.path, title: context.title || "", text: context.text || "", shared: Boolean(context.browserSessionId || context.geckoShare) })
-        : context.mode === "conflicts"
-        ? `Resolve the Git conflicts in this project and finish the active rebase or merge. This request authorizes resolving files, staging the fixes, committing them with meaningful commit messages, and continuing the operation without asking for confirmation at each step.\n\nInspect the live Git status and operation in this project before editing; the file list below is only an initial snapshot. Inspect both sides of each conflict and preserve the intended behavior. Resolve all current conflicts, check the fixes, and stage each resolved path explicitly, including resolved deletions. Preserve unrelated local changes and do not stage them.\n\nDuring a rebase, use git rebase --continue to create the resolved commit, preserving a meaningful original commit message or improving it when needed. Configure the editor noninteractively so continuation cannot hang waiting for input. After every continuation, inspect Git status and the operation again. If new conflicts appear, resolve, check, stage, and continue again. Repeat until the rebase is complete; do not stop with fixes unstaged or the rebase paused. For a merge, stage the resolutions and complete the merge with a meaningful commit message. If no merge or rebase is active, commit the conflict fixes with a meaningful message.\n\nDo not abort the operation, discard unrelated work, skip commits, or push without separate authorization. If a command fails for a reason other than another conflict, investigate and fix it when possible; otherwise report the exact blocker and remaining Git state rather than claiming completion. Verify that no unmerged paths remain and that the rebase or merge has ended before reporting success.\n\nAt the end, state whether the operation completed and give a full report as a numbered list of one-line summaries, one summary per conflict fix. Each summary must identify the file, what Rem changed, and why; distinguish repeated fixes to the same file in different replayed commits. Include verification results and any remaining blockers.\n\nConflicted files:\n${context.text}`
-        : `File: ${context.path || "workflow.rattish"}\nProject: ${root || "No project"}\nLines: ${context.startLine || 1}-${context.endLine || context.startLine || 1}\n${context.version || "Editor selection"}\n\n${context.text || ""}`;
-      const file = new File([body], context.webPage ? "web-page.txt" : context.mode === "conflicts" ? "merge-conflicts.txt" : "editor-selection.txt", { type: "text/plain" });
-      const result = readChatAttachments([file], []);
-      setPendingRemContext({ threadId: thread.id, attachments: result.attachments, error: result.error,
-        draft: context.mode === "ask" ? (context.draft || "") : context.mode === "conflicts" ? body : "Explain the highlighted text in the attached file selection, using its file and project context.",
-        send: context.autoSend === true || context.mode !== "ask" });
-    };
-    window.addEventListener("gofer:rem-context", receive);
-    return () => { active = false; window.removeEventListener("gofer:rem-context", receive); };
-  }, [workflows, recentProjectRoots]);
-
-  useEffect(() => {
-    const receive = event => {
-      const request = event.detail;
-      if (!request || request.signal?.aborted) return;
-      request.handled = true;
-      if (request.background) {
-        startGenerationJob("commit", { projectRoot: request.projectRoot, branch: request.branch }, { provider: providerId, model, effort, permissionMode }).then(request.resolve, request.reject);
-        return;
-      }
-      generateConventionalCommit({ provider: providerId, model, effort, permissionMode, diff: request.diff, projectRoot: request.projectRoot, inspectStaged: request.inspectStaged, signal: request.signal }).then(request.resolve, request.reject);
-    };
-    window.addEventListener("gofer:rem-commit-message", receive);
-    return () => window.removeEventListener("gofer:rem-commit-message", receive);
-  }, [providerId, model, effort, permissionMode]);
-
-  useEffect(() => {
-    const receive = event => {
-      const request = event.detail;
-      if (!request || request.signal?.aborted) return;
-      request.handled = true;
-      const selection = { provider: providerId, model, effort, permissionMode };
-      (request.background ? startGenerationJob("theme", request, selection) : generateReportTheme(request, selection)).then(request.resolve, request.reject);
-    };
-    window.addEventListener("gofer:rem-report-theme", receive);
-    return () => window.removeEventListener("gofer:rem-report-theme", receive);
-  }, [providerId, model, effort, permissionMode]);
-
-  // Apply context after the thread activation effect clears the previous draft.
-  useEffect(() => {
-    if (!pendingRemContext || activeThreadId !== pendingRemContext.threadId) return;
-    setAttachments(pendingRemContext.attachments); setAttachmentError(pendingRemContext.error);
-    setDraft(pendingRemContext.draft);
-    setContextSendThread(pendingRemContext.send ? pendingRemContext.threadId : null);
-    setContextFocusRequest(current => current + 1);
-    setPendingRemContext(null);
-  }, [pendingRemContext, activeThreadId]);
-
-  useEffect(() => {
-    if (!contextSendThread || activeThreadId !== contextSendThread || !draft || !attachments.length
-      || historyState.loading || historyState.error || chatState.sending) return;
-    setContextSendThread(null);
-    void remContextActionsRef.current.sendMessage();
-  }, [contextSendThread, activeThreadId, draft, attachments, historyState.loading, historyState.error, chatState.sending]);
-
-  function openThread(threadId, match) {
-    setSearchTarget(match?.messageId != null ? { threadId, ...match, requestId: uniqueClientId() } : null);
-    if (match?.messageId != null) setExpandedThoughtGroups({});
-    const thread = threads.find((candidate) => candidate.id === threadId) || loadChatThread(threadId);
-    setThreadSearchOpen(false);
-    if (thread && !thread.projectRoot && thread.scopeMode !== "global") {
-      const scopedThread = scopeChatThreadToProject(
-        thread,
-        scopedProjectRoot,
-        workflows,
-        activeWorkflowId,
-        pathValue(projectLabels, scopedProjectRoot)?.trim()
-          || (scopedProjectRoot ? projectNameFromPath(scopedProjectRoot) : "No project"),
-      );
-      setThreads(current => [scopedThread, ...current.filter(candidate => candidate.id !== threadId)]);
-    } else if (thread && !threads.some(candidate => candidate.id === threadId)) {
-      setThreads(current => [...current, thread]);
-    }
-    if (thread) {
-      setThreads(current => current.map(candidate => candidate.id === threadId ? { ...candidate, ...threadReadPatch(false) } : candidate));
-      setProviderId(thread.provider || assistantDefaults.provider || "codex");
-      setModel(thread.model || assistantDefaults.model || "");
-      setEffort(thread.effort || assistantDefaults.effort || "");
-    }
-    activeThreadIdRef.current = threadId;
-    setActiveThreadId(threadId);
-    setChatStateByThread((current) => {
-      const threadState = current[threadId];
-      if (!threadState?.hasNewResponse) return current;
-      return {
-        ...current,
-        [threadId]: { ...threadState, hasNewResponse: false },
-      };
-    });
-  }
-
-  function renderSearchMessages(history, matchId, showSource) {
-    // A query can match Markdown source, hidden metadata, or a deduplicated
-    // thought. Reveal that saved body in place when its rendered form omits it.
-    const displayHistory = showSource ? history.map(message => String(message.id) === String(matchId)
-      ? { ...message, kind: "search-source" } : message) : history;
-    return buildChatItems(displayHistory).map(item => {
-      if (item.type === "thought-group") {
-        return <ThoughtGroup
-          key={item.id}
-          expanded={isThoughtGroupExpanded(item, expandedThoughtGroups, assistantDefaults.autoHideThoughts !== false && !item.thoughts.some(thought => String(thought.id) === String(matchId)))}
-          replyId={item.replyId}
-          groupId={item.id}
-          onToggle={toggleThoughtGroup}
-          searchMessageId={matchId}
-          thoughts={item.thoughts}
-          onOpenLink={openScopedMarkdownLink}
-          sourcePath={assistantMarkdownSourcePath(scopedProjectRoot)}
-          onOpenFile={openScopedFile}
-        />;
-      }
-      const isMatch = String(item.message.id) === String(matchId);
-      return <div key={item.message.id} data-thread-search-match={isMatch || undefined} tabIndex={isMatch ? -1 : undefined}>
-        <ForkableMessage
-          onFork={forkMessageAction}
-          canFork={isForkableMessage(history.find(message => message.id === item.message.id))}
-          message={item.message}
-          onOpenLink={openScopedMarkdownLink}
-          sourcePath={assistantMarkdownSourcePath(scopedProjectRoot)}
-          onUndoChanges={undoMessageAction}
-        />
-      </div>;
-    });
-  }
-
-  function returnToLatestMessages() {
-    setSearchTarget(null);
-    prependScrollRef.current = null;
-    chatPinnedToBottomRef.current = true;
-    renderedConversationRef.current = { threadId: null, textKey: null };
-  }
-
-  function changeThreadProjectScope(projectRoot) {
-    const root = String(projectRoot ?? "").trim();
-    if (!root || samePath(root, scopedProjectRoot)) {
-      setScopeMenuOpen(false);
-      return;
-    }
-    if (!activeThreadId) {
-      setHomeProjectRoot(root);
-      setScopeMenuOpen(false);
-      return;
-    }
-    setThreads((currentThreads) => {
-      const nextThreads = currentThreads.map((thread) =>
-        thread.id === activeThreadId
-          ? scopeChatThreadToProject(
-              thread,
-              root,
-              workflows,
-              activeWorkflowId,
-              pathValue(projectLabels, root)?.trim() || projectNameFromPath(root),
-            )
-          : thread,
-      );
-      return nextThreads;
-    });
-    setHomeProjectRoot(root);
-    setScopeMenuOpen(false);
-  }
-
-  useEffect(() => {
-    if (!activeThread?.projectRoot || activeThread.projectBranch !== undefined) return;
-    let cancelled = false;
-    const { id, projectRoot } = activeThread;
-    window.goferDesktop?.workspace?.gitStatus?.(projectRoot)?.then(snapshot => {
-      if (cancelled || !snapshot || snapshot.error) return;
-      setThreads(current => current.map(thread => thread.id === id && samePath(thread.projectRoot, projectRoot)
-        ? { ...thread, projectBranch: snapshot.active ? snapshot.branch || "" : "" } : thread));
-    }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [activeThread]);
-
-  function updateThreadConfig(patch) {
-    if (!activeThreadId) return;
-    setThreads((current) => {
-      const next = current.map((thread) => thread.id === activeThreadId ? { ...thread, ...patch } : thread);
-      return next;
-    });
-  }
-
-  function showThreadList() {
-    activeThreadIdRef.current = null;
-    setActiveThreadId(null);
-    setConversationMenuOpen(false);
-    setScopeMenuOpen(false);
-  }
-
-  function updateThreadTitleFromMessage(threadId, message) {
-    setThreads((currentThreads) => {
-      const nextThreads = currentThreads.map((thread) =>
-        thread.id === threadId
-          ? {
-              ...thread,
-              title: !thread.titleCustomized && thread.title === "New thread" ? threadTitleFromMessage(message) : thread.title,
-            }
-          : thread,
-      );
-      return nextThreads;
-    });
-  }
-
-  function updateThreadOrganization(threadId, patch) {
-    setThreads(current => {
-      const thread = current.find(item => item.id === threadId) || loadChatThread(threadId);
-      if (!thread) return current;
-      return [...current.filter(item => item.id !== threadId), { ...thread, ...patch }];
-    });
-  }
-
-  function archiveThread(threadId) {
-    applyThreadsAction("archive", [threadId]);
-  }
-
-  function pinThread(threadId, pinned) {
-    applyThreadsAction(pinned ? "pin" : "unpin", [threadId]);
-  }
-
-  // One change for every selected thread. Reading or archiving also clears the
-  // window's own finished-reply marker, which would otherwise keep it unread.
-  async function applyThreadsAction(action, ids) {
-    if (!ids.length) return;
-    if (action === "delete") {
-      if (!window.confirm(ids.length === 1
-        ? `Delete thread "${(threads.find(item => item.id === ids[0]) || loadChatThread(ids[0]))?.title || "Untitled"}"? This cannot be undone.`
-        : `Delete ${ids.length} threads? This cannot be undone.`)) return;
-      for (const id of ids) if (!await removeThread(id)) break;
-      return;
-    }
-    const patch = threadActionPatch(action);
-    if (!patch) return;
-    const chosen = new Set(ids);
-    setThreads(current => {
-      const known = new Set(current.map(item => item.id));
-      const stored = ids.filter(id => !known.has(id)).map(loadChatThread).filter(Boolean);
-      return [...current, ...stored].map(item => chosen.has(item.id) ? { ...item, ...patch } : item);
-    });
-    if (patch.unread === false) {
-      setChatStateByThread(current => ids.some(id => current[id]?.hasNewResponse)
-        ? Object.fromEntries(Object.entries(current).map(([id, state]) => [id, chosen.has(id) ? { ...state, hasNewResponse: false } : state]))
-        : current);
-    }
-  }
-
-  function renameThread(threadId, title) {
-    const name = title.trim();
-    if (!name) return;
-    updateThreadOrganization(threadId, { title: name, titleCustomized: true });
-    setRenamingThread(null);
-  }
-
-  async function deleteThread(threadId) {
-    const thread = threads.find(item => item.id === threadId) || loadChatThread(threadId);
-    if (!window.confirm(`Delete thread "${thread?.title || "Untitled"}"? This cannot be undone.`)) return;
-    await removeThread(threadId);
-  }
-
-  // Deletes the thread and its conversation archive copy, unlike Delete, which keeps it.
-  async function deleteThreadPermanently(threadId) {
-    const thread = threads.find(item => item.id === threadId) || loadChatThread(threadId);
-    if (!window.confirm(permanentDeleteMessage(thread?.title))) return;
-    await removeThread(threadId, { purge: true });
-  }
-
-  // Thread state is read through updaters so several deletions can run in sequence.
-  async function removeThread(threadId, { purge = false } = {}) {
-    deletedChatThreadIdsRef.current.add(threadId);
-    await stopAssistant(threadId);
-    const archived = purge ? await purgeThreadFromArchive(threadId) : await archiveThreadFromStorage(threadId, () => repository.all(threadId), true);
-    if (!archived) {
-      deletedChatThreadIdsRef.current.delete(threadId);
-      setChatStateByThread((current) => ({ ...current, [threadId]: { sending: false, error: purge
-        ? "The archive copy could not be removed, so the thread was kept. Reconnect the archive folder and try Delete permanently again."
-        : "The archive could not be saved. Reconnect the archive folder, or stop archiving in Settings > Memory before deleting this thread." } }));
-      return false;
-    }
-    try { await repository.remove(threadId); } catch (error) {
-      deletedChatThreadIdsRef.current.delete(threadId);
-      reportStorageFailure(threadId, error);
-      return false;
-    }
-    deleteStoredChatThread(threadId);
-    setThreads(current => current.filter((thread) => thread.id !== threadId));
-    conversationCacheRef.current.remove(threadId);
-    delete chatStorageErrorsRef.current[threadId];
-    setChatStateByThread((current) => {
-      const next = { ...current };
-      delete next[threadId];
-      return next;
-    });
-    setLiveTurnByThread((current) => {
-      const next = { ...current };
-      delete next[threadId];
-      return next;
-    });
-    if (activeThreadIdRef.current === threadId) {
-      activeThreadIdRef.current = null;
-      setActiveThreadId(null);
-    }
-    setExpandedThoughtGroups({});
-    setConversationMenuOpen(false);
-
-    try {
-      const response = await fetch(
-        apiUrl(`/chat/threads/${encodeURIComponent(threadId)}`),
-        { method: "DELETE" },
-      );
-      if (!response.ok) {
-        const payload = await response.json();
-        throw new Error(payload.error || `Chat API returned ${response.status}`);
-      }
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Unable to delete chat handoff file";
-      if (!deletedChatThreadIdsRef.current.has(threadId) && activeThreadId === threadId) {
-        setChatStateByThread((current) => ({
-          ...current,
-          [threadId]: { sending: false, error: message },
-        }));
-      }
-    }
-    return true;
-  }
-
-  // Rem's task threads belong to Rem's home, which clears them with their tasks.
-  async function clearArchivedThreads(entries, { confirm = true } = {}) {
-    const ids = entries.filter(entry => !entry.managedRole).map(entry => entry.id);
-    if (!ids.length || archiveClearingRef.current) return;
-    if (confirm && !window.confirm(`Delete ${ids.length} archived ${ids.length === 1 ? "thread" : "threads"}? This cannot be undone.`)) return;
-    archiveClearingRef.current = true;
-    try {
-      for (const id of ids) if (!await removeThread(id)) break;
-    } finally { archiveClearingRef.current = false; }
-  }
-  clearArchivedThreadsRef.current = clearArchivedThreads;
-
-  useEffect(() => {
-    if (!archiveRetentionDays(archiveRetention)) return undefined;
-    const dispose = () => {
-      const running = new Set([...Object.keys(chatAbortControllersRef.current), ...deviceRunningThreadsRef.current]);
-      const entries = chatThreadIndex().filter(entry => entry.managedRole !== "verify");
-      const { archived } = organizeThreads(entries, { running, ...cachedThreadScopes(window.goferDesktop?.workspace) });
-      void clearArchivedThreadsRef.current(expiredArchivedThreads(archived, archiveRetention), { confirm: false });
-    };
-    const initial = window.setTimeout(dispose, 5000);
-    const timer = window.setInterval(dispose, 60 * 60 * 1000);
-    return () => { window.clearTimeout(initial); window.clearInterval(timer); };
-  }, [archiveRetention]);
-
-  return (
-    <aside
-      aria-busy={chatState.sending || undefined}
-      className="studio-chat relative flex h-full min-h-0 shrink-0 flex-col overflow-hidden border-l border-line bg-white"
-      data-chat-pane="true"
-      style={{ width }}
-      onDragEnter={handleFileDragEnter}
-      onDragLeave={handleFileDragLeave}
-      onDragOver={handleFileDragOver}
-      onDrop={handleFileDrop}
-      onPaste={handleClipboardPaste}
-    >
-      {draggingFiles ? (
-        <div
-          aria-live="polite"
-          className="pointer-events-none absolute inset-2 z-[70] grid place-items-center rounded-[14px] border-2 border-dashed border-brand bg-indigo-50/95 text-indigo-700 dark:bg-[#252526]/95 dark:text-indigo-300"
-          role="status"
-        >
-          <div className="flex flex-col items-center gap-2 text-center">
-            <Paperclip aria-hidden="true" size={20} />
-            <span className="text-xs font-semibold">Drop files to attach</span>
-          </div>
-        </div>
-      ) : null}
-      <div aria-atomic="true" aria-live="polite" className="sr-only" role="status">
-        {chatAnnouncement}
-      </div>
-      <div aria-atomic="true" aria-live="polite" className="sr-only" role="status">
-        {backgroundChatAnnouncement}
-      </div>
-      <div aria-atomic="true" aria-live="assertive" className="sr-only" role="alert">
-        {chatState.error}
-      </div>
-      <div
-        aria-label="Resize chat pane"
-        aria-orientation="vertical"
-        aria-valuemax={520}
-        aria-valuemin={300}
-        aria-valuenow={width}
-        aria-valuetext={`${width} pixels wide`}
-        className="absolute left-[-3px] top-0 z-20 h-full w-1.5 cursor-col-resize transition hover:bg-brand/40"
-        role="separator"
-        tabIndex={0}
-        title="Resize chat pane"
-        onKeyDown={onResizeKeyDown}
-        onPointerDown={onResizeStart}
-      />
-      <div className="flex h-[54px] shrink-0 items-center justify-between border-b border-line px-3.5">
-        <div className="flex min-w-0 items-center gap-1 text-xs font-semibold text-muted">
-          {onShowRem ? (
-            <button
-              aria-label="Back to Rem"
-              className="studio-icon-button -ml-1 grid h-8 w-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-slate-100 hover:text-ink"
-              title="Back to Rem"
-              type="button"
-              onClick={onShowRem}
-            >
-              <RatFaceIcon aria-hidden="true" size={17} />
-            </button>
-          ) : null}
-          {activeThread ? (
-            <button
-              aria-label="Back to active threads"
-              className="studio-icon-button -ml-1 grid h-8 w-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-slate-100 hover:text-ink"
-              title="Back to active threads"
-              type="button"
-              onClick={showThreadList}
-            >
-              <ArrowLeft aria-hidden="true" size={16} />
-            </button>
-          ) : null}
-          <div ref={scopeMenuRef} className="relative min-w-0">
-            <button
-              aria-expanded={scopeMenuOpen}
-              aria-haspopup="menu"
-              aria-label={`Scoped to ${scopedProjectName}. Change project scope`}
-              className="flex h-8 min-w-0 max-w-full items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-muted transition hover:bg-slate-100 hover:text-ink disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={chatState.sending || !scopeRoots.length}
-              title={chatState.sending ? "Project scope cannot change while Rem is running" : scopedProjectRoot}
-              type="button"
-              onClick={() => {
-                setConversationMenuOpen(false);
-                setScopeAvailableRoots([]);
-                setScopeWorktrees([]);
-                setScopeLoading(true);
-                setScopeMenuOpen((current) => !current);
-              }}
-            >
-              <GitBranch aria-hidden="true" className="shrink-0" size={14} />
-              <span className="min-w-0 truncate">Scoped to {scopedProjectName}</span>
-              <ChevronDown
-                aria-hidden="true"
-                className={`shrink-0 transition ${scopeMenuOpen ? "rotate-180" : ""}`}
-                size={12}
-              />
-            </button>
-            {scopeMenuOpen ? (
-              <div
-                aria-label="Rem project scope"
-                className="absolute left-0 top-9 z-50 max-h-72 w-72 overflow-y-auto rounded-[14px] border border-line bg-white p-1.5 shadow-panel"
-                role="menu"
-              >
-                <p className="px-2 py-1 text-[10px] font-semibold text-muted">Projects and worktrees</p>
-                {!activeThreadId && defaultGlobalScope ? <button type="button" role="menuitem" className="w-full px-2 py-1 text-left text-xs" onClick={() => { setHomeProjectRoot(""); setScopeMenuOpen(false); }}>Global</button> : null}
-                {scopeLoading ? <p role="status" className="px-2 py-1 text-xs text-muted">Checking workspace folders...</p> : null}
-                {!scopeLoading && !scopeProjects.length ? <p role="status" className="px-2 py-1 text-xs text-muted">No workspace folders available.</p> : null}
-                {scopeProjects.map((project) => (
-                  <button
-                    key={project.root}
-                    className={`flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs transition hover:bg-slate-50 ${
-                      samePath(project.root, scopedProjectRoot)
-                        ? "bg-indigo-50 font-semibold text-indigo-700"
-                        : "text-ink"
-                    }`}
-                    role="menuitem"
-                    title={project.root}
-                    type="button"
-                    onClick={() => changeThreadProjectScope(project.root)}
-                  >
-                    <FolderOpen aria-hidden="true" className="shrink-0 text-muted" size={13} />
-                    <span className="min-w-0 flex-1 truncate">{project.name}</span>
-                    {samePath(project.root, scopedProjectRoot) ? (
-                      <Check aria-hidden="true" className="shrink-0" size={12} />
-                    ) : null}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </div>
-        </div>
-        <div ref={conversationMenuRef} className="relative flex items-center gap-1">
-          {activeThreadId ? <div ref={threadInfoRef} className="relative">
-            <button
-              aria-expanded={threadInfoOpen}
-              aria-haspopup="dialog"
-              aria-label="Thread info"
-              className="studio-icon-button grid h-8 w-8 place-items-center rounded-lg text-muted transition hover:bg-slate-100 hover:text-ink"
-              title="Thread info"
-              type="button"
-              onClick={() => { setConversationMenuOpen(false); setScopeMenuOpen(false); setThreadInfoOpen(current => !current); }}
-            >
-              <Info aria-hidden="true" size={16} />
-            </button>
-            {threadInfoOpen ? <div role="dialog" aria-label="Thread info" className="absolute right-0 top-9 z-50 max-h-[70vh] w-80 overflow-y-auto rounded-[14px] border border-line bg-white p-3 shadow-panel">
-              <p className="truncate text-xs font-semibold text-ink">{activeThread?.title || "This thread"}</p>
-              <p className="mb-3 truncate text-[11px] text-muted" title={scopedProjectRoot}>Scoped to {scopedProjectName}</p>
-              <ThreadContextSent threadId={activeThreadId} refreshKey={String(chatState.sending)} />
-            </div> : null}
-          </div> : null}
-          <button
-            aria-label="New thread"
-            className="studio-icon-button grid h-8 w-8 place-items-center rounded-lg text-muted transition hover:bg-slate-100 hover:text-ink"
-            title="New thread"
-            type="button"
-            onClick={() => createThread(defaultGlobalScope ? "" : prospectiveProjectRoot, { global: defaultGlobalScope })}
-          >
-            <Plus aria-hidden="true" size={17} />
-          </button>
-          <button ref={threadSearchButtonRef} aria-label="Search threads" aria-expanded={threadSearchOpen}
-            className="studio-icon-button grid h-8 w-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-slate-100 hover:text-ink"
-            title="Search threads" type="button" onClick={() => { setThreadSearchOpen(current => !current); setConversationMenuOpen(false); setScopeMenuOpen(false); }}>
-            <Search aria-hidden="true" size={16} />
-          </button>
-          <button
-            aria-expanded={conversationMenuOpen}
-            aria-label="Active threads"
-            className="studio-icon-button grid h-8 w-8 place-items-center rounded-lg text-muted transition hover:bg-slate-100 hover:text-ink"
-            title="Active threads"
-            type="button"
-            onClick={() => {
-              setScopeMenuOpen(false);
-              setConversationMenuOpen((current) => !current);
-            }}
-          >
-            <History aria-hidden="true" size={16} />
-          </button>
-          {conversationMenuOpen ? (
-            <div className="absolute right-0 top-9 z-50 max-h-80 w-72 overflow-y-auto rounded-[14px] border border-line bg-white p-1.5 shadow-panel">
-              <ThreadSections
-                launchedThreadId={launchedThreadId}
-                onLaunchAnimationEnd={() => setLaunchedThreadId(null)}
-                activityByThread={chatStateByThread}
-                threads={threads}
-                activeThreadId={activeThreadId}
-                onArchive={archiveThread}
-                onPin={pinThread}
-                onRename={setRenamingThread}
-                onDelete={deleteThread}
-                onDeletePermanently={memorySettings?.archiveFolder ? deleteThreadPermanently : undefined}
-                onThreadsAction={applyThreadsAction}
-                onClearArchive={clearArchivedThreads}
-                archiveRetention={archiveRetention}
-                onOpen={openThread}
-              />
-            </div>
-          ) : null}
-        </div>
-      </div>
-
-      {forkStatus ? <p role="status" className="border-b border-line px-3.5 py-2 text-xs text-muted">{forkStatus}</p> : null}
-      {renamingThread ? <ThreadRenameDialog
-        thread={renamingThread}
-        onClose={() => setRenamingThread(null)}
-        onRename={renameThread}
-      /> : null}
-      {threadSearchOpen ? <ThreadSearch repository={repository} loadThreads={loadAllChatThreads} onOpen={openThread} onClose={closeThreadSearch} /> : null}
-
-      {activeSearchTarget ? <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line px-3.5 py-2 text-xs text-muted">
-        <span className="min-w-0 truncate" role="status">Match for &quot;{activeSearchTarget.query}&quot;</span>
-        <button type="button" className="shrink-0 rounded px-2 py-1 text-brand focus-visible:outline-brand" onClick={returnToLatestMessages}>Latest messages</button>
-      </div> : null}
-
-      <div
-        ref={chatScrollRef}
-        data-chat-scroll="true"
-        style={{ overflowAnchor: "none" }}
-        className="workflow-scrollbar min-h-0 flex-1 space-y-4 overflow-y-auto px-3.5 py-4"
-        onScroll={(event) => {
-          if (activeSearchTarget) return;
-          chatPinnedToBottomRef.current = conversationIsAtBottom(event.currentTarget);
-          if (event.currentTarget.scrollTop < 80 && historyState.threadId === activeThreadId && historyState.hasMore && !historyState.error) void loadHistoryPage(activeThreadId, historyState.before);
-        }}
-      >
-        {!activeThread ? (
-          <div className="min-h-full" data-assistant-home>
-            <section aria-label="Threads">
-              <ThreadSections
-                launchedThreadId={launchedThreadId}
-                onLaunchAnimationEnd={() => setLaunchedThreadId(null)}
-                activityByThread={chatStateByThread}
-                threads={threads}
-                activeThreadId={activeThreadId}
-                onArchive={archiveThread}
-                onPin={pinThread}
-                onRename={setRenamingThread}
-                onDelete={deleteThread}
-                onDeletePermanently={memorySettings?.archiveFolder ? deleteThreadPermanently : undefined}
-                onThreadsAction={applyThreadsAction}
-                onClearArchive={clearArchivedThreads}
-                archiveRetention={archiveRetention}
-                onOpen={openThread}
-              />
-            </section>
-          </div>
-        ) : activeSearchTarget ? (
-          <ThreadHistoryMatch
-            key={activeSearchTarget.requestId}
-            repository={repository}
-            target={activeSearchTarget}
-            scrollRef={chatScrollRef}
-            renderMessages={renderSearchMessages}
-          />
-        ) : (
-          <>
-            {historyState.threadId === activeThreadId && (historyState.loading || historyState.hasMore || historyState.error) ? (
-              <div className="rem-history-loader flex min-h-8 items-center justify-center gap-2 text-[11px] text-muted" aria-live="polite">
-                {historyState.loading ? <><Loader2 aria-hidden="true" className="motion-safe:animate-spin" size={14} /><span role="status">Loading earlier messages…</span></> : historyState.error ? <><span role="alert">{historyState.error}</span><button className="rounded px-2 py-1 text-brand focus-visible:outline-brand" type="button" onClick={() => loadHistoryPage(activeThreadId, historyState.before)}>Retry</button></> : <button className="rounded px-2 py-1 hover:text-ink focus-visible:outline-brand" type="button" onClick={() => loadHistoryPage(activeThreadId, historyState.before)}>Load earlier messages</button>}
-              </div>
-            ) : null}
-            {!messages.length && !historyState.loading ? <p className="text-sm leading-6 text-muted">I&apos;m Rem, your coding agent in Raticode. I can build workflows, change code, and help you understand your project. What would you like to work on?</p> : null}
-            {conversationItems.map((item) =>
-              item.type === "thought-group" ? (
-                <ThoughtGroup
-                  key={item.id}
-                  expanded={isThoughtGroupExpanded(item, expandedThoughtGroups, assistantDefaults.autoHideThoughts !== false)}
-                  replyId={item.replyId}
-                  onOpenLink={openScopedMarkdownLink}
-                  sourcePath={assistantMarkdownSourcePath(scopedProjectRoot)}
-                  onOpenFile={openScopedFile}
-                  thoughts={item.thoughts}
-                  lazy={item.lazy}
-                  loaded={item.lazy && lazyThoughts[item.lazy.id]}
-                  groupId={item.id}
-                  onToggle={toggleThoughtGroup}
-                />
-              ) : (
-                <ForkableMessage
-                  onFork={forkMessageAction}
-                  key={item.message.id}
-                  canEdit={!chatState.sending && item.message.id === latestUserMessageId}
-                  message={item.message}
-                  onEdit={editMessageAction}
-                  onResume={!chatState.sending && item.message.id === visibleMessages.at(-1)?.id
-                    ? () => void sendMessage(null, { text: "Continue the original task. Inspect completed work first and avoid repeating completed actions." }) : undefined}
-                  supportsImages={supportsImages}
-                  providerName={providerCapability?.displayName || providerId}
-                  onOpenLink={openScopedMarkdownLink}
-                  sourcePath={assistantMarkdownSourcePath(scopedProjectRoot)}
-                  onUndoChanges={undoMessageAction}
-                />
-              ),
-            )}
-            {chatState.error ? (
-              <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm leading-5 text-red-700">
-                {chatState.error}
-              </div>
-            ) : null}
-          </>
-        )}
-      </div>
-
-      <div className="relative shrink-0 border-t border-line p-3">
-          <RemToolsMenu
-            key={activeThreadId || "new-thread"}
-            open={resourcesOpen}
-            onOpenChange={setResourcesOpen}
-            thread={Boolean(activeThread)}
-            sending={chatState.sending}
-            value={activeThread ? activeThread.resources ?? assistantDefaults.resources ?? DEFAULT_REM_RESOURCES : homeResources}
-            memory={memorySettings}
-            onChange={(resources) => {
-              if (activeThread) updateThreadConfig({ resources });
-              // New-thread tools are the saved Rem defaults, so they survive restarts.
-              else if (onNewThreadResourcesChange) onNewThreadResourcesChange(resources);
-              else setNewThreadResources(resources);
-            }}
-          />
-          <ProviderModelEffortFields
-            account={threadAccountMenu ? {
-              menu: threadAccountMenu,
-              warning: accountSignInError || accountWarning,
-              onChange: (choice) => {
-                setAccountSignInError("");
-                if (activeThread) updateThreadConfig({ accountsByProvider: withThreadAccount(activeThread.accountsByProvider, providerId, choice) });
-                else setDraftAccounts(current => withThreadAccount(current, providerId, choice));
-              },
-              onSignIn: (name) => {
-                setAccountSignInError("");
-                signInProviderAccount(name).catch(failure => setAccountSignInError(failure.message || "Could not start the sign-in."));
-              },
-            } : null}
-            capabilities={providers}
-            loading={providersLoading}
-            className="mb-2"
-            disabled={providersLoading || chatState.sending}
-            effort={effort}
-            model={model}
-            provider={providerId}
-            onChange={(patch) => {
-              updateThreadConfig(patch);
-              if (patch.provider !== undefined) setProviderId(patch.provider);
-              if (patch.model !== undefined) setModel(patch.model);
-              if (patch.effort !== undefined) setEffort(patch.effort);
-            }}
-            onRefresh={refreshProviders}
-          />
-          {providerDiscoveryError ? (
-            <p className="mb-2 text-xs text-red-600">{providerDiscoveryError}</p>
-          ) : null}
-          {steeringErrors[activeThreadId] ? <p role="alert" className="mb-2 text-xs text-red-600">{steeringErrors[activeThreadId]}</p> : null}
-          {requiresPermissionChoice ? <div role="alert" className="mb-2 rounded-lg border border-line p-3 text-xs">
-            <p>{providerCapability?.displayName || providerId} needs CLI-managed permissions to send messages. Raticode&apos;s tool restrictions are unsupported.</p>
-            <button type="button" className="mt-2 font-semibold underline" disabled={chatState.sending} onClick={() => selectPermission("cli-managed")}>Use CLI-managed permissions</button>
-          </div> : null}
-          <ChatComposer
-            shortcutHint={!activeThreadId ? "Enter to start thread Shift+Enter for a new line Ctrl+Enter to start thread in background" : undefined}
-            onSteer={steerAssistant}
-            steeringPending={Boolean(steeringBusy[activeThreadId])}
-            provider={providerId}
-            permissionMode={permissionMode}
-            permissionOptions={permissionOptions}
-            onPermissionModeChange={selectPermission}
-            machines={machines}
-            machine={activeThread ? activeThread.machine || "" : draftMachine}
-            machineLocked={Boolean(activeThread && messages.length)}
-            onMachineChange={value => activeThread ? updateThreadConfig({ machine: value || undefined }) : setDraftMachine(value)}
-            attachments={attachments}
-            attachmentError={attachmentError}
-            attachmentWarning={attachmentWarning?.text || ""}
-            audioInputDeviceId={audioInputDeviceId}
-            contextKey={activeThreadId ?? "new-thread"}
-            draft={draft}
-            focusRequest={composerFocusRequest + contextFocusRequest}
-            sending={chatState.sending}
-            sendDisabled={requiresPermissionChoice || (historyState.threadId === activeThreadId && Boolean(historyState.loading || historyState.error))}
-            onAddAttachments={addAttachments}
-            onAttachmentErrorChange={setAttachmentError}
-            onAttachmentsChange={setAttachments}
-            onDraftChange={value => {
-              draftsByThreadRef.current[activeThreadId || "new-thread"] = value;
-              setDraft(value);
-            }}
-            onSend={sendMessage}
-            onStop={() => activeThreadId && stopAssistant(activeThreadId)}
-          />
-      </div>
-    </aside>
-  );
-}
-
-// The thread list lives in its own chunk; App supplies its history helpers.
-export function ThreadSections(props) {
-  return <ThreadSectionsView threadIndex={chatThreadIndex} loadStoredThread={loadChatThread} formatDate={formatThreadDate} {...props} />;
-}
-
-export function ThreadList(props) {
-  return <ThreadListView formatDate={formatThreadDate} {...props} />;
-}
-
-function ThreadRenameDialog({ thread, onClose, onRename }) {
-  const [name, setName] = useState(thread.title);
-  return <Dialog
-    title="Rename Thread"
-    onClose={onClose}
-    overlayClassName="fixed inset-0 z-[95] grid place-items-center ui-scrim px-4"
-    panelClassName="w-full max-w-sm rounded-lg border border-line bg-white p-4 shadow-panel"
-  >
-    <form onSubmit={event => { event.preventDefault(); if (name.trim()) onRename(thread.id, name); }}>
-      <h3 className="mb-3 text-sm font-semibold text-strong">Rename Thread</h3>
-      <label className="mb-1 block text-xs text-muted" htmlFor="rem-thread-name">Thread name</label>
-      <input
-        id="rem-thread-name"
-        aria-label="Thread name"
-        data-dialog-initial-focus
-        maxLength={160}
-        className="h-10 w-full rounded-lg border border-line bg-white px-3 text-sm outline-none focus:border-brand"
-        value={name}
-        onChange={event => setName(event.target.value)}
-        onFocus={event => event.target.select?.()}
-      />
-      <div className="mt-4 flex justify-end gap-2">
-        <button type="button" className="h-9 rounded-lg border border-line px-3 text-sm hover:bg-slate-50" onClick={onClose}>Cancel</button>
-        <button type="submit" disabled={!name.trim()} className="h-9 rounded-lg bg-brand px-3 text-sm font-medium text-white disabled:opacity-60">Save</button>
-      </div>
-    </form>
-  </Dialog>;
-}
-
-
-export function conversationIsAtBottom(element, tolerance = 4) {
-  if (!element) return false;
-  return element.scrollHeight - element.scrollTop - element.clientHeight <= tolerance;
-}
-
-export function scrollConversationToBottom(element) {
-  if (!element) return;
-  element.scrollTop = element.scrollHeight;
-}
-
-function ForkButton({ messageId, onFork }) {
-  return onFork ? <button type="button" title="Fork thread from here" aria-label="Fork thread from here"
-    className="inline-flex h-6 items-center gap-1 rounded px-1.5 text-[10px] text-muted hover:bg-slate-100 hover:text-ink focus-visible:outline-brand"
-    onClick={() => void onFork(messageId)}><GitBranch aria-hidden="true" size={12} /><span>Fork</span></button> : null;
-}
-
-const ForkableMessage = memo(function ForkableMessage({ onFork, canFork, ...props }) {
-  return <div>
-    {props.message.role === "user" && props.message.modelSwitchBanner ? (
-      <div className="rem-model-switch" role="note" aria-label="Model changed">
-        <span>{props.message.modelSwitchBanner}</span>
-      </div>
-    ) : null}
-    <ChatMessageBubble {...props} />
-    {(canFork ?? isForkableMessage(props.message)) ? <div className="flex justify-end"><ForkButton messageId={props.message.id} onFork={onFork} /></div> : null}
-  </div>;
-});
-
-export const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, message, onEdit, onResume, onOpenLink, onUndoChanges, sourcePath, supportsImages = true, providerName = "This provider" }) {
-  const [copied, setCopied] = useState(false);
-  const [editing, setEditing] = useState(false);
-  const [editDraft, setEditDraft] = useState(message.body);
-  const [editAttachments, setEditAttachments] = useState([]);
-  const [editAttachmentError, setEditAttachmentError] = useState("");
-  const copyResetTimerRef = useRef(null);
-
-  useEffect(() => () => window.clearTimeout(copyResetTimerRef.current), []);
-
-  if (message.kind === "turn-summary") {
-    return <TurnSummaryCard message={message} onUndo={() => onUndoChanges(message)} />;
-  }
-  if (message.kind === "error") {
-    return <div data-message-id={message.id} data-history-anchor={message.id}
-      role="alert" aria-live="assertive"
-      className="whitespace-pre-wrap break-words rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
-      {message.body}
-      {message.resumeAvailable && onResume ? <div className="mt-2"><button type="button" className="rounded border border-current px-2 py-1 text-xs focus-visible:outline-brand" onClick={onResume}>Resume task</button></div> : null}
-    </div>;
-  }
-  const isSystem = message.role === "system" || message.kind === "system";
-  const isUser = message.role === "user";
-  // Rem's task threads say who wrote each instruction: Rem or the user. Both
-  // reach the worker as user messages; here they must not look the same.
-  const author = isUser && (message.sender === "rem" || message.sender === "user") ? message.sender : "";
-  const fromRem = author === "rem";
-  const headerButton = fromRem
-    ? "grid h-5 w-5 place-items-center rounded text-muted outline-none transition hover:bg-brand/15 hover:text-ink focus-visible:ring-2 focus-visible:ring-brand/50"
-    : "grid h-5 w-5 place-items-center rounded text-white/80 outline-none transition hover:bg-white/15 hover:text-white focus-visible:ring-2 focus-visible:ring-white/70";
-
-  async function copyMessage() {
-    try {
-      await navigator.clipboard.writeText(message.body);
-      setCopied(true);
-      window.clearTimeout(copyResetTimerRef.current);
-      copyResetTimerRef.current = window.setTimeout(() => setCopied(false), 2000);
-    } catch {
-      setCopied(false);
-    }
-  }
-
-  function beginEditing() {
-    setEditDraft(message.body);
-    setEditAttachments(message.attachments || []);
-    setEditAttachmentError("");
-    setEditing(true);
-  }
-
-  function cancelEditing() {
-    setEditDraft(message.body);
-    setEditAttachments([]);
-    setEditAttachmentError("");
-    setEditing(false);
-  }
-
-  function saveEdit() {
-    const body = editDraft.trim();
-    if (!body && !editAttachments.length) return;
-    onEdit?.(message.id, body, editAttachments);
-    setEditing(false);
-  }
-
-  return (
-    <div
-      data-message-id={message.id}
-      data-history-anchor={message.id}
-      data-author={author || undefined}
-      className={`flex ${
-        isSystem ? "justify-center" : message.role === "user" ? "justify-end" : "justify-start"
-      }`}
-    >
-      <div
-        className={`${isSystem ? "max-w-[86%]" : "w-full min-w-0"} rounded-lg px-3 py-2 text-sm leading-6 ${
-          isSystem
-            ? "border border-line bg-slate-50 text-xs font-medium text-muted"
-            : fromRem
-            ? "border border-brand/40 bg-brand/10 text-ink"
-            : message.role === "user"
-            ? "bg-brand text-white"
-            : "border border-line bg-white text-slate-700 shadow-sm"
-        }`}
-      >
-        {isSystem ? (
-          <span className="whitespace-pre-wrap break-words">{message.body}</span>
-        ) : (
-          <>
-            {isUser ? (
-              <div className="mb-1 flex h-5 items-center justify-end gap-0.5">
-                {author ? (
-                  <span className={`mr-auto inline-flex items-center gap-1 text-[11px] font-semibold ${fromRem ? "text-brand" : "text-white/90"}`}>
-                    {fromRem ? <Bot aria-hidden="true" size={12} /> : <UserRound aria-hidden="true" size={12} />}
-                    <span className="sr-only">Written by </span>{fromRem ? "Rem" : "You"}
-                  </span>
-                ) : null}
-                {message.origin === "phone" && <span title="Sent from your phone" aria-label="Sent from your phone" className="mr-1 inline-flex"><Smartphone aria-hidden="true" size={12} /></span>}
-                {canEdit && !fromRem ? (
-                  <button
-                    aria-label="Edit message"
-                    className={headerButton}
-                    title="Edit message"
-                    type="button"
-                    onClick={beginEditing}
-                  >
-                    <PencilLine aria-hidden="true" size={11} />
-                  </button>
-                ) : null}
-                <button
-                  aria-label={copied ? "Message copied" : "Copy message"}
-                  className={headerButton}
-                  title={copied ? "Message copied" : "Copy message"}
-                  type="button"
-                  onClick={() => void copyMessage()}
-                >
-                  {copied ? <Check aria-hidden="true" size={11} /> : <Copy aria-hidden="true" size={11} />}
-                </button>
-              </div>
-            ) : null}
-            {isUser ? <MessageAttachments attachments={editing ? editAttachments : message.attachments} inverse={!fromRem} onOpenLink={onOpenLink} /> : null}
-            {isUser && editing ? (
-              <div className="space-y-2">
-                <textarea
-                  aria-label="Edit message text"
-                  autoFocus
-                  className="workflow-scrollbar max-h-48 min-h-20 w-full resize-y rounded-md border border-white/35 bg-white/10 px-2.5 py-2 text-sm leading-5 text-white outline-none placeholder:text-indigo-200 focus:border-white/70 focus:ring-2 focus:ring-white/25"
-                  value={editDraft}
-                  onPaste={event => {
-                    const files = clipboardAttachmentFiles(event.clipboardData);
-                    const textFile = largePasteFile(event.clipboardData?.getData?.("text/plain") || "");
-                    if (!files.length && !textFile) return;
-                    event.preventDefault();
-                    event.stopPropagation();
-                    const incoming = textFile ? [...files, textFile] : files;
-                    const result = readChatAttachments(incoming.filter(file => supportsImages || !isChatImage(file)), editAttachments);
-                    setEditAttachments(result.attachments);
-                    setEditAttachmentError(!supportsImages && incoming.some(isChatImage)
-                      ? `${providerName} can't accept images with this selection.` : result.error);
-                  }}
-                  onChange={(event) => setEditDraft(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Escape") cancelEditing();
-                    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) saveEdit();
-                  }}
-                />
-                {editAttachmentError ? <p role="alert">{editAttachmentError}</p> : null}
-                <div className="flex justify-end gap-1.5">
-                  <button
-                    className="h-7 rounded-md px-2 text-xs font-medium text-white/80 outline-none transition hover:bg-white/15 hover:text-white focus-visible:ring-2 focus-visible:ring-white/70"
-                    type="button"
-                    onClick={cancelEditing}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    className="h-7 rounded-md bg-white px-2.5 text-xs font-semibold text-brand outline-none transition hover:bg-indigo-50 focus-visible:ring-2 focus-visible:ring-white/70 disabled:cursor-not-allowed disabled:opacity-50"
-                    disabled={!editDraft.trim() && !editAttachments.length}
-                    type="button"
-                    onClick={saveEdit}
-                  >
-                    Send again
-                  </button>
-                </div>
-              </div>
-            ) : message.body ? (
-              <>
-                {message.kind === "search-source" ? <div className="whitespace-pre-wrap break-words">{message.body}</div>
-                  : <>{message.interrupted ? <span className="mb-2 block text-xs text-muted">Partial response. Rem was interrupted.</span> : null}<MarkdownMessage inverse={isUser && !fromRem} loadWebImages={Boolean(message.sources?.length)} sourcePath={sourcePath} onOpenLink={onOpenLink} value={message.body} /></>}
-                {!isUser && message.kind !== "streaming" && (message.sources?.length || /youtu\.?be/.test(message.body))
-                  ? <Suspense fallback={null}><ChatSources body={message.body} sources={message.sources} /></Suspense> : null}
-                {!isUser && message.kind !== "streaming" ? (
-                  <div className="mt-1 flex justify-end border-t border-line/70 pt-1">
-                    <button
-                      aria-label={copied ? "Response copied" : "Copy response as Markdown"}
-                      className="inline-flex h-6 items-center gap-1 rounded px-1.5 text-[10px] leading-none text-muted outline-none transition hover:bg-slate-50 hover:text-ink focus-visible:ring-2 focus-visible:ring-brand/30 dark:hover:bg-[#242426]"
-                      title={copied ? "Response copied" : "Copy response as Markdown"}
-                      type="button"
-                      onClick={() => void copyMessage()}
-                    >
-                      {copied ? <Check aria-hidden="true" size={11} /> : <Copy aria-hidden="true" size={11} />}
-                      <span>{copied ? "Copied" : "Copy Markdown"}</span>
-                    </button>
-                  </div>
-                ) : null}
-              </>
-            ) : null}
-          </>
-        )}
-      </div>
-    </div>
-  );
-});
-
-function TurnSummaryCard({ message, onUndo }) {
-  const [reviewing, setReviewing] = useState(false);
-  const [showAllFiles, setShowAllFiles] = useState(false);
-  const changes = message.changes;
-  const files = Array.isArray(changes?.files) ? changes.files : [];
-  const visibleFiles = showAllFiles ? files : files.slice(0, 3);
-  const liveDurationMs = useLiveDuration(message.startedAt, message.running);
-  const timing = message.running
-    ? `Running for ${formatAssistantDuration(liveDurationMs)}`
-    : formatAssistantTurnTiming(message.completedAt, message.durationMs);
-
-  if (!changes) {
-    return (
-      <div
-        aria-label="Rem running"
-        className="flex items-center gap-1.5 px-1 text-[10px] text-muted"
-        data-message-id={message.id}
-      data-history-anchor={message.id}
-      >
-        {message.running ? <Loader2 aria-hidden="true" className="animate-spin" size={11} /> : null}
-        <span>{timing}</span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-1.5" data-message-id={message.id}>
-      <section
-        aria-label="Rem file changes"
-        className="overflow-hidden rounded-lg border border-line bg-white dark:bg-[#181818]"
-      >
-        <div className="flex min-h-12 items-center gap-2.5 px-3 py-2">
-          <FileDiff aria-hidden="true" className="shrink-0 text-muted" size={16} />
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-baseline gap-x-2 text-xs">
-              <span className="inline-flex items-center gap-1.5 font-semibold text-ink">
-                {message.running ? <Loader2 aria-hidden="true" className="animate-spin text-brand" size={12} /> : null}
-                {message.running ? assistantLiveChangeLabel(files) : assistantChangeLabel(files)}
-              </span>
-              {files.some(file => !file.binary) ? <><span className="font-medium text-emerald-600">+{changes.additions ?? 0}</span><span className="font-medium text-red-500">-{changes.deletions ?? 0}</span></> : null}
-              {files.some(file => file.binary) ? <span className="text-muted">{files.filter(file => file.binary).length} without line counts</span> : null}
-            </div>
-          </div>
-          <button
-            className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-xs font-medium text-muted outline-none transition hover:bg-slate-50 hover:text-ink focus-visible:ring-2 focus-visible:ring-brand/30 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-[#242426]"
-            disabled={message.running || !changes.undoable || changes.changing}
-            title={!changes.undoable ? changes.undoUnavailableReason : undefined}
-            type="button"
-            onClick={onUndo}
-          >
-            {changes.changing ? (
-              <Loader2 aria-hidden="true" className="animate-spin" size={13} />
-            ) : changes.undone ? (
-              <Redo2 aria-hidden="true" size={13} />
-            ) : (
-              <Undo2 aria-hidden="true" size={13} />
-            )}
-            {changes.changing ? (changes.undone ? "Redoing" : "Undoing") : changes.undone ? "Redo" : "Undo"}
-          </button>
-          <button
-            aria-expanded={reviewing}
-            className="h-8 rounded-md border border-line px-2.5 text-xs font-medium text-ink outline-none transition hover:bg-slate-50 focus-visible:ring-2 focus-visible:ring-brand/30 dark:hover:bg-[#242426]"
-            type="button"
-            onClick={() => setReviewing((current) => !current)}
-          >
-            {reviewing ? "Close" : "Review"}
-          </button>
-        </div>
-        <div className="border-t border-line px-3 py-2">
-          <div className="space-y-1.5">
-            {visibleFiles.map((file) => (
-              <div className="flex min-w-0 items-center gap-2 text-[11px]" key={file.path}>
-                <span className="min-w-0 flex-1 truncate text-muted" title={file.path}>{file.path}</span>
-                {file.binary ? <span className="shrink-0 text-muted">{file.diff?.includes("too large") ? "Too large to count" : "Binary"}</span> : <><span className="shrink-0 font-medium text-emerald-600">+{file.additions ?? 0}</span><span className="shrink-0 font-medium text-red-500">-{file.deletions ?? 0}</span></>}
-              </div>
-            ))}
-          </div>
-          {files.length > 3 ? (
-            <button
-              className="mt-2 inline-flex items-center gap-1 text-[11px] text-muted outline-none transition hover:text-ink focus-visible:ring-2 focus-visible:ring-brand/30"
-              type="button"
-              onClick={() => setShowAllFiles((current) => !current)}
-            >
-              {showAllFiles ? "Show fewer files" : `Show ${files.length - 3} more files`}
-              <ChevronDown aria-hidden="true" className={`transition-transform ${showAllFiles ? "rotate-180" : ""}`} size={13} />
-            </button>
-          ) : null}
-        </div>
-        {reviewing ? (
-          <div className="max-h-80 space-y-3 overflow-auto border-t border-line bg-slate-50 px-3 py-3 dark:bg-[#111113]">
-            {files.map((file) => <AssistantDiffPreview file={file} key={file.path} />)}
-          </div>
-        ) : null}
-        {changes.changeError ? (
-          <p className="border-t border-red-200 bg-red-50 px-3 py-2 text-[11px] leading-4 text-red-700">
-            {changes.changeError}
-          </p>
-        ) : null}
-      </section>
-      <div className="px-1 text-[10px] text-muted">{timing}</div>
-    </div>
-  );
-}
-
-function AssistantDiffPreview({ file }) {
-  return (
-    <section aria-label={`Diff for ${file.path}`}>
-      <h4 className="mb-1.5 truncate font-mono text-[10px] font-semibold text-ink" title={file.path}>
-        {file.path}
-      </h4>
-      <pre className="workflow-scrollbar overflow-x-auto rounded-md border border-line bg-white py-1 font-mono text-[10px] leading-4 dark:bg-[#181818]">
-        {String(file.diff || "No text preview available.").split("\n").map((line, index) => (
-          <span
-            className={`block min-w-max px-2 ${
-              line.startsWith("+") && !line.startsWith("+++")
-                ? "bg-emerald-50 text-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300"
-                : line.startsWith("-") && !line.startsWith("---")
-                ? "bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-300"
-                : "text-slate-600 dark:text-[#b9b9b9]"
-            }`}
-            key={`${index}-${line}`}
-          >
-            {line || " "}
-          </span>
-        ))}
-      </pre>
-    </section>
-  );
-}
-
-export function assistantChangeLabel(files) {
-  const count = files.length;
-  const noun = count === 1 ? "file" : "files";
-  if (count && files.every((file) => file.status === "added")) return `Created ${count} ${noun}`;
-  if (count && files.every((file) => file.status === "deleted")) return `Deleted ${count} ${noun}`;
-  return `Edited ${count} ${noun}`;
-}
-
-function assistantLiveChangeLabel(files) {
-  const count = files.length;
-  const noun = count === 1 ? "file" : "files";
-  if (count && files.every((file) => file.status === "added")) return `Creating ${count} ${noun}`;
-  if (count && files.every((file) => file.status === "deleted")) return `Deleting ${count} ${noun}`;
-  return `Editing ${count} ${noun}`;
-}
-
-function useLiveDuration(startedAt, running) {
-  const [durationMs, setDurationMs] = useState(() => (
-    running ? Math.max(0, Date.now() - Number(startedAt || Date.now())) : 0
-  ));
-
-  useEffect(() => {
-    if (!running) return undefined;
-    const update = () => setDurationMs(Math.max(0, Date.now() - Number(startedAt || Date.now())));
-    update();
-    const intervalId = window.setInterval(update, 1000);
-    return () => window.clearInterval(intervalId);
-  }, [running, startedAt]);
-
-  return durationMs;
-}
-
-export function formatAssistantDuration(durationMs) {
-  const milliseconds = Math.max(0, Number(durationMs) || 0);
-  const seconds = Math.floor(milliseconds / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-}
-
-export function formatAssistantTurnTiming(completedAt, durationMs) {
-  const date = new Date(completedAt);
-  const completed = Number.isNaN(date.getTime())
-    ? "Completed"
-    : date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  const milliseconds = Math.max(0, Number(durationMs) || 0);
-  const seconds = Math.round(milliseconds / 1000);
-  const duration = milliseconds < 1000
-    ? "<1s"
-    : formatAssistantDuration(seconds * 1000);
-  return `${completed} · Ran for ${duration}`;
-}
-
-export function MarkdownMessage({ compact = false, inverse = false, loadWebImages = false, onOpenLink, sourcePath, value }) {
-  return (
-    <MarkdownContent
-      compact={compact}
-      inverse={inverse}
-      loadWebImages={loadWebImages}
-      value={value}
-      onOpenRelativeLink={onOpenLink}
-      sourcePath={sourcePath}
-    />
-  );
-}
-
-const NO_THOUGHTS = [];
-// A `lazy` group has only a placeholder until expanding it loads `loaded.thoughts`.
-const ThoughtGroup = memo(function ThoughtGroup({ groupId, replyId, expanded, onOpenFile, onOpenLink, onToggle, sourcePath, thoughts: groupThoughts, searchMessageId, lazy, loaded }) {
-  const thoughts = lazy ? loaded?.thoughts || NO_THOUGHTS : groupThoughts;
-  const trace = useMemo(() => buildThoughtTrace(thoughts), [thoughts]);
-  const count = trace.length;
-  const match = thoughts.find(thought => String(thought.id) === String(searchMessageId));
-  const matchKey = match?.trace?.id ? `trace-${match.groupId || ""}-${match.trace.id}` : match?.id;
-
-  if (!count && (!lazy || loaded?.thoughts)) return null;
-
-  return (
-    <div className="flex justify-start" data-message-id={groupId}>
-      <div className="w-full min-w-0 text-sm text-slate-700 dark:text-[#d4d4d4]">
-        <button
-          className="flex w-full items-center justify-between gap-3 rounded-md px-1 py-1.5 text-left transition hover:text-ink"
-          type="button"
-          aria-expanded={expanded}
-          onClick={() => onToggle(groupId, replyId, expanded, !expanded && lazy && !loaded?.thoughts ? lazy : null)}
-        >
-          <span className="min-w-0 text-xs font-semibold text-ink">
-            {expanded ? "Hide thoughts" : "Show thoughts"}
-            <span className="ml-1.5 font-normal text-muted">{count || null}</span>
-          </span>
-          <span className="grid h-6 w-6 place-items-center rounded-md text-muted transition">
-            {expanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
-          </span>
-        </button>
-        <div
-          className={`grid transition-all duration-200 ease-out ${
-            expanded ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"
-          }`}
-        >
-          <div className="overflow-hidden">
-            <div className="px-1 pb-1 pt-2">
-              {expanded && !count ? <p className="text-xs text-muted" role={loaded?.error ? "alert" : "status"}>{loaded?.error || "Loading thoughts…"}</p> : null}
-              {expanded && trace.map((entry, index) => (
-                <div
-                  key={entry.key}
-                  data-history-anchor={`${entry.groupId || ""}:${entry.key}`}
-                  data-thread-search-match={entry.key === matchKey ? "true" : undefined}
-                  tabIndex={entry.key === matchKey ? -1 : undefined}
-                  className={`relative ml-1 border-l border-line pl-5 ${
-                    index === trace.length - 1 ? "pb-1" : "pb-4"
-                  }`}
-                >
-                  <span
-                    aria-hidden="true"
-                    className={`absolute -left-[4.5px] top-1 h-2 w-2 rounded-full border border-white dark:border-[#18181a] ${
-                      entry.kind === "tool" && entry.status !== "error"
-                        ? "bg-emerald-500"
-                        : entry.status === "error"
-                        ? "bg-red-500"
-                        : "bg-slate-400"
-                    }`}
-                  />
-                  {shellTraceDetails(entry) ? (
-                    <ShellCommandDisclosure entry={entry} initiallyExpanded={entry.key === matchKey} />
-                  ) : editTraceDetails(entry) ? (
-                    <EditDisclosure entry={entry} onOpenFile={onOpenFile} initiallyExpanded={entry.key === matchKey} />
-                  ) : entry.kind === "tool" && (entry.input || entry.output) ? (
-                    <ToolTraceDisclosure entry={entry} initiallyExpanded={entry.key === matchKey} />
-                  ) : entry.kind === "tool" || !entry.body ? (
-                    <div className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 text-xs leading-5">
-                      {entry.title ? (
-                        <span className="font-semibold text-ink">{entry.title}</span>
-                      ) : null}
-                      {entry.detail ? (
-                        <span className="min-w-0 break-words text-muted">{entry.detail}</span>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  {entry.kind === "summary" && entry.body ? (
-                    <div className="text-xs leading-5 text-slate-600 dark:text-[#b9b9b9]">
-                      <MarkdownMessage compact sourcePath={sourcePath} onOpenLink={onOpenLink} value={entry.body} />
-                    </div>
-                  ) : null}
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-});
-
-function ToolTraceDisclosure({ entry, initiallyExpanded = false }) {
-  const [expanded, setExpanded] = useState(initiallyExpanded);
-  const detail = toolTraceDisclosureDetail(entry);
-  const isSearch = entry.category === "search"
-    || String(entry.title || "").trim().toLowerCase().includes("search");
-
-  return (
-    <div className="min-w-0">
-      <button
-        aria-expanded={expanded}
-        className="group -ml-1 flex min-h-7 w-[calc(100%+0.25rem)] items-center gap-2 rounded-md px-1 text-left text-xs outline-none transition-colors hover:bg-slate-100/70 focus-visible:ring-2 focus-visible:ring-brand/30 dark:hover:bg-[#242426]"
-        type="button"
-        onClick={() => setExpanded((current) => !current)}
-      >
-        <span className="shrink-0 font-semibold text-ink group-hover:text-brand">
-          {entry.title || "Tool"}
-        </span>
-        {detail && (!isSearch || expanded) ? (
-          <span className="min-w-0 flex-1 truncate text-muted" title={detail}>{detail}</span>
-        ) : (
-          <span className="flex-1" />
-        )}
-        <ChevronRight
-          aria-hidden="true"
-          className={`shrink-0 text-muted transition-transform duration-150 group-hover:text-ink ${expanded ? "rotate-90" : ""}`}
-          size={14}
-        />
-      </button>
-      <div
-        className={`grid transition-[grid-template-rows,opacity] duration-150 ease-out ${
-          expanded ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"
-        }`}
-      >
-        <div className="overflow-hidden">
-          {expanded ? <>
-            <div className="mt-1 overflow-hidden rounded-md border border-line bg-white dark:bg-[#181818]">
-              {entry.input ? <TracePayload label="In" value={entry.input} /> : null}
-              {entry.output ? <TracePayload label="Out" value={entry.output} divided={Boolean(entry.input)} /> : null}
-            </div>
-          </> : null}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-export function toolTraceDisclosureDetail(entry) {
-  const detail = String(entry?.detail || "").trim();
-  if (detail) return detail;
-
-  const title = String(entry?.title || "").trim().toLowerCase();
-  if (entry?.category !== "search" && !title.includes("search")) return "";
-
-  const input = String(entry?.input || "").trim();
-  if (!input) return "";
-  try {
-    const parsed = JSON.parse(input);
-    const query = parsed?.query
-      ?? parsed?.q
-      ?? parsed?.search_query?.[0]?.q
-      ?? parsed?.image_query?.[0]?.q;
-    return typeof query === "string" ? query.trim() : "";
-  } catch {
-    return input.includes("\n") ? "" : input;
-  }
-}
-
-function EditDisclosure({ entry, onOpenFile, initiallyExpanded = false }) {
-  const [expanded, setExpanded] = useState(initiallyExpanded);
-  const details = editTraceDetails(entry);
-  if (!details) return null;
-
-  return (
-    <div className="min-w-0">
-      <button
-        aria-expanded={expanded}
-        className="group flex min-h-7 max-w-full items-center gap-1 rounded-md pr-1 text-left text-xs font-semibold text-ink outline-none transition hover:text-brand focus-visible:ring-2 focus-visible:ring-brand/30"
-        type="button"
-        onClick={() => setExpanded((current) => !current)}
-      >
-        <span className="truncate">Editing files</span>
-        <ChevronRight
-          aria-hidden="true"
-          className={`shrink-0 text-muted transition-transform duration-150 ${expanded ? "rotate-90" : ""}`}
-          size={14}
-        />
-      </button>
-      <div
-        className={`grid transition-[grid-template-rows,opacity] duration-150 ease-out ${
-          expanded ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"
-        }`}
-      >
-        <div className="overflow-hidden">
-          {expanded ? <>
-            {details.path ? (
-              <button
-                aria-label={`Open ${details.path} in code editor`}
-                className="mt-0.5 block w-full min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-left text-[10px] text-muted outline-none transition hover:text-brand focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-brand/30"
-                style={{ direction: "rtl" }}
-                title={details.path}
-                type="button"
-                onClick={() => onOpenFile?.(details.path)}
-              >
-                {details.path}
-              </button>
-            ) : null}
-            <pre className="workflow-scrollbar mt-1 max-h-40 min-w-0 overflow-auto whitespace-pre-wrap break-words rounded-md border border-line bg-slate-50 px-2.5 py-2 font-mono text-[10px] leading-4 text-slate-600 dark:bg-[#111113] dark:text-[#b9b9b9]">
-              {details.input || "Waiting for edit details..."}
-            </pre>
-          </> : null}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-export function editTraceDetails(entry) {
-  if (!entry || entry.kind !== "tool" || String(entry.title || "").trim().toLowerCase() !== "edit") {
-    return null;
-  }
-  let path = String(entry.detail || "").trim();
-  const input = String(entry.input || "").trim();
-  if (!path && input) {
-    try {
-      const parsed = JSON.parse(input);
-      path = String(parsed?.path || parsed?.file_path || "").trim();
-    } catch {
-      path = "";
-    }
-  }
-  return { input, path };
-}
-
-function ShellCommandDisclosure({ entry, initiallyExpanded = false }) {
-  const [expanded, setExpanded] = useState(initiallyExpanded);
-  const details = shellTraceDetails(entry);
-  if (!details) return null;
-
-  return (
-    <div className="min-w-0">
-      <button
-        aria-expanded={expanded}
-        className="group flex min-h-7 max-w-full items-center gap-1 rounded-md pr-1 text-left text-xs font-semibold text-ink outline-none transition hover:text-brand focus-visible:ring-2 focus-visible:ring-brand/30"
-        type="button"
-        onClick={() => setExpanded((current) => !current)}
-      >
-        <span className="truncate">Running {details.shell} commands</span>
-        <ChevronRight
-          aria-hidden="true"
-          className={`shrink-0 text-muted transition-transform duration-150 ${expanded ? "rotate-90" : ""}`}
-          size={14}
-        />
-      </button>
-      <div
-        className={`grid transition-[grid-template-rows,opacity] duration-150 ease-out ${
-          expanded ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"
-        }`}
-      >
-        <div className="overflow-hidden">
-          {expanded ? <>
-            <pre className="workflow-scrollbar mt-1 max-h-40 min-w-0 overflow-auto whitespace-pre-wrap break-words rounded-md border border-line bg-slate-50 px-2.5 py-2 font-mono text-[10px] leading-4 text-slate-600 dark:bg-[#111113] dark:text-[#b9b9b9]">
-              {details.command || "Waiting for command..."}
-            </pre>
-          </> : null}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-
-export function shellTraceDetails(entry) {
-  if (!entry || entry.kind !== "tool") return null;
-  const title = String(entry.title || "").trim();
-  const normalizedTitle = title.toLowerCase();
-  const shellTitles = new Map([
-    ["bash", "bash"],
-    ["sh", "sh"],
-    ["zsh", "zsh"],
-    ["fish", "fish"],
-    ["powershell", "PowerShell"],
-    ["pwsh", "PowerShell"],
-    ["cmd", "Command Prompt"],
-    ["command prompt", "Command Prompt"],
-    ["shell", "shell"],
-    ["terminal", "terminal"],
-  ]);
-  if (entry.category !== "shell" && !shellTitles.has(normalizedTitle)) return null;
-
-  let command = String(entry.command || "").trim();
-  if (!command && entry.input) {
-    try {
-      const parsed = JSON.parse(entry.input);
-      command = String(parsed?.command || parsed?.cmd || parsed?.script || "").trim();
-    } catch {
-      command = String(entry.input).trim();
-    }
-  }
-  return {
-    command,
-    shell: String(entry.shell || shellTitles.get(normalizedTitle) || "shell"),
-  };
-}
-
-function TracePayload({ divided = false, label, value }) {
-  return (
-    <div className={`grid grid-cols-[2rem_minmax(0,1fr)] gap-2 px-2.5 py-2 ${divided ? "border-t border-line" : ""}`}>
-      <span className="pt-0.5 text-[9px] font-semibold uppercase tracking-[0.08em] text-muted">
-        {label}
-      </span>
-      <pre className="workflow-scrollbar max-h-40 min-w-0 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-4 text-slate-600 dark:text-[#b9b9b9]">
-        {value}
-      </pre>
-    </div>
-  );
-}
-
-const chatThreadsStorageKey = "gofer-flow-chat-threads";
-
-export function bumpChatThread(threads, threadId, now = new Date().toISOString(), patch = {}) {
-  const thread = threads.find((item) => item.id === threadId);
-  return thread ? [{ ...thread, ...patch, updatedAt: now }, ...threads.filter((item) => item.id !== threadId)] : threads;
-}
-
-// A finished turn is unread until the user opens its thread.
-export function threadReadPatch(unread, now = new Date().toISOString()) {
-  return unread ? { unread: true } : { unread: false, readAt: now };
-}
-
-function chatThreadMetadataKey(id) { return `gofer-flow-chat-thread-meta:${id}`; }
-
-export function chatThreadIndex() {
-  try {
-    const index = JSON.parse(window.localStorage.getItem(chatThreadsStorageKey) || "[]");
-    if (!Array.isArray(index)) return [];
-    // One-time migration. Subsequent starts read metadata for only the first page.
-    const valid = index.filter((entry) => typeof entry?.id === "string");
-    if (valid.some((entry) => typeof entry.title === "string")) {
-      for (const entry of valid) {
-        if (typeof entry.title === "string") window.localStorage.setItem(chatThreadMetadataKey(entry.id), JSON.stringify(entry));
-      }
-      const migrated = valid.map(threadIndexEntry);
-      migrated.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
-      window.localStorage.setItem(chatThreadsStorageKey, JSON.stringify(migrated));
-      return migrated;
-    }
-    if (valid.some(entry => entry.scopeIndexed !== true)) {
-      // Archived entries need no scope lookup until the user opens them.
-      const migrated = valid.map(entry => entry.scopeIndexed ? entry
-        : threadIndexEntry(entry.archived ? entry : loadChatThread(entry.id) || entry));
-      window.localStorage.setItem(chatThreadsStorageKey, JSON.stringify(migrated));
-      return migrated;
-    }
-    return valid;
-  } catch { return []; }
-}
-
-export function loadChatThread(id) {
-  try {
-    const thread = JSON.parse(window.localStorage.getItem(chatThreadMetadataKey(id)) || "null");
-    return thread?.id === id && typeof thread.title === "string" ? thread : null;
-  } catch { return null; }
-}
-
-function loadAllChatThreads() { return loadChatThreads(Infinity); }
-
-export function loadChatThreads(limit = 15) {
-  return chatThreadIndex().slice(0, limit).map(({ id }) => loadChatThread(id)).filter(thread => thread && thread.managedRole !== "verify");
-}
-
-export function persistChatThreads(threads) {
-  const loadedIds = new Set(threads.map((thread) => thread.id));
-  const index = new Map([
-    ...threads.map(thread => [thread.id, threadIndexEntry(thread)]),
-    ...chatThreadIndex().filter((entry) => !loadedIds.has(entry.id)).map((entry) => [entry.id, entry]),
-  ]);
-  for (const thread of threads) {
-    const key = chatThreadMetadataKey(thread.id);
-    const encoded = JSON.stringify(thread);
-    if (window.localStorage.getItem(key) !== encoded) {
-      window.localStorage.setItem(key, encoded);
-      archiveThreadFromStorage(thread.id, () => conversationRepository().all(thread.id));
-    }
-    index.set(thread.id, threadIndexEntry(thread));
-  }
-  const sorted = [...index.values()].sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
-  window.localStorage.setItem(chatThreadsStorageKey, JSON.stringify(sorted));
-}
-
-function deleteStoredChatThread(id) {
-  const index = chatThreadIndex().filter((entry) => entry.id !== id);
-  window.localStorage.setItem(chatThreadsStorageKey, JSON.stringify(index));
-  window.localStorage.removeItem(chatThreadMetadataKey(id));
-}
-
-export function threadTitleFromMessage(message) {
-  const words = message.trim().split(/\s+/).slice(0, 8);
-  const title = words.join(" ");
-  return title.length < message.trim().length ? `${title}...` : title || "New thread";
-}
-
-function formatThreadDate(value) {
-  if (!value) return "No messages yet";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "No messages yet";
-  return date.toLocaleString([], {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
-}
-
-function reportArchiveError(error) {
-  window.dispatchEvent?.(new CustomEvent("gofer:archive-error", { detail: error?.message || String(error) }));
-}
-const scheduleConversationArchive = createConversationArchiveScheduler({ reportError: reportArchiveError });
-function archiveThreadFromStorage(threadId, messages, deleted = false) {
-  const bridge = window.goferDesktop?.rem;
-  if (!bridge?.archive) return Promise.resolve(true);
-  const storage = window.localStorage;
-  return scheduleConversationArchive(threadId, async () => {
-    if (remThreadWasCleared(threadId)) return { skipped: true };
-    const thread = JSON.parse(storage.getItem(chatThreadMetadataKey(threadId)) || "null") || { id: threadId };
-    return bridge.archive(thread, typeof messages === "function" ? await messages() : messages, deleted);
-  }, { deleted });
-}
-
-// Delete permanently removes the archive copy: snapshot, journal and the attachments
-// only this thread used. It goes through the same per-thread queue as saves.
-function purgeThreadFromArchive(threadId) {
-  const bridge = window.goferDesktop?.rem;
-  if (!bridge?.archive) return Promise.resolve(true);
-  if (!bridge.purge) return Promise.resolve(false);
-  return scheduleConversationArchive(threadId, () => bridge.purge([threadId]), { deleted: true });
-}
-
-export function permanentDeleteMessage(title) {
-  return `Delete "${title || "Untitled"}" permanently? This removes the thread from Rem and its conversation archive snapshot, journal and the attachments no other thread uses. ${ARCHIVE_GIT_LIMIT} This cannot be undone.`;
-}
-
-async function deletePhoneThread(id, { purge = false } = {}) {
-  const repository = conversationRepository();
-  if (!await (purge ? purgeThreadFromArchive(id) : archiveThreadFromStorage(id, () => repository.all(id), true))) {
-    throw new Error("Phone deletion is waiting for the desktop archive. Reconnect its folder or stop archiving in Settings > Memory.");
-  }
-  const response = await fetch(apiUrl(`/chat/threads/${encodeURIComponent(id)}`), { method: "DELETE" });
-  if (!response.ok) throw new Error("Phone deletion could not stop and remove the desktop turn. It will retry.");
-  await repository.remove(id);
-  deleteStoredChatThread(id);
-}
-
-async function archiveAllConversations() {
-  for (const thread of chatThreadIndex()) await archiveThreadFromStorage(thread.id, () => conversationRepository().all(thread.id));
-}
-
-export function chatStorageKeyFor(threadId) {
-  return `gofer-flow-chat-thread:${threadId}`;
-}
-
-function loadChatMessages(storageKey) {
-  return loadConversationMessages(storageKey);
-}
-
-export function buildChatItems(messages) {
-  // Hidden context must not split adjacent thoughts in the visible conversation.
-  messages = messages.filter(message => message.kind !== "memory" && message.kind !== "continuation-context" &&
-    !(message.role === "system" && String(message.body || "").startsWith("The previous process was interrupted.")));
-  const items = [];
-  let index = 0;
-
-  while (index < messages.length) {
-    const message = messages[index];
-    if (message.kind !== "thought") {
-      items.push({ type: "message", message });
-      index += 1;
-      continue;
-    }
-
-    const groupId = message.groupId || `legacy-${message.id}`;
-    const thoughts = [];
-    const segmentId = `thought-group-${groupId}-${message.id}`;
-    while (
-      index < messages.length &&
-      messages[index].kind === "thought"
-    ) {
-      thoughts.push(messages[index]);
-      index += 1;
-    }
-    const nextMessage = messages[index];
-    while (isDuplicateOutputThought(thoughts.at(-1), nextMessage)) thoughts.pop();
-    if (thoughts.length) {
-      items.push({
-        id: segmentId,
-        type: "thought-group",
-        thoughts,
-        lazy: thoughts[0].lazy,
-      });
-    }
-  }
-
-  let replyId = null;
-  for (let position = items.length - 1; position >= 0; position -= 1) {
-    const item = items[position];
-    if (item.type === "thought-group") item.replyId = replyId;
-    else if (item.message.role === "user") replyId = null;
-    else if (item.message.role === "assistant" && item.message.kind !== "error" && String(item.message.body || "").trim()) replyId = item.message.id;
-  }
-  return items;
-}
-
-export function isThoughtGroupExpanded(item, overrides, autoHide = true) {
-  const override = overrides[item.id];
-  if (override && override.replyId === item.replyId) return override.expanded;
-  return !item.lazy && (!autoHide || !item.replyId);
-}
-
-// While Rem writes, its answer text shows as a reply instead of a thought.
-// Tool steps that follow fold it back into the thoughts above them.
-export function withLiveReply(items) {
-  const group = items.at(-1);
-  const thought = group?.type === "thought-group" ? group.thoughts.at(-1) : null;
-  const stream = String(thought?.deltaStreamId || "");
-  if (!stream || thought.trace || stream.startsWith("reasoning-") || !String(thought.body || "").trim()) return items;
-  const earlier = group.thoughts.slice(0, -1);
-  return [...items.slice(0, -1), ...(earlier.length ? [{ ...group, thoughts: earlier }] : []),
-    { type: "message", message: { ...thought, kind: "streaming" } }];
-}
-
-export function removeTrailingDuplicateOutputThought(messages, finalBody, groupId) {
-  const finalMessage = { role: "assistant", kind: "final", body: finalBody };
-  const streams = new Map();
-  for (const message of messages) {
-    if (message.groupId !== groupId || message.kind !== "thought" || !message.deltaStreamId || message.trace?.kind === "tool") continue;
-    streams.set(message.deltaStreamId, (streams.get(message.deltaStreamId) || "") + message.body);
-  }
-  const duplicateStreams = new Set([...streams].filter(([, body]) => normalizeMarkdownText(body) === normalizeMarkdownText(finalBody)).map(([id]) => id));
-  return messages.filter((message) => {
-    if (message.groupId !== groupId || message.kind !== "thought") return true;
-    if (message.trace?.kind !== "tool" && duplicateStreams.has(message.deltaStreamId)) return false;
-    if (isDuplicateOutputThought(message, finalMessage)) return false;
-    const body = message.trace?.body ?? message.body;
-    return message.trace?.kind === "tool" || !isProviderMetadataSummary(body);
-  });
-}
-
-function isDuplicateOutputThought(thought, finalMessage) {
-  if (!thought || thought.kind !== "thought" || finalMessage?.role !== "assistant") return false;
-  if (finalMessage.kind === "thought" || finalMessage.kind === "memory") return false;
-  if (thought.trace?.kind === "tool") return false;
-  const thoughtBody = normalizeMarkdownText(thought.trace?.body ?? thought.body);
-  const finalBody = normalizeMarkdownText(finalMessage.body);
-  if (!thoughtBody || !finalBody) return false;
-  if (thoughtBody === finalBody) return true;
-  const untruncatedThought = thoughtBody.replace(/(?:\.{3}|…)$/, "").trim();
-  return untruncatedThought.length >= 48 && finalBody.startsWith(untruncatedThought);
-}
-
-export function buildThoughtTrace(thoughts) {
-  const entries = [];
-  const traceIndexes = new Map();
-
-  for (const thought of thoughts) {
-    const hasStructuredTrace = Boolean(thought?.trace && typeof thought.trace === "object");
-    const rawTrace = hasStructuredTrace
-      ? thought.trace
-      : { kind: "summary", title: "Thought", body: thought?.body };
-    const kind = rawTrace.kind === "tool" ? "tool" : "summary";
-    const traceId = rawTrace.id ? String(rawTrace.id) : "";
-    const traceKey = `trace-${thought?.groupId || ""}-${traceId}`;
-    const entry = {
-      key: traceId ? traceKey : thought?.id || `trace-${entries.length}`,
-      groupId: thought?.groupId,
-      id: traceId,
-      kind,
-      title: kind === "summary"
-        ? String(rawTrace.title || "")
-        : String(rawTrace.title || "Tool"),
-      detail: rawTrace.detail ? String(rawTrace.detail) : "",
-      body: rawTrace.body
-        ? String(rawTrace.body)
-        : kind === "summary" && !hasStructuredTrace
-        ? String(thought?.body || "")
-        : "",
-      input: rawTrace.input ? String(rawTrace.input) : "",
-      output: rawTrace.output ? String(rawTrace.output) : "",
-      category: rawTrace.category ? String(rawTrace.category) : "",
-      shell: rawTrace.shell ? String(rawTrace.shell) : "",
-      command: rawTrace.command ? String(rawTrace.command) : "",
-      status: String(rawTrace.status || ""),
-    };
-
-    if (kind === "summary" && isProviderMetadataSummary(entry.body)) continue;
-
-    if (!traceId || !traceIndexes.has(traceKey)) {
-      if (traceId) traceIndexes.set(traceKey, entries.length);
-      entries.push(entry);
-      continue;
-    }
-
-    const existingIndex = traceIndexes.get(traceKey);
-    const existing = entries[existingIndex];
-    entries[existingIndex] = {
-      ...existing,
-      title: kind === "summary"
-        ? entry.title || existing.title
-        : existing.title === "Tool result"
-        ? entry.title
-        : existing.title,
-      detail: entry.detail || existing.detail,
-      body: entry.body || existing.body,
-      input: existing.input || entry.input,
-      output: entry.output || existing.output,
-      category: entry.category || existing.category,
-      shell: entry.shell || existing.shell,
-      command: entry.command || existing.command,
-      status: entry.status || existing.status,
-    };
-  }
-
-  return entries;
-}
-
-function isProviderMetadataSummary(value) {
-  const compact = String(value ?? "").trim().replace(/\s+/g, " ");
-  return /^(?:tokens? used\s*:?[\s]*)[\d,]+$/i.test(compact) ||
-    /^[\d,]+\s+tokens? used$/i.test(compact);
-}
-
-export function normalizeMarkdownText(value) {
-  return String(value ?? "")
-    .replace(/\r\n?/g, "\n")
-    .replace(/```[^\n]*\n?/g, "")
-    .replace(/^\s{0,3}(?:#{1,6}\s+|>\s*|[-+*]\s+|\d+[.)]\s+)/gm, "")
-    .replace(/\[([^\]]+)\]\([^\s)]+\)/g, "$1")
-    .replace(/[*_~`]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-export function parseChatStreamEvent(line) {
-  const trimmed = line.trim();
-  if (!trimmed) return null;
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return null;
-  }
-}
-
-function uniqueClientId() {
-  if (window.crypto?.randomUUID) {
-    return window.crypto.randomUUID();
-  }
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function buildRunPreviewTriggerContext(workflow) {
-  const triggerContext = {};
-  if (workflow.schedule) {
-    triggerContext.schedule = workflow.schedule;
-  }
-  if (workflow.watch) {
-    triggerContext.watch = workflow.watch;
-  }
-  if (workflow.runContinuously) {
-    triggerContext.runContinuously = true;
-  }
-  return triggerContext;
-}
+const WORKFLOW_SOURCES = ["create", "import"];
 
 export function CreateWorkflowDialog({
   defaultProjectRoot = "",
@@ -10351,7 +6318,6 @@ export function CreateWorkflowDialog({
   const [mode, setMode] = useState("create");
   const [projectRoot, setProjectRoot] = useState("");
   const [projectError, setProjectError] = useState("");
-  const [pickingProject, setPickingProject] = useState(false);
   const [importFile, setImportFile] = useState(null);
   const [importError, setImportError] = useState("");
   const [dragActive, setDragActive] = useState(false);
@@ -10359,7 +6325,13 @@ export function CreateWorkflowDialog({
   const [startersError, setStartersError] = useState("");
   const [starterId, setStarterId] = useState("");
   const importInputRef = useRef(null);
+  const nameInputRef = useRef(null);
   const starter = starters.find((item) => item.id === starterId) ?? null;
+  const chooseMode = (next) => {
+    setMode(next);
+    if (next === "import") setProjectError("");
+  };
+  const sourceTab = useRovingChoice({ keys: WORKFLOW_SOURCES, selected: mode, onSelect: chooseMode, orientation: "horizontal" });
 
   useEffect(() => {
     if (!open) return undefined;
@@ -10389,12 +6361,24 @@ export function CreateWorkflowDialog({
       setMode("create");
       setProjectRoot(defaultProjectRoot);
       setProjectError("");
-      setPickingProject(false);
       setImportFile(null);
       setImportError("");
       setDragActive(false);
     }
   }, [defaultProjectRoot, open]);
+
+  // Name takes focus once per opening, not each time Create new is shown again: the arrow
+  // keys keep focus on the source tabs. The dialog stays mounted, so a reopening can start
+  // on Import; Name gets focus on the first render after the reset shows Create new.
+  const focusNameRef = useRef(false);
+  useEffect(() => {
+    focusNameRef.current = open;
+  }, [open]);
+  useEffect(() => {
+    if (!open || mode !== "create" || !focusNameRef.current) return;
+    focusNameRef.current = false;
+    nameInputRef.current?.focus();
+  }, [open, mode]);
 
   if (!open) return null;
 
@@ -10429,30 +6413,6 @@ export function CreateWorkflowDialog({
     }
     setImportFile(file);
     setImportError("");
-  }
-
-  async function pickProjectFolder() {
-    if (!window.goferDesktop?.workspace?.selectPath) {
-      setProjectError("Native folder selection is available in the desktop app.");
-      return;
-    }
-    setPickingProject(true);
-    setProjectError("");
-    try {
-      const selected = await window.goferDesktop.workspace.selectPath({
-        currentPath: projectRoot || defaultProjectRoot,
-        directoryOnly: true,
-      });
-      if (selected) setProjectRoot(selected);
-    } catch (selectionError) {
-      setProjectError(
-        selectionError instanceof Error
-          ? selectionError.message
-          : "Unable to open the project folder picker.",
-      );
-    } finally {
-      setPickingProject(false);
-    }
   }
 
   return (
@@ -10490,7 +6450,8 @@ export function CreateWorkflowDialog({
               disabled={saving}
               role="tab"
               type="button"
-              onClick={() => setMode("create")}
+              onClick={() => chooseMode("create")}
+              {...sourceTab("create")}
             >
               <Plus aria-hidden="true" size={15} />
               Create new
@@ -10503,10 +6464,8 @@ export function CreateWorkflowDialog({
               disabled={saving}
               role="tab"
               type="button"
-              onClick={() => {
-                setMode("import");
-                setProjectError("");
-              }}
+              onClick={() => chooseMode("import")}
+              {...sourceTab("import")}
             >
               <Upload aria-hidden="true" size={15} />
               Import
@@ -10557,7 +6516,7 @@ export function CreateWorkflowDialog({
               <label className="block">
                 <span className="text-xs font-medium text-muted">Name</span>
                 <input
-                  autoFocus
+                  ref={nameInputRef}
                   className="mt-1 h-10 w-full rounded-lg border border-line px-3 text-sm outline-none transition focus:border-indigo-500"
                   disabled={saving}
                   placeholder={starter ? starter.name : "Daily Analysis"}
@@ -10628,42 +6587,17 @@ export function CreateWorkflowDialog({
               )}
             </div>
           )}
-          <div>
-            <span className="text-xs font-medium text-muted">Project folder</span>
-            <div className="mt-1 flex gap-2">
-              <input
-                aria-describedby={projectError ? "project-folder-error" : "project-folder-hint"}
-                className="h-10 min-w-0 flex-1 rounded-lg border border-line px-3 font-mono text-xs outline-none transition focus:border-indigo-500"
-                disabled={saving || pickingProject}
-                placeholder="Choose a repository or project folder"
-                value={projectRoot}
-                onChange={(event) => {
-                  setProjectRoot(event.target.value);
-                  setProjectError("");
-                }}
-              />
-              <button
-                className="inline-flex h-10 shrink-0 items-center gap-2 rounded-lg border border-line bg-white px-3 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={saving || pickingProject}
-                type="button"
-                onClick={pickProjectFolder}
-              >
-                {pickingProject ? <Loader2 size={15} className="animate-spin" /> : <FolderOpen size={15} />}
-                Browse
-              </button>
-            </div>
-            {projectError ? (
-              <p className="mt-1 text-xs text-rose-700" id="project-folder-error" role="alert">
-                {projectError}
-              </p>
-            ) : (
-              <p className="mt-1 text-xs text-muted" id="project-folder-hint">
-                {mode === "create"
-                  ? "Raticode will create .raticode/<workflow-id> inside this folder."
-                  : "Raticode will add the imported workflow under .raticode."}
-              </p>
-            )}
-          </div>
+          <ProjectFolderField
+            defaultProjectRoot={defaultProjectRoot}
+            disabled={saving}
+            error={projectError}
+            hint={mode === "create"
+              ? "Raticode will create .raticode/<workflow-id> inside this folder."
+              : "Raticode will add the imported workflow under .raticode."}
+            value={projectRoot}
+            onChange={setProjectRoot}
+            onError={setProjectError}
+          />
           {error ? (
             <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm leading-5 text-red-700" role="alert">
               {error}
@@ -11009,8 +6943,3 @@ function WorkflowHealthPanel({ doctorState, workflow }) {
   );
 }
 
-function agentExternalAccessWarnings(workflow) {
-  return (workflow?.resourceWarnings ?? []).filter((warning) =>
-    String(warning).includes("grants provider filesystem access outside working_dir"),
-  );
-}

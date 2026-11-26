@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -13,6 +12,7 @@ import pytest
 
 from gofer.ui import second_brain
 from gofer.ui.brain_library import BrainLibrary
+from tests.helpers.brain_library import wait_idle
 
 ARCHIVE = "Rem Conversations"
 # The archive attachment says the query words more often, so on words alone it outranks
@@ -23,15 +23,6 @@ REPORT = (
     "<html><head><title>Port plan</title></head><body><h1>Port plan</h1>"
     "<p>The harbor survey found two risks.</p></body></html>"
 )
-
-
-def wait_idle(library: BrainLibrary) -> None:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if all(task["state"] != "running" for task in library.snapshot()["tasks"]):
-            return
-        time.sleep(0.02)
-    pytest.fail("Second Brain tasks did not finish")
 
 
 @pytest.fixture

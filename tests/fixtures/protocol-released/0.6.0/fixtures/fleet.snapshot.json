@@ -1,0 +1,24 @@
+{
+  "version": 2,
+  "id": "00000000-0000-4000-8000-000000000001",
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000003",
+  "sequence": 0,
+  "type": "fleet.snapshot",
+  "payload": {
+    "revision": 1,
+    "observed_at": 1900000000,
+    "devices": [
+      {
+        "device_id": "00000000-0000-4000-8000-000000000004",
+        "name": "Public test worker",
+        "role": "desktop",
+        "status": "unknown",
+        "last_seen": null,
+        "observed_at": 1900000000,
+        "fresh_until": 1900000060,
+        "running_jobs": []
+      }
+    ]
+  }
+}

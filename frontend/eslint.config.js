@@ -60,6 +60,25 @@ export const reactSyntaxRules = [
   },
 ];
 
+// The browser's own confirm, alert and prompt boxes block the whole window, can't
+// name the action on their button and look nothing like Raticode. Screens ask with
+// ConfirmDialog (useConfirm) or the Organizations ConfirmButton instead. Tests may
+// still stub these, so the rule skips test files.
+const nativeDialogMessage =
+  "Ask in Raticode's own dialog: useConfirm from components/ConfirmDialog.jsx (or ConfirmButton from OrganizationConfirm.jsx), not the browser's native box.";
+export const nativeDialogRules = {
+  "no-restricted-properties": [
+    "error",
+    ...["window", "globalThis", "self"].flatMap((object) =>
+      ["confirm", "alert", "prompt"].map((property) => ({ object, property, message: nativeDialogMessage })),
+    ),
+  ],
+  "no-restricted-globals": [
+    "error",
+    ...["confirm", "alert", "prompt"].map((name) => ({ name, message: nativeDialogMessage })),
+  ],
+};
+
 export default [
   {
     ignores: [
@@ -99,6 +118,11 @@ export default [
       "react-hooks/exhaustive-deps": "warn",
       "no-restricted-syntax": ["error", ...reactSyntaxRules],
     },
+  },
+  {
+    files: ["src/**/*.{js,jsx}"],
+    ignores: ["src/**/*.test.{js,jsx,mjs}"],
+    rules: nativeDialogRules,
   },
   {
     files: [

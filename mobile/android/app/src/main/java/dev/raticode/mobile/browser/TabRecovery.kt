@@ -48,9 +48,6 @@ internal class TabRecovery(private val clock: () -> Long = System::currentTimeMi
     /** The user reloaded, went somewhere else in the tab, or closed it: start counting again. */
     fun forget(id: String) { restores.remove(id); hungSince.remove(id) }
 
-    /** How many automatic reloads tab [id] had within the last [LOOP_WINDOW_MS]. */
-    fun recentRestores(id: String) = recent(id).size
-
     private fun recent(id: String): ArrayDeque<Long> {
         val list = restores[id] ?: return ArrayDeque()
         val now = clock()

@@ -11,7 +11,6 @@ from gofer.rattish.runtime import (
     HandlerResult,
     InvalidRattishIrError,
     NodeHandlerRegistry,
-    execute_bash_node,
     execute_node,
     load_ir,
 )
@@ -84,7 +83,7 @@ Node show-mode:
         schema,
         {contract.node_type: contract.document for contract in rattish_compiler.contracts},
     )
-    execution = await execute_bash_node(ir, "show-mode")
+    execution = await execute_node(ir, "show-mode")
 
     assert execution.outcome == "success"
     assert execution.output == {"stdout": "release", "stderr": "", "exit_code": 0}
@@ -113,8 +112,8 @@ Node consume:
 """
     compiled = compiler().compile(source, CompileContext("two-node-slice", tmp_path))
 
-    produce = await execute_bash_node(compiled.ir, "produce")
-    consume = await execute_bash_node(
+    produce = await execute_node(compiled.ir, "produce")
+    consume = await execute_node(
         compiled.ir,
         "consume",
         node_outputs={"produce": produce.output},
@@ -149,7 +148,7 @@ Node consume:
 """
     compiled = compiler().compile(source, CompileContext("workflow-input-slice", tmp_path))
 
-    execution = await execute_bash_node(
+    execution = await execute_node(
         compiled.ir,
         "consume",
         workflow_inputs={"message": "hello from input"},

@@ -629,23 +629,7 @@ class ProviderCapabilityService:
         """
         providers = []
         for provider_id, probe in self._probes.items():
-            executable = resolve_provider_executable(provider_id, probe_alias=False)
-            key = _CacheKey(provider_id, executable, _executable_mtime_ns(executable))
-            with self._lock:
-                cached = self._cache.get(key)
-            # Cursor's generic `agent` alias needs a CLI identity check. Only
-            # reuse it here if discovery already verified this executable.
-            if (
-                executable is None
-                and provider_id == "cursor"
-                and not provider_preference(provider_id).get("executable")
-            ):
-                alias = shutil.which("agent")
-                alias_key = _CacheKey(provider_id, alias, _executable_mtime_ns(alias))
-                with self._lock:
-                    alias_cached = self._cache.get(alias_key) if alias else None
-                if alias_cached:
-                    executable, cached = alias, alias_cached
+            executable, cached = self._cached_entry(provider_id)
             capability = (
                 cached.capability
                 if cached
@@ -661,6 +645,35 @@ class ProviderCapabilityService:
                 payload.update(discoveryStatus="pending", discoveredAt=None)
             providers.append(payload)
         return {"providers": providers}
+
+    def cached(self, provider_id: ProviderId) -> ProviderCapability | None:
+        """The catalog discovery last read for this provider, even an expired one.
+
+        Never runs the CLI, so callers that only apply saved preferences stay quick.
+        None when nothing has been discovered for the executable as it is now.
+        """
+        _executable, cached = self._cached_entry(provider_id)
+        return cached.capability if cached else None
+
+    def _cached_entry(self, provider_id: ProviderId) -> tuple[str | None, _CacheEntry | None]:
+        executable = resolve_provider_executable(provider_id, probe_alias=False)
+        key = _CacheKey(provider_id, executable, _executable_mtime_ns(executable))
+        with self._lock:
+            cached = self._cache.get(key)
+        # Cursor's generic `agent` alias needs a CLI identity check. Only
+        # reuse it here if discovery already verified this executable.
+        if (
+            executable is None
+            and provider_id == "cursor"
+            and not provider_preference(provider_id).get("executable")
+        ):
+            alias = shutil.which("agent")
+            alias_key = _CacheKey(provider_id, alias, _executable_mtime_ns(alias))
+            with self._lock:
+                alias_cached = self._cache.get(alias_key) if alias else None
+            if alias_cached:
+                executable, cached = alias, alias_cached
+        return executable, cached
 
     def provider(
         self,
@@ -802,27 +815,6 @@ def _validate_capability_selection(
         raise ProviderCapabilityError(
             f"Effort '{effort}' is not supported by model '{selected_model}'"
         )
-
-
-def validate_provider_selection(
-    provider_id: str,
-    model: str | None,
-    effort: str | None,
-    *,
-    service: ProviderCapabilityService | None = None,
-) -> None:
-    """Strictly validate an immediate local execution selection.
-
-    An unavailable discovery result is intentionally not treated as a failed
-    selection: the provider CLI remains the final authority, and workflows need
-    to be portable to other hosts.
-    """
-
-    if provider_id not in CLI_PROVIDERS:
-        raise ProviderCapabilityError(f"Unknown provider '{provider_id}'")
-    _require_sync_context("validate_provider_selection", "validate_provider_selection_async")
-    capability = (service or provider_capability_service()).provider(provider_id)
-    _validate_capability_selection(capability, model, effort)
 
 
 async def validate_provider_selection_async(

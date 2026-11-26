@@ -307,6 +307,35 @@ class GeckoBrowserTest {
         return seen.size
     }
 
+    /** Delete asks before a profile and everything in it goes; Keep leaves it. Needs no internet. */
+    @Test fun deletingAProfileAsksFirst() {
+        val gecko = start()
+        try {
+            compose.runOnUiThread { assertTrue(gecko.addProfile("Work")) }
+            waitFor("the new profile") { gecko.profile.name == "Work" }
+            compose.onNodeWithTag("geckoMenu").performClick()
+            waitFor("menu") { shown("geckoMenuSheet") }
+            compose.onNode(hasText("Profiles")).performClick()
+            waitFor("profiles sheet") { shown("geckoProfilesSheet") }
+            assertFalse("The default profile has no Delete", shown("geckoProfileDelete-Personal"))
+
+            compose.onNodeWithTag("geckoProfileDelete-Work").performClick()
+            waitFor("the delete question") { shown("geckoDeleteProfile") }
+            compose.onNode(hasText("Delete Work?")).assertExists()
+            compose.onNode(hasText(GeckoRules.DELETE_PROFILE_TEXT)).assertExists()
+            compose.onNodeWithTag("geckoDeleteProfileKeep").performClick()
+            waitFor("the question closed") { !shown("geckoDeleteProfile") }
+            assertTrue("Keep leaves the profile", gecko.saved.profiles.any { it.name == "Work" })
+            assertEquals("Keep doesn't switch profiles", "Work", gecko.profile.name)
+
+            compose.onNodeWithTag("geckoProfileDelete-Work").performClick()
+            waitFor("the delete question again") { shown("geckoDeleteProfileConfirm") }
+            compose.onNodeWithTag("geckoDeleteProfileConfirm").performClick()
+            waitFor("the profile deleted") { gecko.saved.profiles.none { it.name == "Work" } }
+            assertEquals(GeckoRules.DEFAULT_PROFILE, gecko.saved.currentProfile)
+        } finally { end() }
+    }
+
     /**
      * The Open button of an installed extension, run alone in a fresh app (`-e class …#opensExtensionsFromTheOpenButton`),
      * so no extension has opened a tab of its own first. Before the fix Gecko was never told which tab was in view, and
@@ -360,6 +389,20 @@ class GeckoBrowserTest {
             SystemClock.sleep(1000)
             assertEquals("No popup from a private tab", null, gecko.popup)
             compose.onNode(hasText("private tabs", substring = true)).assertExists()
+
+            // Remove asks first: Keep leaves uBlock installed, and only Remove extension uninstalls it.
+            compose.onNode(hasScrollToNodeAction()).performScrollToNode(hasTestTag("geckoRemove-${ublock!!.id}"))
+            compose.onNodeWithTag("geckoRemove-${ublock.id}").performClick()
+            waitFor("the remove question") { shown("geckoRemoveExtension") }
+            compose.onNode(hasText(GeckoRules.removeExtensionTitle(ublock.name))).assertExists()
+            compose.onNodeWithTag("geckoRemoveExtensionKeep").performClick()
+            waitFor("the question closed") { !shown("geckoRemoveExtension") }
+            SystemClock.sleep(1000)
+            assertTrue("Keep leaves it installed", gecko.extensions.any { it.id == ublock.id })
+            compose.onNodeWithTag("geckoRemove-${ublock.id}").performClick()
+            waitFor("the remove question again") { shown("geckoRemoveExtensionConfirm") }
+            compose.onNodeWithTag("geckoRemoveExtensionConfirm").performClick()
+            waitFor("uBlock removed", 20000) { gecko.extensions.none { it.id == ublock.id } }
         } finally {
             compose.runOnUiThread { gecko.closePopup(); gecko.extensions.forEach(gecko::uninstall); gecko.tabs.map { it.id }.forEach(gecko::close) }
             SystemClock.sleep(1500)

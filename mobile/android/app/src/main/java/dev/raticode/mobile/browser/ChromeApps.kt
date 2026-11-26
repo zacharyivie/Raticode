@@ -38,8 +38,9 @@ object ChromeApps {
 
     val APP = BrowserApp(
         engine = ENGINE, name = "Chrome", maker = "Google", editions = EDITIONS, store = "com.android.chrome",
-        signIn = BrowserApp.SignIn(SIGN_IN_PAGE, "Sign in to Google",
-            "Opens Google's sign-in page in Chrome. Chrome's own sign-in and sync are under Sign in at the top of Chrome's Settings (menu ⋮)"),
+        signIn = BrowserApp.SignIn("Sign in to Google",
+            "Opens Google's sign-in page in Chrome. Chrome's own sign-in and sync are under Sign in at the top of Chrome's Settings (menu ⋮)",
+            url = SIGN_IN_PAGE),
         limits = "Chrome for Android has no extensions, and it doesn't let other apps open its settings or sign-in screens, so change those in Chrome: menu ⋮ › Settings.",
     )
 }

@@ -352,7 +352,7 @@ test("private tabs: their own in-memory profile, and nothing in the saved browse
   const handler = profiles[PARTITIONS.private].requestHandler;
   const granted = new Promise((resolve) => handler(tab.contents, "geolocation", resolve, { requestingUrl: "https://secret.example/" }));
   await privateSettle();
-  const request = sent("gofer:browser-prompt").at(-1);
+  const request = sent("gofer:browser-state").at(-1).prompts.at(-1);
   browsers.browserAction(event, { id: tab.id, action: "prompt-response", requestId: request.requestId, response: "allow" });
   assert.equal(await granted, true);
   assert.equal(profiles[PARTITIONS.private].checkHandler(tab.contents, "geolocation", "", { requestingUrl: "https://secret.example/" }), true);
@@ -534,7 +534,7 @@ test("permission prompts are remembered per site; Rem is never asked", async () 
   const handler = profiles[PARTITIONS.user].requestHandler;
   const granted = new Promise((resolve) => handler(web.contents, "media", resolve, { mediaTypes: ["video", "audio"], requestingUrl: "https://meet.example.com/room" }));
   await new Promise((resolve) => setImmediate(resolve));
-  const request = sent("gofer:browser-prompt").at(-1);
+  const request = sent("gofer:browser-state").at(-1).prompts.at(-1);
   assert.equal(request.kind, "permission");
   assert.equal(request.origin, "https://meet.example.com");
   assert.deepEqual(request.permissions.map((item) => item.key), ["camera", "microphone"]);
@@ -547,7 +547,8 @@ test("permission prompts are remembered per site; Rem is never asked", async () 
   assert.equal(await new Promise((resolve) => handler(web.contents, "clipboard-sanitized-write", resolve, {})), true);
   const rem = openRem();
   assert.equal(await new Promise((resolve) => profiles[PARTITIONS.rem].requestHandler(rem.contents, "notifications", resolve, {})), false);
-  assert.equal(sent("gofer:browser-prompt").length, 1);
+  // Only the page's one request ever showed up in a tab's prompts.
+  assert.equal(new Set(sent("gofer:browser-state").flatMap((state) => (state.prompts || []).map((item) => item.requestId))).size, 1);
   // Leaving the page cancels its pending request.
   const pending = new Promise((resolve) => handler(web.contents, "geolocation", resolve, { requestingUrl: "https://meet.example.com/" }));
   await new Promise((resolve) => setImmediate(resolve));
@@ -845,7 +846,7 @@ test("HTTP sign-in is asked in the tab and never offered to Rem", async () => {
   assert.deepEqual(remCalls, [[]]);
   const web = open({ url: "https://intranet.test/" });
   const credentials = new Promise((resolve) => browsers.handleLogin({ preventDefault() {} }, web.contents, { url: "https://intranet.test/" }, { host: "intranet.test", realm: "Staff" }, (...args) => resolve(args)));
-  const request = sent("gofer:browser-prompt").at(-1);
+  const request = sent("gofer:browser-state").at(-1).prompts.at(-1);
   assert.equal(request.kind, "auth");
   assert.equal(request.realm, "Staff");
   browsers.browserAction(event, { id: web.id, action: "prompt-response", requestId: request.requestId, response: { username: "ada", password: "s3cret" } });

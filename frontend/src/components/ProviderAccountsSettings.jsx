@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { FolderOpen, MoreHorizontal, Plus } from "lucide-react";
 import { apiUrl } from "../lib/api";
 import { changeLinkLabel, inUseLabel, inUseLineValue } from "../lib/providerAccountUses.js";
+import { useConfirm } from "./ConfirmDialog.jsx";
 
 // Provider accounts: each one is its own config folder of a provider's CLI (Claude
 // Code, Codex), signed in once with that CLI's own sign-in. Raticode never sees it.
@@ -97,11 +98,12 @@ export default function ProviderAccountsSettings({ accountsState, providerIds, u
 export function ProviderAccounts({ provider, accountsState, uses, onChangeUse }) {
   const { overview, busy, load, act, error, errorProvider } = accountsState;
   const [adding, setAdding] = useState(false);
+  const [confirm, confirmDialog] = useConfirm();
   const accounts = (overview?.accounts ?? []).filter(account => account.provider === provider.id);
   const warnings = (overview?.warnings ?? []).filter(warning => (warning.provider ?? "claude_code") === provider.id);
   const titleId = `provider-accounts-${provider.id}`;
-  function remove(account) {
-    if (!window.confirm(`Sign out "${account.name}" and delete its ${provider.label} folder, including its conversation history?`)) return;
+  async function remove(account) {
+    if (!await confirm({ confirmLabel: "Sign out and delete", danger: true, message: `Sign out "${account.name}" and delete its ${provider.label} folder, including its conversation history?` })) return;
     void act({ action: "remove", provider: provider.id, name: account.name }, `remove:${account.name}`).then(payload => {
       if (payload) window.dispatchEvent(new CustomEvent("raticode:provider-account-renamed", { detail: { provider: provider.id, from: account.name, to: "" } }));
     });
@@ -129,6 +131,7 @@ export function ProviderAccounts({ provider, accountsState, uses, onChangeUse })
     </ul> : !adding ? <p className="text-xs text-muted">No extra {provider.label} accounts.{uses?.lines?.length ? "" : ` Threads and tasks use your default ${provider.label} sign-in.`} Add an account to keep another sign-in in its own folder and let Rem switch between them.</p> : null}
     {adding ? <AddAccountForm provider={provider} busy={busy} act={act} close={() => setAdding(false)} /> : null}
     {error && errorProvider === provider.id ? <p role="alert" className="text-xs text-red-600">{error}</p> : null}
+    {confirmDialog}
   </div>;
 }
 

@@ -12,7 +12,7 @@ import sqlite3
 import uuid
 from collections.abc import AsyncGenerator, Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
 from typing import Any, ParamSpec
@@ -419,17 +419,6 @@ def reported_cost(metadata: Mapping[str, Any]) -> float | None:
 # Calls made on this computer. A summary row for work a paired desktop ran names that
 # computer and is left out of this computer's account totals.
 LOCAL_ROWS = "computer_id IS NULL"
-
-
-def activity_payload(data_dir: Path | None = None, *, days: int = 30) -> dict[str, Any]:
-    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
-    with usage_db(data_dir) as db:
-        rows = db.execute(
-            f"SELECT * FROM usage_invocations WHERE observed_at >= ? AND {LOCAL_ROWS}",
-            (cutoff,),
-        ).fetchall()
-        started = db.execute("SELECT value FROM usage_meta WHERE key='started_at'").fetchone()[0]
-    return {"tracking_started_at": started, "activity": summarize_calls(rows)}
 
 
 def summarize_calls(rows: Iterable[Any]) -> dict[str, Any]:

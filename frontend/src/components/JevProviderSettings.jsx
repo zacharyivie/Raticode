@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { apiUrl } from "../lib/api";
+import { apiJson } from "../lib/api";
 
 // Jev is a classification provider for jev workflow nodes, not a coding provider, so it
 // gets its own card. The key goes to the backend once and lives in the system keychain;
@@ -15,12 +15,7 @@ export default function JevProviderSettings({ labelledBy = "", onStatusChange } 
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
 
-  async function request(path, options = {}) {
-    const response = await fetch(apiUrl(path), options);
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || "Jev settings couldn't be saved.");
-    return payload;
-  }
+  const request = (path, options = {}) => apiJson(path, { ...options, failure: "Jev settings couldn't be saved." });
 
   useEffect(() => {
     let live = true;
@@ -44,11 +39,10 @@ export default function JevProviderSettings({ labelledBy = "", onStatusChange } 
     }
   }
 
-  const post = body => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   async function saveKey(event) {
     event.preventDefault();
     if (!key.trim()) return;
-    if (await run("save", "/classifiers/jev/key", post({ key }))) setKey("");
+    if (await run("save", "/classifiers/jev/key", { method: "POST", body: { key } })) setKey("");
   }
 
   const configured = Boolean(status?.configured);
@@ -60,7 +54,7 @@ export default function JevProviderSettings({ labelledBy = "", onStatusChange } 
     <div className="flex items-center justify-between gap-3 pt-1">
       <h4 className="text-xs font-semibold">Jev (TypeSafe)</h4>
       {configured ? <select aria-label="Jev status" className="rounded border border-line bg-white px-2 py-1 text-xs" disabled={Boolean(busy)}
-        value={enabled ? "enabled" : "disabled"} onChange={event => run("toggle", "/classifiers/jev/settings", post({ enabled: event.target.value === "enabled" }))}>
+        value={enabled ? "enabled" : "disabled"} onChange={event => run("toggle", "/classifiers/jev/settings", { method: "POST", body: { enabled: event.target.value === "enabled" } })}>
         <option value="enabled">Enabled</option><option value="disabled">Disabled</option>
       </select> : null}
     </div>
@@ -73,7 +67,7 @@ export default function JevProviderSettings({ labelledBy = "", onStatusChange } 
       <button type="submit" className="rounded border border-line px-2 py-1.5 text-xs font-semibold text-brand disabled:opacity-50" disabled={Boolean(busy) || !key.trim()}>{busy === "save" ? "Saving…" : "Save"}</button>
     </form>
     {configured ? <div className="flex flex-wrap gap-3">
-      <button type="button" className="text-xs font-semibold text-brand disabled:opacity-50" disabled={Boolean(busy) || !enabled} onClick={() => run("check", "/classifiers/jev/check", post({}))}>{busy === "check" ? "Checking key…" : "Check key"}</button>
+      <button type="button" className="text-xs font-semibold text-brand disabled:opacity-50" disabled={Boolean(busy) || !enabled} onClick={() => run("check", "/classifiers/jev/check", { method: "POST", body: {} })}>{busy === "check" ? "Checking key…" : "Check key"}</button>
       <button type="button" className="text-xs font-semibold text-red-700 disabled:opacity-50" disabled={Boolean(busy)} onClick={() => run("remove", "/classifiers/jev/key", { method: "DELETE" })}>{busy === "remove" ? "Removing…" : "Remove key"}</button>
     </div> : null}
     {status?.checkedAt ? <p className={`text-xs ${status.checkError ? "text-red-700" : "text-muted"}`}>

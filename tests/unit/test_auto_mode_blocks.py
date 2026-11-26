@@ -165,6 +165,7 @@ def test_organization_workers_are_told_not_to_wait_for_sign_off_in_auto_mode() -
 # On the board -------------------------------------------------------------------------------
 
 
+# Not the organization assign: gives Rem its kanban projects.
 def assign(home: Any, *roots: Path) -> None:
     with home.store.read() as db:
         config = home.store.setting(db, "config")

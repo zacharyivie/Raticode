@@ -1,26 +1,15 @@
 import { useEffect, useState } from "react";
-import { apiUrl } from "../lib/api.js";
+import { apiJson } from "../lib/api.js";
 
 // How often the offline model's download progress is read while it runs.
 export const MODEL_POLL_MS = 700;
 const ACTIVE_DOWNLOAD = new Set(["starting", "downloading", "installing"]);
 
-async function request(path, { method = "GET", body, signal, failure } = {}) {
-  const response = await fetch(apiUrl(path), {
-    method,
-    signal,
-    ...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
-  });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || failure);
-  return payload;
-}
-
-const loadEngines = (refresh, signal) => request(`/chat/transcribe/engines${refresh ? "?refresh=1" : ""}`, { signal, failure: "Could not check speech recognition" });
-const saveEngine = (engine) => request("/chat/transcribe/engines", { method: "POST", body: { engine }, failure: "Could not save the speech setting" });
-const loadModel = (signal) => request("/chat/transcribe/model", { signal, failure: "Could not check the offline model" });
-const startModelDownload = () => request("/chat/transcribe/model", { method: "POST", body: {}, failure: "Could not start the download" });
-const tryRecognizer = () => request("/chat/transcribe/engines/test", { method: "POST", body: {}, failure: "Could not test speech recognition" });
+const loadEngines = (refresh, signal) => apiJson(`/chat/transcribe/engines${refresh ? "?refresh=1" : ""}`, { signal, failure: "Could not check speech recognition" });
+const saveEngine = (engine) => apiJson("/chat/transcribe/engines", { method: "POST", body: { engine }, failure: "Could not save the speech setting" });
+const loadModel = (signal) => apiJson("/chat/transcribe/model", { signal, failure: "Could not check the offline model" });
+const startModelDownload = () => apiJson("/chat/transcribe/model", { method: "POST", body: {}, failure: "Could not start the download" });
+const tryRecognizer = () => apiJson("/chat/transcribe/engines/test", { method: "POST", body: {}, failure: "Could not test speech recognition" });
 
 function megabytes(bytes) {
   return Math.round(bytes / (1024 * 1024));

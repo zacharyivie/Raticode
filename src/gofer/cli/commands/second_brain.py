@@ -21,6 +21,7 @@ def run_second_brain(
     memory_folder: bool = False,
     report_theme_file: Path | None = None,
     task_report_tool: bool = False,
+    private_brain_folders: list[Path] | None = None,
 ) -> None:
     from gofer.ui.report_themes import read_theme_file
     from gofer.ui.second_brain import serve_registered_brains, serve_second_brain
@@ -48,6 +49,8 @@ def run_second_brain(
         report_theme,
         theme_config=theme_config,
         task_report_tool=task_report_tool,
+        # Private brains inside an unregistered folder, left out of its index.
+        private_folders=private_brain_folders or (),
     )
 
 
@@ -75,6 +78,7 @@ def _parser() -> _Parser:
     parser.add_argument("--memory-folder", action="store_true")
     parser.add_argument("--report-theme-file", type=Path, default=None)
     parser.add_argument("--task-report-tool", action="store_true")
+    parser.add_argument("--private-brain-folder", type=Path, action="append", default=None)
     return parser
 
 
@@ -111,5 +115,6 @@ def fast_main(argv: list[str]) -> int | None:
         args.memory_folder,
         args.report_theme_file,
         args.task_report_tool,
+        args.private_brain_folder,
     )
     return 0

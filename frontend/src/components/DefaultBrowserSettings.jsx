@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { ipcErrorMessage } from "../lib/ipcError.js";
 
 // Settings > Browser > Default web browser. Shows whether the computer opens
 // links in Raticode and takes the user to the system's own default-apps
@@ -20,10 +21,6 @@ const HOW_TO = {
   linux: "Choose Raticode as the web browser in your desktop's default-apps settings, or use Make Raticode the default browser.",
 };
 
-function cleanError(cause) {
-  return String(cause?.message || cause || "That didn't work.").replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
-}
-
 export function defaultBrowserSummary(status) {
   if (!status) return "Checking…";
   if (status.problem) return status.problem;
@@ -41,7 +38,7 @@ export default function DefaultBrowserSettings() {
 
   const refresh = useCallback(async () => {
     if (!bridge) return;
-    try { setStatus(await bridge("status")); } catch (cause) { setError(cleanError(cause)); }
+    try { setStatus(await bridge("status")); } catch (cause) { setError(ipcErrorMessage(cause)); }
   }, [bridge]);
 
   useEffect(() => { void refresh(); }, [refresh]);
@@ -52,7 +49,7 @@ export default function DefaultBrowserSettings() {
     setBusy(true);
     setError("");
     setNote("");
-    try { await work(); } catch (cause) { setError(cleanError(cause)); } finally { setBusy(false); }
+    try { await work(); } catch (cause) { setError(ipcErrorMessage(cause)); } finally { setBusy(false); }
   }
 
   const openSettings = () => run(async () => {

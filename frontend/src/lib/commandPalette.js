@@ -166,12 +166,21 @@ export function keybindingPaletteItems(settings, platform) {
   });
 }
 
+// One Go to entry per plugin in the activity rail, in the rail's default order.
+// Keywords are the other words people type for the same place.
 export const PLUGIN_DESTINATIONS = Object.freeze([
+  { pluginId: "rem", label: "Go to Rem", keywords: ["home", "threads", "chat"] },
+  { pluginId: "workflows", label: "Go to Workflows" },
+  { pluginId: "files", label: "Go to File explorer", keywords: ["explorer", "files", "folders", "tree"] },
   { pluginId: "browser", label: "Go to Browser tabs" },
+  { pluginId: "search", label: "Go to Search", keywords: ["find", "replace", "grep"] },
+  { pluginId: "source-control", label: "Go to Source control", keywords: ["git", "changes", "branches", "commits", "worktrees", "history"] },
+  { pluginId: "kanban", label: "Go to Kanban", keywords: ["board", "tickets"] },
   { pluginId: "posts", label: "Go to Posts", description: "Experimental" },
+  { pluginId: "swarms", label: "Go to Swarms", keywords: ["agents", "teams"] },
   { pluginId: "organizations", label: "Go to Organizations" },
   { pluginId: "second-brain", label: "Go to Second Brain" },
-]);
+].map(Object.freeze));
 
 // Actions that have no key of their own.
 export function actionPaletteItems({ triggersPaused = false } = {}) {
@@ -181,7 +190,11 @@ export function actionPaletteItems({ triggersPaused = false } = {}) {
     triggersPaused
       ? { id: "action:triggers.resume", actionId: "triggers.resume", group: "Workflow", label: "Resume all triggers", keywords: ["pause"] }
       : { id: "action:triggers.pause", actionId: "triggers.pause", group: "Workflow", label: "Pause all triggers" },
-    ...PLUGIN_DESTINATIONS.map(({ pluginId, label, description }) => ({ id: `action:open.${pluginId}`, actionId: `open.${pluginId}`, pluginId, group: "Go to", label, ...(description ? { description } : {}) })),
+    ...PLUGIN_DESTINATIONS.map(({ pluginId, label, description, keywords }) => ({
+      id: `action:open.${pluginId}`, actionId: `open.${pluginId}`, pluginId, group: "Go to", label,
+      ...(description ? { description } : {}),
+      ...(keywords ? { keywords } : {}),
+    })),
     ...SETTINGS_SECTIONS.map((section) => settingsSectionItem(section)),
   ];
 }

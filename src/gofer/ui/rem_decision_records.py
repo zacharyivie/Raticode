@@ -36,6 +36,7 @@ import subprocess
 import tempfile
 import threading
 from collections import OrderedDict
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -357,21 +358,16 @@ def _git(
     env: dict[str, str] | None = None,
     stdin: bytes | None = None,
 ) -> subprocess.CompletedProcess[bytes] | None:
-    from gofer.utils.process import (
-        NO_REPOSITORY_PROGRAMS,
-        build_subprocess_env,
-        untrusted_repository_git_env,
-    )
+    from gofer.utils.process import build_subprocess_env, run_repository_git
 
-    base = untrusted_repository_git_env(project, build_subprocess_env())
     try:
-        return subprocess.run(
-            ["git", *NO_REPOSITORY_PROGRAMS, "-C", str(project), *args],
-            input=stdin,
-            capture_output=True,
+        return run_repository_git(
+            project,
+            *args,
             timeout=GIT_TIMEOUT,
-            check=False,
-            env={**base, **(env or {})},
+            input=stdin,
+            env={**build_subprocess_env(), **(env or {})},
+            text=False,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -382,6 +378,35 @@ def _out(project: str | Path, *args: str, **kwargs: Any) -> str | None:
     if result is None or result.returncode != 0:
         return None
     return result.stdout.decode(errors="replace")
+
+
+def first_commit(project: str, branch: str, path: str) -> dict[str, str] | None:
+    """The commit that first added ``path`` on ``branch``: short hash, author name, date.
+
+    ``{"commit", "author", "at"}`` with ``at`` the author date in UTC; None when git can't
+    tell. Only the author's name is read, never the email.
+    """
+    out = _out(
+        project,
+        "log",
+        "--diff-filter=A",
+        "--no-renames",
+        "--format=%H%x00%an%x00%at",
+        f"refs/heads/{branch}",
+        "--",
+        path,
+    )
+    # Newest first: the last line is the first time the file was added.
+    lines = [line for line in (out or "").splitlines() if line.count("\0") == 2]
+    if not lines:
+        return None
+    commit, author, stamp = lines[-1].split("\0")
+    try:
+        at = datetime.fromtimestamp(int(stamp), UTC).isoformat()
+    except (ValueError, OverflowError, OSError):
+        return None
+    name = " ".join("".join(c for c in author if c.isprintable()).split())[:100]
+    return {"commit": commit[:12], "author": name, "at": at}
 
 
 def folder_files(project: str, branch: str, folder: str) -> dict[str, str] | None:
@@ -775,13 +800,16 @@ def sync(
     project: str,
     *,
     files: dict[str, str],
+    branch: str | None = None,
     by_runs: frozenset[str] = frozenset(),
     deferred: frozenset[str] = frozenset(),
 ) -> list[str]:
     """Read the project's record files into the store; returns the IDs that changed.
 
     A file Raticode doesn't know yet (written by the user or another tool) becomes a
-    decision as its status says. A known file whose text differs from what Raticode last
+    decision as its status says. Its ``source`` names the commit that added it on the
+    landing ``branch`` and that commit's author, and it counts as decided on that commit's
+    date rather than when Raticode read it. A known file whose text differs from what Raticode last
     wrote or read was edited outside Raticode: the store takes its wording and status, and
     the item is marked ``edited_outside`` so the Decisions view says so.
 
@@ -838,6 +866,8 @@ def sync(
             item["record_path"] = path
         status = FROM_FILE[parsed["status"]]
         if item is None:
+            added = first_commit(project, branch, path) if branch else None
+            decided = status in decision_book.IN_FORCE
             item = {
                 "id": f"D-{book['next_number']}",
                 "project": key,
@@ -852,16 +882,26 @@ def sync(
                 "reversible": True,
                 "tried": "",
                 "status": status,
-                "decided_by": "user" if status in decision_book.IN_FORCE else None,
-                "decided_at": stamp if status in decision_book.IN_FORCE else None,
-                "source": {"via": "repository"},
+                "decided_by": "user" if decided else None,
+                "decided_at": ((added or {}).get("at") or stamp) if decided else None,
+                "source": {
+                    "via": "repository",
+                    **({"commit": added["commit"], "author": added["author"]} if added else {}),
+                },
                 "asked_by": [],
                 "evidence_hashes": {},
                 "failures": 0,
                 "created_at": stamp,
                 "updated_at": stamp,
                 "record_path": path,
-                "history": [{"at": stamp, "actor": "raticode", "action": "read", "note": path}],
+                "history": [
+                    {
+                        "at": stamp,
+                        "actor": "raticode",
+                        "action": "read",
+                        "note": f"{path}, added in {added['commit']}" if added else path,
+                    }
+                ],
             }
             book["next_number"] += 1
             book["items"].append(item)

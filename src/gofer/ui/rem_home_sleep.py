@@ -30,6 +30,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from gofer.ui.swarm_tools import TOOL_FAILURE_HINT, SwarmToolServer
+from gofer.utils.instants import stored_instant
 
 if TYPE_CHECKING:
     from gofer.ui.rem_home import RemHome
@@ -66,14 +67,6 @@ SLEEP_GUIDANCE = (
     "thread when the time is up. Sleeping is not a result: the task is reviewed only after "
     "your final answer."
 )
-
-
-def _instant(value: Any) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def clock_time(at: datetime) -> str:
@@ -199,7 +192,7 @@ def request(
 
 
 def label(record: dict[str, Any]) -> str:
-    until = _instant(record.get("until"))
+    until = stored_instant(record.get("until"))
     when = f"Sleeping until {clock_time(until)}" if until else "Sleeping"
     return f"{when} · waiting for {record.get('waiting_for') or 'an outside event'}"
 
@@ -269,7 +262,7 @@ def wake(run: dict[str, Any], at: datetime) -> tuple[dict[str, Any], str]:
     so time spent waiting for a free worker or paused doesn't use the budget.
     """
     record = dict(run["sleep"])
-    parked = _instant(record.get("parked_at")) or at
+    parked = stored_instant(record.get("parked_at")) or at
     slept = min(max((at - parked).total_seconds(), 0), int(record.get("minutes") or 0) * 60)
     by = record.get("woken_by") or "timer"
     record.update(

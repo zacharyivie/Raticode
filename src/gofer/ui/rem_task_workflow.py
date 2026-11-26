@@ -25,7 +25,6 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -45,8 +44,6 @@ MARKER = re.compile(r"^[\s*_>`-]*workflow draft:\s*(?P<value>.+?)[\s*_`]*$", re.
 NOT_WORTH_IT = re.compile(r"^not worth it\s*[-–—:]*\s*(?P<reason>.*)$", re.I | re.S)
 FILE_KEYS = ("file_path", "path", "notebook_path", "filePath")
 SKILL = "skills/raticode-workflow-builder/SKILL.md"
-# APScheduler (which Rem's own cron schedules use) numbers weekdays from Monday = 0.
-_APS_DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
 class WorkflowSwitchError(ValueError):
@@ -54,46 +51,6 @@ class WorkflowSwitchError(ValueError):
 
 
 # --------------------------------------------------------------------------- schedule
-
-
-def _aps_weekday_names(field: str) -> str:
-    """A Rem cron weekday field, read the way Rem runs it, as crontab day names.
-
-    Rem's own schedules hand cron text to APScheduler, which counts weekdays from
-    Monday = 0. Triggers follow crontab (Sunday = 0). Names mean the same to both,
-    so the trigger fires on exactly the days the task did.
-    """
-    text = field.strip().lower()
-    if text in {"*", "?"}:
-        return "*"
-
-    def index(token: str) -> int:
-        if token.isdigit() and 0 <= int(token) <= 6:
-            return int(token)
-        if token[:3] in _APS_DAYS:
-            return _APS_DAYS.index(token[:3])
-        raise WorkflowSwitchError(f"Weekday {token!r} in this task's schedule isn't valid.")
-
-    days: set[int] = set()
-    for term in text.split(","):
-        body, _, step_text = term.partition("/")
-        step = int(step_text) if step_text.isdigit() and int(step_text) > 0 else 1
-        if step_text and step_text != str(step):
-            raise WorkflowSwitchError(f"Weekday step {step_text!r} isn't valid.")
-        if body in {"*", "?"}:
-            first, last = 0, 6
-        elif "-" in body:
-            start, _, end = body.partition("-")
-            first, last = index(start), index(end)
-        else:
-            first = last = index(body)
-        if first > last:
-            raise WorkflowSwitchError(f"Weekday range {body!r} runs backwards.")
-        days.update(range(first, last + 1, step))
-    # Crontab order (Sunday first) reads the way people write it.
-    order = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")
-    names = {_APS_DAYS[day] for day in days}
-    return ",".join(day for day in order if day in names)
 
 
 def trigger_schedule(schedule: dict[str, Any]) -> tuple[str, str]:
@@ -111,34 +68,12 @@ def trigger_schedule(schedule: dict[str, Any]) -> tuple[str, str]:
         names = ",".join(day[:3] for day in order if day in days)
         return f"{minute} {hour} * * {names}", timezone
     if kind == "cron":
+        # Rem stores crontab text with day names, which triggers read the same way.
         fields = str(schedule.get("cron") or "").split()
         if len(fields) != 5:
             raise WorkflowSwitchError("This task's cron schedule needs five fields.")
-        fields[4] = _aps_weekday_names(fields[4])
         return " ".join(fields), timezone
     raise WorkflowSwitchError("Only Daily, Weekly and Custom cron tasks can switch to a workflow.")
-
-
-def schedule_matches(schedule: dict[str, Any], count: int = 12) -> bool:
-    """Whether the trigger's next ``count`` times are the task's, from now."""
-    from gofer.rattish.triggers import next_occurrence, parse_cron
-    from gofer.ui.rem_home_models import Schedule
-
-    expression, timezone = trigger_schedule(schedule)
-    trigger = parse_cron(expression, timezone)
-    rem = Schedule.model_validate(schedule)
-    clock = datetime.now(UTC)
-    rem_clock = clock
-    for _ in range(count):
-        mine = next_occurrence(trigger, clock)
-        theirs = rem.next(rem_clock)
-        if mine is None or theirs is None:
-            return mine is None and theirs is None
-        if mine.astimezone(UTC).isoformat() != theirs:
-            return False
-        clock = mine
-        rem_clock = datetime.fromisoformat(theirs)
-    return True
 
 
 def describe_schedule(schedule: dict[str, Any]) -> str:

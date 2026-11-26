@@ -11,24 +11,15 @@ from __future__ import annotations
 import http.client
 import json
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from gofer.ui import brain_library
-from gofer.ui.brain_library import HEALTH_RECHECK_SECONDS, BrainLibrary
+from gofer.ui.brain_library import HEALTH_RECHECK_SECONDS, BrainLibrary, LinkTargets
 from gofer.ui.server import GoferUiServer
-
-
-def wait_tasks(library: BrainLibrary) -> None:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if all(task["state"] != "running" for task in library.snapshot()["tasks"]):
-            return
-        time.sleep(0.02)
-    pytest.fail("Second Brain task did not finish")
+from tests.helpers.brain_library import wait_idle
 
 
 @pytest.fixture
@@ -50,7 +41,7 @@ def opened(library: BrainLibrary, tmp_path: Path) -> tuple[dict[str, Any], Path]
     # Not an indexed type: only the filesystem check knows whether it is there.
     (root / "data.bin").write_bytes(b"\0")
     brain = library.open({"root": str(root)})
-    wait_tasks(library)
+    wait_idle(library)
     return brain, root
 
 
@@ -105,7 +96,7 @@ def test_every_write_path_moves_the_revision(library, tmp_path):
     # tasks: starting one, its progress and result, dismissing it
     before = library.revision()
     task = library.request("task", {"kind": "index", "brainId": brain["id"]})
-    wait_tasks(library)
+    wait_idle(library)
     assert library.revision() > before
     moves(lambda: library._task_update(task["id"], label="Renamed task"))
     moves(lambda: library.request("dismiss", {"id": task["id"]}))
@@ -293,10 +284,14 @@ def test_health_builds_each_brains_document_list_once(library, tmp_path, monkeyp
     lists: list[int] = []
     original = brain_library.linked_document
 
-    def recording(doc: dict[str, Any], link: str, documents: list[dict[str, Any]]) -> Any:
-        lists.append(id(documents))
-        assert all(item["brainId"] == doc["brainId"] for item in documents)
-        return original(doc, link, documents)
+    def recording(doc: dict[str, Any], link: str, targets: LinkTargets) -> Any:
+        lists.append(id(targets))
+        assert all(
+            item["brainId"] == doc["brainId"]
+            for items in targets.by_path.values()
+            for item in items
+        )
+        return original(doc, link, targets)
 
     monkeypatch.setattr(brain_library, "linked_document", recording)
     library.recheck_health()
@@ -342,7 +337,7 @@ def test_get_answers_unchanged_for_the_current_revision(api, tmp_path):
     root.mkdir()
     (root / "notes.md").write_text("# Notes\n", encoding="utf-8")
     api.second_brains.open({"root": str(root)})
-    wait_tasks(api.second_brains)
+    wait_idle(api.second_brains)
     full = get(api)
     assert full["brains"] and full["revision"]
     assert get(api, f"?revision={full['revision']}") == {

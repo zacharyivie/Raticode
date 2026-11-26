@@ -29,6 +29,20 @@ export function canDropOn(ticket, column) {
   return ["backlog", "todo", "in_progress", "done"].includes(column);
 }
 
+// What a move did, for the board's notice: "REM-12 cancelled." or "REM-12 moved to Backlog."
+export function moveNotice(ticket, column) {
+  if (column === "cancelled") return `${ticket.key} cancelled.`;
+  if (column === "in_progress" && ticket.scope === "rem") return `${ticket.key} ${ticket.paused ? "resumed" : "started"}.`;
+  return `${ticket.key} moved to ${STATUS_LABELS[column] || column}.`;
+}
+
+// Undo sends a ticket back with another move, so it's offered only where that move exists:
+// never after starting work, and not back into In review or Blocked, which runs decide.
+const UNDO_COLUMNS = { rem: ["backlog", "todo", "done", "cancelled"], organization: ["backlog", "todo"] };
+export function canUndoMove(ticket, column) {
+  return column !== "in_progress" && !ticket.paused && (UNDO_COLUMNS[ticket.scope] || []).includes(ticket.status);
+}
+
 export function ownerFilters(board) {
   return [["all", "Everyone"], ["rem", "Rem"], ...(board?.organizations || []).map(org => [org.organization_id, org.name])];
 }
@@ -296,6 +310,35 @@ export function savedSwitchNote(view) {
   if (!settings.enabled) return "Off for now. The saved switch is on.";
   const after = selfWorkWindows(view)?.active?.after_end;
   return after === "on" ? "On for this window; stays on after it." : "On for this window; goes back to off after it.";
+}
+
+// The Start/Stop self-work button in Rem's side pane: what it says and what a click sends. It
+// reads the same view as Settings > Rem, so a change from chat, the CLI or the phone shows on
+// the next poll. Start starts self-work now, as telling Rem "start self-work now" does: it
+// turns self-work on and doesn't wait for quiet minutes, with the objectives as they are.
+// Stop turns self-work off and ends a running window. While self-work is on but waits for
+// quiet minutes, startNow is the change that starts it without waiting.
+export function selfWorkToggle(view) {
+  const settings = view?.settings;
+  if (!settings || typeof settings.enabled !== "boolean") return null;
+  const on = settings.enabled;
+  let detail;
+  if (on) {
+    const stop = selfWorkStop(view);
+    detail = [selfWorkLine(view), stop?.active && stop.label ? `${stop.label}.` : ""].filter(Boolean).join(" ");
+  } else {
+    const next = selfWorkWindows(view)?.upcoming?.[0];
+    detail = `Rem starts on its objectives now and keeps going until you stop it.${next?.label ? ` Next window: ${next.label}.` : ""}`;
+  }
+  const waiting = on && view.state?.mode === "waiting" && Boolean(view.state?.starts_at) && !view.state?.started_now_at;
+  return {
+    on,
+    mode: view.state?.mode || (on ? "waiting" : "off"),
+    label: on ? "Stop self-work" : "Start self-work",
+    detail,
+    change: on ? { enabled: false, expected_revision: settings.revision } : { start_now: true, expected_revision: settings.revision },
+    startNow: waiting ? { start_now: true, expected_revision: settings.revision } : null,
+  };
 }
 
 // Whether self-work uses tickets: the desktop's Kanban board is on. Older desktops don't say,

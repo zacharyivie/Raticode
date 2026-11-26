@@ -28,6 +28,10 @@ If the desktop app crashed, its crash screen has **Open an issue**, which fills 
 
 Don't put the details of a security problem in a public issue. Email [support@raticode.dev](mailto:support@raticode.dev), or open an issue titled "Security report" that says only how to reach you, and the maintainer will arrange a private channel.
 
+## Support Raticode's development
+
+Raticode is free and open source. If it saves you time and you'd like to help keep new releases coming, you can [buy the developer a coffee](https://buymeacoffee.com/Raticode). It's optional: every feature stays free either way, and support by email or GitHub issues doesn't depend on it.
+
 ## Releases and changes
 
 Every desktop release, with its notes and checksums, is on [GitHub Releases](https://github.com/zacharyivie/Raticode/releases). Choose **Watch > Custom > Releases** on the repository to hear about new ones.

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { NO_OBJECTIVES, applyObjectiveChange, draftChange, moveChange, objectiveDetails, objectivesCount, runningByObjective, sameObjectives, taskObjective } from "./remObjectives.js";
+import { NO_OBJECTIVES, OBJECTIVES_PAGE, applyObjectiveChange, draftChange, moreToLoad, objectiveDetails, objectivesCount, orderedObjectives, runningByObjective, sameObjectives, splitObjectives, staleCount, taskObjective } from "./remObjectives.js";
 
 const items = [
   { id: "a", text: "Raise UX quality of the workflow studio", done_when: "", done: false, created_by: "user" },
@@ -39,11 +39,48 @@ test("hover text explains open-ended objectives and how a done one was met", () 
   assert.match(done, /Written by Rem/);
 });
 
-test("moving stops at the ends of the list", () => {
-  assert.equal(moveChange(items, "a", -1), null);
-  assert.deepEqual(moveChange(items, "a", 1), { action: "move", id: "a", index: 1 });
-  assert.equal(moveChange(items, "c", 1), null);
-  assert.equal(moveChange(items, "missing", 1), null);
+const stamp = minutes => new Date(Date.UTC(2026, 10, 24, 12, minutes)).toISOString();
+
+test("objectives list newest first, open above done, and stale ones last", () => {
+  const mixed = [
+    { id: "old-open", done: false, created_at: stamp(1) },
+    { id: "stale", done: true, stale: true, created_at: stamp(9) },
+    { id: "new-done", done: true, created_at: stamp(8) },
+    { id: "new-open", done: false, created_at: stamp(7) },
+    { id: "batch-1", done: false, created_at: stamp(5) },
+    { id: "batch-2", done: false, created_at: stamp(5) },
+    { id: "old-done", done: true, created_at: stamp(2) },
+  ];
+  assert.deepEqual(orderedObjectives(mixed).map(item => item.id), ["new-open", "batch-1", "batch-2", "old-open", "new-done", "old-done", "stale"]);
+  const { current, stale } = splitObjectives(orderedObjectives(mixed));
+  assert.deepEqual(stale.map(item => item.id), ["stale"]);
+  assert.equal(current.length, 6);
+});
+
+test("stale objectives don't count toward this session's done/total", () => {
+  assert.equal(objectivesCount({ items: [], open: 2, done: 1, stale: 4, total: 7 }), "1/3");
+  assert.equal(objectivesCount({ items: [], open: 0, done: 0, stale: 4, total: 4 }), "", "only stale ones: nothing current");
+  // A view without counts (a design fixture) works them out from its items.
+  assert.equal(objectivesCount({ items: [{ done: false }, { done: true }, { done: true, stale: true }] }), "1/2");
+  assert.equal(staleCount({ items: [{ done: true, stale: true }, { done: false, stale: true }] }), 1, "only a done one is stale");
+  assert.match(objectiveDetails({ ...items[1], stale: true }), /Stale: done in an earlier self-work session/);
+});
+
+test("scrolling loads more current ones, and stale ones only while their group is open", () => {
+  const page = (loaded, counts) => ({ items: Array.from({ length: loaded }, (_, n) => ({ id: `o${n}` })), offset: 0, ...counts });
+  assert.equal(OBJECTIVES_PAGE, 30);
+  assert.equal(moreToLoad(page(30, { open: 20, done: 15, stale: 10, total: 45 }), false), true, "current ones still to load");
+  assert.equal(moreToLoad(page(35, { open: 20, done: 15, stale: 10, total: 45 }), false), false, "only stale ones left, group folded");
+  assert.equal(moreToLoad(page(35, { open: 20, done: 15, stale: 10, total: 45 }), true), true, "stale group open");
+  assert.equal(moreToLoad(page(45, { open: 20, done: 15, stale: 10, total: 45 }), true), false, "everything loaded");
+});
+
+test("a poll's first page doesn't drop pages the user scrolled to in the same revision", () => {
+  const loaded = { revision: 5, items: Array.from({ length: 60 }, (_, n) => ({ id: `o${n}` })), total: 60 };
+  const polled = { revision: 5, items: loaded.items.slice(0, 30), total: 60 };
+  assert.equal(sameObjectives(polled, loaded), loaded);
+  const changed = { ...polled, revision: 6 };
+  assert.equal(sameObjectives(changed, loaded), changed);
 });
 
 test("a draft is tidied, and an unchanged or empty one saves nothing", () => {
@@ -58,14 +95,17 @@ test("the design fixtures apply the same changes locally", () => {
   const added = applyObjectiveChange(view, { action: "add", text: "Harden the CLI", done_when: "" }, stamp);
   assert.equal(added.items.length, 4);
   assert.equal(added.revision, 3);
-  const moved = applyObjectiveChange(view, { action: "move", id: "c", index: 0 });
-  assert.deepEqual(moved.items.map(item => item.id), ["c", "a", "b"]);
+  assert.equal(added.items[0].text, "Harden the CLI", "the newest goes on top");
+  // There is no manual order; a move changes nothing.
+  assert.equal(applyObjectiveChange(view, { action: "move", id: "c", index: 0 }), view);
   const checked = applyObjectiveChange(view, { action: "check", id: "a" }, stamp);
-  assert.equal(checked.items[0].done, true);
+  assert.equal(checked.items.find(item => item.id === "a").done, true);
+  assert.deepEqual(checked.items.map(item => item.id), ["c", "a", "b"], "done ones go below open ones");
   assert.equal(checked.done, 2);
-  const reopened = applyObjectiveChange(view, { action: "uncheck", id: "b" });
-  assert.equal(reopened.items[1].done, false);
-  assert.equal("done_evidence" in reopened.items[1], false);
-  assert.deepEqual(applyObjectiveChange(view, { action: "remove", id: "a" }).items.map(item => item.id), ["b", "c"]);
+  const reopened = applyObjectiveChange({ ...view, items: [items[0], { ...items[1], stale: true }, items[2]] }, { action: "uncheck", id: "b" });
+  const b = reopened.items.find(item => item.id === "b");
+  assert.equal(b.done, false);
+  assert.equal("done_evidence" in b || "stale" in b, false, "reopened, it isn't stale any more");
+  assert.deepEqual(applyObjectiveChange(view, { action: "remove", id: "a" }).items.map(item => item.id), ["c", "b"]);
   assert.equal(applyObjectiveChange(view, { action: "edit", id: "missing", text: "x" }), view);
 });

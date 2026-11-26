@@ -18,6 +18,8 @@ from typing import Any
 
 import typer
 
+from gofer.cli.output import confirm_unseen, fail
+
 app = typer.Typer(
     help=(
         "List, approve or remove workflow shortcuts: system-wide keys, added in the "
@@ -27,7 +29,7 @@ app = typer.Typer(
 )
 
 _DATA_DIR_OPTION = typer.Option(
-    None, "--data-dir", help="Override the app data directory that holds the shortcuts."
+    None, "--data-dir", help="Override the data folder that holds the shortcuts."
 )
 _FORMAT_OPTION = typer.Option("text", "--format", help="Output format: text or json.")
 _APPROVAL_STATES = {
@@ -40,14 +42,6 @@ def _require_format(output_format: str) -> None:
     if output_format not in {"text", "json"}:
         typer.echo("Unsupported format. Use 'text' or 'json'.", err=True)
         raise typer.Exit(2)
-
-
-def _fail(message: str, output_format: str, code: int = 1) -> typer.Exit:
-    if output_format == "json":
-        typer.echo(json.dumps({"ok": False, "error": message}, sort_keys=True))
-    else:
-        typer.echo(message, err=True)
-    return typer.Exit(code)
 
 
 def _key_label(binding: str) -> str:
@@ -95,7 +89,7 @@ def list_shortcuts(
     try:
         payload = list_payload(base, details=True)
     except ShortcutError as exc:
-        raise _fail(str(exc), output_format) from exc
+        raise fail(str(exc), output_format) from exc
     shortcuts: list[dict[str, Any]] = payload["shortcuts"]
     for item in shortcuts:
         item["key"] = _key_label(item["binding"])
@@ -136,9 +130,9 @@ def remove_shortcut(
     try:
         removed = remove_payload(base, shortcut_id.strip())["removed"]
     except ShortcutNotFound as exc:
-        raise _fail(f"{exc} Run `Raticode rattish shortcuts list` to see them.", output_format)
+        raise fail(f"{exc} Run `Raticode rattish shortcuts list` to see them.", output_format)
     except ShortcutError as exc:
-        raise _fail(str(exc), output_format) from exc
+        raise fail(str(exc), output_format) from exc
     if output_format == "json":
         typer.echo(json.dumps({"ok": True, "removed": removed}, sort_keys=True))
         return
@@ -166,28 +160,6 @@ def _changes_text(changes: dict[str, Any]) -> str:
 
         lines.append(unseen_note(changes["unseen"]))
     return "\n".join(line for line in lines if line)
-
-
-def _unseen_lines(unseen: list[dict[str, Any]]) -> list[str]:
-    from gofer.rattish.trigger_approval import unseen_lines
-
-    return unseen_lines(unseen)
-
-
-def _confirm_unseen(files: list[dict[str, Any]], *, yes: bool, unseen: bool, fmt: str) -> bool:
-    """Whether you approve files whose change wasn't shown: --unseen, or a second yes."""
-    if not files or unseen:
-        return unseen
-    if yes or fmt != "text":
-        return False
-    from gofer.rattish.trigger_approval import unseen_heading
-
-    heading, advice = unseen_heading(files)
-    typer.echo(heading)
-    for line in _unseen_lines(files):
-        typer.echo(line)
-    typer.echo(advice)
-    return typer.confirm("Approve them without seeing all of their changes?", default=False)
 
 
 @app.command("approve")
@@ -241,11 +213,11 @@ def approve(
     try:
         shown = shortcut_changes(base, shortcut_id)
     except ShortcutNotFound as exc:
-        raise _fail(
+        raise fail(
             f"{exc} Run `Raticode rattish shortcuts list` to see them.", output_format
         ) from None
     except ShortcutError as exc:
-        raise _fail(str(exc), output_format) from None
+        raise fail(str(exc), output_format) from None
     if output_format == "text":
         typer.echo(_changes_text(shown))
     if shown["state"] == "approved" and fingerprint is None:
@@ -271,7 +243,7 @@ def approve(
         if not typer.confirm("Approve this version for the shortcut?", default=False):
             typer.echo("Not approved. The shortcut won't run the workflow until you approve.")
             raise typer.Exit(1)
-    accept_unseen = _confirm_unseen(
+    accept_unseen = confirm_unseen(
         shown.get("unseen") or [], yes=yes, unseen=unseen, fmt=output_format
     )
     try:
@@ -303,7 +275,7 @@ def approve(
             typer.echo(str(exc), err=True)
         raise typer.Exit(int(ExitCode.CONFLICT)) from None
     except ShortcutError as exc:
-        raise _fail(str(exc), output_format) from None
+        raise fail(str(exc), output_format) from None
     if output_format == "json":
         typer.echo(
             json.dumps(

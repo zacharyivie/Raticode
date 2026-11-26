@@ -271,8 +271,8 @@ object BrowserRules {
         val appModes: Map<String, String> = emptyMap(),
         /**
          * The default browser: where new tabs, chat links and the Browser page go. "raticode" (Raticode (chromium), this
-         * app's WebView browser), "gecko" (Raticode (gecko)), "firefox" (Firefox for Android), "edge" (Microsoft Edge) or a
-         * [BrowserApps] engine such as "chrome". The stored values never change; only the names people see do.
+         * app's WebView browser), "gecko" (Raticode (gecko)), "firefox" (Firefox for Android) or a [BrowserApps] engine
+         * such as "chrome" or "edge". The stored values never change; only the names people see do.
          */
         val engine: String = ENGINE_RATICODE,
         /**
@@ -280,10 +280,6 @@ object BrowserRules {
          * list, when that isn't [engine]; null follows [engine]. See [pageEngine].
          */
         val showing: String? = null,
-        /** How Firefox shows pages: as a Firefox tab over Raticode ("tab") or in the Firefox app ("app"). */
-        val firefoxMode: String = FirefoxApps.MODE_APP,
-        /** How Edge shows pages: in the Edge app ("app", the default, like Firefox) or as an Edge tab over Raticode ("tab"). */
-        val edgeMode: String = EdgeApps.MODE_APP,
         /**
          * Which built-in browser opens links other apps send while Raticode is the phone's default browser: [ENGINE_RATICODE]
          * (the default) or [ENGINE_GECKO]. See dev.raticode.mobile.open.OpenLinkActivity.
@@ -292,14 +288,12 @@ object BrowserRules {
     )
 
     const val ENGINE_RATICODE = "raticode"
-    const val ENGINE_FIREFOX = "firefox"
-    const val ENGINE_EDGE = "edge"
     /** Raticode's second browser, on Mozilla's Gecko engine, inside this app (`GeckoBrowser`). */
     const val ENGINE_GECKO = "gecko"
 
     /** A saved or chosen browser value this phone knows, or "raticode" for anything else. */
     fun engine(value: String?): String =
-        value?.takeIf { it == ENGINE_RATICODE || it == ENGINE_FIREFOX || it == ENGINE_EDGE || it == ENGINE_GECKO || BrowserApps.byEngine(it) != null } ?: ENGINE_RATICODE
+        value?.takeIf { it == ENGINE_RATICODE || it == ENGINE_GECKO || BrowserApps.byEngine(it) != null } ?: ENGINE_RATICODE
 
     /** Raticode (chromium) and Raticode (gecko) run inside this app and share one tab list; the others are separate apps. */
     fun inApp(engine: String?) = engine == ENGINE_RATICODE || engine == ENGINE_GECKO
@@ -333,8 +327,7 @@ object BrowserRules {
         .put("app_opens", JSONObject(saved.appModes.filterKeys { BrowserApps.byEngine(it) != null }.mapValues { BrowserApps.mode(it.value) }))
         .put("keep_history", saved.keepHistory).put("links_in_app", saved.linksInApp)
         .put("search", saved.search).put("computer_search", saved.computerSearch).put("text_zoom", saved.textZoom)
-        .put("engine", saved.engine).put("firefox_opens", saved.firefoxMode)
-        .put("edge_opens", saved.edgeMode).put("external_engine", saved.externalEngine)
+        .put("engine", saved.engine).put("external_engine", saved.externalEngine)
         .also { json -> saved.showing?.takeIf { inApp(it) && it != saved.engine }?.let { json.put("showing", it) } }
         .toString()
 
@@ -365,20 +358,27 @@ object BrowserRules {
             search = search,
             computerSearch = json.optString("computer_search").takeIf { "{query}" in it && BrowserAddress.isWeb(it.replace("{query}", "q")) }.orEmpty(),
             textZoom = json.optInt("text_zoom", 100).coerceIn(MIN_TEXT, MAX_TEXT),
-            appModes = json.optJSONObject("app_opens")?.let { modes ->
-                BrowserApps.ALL.mapNotNull { app -> modes.optString(app.engine).takeIf { it.isNotEmpty() }?.let { app.engine to BrowserApps.mode(it) } }.toMap()
-            }.orEmpty(),
+            appModes = appModes(json),
             engine = chosen,
             // Saves from before the shared tab list have no "showing": the page follows the default, as it always did.
             showing = json.optString("showing").takeIf { inApp(it) && it != chosen },
-            // "firefox_opens" replaced "firefox_mode" on November 7, 2026, when the Firefox app became the default: the
-            // earlier default closed the page (and its music) when the user went back to Raticode. A choice made since
-            // is kept; the old field is read as the new default.
-            firefoxMode = if (json.optString("firefox_opens") == FirefoxApps.MODE_TAB) FirefoxApps.MODE_TAB else FirefoxApps.MODE_APP,
-            // Edge opens in its own app unless the user chose a tab over Raticode, for the same reason as Firefox.
-            edgeMode = if (json.optString("edge_opens") == EdgeApps.MODE_TAB) EdgeApps.MODE_TAB else EdgeApps.MODE_APP,
             externalEngine = if (json.optString("external_engine") == ENGINE_GECKO) ENGINE_GECKO else ENGINE_RATICODE,
         )
+    }
+
+    /**
+     * How each of [BrowserApps] shows pages, from "app_opens". Edge and Firefox had their own "edge_opens" and
+     * "firefox_opens" before they became [BrowserApps] (November 2026); a save that still holds one keeps that choice
+     * until the next save writes "app_opens". ("firefox_opens" itself replaced "firefox_mode" on November 7, 2026, when
+     * the Firefox app became the default; "firefox_mode" held the old default rather than a choice, so it isn't read.)
+     */
+    private fun appModes(json: JSONObject): Map<String, String> {
+        val modes = json.optJSONObject("app_opens")
+        val legacy = mapOf(MicrosoftEdge.ENGINE to json.optString("edge_opens"), Firefox.ENGINE to json.optString("firefox_opens"))
+        return BrowserApps.ALL.mapNotNull { app ->
+            (modes?.optString(app.engine)?.takeIf { it.isNotEmpty() } ?: legacy[app.engine]?.takeIf { it.isNotEmpty() })
+                ?.let { app.engine to BrowserApps.mode(it) }
+        }.toMap()
     }
 
     /** How [engine]'s app shows pages, from [Saved.appModes]. */

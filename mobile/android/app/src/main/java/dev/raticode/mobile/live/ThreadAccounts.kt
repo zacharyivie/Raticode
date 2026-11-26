@@ -16,7 +16,7 @@ object ThreadAccounts {
     const val SIGN_IN_HELP = "Sign in on your computer: Settings › Usage › Sign in on this account's card. You can pick it here after that."
     /** Starts or cancels an account's sign-in on the desktop, finished on this phone with a link and a one-time code. */
     const val SIGN_IN = "provider.account.sign_in"
-    /** The screen key of a sign-in's answer: one per account. */
+    /** The screen key of a sign-in's answer, followed by its [signInId]: one per account. */
     const val SIGN_IN_KEY = "$SIGN_IN:"
     const val SIGN_IN_UPDATE_DESKTOP = "Update Raticode on your computer to sign accounts in from the phone."
 
@@ -75,9 +75,19 @@ object ThreadAccounts {
         if (cancel) put("cancel", true)
     }
 
-    /** Every account's sign-in in [view], by account name. */
-    fun signIns(view: View): Map<String, SignIn> =
-        view.menus.values.flatMap { menu -> menu.accounts.mapNotNull { a -> a.signIn?.let { a.name to it } } }.toMap()
+    /**
+     * One account's sign-in, as "provider/name": two providers can each have an account with the same name. Provider ids
+     * never hold a slash, so the first one splits them.
+     */
+    fun signInId(provider: String, name: String) = "$provider/$name"
+
+    /** The sign-in answer's screen key, from the request's provider and name; an older desktop's answer names neither. */
+    fun signInKey(params: JSONObject) = SIGN_IN_KEY + signInId(params.optString("provider"), params.optString("name"))
+
+    /** Every account's sign-in in [view], by [signInId]. */
+    fun signIns(view: View): Map<String, SignIn> = view.menus.values.flatMap { menu ->
+        menu.accounts.mapNotNull { a -> a.signIn?.let { signInId(menu.provider, a.name) to it } }
+    }.toMap()
 
     /**
      * What to do with the code on the sign-in page. Grok's link can already hold the code (xAI's verification link with

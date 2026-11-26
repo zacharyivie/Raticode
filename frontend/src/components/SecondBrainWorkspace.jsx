@@ -1,6 +1,8 @@
 import { useEffect, useMemo } from "react";
 import { ArrowLeft, CircleAlert, CircleCheck, Download, FolderKanban, FolderOpen, HardDrive, HeartPulse, Inbox, Info, Library, Loader2, Network, Repeat, ScrollText, Search, Settings2, Trash2, Upload, X } from "lucide-react";
 import { useSecondBrain, viewFor, navigate, openDialog, cancelTask, dismissTask, dismissToast, dismissError, adoptLegacyRoot, ensureLibrary, setResearchProvider, refreshLibrary, startTask } from "../lib/secondBrainStore.js";
+import { noticeDuration } from "../lib/notices.js";
+import { Notice } from "./Notice.jsx";
 import { BrainMark, Pill, ProgressBar } from "./SecondBrainParts.jsx";
 import SearchView from "./SecondBrainSearch.jsx";
 import { CollectionsView } from "./SecondBrainCollections.jsx";
@@ -39,13 +41,10 @@ function TaskToast({ task }) {
   </div>;
 }
 
-function Toast({ tone = "success", message, action, onDismiss }) {
+// Second Brain's look for the shared notice, with an icon for its tone.
+function Toast({ tone = "success", ...props }) {
   const Icon = TOAST_ICONS[tone] || CircleCheck;
-  return <div className="sb-toast" data-tone={tone} role={tone === "danger" ? "alert" : "status"}>
-    <Icon size={15} aria-hidden="true" />
-    <p className="sb-toast-text">{message}</p>
-    <div className="sb-toast-actions">{action}<button type="button" className="sb-icon-button" aria-label="Dismiss notification" title="Dismiss" onClick={onDismiss}><X size={14} /></button></div>
-  </div>;
+  return <Notice className="sb-toast" dismissClassName="sb-icon-button" tone={tone} icon={<Icon size={15} aria-hidden="true" />} {...props} />;
 }
 
 export default function SecondBrainWorkspace({ onClose, assistant = {}, memorySettings = {} }) {
@@ -54,12 +53,6 @@ export default function SecondBrainWorkspace({ onClose, assistant = {}, memorySe
   const brain = store.brains.find(item => item.id === store.activeBrainId);
   const view = viewFor(store);
   useEffect(() => { void ensureLibrary().then(() => adoptLegacyRoot(memorySettings.secondBrainRoot)); }, [memorySettings.secondBrainRoot]);
-  useEffect(() => {
-    if (!store.toast) return undefined;
-    // Errors stay longer so they can be read; confirmations get out of the way quickly.
-    const timer = setTimeout(dismissToast, store.toast.tone === "danger" ? 12000 : 4000);
-    return () => clearTimeout(timer);
-  }, [store.toast]);
   const counts = useMemo(() => {
     const documents = store.documents.filter(doc => doc.brainId === brain?.id);
     const ids = new Set(documents.map(doc => doc.id));
@@ -104,7 +97,8 @@ export default function SecondBrainWorkspace({ onClose, assistant = {}, memorySe
     {tasks.length || store.toast || store.error ? <div className="sb-toasts">
       {store.error ? <Toast tone="danger" message={store.error} action={<button type="button" className="sb-mini-button" onClick={() => refreshLibrary()}>Retry</button>} onDismiss={dismissError} /> : null}
       {tasks.map(task => <TaskToast key={task.id} task={task} />)}
-      {store.toast ? <Toast key={store.toast.id} tone={store.toast.tone} message={store.toast.message} onDismiss={dismissToast} /> : null}
+      {store.toast ? <Toast key={store.toast.id} tone={store.toast.tone} message={store.toast.message} duration={noticeDuration(store.toast)} onDismiss={dismissToast}
+        action={store.toast.action ? <button type="button" className="sb-mini-button" onClick={store.toast.action.run}>{store.toast.action.label}</button> : null} /> : null}
     </div> : null}
     <SecondBrainDialogs provider={provider} />
   </section></ResearchProviderContext.Provider>;

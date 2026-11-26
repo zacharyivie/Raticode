@@ -127,6 +127,22 @@ class RemDecisionsTest {
         assertEquals("Rem decided (auto mode) on 2026-11-19 · About you · D-4", RemDecisions.decidedLine(parsed.decisions[1]))
     }
 
+    @Test fun aRecordReadFromTheRepositorySaysWhichCommitAddedItInsteadOfYouDecided() {
+        val parsed = DesktopViews.parse(RemDecisions.READ, JSONObject("""{"revision":1,"decisions":[
+            {"id":"D-7","question":"Indentation?","answer":"Use tabs.","status":"confirmed","decided_by":"user",
+             "decided_at":"2026-03-04T03:06:07+00:00","project":"Site","read_from":{"commit":"1a2b3c4d5e6f","author":"Other Person"}},
+            {"id":"D-8","question":"Old read","answer":"x","status":"confirmed","decided_by":"user",
+             "decided_at":"2026-03-05T03:06:07+00:00","project":"Site","read_from":{"commit":"","author":""}}]}""")) as RemDecisionList
+        val (read, older) = parsed.decisions
+        val line = RemDecisions.decidedLine(read)
+        assertTrue(line, line.startsWith("Read from the repository"))
+        assertFalse(line, line.contains("You decided"))
+        assertEquals("Read from the repository: added in 1a2b3c4d5e6f by Other Person on 2026-03-04 · Site · D-7", line)
+        assertEquals("Read from the repository on 2026-03-05 · Site · D-8", RemDecisions.decidedLine(older))
+        // An older desktop sends no read_from: it says You decided, as before.
+        assertEquals("You decided on 2026-03-04 · Site · D-7", RemDecisions.decidedLine(read.copy(readFrom = null)))
+    }
+
     @Test fun aTappedAlertOpensItsDecisionsSectionWithItFirst() {
         val parsed = DesktopViews.parse(RemDecisions.READ, list) as RemDecisionList
         assertEquals(RemDecisions.Section.WAITING, RemDecisions.sectionOf(parsed, "D-4"))

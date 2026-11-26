@@ -20,6 +20,7 @@ from gofer.ui.organization_auto import (
     review_pass,
 )
 from gofer.ui.organizations import OrganizationManager
+from tests.helpers.organizations import act
 
 
 async def final(**options: Any) -> Any:
@@ -56,6 +57,7 @@ def manager(tmp_path: Path) -> Any:
         manager.close()
 
 
+# Not the shared company: a paper-only Desk with a turn limit that starts in Auto mode.
 def company(manager: OrganizationManager, root: Path, *, auto: bool = True) -> Any:
     employees = [
         {"id": "lead", "name": "Avery", "permissionMode": "read-only"},
@@ -79,14 +81,6 @@ def company(manager: OrganizationManager, root: Path, *, auto: bool = True) -> A
     if auto:
         org = act(manager, org, "auto_mode", enabled=True, confirm=True)
     return org
-
-
-def act(
-    manager: OrganizationManager, org: dict[str, Any], action: str, actor: str = "user", **p: Any
-) -> Any:
-    return manager.call(
-        org["projectRoot"], actor, {"organizationId": org["id"], "action": action, "params": p}
-    )
 
 
 def state(manager: OrganizationManager, org: dict[str, Any]) -> Any:

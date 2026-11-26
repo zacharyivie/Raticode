@@ -250,6 +250,7 @@ Raticode tickets projects ~/code/app ~/code/site --expected-revision 2
 ```bash
 Raticode selfwork status
 Raticode selfwork report --mark-seen
+Raticode selfwork start
 Raticode selfwork on
 Raticode selfwork off
 Raticode selfwork window --until 19:00
@@ -272,17 +273,18 @@ Raticode selfwork objectives
 Raticode selfwork objectives add --text "Raise UX quality of the workflow studio"
 Raticode selfwork objectives add --text "Make every starter run on Windows" --done-when "All starters pass on the Windows CI job"
 Raticode selfwork objectives check --id OBJECTIVE_ID
-Raticode selfwork objectives move --id OBJECTIVE_ID --index 0
+Raticode selfwork objectives --limit 30 --offset 30
 ```
 
 - `status` shows whether self-work is on, what it's doing, how many of its tasks are paused, and its settings.
-- `on` and `off` flip only the switch, like telling Rem "turn on self-work". `set` changes several settings at once and needs `--expected-revision`.
+- `start` [starts self-work now](../rem/board.md#start-self-work-now), like telling Rem "start self-work now": it turns self-work on if it's off and doesn't wait for 15 quiet minutes. Not in a released version yet.
+- `on` and `off` flip only the switch, like telling Rem "turn on self-work"; turned on, self-work waits for 15 quiet minutes. `set` changes several settings at once and needs `--expected-revision`.
 - `--session-token-limit`, `--daily-token-limit` and `--rate-limit-percent` set the [self-work limits](../rem/board.md#self-work-limits); 0 turns one off. `status` shows them, and why self-work stopped starting new work when a limit is reached.
 - `--daily-allowance-percent` sets the [daily cap on the weekly allowance](../rem/board.md#daily-cap-on-the-weekly-allowance) (new in 0.6.0); a percent above 0 chooses Daily cap and 0 turns it off. It's refused while Pace to reset is chosen.
 - `--allowance-mode off|daily|pace` chooses how self-work uses a weekly allowance, and `--pace-aim N` (1 to 100, such as 50 for half the week) and `--pace-lead H` (0 to 24) set [Pace to reset](../rem/board.md#pace-to-reset)'s aim and finish (new in 0.6.0). `status` adds the pace line, such as "Pacing Codex's weekly allowance: 40% used, line 48.5%. Up to 2 tasks can start." `status` adds a line with today's use, naming the [account](../rem/providers.md#self-work-on-accounts) self-work runs on when it uses one.
 - `--auto-approve` turns on [auto-approval](../rem/board.md#let-rem-approve-its-own-tickets): self-work's new ideas go to Backlog approved until self-work ends. It also needs `--confirm-auto-approve`; without it the command explains what the setting allows and changes nothing. `apply` needs the same flag when its file turns auto-approval on. `--no-auto-approve` turns it off. `status` shows how many tickets self-work approved this session.
 - `--account PROVIDER=ACCOUNT` sets [which account self-work uses](../rem/board.md#which-account-self-work-uses) with that provider (new in 0.6.0): an account name, `auto` to choose by usage, `@default` for the default sign-in, or nothing after `=` for Rem's setting. Repeat it for several providers. `status` lists the choices, `export` writes them as `provider_accounts` and `apply` replaces them all.
-- `objectives` lists the [self-work objectives](../rem/board.md#objectives) with their IDs (new in 0.6.0). `add`, `edit`, `remove`, `move`, `check` and `uncheck` change them as you, like the side pane; `--done-when` sets the doneness criteria, and `--expected-revision` refuses the change if the list moved on (exit 4).
+- `objectives` lists the [self-work objectives](../rem/board.md#objectives) with their IDs (new in 0.6.0). `add`, `edit`, `remove`, `check` and `uncheck` change them as you, like the side pane; `--done-when` sets the doneness criteria, and `--expected-revision` refuses the change if the list moved on (exit 4). The list comes newest first with open ones above done ones, then the [stale](../rem/board.md#order-sessions-and-stale-objectives) ones done in earlier sessions under their own heading; the count is done/total for the current session. It shows 30 at a time: `--limit` (up to 500) and `--offset` page through the rest. `move` and `--index` are gone, since the order is fixed. Not in a released version yet.
 - `report` is the running report described in [Self-work](../rem/board.md#self-work). `report --period` prints the [report of the last self-work period](../rem/board.md#the-report-when-self-work-stops).
 - `window` sets a [timed window](../rem/board.md#timed-self-work), like telling Rem. `--date YYYY-MM-DD` picks the day, `--timezone` names a zone (the computer's by default) and `--then restore|on|off` sets the switch afterwards. `status` shows the windows with their IDs, and `--cancel` ends or drops one.
 - `stop-when` sets [when the self-work running now stops](../rem/board.md#stop-condition-and-latest-time), like telling Rem: a condition in your words, which Rem checks after each self-work task finishes, and `--no-later-than HH:MM` (with `--day today|tonight|tomorrow|YYYY-MM-DD` and `--timezone`) as the latest time. An empty condition (`""`) clears it; `--clear condition|no-later-than|both` clears either or both, and `--revision` refuses the change if the stop moved on. Self-work must be on. `status` shows the condition, the latest time and Rem's last check. Not in a released version yet.

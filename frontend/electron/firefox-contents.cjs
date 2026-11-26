@@ -6,14 +6,13 @@
 // Firefox renders without a window. The tab streams screenshots of its
 // viewport to the studio, which draws them on a canvas and sends the user's
 // mouse and keyboard back as WebDriver BiDi input. That input is trusted, as
-// is Rem's: Firefox treats both like a person using the page.
+// is Rem's: Firefox treats both like a person using the page. What doesn't
+// depend on WebDriver BiDi is in stream-tab.cjs.
 const crypto = require("node:crypto");
 const { EventEmitter } = require("node:events");
-const { watchSound } = require("./stream-sound.cjs");
+const { FALLBACK_VIEW, STATE_WORLD, StreamTab, clampView } = require("./stream-tab.cjs");
 const { mediaPageHook } = require("./browser-media.cjs");
 
-const FALLBACK_VIEW = { width: 1280, height: 800, scale: 1 };
-const MAX_VIEW = 4096;
 const FRAME_QUALITY = 0.82;
 // Frame pacing: fast while the user or the page is active, slow when idle.
 const ACTIVE_FRAME_MS = 40;
@@ -25,9 +24,6 @@ const ACK_TIMEOUT_MS = 500;
 const POPUP_URL_TIMEOUT_MS = 2000;
 const MAX_TEXT_INPUT = 20000;
 const TEXT_CHUNK = 200;
-const CURSOR_INTERVAL_MS = 120;
-const STATE_SANDBOX = "raticode-state";
-const STATE_REFRESH_MS = 1000;
 // Firefox's own error and warning pages. A certificate warning's "Accept the
 // Risk and Continue", or a blocked site's way past the block, is the user's
 // decision; Raticode's own tabs never let Rem past either.
@@ -96,19 +92,6 @@ function downloadKey(params = {}) {
   return `url:${String(params.url || "").slice(0, 4096)}`;
 }
 
-function clampView(view) {
-  const { width, height, scale } = view || {};
-  const w = Math.round(Number(width));
-  const h = Math.round(Number(height));
-  const s = Number(scale);
-  if (!Number.isFinite(w) || !Number.isFinite(h) || w < 50 || h < 50) return null;
-  return {
-    width: Math.min(w, MAX_VIEW),
-    height: Math.min(h, MAX_VIEW),
-    scale: Number.isFinite(s) && s >= 0.5 && s <= 4 ? s : 1,
-  };
-}
-
 // Same-origin rules hide most of a tab's history from the page, so Raticode
 // keeps its own list. New entries come from pushes; traversals Raticode asks
 // for move the index; reloads and replacements keep it.
@@ -150,56 +133,25 @@ function createHistoryTracker() {
   };
 }
 
-class FirefoxContents extends EventEmitter {
-  constructor({ engine, kind = "user", nativeImage = null, clipboard = null, log = () => {}, adopt = "" }) {
-    super();
+class FirefoxContents extends StreamTab {
+  constructor({ engine, kind, nativeImage, clipboard, log, adopt = "" }) {
+    super({ kind, nativeImage, clipboard, log, eventPrefix: "firefox" });
     this.engine = "firefox";
-    this.kind = kind;
     // A tab the user shared from Gecko's own window: Rem drives it, but its
     // size, page scripts and life stay the user's.
     this.adopted = typeof adopt === "string" ? adopt : "";
     this.firefox = engine;
-    this.nativeImage = nativeImage;
-    this.clipboard = clipboard;
-    this.log = log;
     this.context = "";
-    this.destroyed = false;
-    this.dead = false;
-    this.url = "about:blank";
-    this.title = "";
-    this.loading = true;
-    // True from the start of a navigation until the new document fires
-    // DOMContentLoaded. See isLoadingMainFrame().
-    this.documentLoading = true;
-    this.focused = false;
-    this.muted = false;
-    this.pageZoom = 1;
-    this.view = null;
-    this.visible = false;
     this.history = createHistoryTracker();
-    this.windowOpenHandler = () => ({ action: "deny" });
-    this.waiters = new Set();
-    this.inputQueue = Promise.resolve();
-    this.pendingMove = null;
-    this.pressedKeys = new Set();
-    this.dialog = null;
     this.frame = { seq: 0, awaitingAck: false, ackDeadline: 0, lastAt: 0, lastHash: "", lastChange: 0, streaming: false, wake: null };
     this.activityAt = Date.now();
-    this.cursorAt = 0;
     this.stats = { frames: 0, captureMs: 0, bytes: 0 };
-    this.guardNavigation = false;
-    this.mainFrame = {};
     this.debugger = createDebuggerShim(this);
-    this.nativeInput = {
-      click: (options) => this.nativeClick(options),
-      hover: (options) => this.nativeHover(options),
-      press: (key) => this.nativePress(key),
-    };
-    this.audible = false;
-    this.sound = watchSound(this, { ready: () => Boolean(this.context), evaluate: (expression) => this.evaluateIn(STATE_SANDBOX, expression) });
-    this.ready = this.start();
-    this.ready.catch((error) => this.fail(error));
+    this.boot();
   }
+
+  get name() { return "Firefox"; }
+  isRunning() { return Boolean(this.context); }
 
   async start() {
     if (this.adopted) {
@@ -238,40 +190,10 @@ class FirefoxContents extends EventEmitter {
     this.emit("firefox-ready");
   }
 
-  fail(error) {
-    this.loading = false;
-    this.dead = true;
-    this.lastError = error?.message || String(error);
-    this.emit("did-fail-load", {}, -2, this.lastError, this.url, true);
-    this.emit("did-stop-loading");
-  }
-
   // -------------------------------------------------------------------------
   // webContents interface
 
-  isDestroyed() { return this.destroyed; }
-  getURL() { return this.url; }
-  getTitle() { return this.title; }
-  isLoading() { return this.loading; }
-  // As Electron's method of the same name, but true only until the page's
-  // DOM is ready (browsingContext.domContentLoaded), so a frame or image that
-  // never finishes doesn't keep it true.
-  isLoadingMainFrame() { return this.loading && this.documentLoading; }
-  isFocused() { return this.focused; }
-  getType() { return "firefox"; }
-  // The studio focuses its own view of the tab.
-  focus() { this.emit("firefox-focus"); }
-  setBackgroundThrottling() {}
-  setBackgroundColor() {}
-  setZoomFactor() {}
-  setWindowOpenHandler(handler) { this.windowOpenHandler = typeof handler === "function" ? handler : this.windowOpenHandler; }
-  isCurrentlyAudible() { return this.audible === true; }
-  isDevToolsOpened() { return false; }
-  closeDevTools() {}
-  openDevTools() { throw new Error("Developer tools are not available in Firefox tabs."); }
   savePage() { return Promise.reject(new Error("Saving pages is not available in Firefox tabs. Save as PDF instead.")); }
-  print() { throw new Error("Printing is not available in Firefox tabs. Save as PDF instead."); }
-  async getPrintersAsync() { return []; }
 
   async printToPDF(options = {}) {
     await this.alive();
@@ -284,39 +206,17 @@ class FirefoxContents extends EventEmitter {
   }
 
   async loadURL(url) {
-    await this.alive();
-    this.lastError = "";
     const target = String(url);
-    const waiter = this.waitForNavigation();
-    // Report loading at once, as Chromium does, so callers that wait for the
-    // page to settle do not return before Firefox announces the navigation.
-    this.loading = true;
-    this.documentLoading = true;
+    const waiter = await this.startNavigation();
     try {
       await this.command("browsingContext.navigate", { context: this.context, url: target, wait: "none" });
     } catch (error) {
-      waiter.cancel();
-      this.loading = false;
-      this.emit("did-fail-load", {}, -2, error.message, target, true);
-      this.emit("did-stop-loading");
-      throw new Error(`Firefox could not open ${target}: ${error.message}`, { cause: error });
+      throw this.navigationRefused(waiter, target, error);
     }
     return waiter.promise;
   }
 
-  downloadURL(url) { void this.loadURL(url).catch(() => {}); }
-  reload() { void this.reloadPage(false); }
-  reloadIgnoringCache() { void this.reloadPage(true); }
-
-  async reloadPage(ignoreCache) {
-    if (this.dead) {
-      await this.revive();
-      if (this.url && this.url !== "about:blank") await this.loadURL(this.url).catch(() => {});
-      return;
-    }
-    await this.alive();
-    this.loading = true;
-    this.documentLoading = true;
+  async reloadDocument(ignoreCache) {
     // Firefox (158 and earlier) refuses the whole reload when it is given
     // ignoreCache, even false. A hard reload asks for it and falls back to a
     // plain reload where Firefox doesn't support it yet.
@@ -334,7 +234,7 @@ class FirefoxContents extends EventEmitter {
     }
   }
 
-  stop() { void this.evaluateIn(STATE_SANDBOX, "window.stop()").catch(() => {}); }
+  stop() { void this.evaluateIn(STATE_WORLD, "window.stop()").catch(() => {}); }
 
   get navigationHistory() {
     const history = this.history;
@@ -353,7 +253,7 @@ class FirefoxContents extends EventEmitter {
         if (current && current !== this.url) this.commitUrl(current);
         // Same-page entries and back-forward cache restores fire no load
         // event, so a finished document ends the loading state here.
-        const ready = this.navigation === before ? "complete" : await this.evaluateIn(STATE_SANDBOX, "document.readyState").catch(() => "");
+        const ready = this.navigation === before ? "complete" : await this.evaluateIn(STATE_WORLD, "document.readyState").catch(() => "");
         if (ready === "complete" && this.loading) {
           this.loading = false;
           await this.refreshState();
@@ -377,14 +277,6 @@ class FirefoxContents extends EventEmitter {
     };
   }
 
-  // Each world gets its own Firefox sandbox: it shares the page's DOM but
-  // none of its scripts, like Chromium's isolated worlds.
-  async executeJavaScriptInIsolatedWorld(worldId, sources, userGesture = false) {
-    this.refuseRemOnErrorPage();
-    const code = (sources || []).map((item) => item.code).join(";\n");
-    return this.evaluateIn(`raticode-world-${Number(worldId) || 0}`, code, { userActivation: userGesture === true });
-  }
-
   // While Rem uses the tab, Firefox's error and warning pages refuse Rem's page
   // tools; Rem can still go back or open another page. The user's own tab
   // works as Firefox's does.
@@ -394,14 +286,15 @@ class FirefoxContents extends EventEmitter {
     }
   }
 
-  async evaluateIn(sandbox, expression, { userActivation = false } = {}) {
+  // Each world gets its own Firefox sandbox.
+  async evaluateIn(sandbox, expression, { userGesture = false } = {}) {
     await this.alive();
     const response = await this.command("script.evaluate", {
       expression,
       target: sandbox ? { context: this.context, sandbox } : { context: this.context },
       awaitPromise: true,
       resultOwnership: "none",
-      userActivation,
+      userActivation: userGesture,
       serializationOptions: { maxObjectDepth: 32, maxDomDepth: 0, includeShadowTree: "none" },
     });
     if (response.type === "exception") {
@@ -411,149 +304,39 @@ class FirefoxContents extends EventEmitter {
     return fromRemoteValue(response.result);
   }
 
-  async capturePage() {
-    await this.alive();
+  async screenshot() {
     const { data } = await this.command("browsingContext.captureScreenshot", { context: this.context, origin: "viewport" });
-    const buffer = Buffer.from(data, "base64");
-    if (!this.nativeImage) return buffer;
-    return this.nativeImage.createFromBuffer(buffer);
-  }
-
-  setAudioMuted(muted) {
-    this.muted = muted === true;
-    void this.applyMute();
-  }
-
-  async applyMute() {
-    if (!this.context || this.dead) return;
-    await this.evaluateIn(STATE_SANDBOX, `for (const media of document.querySelectorAll("audio,video")) media.muted = ${this.muted}; true`).catch(() => {});
-    await this.sound.check();
-  }
-
-  // Firefox's window.find selects each match, so the highlight appears in the stream.
-  findInPage(text, { forward = true, findNext = true } = {}) {
-    const requestId = (this.findRequestId = (this.findRequestId || 0) + 1);
-    const query = String(text);
-    // A new search starts from the top of the page, not the previous match.
-    const fresh = findNext !== false && this.findQuery !== query;
-    void this.alive().then(async () => {
-      const result = await this.evaluateIn(STATE_SANDBOX, `(() => {
-        const query = ${JSON.stringify(query)};
-        if (${fresh}) {
-          // A focused control keeps Firefox's selection where it is, so no
-          // match gets selected. The user is typing in Raticode's find bar.
-          if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur?.();
-          getSelection()?.removeAllRanges();
-        }
-        const haystack = (document.body?.innerText || "").toLowerCase();
-        const needle = query.toLowerCase();
-        let matches = 0;
-        for (let at = haystack.indexOf(needle); needle && at >= 0; at = haystack.indexOf(needle, at + needle.length)) matches += 1;
-        const found = matches ? window.find(query, false, ${forward === false}, true) : false;
-        return { matches, found };
-      })()`);
-      if (requestId !== this.findRequestId) return;
-      const matches = Number(result?.matches) || 0;
-      if (findNext !== false || this.findQuery !== query) this.findOrdinal = matches ? 1 : 0;
-      else if (matches) this.findOrdinal = ((this.findOrdinal || 0) + (forward === false ? matches - 1 : 1) - 1) % matches + 1;
-      this.findQuery = query;
-      this.emit("found-in-page", {}, { requestId, matches, activeMatchOrdinal: matches ? this.findOrdinal : 0, finalUpdate: true });
-    }).catch(() => {});
-    return requestId;
-  }
-
-  stopFindInPage() {
-    this.findQuery = "";
-    void this.evaluateIn(STATE_SANDBOX, "getSelection()?.removeAllRanges(); true").catch(() => {});
+    return Buffer.from(data, "base64");
   }
 
   // -------------------------------------------------------------------------
   // Lifecycle
 
-  async alive() {
-    await this.ready;
-    if (this.destroyed) throw new Error("The Firefox tab was closed.");
-    if (this.dead) throw new Error(this.lastError || "Firefox stopped. Reload the tab to start it again.");
-  }
-
   async revive() {
-    if (this.destroyed) return;
     // A shared tab can't come back once Gecko stopped; the user shares it again.
     if (this.adopted) { this.close(); return; }
-    this.dead = false;
-    this.lastError = "";
-    this.loading = true;
-    this.documentLoading = true;
-    this.emit("did-start-loading");
-    this.ready = this.start();
-    await this.ready;
+    await super.revive();
   }
 
-  // Firefox stopped or crashed. The tab stays open and restarts on reload.
-  markDead(reason = "Firefox stopped") {
-    // The first reason given stays: "signing in in a window" beats the plain
-    // "Firefox stopped" that follows when the process exits.
-    if (this.destroyed || this.dead) return;
-    this.dead = true;
-    this.loading = false;
-    this.lastError = `${reason}. Reload the tab to start Firefox again.`;
-    if (this.context) this.firefox.unregister(this.context);
-    this.context = "";
-    for (const waiter of this.waiters) waiter.reject(new Error(this.lastError));
-    this.waiters.clear();
-    this.emit("render-process-gone", {}, { reason });
-    this.emit("did-stop-loading");
-  }
+  stopFrames() { this.wakeFrames(); }
 
-  close() {
-    if (this.destroyed) return;
-    this.destroyed = true;
-    this.visible = false;
-    clearTimeout(this.stateTimer);
-    this.wakeFrames();
-    for (const waiter of this.waiters) waiter.reject(new Error("The Firefox tab was closed."));
-    this.waiters.clear();
-    if (this.context) {
-      const context = this.context;
-      this.firefox.unregister(context);
-      // A shared tab stays open for the user; Rem only lets go of it.
-      if (this.adopted) this.firefox.release(context);
-      else void this.firefox.send("browsingContext.close", { context, promptUnload: false }).catch(() => {});
-    }
-    this.emit("destroyed");
-    this.removeAllListeners();
+  // Firefox stopped or crashed, or the tab closed.
+  releasePage(closing) {
+    const context = this.context;
+    if (!context) return;
+    this.firefox.unregister(context);
+    if (!closing) this.context = "";
+    // A shared tab stays open for the user; Rem only lets go of it.
+    else if (this.adopted) this.firefox.release(context);
+    else void this.firefox.send("browsingContext.close", { context, promptUnload: false }).catch(() => {});
   }
 
   command(method, params, options) {
     return this.firefox.send(method, params, options);
   }
 
-  // Input that opens alert() or confirm() keeps Firefox's command waiting
-  // until the dialog is answered. Return as soon as the dialog shows.
-  input(actions) {
-    const sent = this.command("input.performActions", { context: this.context, actions });
-    sent.catch(() => {});
-    if (this.dialog) return sent;
-    let listener;
-    const opened = new Promise((resolve) => { listener = resolve; this.once("firefox-dialog-opened", listener); });
-    return Promise.race([sent, opened]).finally(() => this.off("firefox-dialog-opened", listener));
-  }
-
-  waitForNavigation() {
-    let entry;
-    const promise = new Promise((resolve, reject) => { entry = { resolve, reject }; });
-    this.waiters.add(entry);
-    return {
-      promise: promise.finally(() => this.waiters.delete(entry)),
-      cancel: () => { this.waiters.delete(entry); entry.resolve(); },
-    };
-  }
-
-  settleWaiters(error) {
-    for (const waiter of this.waiters) {
-      if (error) waiter.reject(error); else waiter.resolve();
-    }
-    this.waiters.clear();
+  dispatchInput(actions) {
+    return this.command("input.performActions", { context: this.context, actions });
   }
 
   // -------------------------------------------------------------------------
@@ -682,7 +465,7 @@ class FirefoxContents extends EventEmitter {
     if (!this.context || this.dead || this.destroyed) return;
     let state;
     try {
-      state = await this.evaluateIn(STATE_SANDBOX, `[history.length, performance.getEntriesByType("navigation")[0]?.type || "", document.title, document.querySelector('link[rel~="icon"]')?.href || ""]`);
+      state = await this.evaluateIn(STATE_WORLD, `[history.length, performance.getEntriesByType("navigation")[0]?.type || "", document.title, document.querySelector('link[rel~="icon"]')?.href || ""]`);
     } catch {
       return;
     }
@@ -696,20 +479,12 @@ class FirefoxContents extends EventEmitter {
       this.pendingCommit = false;
     }
     this.historyLength = Number(historyLength) || 0;
-    if (typeof title === "string" && title !== this.title) {
-      this.title = title;
-      this.history.setTitle(title);
-      this.emit("page-title-updated", {}, title);
-    }
-    const icon = typeof favicon === "string" && /^https?:/i.test(favicon) ? favicon : this.url.startsWith("http") ? `${new URL(this.url).origin}/favicon.ico` : "";
-    if (icon !== this.favicon) {
-      this.favicon = icon;
-      this.emit("page-favicon-updated", {}, icon ? [icon] : []);
-    }
+    this.showPageState(title, favicon);
   }
 
-  // Pages open pop-ups as Firefox windows. Raticode asks the same window-open
-  // handler as for its own tabs, then closes the Firefox window.
+  titleChanged(title) { this.history.setTitle(title); }
+
+  // Pages open pop-ups as Firefox windows, which Raticode closes.
   async handlePopup(params) {
     const popup = params.context;
     let url = params.url && params.url !== "about:blank" ? params.url : "";
@@ -725,9 +500,7 @@ class FirefoxContents extends EventEmitter {
       }
     }
     void this.command("browsingContext.close", { context: popup, promptUnload: false }).catch(() => {});
-    if (!url) return;
-    const decision = this.windowOpenHandler({ url, disposition: "foreground-tab", features: "", postBody: null }) || {};
-    if (decision.action === "allow") this.emit("firefox-open-tab", { url });
+    if (url) this.offerPopup(url);
   }
 
   // Rem's own tabs check every navigation against its site rules before
@@ -787,22 +560,15 @@ class FirefoxContents extends EventEmitter {
     }
   }
 
-  setPageZoom(factor) {
-    const zoom = Number(factor);
-    this.pageZoom = Number.isFinite(zoom) && zoom > 0.2 && zoom < 6 ? zoom : 1;
+  zoomChanged() {
     void this.applyViewport();
     this.markActive();
   }
 
-  // Layout happens at the view's CSS size divided by the page zoom; the
-  // device pixel ratio keeps the image sharp on the studio's display.
   async applyViewport() {
     // A shared tab keeps the size of Gecko's window.
     if (!this.context || this.dead || this.adopted) return;
-    const view = this.view || FALLBACK_VIEW;
-    const width = Math.max(100, Math.round(view.width / this.pageZoom));
-    const height = Math.max(100, Math.round(view.height / this.pageZoom));
-    const devicePixelRatio = Math.min(Math.max(view.scale * this.pageZoom, 0.5), 6);
+    const { width, height, deviceScaleFactor: devicePixelRatio } = this.viewport();
     const key = `${width}x${height}@${devicePixelRatio}`;
     if (key === this.viewportKey) return;
     this.viewportKey = key;
@@ -810,18 +576,6 @@ class FirefoxContents extends EventEmitter {
       this.viewportKey = "";
       this.log("warn", `Firefox viewport change failed: ${error.message}`);
     });
-  }
-
-  // At most one read per interval, plus one after the last change.
-  scheduleStateRefresh() {
-    if (this.stateTimer) return;
-    const wait = Math.max(0, (this.stateReadAt || 0) + STATE_REFRESH_MS - Date.now());
-    this.stateTimer = setTimeout(() => {
-      this.stateTimer = null;
-      this.stateReadAt = Date.now();
-      void this.refreshState();
-    }, wait);
-    this.stateTimer.unref?.();
   }
 
   markActive() {
@@ -908,122 +662,37 @@ class FirefoxContents extends EventEmitter {
   // -------------------------------------------------------------------------
   // The user's input from the studio
 
-  handleInput(events) {
-    for (const item of Array.isArray(events) ? events.slice(0, 200) : []) {
-      if (!item || typeof item !== "object") continue;
-      if (item.t === "move") {
-        // Only the latest pointer position matters while input is queued.
-        const queued = this.pendingMove;
-        this.pendingMove = item;
-        if (queued) continue;
-        this.enqueue(() => {
-          const move = this.pendingMove;
-          this.pendingMove = null;
-          return move ? this.userInput(move) : undefined;
-        });
-        continue;
-      }
-      this.enqueue(() => this.userInput(item));
-    }
-    this.markActive();
-  }
-
-  enqueue(task) {
-    this.inputQueue = this.inputQueue.then(task).catch((error) => {
-      if (!this.destroyed && !this.dead) this.log("debug", `Firefox input failed: ${error.message}`);
-    });
-  }
-
-  point(item) {
-    const x = Math.round(Number(item.x) / this.pageZoom);
-    const y = Math.round(Number(item.y) / this.pageZoom);
-    const view = this.view || FALLBACK_VIEW;
-    const maxX = Math.round(view.width / this.pageZoom) - 1;
-    const maxY = Math.round(view.height / this.pageZoom) - 1;
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-    return { x: Math.min(Math.max(x, 0), maxX), y: Math.min(Math.max(y, 0), maxY) };
-  }
-
   pointer(actions) {
     return this.input([{ type: "pointer", id: "user-mouse", parameters: { pointerType: "mouse" }, actions }]);
   }
 
-  async userInput(item) {
-    await this.alive();
-    switch (item.t) {
-      case "move": {
-        const at = this.point(item);
-        if (!at) return;
-        await this.pointer([{ type: "pointerMove", x: at.x, y: at.y, origin: "viewport" }]);
-        if (Date.now() - this.cursorAt > CURSOR_INTERVAL_MS) {
-          this.cursorAt = Date.now();
-          void this.reportCursor(at);
-        }
-        return;
-      }
-      case "down":
-      case "up": {
-        const at = this.point(item);
-        if (!at) return;
-        const button = [0, 1, 2].includes(item.button) ? item.button : 0;
-        this.emit("input-event", {}, { type: item.t === "down" ? "mouseDown" : "mouseUp" });
-        await this.pointer([
-          { type: "pointerMove", x: at.x, y: at.y, origin: "viewport" },
-          { type: item.t === "down" ? "pointerDown" : "pointerUp", button },
-        ]);
-        if (item.t === "up" && button === 0) void this.reportSelect(at);
-        return;
-      }
-      case "wheel": {
-        const at = this.point(item);
-        if (!at) return;
-        const deltaX = Math.round(Math.max(-5000, Math.min(5000, Number(item.dx) || 0)) / this.pageZoom);
-        const deltaY = Math.round(Math.max(-5000, Math.min(5000, Number(item.dy) || 0)) / this.pageZoom);
-        if (!deltaX && !deltaY) return;
-        await this.command("input.performActions", {
-          context: this.context,
-          actions: [{ type: "wheel", id: "user-wheel", actions: [{ type: "scroll", x: at.x, y: at.y, deltaX, deltaY, origin: "viewport" }] }],
-        });
-        return;
-      }
-      case "keydown":
-      case "keyup": {
-        const value = webdriverKey(item.key);
-        if (!value) return;
-        if (item.t === "keydown") {
-          this.pressedKeys.add(value);
-          this.emit("input-event", {}, { type: "keyDown" });
-        } else {
-          if (!this.pressedKeys.has(value)) return;
-          this.pressedKeys.delete(value);
-        }
-        await this.input([{ type: "key", id: "user-keyboard", actions: [{ type: item.t === "keydown" ? "keyDown" : "keyUp", value }] }]);
-        return;
-      }
-      case "text":
-        this.emit("input-event", {}, { type: "char" });
-        await this.typeText(String(item.text ?? ""));
-        return;
-      case "copy":
-      case "cut":
-        await this.copySelection();
-        return;
-      case "focus":
-        this.focused = true;
-        return;
-      case "blur":
-        this.focused = false;
-        this.pressedKeys.clear();
-        await this.command("input.releaseActions", { context: this.context }).catch(() => {});
-        return;
-      case "select-option":
-        await this.chooseOption(Number(item.index));
-        return;
-      case "file-dialog":
-        return;
-      default:
-        return;
-    }
+  moveUserPointer(at) {
+    return this.pointer([{ type: "pointerMove", x: at.x, y: at.y, origin: "viewport" }]);
+  }
+
+  userButton(down, button, at) {
+    return this.pointer([
+      { type: "pointerMove", x: at.x, y: at.y, origin: "viewport" },
+      { type: down ? "pointerDown" : "pointerUp", button },
+    ]);
+  }
+
+  userWheel(at, deltaX, deltaY) {
+    return this.command("input.performActions", {
+      context: this.context,
+      actions: [{ type: "wheel", id: "user-wheel", actions: [{ type: "scroll", x: at.x, y: at.y, deltaX, deltaY, origin: "viewport" }] }],
+    });
+  }
+
+  userKey(key) { return webdriverKey(key); }
+
+  sendUserKey(value, down) {
+    return this.input([{ type: "key", id: "user-keyboard", actions: [{ type: down ? "keyDown" : "keyUp", value }] }]);
+  }
+
+  async releaseUserInput() {
+    this.pressedKeys.clear();
+    await this.command("input.releaseActions", { context: this.context }).catch(() => {});
   }
 
   // Pasted or composed text arrives as trusted key presses.
@@ -1036,72 +705,6 @@ class FirefoxContents extends EventEmitter {
       });
       await this.input([{ type: "key", id: "user-keyboard", actions }]);
     }
-  }
-
-  // Firefox's clipboard is its own while it runs without a window, so copy
-  // and cut put the page's selection on the system clipboard here.
-  async copySelection() {
-    const text = await this.evaluateIn(STATE_SANDBOX, `(() => {
-      const active = document.activeElement;
-      if (active && typeof active.selectionStart === "number" && /^(?:input|textarea)$/i.test(active.localName) && active.type !== "password") {
-        return active.value.slice(active.selectionStart, active.selectionEnd);
-      }
-      return String(getSelection() || "");
-    })()`).catch(() => "");
-    if (text && this.clipboard) await Promise.resolve(this.clipboard.writeText(String(text))).catch(() => {});
-  }
-
-  async reportCursor(at) {
-    const cursor = await this.evaluateIn(STATE_SANDBOX, `(() => {
-      const element = document.elementFromPoint(${at.x}, ${at.y});
-      if (!element) return "default";
-      const style = getComputedStyle(element).cursor;
-      if (style && style !== "auto") return style;
-      if (element.closest("a[href],button,summary,label[for],select,[role=button],[role=link]")) return "pointer";
-      if (element.isContentEditable || /^(?:textarea)$/i.test(element.localName) || element.localName === "input" && !/^(?:button|checkbox|radio|submit|reset|range|color|file|image)$/i.test(element.type)) return "text";
-      return "default";
-    })()`).catch(() => "");
-    if (typeof cursor === "string" && cursor !== this.cursor) {
-      this.cursor = cursor;
-      this.emit("firefox-cursor", { cursor: cursor.slice(0, 40) });
-    }
-  }
-
-  // A headless Firefox draws no drop-down for <select>, so the studio shows
-  // the options itself after a click opens one.
-  async reportSelect(at) {
-    const choice = await this.evaluateIn(STATE_SANDBOX, `(() => {
-      const element = document.activeElement;
-      if (!element || element.localName !== "select" || element.multiple || element.size > 1 || element.disabled) return null;
-      const rect = element.getBoundingClientRect();
-      if (${at.x} < rect.left || ${at.x} > rect.right || ${at.y} < rect.top || ${at.y} > rect.bottom) return null;
-      return {
-        rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
-        options: [...element.options].slice(0, 500).map((option, index) => ({ index, label: (option.label || option.text || "").slice(0, 200), disabled: option.disabled, selected: option.selected, group: option.parentElement?.localName === "optgroup" ? (option.parentElement.label || "").slice(0, 100) : "" })),
-      };
-    })()`).catch(() => null);
-    if (!choice?.options?.length) return;
-    const zoom = this.pageZoom;
-    const rect = choice.rect || {};
-    this.emit("firefox-select", {
-      rect: { x: rect.x * zoom, y: rect.y * zoom, width: rect.width * zoom, height: rect.height * zoom },
-      options: choice.options,
-    });
-  }
-
-  async chooseOption(index) {
-    if (!Number.isInteger(index) || index < 0) return;
-    await this.evaluateIn(STATE_SANDBOX, `(() => {
-      const element = document.activeElement;
-      if (!element || element.localName !== "select") return false;
-      const option = element.options[${index}];
-      if (!option || option.disabled) return false;
-      element.selectedIndex = ${index};
-      element.dispatchEvent(new Event("input", { bubbles: true }));
-      element.dispatchEvent(new Event("change", { bubbles: true }));
-      return true;
-    })()`, { userActivation: true });
-    this.markActive();
   }
 
   async setFiles(element, files) {

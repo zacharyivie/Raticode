@@ -6,7 +6,6 @@ import importlib.util
 import json
 import os
 import stat
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
@@ -15,6 +14,7 @@ from typing import Any
 import pytest
 
 from gofer.ui.brain_library import BrainLibrary
+from tests.helpers.brain_library import wait_idle
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "brain-search"
@@ -52,15 +52,6 @@ def test_fixture_search_keeps_its_recorded_top5(tmp_path: Path) -> None:
             if not result["ranks"][mode] or result["ranks"][mode] > 5
         ]
         assert top5 >= recorded["top5"], f"{mode} top-5 {top5:.4f} < {recorded['top5']}: {missed}"
-
-
-def wait_idle(library: BrainLibrary) -> None:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if all(task["state"] != "running" for task in library.snapshot()["tasks"]):
-            return
-        time.sleep(0.02)
-    pytest.fail("Second Brain tasks did not finish")
 
 
 def write_thread(archive: Path, key: str, body: str, *, task: bool, title: str = "") -> None:

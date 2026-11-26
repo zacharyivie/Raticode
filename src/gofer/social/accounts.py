@@ -24,6 +24,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from gofer.social.models import PLATFORMS
+from gofer.utils.instants import stored_instant
 
 KEYCHAIN_SERVICE = "Raticode social accounts"
 INDEX_FILE = "accounts.json"
@@ -125,16 +126,6 @@ def _iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _parse(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-
-
 class AccountStore:
     """The account index for one data folder. Inject ``secrets`` in tests."""
 
@@ -191,7 +182,7 @@ class AccountStore:
         moment = now or _now()
         result = {key: value for key, value in item.items() if key != "secret_fields"}
         result["status"] = self.status(item, moment)
-        expires = _parse(item.get("token_expires_at"))
+        expires = stored_instant(item.get("token_expires_at"))
         result["expires_in_days"] = max(0, (expires - moment).days) if expires is not None else None
         result["platform_label"] = PLATFORMS[item["platform"]].label
         return result
@@ -203,7 +194,7 @@ class AccountStore:
             return "disabled"
         if item.get("needs_reconnect"):
             return "needs_reconnect"
-        expires = _parse(item.get("token_expires_at"))
+        expires = stored_instant(item.get("token_expires_at"))
         moment = now or _now()
         if expires is not None:
             if expires <= moment:

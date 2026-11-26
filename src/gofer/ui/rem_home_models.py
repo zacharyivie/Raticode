@@ -8,18 +8,20 @@ from typing import Annotated, Any, Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from apscheduler.triggers.cron import CronTrigger
 from pydantic import (
     AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
     PrivateAttr,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
 
 from gofer.core.provider_capabilities import ProviderId
+from gofer.core.provider_preferences import app_default_selection
+from gofer.rattish.triggers import cron_with_day_names, parse_cron, saved_cron_day_names
 from gofer.ui.rem_decisions import (
     DecisionAnswer,
     DecisionConflict,
@@ -56,8 +58,13 @@ class Schedule(BaseModel):
     every_minutes: int = Field(default=60, ge=1, le=525600, strict=True)
     cron: str = ""
 
+    @classmethod
+    def saved(cls, value: dict[str, Any]) -> Schedule:
+        """A schedule as Rem stored it, which may predate the checks new saves get."""
+        return cls.model_validate(value, context=saved_schedule(value))
+
     @model_validator(mode="after")
-    def validate_schedule(self) -> Schedule:
+    def validate_schedule(self, info: ValidationInfo) -> Schedule:
         try:
             ZoneInfo(self.timezone)
         except ZoneInfoNotFoundError as exc:
@@ -73,7 +80,11 @@ class Schedule(BaseModel):
             if parsed.tzinfo is None:
                 raise ValueError("A reminder time needs a timezone")
         if self.kind == "cron":
-            CronTrigger.from_crontab(self.cron, timezone=ZoneInfo(self.timezone))
+            # Crontab weekdays (Sunday = 0), stored as day names so the text means the
+            # same days everywhere. The text the task already had skips the new checks.
+            saved = self.cron == (info.context or {}).get("saved_cron")
+            parse_cron(self.cron, self.timezone, saved=saved)
+            self.cron = cron_with_day_names(self.cron)
         return self
 
     def next(self, after: datetime, *, initial: bool = False) -> str | None:
@@ -90,7 +101,7 @@ class Schedule(BaseModel):
             return (after + timedelta(minutes=self.every_minutes)).isoformat()
         zone = ZoneInfo(self.timezone)
         if self.kind == "cron":
-            value = CronTrigger.from_crontab(self.cron, timezone=zone).get_next_fire_time(
+            value = parse_cron(self.cron, self.timezone, saved=True).get_next_fire_time(
                 None, after + timedelta(seconds=1)
             )
             return value.astimezone(UTC).isoformat() if value else None
@@ -109,11 +120,46 @@ class Schedule(BaseModel):
         raise ValueError("Could not calculate next occurrence")
 
 
+def saved_schedule(source: dict[str, Any]) -> dict[str, Any]:
+    """Validation context for a schedule (or a task holding one) as Rem stored it.
+
+    Re-saving that cron text unchanged, such as when a task's title is edited, keeps a
+    schedule saved before the crontab checks existed. Changed text gets every check.
+    """
+    schedule = source["schedule"] if "schedule" in source else source
+    return {"saved_cron": (schedule or {}).get("cron")}
+
+
+def legacy_cron_day_names(schedule: dict[str, Any]) -> bool:
+    """Name the weekdays of a cron schedule saved with numbers; whether it changed."""
+    if schedule.get("kind") != "cron":
+        return False
+    text = str(schedule.get("cron") or "")
+    converted = saved_cron_day_names(text)
+    schedule["cron"] = converted
+    return converted != text
+
+
+# A check that came with a task a paired desktop handed over names that desktop:
+# "desktop:<its device ID>". It isn't the user's own words on this computer.
+DESKTOP_AUTHOR = re.compile(
+    r"^desktop:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
+
+def desktop_author(device_id: str) -> str:
+    """The ``authored_by`` of a check the paired desktop ``device_id`` sent."""
+    return f"desktop:{device_id}"
+
+
 class Criterion(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str = Field(default_factory=lambda: str(uuid4()), min_length=1, max_length=128)
     description: str = Field(min_length=1, max_length=4000)
-    authored_by: Literal["user", "rem_recommended", "project_rules"] = "user"
+    authored_by: (
+        Literal["user", "rem_recommended", "project_rules"]
+        | Annotated[str, Field(pattern=DESKTOP_AUTHOR.pattern)]
+    ) = "user"
 
 
 class Recipe(BaseModel):
@@ -242,7 +288,7 @@ def worker_config(config: dict[str, Any], recipe: dict[str, Any]) -> dict[str, A
     if recipe.get("provider_profile"):
         # The task's own account choice always wins over Rem's setting.
         selected["task_account"] = recipe["provider_profile"]
-    return selected
+    return with_app_defaults(selected)
 
 
 def chat_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -253,13 +299,37 @@ def chat_config(config: dict[str, Any]) -> dict[str, Any]:
     """
     provider = config.get("chat_provider")
     if not provider:
-        return config
-    return {
-        **config,
-        "provider": provider,
-        "model": config.get("chat_model") or "cli-default",
-        "effort": config.get("chat_effort") or "",
+        return with_app_defaults(config)
+    return with_app_defaults(
+        {
+            **config,
+            "provider": provider,
+            "model": config.get("chat_model") or "cli-default",
+            "effort": config.get("chat_effort") or "",
+        }
+    )
+
+
+def with_app_defaults(config: dict[str, Any]) -> dict[str, Any]:
+    """Fill a model or effort Settings > Rem leaves empty from the app's own defaults.
+
+    Settings > Providers > <app> > Default model and effort apply to Rem's tasks, chat
+    and self-work as they do to new threads (app_default_selection). A model and effort
+    Settings > Rem, the task or the chat names win. Returns config itself when nothing
+    changes.
+    """
+    provider = str(config.get("provider") or "codex")
+    model, effort = config.get("model"), config.get("effort")
+    filled_model, filled_effort = app_default_selection(
+        provider,
+        model if isinstance(model, str) else None,
+        effort if isinstance(effort, str) else None,
+    )
+    changes = {
+        **({"model": filled_model} if filled_model and filled_model != model else {}),
+        **({"effort": filled_effort} if filled_effort and filled_effort != effort else {}),
     }
+    return {**config, **changes} if changes else config
 
 
 def worker_resources(config: dict[str, Any], *, readonly: bool, review: bool) -> dict[str, Any]:
@@ -620,13 +690,15 @@ class ClockTime(BaseModel):
 class SelfWorkRequest(BaseModel):
     """Change Rem's self-work because the user asked: on, off, a timed window, or a report.
 
-    ``enable``/``disable`` flip the Settings > Rem switch. ``schedule`` adds a window: from
+    ``enable``/``disable`` flip the Settings > Rem switch; on, self-work still waits for the
+    user to be quiet for 15 minutes. ``start_now`` begins self-work now: it turns the switch
+    on if it is off and skips that wait until self-work goes off. ``schedule`` adds a window: from
     ``start`` (now when absent) until ``end``, or ``until`` the tasks running now finish.
     ``stop_at`` ends the self-work running now at ``end``. ``cancel_schedule`` drops the
     windows. ``report`` posts what self-work did in its current or last period.
     ``stop_when`` sets the self-work running now to stop when ``done_when`` (the user's
     condition, judged by Rem against real records) is met, or at ``no_later_than`` at the
-    latest; ``enable`` and ``schedule`` may carry them too. ``clear_stop`` clears the
+    latest; ``enable``, ``start_now`` and ``schedule`` may carry them too. ``clear_stop`` clears the
     condition, the latest time or both (``clear``). The thread limit, backlog pulling,
     auto-approval and Rem's projects never change here. The backend applies it and writes
     the result into the reply.
@@ -636,6 +708,7 @@ class SelfWorkRequest(BaseModel):
     action: Literal[
         "enable",
         "disable",
+        "start_now",
         "status",
         "schedule",
         "stop_at",
@@ -666,8 +739,10 @@ class SelfWorkRequest(BaseModel):
         stops = self.done_when is not None or self.no_later_than is not None
         if self.action == "stop_when" and not stops:
             raise ValueError("stop_when needs done_when or no_later_than")
-        if stops and self.action not in {"stop_when", "enable", "schedule"}:
-            raise ValueError("Only stop_when, enable and schedule take done_when or no_later_than")
+        if stops and self.action not in {"stop_when", "enable", "start_now", "schedule"}:
+            raise ValueError(
+                "Only stop_when, enable, start_now and schedule take done_when or no_later_than"
+            )
         if self.clear is not None and self.action != "clear_stop":
             raise ValueError("Only clear_stop takes clear")
         if self.action == "schedule" and not (self.end or self.until):
@@ -785,9 +860,3 @@ class TaskUpdate(BaseModel):
                 "and evidence"
             )
         return self
-
-
-def checked_dict(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError("Expected a JSON object")
-    return value

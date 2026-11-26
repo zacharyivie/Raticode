@@ -710,23 +710,6 @@ async def test_rem_stream_and_nonstream_preserve_context_and_cleanup(
     assert all(not path.exists() for path in paths)
 
 
-def test_all_workflow_entrypoints_register_the_new_adapters():
-    from gofer.cli.commands import agent, workflow
-    from gofer.core import runner, watcher
-    from gofer.ui import api
-
-    for registrations in (
-        agent._SUBSCRIPTIONS,
-        workflow._SUBSCRIPTIONS,
-        runner._SUBSCRIPTIONS,
-        watcher._subscriptions,
-        api._subscriptions,
-    ):
-        for provider in ("cursor", "copilot", "opencode"):
-            assert isinstance(registrations[provider], CliSubscription)
-            assert registrations[provider].provider == provider
-
-
 @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
 def test_copilot_effort_reaches_rem_and_subscription(effort):
     settings = ResolvedProviderSettings(subscription="copilot", model="gpt-test", effort=effort)

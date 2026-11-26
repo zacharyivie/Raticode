@@ -8,7 +8,8 @@ from typing import Any
 import pytest
 
 from gofer.core import usage_service
-from gofer.core.usage_ledger import activity_payload, record_invocation, track_chat_usage, usage_db
+from gofer.core.usage_history import resolve_range, usage_history
+from gofer.core.usage_ledger import record_invocation, track_chat_usage, usage_db
 from gofer.core.usage_service import refresh_usage, usage_overview
 
 
@@ -39,7 +40,7 @@ def test_ledger_deduplicates_and_keeps_unknowns_and_estimates_separate(tmp_path:
         data_dir=tmp_path,
         metadata={"input_tokens": 40, "output_tokens": 10, "estimated": True},
     )
-    result = activity_payload(tmp_path)["activity"]
+    result = usage_history(tmp_path, resolve_range())["activity"]
     assert result["calls"] == 4
     assert result["reported_calls"] == 2
     assert result["unknown_calls"] == 1
@@ -53,7 +54,7 @@ def test_ledger_deduplicates_and_keeps_unknowns_and_estimates_separate(tmp_path:
 
 
 def test_empty_and_period_filters(tmp_path: Path) -> None:
-    assert activity_payload(tmp_path)["activity"]["total_tokens"] is None
+    assert usage_history(tmp_path, resolve_range())["activity"]["total_tokens"] is None
     record_invocation(
         invocation_id="old",
         provider="codex",
@@ -62,7 +63,7 @@ def test_empty_and_period_filters(tmp_path: Path) -> None:
     )
     with usage_db(tmp_path) as db:
         db.execute("UPDATE usage_invocations SET observed_at='2020-01-01T00:00:00+00:00'")
-    assert activity_payload(tmp_path, days=1)["activity"]["calls"] == 0
+    assert usage_history(tmp_path, resolve_range(days=1))["activity"]["calls"] == 0
     with pytest.raises(ValueError):
         usage_overview(tmp_path, days=-1)
 
@@ -140,7 +141,7 @@ async def test_stream_provider_switches_and_closing_records_usage(tmp_path: Path
         source = stream(provider, "model", tmp_path)
         await anext(source)
         await source.aclose()
-    result = activity_payload(tmp_path)["activity"]
+    result = usage_history(tmp_path, resolve_range())["activity"]
     assert result["calls"] == 2
     assert result["total_tokens"] == 30
     assert {r["provider"] for r in result["providers"]} == {"codex", "claude_code"}
@@ -234,7 +235,7 @@ async def test_stream_records_even_when_no_output_or_cleanup_fails(
         await source.aclose()
     except ValueError:
         pass
-    result = activity_payload(tmp_path)["activity"]
+    result = usage_history(tmp_path, resolve_range())["activity"]
     assert result["calls"] == 1
     assert result["unknown_calls"] == (1 if mode == "early_error" else 0)
     assert result["partial_calls"] == (0 if mode == "early_error" else 1)

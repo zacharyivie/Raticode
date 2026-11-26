@@ -596,9 +596,6 @@ def zip_package(files: dict[str, str]) -> str:
     return base64.b64encode(buffer.getvalue()).decode()
 
 
-PAPERCLIP_REFERENCE = "01d9a121859a3d8298dce91452f75516e837e819"
-
-
 def github_package(repository: str, commit: str, directory: str = "") -> dict[str, str]:
     """Fetch a bounded archive at an immutable revision; never execute package code."""
     import re

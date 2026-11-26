@@ -10,6 +10,7 @@ import pytest
 
 from gofer.ui.organization_consent import approval_order
 from gofer.ui.organizations import OrganizationManager
+from tests.helpers.organizations import act
 
 
 async def final(**options: Any) -> Any:
@@ -25,6 +26,7 @@ def manager(tmp_path: Path) -> Any:
         manager.close()
 
 
+# Not the shared company: a read-only lead and a paused builder in a Desk with no project.
 def company(manager: OrganizationManager, root: Path) -> Any:
     employees = [
         {"id": "lead", "name": "Avery", "permissionMode": "read-only"},
@@ -34,14 +36,6 @@ def company(manager: OrganizationManager, root: Path) -> Any:
         str(root),
         "user",
         {"action": "create", "params": {"config": {"name": "Desk", "employees": employees}}},
-    )
-
-
-def act(
-    manager: OrganizationManager, org: dict[str, Any], action: str, actor: str = "user", **p: Any
-) -> Any:
-    return manager.call(
-        org["projectRoot"], actor, {"organizationId": org["id"], "action": action, "params": p}
     )
 
 

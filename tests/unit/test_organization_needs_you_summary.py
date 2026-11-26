@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from gofer.ui.organizations import OrganizationManager
+from tests.helpers.organizations import act
 
 
 async def final(**options: Any) -> Any:
@@ -21,12 +22,6 @@ def manager(tmp_path: Path) -> Any:
         yield manager
     finally:
         manager.close()
-
-
-def act(manager: OrganizationManager, org: dict[str, Any], action: str, **p: Any) -> Any:
-    return manager.call(
-        org["projectRoot"], "user", {"organizationId": org["id"], "action": action, "params": p}
-    )
 
 
 def listed(manager: OrganizationManager) -> Any:

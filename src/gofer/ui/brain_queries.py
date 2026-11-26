@@ -30,7 +30,6 @@ FIELDS = {
     "generated": "date",
 }
 QUERY_FIELDS = list(FIELDS)
-DATES = {field for field, key in FIELDS.items() if key == "date"}
 # JavaScript's \s, so words split exactly where the app splits them.
 _SPACE = (
     "\t\n\v\f\r \u00a0\u1680"

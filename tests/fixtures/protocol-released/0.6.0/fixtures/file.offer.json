@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "id": "10000000-0000-4000-8000-000000000009",
+  "thread_id": "00000000-0000-4000-8000-000000000002",
+  "request_id": "00000000-0000-4000-8000-000000000001",
+  "sequence": 9,
+  "type": "file.offer",
+  "payload": {
+    "file_id": "00000000-0000-4000-8000-000000000008",
+    "name": "profile_pic.png",
+    "mime": "image/png",
+    "size": 1234,
+    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "expires_at": 2000000300
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "version": 2,
+  "id": "00000000-0000-4000-8000-000000000001",
+  "thread_id": "00000000-0000-4000-8000-000000000002",
+  "request_id": "00000000-0000-4000-8000-000000000003",
+  "sequence": 0,
+  "type": "thread.history.snapshot",
+  "payload": {
+    "before": 0,
+    "has_more": false,
+    "total": 3,
+    "messages": [
+      {
+        "id": "example-user",
+        "role": "user",
+        "text": "",
+        "source_id": "example-user",
+        "offset": 0,
+        "presentation": {},
+        "attachments": [
+          {
+            "id": "00000000-0000-4000-8000-000000000005",
+            "name": "README.md",
+            "size": 42,
+            "mime": "text/markdown"
+          }
+        ]
+      },
+      {
+        "id": "example-thought",
+        "role": "assistant",
+        "text": "**Reviewing**",
+        "source_id": "example-thought",
+        "offset": 0,
+        "presentation": {
+          "kind": "thought",
+          "groupId": "example-turn",
+          "trace": {
+            "id": "tool-1",
+            "kind": "tool",
+            "title": "bash",
+            "input": "pwd",
+            "output": "/fixture",
+            "status": "completed"
+          }
+        },
+        "attachments": []
+      },
+      {
+        "id": "example-summary",
+        "role": "assistant",
+        "text": "",
+        "source_id": "example-summary",
+        "offset": 0,
+        "presentation": {
+          "kind": "turn-summary",
+          "running": false,
+          "durationMs": 2000
+        },
+        "attachments": []
+      }
+    ]
+  }
+}

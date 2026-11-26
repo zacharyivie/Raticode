@@ -27,6 +27,7 @@ from typing import Any
 
 import pytest
 
+from gofer.ui.routes import Route, RouteTable
 from tests.helpers.cli_parity import (
     ROOT,
     UnreadableRoute,
@@ -39,10 +40,11 @@ from tests.helpers.cli_parity import (
     mapped_commands,
     phone_messages,
     phone_operations,
+    table_routes,
 )
 
 GUIDE = ROOT / "website/docs/reference/cli-headless.md"
-COMMAND_KINDS = {"backend", "offline", "legacy", "hidden"}
+COMMAND_KINDS = {"backend", "offline", "hidden"}
 # Manifest sections that map one surface each to commands or exclusions.
 SURFACES = ("routes", "phoneOperations", "phoneMessages", "electron")
 
@@ -190,7 +192,7 @@ def test_command_index_catches_a_changed_option(monkeypatch) -> None:
     command = typer.main.get_command(app)
     monkeypatch.setattr(typer.main, "get_command", lambda _app: command)
     doctor = command.commands["doctor"]  # type: ignore[attr-defined]
-    option = next(p for p in doctor.params if "--workflow" in p.opts)
+    option = next(p for p in doctor.params if "--secrets-dir" in p.opts)
     monkeypatch.setattr(option, "help", "A changed help text.")
     assert "A changed help text." in generator.render()
     assert generator.render() != before
@@ -242,22 +244,6 @@ class GoferUiRequestHandler:
         if method == "GET" and not swarm_id:
             pass
 
-    def _dispatch_rattish_triggers(self, method, path, query):
-        if method == "GET" and not action:
-            pass
-
-    def _dispatch_rattish_secrets(self, method, path, query):
-        if method == "GET" and not action:
-            pass
-
-    def _dispatch_worktree_setup(self, method, path, query):
-        if method == "POST" and action == "approve":
-            pass
-
-    def _dispatch_workflow_shortcuts(self, method, path, query):
-        if method == "GET" and not action:
-            pass
-
     def _dispatch_GET(self):
         if parsed.path == "/api/health":
             pass
@@ -278,9 +264,18 @@ class GoferUiRequestHandler:
 """
 
 
-def _routes(extra: str = "pass") -> set[str]:
+def _table(*routes: tuple[str, str]) -> RouteTable:
+    table = RouteTable()
+    table.add(Route("GET", "/api/rattish/triggers", "_triggers_list"))
+    table.add(Route("POST", "/api/worktree-setup/approve", "_worktree_setup_approve", body=0))
+    for method, path in routes:
+        table.add(Route(method, path, "_handler"))
+    return table
+
+
+def _routes(extra: str = "pass", table: RouteTable | None = None) -> set[str]:
     source = textwrap.dedent(_HANDLER).replace("{extra}", extra).replace("{{", "{")
-    return backend_routes(source.replace("}}", "}"))
+    return backend_routes(source.replace("}}", "}"), table or _table())
 
 
 def test_reader_finds_a_newly_added_route() -> None:
@@ -298,6 +293,62 @@ def test_reader_finds_a_newly_added_route() -> None:
     } <= before
     after = _routes('if parsed.path == "/api/brand-new":\n            pass')
     assert after - before == {"GET /api/brand-new"}
+
+
+# The routes server.py's dispatchers for triggers, secrets, worktree setup and shortcuts
+# answered before they moved into the route table (dev 34decd48's parity reader).
+PILOT_ROUTES = {
+    "DELETE /api/rattish/secrets/*",
+    "DELETE /api/rattish/triggers/*",
+    "DELETE /api/workflow-shortcuts/*",
+    "GET /api/rattish/secrets",
+    "GET /api/rattish/triggers",
+    "GET /api/rattish/triggers/*/changes",
+    "GET /api/rattish/triggers/budget",
+    "GET /api/rattish/triggers/pause",
+    "GET /api/workflow-shortcuts",
+    "GET /api/workflow-shortcuts/*",
+    "GET /api/workflow-shortcuts/*/changes",
+    "GET /api/workflow-shortcuts/target",
+    "GET /api/worktree-setup",
+    "GET /api/worktree-setup/pending",
+    "POST /api/rattish/secrets",
+    "POST /api/rattish/triggers",
+    "POST /api/rattish/triggers/*",
+    "POST /api/rattish/triggers/*/approve",
+    "POST /api/rattish/triggers/*/rotate-token",
+    "POST /api/rattish/triggers/budget",
+    "POST /api/rattish/triggers/login",
+    "POST /api/rattish/triggers/pause",
+    "POST /api/rattish/triggers/preview",
+    "POST /api/workflow-shortcuts",
+    "POST /api/workflow-shortcuts/*/approve",
+    "POST /api/workflow-shortcuts/*/run",
+    "POST /api/worktree-setup/approve",
+    "POST /api/worktree-setup/revoke",
+}
+
+
+def test_route_table_declares_the_trigger_secret_setup_and_shortcut_routes() -> None:
+    assert table_routes() == PILOT_ROUTES
+    assert PILOT_ROUTES <= backend_routes()
+
+
+def test_reader_finds_a_route_added_to_the_table() -> None:
+    before = _routes()
+    after = _routes(table=_table(("PATCH", "/api/brand-new/{item_id}/rename")))
+    # A {param} segment reads as * in the key, as the manifest writes it.
+    assert after - before == {"PATCH /api/brand-new/*/rename"}
+
+
+def test_route_table_refuses_a_duplicate_key() -> None:
+    with pytest.raises(ValueError, match="Two routes"):
+        _table(("GET", "/api/x/{a}"), ("GET", "/api/x/{b}"))
+
+
+def test_reader_refuses_a_route_in_both_the_table_and_an_if_chain() -> None:
+    with pytest.raises(UnreadableRoute, match="both in the route table"):
+        _routes(table=_table(("GET", "/api/health")))
 
 
 def test_reader_finds_a_route_nested_in_another_routes_body() -> None:

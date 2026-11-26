@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000280",
+  "id": "10000000-0000-4000-8000-000000000280",
+  "sequence": 280,
+  "type": "desktop.action",
+  "payload": {
+    "op": "rem.decision.change",
+    "params": {
+      "action": "change",
+      "id": "D-3",
+      "expected_revision": 7,
+      "answer": "Run npm test before each commit."
+    }
+  }
+}

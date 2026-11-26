@@ -130,7 +130,6 @@ def test_the_user_can_still_export_a_token(tmp_path: Path) -> None:
 
 def test_client_and_backend_agree_on_the_agent_token_prefix() -> None:
     assert AGENT_TOKEN_PREFIX == headless.AGENT_TOKEN_PREFIX
-    assert headless.AGENT_SESSION_ENV in AGENT_SESSION_ENVS
 
 
 # --- H2: legacy workflow approve/reject ---------------------------------------------
@@ -300,9 +299,9 @@ def test_agent_tokens_can_read_and_make_listed_writes(method: str, path: str) ->
 @pytest.mark.parametrize(
     "path",
     [
-        "/api/session",
+        "/api/usage/credentials",
         "/api/devices",
-        "/api/desktop/trusted-roots",
+        "/api/desktop/path-grants",
         "/api/rem/context",
         "/api/rem-resources",
         # A phone-started sign-in shows its one-time code and link here.
@@ -392,7 +391,7 @@ def test_api_guard_covers_every_excluded_user_only_route() -> None:
         (["POST", "/workflows/w/run"], "workflows"),
         (["POST", "/workflows/w/approvals/r/n/approve"], "approve"),
         (["POST", "/rem/kanban/ticket", "-f", "action=approve"], "Rem"),
-        (["GET", "/session"], "owner"),
+        (["GET", "/provider/accounts"], "owner"),
     ],
 )
 def test_api_refuses_user_only_requests_inside_agent_turns(

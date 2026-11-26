@@ -152,3 +152,24 @@ def test_the_real_query_is_off_outside_windows() -> None:
     if sys.platform == "win32":
         pytest.skip("Windows answers for real")
     assert run_service._windows_process_state(os.getpid()) == (False, None)
+
+
+@pytest.mark.skipif(
+    not (sys.platform in {"win32", "darwin"} or sys.platform.startswith("linux")),
+    reason="start times are read on Linux, macOS and Windows",
+)
+def test_native_start_token_tells_a_later_process_apart() -> None:
+    from gofer.utils.pids import process_start_token as native_start_token
+
+    mine = native_start_token(os.getpid())
+    assert mine is not None
+    assert native_start_token(os.getpid()) == mine
+    python = getattr(sys, "_base_executable", None) or sys.executable
+    child = subprocess.Popen([python, "-I", "-c", "import time; time.sleep(120)"])
+    try:
+        token = native_start_token(child.pid)
+        assert token is not None and token != mine
+        assert native_start_token(child.pid) == token
+    finally:
+        child.terminate()
+        child.wait(timeout=30)

@@ -40,9 +40,15 @@ const frontendPackage = JSON.parse(fs.readFileSync(path.join(frontendRoot, "pack
 let viteServer;
 let apiUrl;
 let appModule;
+let chatPaneModule;
+let chatMessagesModule;
+let chatThreadsModule;
+let projectsModule;
 let crashBoundaryModule;
 let bottomPanelModule;
 let canvasModule;
+let inspectorFieldsModule;
+let runTimelineModule;
 let triggersSectionModule;
 let secretsSectionModule;
 let resultCacheSectionModule;
@@ -52,11 +58,13 @@ let dialogModule;
 let runPreviewModule;
 let integratedBrowserModule;
 let markdownContentModule;
-let rattishEditorModule;
 let rattishRangesModule;
 let settingsModule;
+let graphEditHistoryModule;
 let settingsPopoverModule;
 let workflowDialogsModule;
+let legacyTomlLibModule;
+let legacyTomlModule;
 let chatAttachmentsModule;
 let chatComposerModule;
 let ticketTimelineModule;
@@ -154,9 +162,15 @@ before(async () => {
   }
   ({ apiUrl } = await viteServer.ssrLoadModule("/src/lib/api.js"));
   appModule = await viteServer.ssrLoadModule("/src/pages/App.jsx");
+  chatPaneModule = await viteServer.ssrLoadModule("/src/components/ChatPane.jsx");
+  chatMessagesModule = await viteServer.ssrLoadModule("/src/components/ChatMessages.jsx");
+  chatThreadsModule = await viteServer.ssrLoadModule("/src/lib/chatThreads.js");
+  projectsModule = await viteServer.ssrLoadModule("/src/lib/projects.js");
   crashBoundaryModule = await viteServer.ssrLoadModule("/src/components/AppCrashBoundary.jsx");
   bottomPanelModule = await viteServer.ssrLoadModule("/src/components/UnifiedBottomPanel.jsx");
   canvasModule = await viteServer.ssrLoadModule("/src/components/DagCanvas.jsx");
+  inspectorFieldsModule = await viteServer.ssrLoadModule("/src/components/InspectorFields.jsx");
+  runTimelineModule = await viteServer.ssrLoadModule("/src/components/RunTimelinePanel.jsx");
   triggersSectionModule = await viteServer.ssrLoadModule("/src/components/RattishTriggersSection.jsx");
   secretsSectionModule = await viteServer.ssrLoadModule("/src/components/WorkflowSecretsSection.jsx");
   resultCacheSectionModule = await viteServer.ssrLoadModule("/src/components/WorkflowResultCacheSection.jsx");
@@ -167,11 +181,13 @@ before(async () => {
   runPreviewModule = await viteServer.ssrLoadModule("/src/components/RunPreviewDialog.jsx");
   integratedBrowserModule = await viteServer.ssrLoadModule("/src/components/IntegratedBrowser.jsx");
   markdownContentModule = await viteServer.ssrLoadModule("/src/components/MarkdownContent.jsx");
-  rattishEditorModule = await viteServer.ssrLoadModule("/src/components/RattishEditor.jsx");
   rattishRangesModule = await viteServer.ssrLoadModule("/src/lib/rattishRanges.js");
   settingsModule = await viteServer.ssrLoadModule("/src/lib/settings.js");
+  graphEditHistoryModule = await viteServer.ssrLoadModule("/src/lib/graphEditHistory.js");
   settingsPopoverModule = await viteServer.ssrLoadModule("/src/components/SettingsPopover.jsx");
   workflowDialogsModule = await viteServer.ssrLoadModule("/src/components/WorkflowDialogs.jsx");
+  legacyTomlModule = await viteServer.ssrLoadModule("/src/components/LegacyTomlWorkflows.jsx");
+  legacyTomlLibModule = await viteServer.ssrLoadModule("/src/lib/legacyToml.js");
   chatAttachmentsModule = await viteServer.ssrLoadModule("/src/lib/chatAttachments.js");
   chatComposerModule = await viteServer.ssrLoadModule("/src/components/ChatComposer.jsx");
   ticketTimelineModule = await viteServer.ssrLoadModule("/src/components/TicketTimeline.jsx");
@@ -336,6 +352,31 @@ test("settings dropdown exposes useful app categories and searchable commands", 
   }
 });
 
+test("settings call Raticode's data folder by its glossary name", async () => {
+  const general = renderToStaticMarkup(React.createElement(settingsPopoverModule.default, {
+    initialCategory: "general",
+    onChange() {},
+    onClose() {},
+    onResetAll() {},
+    open: true,
+    settings: settingsModule.DEFAULT_APP_SETTINGS,
+  }));
+  const dataRow = general.match(/data-setting-row="dataDir"[\s\S]*?<\/p>/)?.[0] ?? "";
+  assert.match(dataRow, />Data folder<\/p>/);
+  assert.match(general, /title="Data folder"/);
+  assert.doesNotMatch(general, /[Aa]pplication data|app data/);
+  // Both the glossary term and the old wording find the row.
+  assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("data folder"), ["general", "developer"]);
+  assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("data directory"), ["general"]);
+
+  window.goferDesktop = { developer: { info: () => new Promise(() => {}), action: async () => "" } };
+  const { default: DeveloperSettings } = await viteServer.ssrLoadModule("/src/components/DeveloperSettings.jsx");
+  const developer = renderToStaticMarkup(React.createElement(DeveloperSettings));
+  assert.match(developer, /<button[^>]*>Open data folder<\/button>/);
+  assert.match(developer, /<button[^>]*>Open desktop data<\/button>/);
+  assert.doesNotMatch(developer, /Open app data/);
+});
+
 test("settings give Rem resources the full row width beneath their label", () => {
   const markup = renderToStaticMarkup(React.createElement(settingsPopoverModule.default, {
     initialCategory: "assistant",
@@ -352,6 +393,26 @@ test("settings give Rem resources the full row width beneath their label", () =>
   assert.match(resourcesRow, /class="rem-tools"/);
   assert.match(resourcesRow, /Run commands/);
   assert.doesNotMatch(resourcesRow, /w-52/);
+});
+
+test("Settings › Rem model menus show the app's default as Automatic until a model is picked", () => {
+  const { RemModelSelect } = settingsPopoverModule;
+  const provider = {
+    id: "claude_code",
+    defaultModel: "m2",
+    models: [{ id: "m1", displayName: "M1" }, { id: "m2", displayName: "M2" }],
+  };
+  const render = (value) => renderToStaticMarkup(React.createElement(RemModelSelect, { provider, value, onChange() {} }));
+
+  const empty = render("");
+  assert.match(empty, /<option value="" selected="">Automatic \(m2\)<\/option>/);
+  assert.ok(empty.indexOf("Automatic (m2)") < empty.indexOf(">M1<"));
+  assert.match(render("cli-default"), /<option value="" selected="">Automatic \(m2\)<\/option>/);
+  const picked = render("m1");
+  assert.match(picked, /<option value="m1" selected="">M1<\/option>/);
+  assert.match(picked, /<option value="">Automatic \(m2\)<\/option>/);
+  assert.match(render("gone"), /<option value="gone" selected="">gone \(unavailable\)<\/option>/);
+  assert.match(renderToStaticMarkup(React.createElement(RemModelSelect, { provider: { models: [] }, value: "m1", onChange() {} })), /disabled=""[^>]*>.*<option value="m1" selected="">m1<\/option>/);
 });
 
 test("studio session persists the selected project, workflow, and editor", () => {
@@ -900,7 +961,7 @@ test("Rem attaches dropped files and pasted screenshots", async () => {
   const fetchMock = createFetchMock([
     jsonResponse("/api/provider/capabilities", { providers: [] }),
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     onOpenMarkdownLink() {},
     onResizeKeyDown() {},
     onResizeStart() {},
@@ -955,7 +1016,7 @@ test("Rem edit paths preserve the filename and open in the scoped code editor", 
     sourceFormat: "rattish",
     sourcePath: "/projects/alpha/.raticode/testing/workflow.rattish",
   };
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     activeWorkflowId: workflow.id,
     onOpenFile: (pathValue, projectRoot) => opened.push([pathValue, projectRoot]),
     onOpenMarkdownLink() {},
@@ -1020,7 +1081,7 @@ test("Rem follows new text only while the conversation is at the bottom", async 
     (url) => (url === "/api/chat/stream" ? controlledStream.response(url) : null),
   ]);
   const workflow = workflowFixture({ id: "testing", name: "Testing" });
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     activeWorkflowId: workflow.id,
     onOpenMarkdownLink() {},
     onResizeKeyDown() {},
@@ -1073,7 +1134,7 @@ test("assistant threads open at the bottom and returning home resets the pane to
     (url) => (url === "/api/chat/stream" ? chatStream(url) : null),
   ]);
   const workflow = workflowFixture({ id: "testing", name: "Testing" });
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     activeWorkflowId: workflow.id,
     onOpenMarkdownLink() {},
     onResizeKeyDown() {},
@@ -2688,17 +2749,12 @@ test("every migrated dialog family uses the shared keyboard and focus contract",
   };
   const cases = [
     {
-      name: "workflow history",
-      render: (onClose) => React.createElement(workflowDialogsModule.WorkflowHistoryDialog, {
-        diff: null,
-        error: "",
-        loading: false,
-        revisions: [],
-        workflow: workflowFixture(),
+      name: "convert TOML workflow",
+      render: (onClose) => React.createElement(legacyTomlModule.ConvertTomlWorkflowDialog, {
+        defaultProjectRoot: "/workspace",
+        file: { name: "demo.toml", path: "/data/demo.toml" },
         onClose,
-        onPreview() {},
-        onRefresh() {},
-        onRestore() {},
+        onConvert() {},
       }),
     },
     {
@@ -2726,7 +2782,7 @@ test("every migrated dialog family uses the shared keyboard and focus contract",
       render: (onClose) => React.createElement(workflowDialogsModule.ExportWorkflowDialog, {
         directory: "/tmp",
         error: "",
-        filename: "demo.gof.zip",
+        filename: "demo.raticode",
         open: true,
         saving: false,
         workflow: workflowFixture(),
@@ -2744,17 +2800,9 @@ test("every migrated dialog family uses the shared keyboard and focus contract",
       }),
     },
     {
-      name: "filesystem trust",
-      render: (onClose) => React.createElement(canvasModule.FilesystemTrustPrompt, {
-        parentPath: "/workspace",
-        onCancel: onClose,
-        onConfirm() {},
-      }),
-    },
-    {
       name: "file editor",
       desktop: { textFiles: { read: async () => ({ content: "hello" }) } },
-      render: (onClose) => React.createElement(canvasModule.TextFileDialog, {
+      render: (onClose) => React.createElement(inspectorFieldsModule.TextFileDialog, {
         mode: "edit",
         path: "/workspace/demo.txt",
         onClose,
@@ -2780,7 +2828,7 @@ test("every migrated dialog family uses the shared keyboard and focus contract",
           }),
         },
       },
-      render: (onClose) => React.createElement(canvasModule.PathPickerDialog, {
+      render: (onClose) => React.createElement(inspectorFieldsModule.PathPickerDialog, {
         currentPath: "/workspace",
         label: "Working directory",
         onClose,
@@ -2815,30 +2863,32 @@ test("every migrated dialog family uses the shared keyboard and focus contract",
   }
 });
 
-test("workflow refresh helpers preserve local edits during silent refresh", () => {
-  const remote = [
-    {
-      id: "demo",
-      name: "Remote",
-      nodes: [{ id: "step", type: "agent", label: "Remote label", x: 10, y: 20 }],
-      edges: [],
-      agents: {},
-      sourcePath: "/tmp/demo.toml",
-      status: "Ready",
-    },
-  ];
-  const local = {
-    ...remote[0],
-    name: "Unsaved local",
-    nodes: [{ id: "step", type: "agent", label: "Local label", x: 99, y: 120 }],
+test("the path picker asks before moving an entry to the trash", async () => {
+  const deleted = [];
+  let entries = [{ path: "/workspace/old.txt", name: "old.txt", isFile: true, isDirectory: false }];
+  const workspace = {
+    listDirectory: async () => ({ directory: "/workspace", entries, parent: null }),
+    deletePath: async (target) => { deleted.push(target); entries = entries.filter(entry => entry.path !== target); },
   };
-
-  const preserved = appModule.preserveLocalWorkflow(remote, local, "/data")[0];
-
-  assert.equal(preserved.name, "Unsaved local");
-  assert.equal(preserved.sourcePath, "/tmp/demo.toml");
-  assert.equal(preserved.nodes[0].label, "Local label");
-  assert.equal(preserved.nodes[0].x, 99);
+  const dom = await mountReact(React.createElement(inspectorFieldsModule.PathPickerDialog, {
+    currentPath: "/workspace", label: "Working directory", onClose() {}, onSelect() {},
+  }), createFetchMock([]), { desktop: { workspace } });
+  try {
+    await dom.flush();
+    const remove = async () => {
+      const row = allElements(dom.container).find(el => el.tagName === "BUTTON" && textOf(el).includes("old.txt"));
+      await dom.pointer(row, "onContextMenu", { clientX: 10, clientY: 10 });
+      await dom.click(allElements(dom.container).find(el => el.tagName === "BUTTON" && textOf(el).trim() === "Delete"));
+    };
+    await remove();
+    assert.equal(await confirmTone(dom), "danger");
+    assert.deepEqual(await answerConfirm(dom, false), { message: "Move old.txt to the trash? This file can be restored from the operating system trash.", confirmLabel: "Move to trash" });
+    assert.deepEqual(deleted, []);
+    await remove();
+    await answerConfirm(dom, true);
+    await dom.flush();
+    assert.deepEqual(deleted, ["/workspace/old.txt"]);
+  } finally { await dom.unmount(); }
 });
 
 test("reduced-motion preference disables smooth scrolling and status animation", () => {
@@ -2908,299 +2958,15 @@ test("button primitives used by dialogs and the inspector are defined", () => {
 });
 
 test("brand actions keep the indigo accent on hover and focus", () => {
-  for (const file of ["src/pages/App.jsx", "src/components/DagCanvas.jsx", "src/components/PathNameDialog.jsx", "src/components/RunPreviewDialog.jsx"]) {
+  for (const file of ["src/pages/App.jsx", "src/components/ChatPane.jsx", "src/components/ChatMessages.jsx", "src/components/DagCanvas.jsx", "src/components/InspectorFields.jsx", "src/components/RunTimelinePanel.jsx", "src/components/PathNameDialog.jsx", "src/components/RunPreviewDialog.jsx"]) {
     const source = fs.readFileSync(path.join(frontendRoot, file), "utf8");
     assert.doesNotMatch(source, /(hover|focus|focus-visible|focus-within):(bg|border|ring)-teal-/, file);
   }
 });
 
-test("workflow save payload keeps all filesystem permission combinations and graph positions", () => {
-  const permissionCombinations = Array.from({ length: 8 }, (_unused, value) => ({
-    path: `/outside/shared-${value}`,
-    read: Boolean(value & 4),
-    write: Boolean(value & 2),
-    execute: Boolean(value & 1),
-  }));
-  const payload = appModule.workflowPayloadForSave({
-    id: "demo",
-    name: "Demo",
-    filesystemAccess: [
-      ...permissionCombinations,
-      { path: "/outside/shared-0/", read: true, write: true, execute: true },
-      { path: "/outside/defaults" },
-      { path: "" },
-    ],
-    nodes: [
-      {
-        id: "step",
-        type: "bash_command",
-        label: "Run",
-        operation: { type: "bash_command", command: "echo hi" },
-      },
-    ],
-  });
-
-  assert.deepEqual(payload.edges, []);
-  assert.deepEqual(payload.agents, {});
-  assert.deepEqual(payload.filesystemAccess, [
-    ...permissionCombinations,
-    { path: "/outside/defaults", read: true, write: true, execute: false },
-  ]);
-  assert.equal(payload.nodes[0].x, 0);
-  assert.equal(payload.nodes[0].y, 0);
-  assert.equal(payload.nodes[0].operation.command, "echo hi");
-});
-
-test("filesystem permission controls update each flag independently", async () => {
-  const changes = [];
-  const workflow = {
-    ...workflowFixture(),
-    filesystemAccess: [
-      { path: "/outside/tools", read: false, write: true, execute: false },
-    ],
-  };
-  const dom = await mountReact(
-    React.createElement(DagCanvasHarness, {
-      dataDir: "/workspace",
-      workflow,
-      onWorkflowChange: (nextWorkflow) => changes.push(nextWorkflow),
-    }),
-    createFetchMock([]),
-  );
-
-  await openWorkflowSettingsFromMenu(dom);
-  const workflowSettingsHeading = headingByText(dom, "Workflow settings");
-  assert.ok(workflowSettingsHeading);
-  const workflowSettingsHeader = dom.ancestor(workflowSettingsHeading, "HEADER");
-  assert.equal(
-    allElements(workflowSettingsHeader).some(
-      (element) => element.tagName === "P" && textOf(element) === workflow.id,
-    ),
-    true,
-  );
-  assert.equal(
-    allElements(dom.container).some(
-      (element) => element.tagName === "LABEL" && textOf(element) === "ID",
-    ),
-    false,
-  );
-  await dom.click(dom.byText("Access"));
-
-  await dom.change(dom.controlAfterLabel("Read files"), true);
-  await dom.change(dom.controlAfterLabel("Write files"), false);
-  await dom.change(dom.controlAfterLabel("Execute files"), true);
-
-  assert.deepEqual(changes.at(-1).filesystemAccess, [
-    { path: "/outside/tools", read: true, write: false, execute: true },
-  ]);
-  assert.match(
-    dom.text(),
-    /Write access allows this workflow to create, change, move, and delete files/,
-  );
-  assert.match(dom.text(), /Execute access allows this workflow to run programs/);
-
-  await dom.unmount();
-});
-
-test("autosave persists edits to two workflows with independent debounces", async () => {
-  const fetchMock = createFetchMock([
-    jsonResponse("/api/workflows", workflowsPayload([
-      workflowFixture({ id: "a", name: "Workflow A", label: "A original" }),
-      workflowFixture({ id: "b", name: "Workflow B", label: "B original" }),
-    ])),
-    saveWorkflowResponse(),
-  ]);
-  const dom = await mountReact(React.createElement(appModule.default), fetchMock);
-
-  await dom.flush();
-  await dom.change(dom.controlAfterLabel("Name"), "A final");
-  await dom.click(dom.ancestor(dom.byText("Workflow B"), (node) => node.getAttribute?.("role") === "button"));
-  await dom.change(dom.controlAfterLabel("Name"), "B final");
-  await dom.flush(650);
-
-  const saves = fetchMock.calls.filter((call) => call.options.method === "PUT");
-  assert.equal(saves.length, 2);
-  assert.deepEqual(
-    saves.map((call) => [call.url, JSON.parse(call.options.body).name]).sort(),
-    [
-      ["/api/workflows/a", "A final"],
-      ["/api/workflows/b", "B final"],
-    ],
-  );
-  assert.match(dom.text(), /Saved/);
-
-  await dom.unmount();
-});
-
-test("autosave serializes revisions and ignores a stale response", async () => {
-  const firstSave = createDeferred();
-  let saveCount = 0;
-  const fetchMock = createFetchMock([
-    jsonResponse("/api/workflows", workflowsPayload([
-      workflowFixture({ id: "demo", name: "Demo", label: "Original" }),
-    ])),
-    (url, options = {}) => {
-      if (url !== "/api/workflows/demo" || options.method !== "PUT") return null;
-      saveCount += 1;
-      const workflow = JSON.parse(options.body);
-      return {
-        ok: true,
-        status: 200,
-        json: async () => (saveCount === 1 ? firstSave.promise : { workflow }),
-      };
-    },
-  ]);
-  const dom = await mountReact(React.createElement(appModule.default), fetchMock);
-
-  await dom.flush();
-  await dom.change(dom.controlAfterLabel("Name"), "First revision");
-  await dom.flush(650);
-  await dom.change(dom.controlAfterLabel("Name"), "Newest revision");
-  await dom.flush(650);
-  assert.equal(fetchMock.calls.filter((call) => call.options.method === "PUT").length, 1);
-
-  firstSave.resolve({
-    workflow: workflowFixture({ id: "demo", name: "First revision", label: "Original" }),
-  });
-  await dom.flush();
-  await dom.flush();
-
-  assert.equal(dom.controlAfterLabel("Name").value, "Newest revision");
-  const saves = fetchMock.calls.filter((call) => call.options.method === "PUT");
-  assert.equal(saves.length, 2);
-  assert.equal(JSON.parse(saves[1].options.body).name, "Newest revision");
-  assert.match(dom.text(), /Saved/);
-
-  await dom.unmount();
-});
-
-test("failed autosave remains visible and retryable", async () => {
-  let saveCount = 0;
-  const fetchMock = createFetchMock([
-    jsonResponse("/api/workflows", workflowsPayload([
-      workflowFixture({ id: "demo", name: "Demo", label: "Original" }),
-    ])),
-    (url, options = {}) => {
-      if (url !== "/api/workflows/demo" || options.method !== "PUT") return null;
-      saveCount += 1;
-      const workflow = JSON.parse(options.body);
-      return saveCount === 1
-        ? { ok: false, status: 500, json: async () => ({ error: "Disk is unavailable" }) }
-        : { ok: true, status: 200, json: async () => ({ workflow }) };
-    },
-  ]);
-  const dom = await mountReact(React.createElement(appModule.default), fetchMock);
-
-  await dom.flush();
-  await dom.change(dom.controlAfterLabel("Name"), "Recoverable edit");
-  assert.match(dom.text(), /Saving…/);
-  await dom.flush(650);
-
-  const retryButton = dom.byText("Retry");
-  const alert = dom.ancestor(retryButton, (node) => node.getAttribute?.("role") === "alert");
-  assert.match(alert.textContent, /Couldn't saveDisk is unavailable—Retry/);
-  assert.equal(alert.getAttribute("title"), "Disk is unavailable");
-  assert.equal(alert.getAttribute("aria-live"), "assertive");
-  assert.equal(alert.getAttribute("aria-atomic"), "true");
-  assert.equal(
-    matchingLiveRegions(dom.container, {
-      politeness: "assertive",
-      role: "alert",
-      text: "Disk is unavailable",
-    }).length,
-    1,
-  );
-
-  await dom.click(retryButton);
-  await dom.flush();
-  assert.equal(saveCount, 2);
-  assert.match(dom.text(), /Saved/);
-  assert.equal(
-    matchingLiveRegions(dom.container, {
-      politeness: "assertive",
-      role: "alert",
-      text: "Disk is unavailable",
-    }).length,
-    0,
-  );
-
-  await dom.unmount();
-});
-
-test("silent refresh preserves every dirty workflow and updates clean workflows", async () => {
-  const pendingSave = createDeferred();
-  let serveRemoteWorkflows = false;
-  const initialWorkflows = [
-    workflowFixture({ id: "a", name: "Workflow A", label: "A original" }),
-    workflowFixture({ id: "b", name: "Workflow B", label: "B original" }),
-    workflowFixture({ id: "c", name: "Workflow C", label: "C original" }),
-  ];
-  const refreshedWorkflows = [
-    workflowFixture({ id: "a", name: "A remote", label: "A remote" }),
-    workflowFixture({ id: "b", name: "B remote", label: "B remote" }),
-    workflowFixture({ id: "c", name: "C refreshed", label: "C refreshed" }),
-  ];
-  const fetchMock = createFetchMock([
-    (url, options = {}) => {
-      if (url !== "/api/workflows" || (options.method ?? "GET") !== "GET") return null;
-      return {
-        ok: true,
-        status: 200,
-        json: async () => workflowsPayload(
-          serveRemoteWorkflows ? refreshedWorkflows : initialWorkflows,
-        ),
-      };
-    },
-    (url, options = {}) => {
-      if (!url.startsWith("/api/workflows/") || options.method !== "PUT") return null;
-      return { ok: true, status: 200, json: async () => pendingSave.promise };
-    },
-  ]);
-  const dom = await mountReact(React.createElement(appModule.default), fetchMock);
-
-  await dom.flush();
-  await dom.change(dom.controlAfterLabel("Name"), "A local");
-  await dom.click(dom.ancestor(dom.byText("Workflow B"), (node) => node.getAttribute?.("role") === "button"));
-  await dom.change(dom.controlAfterLabel("Name"), "B local");
-  await dom.click(dom.ancestor(dom.byText("Workflow C"), (node) => node.getAttribute?.("role") === "button"));
-  serveRemoteWorkflows = true;
-  await dom.flush(2000);
-
-  assert.equal(dom.controlAfterLabel("Name").value, "C refreshed");
-  await dom.click(dom.ancestor(dom.byText("A local"), (node) => node.getAttribute?.("role") === "button"));
-  assert.equal(dom.controlAfterLabel("Name").value, "A local");
-  await dom.click(dom.ancestor(dom.byText("B local"), (node) => node.getAttribute?.("role") === "button"));
-  assert.equal(dom.controlAfterLabel("Name").value, "B local");
-
-  await dom.unmount();
-});
-
-test("page hide preserves pending edits with a keepalive save", async () => {
-  const fetchMock = createFetchMock([
-    jsonResponse("/api/workflows", workflowsPayload([
-      workflowFixture({ id: "demo", name: "Demo", label: "Original" }),
-    ])),
-    saveWorkflowResponse(),
-  ]);
-  const dom = await mountReact(React.createElement(appModule.default), fetchMock);
-
-  await dom.flush();
-  await dom.change(dom.controlAfterLabel("Name"), "Pending at unload");
-  await dom.dispatchWindow("pagehide");
-
-  const unloadSave = fetchMock.calls.find(
-    (call) => call.url === "/api/workflows/demo" && call.options.keepalive,
-  );
-  assert.ok(unloadSave);
-  assert.equal(JSON.parse(unloadSave.options.body).name, "Pending at unload");
-
-  await dom.unmount();
-});
-
-test("workflow deletion helpers remove the selected workflow and choose the next active ID", () => {
+test("deleting the active workflow makes the next one active", () => {
   const workflows = [{ id: "a" }, { id: "b" }, { id: "c" }];
 
-  assert.deepEqual(appModule.workflowIdsAfterDelete(workflows, "b"), ["a", "c"]);
   assert.equal(appModule.nextActiveWorkflowIdAfterDelete(workflows, "b", "b"), "a");
   assert.equal(appModule.nextActiveWorkflowIdAfterDelete(workflows, "c", "b"), "c");
 });
@@ -3237,7 +3003,7 @@ test("terminal panel and Code workspace survive deleting the last workflow", asy
   await dom.click(dom.byLabel("Workflows"));
   await dom.click(dom.byTitle("Workflow actions"));
   await dom.click(dom.ancestor(dom.byText("Delete workflow"), "BUTTON"));
-  await dom.flush();
+  await answerConfirm(dom, true);
 
   assert.equal(dom.byLabel("Bottom panel"), bottomPanel);
   assert.equal(dom.byLabel("Code workspace"), codeWorkspace);
@@ -3270,7 +3036,7 @@ test("deleting a Rattish workflow removes its recent-file entry", async () => {
       },
     }),
     jsonResponse(
-      "/api/workflows/only?sourceFormat=rattish",
+      "/api/workflows/only",
       { deleted: true },
       { method: "DELETE" },
     ),
@@ -3288,7 +3054,7 @@ test("deleting a Rattish workflow removes its recent-file entry", async () => {
   await dom.flush();
   await dom.click(dom.byTitle("Workflow actions"));
   await dom.click(dom.byText("Delete workflow"));
-  await dom.flush();
+  await answerConfirm(dom, true);
   await dom.click(dom.byLabel("File explorer"));
 
   assert.equal(
@@ -3319,34 +3085,29 @@ test("deleting a Rattish workflow names its waiting run worktrees first", async 
     }),
     jsonResponse("/api/workflows/only/run-worktrees", { workflowId: "only", pending: 2, runIds: ["r1", "r2"] }),
     jsonResponse(
-      "/api/workflows/only?sourceFormat=rattish",
+      "/api/workflows/only",
       { deleted: true, runWorktreesRemoved: 2, runWorktreeErrors: [] },
       { method: "DELETE" },
     ),
   ]);
-  const confirmations = [];
-  const originalConfirm = window.confirm;
   const dom = await mountReact(React.createElement(appModule.default), fetchMock);
-  let approved = false;
-  window.confirm = (message) => { confirmations.push(message); return approved; };
   try {
     await dom.flush();
     await dom.click(dom.byTitle("Workflow actions"));
     await dom.click(dom.byText("Delete workflow"));
     await dom.flush();
-    assert.equal(confirmations.length, 1);
-    assert.match(confirmations[0], /2 run worktrees still wait to be landed or discarded/);
-    assert.match(confirmations[0], /removes them and their branches/);
+    const asked = await answerConfirm(dom, false);
+    assert.equal(asked.confirmLabel, "Delete workflow");
+    assert.match(asked.message, /2 run worktrees still wait to be landed or discarded/);
+    assert.match(asked.message, /removes them and their branches/);
     assert.equal(fetchMock.calls.some((call) => call.options.method === "DELETE"), false);
 
-    approved = true;
     await dom.click(dom.byTitle("Workflow actions"));
     await dom.click(dom.byText("Delete workflow"));
-    await dom.flush();
+    await answerConfirm(dom, true);
     assert.equal(fetchMock.calls.filter((call) => call.options.method === "DELETE").length, 1);
     assert.match(dom.text(), /Deleted Only workflow and 2 run worktrees/);
   } finally {
-    window.confirm = originalConfirm;
     await dom.unmount();
   }
 });
@@ -3387,24 +3148,6 @@ test("workflow sidebar groups workflows by registered project folder", () => {
     ).map((group) => ({ name: group.name, root: group.root })),
     [{ name: "Raticode", root: "/workspace/gofer-flow" }],
   );
-});
-
-test("silent refresh replaces stale local project identity with the registry identity", () => {
-  const local = workflowFixture({ id: "review" });
-  local.projectRoot = "/app-data/showcase-completed-workflow";
-  local.projectName = "showcase-completed-workflow";
-  const remote = {
-    ...local,
-    projectRoot: "/repos/customer-api",
-    projectName: "wrong-cached-name",
-    workflowRoot: "/repos/customer-api/.raticode/review",
-  };
-
-  const [preserved] = appModule.preserveLocalWorkflow([remote], local, "/app-data");
-
-  assert.equal(preserved.projectRoot, "/repos/customer-api");
-  assert.equal(preserved.projectName, "customer-api");
-  assert.equal(preserved.workflowRoot, "/repos/customer-api/.raticode/review");
 });
 
 test("project folder menus stay inside the desktop viewport", () => {
@@ -3896,6 +3639,8 @@ test("Code file explorer creates, copies, pastes, reveals, renames, and trashes 
 
   await contextMenu(dom.byText("decisions.md"));
   await dom.click(menuAction("Delete"));
+  assert.equal(await confirmTone(dom), "danger");
+  assert.deepEqual(await answerConfirm(dom, true), { message: "Move decisions.md to the trash? This file can be restored from the operating system trash.", confirmLabel: "Move to trash" });
   await dom.flush();
   assert.equal(calls.at(-1)[0], "delete");
   assert.equal(allElements(dom.container).some((element) => textOf(element) === "decisions.md"), false);
@@ -4328,9 +4073,9 @@ test("Markdown code documents default to preview and resolve relative file links
     ),
     { column: 7, lineNumber: 3262, path: "C:\\repo\\frontend\\src\\pages\\App.test.mjs" },
   );
-  assert.equal(appModule.assistantMarkdownSourcePath("/repo"), "/repo/.raticode-assistant.md");
+  assert.equal(projectsModule.assistantMarkdownSourcePath("/repo"), "/repo/.raticode-assistant.md");
   assert.equal(
-    appModule.assistantMarkdownSourcePath("C:\\repo\\"),
+    projectsModule.assistantMarkdownSourcePath("C:\\repo\\"),
     "C:\\repo\\.raticode-assistant.md",
   );
 });
@@ -4363,10 +4108,6 @@ test("HTML documents default to browser mode and browser tabs use page titles", 
     favicon: "https://www.youtube.com/s/desktop/favicon.ico",
   }), "https://www.youtube.com/s/desktop/favicon.ico");
   assert.equal(codeWorkspaceModule.browserTabFavicon({ favicon: "javascript:alert(1)" }), "");
-  assert.equal(integratedBrowserModule.browserFaviconUrl([
-    "javascript:alert(1)",
-    "https://www.youtube.com/s/desktop/favicon.ico",
-  ]), "https://www.youtube.com/s/desktop/favicon.ico");
   assert.equal(codeWorkspaceModule.browserViewTabMetadata(null, {
     title: "",
     url: "file:///repo/wiki/index.html",
@@ -4400,36 +4141,6 @@ test("HTML preview exposes its diff action beside the read-write toggle", async 
   assert.equal(diffRequests, 1);
   assert.ok(dom.byLabel("HTML view mode"));
   await dom.unmount();
-});
-
-test("integrated browser shortcut matches VS Code on desktop platforms", () => {
-  assert.equal(integratedBrowserModule.isIntegratedBrowserShortcut({
-    altKey: true,
-    code: "Slash",
-    ctrlKey: true,
-    key: "/",
-    metaKey: false,
-    repeat: false,
-    shiftKey: false,
-  }), true);
-  assert.equal(integratedBrowserModule.isIntegratedBrowserShortcut({
-    altKey: true,
-    code: "Slash",
-    ctrlKey: false,
-    key: "/",
-    metaKey: true,
-    repeat: false,
-    shiftKey: false,
-  }), true);
-  assert.equal(integratedBrowserModule.isIntegratedBrowserShortcut({
-    altKey: false,
-    code: "Slash",
-    ctrlKey: true,
-    key: "/",
-    metaKey: false,
-    repeat: false,
-    shiftKey: false,
-  }), false);
 });
 
 test("browser chrome keeps navigation shortcuts when the embedded page is unavailable", () => {
@@ -5492,29 +5203,13 @@ test("workflow switches retain editor tabs from every project", () => {
   }, "beta"), "/projects/beta/workflow.rattish");
 });
 
-test("project shortcuts and recent project ordering use native editor conventions", () => {
-  assert.equal(appModule.isOpenProjectShortcut({
-    altKey: false,
-    ctrlKey: true,
-    key: "o",
-    metaKey: false,
-    repeat: false,
-    shiftKey: false,
-  }), true);
-  assert.equal(appModule.isOpenProjectShortcut({
-    altKey: false,
-    ctrlKey: true,
-    key: "o",
-    metaKey: false,
-    repeat: true,
-    shiftKey: false,
-  }), false);
+test("recent project ordering uses native editor conventions", () => {
   assert.deepEqual(
     appModule.rememberRecentProject(["/repo/one", "/repo/two"], "/repo/two"),
     ["/repo/two", "/repo/one"],
   );
   assert.deepEqual(
-    appModule.mergeRecentProjects(["/repo/one"], ["/repo/two", "/repo/one"]),
+    projectsModule.mergeRecentProjects(["/repo/one"], ["/repo/two", "/repo/one"]),
     ["/repo/one", "/repo/two"],
   );
   assert.deepEqual(
@@ -5537,7 +5232,7 @@ test("project shortcuts and recent project ordering use native editor convention
     [{ path: "/repo/main" }, { path: "/repo/feature" }],
     "/repo/fallback",
   ), "/repo/main");
-  const scopedThread = appModule.scopeChatThreadToProject(
+  const scopedThread = chatThreadsModule.scopeChatThreadToProject(
     { id: "thread-1", title: "Project work" },
     "/repo/two",
     [
@@ -5549,7 +5244,7 @@ test("project shortcuts and recent project ordering use native editor convention
   assert.equal(scopedThread.projectRoot, "/repo/two");
   assert.equal(scopedThread.selectedWorkflowId, null);
   assert.deepEqual(
-    appModule.chatWorkflowContextForThread(scopedThread, [
+    chatThreadsModule.chatWorkflowContextForThread(scopedThread, [
       { id: "one", projectRoot: "/repo/one" },
       { id: "two", projectRoot: "/repo/two" },
     ]).workflows.map((workflow) => workflow.id),
@@ -5573,8 +5268,6 @@ test("projects without workflows still expose a code workspace", () => {
     status: "Project",
     tags: [],
   });
-  assert.equal(appModule.codeWorkspaceAvailable(workspace), true);
-  assert.equal(appModule.codeWorkspaceAvailable({ sourceFormat: "rattish" }), false);
 
   const previousWorkflow = {
     id: "previous",
@@ -5588,10 +5281,6 @@ test("projects without workflows still expose a code workspace", () => {
       "/workspace/empty-project",
     ),
     workspace,
-  );
-  assert.equal(
-    appModule.activeWorkspaceForView([], undefined, "", "code").sourceFormat,
-    "project",
   );
 });
 
@@ -5698,10 +5387,7 @@ test("empty Graph view offers creation, .raticode import, and project opening", 
   assert.ok(dom.byText("Import workflow"));
   assert.ok(dom.byText("Open project"));
   assert.ok(dom.byLabel("Open settings"));
-  assert.equal(
-    reactProps(dom.byTitle("Workflow history is available after you create a workflow")).disabled,
-    true,
-  );
+  assert.equal(allElements(dom.container).some((element) => /Workflow history/.test(element.getAttribute?.("title") ?? "")), false);
   assert.ok(dom.ancestor(dom.byLabel("Open settings"), "HEADER"));
   assert.equal(
     allElements(dom.container).some(
@@ -5808,6 +5494,10 @@ test("empty Graph view imports a .raticode bundle into the open project", async 
   assert.equal(dataTransfer.dropEffect, "copy");
   await dom.pointer(importZone, "onDrop", { dataTransfer });
   await dom.flush();
+  assert.deepEqual(await answerConfirm(dom, true), {
+    message: "Import \"Daily Review\" into empty-project?\n\n1 workflow file will be added under .raticode.",
+    confirmLabel: "Import workflow",
+  });
 
   const importCall = fetchMock.calls.find(
     (call) => call.url === "/api/rattish/workflows/import" && call.options.method === "POST",
@@ -6063,20 +5753,103 @@ test("workflow bundle paths use the selected folder and the Rattish export route
   );
 });
 
-test("graph workflow selection is independent from the code explorer project", () => {
-  const workflows = [
-    { id: "alpha", projectRoot: "/workspace/alpha" },
-    { id: "beta", projectRoot: "/workspace/beta" },
-  ];
+test("old TOML workflows in the data folder are listed with a Convert to Rattish action that keeps the file", async () => {
+  const converted = {
+    ...workflowFixture({ id: "gofer-demo", name: "Gofer Demo" }),
+    nodes: [],
+    sourceFormat: "rattish",
+    sourcePath: "/workspace/.raticode/gofer-demo/workflow.rattish",
+  };
+  let convertReply = { ok: false, status: 400, json: async () => ({ error: "Workflow 'gofer-demo' already exists in /workspace" }) };
+  // The backend lists the converted workflow once it is registered; the .toml files stay.
+  const listed = [];
+  const fetchMock = createFetchMock([
+    (url, options = {}) => (url === "/api/workflows" && (options.method ?? "GET") === "GET" ? {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ...workflowsPayload([...listed]),
+        authoringLanguage: "rattish",
+        legacyTomlFiles: [
+          { name: "gofer-demo.toml", path: "/data/gofer/gofer-demo.toml" },
+          { name: "skills-demo.toml", path: "/data/gofer/skills-demo.toml" },
+          { name: "", path: "" },
+        ],
+      }),
+    } : null),
+    (url, options = {}) => {
+      if (url !== "/api/workflows/convert-toml" || options.method !== "POST") return null;
+      if (convertReply.ok) listed.push(converted);
+      return convertReply;
+    },
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, {
+    desktop: { workspace: { pathGrantForApi: (root) => `grant:${root}`, trustProjectRoot: async () => {} } },
+    storage: { [appModule.STUDIO_SESSION_STORAGE_KEY]: JSON.stringify({ projectRoot: "/workspace" }) },
+  });
+  try {
+    await dom.flush();
+    const notice = allElements(dom.container).find((element) => element.getAttribute?.("data-legacy-toml-notice") === "true");
+    assert.ok(notice, "the workflow list shows the old TOML notice");
+    assert.match(textOf(notice), /2 old TOML workflows aren't loaded any more/);
+    assert.match(textOf(notice), /The \.toml file is kept and not changed\./);
+    assert.match(textOf(notice), /gofer-demo\.toml.*skills-demo\.toml/);
 
-  assert.equal(
-    appModule.activeWorkspaceForView(workflows, "beta", "/workspace/alpha", "graph").id,
-    "beta",
+    await dom.click(dom.byTitle("Convert gofer-demo.toml to a Rattish workflow"));
+    await dom.flush();
+    assert.equal(dom.byLabel("Project folder").value, "/workspace");
+    const form = dom.ancestor(dom.byLabel("Project folder"), "FORM");
+    await dom.pointer(form, "onSubmit");
+    await dom.flush();
+    const first = fetchMock.calls.find((call) => call.url === "/api/workflows/convert-toml");
+    assert.deepEqual(JSON.parse(first.options.body), {
+      path: "/data/gofer/gofer-demo.toml",
+      projectRoot: "/workspace",
+      projectGrantId: "grant:/workspace",
+    });
+    assert.match(dom.text(), /already exists in \/workspace/);
+
+    convertReply = {
+      ok: true,
+      status: 201,
+      json: async () => ({
+        workflow: converted,
+        conversion: {
+          notes: ["Add its schedule: Raticode rattish triggers add cron .raticode/gofer-demo --cron '0 9 * * *'"],
+          unsupported: ["node pick: run_continuously"],
+        },
+      }),
+    };
+    await dom.pointer(dom.ancestor(dom.byLabel("Project folder"), "FORM"), "onSubmit");
+    await dom.flush();
+    const result = allElements(dom.container).find((element) => element.getAttribute?.("data-convert-result") === "true");
+    assert.ok(result, "the dialog shows the conversion result");
+    assert.match(textOf(result), /Converted to Gofer Demo\. The \.toml file wasn't changed\./);
+    assert.match(textOf(result), /Still to do.*rattish triggers add cron/);
+    assert.match(textOf(result), /Not converted.*node pick: run_continuously/);
+    assert.ok(
+      allElements(dom.container).some((element) => element.getAttribute?.("aria-label") === "Gofer Demo actions"),
+      "the converted workflow joins the workflow list",
+    );
+    await dom.click(dom.byText("Done"));
+    assert.equal(allElements(dom.container).some((element) => element.getAttribute?.("data-convert-result") === "true"), false);
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test("TOML helpers read the leftover list, build the convert request, and the app calls no removed TOML route", () => {
+  assert.deepEqual(
+    legacyTomlLibModule.legacyTomlFilesFromPayload({ legacyTomlFiles: [{ path: "/d/a.toml" }, { name: "x" }, null] }),
+    [{ name: "a.toml", path: "/d/a.toml" }],
   );
-  assert.equal(
-    appModule.activeWorkspaceForView(workflows, "beta", "/workspace/alpha", "code").id,
-    "alpha",
-  );
+  assert.deepEqual(legacyTomlLibModule.legacyTomlFilesFromPayload({}), []);
+  const request = legacyTomlLibModule.convertTomlWorkflowRequest({ path: "/d/a.toml", projectRoot: "/p" });
+  assert.equal(request.url, apiUrl("/workflows/convert-toml"));
+  assert.deepEqual(JSON.parse(request.options.body), { path: "/d/a.toml", projectRoot: "/p" });
+  const source = fs.readFileSync(path.join(frontendRoot, "src/pages/App.jsx"), "utf8");
+  assert.match(source, /Raticode no longer runs TOML workflows\. Import takes a \.raticode workflow bundle\./);
+  assert.doesNotMatch(source, /apiUrl\("\/workflows\/import|\/history\/\$\{|\/validate\/fix|executionMode|\/queue\b|webhooks\/\$\{|method: "PUT"/);
 });
 
 test("Rattish byte spans convert to Monaco text ranges across Unicode", () => {
@@ -6159,8 +5932,208 @@ test("Rattish editor projection populates the graph with source-backed route det
   assert.equal(projected.nodes[0].type, "bash_command");
   assert.deepEqual({ x: projected.nodes[0].x, y: projected.nodes[0].y }, { x: 32, y: 48 });
   assert.ok(projected.nodes[1].x > projected.nodes[0].x);
-  assert.equal(projected.edges[0].displayLabel, "when");
+  assert.equal(projected.edges[0].mode, "when");
+  assert.equal("condition" in projected.edges[0], false);
+  assert.equal("settings" in projected.nodes[1], false);
   assert.equal(projected.validationDiagnostics[0].targetId, "review");
+});
+
+test("Workflow graph route labels keep the predicate exactly as written", async () => {
+  const { edgeLabel } = await viteServer.ssrLoadModule("/src/components/GraphOutline.jsx");
+  assert.equal(
+    edgeLabel({ mode: "when", predicateSource: "page.output.likely_needs_javascript" }),
+    "when page.output.likely_needs_javascript",
+  );
+  assert.equal(edgeLabel({ mode: "when", predicateSource: null }), "when");
+  assert.equal(edgeLabel({ mode: "otherwise" }), "otherwise");
+  assert.equal(edgeLabel({ mode: "unconditional" }), "always");
+});
+
+test("Workflow graph node summaries read Rattish fields", () => {
+  const summary = canvasModule.nodeMetaFromOperation;
+  assert.equal(summary({ type: "agent", provider: "claude-code", skill: "review" }), "claude-code · /review");
+  assert.equal(summary({ type: "agent", provider: "codex", prompt_path: "prompts/review.md" }, "/project"), "codex · /project/prompts/review.md");
+  assert.equal(summary({ type: "agent", provider: "codex", skill: null }), "codex");
+  assert.equal(summary({ type: "common_llm_task", task: "review", provider: "codex" }), "review with codex");
+  assert.equal(summary({ type: "approval_gate", decision_timeout: "30m" }), "approval timeout 30m");
+  assert.equal(summary({ type: "approval_gate", decision_timeout: null }), "approval required");
+});
+
+test("DagCanvas shows only the Rattish inspector, and none without a Rattish document", async () => {
+  const canvasSource = fs.readFileSync(path.join(frontendRoot, "src/components/DagCanvas.jsx"), "utf8");
+  assert.doesNotMatch(canvasSource, /LegacyTomlInspector|^function Inspector\(/m);
+  assert.equal(fs.existsSync(path.join(frontendRoot, "src/components/LegacyTomlInspector.jsx")), false);
+  const inspectorLabel = (dom) =>
+    allElements(dom.container).find((element) => element.getAttribute?.("id") === "workflow-inspector")?.getAttribute("aria-label");
+
+  const plain = await mountReact(
+    React.createElement(DagCanvasHarness, { workflow: workflowFixture({ id: "no-document" }), onWorkflowChange() {} }),
+    createFetchMock([]),
+  );
+  try {
+    await plain.pointer(plain.ancestor(plain.byText("Run command"), "ARTICLE"), "onPointerDown");
+    await plain.flush();
+    assert.equal(inspectorLabel(plain), undefined);
+  } finally {
+    await plain.unmount();
+  }
+
+  const document = {
+    workflowId: "rattish-inspector",
+    source: "Rattish: 1\nWorkflow:\n  name: Inspector\nNode prepare:\n  type: bash-command\n  command: echo ready\n",
+    workflow: { name: "Inspector", fields: { name: { value: "Inspector" } } },
+    nodeContracts: [],
+    graph: {
+      nodes: [
+        {
+          id: "prepare",
+          label: "prepare",
+          type: "bash-command",
+          configuration: { command: "echo ready" },
+          execution: { allow_fail: false, max_concurrency: 1, retry_count: 0, retry_delay_ms: 1000 },
+          authoredFields: { command: { value: "echo ready" }, type: { value: "bash-command" } },
+          bindings: [],
+          needs: [],
+          diagnostics: [],
+        },
+      ],
+      edges: [],
+    },
+  };
+  const workflow = appModule.rattishGraphWorkflow(
+    { ...workflowFixture({ id: "rattish-inspector", name: "Inspector" }), sourceFormat: "rattish", nodes: [], edges: [] },
+    document,
+  );
+  const rattish = await mountReact(
+    React.createElement(DagCanvasHarness, { workflow, rattishDocument: document, onWorkflowChange() {} }),
+    createFetchMock([]),
+  );
+  try {
+    await rattish.pointer(rattish.ancestor(rattish.byText("prepare"), "ARTICLE"), "onPointerDown");
+    await rattish.flush();
+    assert.equal(inspectorLabel(rattish), "Rattish workflow settings and node inspector");
+    assert.equal(rattish.byText("Node inspector").tagName, "H2");
+    assert.ok(rattish.byTitle("Hide inspector"));
+  } finally {
+    await rattish.unmount();
+  }
+});
+
+test("a refused inspector save keeps the typed draft and says why under the field", async () => {
+  const { TextareaField, useCommittedDraft } = inspectorFieldsModule;
+  let state;
+  function DraftHarness({ onCommit }) {
+    state = useCommittedDraft({
+      format: (value) => String(value ?? ""),
+      onCommit,
+      parse: (text) => ({ ok: true, value: text }),
+      value: "saved prompt",
+    });
+    return null;
+  }
+  const commits = [];
+  let dom = await mountReact(React.createElement(DraftHarness, {
+    onCommit: (value) => { commits.push(value); return Promise.resolve(null); },
+  }), createFetchMock([]));
+  try {
+    await React.act(async () => { state.onFocus(); state.onChange("typed prompt"); });
+    await React.act(async () => { state.onBlur(); });
+    await dom.flush();
+    assert.deepEqual(commits, ["typed prompt"]);
+    assert.equal(state.draft, "typed prompt");
+    assert.equal(state.error, "This change wasn't saved.");
+    // Escape still goes back to the saved value.
+    await React.act(async () => { state.onKeyDown({ key: "Escape", preventDefault() {} }); });
+    assert.equal(state.draft, "saved prompt");
+    assert.equal(state.error, "");
+  } finally { await dom.unmount(); }
+
+  // In a field: the backend's reason shows under it, and "Use saved value" puts the saved text back.
+  function PromptHarness() {
+    const [value, setValue] = React.useState("saved prompt");
+    return React.createElement(TextareaField, {
+      commitOnBlur: true,
+      label: "Prompt",
+      value,
+      onChange(next) {
+        if (next.includes("{{")) return Promise.resolve({ error: "Prompt refers to an unknown input." });
+        setValue(next);
+        return Promise.resolve({ source: next });
+      },
+    });
+  }
+  dom = await mountReact(React.createElement(PromptHarness), createFetchMock([]));
+  try {
+    const prompt = () => dom.controlAfterLabel("Prompt");
+    await dom.focus(prompt());
+    await dom.change(prompt(), "Use {{inputs.missing}}");
+    await dom.blur(prompt());
+    await dom.flush();
+    assert.equal(prompt().value, "Use {{inputs.missing}}");
+    assert.equal(prompt().getAttribute("aria-invalid"), "true");
+    const message = dom.byExactText("Prompt refers to an unknown input.");
+    assert.ok(prompt().getAttribute("aria-describedby").split(" ").includes(message.parentNode.getAttribute("id")));
+    await dom.click(dom.byExactText("Use saved value"));
+    assert.equal(prompt().value, "saved prompt");
+    assert.equal(prompt().getAttribute("aria-invalid"), null);
+    assert.doesNotMatch(dom.text(), /unknown input|Use saved value/);
+    // A save that goes through shows no message.
+    await dom.focus(prompt());
+    await dom.change(prompt(), "new prompt");
+    await dom.blur(prompt());
+    await dom.flush();
+    assert.equal(prompt().value, "new prompt");
+    assert.doesNotMatch(dom.text(), /wasn't saved|Use saved value/);
+  } finally { await dom.unmount(); }
+});
+
+test("a refused inspector save stays on its node when another node is selected", async () => {
+  const promptNode = (id) => ({
+    id, label: id, type: "rem-prompt",
+    configuration: { prompt: "Summarize" },
+    execution: { allow_fail: false, max_concurrency: 1, retry_count: 0, retry_delay_ms: 1000 },
+    authoredFields: { prompt: { value: "Summarize" }, type: { value: "rem-prompt" } },
+    bindings: [], needs: [], diagnostics: [],
+  });
+  const document = {
+    workflowId: "refused-save",
+    source: "Rattish: 1\nWorkflow:\n  name: Refused\nNode fetch:\n  type: rem-prompt\n  prompt: Summarize\nNode build:\n  type: rem-prompt\n  prompt: Summarize\n",
+    workflow: { name: "Refused", fields: { name: { value: "Refused" } } },
+    nodeContracts: [{ nodeType: "rem-prompt", configurationSchema: { type: "object", properties: { prompt: { type: "string" } } }, defaults: {} }],
+    graph: { nodes: [promptNode("fetch"), promptNode("build")], edges: [] },
+  };
+  const workflow = appModule.rattishGraphWorkflow(
+    { ...workflowFixture({ id: "refused-save", name: "Refused" }), sourceFormat: "rattish", nodes: [], edges: [] },
+    document,
+  );
+  const dom = await mountReact(React.createElement(DagCanvasHarness, {
+    workflow,
+    rattishDocument: document,
+    onRattishMutation: async () => ({ error: "The prompt can't be empty." }),
+    onWorkflowChange() {},
+  }), createFetchMock([]));
+  try {
+    const select = async (id) => {
+      const card = allElements(dom.container).find((el) => el.tagName === "ARTICLE" && textOf(el).includes(id));
+      await dom.pointer(card, "onPointerDown");
+      await dom.flush();
+      await dom.click(dom.byText("Action"));
+    };
+    await select("fetch");
+    await dom.focus(dom.controlAfterLabel("Prompt"));
+    await dom.change(dom.controlAfterLabel("Prompt"), "");
+    await dom.blur(dom.controlAfterLabel("Prompt"));
+    await dom.flush();
+    assert.equal(dom.controlAfterLabel("Prompt").value, "");
+    assert.match(dom.text(), /The prompt can't be empty\./);
+    // Both nodes hold the same saved prompt, so only the node switch can clear the message.
+    await select("build");
+    assert.equal(dom.controlAfterLabel("Prompt").value, "Summarize");
+    assert.doesNotMatch(dom.text(), /can't be empty|Use saved value/);
+    await select("fetch");
+    assert.equal(dom.controlAfterLabel("Prompt").value, "Summarize");
+    assert.doesNotMatch(dom.text(), /can't be empty|Use saved value/);
+  } finally { await dom.unmount(); }
 });
 
 test("Rattish graph restores selection and emits targeted inspector mutations", async () => {
@@ -6275,7 +6248,13 @@ test("Rattish graph restores selection and emits targeted inspector mutations", 
   await dom.blur(dom.controlAfterLabel("Command"));
   await dom.flush();
   assert.deepEqual(mutations.at(-1)[0].value, "");
+  // A refused save keeps the typed text and says so under the field.
+  assert.equal(dom.controlAfterLabel("Command").value, "");
+  assert.equal(dom.controlAfterLabel("Command").getAttribute("aria-invalid"), "true");
+  assert.match(dom.text(), /This change wasn't saved\./);
+  await dom.click(dom.byExactText("Use saved value"));
   assert.equal(dom.controlAfterLabel("Command").value, "echo ready");
+  assert.doesNotMatch(dom.text(), /This change wasn't saved/);
 
   await dom.click(dom.byTitle("Add node"));
   await dom.flush();
@@ -6737,6 +6716,168 @@ test("Rem task nodes pick their task by title and explain how they run", async (
   await dom.unmount();
 });
 
+test("list and name/value node fields edit as rows, with Edit as JSON as the fallback", async () => {
+  const mutations = [];
+  const node = (id, type, configuration) => ({
+    id,
+    label: id,
+    type,
+    configuration,
+    execution: { allow_fail: false, max_concurrency: 1, retry_count: 0, retry_delay_ms: 1000 },
+    authoredFields: { type: { value: type } },
+    bindings: [],
+    needs: [],
+    diagnostics: [],
+  });
+  const rattishDocument = {
+    workflowId: "rows",
+    source: "Rattish: 1\nWorkflow:\n  name: Rows\n",
+    workflow: { name: "Rows", fields: { name: { value: "Rows" } } },
+    nodeContracts: [
+      {
+        nodeType: "http-request",
+        configurationSchema: {
+          type: "object",
+          properties: {
+            url: { type: "string" },
+            headers: { type: "object", additionalProperties: { type: "string" } },
+            retry: { type: "object", properties: { attempts: { type: "integer" } }, additionalProperties: false },
+          },
+        },
+        defaults: {},
+      },
+      {
+        nodeType: "approval-gate",
+        configurationSchema: {
+          type: "object",
+          properties: {
+            message: { type: "string" },
+            approvers: { type: "array", items: { type: "string" } },
+          },
+        },
+        defaults: {},
+      },
+    ],
+    graph: {
+      nodes: [
+        node("fetch", "http-request", { url: "https://example.com", headers: {}, retry: { attempts: 1 } }),
+        node("gate", "approval-gate", { message: "OK?", approvers: ["ann", "bo"] }),
+      ],
+      edges: [],
+    },
+  };
+  const workflow = appModule.rattishGraphWorkflow(
+    { ...workflowFixture({ id: "rows", name: "Rows" }), sourceFormat: "rattish", nodes: [], edges: [] },
+    rattishDocument,
+  );
+  // The backend's answer: the same document with the saved field in the node's configuration.
+  let saved = rattishDocument;
+  const dom = await mountReact(
+    React.createElement(DagCanvasHarness, {
+      workflow,
+      rattishDocument,
+      onRattishMutation(next) {
+        mutations.push(next);
+        const [{ target, field, value }] = next;
+        saved = {
+          ...saved,
+          graph: {
+            ...saved.graph,
+            nodes: saved.graph.nodes.map((candidate) =>
+              candidate.id === target.node
+                ? { ...candidate, configuration: { ...candidate.configuration, [field]: value } }
+                : candidate,
+            ),
+          },
+        };
+        return Promise.resolve(saved);
+      },
+      onWorkflowChange() {},
+    }),
+    createFetchMock([]),
+  );
+  const textareas = () => allElements(dom.container).filter((element) => element.tagName === "TEXTAREA");
+  try {
+    await dom.pointer(dom.ancestor(dom.byText("fetch"), "ARTICLE"), "onPointerDown");
+    await dom.flush();
+    await dom.click(dom.byText("Action"));
+    await dom.flush();
+    // Headers is a name/value editor, not a JSON box; Retry has its own fields and stays JSON.
+    assert.match(dom.text(), /No headers yet/);
+    assert.equal(textareas().length, 1);
+    await dom.click(dom.byExactText("Add header"));
+    await dom.flush();
+    assert.match(dom.text(), /Name.*Value/);
+    assert.equal(document.activeElement, dom.byLabel("Header 1 name"));
+    await dom.change(dom.byLabel("Header 1 name"), "Accept");
+    await dom.change(dom.byLabel("Header 1 value"), "application/json");
+    // Moving between the row's own inputs doesn't save; leaving the editor does.
+    await React.act(async () => {
+      reactProps(dom.byLabel("Header 1 name")).onBlur({ relatedTarget: dom.byLabel("Header 1 value") });
+    });
+    assert.deepEqual(mutations, []);
+    await dom.blur(dom.byLabel("Header 1 value"));
+    await dom.flush();
+    assert.deepEqual(mutations, [
+      [{ kind: "set_field", target: { node: "fetch" }, field: "headers", value: { Accept: "application/json" } }],
+    ]);
+
+    // A repeated or missing name is flagged on its row and nothing is saved.
+    await dom.click(dom.byExactText("Add header"));
+    await dom.flush();
+    await dom.change(dom.byLabel("Header 2 name"), "Accept");
+    assert.equal(dom.byLabel("Header 2 name").getAttribute("aria-invalid"), "true");
+    assert.match(dom.text(), /Accept is already used in row 1\./);
+    await dom.blur(dom.byLabel("Header 2 name"));
+    await dom.flush();
+    assert.equal(mutations.length, 1);
+    await dom.change(dom.byLabel("Header 2 name"), "");
+    await dom.change(dom.byLabel("Header 2 value"), "orphan");
+    assert.match(dom.text(), /Add a name for this value\./);
+    await dom.click(dom.byLabel("Remove header 2"));
+    await dom.flush();
+    assert.doesNotMatch(dom.text(), /Add a name|already used/);
+    assert.equal(mutations.length, 1);
+
+    // Approvers: one row each, with Add, Remove and Move.
+    await dom.pointer(dom.ancestor(dom.byText("gate"), "ARTICLE"), "onPointerDown");
+    await dom.flush();
+    await dom.click(dom.byText("Action"));
+    await dom.flush();
+    assert.equal(dom.byLabel("Approver 1").value, "ann");
+    assert.equal(dom.byLabel("Approver 2").value, "bo");
+    assert.equal(reactProps(dom.byLabel("Move approver 1 up")).disabled, true);
+    await dom.click(dom.byLabel("Move approver 2 up"));
+    await dom.flush();
+    assert.deepEqual(mutations.at(-1), [
+      { kind: "set_field", target: { node: "gate" }, field: "approvers", value: ["bo", "ann"] },
+    ]);
+    assert.equal(document.activeElement, dom.byLabel("Move approver 1 down"));
+    await dom.click(dom.byExactText("Add approver"));
+    await dom.flush();
+    await dom.change(dom.byLabel("Approver 3"), "cy");
+    await dom.keyDown(dom.byLabel("Approver 3"), "Enter");
+    await dom.flush();
+    assert.deepEqual(mutations.at(-1)[0].value, ["bo", "ann", "cy"]);
+    await dom.click(dom.byLabel("Remove approver 1"));
+    await dom.flush();
+    assert.deepEqual(mutations.at(-1)[0].value, ["ann", "cy"]);
+
+    // Edit as JSON shows the JSON box with the same value.
+    const jsonSwitch = dom.byLabel("Edit Approvers as JSON");
+    assert.equal(jsonSwitch.getAttribute("role"), "switch");
+    assert.equal(jsonSwitch.getAttribute("aria-checked"), "false");
+    assert.equal(textareas().length, 0);
+    await dom.click(jsonSwitch);
+    await dom.flush();
+    assert.equal(dom.byLabel("Edit Approvers as JSON").getAttribute("aria-checked"), "true");
+    assert.equal(textareas().length, 1);
+    assert.equal(textareas()[0].value, JSON.stringify(["ann", "cy"], null, 2));
+  } finally {
+    await dom.unmount();
+  }
+});
+
 test("MCP tool nodes pick a server from Rem's list and a tool the server lists", async () => {
   const mutations = [];
   const node = (id, configuration) => ({
@@ -6882,20 +7023,12 @@ test("MCP tool nodes pick a server from Rem's list and a tool the server lists",
   await dom.unmount();
 });
 
-test("Rattish edits become dirty immediately without adding a code-mode top bar", async () => {
-  const savedSource = "Rattish: 1\n\nWorkflow:\n  name: Demo\n";
-  const editedSource = `${savedSource}\nNode prepare:\n  type: bash-command\n  command: echo ready\n`;
-  const edited = rattishEditorModule.editorDocumentAfterChange(
-    { diagnostics: [], dirty: false, source: savedSource },
-    editedSource,
-    savedSource,
-  );
-  assert.equal(edited.dirty, true);
-  assert.equal(
-    rattishEditorModule.editorDocumentAfterChange(edited, savedSource, savedSource).dirty,
-    false,
-  );
-
+test("an edited Rattish file in code view gets no code-mode top bar", async () => {
+  const edited = {
+    diagnostics: [],
+    dirty: true,
+    source: "Rattish: 1\n\nWorkflow:\n  name: Demo\n\nNode prepare:\n  type: bash-command\n  command: echo ready\n",
+  };
   const workflow = {
     ...workflowFixture({ id: "demo", name: "Demo" }),
     projectName: "gofer-flow",
@@ -6938,12 +7071,6 @@ test("Rattish edits become dirty immediately without adding a code-mode top bar"
 });
 
 test("studio header separates quiet paths from focused workflow and file names", async () => {
-  assert.equal(appModule.topBarProjectName({
-    projectName: "Gofer Flow Workflows",
-    projectRoot: "/repos/gofer-flow",
-  }), "Gofer Flow Workflows");
-  assert.equal(appModule.topBarProjectName({ projectRoot: "/repos/gofer-flow" }), "gofer-flow");
-  assert.equal(appModule.topBarProjectName({}), "Unfiled project");
   assert.deepEqual(
     appModule.topBarLabelParts(
       { id: "review", name: "Review PR", projectRoot: "/repos/gofer-flow" },
@@ -6988,6 +7115,36 @@ test("studio header separates quiet paths from focused workflow and file names",
   assert.ok(toolbar, "The graph has a dedicated toolbar row");
   assert.notEqual(toolbar.parentNode, workflowTitle.parentNode, "Controls cannot overlap the workflow title row");
   await dom.unmount();
+});
+
+test("create workflow dialog focuses Name each time it opens, even after Import was chosen", async () => {
+  let setOpen;
+  function Harness() {
+    const [open, setOpenState] = React.useState(true);
+    setOpen = setOpenState;
+    return React.createElement(appModule.CreateWorkflowDialog, {
+      defaultProjectRoot: "/repos/raticode", error: "", open, saving: false, onClose() {}, onCreate() {}, onImport() {},
+    });
+  }
+  const dom = await mountReact(React.createElement(Harness), createFetchMock([]));
+  const nameInput = () => allElements(dom.container).find((node) => node.tagName === "INPUT" && node.getAttribute("placeholder") === "Daily Analysis");
+  const sourceTab = (label) => allElements(dom.container).find((node) => node.getAttribute?.("role") === "tab" && textOf(node).trim() === label);
+  try {
+    assert.ok(nameInput(), "the dialog opens on Create new");
+    assert.equal(document.activeElement, nameInput(), "Name has focus when the dialog first opens");
+    await dom.click(sourceTab("Import"));
+    assert.equal(nameInput(), undefined, "Import replaces the Name field");
+    await React.act(async () => { setOpen(false); });
+    await React.act(async () => { setOpen(true); });
+    await dom.flush();
+    assert.ok(nameInput(), "a reopened dialog starts on Create new again");
+    assert.equal(document.activeElement, nameInput(), "Name has focus again after reopening");
+    // Moving back to Create new from the tabs keeps focus on the tab.
+    await dom.click(sourceTab("Import"));
+    await dom.focus(sourceTab("Import"));
+    await dom.keyDown(sourceTab("Import"), "ArrowRight");
+    assert.equal(document.activeElement, sourceTab("Create new"));
+  } finally { await dom.unmount(); }
 });
 
 test("create workflow dialog submits the selected project folder", async () => {
@@ -7271,7 +7428,7 @@ test("App keeps the new workflow name field enabled after deleting a workflow", 
   await dom.flush();
   await dom.click(dom.allByTitle("Workflow actions")[0]);
   await dom.click(dom.byText("Delete workflow"));
-  await dom.flush();
+  await answerConfirm(dom, true);
 
   await dom.click(dom.byTitle("New Workflow"));
   const nameInput = dom.controlAfterLabel("Name");
@@ -7319,24 +7476,12 @@ test("run, plan, and log helpers build backend requests without a real server", 
     triggerContext: {},
   });
 
-  const replayRequest = appModule.workflowReplayTriggerRequest(
-    "demo workflow",
-    "run/1",
-    "github",
-  );
-  assert.equal(
-    replayRequest.url,
-    "http://127.0.0.1:8765/api/workflows/demo%20workflow/webhooks/github/replay",
-  );
-  assert.equal(replayRequest.options.method, "POST");
-  assert.deepEqual(JSON.parse(replayRequest.options.body), { runId: "run/1" });
-
   assert.deepEqual(appModule.workflowLogUrls("demo workflow", "run/1"), {
     latest: "http://127.0.0.1:8765/api/workflows/demo%20workflow/logs/latest",
-    runs: "http://127.0.0.1:8765/api/workflows/demo%20workflow/logs",
     selected:
       "http://127.0.0.1:8765/api/workflows/demo%20workflow/logs/run%2F1?tailBytes=65536&details=0",
   });
+  assert.match(appModule.workflowLogUrls("demo", "r", { details: true }).selected, /details=1$/);
 });
 
 test("workflow failures prefer the runtime error and fall back to the failed node", () => {
@@ -7362,13 +7507,13 @@ test("chat helpers parse stream events, group thoughts, and build request payloa
     { id: "a1", role: "assistant", body: "Done" },
   ];
 
-  const items = appModule.buildChatItems(messages);
+  const items = chatThreadsModule.buildChatItems(messages);
   assert.equal(items[0].type, "message");
   assert.equal(items[1].type, "thought-group");
   assert.equal(items[1].thoughts.length, 2);
   assert.equal(items[2].message.body, "Done");
 
-  const duplicateOutputItems = appModule.buildChatItems([
+  const duplicateOutputItems = chatThreadsModule.buildChatItems([
     { id: "u2", role: "user", body: "Can you do this?" },
     {
       id: "t3",
@@ -7382,7 +7527,7 @@ test("chat helpers parse stream events, group thoughts, and build request payloa
   ]);
   assert.deepEqual(duplicateOutputItems.map((item) => item.type), ["message", "message"]);
 
-  const retainedTraceItems = appModule.buildChatItems([
+  const retainedTraceItems = chatThreadsModule.buildChatItems([
     { id: "u3", role: "user", body: "Inspect this" },
     {
       id: "t4",
@@ -7418,16 +7563,16 @@ test("chat helpers parse stream events, group thoughts, and build request payloa
     },
   ];
   assert.deepEqual(
-    appModule.removeTrailingDuplicateOutputThought(streamedMessages, "Final answer", "g4"),
+    chatThreadsModule.removeTrailingDuplicateOutputThought(streamedMessages, "Final answer", "g4"),
     [],
   );
   assert.equal(
-    appModule.removeTrailingDuplicateOutputThought(streamedMessages, "Different answer", "g4")
+    chatThreadsModule.removeTrailingDuplicateOutputThought(streamedMessages, "Different answer", "g4")
       .length,
     1,
   );
   assert.deepEqual(
-    appModule.removeTrailingDuplicateOutputThought([
+    chatThreadsModule.removeTrailingDuplicateOutputThought([
       {
         id: "metadata-thought",
         role: "assistant",
@@ -7454,7 +7599,7 @@ test("chat helpers parse stream events, group thoughts, and build request payloa
     },
   };
   assert.deepEqual(
-    appModule.removeTrailingDuplicateOutputThought(
+    chatThreadsModule.removeTrailingDuplicateOutputThought(
       [markdownDuplicate],
       "The workflow processes tickets.\n\n1. `collect` reads files.\n2. `classify` labels them for routing and review.",
       "g5",
@@ -7462,7 +7607,7 @@ test("chat helpers parse stream events, group thoughts, and build request payloa
     [],
   );
 
-  const trace = appModule.buildThoughtTrace([
+  const trace = chatThreadsModule.buildThoughtTrace([
     {
       id: "trace-summary",
       body: "Inspecting nodes",
@@ -7497,7 +7642,7 @@ test("chat helpers parse stream events, group thoughts, and build request payloa
   assert.equal(trace[1].detail, "workflow.toml");
   assert.equal(trace[1].output, "[workflow]");
   assert.equal(trace[0].title, "Thought");
-  assert.deepEqual(appModule.shellTraceDetails({
+  assert.deepEqual(chatMessagesModule.shellTraceDetails({
     kind: "tool",
     title: "Bash",
     input: '{"command":"npm test"}',
@@ -7505,7 +7650,7 @@ test("chat helpers parse stream events, group thoughts, and build request payloa
     command: "npm test",
     shell: "bash",
   });
-  assert.deepEqual(appModule.shellTraceDetails({
+  assert.deepEqual(chatMessagesModule.shellTraceDetails({
     kind: "tool",
     title: "PowerShell",
     category: "shell",
@@ -7515,24 +7660,24 @@ test("chat helpers parse stream events, group thoughts, and build request payloa
     command: "Get-ChildItem",
     shell: "PowerShell",
   });
-  assert.equal(appModule.shellTraceDetails({ kind: "tool", title: "Read" }), null);
-  assert.equal(appModule.toolTraceDisclosureDetail({
+  assert.equal(chatMessagesModule.shellTraceDetails({ kind: "tool", title: "Read" }), null);
+  assert.equal(chatMessagesModule.toolTraceDisclosureDetail({
     kind: "tool",
     title: "Search",
     input: '{"search_query":[{"q":"Amsterdam current weather"}]}',
   }), "Amsterdam current weather");
-  assert.equal(appModule.toolTraceDisclosureDetail({
+  assert.equal(chatMessagesModule.toolTraceDisclosureDetail({
     kind: "tool",
     title: "Search",
     detail: "Weather in Amsterdam",
     input: '{"query":"ignored fallback"}',
   }), "Weather in Amsterdam");
-  assert.equal(appModule.toolTraceDisclosureDetail({
+  assert.equal(chatMessagesModule.toolTraceDisclosureDetail({
     kind: "tool",
     title: "Read",
     input: "a very long payload that should stay inside the disclosure",
   }), "");
-  const thinkingTrace = appModule.buildThoughtTrace([
+  const thinkingTrace = chatThreadsModule.buildThoughtTrace([
     {
       id: "thinking-start",
       kind: "thought",
@@ -7562,7 +7707,7 @@ test("chat helpers parse stream events, group thoughts, and build request payloa
   assert.equal(thinkingTrace[0].detail, "for 8s");
   assert.equal(thinkingTrace[0].body, "");
   assert.equal(thinkingTrace[0].status, "complete");
-  assert.deepEqual(appModule.buildThoughtTrace([
+  assert.deepEqual(chatThreadsModule.buildThoughtTrace([
     {
       id: "trace-metadata",
       body: "tokens used\n15,930",
@@ -7582,21 +7727,21 @@ test("chat helpers parse stream events, group thoughts, and build request payloa
   assert.match(markdownMarkup, /<table/);
   assert.match(markdownMarkup, /aria-label="Copy code to clipboard"/);
   assert.equal(
-    appModule.normalizeMarkdownText("1. **Run** `collect`\n2. Review"),
+    chatThreadsModule.normalizeMarkdownText("1. **Run** `collect`\n2. Review"),
     "Run collect Review",
   );
 
-  assert.deepEqual(appModule.parseChatStreamEvent('{"type":"final","message":{"body":"ok"}}'), {
+  assert.deepEqual(chatThreadsModule.parseChatStreamEvent('{"type":"final","message":{"body":"ok"}}'), {
     type: "final",
     message: { body: "ok" },
   });
-  assert.equal(appModule.parseChatStreamEvent("not json"), null);
+  assert.equal(chatThreadsModule.parseChatStreamEvent("not json"), null);
   assert.equal(
-    appModule.threadTitleFromMessage("one two three four five six seven eight nine ten"),
+    chatThreadsModule.threadTitleFromMessage("one two three four five six seven eight nine ten"),
     "one two three four five six seven eight...",
   );
 
-  assert.deepEqual(appModule.chatStreamRequestBody({
+  assert.deepEqual(chatThreadsModule.chatStreamRequestBody({
     provider: "codex",
     model: "cli-default",
     effort: "high",
@@ -7699,7 +7844,7 @@ test("coerceWorkflowParameters converts drafts and validates them against the in
       ratio: { type: "number", schema: { type: "number", maximum: 1 } },
       options: { type: "object", schema: { type: "object" } },
       limit: { type: "integer", schema: { type: "integer" } },
-      legacy: { type: "number" },
+      label: { type: "string", schema: { type: "string" } },
     },
   };
   assert.deepEqual(
@@ -7707,9 +7852,9 @@ test("coerceWorkflowParameters converts drafts and validates them against the in
       ratio: "0.5",
       options: '{"a": 1}',
       limit: "",
-      legacy: "7",
+      label: "7",
     }),
-    { errors: {}, parameters: { ratio: 0.5, options: { a: 1 }, legacy: "7" } },
+    { errors: {}, parameters: { ratio: 0.5, options: { a: 1 }, label: "7" } },
   );
   assert.deepEqual(
     runPreviewModule.coerceWorkflowParameters(workflow, { ratio: "2", options: "[1]", limit: "1.5" }).errors,
@@ -7843,7 +7988,7 @@ test("RunPreviewDialog renders grouped warnings, destructive actions, providers,
 
 test("UsageSummaryStrip renders run cost, expensive nodes, and slow nodes", () => {
   const html = renderToStaticMarkup(
-    React.createElement(canvasModule.UsageSummaryStrip, {
+    React.createElement(runTimelineModule.UsageSummaryStrip, {
       summary: {
         totals: {
           agent_calls: 3,
@@ -7867,7 +8012,7 @@ test("UsageSummaryStrip renders run cost, expensive nodes, and slow nodes", () =
 
 test("UsageSummaryStrip shows a Rattish run's tokens, cost and limits, keeping unknown as unknown", () => {
   const html = renderToStaticMarkup(
-    React.createElement(canvasModule.UsageSummaryStrip, {
+    React.createElement(runTimelineModule.UsageSummaryStrip, {
       summary: {
         calls: 3,
         totalTokens: 1500,
@@ -7892,147 +8037,12 @@ test("UsageSummaryStrip shows a Rattish run's tokens, cost and limits, keeping u
   assert.match(html, /draft<\/span>: tokens 1,200, cost unknown/);
   assert.equal(
     renderToStaticMarkup(
-      React.createElement(canvasModule.UsageSummaryStrip, {
+      React.createElement(runTimelineModule.UsageSummaryStrip, {
         summary: { calls: 0, tokensLabel: "0", costLabel: "$0", nodes: {} },
       }),
     ),
     "",
   );
-});
-
-test("App loads workflows, preserves local edits on silent refreshes, saves errors, deletes workflows, and loads logs", async () => {
-  const selectedExportFolders = [];
-  const dom = await mountReact(
-    React.createElement(appModule.default),
-    createFetchMock([
-      jsonResponse("/api/workflows", workflowsPayload([
-        workflowFixture({ id: "demo", name: "Demo", label: "Original label" }),
-        workflowFixture({ id: "other", name: "Other", label: "Other label" }),
-      ])),
-      jsonResponse("/api/provider/capabilities", {
-        providers: [{
-          id: "codex",
-          displayName: "Codex",
-          available: true,
-          discoveryStatus: "ready",
-          defaultModel: "gpt-5.6-sol",
-          models: [{
-            id: "gpt-5.6-sol",
-            displayName: "GPT-5.6-Sol",
-            defaultEffort: "medium",
-            efforts: [{ id: "low", displayName: "Low" }, { id: "medium", displayName: "Medium" }],
-          }],
-        }],
-      }),
-      jsonResponse("/api/workflows/demo/logs/latest", {
-        log: { logText: "latest demo log", logPath: "/tmp/demo.log" },
-      }),
-      jsonResponse("/api/workflows/demo/logs?limit=100", {
-        runs: [{ id: "run-1", status: "success", startedAt: "2026-01-02T03:04:05Z" }],
-      }),
-      jsonResponse("/api/workflows/demo", { error: "Save rejected" }, { method: "PUT", ok: false, status: 400 }),
-      jsonResponse("/api/workflows/demo", { deleted: true }, { method: "DELETE" }),
-      jsonResponse("/api/workflows/other/export", {
-        bundlePath: "/exports/other.gof.zip",
-      }, { method: "POST" }),
-      jsonResponse("/api/projects/open", {
-        workflows: [
-          workflowFixture({ id: "demo", name: "Demo", label: "Remote refreshed label" }),
-          workflowFixture({ id: "other", name: "Other", label: "Other label" }),
-        ],
-      }, { method: "POST" }),
-      jsonResponse("/api/workflows", workflowsPayload([
-        workflowFixture({ id: "demo", name: "Demo", label: "Remote refreshed label" }),
-        workflowFixture({ id: "other", name: "Other", label: "Other label" }),
-      ])),
-    ]),
-    {
-      desktop: {
-        workspace: {
-          pathGrantForApi: (path) => path === "/exports" ? "grant-exports" : "grant-workspace",
-          selectPath: async (options) => {
-            selectedExportFolders.push(options);
-            return "/exports";
-          },
-          trustProjectRoot: async () => {},
-        },
-      },
-    },
-  );
-
-  await dom.flush();
-  assert.match(dom.text(), /Demo/);
-  await dom.click(dom.ancestor(dom.byText("Run Timeline"), "BUTTON"));
-  await dom.flush();
-  assert.match(dom.text(), /latest demo log/);
-  const graphToolbar = dom.ancestor(
-    dom.byTitle("Select workflow run"),
-    (node) => node.getAttribute?.("data-toolbar") === "graph-editor",
-  );
-  const studioTopBar = dom.ancestor(
-    graphToolbar,
-    (node) => String(node.getAttribute?.("class") ?? "").includes("studio-topbar"),
-  );
-  assert.ok(studioTopBar);
-  assert.equal(
-    allElements(dom.container).filter(
-      (element) => element.getAttribute?.("data-toolbar") === "graph-editor",
-    ).length,
-    1,
-  );
-  assert.equal(
-    dom.fetchCalls.some((call) => call.url === "/api/workflows/demo/logs/latest"),
-    true,
-  );
-
-  const labelInput = dom.controlAfterLabel("Name");
-  await dom.change(labelInput, "Local unsaved label");
-  assert.match(dom.text(), /Local unsaved label/);
-
-  await dom.flush(2100);
-  assert.match(dom.text(), /Local unsaved label/);
-  assert.doesNotMatch(dom.text(), /Remote refreshed label/);
-  assert.equal(
-    dom.fetchCalls.some(
-      (call) => call.url === "/api/projects/open" && call.options.method === "POST",
-    ),
-    false,
-  );
-
-  await dom.click(dom.byTitle("Validate workflow"));
-  await dom.flush();
-  assert.match(dom.text(), /Save rejected/);
-
-  await dom.click(dom.ancestor(dom.byText("Other"), (node) => node.getAttribute?.("role") === "button"));
-  assert.match(dom.text(), /Other label/);
-
-  await dom.click(dom.allByTitle("Workflow actions")[0]);
-  await dom.click(dom.byText("Delete workflow"));
-  await dom.flush();
-  assert.equal(dom.fetchCalls.some((call) => call.url === "/api/workflows/demo?sourceFormat=toml" && call.options.method === "DELETE"), true);
-  assert.match(dom.text(), /Other/);
-
-  await dom.click(dom.byTitle("Export workflow bundle"));
-  await dom.flush();
-  assert.match(dom.text(), /Export workflow bundle/);
-  await dom.click(dom.byTitle("Choose export folder"));
-  await dom.flush();
-  assert.deepEqual(selectedExportFolders, [{ currentPath: "/workspace", directoryOnly: true }]);
-  await dom.pointer(dom.ancestor(dom.byTitle("Confirm workflow export"), "FORM"), "onSubmit");
-  await dom.flush();
-  assert.equal(
-    dom.fetchCalls.some(
-      (call) =>
-        call.url === "/api/workflows/other/export" &&
-        call.options.method === "POST" &&
-        JSON.parse(call.options.body).outputPath === "/exports/other.gof.zip" &&
-        JSON.parse(call.options.body).grantId === "grant-exports",
-    ),
-    true,
-  );
-  assert.match(dom.text(), /Exported bundle to \/exports\/other\.gof\.zip/);
-
-  await dom.unmount();
 });
 
 test("App renders run and stop state, opens the run preview, executes runs, and sends chat prompts", async () => {
@@ -8051,10 +8061,6 @@ test("App renders run and stop state, opens the run preview, executes runs, and 
     jsonResponse("/api/workflows", workflowsPayload([
       {
         ...workflowFixture({ id: "demo", name: "Demo", status: "Running" }),
-        filesystemAccess: [
-          { path: "/outside/input", read: true, write: false, execute: false },
-          { path: "/outside/tools", read: false, write: false, execute: true },
-        ],
         runs: [{ id: "run-1", status: "running", startedAt: "2026-01-02T03:04:05Z" }],
       },
     ])),
@@ -8079,15 +8085,9 @@ test("App renders run and stop state, opens the run preview, executes runs, and 
     jsonResponse("/api/workflows/demo/logs?limit=100", {
       runs: [{ id: "run-1", status: "running", startedAt: "2026-01-02T03:04:05Z" }],
     }),
-    jsonResponse("/api/workflows/demo", {
-      workflow: {
-        ...workflowFixture({ id: "demo", name: "Demo", status: "Ready" }),
-        filesystemAccess: [
-          { path: "/outside/input", read: true, write: false, execute: false },
-          { path: "/outside/tools", read: false, write: false, execute: true },
-        ],
-      },
-    }, { method: "PUT" }),
+    jsonResponse("/api/workflows/demo/document", {
+      document: { diagnostics: [], preflight: { diagnostics: [] }, source: "Rattish: 1\n", savedRevision: "rev-1" },
+    }),
     jsonResponse("/api/workflows/demo/plan", {
       plan: {
         workflowId: "demo",
@@ -8148,8 +8148,7 @@ test("App renders run and stop state, opens the run preview, executes runs, and 
   await dom.flush();
   assert.match(dom.text(), /Run preview: Demo/);
   assert.match(dom.text(), /delete file: \/tmp\/out\.txt/);
-  assert.match(dom.text(), /\/outside\/input: read/);
-  assert.match(dom.text(), /\/outside\/tools: execute/);
+  assert.doesNotMatch(dom.text(), /Filesystem access/);
   const previewRunButton = dom.ancestor(dom.byText("Run workflow"), "BUTTON");
   assert.match(previewRunButton.getAttribute("class"), /inline-flex/);
   assert.match(previewRunButton.getAttribute("class"), /items-center/);
@@ -8182,7 +8181,7 @@ test("App renders run and stop state, opens the run preview, executes runs, and 
     1,
   );
   const runRequest = fetchMock.calls.find((call) => call.url === "/api/workflows/demo/run");
-  assert.deepEqual(JSON.parse(runRequest.options.body), { dryRun: false, triggerContext: {} });
+  assert.deepEqual(JSON.parse(runRequest.options.body), { background: true, dryRun: false, expectedRevision: "rev-1", triggerContext: {} });
 
   const chatComposer = dom.ancestor(
     dom.byLabel("Attach files"),
@@ -8357,6 +8356,74 @@ test("App renders run and stop state, opens the run preview, executes runs, and 
   await dom.unmount();
 });
 
+test("A Rattish workflow runs through the run route even with a stored Remote run target, and shows no Remote or History controls", async () => {
+  const workflow = {
+    ...workflowFixture({ id: "nightly", name: "Nightly" }),
+    sourceFormat: "rattish",
+    sourcePath: "/workspace/.raticode/nightly/workflow.rattish",
+  };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflow])),
+    jsonResponse("/api/workflows/nightly/logs?limit=100", { runs: [] }),
+    jsonResponse("/api/workflows/nightly/document", {
+      document: { diagnostics: [], preflight: { diagnostics: [] }, source: "Rattish: 1\n", savedRevision: "rev-1" },
+    }),
+    jsonResponse("/api/workflows/nightly/plan", {
+      plan: {
+        workflowId: "nightly",
+        workflowName: "Nightly",
+        generations: [{ index: 0, nodes: [{ id: "step", type: "bash_command", detail: "echo hi" }] }],
+      },
+    }, { method: "POST" }),
+    jsonResponse("/api/workflows/nightly/run", {
+      run: { success: true, status: "success", logText: "done", logPath: "/tmp/nightly.log", nodeOutputs: {} },
+    }, { method: "POST" }),
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, {
+    storage: {
+      // An install from before TOML retirement may still hold the old Runner queue choice.
+      [settingsModule.SETTINGS_STORAGE_KEY]: JSON.stringify({ general: { executionMode: "remote" } }),
+      [appModule.STUDIO_SESSION_STORAGE_KEY]: JSON.stringify({ projectRoot: "/workspace", workflowId: "nightly" }),
+    },
+  });
+  try {
+    await dom.flush();
+    const titled = (pattern) => allElements(dom.container).filter((element) =>
+      pattern.test(`${element.getAttribute?.("title") ?? ""} ${element.getAttribute?.("aria-label") ?? ""}`));
+    assert.ok(dom.byTitle("Run workflow now"), "The workflow toolbar did not render");
+    const buttonsNamed = (pattern) => allElements(dom.container).filter((element) =>
+      element.tagName === "BUTTON" && pattern.test(`${textOf(element)} ${element.getAttribute("title") ?? ""} ${element.getAttribute("aria-label") ?? ""}`));
+    assert.deepEqual(titled(/Workflow history/), []);
+    // The source-control pane has its own History tab; the old workflow toolbar button was titled "Workflow history".
+    assert.deepEqual(buttonsNamed(/^\s*Remote\b|Workflow history|Runner queue/), []);
+
+    await dom.click(dom.byTitle("Run workflow now"));
+    await dom.flush();
+    const dialog = allElements(dom.container).find((element) => element.getAttribute?.("role") === "dialog");
+    assert.ok(dialog, "Run preview did not open");
+    assert.match(textOf(dialog), /Run preview: Nightly/);
+    assert.match(textOf(dialog), /Run order/);
+    assert.doesNotMatch(textOf(dialog), /execution|Remote|Runner queue/i);
+    const describedBy = allElements(dom.container).find((element) => element.getAttribute?.("id") === dialog.getAttribute("aria-describedby"));
+    assert.match(textOf(describedBy), /before it starts/);
+    assert.doesNotMatch(textOf(describedBy), /execution/i);
+    const dialogButtons = allElements(dialog).filter((element) => element.tagName === "BUTTON");
+    assert.deepEqual(dialogButtons.filter((button) => /Remote|Local/.test(textOf(button))), []);
+    const close = dom.byLabel("Close run preview");
+    assert.equal(close.tagName, "BUTTON");
+    assert.equal(dialog.contains(close), true);
+
+    await dom.click(dom.ancestor(dom.byText("Run workflow"), "BUTTON"));
+    await dom.flush();
+    const runCalls = fetchMock.calls.filter((call) => call.url === "/api/workflows/nightly/run");
+    assert.equal(runCalls.length, 1);
+    assert.equal(runCalls[0].options.method, "POST");
+    assert.deepEqual(fetchMock.calls.filter((call) => /\/queue\b/.test(call.url)), []);
+  } finally {
+    await dom.unmount();
+  }
+});
+
 test("ACP text deltas update one thought, preserve whitespace, and remove duplicate final output", async () => {
   const fragments = ["A ", "son", "net", " ", "or\n", "limerick."];
   const body = fragments.join("");
@@ -8385,7 +8452,7 @@ test("ACP text deltas update one thought, preserve whitespace, and remove duplic
     for (let index = 0; index < fragments.length; index += 1) {
       controlled.releaseNext();
       await dom.flush();
-      const saved = JSON.parse(window.localStorage.getItem(appModule.chatStorageKeyFor(threadId)));
+      const saved = JSON.parse(window.localStorage.getItem(chatThreadsModule.chatStorageKeyFor(threadId)));
       const thoughts = saved.filter(message => message.kind === "thought");
       assert.equal(thoughts.length, 1);
       assert.equal(thoughts[0].body, fragments.slice(0, index + 1).join(""));
@@ -8393,7 +8460,7 @@ test("ACP text deltas update one thought, preserve whitespace, and remove duplic
     assert.match(dom.text(), /sonnet/);
     controlled.releaseNext();
     await dom.flush();
-    const saved = JSON.parse(window.localStorage.getItem(appModule.chatStorageKeyFor(threadId)));
+    const saved = JSON.parse(window.localStorage.getItem(chatThreadsModule.chatStorageKeyFor(threadId)));
     assert.equal(saved.filter(message => message.kind === "thought").length, 0);
     assert.equal(saved.filter(message => message.kind === "final" && message.body === body).length, 1);
   } finally { await dom.unmount(); }
@@ -8417,7 +8484,7 @@ test("Rem streams its answer as a live reply and lists the pages it read", async
     },
   ]);
   const dom = await mountReact(React.createElement(appModule.default), fetchMock);
-  const saved = () => JSON.parse(window.localStorage.getItem(appModule.chatStorageKeyFor(request.conversationId)));
+  const saved = () => JSON.parse(window.localStorage.getItem(chatThreadsModule.chatStorageKeyFor(request.conversationId)));
   try {
     await dom.flush();
     await dom.change(dom.first("textarea"), "What does the guide say?");
@@ -8466,7 +8533,7 @@ test("Rem recovery keeps partial output once, shows status, and keeps Stop avail
     assert.ok(dom.byTitle("Stop Rem"));
     assert.match(dom.text(), /Resuming, attempt 1 of 2/);
     assert.match(dom.text(), /Partial response/);
-    const saved = JSON.parse(window.localStorage.getItem(appModule.chatStorageKeyFor(threadId)));
+    const saved = JSON.parse(window.localStorage.getItem(chatThreadsModule.chatStorageKeyFor(threadId)));
     assert.equal(saved.filter(message => message.body === "Completed part").length, 1);
     assert.equal(saved.filter(message => message.kind === "error").length, 0);
     controlled.releaseNext(); await dom.flush();
@@ -8504,7 +8571,7 @@ test("Rem retains an interrupted answer and Resume task continues the same conve
     await dom.click(dom.ancestor(dom.byText("Resume task"), "BUTTON")); await dom.flush();
     assert.equal(requests, 2);
     assert.match(dom.text(), /Resumed task complete/);
-    const saved = JSON.parse(window.localStorage.getItem(appModule.chatStorageKeyFor(threadId)));
+    const saved = JSON.parse(window.localStorage.getItem(chatThreadsModule.chatStorageKeyFor(threadId)));
     assert.equal(saved.filter(message => message.body === "Partial answer").length, 1);
   } finally { await dom.unmount(); }
 });
@@ -8573,6 +8640,178 @@ test("assistant threads keep streaming after navigation and report running and c
   await dom.unmount();
 });
 
+// Stands in for the web Notification the studio allows, recording each one shown.
+function fakeNotifications() {
+  const shown = [];
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "Notification");
+  globalThis.Notification = class {
+    static permission = "granted";
+    constructor(title, options = {}) { this.title = title; this.options = options; shown.push(this); }
+    close() {}
+  };
+  return {
+    shown,
+    titles: () => shown.map(notice => notice.title),
+    restore() { if (previous) Object.defineProperty(globalThis, "Notification", previous); else delete globalThis.Notification; },
+  };
+}
+
+test("a thread's turn ending while Raticode is in the background shows one notification naming the thread, which opens it", async () => {
+  const notices = fakeNotifications();
+  let requests = 0;
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture()])),
+    jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", displayName: "Codex", available: true, models: [] }] }),
+    (url) => {
+      if (url !== "/api/chat/stream") return null;
+      requests += 1;
+      const event = requests === 2 ? { type: "error", error: "Provider crashed" } : { type: "final", message: { body: `Secret answer ${requests}` } };
+      return streamResponse([JSON.stringify(event) + "\n"])(url);
+    },
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock);
+  let focused = false;
+  document.hasFocus = () => focused;
+  try {
+    await dom.flush();
+    await dom.change(dom.first("textarea"), "Summarize the release notes");
+    await dom.click(dom.byTitle("Send message"));
+    await dom.flush();
+    assert.deepEqual(notices.titles(), ["Reply in Summarize the release notes"]);
+    assert.equal(notices.shown[0].options.body, "", "the notice never carries the agent's words");
+    assert.match(notices.shown[0].options.tag, /^thread-/);
+
+    // Away from the thread, clicking the notification opens it again.
+    await dom.click(dom.byTitle("Back to active threads"));
+    await dom.flush();
+    assert.doesNotMatch(dom.text(), /Secret answer 1/);
+    await React.act(async () => notices.shown[0].onclick());
+    await dom.flush();
+    assert.match(dom.text(), /Secret answer 1/);
+
+    // A failed turn names the thread too, once.
+    await dom.change(dom.first("textarea"), "Try that again");
+    await dom.click(dom.byTitle("Send message"));
+    await dom.flush();
+    assert.deepEqual(notices.titles(), ["Reply in Summarize the release notes", "Turn failed in Summarize the release notes"]);
+
+    // With Raticode focused nothing shows.
+    focused = true;
+    await dom.change(dom.first("textarea"), "One more");
+    await dom.click(dom.byTitle("Send message"));
+    await dom.flush();
+    assert.equal(requests, 3);
+    assert.equal(notices.shown.length, 2);
+  } finally {
+    notices.restore();
+    await dom.unmount();
+  }
+});
+
+test("a thread's turn that ends on another device notifies once in the background, but a Rem task's thread leaves it to the task's notice", async () => {
+  const backgroundNotices = await viteServer.ssrLoadModule("/src/lib/backgroundNotices.js");
+  backgroundNotices.setBackgroundNotices(true);
+  const notices = fakeNotifications();
+  const dom = await mountReact(React.createElement(appModule.default), createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture()])),
+  ]));
+  document.hasFocus = () => false;
+  const at = new Date().toISOString();
+  const sync = (detail) => React.act(async () => { window.dispatchEvent(new CustomEvent("gofer:device-thread-sync", { detail })); });
+  try {
+    await dom.flush();
+    const phone = { id: "notice-phone-thread", title: "Plan the trip", provider: "codex", model: "", createdAt: at, updatedAt: at, scopeMode: "global" };
+    await sync({ metadata: phone, messages: [], running: true });
+    const failed = [{ id: "notice-phone-error", role: "system", kind: "error", body: "Provider crashed" }];
+    await sync({ metadata: phone, messages: failed, running: false, completed: true });
+    await sync({ metadata: phone, messages: failed, running: false, completed: true });
+    assert.deepEqual(notices.titles(), ["Turn failed in Plan the trip"]);
+
+    const task = { ...phone, id: "notice-task-thread", title: "Fix the export", managedRunId: "run-1" };
+    await sync({ metadata: task, messages: [], running: true });
+    await sync({ metadata: task, messages: [{ id: "notice-task-final", role: "assistant", kind: "final", body: "Done" }], running: false, completed: true });
+    assert.equal(notices.shown.length, 1);
+  } finally {
+    notices.restore();
+    await dom.unmount();
+  }
+});
+
+test("Settings > General can turn off notifications while Raticode is in the background", async () => {
+  const notices = fakeNotifications();
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture()])),
+    jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", displayName: "Codex", available: true, models: [] }] }),
+    (url) => (url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url) : null),
+  ]);
+  assert.equal(settingsModule.normalizeAppSettings({}).general.backgroundNotices, true, "on by default");
+  const storage = { [settingsModule.SETTINGS_STORAGE_KEY]: JSON.stringify({ general: { backgroundNotices: false } }) };
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage });
+  document.hasFocus = () => false;
+  try {
+    await dom.flush();
+    await dom.change(dom.first("textarea"), "Quietly finish");
+    await dom.click(dom.byTitle("Send message"));
+    await dom.flush();
+    assert.match(dom.text(), /Done/);
+    assert.deepEqual(notices.titles(), []);
+  } finally {
+    notices.restore();
+    await dom.unmount();
+    (await viteServer.ssrLoadModule("/src/lib/backgroundNotices.js")).setBackgroundNotices(true);
+  }
+});
+
+test("Rem's reply in its own chat shows one notification while Raticode is in the background, which opens Rem's chat at it", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  const backgroundNotices = await viteServer.ssrLoadModule("/src/lib/backgroundNotices.js");
+  store.resetRemHomeStore();
+  store.setRemHomeContext(null);
+  const at = new Date().toISOString();
+  let messages = [{ id: "notice-user-1", role: "user", created_at: at, body: "Is the build green?" }];
+  const fetchMock = createFetchMock([
+    (url) => (url === "/api/rem/conversation" ? { ok: true, status: 200, json: async () => ({ conversation: { id: "rem", turn_state: "idle" }, messages }) } : null),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+  ]);
+  const dom = await mountReact(React.createElement("div"), fetchMock);
+  const notices = fakeNotifications();
+  let focused = false;
+  document.hasFocus = () => focused;
+  const opened = [];
+  window.addEventListener("gofer:rem-show-message", event => opened.push(event.detail.id));
+  const reply = (id, extra = {}) => { messages = [...messages, { id, role: "rem", created_at: at, body: "Yes, every check passed.", ...extra }]; };
+  try {
+    backgroundNotices.setBackgroundNotices(true);
+    await store.refreshRemHome();
+    assert.deepEqual(notices.titles(), [], "the chat Raticode opens with isn't news");
+    reply("notice-rem-1");
+    await store.refreshRemHome();
+    await store.refreshRemHome();
+    assert.deepEqual(notices.titles(), ["Rem replied"]);
+    assert.equal(notices.shown[0].options.body, "", "the notice never carries Rem's words");
+    await React.act(async () => notices.shown[0].onclick());
+    assert.deepEqual(opened, ["notice-rem-1"]);
+    assert.equal(store.getState().messageRequest.id, "notice-rem-1");
+
+    // Task updates have their own notice; focus or the switch being off show nothing.
+    reply("notice-rem-update", { kind: "task_update" });
+    await store.refreshRemHome();
+    focused = true;
+    reply("notice-rem-2");
+    await store.refreshRemHome();
+    focused = false;
+    backgroundNotices.setBackgroundNotices(false);
+    reply("notice-rem-3");
+    await store.refreshRemHome();
+    assert.equal(notices.shown.length, 1);
+  } finally {
+    backgroundNotices.setBackgroundNotices(true);
+    notices.restore();
+    store.resetRemHomeStore();
+    await dom.unmount();
+  }
+});
+
 test("assistant file changes and elapsed time update before the turn completes", async () => {
   const controlledStream = controlledStreamResponse([
     '{"type":"changes","changes":{"id":null,"projectRoot":"/workspace","fileCount":1,"additions":1,"deletions":0,"undoable":false,"live":true,"files":[{"path":"workflow.rattish","status":"modified","additions":1,"deletions":0,"binary":false,"diff":"+working\\n"}]}}\n',
@@ -8623,7 +8862,7 @@ test("assistant keeps an open live edit preview stable while new messages arrive
     (url) => (url === "/api/chat/stream" ? controlledStream.response(url) : null),
   ]);
   const workflow = workflowFixture({ id: "testing", name: "Testing" });
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     activeWorkflowId: workflow.id,
     onOpenMarkdownLink() {},
     onResizeKeyDown() {},
@@ -8675,7 +8914,7 @@ test("editing and resending the latest user message replaces the rest of the con
     (url) => (url === "/api/chat/stream" ? chatStream(url) : null),
   ]);
   const workflow = workflowFixture({ id: "testing", name: "Testing" });
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     activeWorkflowId: workflow.id,
     onOpenMarkdownLink() {},
     onResizeKeyDown() {},
@@ -8733,8 +8972,8 @@ test("editing and resending the latest user message replaces the rest of the con
     ],
   );
 
-  const [thread] = appModule.loadChatThreads();
-  const storedMessages = JSON.parse(window.localStorage.getItem(appModule.chatStorageKeyFor(thread.id)));
+  const [thread] = chatThreadsModule.loadChatThreads();
+  const storedMessages = JSON.parse(window.localStorage.getItem(chatThreadsModule.chatStorageKeyFor(thread.id)));
   assert.equal(storedMessages.findLast((message) => message.role === "user").body, "Corrected prompt");
   assert.equal(storedMessages.filter((message) => message.role === "user").length, 2);
 
@@ -8771,7 +9010,7 @@ test("assistant threads keep their project scope until the user changes it", asy
         type: "button",
         onClick: () => setSelectedWorkflow(beta),
       }, "Select beta in Studio"),
-      React.createElement(appModule.ChatPane, {
+      React.createElement(chatPaneModule.ChatPane, {
         activeWorkflowId: selectedWorkflow.id,
         onOpenMarkdownLink() {},
         onResizeKeyDown() {},
@@ -8829,7 +9068,7 @@ test("assistant threads keep their project scope until the user changes it", asy
 
 test("Rem with no open folder does not inherit a selected workflow's stale scope", async () => {
   const workflow = { ...workflowFixture(), projectRoot: "/worktrees/perf-improvements" };
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     activeProjectRoot: "", workflow, workflows: [workflow], width: 380,
   }), createFetchMock([jsonResponse("/api/provider/capabilities", { providers: [] })]));
   assert.ok(dom.byLabel("Scoped to No project. Change project scope"));
@@ -8845,7 +9084,7 @@ test("Rem returns to the open folder after leaving a thread with a deleted workt
     const [root, setRoot] = React.useState(staleWorkflow.projectRoot);
     return React.createElement(React.Fragment, null,
       React.createElement("button", { onClick: () => setRoot("/projects/gofer-flow") }, "Open gofer-flow"),
-      React.createElement(appModule.ChatPane, {
+      React.createElement(chatPaneModule.ChatPane, {
         activeProjectRoot: root, workflow: staleWorkflow, workflows: [staleWorkflow], width: 380,
         recentProjectRoots: ["/projects/gofer-flow"],
       }));
@@ -8887,7 +9126,7 @@ test("changing project scope from assistant home keeps the thread list visible",
       providers: [{ id: "codex", displayName: "Codex", available: true, models: [] }],
     }),
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     activeWorkflowId: alpha.id,
     onOpenMarkdownLink() {},
     onResizeKeyDown() {},
@@ -8947,15 +9186,14 @@ test("deleting a background assistant thread disposes its pending stream state",
   await dom.click(dom.byTitle("Back to active threads"));
   await openThreadGroup(dom, "Running");
   await dom.click(dom.byTitle("Thread options"));
-  window.confirm = () => true;
   await dom.click(dom.byText("Delete thread"));
-  await dom.flush();
+  await answerConfirm(dom, true);
 
   controlledStream.releaseNext();
   await dom.flush();
 
   assert.doesNotMatch(dom.text(), /Delete this running thread/);
-  assert.equal(window.localStorage.getItem(appModule.chatStorageKeyFor(threadId)), null);
+  assert.equal(window.localStorage.getItem(chatThreadsModule.chatStorageKeyFor(threadId)), null);
   assert.equal(dom.allByTitle("Rem response running").length, 0);
   assert.equal(dom.allByTitle("Rem response complete").length, 0);
 
@@ -9078,12 +9316,12 @@ test("assistant errors persist across retries and reloads but stay out of model 
   assert.ok(requests[1].messages.some(message => message.body === "First request"));
   assert.ok(requests[1].messages.every(message => !message.body.includes("Assistant unavailable")));
   const threadId = requests[0].conversationId;
-  const keys = ["gofer-flow-chat-threads", `gofer-flow-chat-thread-meta:${threadId}`, appModule.chatStorageKeyFor(threadId)];
+  const keys = ["gofer-flow-chat-threads", `gofer-flow-chat-thread-meta:${threadId}`, chatThreadsModule.chatStorageKeyFor(threadId)];
   const storage = Object.fromEntries(keys.map(key => [key, window.localStorage.getItem(key)]));
-  const saved = JSON.parse(storage[appModule.chatStorageKeyFor(threadId)]);
+  const saved = JSON.parse(storage[chatThreadsModule.chatStorageKeyFor(threadId)]);
   assert.equal(saved.filter(message => message.kind === "error").length, 1);
   await dom.unmount();
-  const reopened = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock, { storage });
+  const reopened = await mountReact(React.createElement(chatPaneModule.ChatPane, { width: 380 }), fetchMock, { storage });
   try {
     await reopened.flush();
     await reopened.click(allElements(reopened.container).find(element => element.tagName === "BUTTON" && textOf(element).startsWith("First request")));
@@ -9188,437 +9426,7 @@ test("App lets users dismiss a doctor load failure warning", async () => {
   await dom.unmount();
 });
 
-test("DagCanvas mounted interactions create/select/edit/delete nodes, create edges, persist positions, and use folder pickers", async () => {
-  let workflow = {
-    ...workflowFixture({ id: "canvas", name: "Canvas", label: "Initial command" }),
-    validationBindings: [
-      {
-        id: "binding:step:operation.command:trigger.name",
-        destinationNode: "step",
-        destinationField: "operation.command",
-        expression: "trigger.name",
-        producer: "workflow.trigger",
-        sourceType: "unknown",
-        destinationType: "string",
-        resolutionPhase: "run-start",
-        status: "optional",
-        coercion: "string",
-      },
-    ],
-  };
-  const changes = [];
-  const dom = await mountReact(
-    React.createElement(DagCanvasHarness, {
-      dataDir: "/workspace",
-      workflow,
-      onWorkflowChange(nextWorkflow) {
-        workflow = nextWorkflow;
-        changes.push(nextWorkflow);
-      },
-    }),
-    createFetchMock([]),
-    {
-      desktop: {
-        workspace: {
-          getPathInfo: async () => ({ isDirectory: true, isFile: false }),
-          listDirectory: async ({ currentPath }) => ({
-            directory: currentPath === "/workspace/repo" ? "/workspace/repo" : "/workspace",
-            parent: currentPath === "/workspace/repo" ? "/workspace" : null,
-            entries: currentPath === "/workspace/repo"
-              ? []
-              : [{ name: "repo", path: "/workspace/repo", isDirectory: true, isFile: false }],
-          }),
-        },
-      },
-    },
-  );
-
-  await dom.flush();
-  await dom.click(dom.byTitle("Add node"));
-  assert.equal(changes.at(-1).nodes.length, 2);
-  assert.equal(changes.at(-1).nodes[1].type, "agent");
-
-  await dom.pointer(dom.ancestor(dom.byText("Initial command"), "ARTICLE"), "onPointerDown");
-  await dom.flush();
-  assert.equal(dom.byText("Node inspector").tagName, "H2");
-  const nodeInspectorHeader = dom.ancestor(dom.byText("Node inspector"), "HEADER");
-  assert.equal(
-    allElements(nodeInspectorHeader).some(
-      (element) => element.tagName === "P" && textOf(element) === workflow.nodes[0].id,
-    ),
-    true,
-  );
-  assert.equal(dom.byTitle("Hide node inspector").tagName, "BUTTON");
-  const nodeInspectorTabs = allElements(dom.byLabel("Node inspector sections")).filter(
-    (element) => element.getAttribute("role") === "tab",
-  );
-  assert.deepEqual(
-    nodeInspectorTabs.map((tab) => textOf(tab)),
-    ["General", "Action", "Inputs", "Run", "Edges"],
-  );
-  assert.equal(nodeInspectorTabs[0].getAttribute("aria-selected"), "true");
-  const nodeInspectorPanel = (id) =>
-    allElements(dom.container).find((element) => element.getAttribute("id") === id);
-  assert.equal(nodeInspectorPanel("node-tabpanel-action").getAttribute("hidden"), "");
-  assert.equal(nodeInspectorPanel("node-tabpanel-general").getAttribute("tabindex"), "0");
-  assert.equal(
-    nodeInspectorPanel("node-tabpanel-general").contains(dom.controlAfterLabel("Label")),
-    true,
-  );
-  assert.equal(
-    allElements(nodeInspectorPanel("node-tabpanel-general")).some(
-      (element) => element.tagName === "LABEL" && textOf(element) === "ID",
-    ),
-    false,
-  );
-  assert.equal(
-    nodeInspectorPanel("node-tabpanel-action").contains(dom.controlAfterLabel("Command")),
-    true,
-  );
-  assert.equal(
-    nodeInspectorPanel("node-tabpanel-inputs").textContent.includes("Source output"),
-    true,
-  );
-  assert.equal(
-    nodeInspectorPanel("node-tabpanel-run").contains(dom.controlAfterLabel("Pipe output")),
-    true,
-  );
-  assert.equal(
-    allElements(nodeInspectorPanel("node-tabpanel-edges")).some(
-      (element) => element.tagName === "BUTTON" && textOf(element) === "Add edge",
-    ),
-    true,
-  );
-  assert.equal(
-    nodeInspectorPanel("node-tabpanel-general").contains(dom.controlAfterLabel("Command")),
-    false,
-  );
-  await dom.keyDown(nodeInspectorTabs[0], "ArrowRight");
-  assert.equal(nodeInspectorTabs[1].getAttribute("aria-selected"), "true");
-  assert.equal(nodeInspectorTabs[1].getAttribute("tabindex"), "0");
-  assert.equal(document.activeElement, nodeInspectorTabs[1]);
-  assert.equal(nodeInspectorPanel("node-tabpanel-general").getAttribute("hidden"), "");
-  assert.equal(nodeInspectorPanel("node-tabpanel-action").getAttribute("hidden"), null);
-  assert.equal(
-    allElements(dom.container).some(
-      (element) => element.tagName === "BUTTON" && element.contains(dom.byText("Node inspector")),
-    ),
-    false,
-  );
-  assert.match(dom.text(), /operation\.commandoptional/);
-  assert.match(dom.text(), /trigger\.name from workflow\.trigger/);
-
-  await dom.click(dom.byTitle("Hide node inspector"));
-  await openWorkflowSettingsFromMenu(dom);
-  assert.ok(headingByText(dom, "Workflow settings"));
-  assert.doesNotMatch(
-    dom.ancestor(dom.byText("Initial command"), "ARTICLE").getAttribute("class"),
-    /border-indigo-500|ring-indigo-100/,
-  );
-
-  await dom.pointer(dom.ancestor(dom.byText("Initial command"), "ARTICLE"), "onPointerDown");
-  await dom.flush();
-  await dom.change(dom.controlAfterLabel("Command"), "echo edited");
-  assert.equal(changes.at(-1).nodes[0].operation.command, "echo edited");
-
-  await dom.click(dom.byTitle("Choose working directory"));
-  await dom.flush();
-  await dom.click(dom.ancestor(dom.byText("repo"), "BUTTON"));
-  await dom.flush();
-  await dom.click(dom.byText("Choose current folder"));
-  assert.equal(changes.at(-1).nodes[0].operation.working_dir, "/workspace/repo");
-
-  const nodeCard = dom.ancestor(dom.byText("Initial command"), "ARTICLE");
-  const initialViewportScale = Number(
-    nodeCard.parentNode.style.transform.match(/scale\(([-\d.]+)\)/)?.[1],
-  );
-  const dragStart = testEvent(nodeCard, { clientX: 10, clientY: 10, pointerId: 7 });
-  await React.act(async () => reactProps(nodeCard).onPointerDown(dragStart));
-  assert.equal(dragStart.defaultPrevented, true);
-  // movementX/Y can be in device pixels; the node must follow the cursor's client position.
-  await dom.pointer(nodeCard, "onPointerMove", { clientX: 20, clientY: 30, movementX: 20, movementY: 40, pointerId: 7 });
-  await dom.pointer(nodeCard, "onPointerMove", { clientX: 35, clientY: 45, movementX: 30, movementY: 30, pointerId: 7 });
-  await dom.pointer(nodeCard, "onPointerUp", { clientX: 35, clientY: 45, pointerId: 7 });
-  assert.equal(changes.at(-1).nodes[0].x, 25 / initialViewportScale);
-  assert.equal(changes.at(-1).nodes[0].y, 35 / initialViewportScale);
-  const changesAfterDrop = changes.length;
-  await dom.pointer(nodeCard, "onPointerMove", { buttons: 0, clientX: 90, clientY: 90, pointerId: 7 });
-  assert.equal(changes.length, changesAfterDrop);
-
-  await dom.click(dom.byText("Add edge"));
-  await dom.change(dom.selectWithOption("node-1"), "node-1");
-  assert.equal(changes.at(-1).edges[0].from, "step");
-  assert.equal(changes.at(-1).edges[0].to, "node-1");
-
-  await dom.pointer(nodeCard, "onPointerDown", { button: 2, clientX: 80, clientY: 90, pointerId: 8 });
-  await dom.pointer(nodeCard, "onContextMenu", { button: 2, clientX: 80, clientY: 90 });
-  await dom.click(dom.byText("Duplicate node"));
-  assert.equal(changes.at(-1).nodes.length, 3);
-  assert.equal(changes.at(-1).nodes.at(-1).label, "Initial command copy");
-  assert.equal(changes.at(-1).nodes.at(-1).x, 25 / initialViewportScale + 28);
-  assert.equal(changes.at(-1).nodes.at(-1).y, 35 / initialViewportScale + 28);
-
-  await dom.pointer(
-    dom.ancestor(dom.byText("Initial command copy"), "ARTICLE"),
-    "onContextMenu",
-    { button: 2, clientX: 90, clientY: 100 },
-  );
-  await dom.click(dom.byText("Rename node"));
-  await dom.change(dom.controlAfterLabel("Node label"), "Renamed command");
-  await dom.pointer(dom.ancestor(dom.byTitle("Confirm node rename"), "FORM"), "onSubmit");
-  assert.equal(changes.at(-1).nodes.at(-1).label, "Renamed command");
-
-  await dom.pointer(
-    dom.ancestor(dom.byText("Renamed command"), "ARTICLE"),
-    "onContextMenu",
-    { button: 2, clientX: 90, clientY: 100 },
-  );
-  await dom.click(dom.byText("Delete node"));
-  assert.equal(changes.at(-1).nodes.some((node) => node.label === "Renamed command"), false);
-
-  await dom.pointer(dom.ancestor(dom.byText("Initial command"), "ARTICLE"), "onContextMenu", {
-    button: 2,
-    clientX: 80,
-    clientY: 90,
-  });
-  await dom.click(dom.byText("Delete node"));
-  assert.equal(changes.at(-1).nodes.some((node) => node.id === "step"), false);
-  assert.deepEqual(changes.at(-1).edges, []);
-
-  await dom.unmount();
-});
-
-test("graph outline supports the complete keyboard node and edge editing flow", async () => {
-  let workflow = {
-    ...workflowFixture({ id: "keyboard-graph", label: "Collect input" }),
-    nodes: [
-      {
-        id: "collect",
-        type: "bash_command",
-        label: "Collect input",
-        x: 0,
-        y: 0,
-        operation: { type: "bash_command", command: "echo input" },
-      },
-      {
-        id: "review",
-        type: "agent",
-        label: "Review input",
-        x: 320,
-        y: 0,
-        operation: { type: "agent", agent_id: "reviewer", prompt: "Review" },
-      },
-    ],
-    edges: [],
-  };
-  const changes = [];
-  const dom = await mountReact(
-    React.createElement(DagCanvasHarness, {
-      workflow,
-      onWorkflowChange(nextWorkflow) {
-        workflow = nextWorkflow;
-        changes.push(nextWorkflow);
-      },
-    }),
-    createFetchMock([]),
-  );
-
-  await dom.click(dom.byTitle("Map"));
-  const outline = dom.byLabel("Graph outline");
-  const nodeButtons = () => allElements(outline).filter(
-    (element) => element.tagName === "BUTTON" && element.getAttribute("aria-label")?.includes("status"),
-  );
-  assert.equal(nodeButtons().length, 2);
-  assert.match(nodeButtons()[0].getAttribute("aria-label"), /0 incoming; 0 outgoing, valid/);
-
-  await dom.focus(nodeButtons()[0]);
-  assert.equal(nodeButtons()[0].getAttribute("aria-current"), "true");
-  await dom.keyDown(nodeButtons()[0], "c");
-  assert.match(dom.text(), /Connecting from Collect input/);
-  await dom.keyDown(nodeButtons()[1], "Enter");
-  assert.equal(changes.at(-1).edges[0].from, "collect");
-  assert.equal(changes.at(-1).edges[0].to, "review");
-
-  const edgeButton = allElements(outline).find(
-    (element) => element.tagName === "BUTTON" && element.getAttribute("aria-label")?.startsWith("Collect input to Review input"),
-  );
-  assert.ok(edgeButton);
-  assert.match(edgeButton.getAttribute("aria-label"), /condition always, valid/);
-  assert.equal(document.activeElement, edgeButton);
-  assert.equal(edgeButton.getAttribute("aria-current"), "true");
-  await dom.keyDown(document.activeElement, "Delete");
-  assert.deepEqual(changes.at(-1).edges, []);
-  assert.equal(document.activeElement, nodeButtons()[0]);
-  assert.equal(nodeButtons()[0].getAttribute("aria-current"), "true");
-
-  await dom.keyDown(document.activeElement, "d", { ctrlKey: true });
-  assert.equal(changes.at(-1).nodes.length, 3);
-  assert.equal(changes.at(-1).nodes.at(-1).label, "Collect input copy");
-
-  const duplicatedButton = nodeButtons().find((button) =>
-    button.getAttribute("aria-label")?.startsWith("Collect input copy"),
-  );
-  assert.equal(document.activeElement, duplicatedButton);
-  assert.equal(duplicatedButton.getAttribute("aria-current"), "true");
-  await dom.keyDown(document.activeElement, "Delete");
-  assert.equal(changes.at(-1).nodes.some((node) => node.label === "Collect input copy"), false);
-  assert.equal(document.activeElement.getAttribute("aria-label")?.startsWith("Review input,"), true);
-  assert.equal(document.activeElement.getAttribute("aria-current"), "true");
-
-  await dom.unmount();
-});
-
-test("edge inspector displays and edits structured-output field relationships", async () => {
-  let workflow = {
-    ...workflowFixture({ id: "structured-edge", label: "Analyze request" }),
-    nodes: [
-      {
-        id: "analyze",
-        type: "agent",
-        label: "Analyze request",
-        x: 0,
-        y: 0,
-        operation: { type: "agent", agent_id: "analyzer", prompt: "Analyze" },
-      },
-      {
-        id: "format-high",
-        type: "bash_command",
-        label: "Format high priority",
-        x: 320,
-        y: 0,
-        operation: { type: "bash_command", command: "printf HIGH" },
-      },
-    ],
-    edges: [
-      {
-        id: "analyze-format-high",
-        from: "analyze",
-        to: "format-high",
-        condition: "output_field",
-        field: "priority",
-        operator: "equals",
-        value: "high",
-        label: 'priority equals "high"',
-      },
-    ],
-  };
-  const changes = [];
-  const dom = await mountReact(
-    React.createElement(DagCanvasHarness, {
-      workflow,
-      onWorkflowChange(nextWorkflow) {
-        workflow = nextWorkflow;
-        changes.push(nextWorkflow);
-      },
-    }),
-    createFetchMock([]),
-  );
-
-  await dom.click(dom.byTitle("Map"));
-  const edgeButton = allElements(dom.byLabel("Graph outline")).find(
-    (element) => element.tagName === "BUTTON"
-      && element.getAttribute("aria-label")?.startsWith("Analyze request to Format high priority"),
-  );
-  assert.ok(edgeButton);
-  await dom.click(edgeButton);
-
-  const edgeInspector = dom.ancestor(dom.byText("Edge inspector"), "SECTION");
-  const inspectorControl = (labelText) => {
-    const label = allElements(edgeInspector).find(
-      (element) => element.tagName === "LABEL" && textOf(element).includes(labelText),
-    );
-    assert.ok(label, `Unable to find edge inspector label: ${labelText}`);
-    const control = allElements(label).find((element) =>
-      ["INPUT", "SELECT", "TEXTAREA"].includes(element.tagName),
-    );
-    assert.ok(control, `Unable to find edge inspector control: ${labelText}`);
-    return control;
-  };
-  const selectedValue = (select) =>
-    [...select.options].find((option) => option.selected)?.value ?? "";
-
-  const typeControl = inspectorControl("Type");
-  assert.deepEqual(
-    [...typeControl.options].map((option) => option.value),
-    ["always", "on_success", "on_failure", "output_matches", "output_field", "after_loop"],
-  );
-  assert.equal(selectedValue(typeControl), "output_field");
-  assert.equal(inspectorControl("Field").value, "priority");
-  assert.equal(selectedValue(inspectorControl("Operator")), "equals");
-  assert.equal(inspectorControl("Comparison value (JSON)").value, '"high"');
-
-  await dom.change(inspectorControl("Field"), "result.priority");
-  assert.equal(changes.at(-1).edges[0].field, "result.priority");
-  assert.equal(changes.at(-1).edges[0].label, 'result.priority equals "high"');
-
-  await dom.change(inspectorControl("Operator"), "exists");
-  assert.equal(changes.at(-1).edges[0].operator, "exists");
-  assert.equal(changes.at(-1).edges[0].label, "result.priority exists");
-  assert.doesNotMatch(dom.text(), /Comparison value \(JSON\)/);
-
-  await dom.unmount();
-});
-
-test("START nodes open the same tabbed node inspector as every other node type", async () => {
-  const workflow = {
-    ...workflowFixture({ id: "start-inspector" }),
-    nodes: [
-      {
-        id: "start",
-        type: "start",
-        label: "START",
-        x: 0,
-        y: 0,
-        operation: { type: "start" },
-      },
-    ],
-  };
-  const dom = await mountReact(
-    React.createElement(DagCanvasHarness, { workflow, onWorkflowChange() {} }),
-    createFetchMock([]),
-  );
-
-  await dom.pointer(dom.ancestor(dom.byText("START"), "ARTICLE"), "onPointerDown");
-  await dom.flush();
-
-  assert.equal(dom.byText("Node inspector").tagName, "H2");
-  assert.equal(dom.byLabel("Node inspector sections").getAttribute("role"), "tablist");
-  await dom.click(dom.byText("Action"));
-  assert.match(dom.text(), /This node does no work/);
-  const actionPanel = allElements(dom.container).find(
-    (element) => element.getAttribute("id") === "node-tabpanel-action",
-  );
-  assert.equal(actionPanel.getAttribute("tabindex"), "0");
-  await dom.focus(actionPanel);
-  assert.equal(document.activeElement, actionPanel);
-
-  await dom.unmount();
-});
-
 test("pane separators expose values and support arrow, boundary, and reset keys", async () => {
-  const canvasDom = await mountReact(
-    React.createElement(DagCanvasHarness, {
-      workflow: workflowFixture({ id: "resizers" }),
-      onWorkflowChange() {},
-    }),
-    createFetchMock([]),
-  );
-  await openWorkflowSettingsFromMenu(canvasDom);
-  const inspectorResizer = canvasDom.byLabel("Resize workflow settings and node inspector");
-  assert.equal(inspectorResizer.getAttribute("role"), "separator");
-  assert.equal(inspectorResizer.getAttribute("aria-orientation"), "vertical");
-  assert.equal(inspectorResizer.getAttribute("aria-valuemin"), "280");
-  assert.equal(inspectorResizer.getAttribute("aria-valuemax"), "520");
-  assert.equal(inspectorResizer.getAttribute("aria-valuenow"), "340");
-  await canvasDom.keyDown(inspectorResizer, "ArrowRight");
-  assert.equal(inspectorResizer.getAttribute("aria-valuenow"), "350");
-  await canvasDom.keyDown(inspectorResizer, "End");
-  assert.equal(inspectorResizer.getAttribute("aria-valuenow"), "520");
-  await canvasDom.keyDown(inspectorResizer, "Enter");
-  assert.equal(inspectorResizer.getAttribute("aria-valuenow"), "340");
-
-  await canvasDom.unmount();
-
   const appDom = await mountReact(
     React.createElement(appModule.default),
     createFetchMock([
@@ -9993,103 +9801,6 @@ test("terminal initialization creates only one tab under repeated effects", () =
   assert.equal(bottomPanelModule.shouldCreateInitialTerminal(false, 0, false), false);
 });
 
-test("inspector parsed fields keep drafts stable and commit or restore consistently", async () => {
-  const changes = { keyValue: [], list: [], number: [], path: [] };
-  const dom = await mountReact(
-    React.createElement(InspectorDraftHarness, { changes }),
-    createFetchMock([]),
-  );
-
-  const number = dom.controlAfterLabel("Draft number");
-  await dom.focus(number);
-  await dom.change(number, "");
-  assert.equal(number.value, "");
-  assert.deepEqual(changes.number, []);
-  await dom.change(number, "-");
-  assert.equal(number.value, "-");
-  assert.match(dom.text(), /Enter a complete number/);
-  await dom.change(number, "-2.5");
-  assert.deepEqual(changes.number, []);
-  await dom.blur(number);
-  assert.deepEqual(changes.number, [-2.5]);
-
-  await dom.focus(number);
-  await dom.change(number, "4.");
-  assert.equal(number.value, "4.");
-  await dom.keyDown(number, "Escape");
-  assert.equal(number.value, "-2.5");
-  assert.deepEqual(changes.number, [-2.5]);
-  await dom.change(number, "3.75");
-  await dom.keyDown(number, "Enter");
-  assert.deepEqual(changes.number, [-2.5, 3.75]);
-  assert.doesNotMatch(dom.text(), /changed elsewhere.*draft is preserved/i);
-
-  await dom.change(number, "-");
-  await dom.click(dom.byText("Update number externally"));
-  assert.equal(number.value, "-");
-  assert.match(dom.text(), /Enter a complete number/);
-  assert.match(dom.text(), /changed elsewhere.*draft is preserved/i);
-  await dom.keyDown(number, "Escape");
-  assert.equal(number.value, "11");
-
-  const list = dom.controlAfterLabel("Draft list");
-  await dom.focus(list);
-  await dom.change(list, "alpha, beta,");
-  assert.equal(list.value, "alpha, beta,");
-  assert.deepEqual(changes.list, []);
-  await dom.blur(list);
-  assert.deepEqual(changes.list, [["alpha", "beta"]]);
-  assert.equal(list.value, "alpha, beta");
-  await dom.focus(list);
-  await dom.change(list, "gamma, delta");
-  await dom.keyDown(list, "Enter");
-  assert.deepEqual(changes.list.at(-1), ["gamma", "delta"]);
-  await dom.change(list, "temporary,");
-  await dom.keyDown(list, "Escape");
-  assert.equal(list.value, "gamma, delta");
-  assert.deepEqual(changes.list, [["alpha", "beta"], ["gamma", "delta"]]);
-
-  const keyValue = dom.controlAfterLabel("Draft key/value");
-  await dom.focus(keyValue);
-  await dom.change(keyValue, "TOKEN");
-  assert.equal(keyValue.value, "TOKEN");
-  assert.match(dom.text(), /Line 1 needs an “=”/);
-  await dom.blur(keyValue);
-  assert.deepEqual(changes.keyValue, []);
-  assert.equal(keyValue.value, "TOKEN");
-  await dom.focus(keyValue);
-  await dom.change(keyValue, "TOKEN=secret\nMODE=");
-  await dom.keyDown(keyValue, "Enter");
-  assert.deepEqual(changes.keyValue, [{ TOKEN: "secret", MODE: "" }]);
-  await dom.change(keyValue, "BROKEN");
-  await dom.keyDown(keyValue, "Escape");
-  assert.equal(keyValue.value, "TOKEN=secret\nMODE=");
-
-  const pathInput = dom.controlAfterLabel("Draft path");
-  assert.equal(pathInput.value, "scripts/run.sh");
-  assert.equal(pathInput.getAttribute("title"), "/workspace/scripts/run.sh");
-  await dom.focus(pathInput);
-  await dom.change(pathInput, "");
-  await dom.change(pathInput, "scripts/next.sh");
-  assert.equal(pathInput.value, "scripts/next.sh");
-  assert.deepEqual(changes.path, []);
-  await dom.blur(pathInput);
-  assert.deepEqual(changes.path, ["scripts/next.sh"]);
-  assert.equal(pathInput.value, "scripts/next.sh");
-  await dom.focus(pathInput);
-  await dom.change(pathInput, "scripts/entered.sh");
-  await dom.keyDown(pathInput, "Enter");
-  assert.deepEqual(changes.path, ["scripts/next.sh", "scripts/entered.sh"]);
-  assert.equal(pathInput.value, "scripts/entered.sh");
-  assert.doesNotMatch(dom.text(), /changed elsewhere.*draft is preserved/i);
-  await dom.change(pathInput, "scripts/cancelled.sh");
-  await dom.keyDown(pathInput, "Escape");
-  assert.equal(pathInput.value, "scripts/entered.sh");
-  assert.deepEqual(changes.path, ["scripts/next.sh", "scripts/entered.sh"]);
-
-  await dom.unmount();
-});
-
 test("DagCanvas renders pending approvals as a centered graph overlay", async () => {
   const workflow = {
     ...workflowFixture({ id: "approval-canvas", name: "Approval Canvas" }),
@@ -10219,100 +9930,6 @@ test("approval dialog keeps typed notes and stays closed across approval polls",
   await dom.unmount();
 });
 
-test("DagCanvas renders inline agent health warnings in the inspector", async () => {
-  const workflow = {
-    ...workflowFixture({ id: "agent-health", name: "Agent Health", label: "Review" }),
-    agents: {
-      reviewer: {
-        subscription: "codex",
-        working_dir: ".",
-      },
-    },
-    healthErrors: [
-      {
-        id: "workflow.provider_cli",
-        severity: "error",
-        subject: "codex",
-        message: "Workflow requires provider CLI 'codex', but it is not on PATH.",
-      },
-    ],
-    nodes: [
-      {
-        id: "review",
-        type: "agent",
-        label: "Review",
-        x: 0,
-        y: 0,
-        operation: {
-          type: "agent",
-          agent_id: "reviewer",
-          working_dir: ".",
-        },
-      },
-    ],
-  };
-
-  const dom = await mountReact(
-    React.createElement(DagCanvasHarness, {
-      dataDir: "/workspace",
-      workflow,
-      onWorkflowChange() {},
-    }),
-    createFetchMock([]),
-  );
-
-  await dom.flush();
-  await dom.pointer(dom.ancestor(dom.byText("Review"), "ARTICLE"), "onPointerDown");
-  await dom.flush();
-
-  assert.match(dom.text(), /Agent config/);
-  assert.match(dom.text(), /Workflow requires provider CLI 'codex'/);
-
-  await dom.unmount();
-});
-
-test("DagCanvas edits named structured-output schemas without mounting an eager textarea", async () => {
-  const changes = [];
-  const workflow = workflowFixture({ id: "schemas", name: "Schemas" });
-  const dom = await mountReact(
-    React.createElement(DagCanvasHarness, {
-      dataDir: "/workspace",
-      workflow,
-      onWorkflowChange(nextWorkflow) {
-        changes.push(nextWorkflow);
-      },
-    }),
-    createFetchMock([]),
-  );
-
-  await dom.flush();
-  assert.equal(
-    allElements(dom.container).filter((element) => element.tagName === "TEXTAREA").length,
-    0,
-  );
-  await dom.click(dom.byText("Variables"));
-  await dom.flush();
-  const schemaEditor = dom.controlAfterLabel("Named output schemas (JSON object)");
-  await dom.focus(schemaEditor);
-  await dom.change(schemaEditor, "");
-  assert.equal(schemaEditor.value, "");
-  assert.deepEqual(changes, []);
-  await dom.change(
-    schemaEditor,
-    '{"review_result":{"type":"object","properties":{"verdict":{"type":"string"}}}}',
-  );
-  assert.deepEqual(changes, []);
-  await dom.blur(schemaEditor);
-
-  assert.deepEqual(changes.at(-1).outputSchemas, {
-    review_result: {
-      type: "object",
-      properties: { verdict: { type: "string" } },
-    },
-  });
-  await dom.unmount();
-});
-
 test("DagCanvas uses live node summaries across running, completed and failed activations", async () => {
   const workflow = workflowFixture({ id: "live-status", name: "Live status" });
   let update;
@@ -10335,7 +9952,7 @@ test("DagCanvas uses live node summaries across running, completed and failed ac
   } finally { await dom.unmount(); }
 });
 
-test("DagCanvas renders structured run timeline and selected node details", async () => {
+test("DagCanvas renders a structured run timeline", async () => {
   const workflow = workflowFixture({ id: "timeline", name: "Timeline", label: "Run command" });
   const logState = {
     loading: false,
@@ -10448,7 +10065,7 @@ test("DagCanvas renders structured run timeline and selected node details", asyn
         logState,
         onWorkflowChange() {},
       }),
-      React.createElement(canvasModule.RunTimelinePanel, {
+      React.createElement(runTimelineModule.RunTimelinePanel, {
         embedded: true,
         runEvents: logState.runEvents,
         text: logState.text,
@@ -10465,75 +10082,6 @@ test("DagCanvas renders structured run timeline and selected node details", asyn
   assert.match(dom.text(), /321 tokens/);
   assert.match(dom.text(), /Most expensive: step/);
   assert.match(dom.text(), /completed/);
-  await dom.pointer(dom.ancestor(dom.byText("Run command"), "ARTICLE"), "onPointerDown");
-  await dom.flush();
-  assert.match(dom.text(), /Last run/);
-  assert.match(dom.text(), /ReusedYes/);
-  assert.match(dom.text(), /Providercodex \(gpt-5\)/);
-  assert.match(dom.text(), /Provider appCodex 0\.156\.0/);
-  assert.match(dom.text(), /Switched from claude-code \(claude-sonnet-5\) to codex \(gpt-5\): service overloaded\./);
-  assert.ok(dom.byTitle("reused"));
-  assert.match(dom.text(), /0\.25s/);
-  assert.match(dom.text(), /agent summary message/);
-  assert.match(dom.text(), /Fan-out items/);
-  assert.match(dom.text(), /1: failed/);
-  assert.match(dom.text(), /Iteration 1 - Attempt 1/);
-  assert.match(dom.text(), /Outputok/);
-  await dom.click(dom.byText("Next"));
-  assert.match(dom.text(), /Iteration 2 - Attempt 1/);
-  assert.match(dom.text(), /OutputStderrPromptbad item/);
-  await dom.click(dom.byTitle("Show Stderr"));
-  assert.match(dom.text(), /stderr detail/);
-  await dom.click(dom.byTitle("Show Prompt"));
-  assert.match(dom.text(), /rendered prompt/);
-  assert.match(dom.text(), /step -> next/);
-
-  await dom.unmount();
-});
-
-test("DagCanvas run history exposes resume and rerun controls", async () => {
-  const resumeCalls = [];
-  const workflow = workflowFixture({ id: "history-actions", name: "History actions" });
-  const dom = await mountReact(
-    React.createElement(DagCanvasHarness, {
-      dataDir: "/workspace",
-      workflow,
-      logState: {
-        loading: false,
-        error: "",
-        text: "failed run",
-        path: "logs/history-actions/run-1.log",
-        runs: [{ id: "run-1.log", status: "error", startedAt: "2026-01-02T03:04:05Z" }],
-        selectedRunId: "run-1.log",
-      },
-      onResumeRunLog(runId, options) {
-        resumeCalls.push({ runId, options });
-      },
-      onWorkflowChange() {},
-    }),
-    createFetchMock([]),
-  );
-
-  await dom.flush();
-  await dom.click(dom.byTitle("More graph actions"));
-  await dom.click(dom.byTitle("Select workflow run"));
-  assert.match(dom.text(), /Resume/);
-  assert.match(dom.text(), /Rerun failed nodes/);
-  assert.match(dom.text(), /Rerun from selected node/);
-
-  await dom.click(dom.ancestor(dom.byText("Resume"), "BUTTON"));
-  await dom.click(dom.ancestor(dom.byText("Rerun failed nodes"), "BUTTON"));
-
-  await dom.pointer(dom.ancestor(dom.byText("Run command"), "ARTICLE"), "onPointerDown");
-  await dom.flush();
-  await dom.click(dom.ancestor(dom.byText("Rerun from selected node"), "BUTTON"));
-
-  assert.deepEqual(resumeCalls, [
-    { runId: "run-1.log", options: {} },
-    { runId: "run-1.log", options: { skipCache: true } },
-    { runId: "run-1.log", options: { fromNode: "step" } },
-  ]);
-
   await dom.unmount();
 });
 
@@ -10792,261 +10340,213 @@ test("DagCanvas shows Rattish run outcomes, start nodes, needs, and project path
   await dom.unmount();
 });
 
-test("DagCanvas surfaces webhook trigger state and replay controls", async () => {
-  const replayCalls = [];
-  const workflow = {
-    ...workflowFixture({ id: "hooked", name: "Hooked" }),
-    webhooks: {
-      github: {
-        id: "github",
-        enabled: true,
-        source: "github",
-        fanout_path: "payload.items",
-        tokenConfigured: true,
-        concurrency_policy: "reject_if_running",
-      },
+// A finished Rattish run: greet printed two lines, answer is an agent node that
+// returned a string, and check ran twice, the second time failing.
+function rattishRunOutputFixture() {
+  const nodeTypes = { greet: "bash-command", answer: "agent", check: "bash-command" };
+  const document = {
+    workflowId: "rattish-output",
+    source: "Rattish: 1\nWorkflow:\n  name: Output\n",
+    workflow: { name: "Output", fields: { name: { value: "Output" } } },
+    nodeContracts: [],
+    graph: {
+      nodes: Object.entries(nodeTypes).map(([id, type]) => ({
+        id,
+        label: id,
+        type,
+        configuration: {},
+        execution: { allow_fail: false, max_concurrency: 1, retry_count: 0, retry_delay_ms: 1000 },
+        authoredFields: { type: { value: type } },
+        bindings: [],
+        needs: [],
+        diagnostics: [],
+      })),
+      edges: [],
     },
   };
+  const workflow = appModule.rattishGraphWorkflow(
+    { ...workflowFixture({ id: "rattish-output", name: "Output" }), sourceFormat: "rattish", nodes: [], edges: [] },
+    document,
+  );
+  const command = (stdout, stderr, exitCode) => ({ stdout, stderr, exit_code: exitCode });
+  const greet = command("line one\nline two", "", 0);
+  const answer = "Ship it.\nAll checks pass.";
+  const firstCheck = command("first try ok", "", 0);
+  const secondCheck = command("second try", "boom", 1);
+  const failure = "Command exited with status 1: boom";
+  const event = (sequence, nodeId, runNumber, status) => ({
+    sequence,
+    type: status === "started" ? "node_started" : "node_completed",
+    nodeId,
+    status,
+    attempt: 1,
+    runNumber,
+    activationLineageId: `lineage-${nodeId}-${runNumber}`,
+  });
+  const attempt = (runNumber, output, error = null) => ({
+    attempt: 1,
+    runNumber,
+    output: JSON.stringify(output),
+    stdout: output?.stdout ?? null,
+    stderr: output?.stderr ?? null,
+    error,
+  });
+  const logState = {
+    loading: false,
+    error: "",
+    text: "",
+    path: "runs/rattish-output/run-1.json",
+    runs: [{ id: "run-1", status: "error", startedAt: "2026-11-25T08:00:00Z" }],
+    selectedRunId: "run-1",
+    nodeOutputs: {
+      greet: { success: true, outcome: "success", output: JSON.stringify(greet), data: greet, exitCode: 0, error: null },
+      answer: { success: true, outcome: "success", output: JSON.stringify(answer), data: answer, exitCode: null, error: null },
+      check: { success: false, outcome: "failure", output: JSON.stringify(secondCheck), data: secondCheck, exitCode: 1, error: failure },
+    },
+    runNodes: {
+      greet: { nodeId: "greet", status: "success", durationMs: 12, attempts: [attempt(1, greet)] },
+      answer: { nodeId: "answer", status: "success", durationMs: 900, attempts: [attempt(2, answer)] },
+      check: { nodeId: "check", status: "error", durationMs: 30, message: failure, attempts: [attempt(3, firstCheck), attempt(4, secondCheck, failure)] },
+    },
+    runEvents: [
+      event(1, "greet", 1, "started"),
+      event(2, "greet", 1, "completed"),
+      event(3, "answer", 2, "completed"),
+      event(4, "check", 3, "completed"),
+      event(5, "check", 4, "failed"),
+    ],
+  };
+  return { document, logState, workflow };
+}
+
+async function openRattishRunTab(dom, nodeId) {
+  await dom.pointer(dom.ancestor(dom.byExactText(nodeId), "ARTICLE"), "onPointerDown");
+  await dom.flush();
+  const inspector = dom.byLabel("Rattish workflow settings and node inspector");
+  await dom.click(allElements(inspector).find((element) => element.getAttribute?.("data-inspector-tab") === "run"));
+  return inspector;
+}
+
+function inspectorSection(inspector, title) {
+  const heading = allElements(inspector).find((element) => element.tagName === "H3" && textOf(element) === title);
+  assert.ok(heading, `Unable to find section: ${title}`);
+  return heading.parentNode;
+}
+
+function outputPane(root, label) {
+  const pane = allElements(root).find((element) => element.tagName === "PRE" && element.getAttribute("aria-label") === label);
+  assert.ok(pane, `Unable to find ${label} pane`);
+  return pane;
+}
+
+test("Rattish node inspector shows a node's stdout and a string answer as text lines, with Copy and the raw JSON folded away", async () => {
+  const { document, logState, workflow } = rattishRunOutputFixture();
+  const dom = await mountReact(
+    React.createElement(DagCanvasHarness, { workflow, rattishDocument: document, logState, onWorkflowChange() {} }),
+    createFetchMock([]),
+  );
+  const copies = [];
+  navigator.clipboard.writeText = async (value) => copies.push(value);
+  try {
+    await dom.flush();
+    let latest = inspectorSection(await openRattishRunTab(dom, "greet"), "Latest activation");
+    const stdout = outputPane(latest, "Stdout");
+    assert.deepEqual(textOf(stdout).split("\n"), ["line one", "line two"]);
+    assert.doesNotMatch(textOf(latest), /\\n|"line one|exit_code/, "no JSON escapes, quotes or keys outside Raw data");
+    assert.equal(textOf(dom.byLabel("Copy Stdout")).trim(), "Copy");
+    await dom.click(dom.byLabel("Copy Stdout"));
+    assert.deepEqual(copies, ["line one\nline two"]);
+    assert.ok(dom.byLabel("Stdout copied"));
+
+    const rawData = allElements(latest).find((element) => element.tagName === "BUTTON" && textOf(element).startsWith("Raw data"));
+    assert.equal(rawData.getAttribute("aria-expanded"), "false");
+    await dom.click(rawData);
+    assert.match(textOf(latest), /"exit_code": 0/);
+
+    latest = inspectorSection(await openRattishRunTab(dom, "answer"), "Latest activation");
+    assert.equal(textOf(outputPane(latest, "Output")), "Ship it.\nAll checks pass.");
+    assert.doesNotMatch(textOf(latest), /"Ship it/);
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test("Rattish node inspector shows a failed node's error, and each Activation history row opens that activation's own output", async () => {
+  const { document, logState, workflow } = rattishRunOutputFixture();
+  const dom = await mountReact(
+    React.createElement(DagCanvasHarness, { workflow, rattishDocument: document, logState, onWorkflowChange() {} }),
+    createFetchMock([]),
+  );
+  try {
+    await dom.flush();
+    const inspector = await openRattishRunTab(dom, "check");
+    const latest = inspectorSection(inspector, "Latest activation");
+    const error = outputPane(latest, "Error");
+    assert.equal(textOf(error), "Command exited with status 1: boom");
+    assert.match(error.getAttribute("class"), /text-red-700/);
+    assert.ok(allElements(latest).some((element) => element.getAttribute?.("title") === "Show Stdout"));
+
+    const history = inspectorSection(inspector, "Activation history");
+    const row = (runNumber) => allElements(history).find(
+      (element) => element.tagName === "BUTTON" && textOf(element).startsWith(`Activation ${runNumber}`),
+    );
+    assert.match(textOf(history), /lineage-check-3/, "the lineage ID stays as secondary text");
+    assert.doesNotMatch(textOf(history), /first try ok|second try/);
+
+    await dom.click(row(3));
+    assert.equal(row(3).getAttribute("aria-expanded"), "true");
+    const firstRow = row(3).parentNode;
+    assert.equal(textOf(outputPane(firstRow, "Stdout")), "first try ok");
+    assert.equal(allElements(firstRow).some((element) => element.getAttribute?.("title") === "Show Error"), false);
+
+    await dom.click(row(4));
+    const secondRow = row(4).parentNode;
+    assert.equal(textOf(outputPane(secondRow, "Error")), "Command exited with status 1: boom");
+    await dom.click(allElements(secondRow).find((element) => element.getAttribute?.("title") === "Show Stdout"));
+    assert.equal(textOf(outputPane(secondRow, "Stdout")), "second try");
+
+    await dom.click(row(3));
+    assert.equal(row(3).getAttribute("aria-expanded"), "false");
+    assert.doesNotMatch(textOf(row(3).parentNode), /first try ok/);
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test("Rattish node inspector says when the run's output was cut", async () => {
+  const { document, logState, workflow } = rattishRunOutputFixture();
   const dom = await mountReact(
     React.createElement(DagCanvasHarness, {
-      dataDir: "/workspace",
       workflow,
-      logState: {
-        loading: false,
-        error: "",
-        text: "webhook run",
-        path: "logs/hooked/run-1.log",
-        runs: [
-          {
-            id: "run-1.log",
-            status: "success",
-            startedAt: "2026-01-02T03:04:05Z",
-            triggerId: "github",
-            triggerType: "webhook",
-            hasTriggerReplay: true,
-          },
-        ],
-        selectedRunId: "run-1.log",
-      },
-      onReplayRunLog(runId, triggerId) {
-        replayCalls.push({ runId, triggerId });
-      },
+      rattishDocument: document,
+      logState: { ...logState, nodeOutputsTruncated: true },
       onWorkflowChange() {},
     }),
     createFetchMock([]),
   );
-
-  await dom.click(dom.byText("Triggers"));
-
-  await dom.flush();
-  assert.match(dom.text(), /API trigger: github \(github\)/);
-  assert.match(dom.text(), /Webhook\/API triggers/);
-  assert.match(dom.text(), /Token required/);
-
-  await dom.click(dom.byTitle("More graph actions"));
-  await dom.click(dom.byTitle("Select workflow run"));
-  await dom.click(dom.ancestor(dom.byText("Replay webhook payload"), "BUTTON"));
-  assert.deepEqual(replayCalls, [{ runId: "run-1.log", triggerId: "github" }]);
-
-  await dom.unmount();
-});
-
-test("DagCanvas exposes invocation bindings for triggers and child calls", async () => {
-  const workflow = {
-    ...workflowFixture({ id: "bindings", name: "Bindings" }),
-    schedule: { cron_expression: "0 9 * * *", timezone: "UTC", inputs: {} },
-    watch: {
-      path: "/workspace/inbox",
-      glob: "*",
-      recursive: false,
-      debounce_seconds: 1,
-      mode: "batch",
-      max_concurrency: 1,
-      inputs: {},
-    },
-    webhooks: {
-      default: {
-        id: "default",
-        enabled: true,
-        source: "webhook",
-        input_bindings: {},
-      },
-    },
-    nodes: [
-      {
-        id: "call-workflow",
-        label: "Call workflow",
-        type: "workflow",
-        operation: canvasModule.defaultOperation("workflow"),
-        settings: {},
-        x: 0,
-        y: 0,
-      },
-      {
-        id: "call-subflow",
-        label: "Call subflow",
-        type: "subflow",
-        operation: canvasModule.defaultOperation("subflow"),
-        settings: {},
-        x: 260,
-        y: 0,
-      },
-    ],
-    edges: [],
-  };
-  const dom = await mountReact(
-    React.createElement(DagCanvasHarness, {
-      dataDir: "/workspace",
-      workflow,
-      onWorkflowChange() {},
-    }),
-    createFetchMock([]),
-  );
-
-  await dom.click(dom.byText("Triggers"));
-
-  await dom.flush();
-  assert.ok((dom.text().match(/Invocation inputs \(JSON object\)/g) ?? []).length >= 2);
-  assert.match(dom.text(), /Input bindings \(JSON object\)/);
-
-  await dom.pointer(dom.ancestor(dom.byText("Call workflow"), "ARTICLE"), "onPointerDown");
-  await dom.flush();
-  assert.match(dom.text(), /Workflow ID/);
-  assert.match(dom.text(), /Input bindings \(JSON object or quoted exact reference\)/);
-  assert.match(dom.text(), /called workflow’s immutable inputs/);
-
-  await dom.pointer(dom.ancestor(dom.byText("Call subflow"), "ARTICLE"), "onPointerDown");
-  await dom.flush();
-  assert.match(dom.text(), /Component ID/);
-  assert.match(dom.text(), /Declared outputs \(JSON object\)/);
-
-  await dom.unmount();
-});
-
-test("DagCanvas notification editor exposes every delivery channel configuration", async () => {
-  const workflow = {
-    ...workflowFixture({ id: "notifications", name: "Notifications" }),
-    nodes: [
-      {
-        id: "notify",
-        label: "Notify operators",
-        type: "notification",
-        operation: canvasModule.defaultOperation("notification"),
-        settings: {},
-        x: 0,
-        y: 0,
-      },
-    ],
-  };
-  const changes = [];
-  const dom = await mountReact(
-    React.createElement(DagCanvasHarness, {
-      dataDir: "/workspace",
-      workflow,
-      onWorkflowChange(nextWorkflow) {
-        changes.push(nextWorkflow);
-      },
-    }),
-    createFetchMock([]),
-  );
-
-  await dom.pointer(dom.ancestor(dom.byText("Notify operators"), "ARTICLE"), "onPointerDown");
-  await dom.change(dom.controlAfterLabel("Channel"), "email");
-  await dom.flush();
-  assert.ok(dom.controlAfterLabel("From address"));
-  assert.ok(dom.controlAfterLabel("Recipients"));
-  assert.ok(dom.controlAfterLabel("SMTP host"));
-  assert.ok(dom.controlAfterLabel("SMTP password or secret reference"));
-  assert.ok(dom.controlAfterLabel("Use STARTTLS"));
-  assert.ok(dom.controlAfterLabel("Network allowlist"));
-
-  await dom.change(dom.controlAfterLabel("Channel"), "webhook");
-  await dom.flush();
-  assert.ok(dom.controlAfterLabel("Webhook URL"));
-  assert.ok(dom.controlAfterLabel("Headers"));
-  assert.ok(dom.controlAfterLabel("Payload (JSON)"));
-  assert.equal(changes.at(-1).nodes[0].operation.channel, "webhook");
-
-  // The phone channel stores a notice for the paired phone; it has no destination fields.
-  await dom.change(dom.controlAfterLabel("Channel"), "phone");
-  await dom.flush();
-  assert.equal(changes.at(-1).nodes[0].operation.channel, "phone");
-  assert.throws(() => dom.controlAfterLabel("Webhook URL"));
-  assert.throws(() => dom.controlAfterLabel("SMTP host"));
-
-  await dom.change(dom.controlAfterLabel("Channel"), "__runtime_reference__");
-  await dom.flush();
-  const channelReference = dom.controlAfterLabel("Channel reference");
-  assert.equal(channelReference.value, "{{inputs.value}}");
-  await dom.focus(channelReference);
-  await dom.change(channelReference, "{{inputs.channel}}");
-  await dom.blur(channelReference);
-  assert.equal(changes.at(-1).nodes[0].operation.channel, "{{inputs.channel}}");
-
-  await dom.unmount();
+  try {
+    await dom.flush();
+    const latest = inspectorSection(await openRattishRunTab(dom, "greet"), "Latest activation");
+    assert.match(textOf(latest), /too large to show in full, so some of it was cut here/);
+  } finally {
+    await dom.unmount();
+  }
 });
 
 test("number fields accept exact runtime references only when enabled", () => {
-  assert.deepEqual(canvasModule.parseNumberDraft("{{inputs.timeout}}", 0, true), {
+  assert.deepEqual(inspectorFieldsModule.parseNumberDraft("{{inputs.timeout}}", 0, true), {
     ok: true,
     value: "{{inputs.timeout}}",
   });
-  assert.equal(canvasModule.parseNumberDraft("{{inputs.timeout}}", 0).ok, false);
-  assert.equal(canvasModule.parseNumberDraft("{{inputs.timeout}} trailing", 0, true).ok, false);
-});
-
-test("DagCanvas authors runtime generic fan-out settings", async () => {
-  const workflow = {
-    ...workflowFixture({ id: "runtime-fields", name: "Runtime fields" }),
-    nodes: [
-      {
-        id: "fan",
-        label: "Fan items",
-        type: "pass",
-        operation: canvasModule.defaultOperation("pass"),
-        settings: {},
-        x: 0,
-        y: 0,
-      },
-    ],
-  };
-  const changes = [];
-  const dom = await mountReact(
-    React.createElement(DagCanvasHarness, {
-      dataDir: "/workspace",
-      workflow,
-      onWorkflowChange(nextWorkflow) {
-        changes.push(nextWorkflow);
-      },
-    }),
-    createFetchMock([]),
-  );
-
-  await dom.pointer(dom.ancestor(dom.byText("PASS"), "ARTICLE"), "onPointerDown");
-  await dom.change(dom.controlAfterLabel("For each"), "{{inputs.items}}");
-  await dom.flush();
-  const concurrency = dom.controlAfterLabel("Fan-out max concurrency");
-  await dom.focus(concurrency);
-  await dom.change(concurrency, "{{inputs.workers}}");
-  await dom.blur(concurrency);
-  await dom.click(dom.byText("Use an exact runtime reference"));
-  await dom.flush();
-  const failFast = dom.controlAfterLabel("Fan-out fail fast reference");
-  await dom.focus(failFast);
-  await dom.change(failFast, "{{inputs.stop_early}}");
-  await dom.blur(failFast);
-  assert.equal(changes.at(-1).nodes[0].settings.forEach, "{{inputs.items}}");
-  assert.equal(changes.at(-1).nodes[0].settings.maxConcurrency, "{{inputs.workers}}");
-  assert.equal(changes.at(-1).nodes[0].settings.failFast, "{{inputs.stop_early}}");
-
-  await dom.unmount();
+  assert.equal(inspectorFieldsModule.parseNumberDraft("{{inputs.timeout}}", 0).ok, false);
+  assert.equal(inspectorFieldsModule.parseNumberDraft("{{inputs.timeout}} trailing", 0, true).ok, false);
 });
 
 test("DagCanvas retention controls send configured cleanup settings", async () => {
   const pruneCalls = [];
   const settingsChanges = [];
   const dom = await mountReact(
-    React.createElement(canvasModule.RunTimelinePanel, {
+    React.createElement(runTimelineModule.RunTimelinePanel, {
       embedded: true,
       retentionSettings: { keepDays: 7, keepFailedDays: 21, keepLast: 50 },
       text: "completed run",
@@ -11544,9 +11044,6 @@ test("commit history refreshes in the background and rows expand on click", asyn
     { desktop: { workspace } },
   );
 
-  assert.equal(codeFileExplorerModule.commitMessageBody(commit), "Full commit details.");
-  assert.equal(codeFileExplorerModule.commitMessageBody({ ...commit, message: commit.subject }), "");
-  assert.equal(codeFileExplorerModule.commitMessageBody({ ...commit, message: "A different first line\n\nMore context." }), "A different first line\n\nMore context.");
 
   const sourceControlButton = dom.byLabel("Source control");
   await dom.click(sourceControlButton);
@@ -12215,234 +11712,26 @@ test("Electron backend error IPC actions still validate the expected window and 
   );
 });
 
-test("DagCanvas helpers create default agent nodes and serialize node edits", () => {
-  const workflow = { id: "wf", agents: {}, nodes: [], edges: [] };
-  const withNode = canvasModule.addDefaultNodeToWorkflow(workflow, {
-    usedAgentIds: ["agent-1"],
-    x: 40,
-    y: 50,
-  });
-
-  assert.equal(withNode.nodes[0].id, "node-1");
-  assert.equal(withNode.nodes[0].type, "agent");
-  assert.equal(withNode.nodes[0].operation.agent_id, "agent-2");
-  assert.equal(withNode.nodes[0].x, 40);
-  assert.equal(withNode.agents["agent-2"].subscription, "codex");
-
-  const edited = canvasModule.updateWorkflowNodeOperation(withNode, "node-1", {
-    prompt_path: "prompts/review.md",
-    working_dir: "repo",
-  });
-
-  assert.equal(edited.nodes[0].operation.prompt_path, "prompts/review.md");
-  assert.equal(edited.nodes[0].operation.working_dir, "repo");
-  assert.match(edited.nodes[0].meta, /prompts\/review\.md/);
-
-  const withHttpNode = canvasModule.addDefaultNodeToWorkflow(workflow, {
-    type: "http_request",
-    x: 80,
-    y: 90,
-  });
-  assert.equal(withHttpNode.nodes[0].type, "http_request");
-  assert.equal(withHttpNode.nodes[0].operation.method, "GET");
-  assert.equal(withHttpNode.nodes[0].operation.expected_statuses[0], 200);
-  assert.match(withHttpNode.nodes[0].meta, /https:\/\/api\.example\.com\/resource/);
-
-  assert.deepEqual(canvasModule.defaultOperation("workflow"), {
-    type: "workflow",
-    workflow_id: "",
-    input_bindings: {},
-  });
-  assert.deepEqual(canvasModule.defaultOperation("subflow"), {
-    type: "subflow",
-    component_id: "",
-    source_path: "",
-    input_bindings: {},
-    output_contract: {},
-  });
-  assert.deepEqual(canvasModule.defaultOperation("notification").expected_statuses, [
-    200,
-    201,
-    202,
-    204,
-  ]);
-  assert.equal(canvasModule.defaultOperation("notification").smtp_port, 587);
-});
-
-test("DagCanvas helper duplicates nodes with unique ids and agent configs", () => {
-  const workflow = {
-    id: "wf",
-    agents: {
-      "agent-1": { subscription: "codex", model: "gpt-5" },
-    },
-    nodes: [
-      {
-        id: "node-1",
-        type: "agent",
-        label: "Review",
-        operation: { type: "agent", agent_id: "agent-1", prompt: "Read this" },
-        x: 10,
-        y: 20,
-      },
-    ],
-    edges: [],
-  };
-
-  const duplicated = canvasModule.duplicateWorkflowNode(workflow, "node-1");
-
-  assert.deepEqual(duplicated.nodes.map((node) => node.id), ["node-1", "node-2"]);
-  assert.equal(duplicated.nodes[1].label, "Review copy");
-  assert.equal(duplicated.nodes[1].operation.agent_id, "agent-2");
-  assert.equal(duplicated.agents["agent-2"].subscription, "codex");
-  assert.equal(duplicated.nodes[1].x, 38);
-  assert.equal(duplicated.nodes[1].y, 48);
-});
-
 test("DagCanvas HTTP JSON body editor preserves nested values and rejects invalid text", () => {
   const body = {
     issue: { title: "Bug", labels: ["api", "urgent"] },
     count: 2,
     active: true,
   };
-  const text = canvasModule.formatJsonBodyEditorValue(body);
+  const text = inspectorFieldsModule.formatJsonBodyEditorValue(body);
   assert.match(text, /"labels": \[/);
-  assert.deepEqual(canvasModule.parseJsonBodyEditorValue(text), {
+  assert.deepEqual(inspectorFieldsModule.parseJsonBodyEditorValue(text), {
     ok: true,
     value: body,
   });
-  assert.deepEqual(canvasModule.parseJsonBodyEditorValue(""), {
+  assert.deepEqual(inspectorFieldsModule.parseJsonBodyEditorValue(""), {
     ok: true,
     value: null,
   });
-  assert.equal(canvasModule.parseJsonBodyEditorValue("{broken").ok, false);
+  assert.equal(inspectorFieldsModule.parseJsonBodyEditorValue("{broken").ok, false);
 });
 
-test("DagCanvas exposes HTTP response fields as selectable outputs", () => {
-  const fields = canvasModule.nodeOutputFields({
-    id: "call-api",
-    type: "http_request",
-    operation: { type: "http_request" },
-  });
-  const paths = new Set(fields.map(([pathValue]) => pathValue));
-
-  assert(paths.has("data.status"));
-  assert(paths.has("data.headers"));
-  assert(paths.has("data.body"));
-  assert(paths.has("data.json"));
-  assert(paths.has("data.selected"));
-});
-
-test("DagCanvas exposes approval and notification fields as selectable outputs", () => {
-  const approvalFields = canvasModule.nodeOutputFields({
-    id: "approval",
-    type: "approval_gate",
-    operation: { type: "approval_gate" },
-  });
-  const approvalPaths = new Set(approvalFields.map(([pathValue]) => pathValue));
-  assert(approvalPaths.has("data.decision"));
-  assert(approvalPaths.has("data.decidedBy"));
-  assert(approvalPaths.has("data.notes"));
-
-  const notificationFields = canvasModule.nodeOutputFields({
-    id: "notify",
-    type: "notification",
-    operation: { type: "notification" },
-  });
-  const notificationPaths = new Set(notificationFields.map(([pathValue]) => pathValue));
-  assert(notificationPaths.has("data.title"));
-  assert(notificationPaths.has("data.body"));
-  assert(notificationPaths.has("data.channel"));
-});
-
-test("DagCanvas exposes local vector index and search quality fields", () => {
-  const vectorFields = canvasModule.nodeOutputFields({
-    id: "index",
-    type: "local_vectorize",
-    operation: { type: "local_vectorize" },
-  });
-  const vectorPaths = new Set(vectorFields.map(([pathValue]) => pathValue));
-  assert(vectorPaths.has("data.indexed_file_count"));
-  assert(vectorPaths.has("data.current"));
-  assert(vectorPaths.has("data.stale_files"));
-  assert(vectorPaths.has("data.strategy"));
-
-  const searchFields = canvasModule.nodeOutputFields({
-    id: "search",
-    type: "local_search",
-    operation: { type: "local_search" },
-  });
-  const searchPaths = new Set(searchFields.map(([pathValue]) => pathValue));
-  assert(searchPaths.has("data.score_threshold"));
-  assert(searchPaths.has("data.strategy"));
-
-  const workflow = {
-    id: "wf",
-    agents: {},
-    nodes: [],
-    edges: [],
-  };
-  const withVector = canvasModule.addDefaultNodeToWorkflow(workflow, {
-    type: "local_vectorize",
-    x: 0,
-    y: 0,
-  });
-  assert.equal(withVector.nodes[0].operation.mode, "incremental");
-  const withSearch = canvasModule.addDefaultNodeToWorkflow(workflow, {
-    type: "local_search",
-    x: 0,
-    y: 0,
-  });
-  assert.equal(withSearch.nodes[0].operation.score_threshold, 0);
-  assert.equal(withSearch.nodes[0].operation.include_snippets, true);
-  assert.equal(withSearch.nodes[0].operation.include_file_metadata, true);
-});
-
-test("DagCanvas helpers persist graph positions and create/remove edges", () => {
-  let workflow = {
-    id: "wf",
-    agents: {},
-    nodes: [
-      { id: "a", type: "bash_command", label: "A", operation: { type: "bash_command" }, x: 1, y: 2 },
-      { id: "b", type: "agent", label: "B", operation: { type: "agent" }, x: 20, y: 30 },
-    ],
-    edges: [],
-  };
-
-  workflow = canvasModule.moveWorkflowNode(workflow, "a", { x: 9, y: 10 });
-  assert.equal(workflow.nodes[0].x, 10);
-  assert.equal(workflow.nodes[0].y, 12);
-
-  workflow = canvasModule.addWorkflowEdge(workflow, "a", "b", "output_matches", "ready");
-  assert.equal(workflow.edges[0].id, "a-b");
-  assert.equal(workflow.edges[0].label, "matches ready");
-  assert.equal(workflow.edges[0].outputPattern, "ready");
-
-  const typedWorkflow = canvasModule.addWorkflowEdge(
-    { ...workflow, edges: [] },
-    "a",
-    "b",
-    "output_field",
-    null,
-    "score",
-    "greater_than",
-    7,
-  );
-  assert.equal(typedWorkflow.edges[0].label, "score greater than 7");
-  assert.equal(
-    canvasModule.edgeLabel("output_field", null, "verdict", "equals", "approved"),
-    'verdict equals "approved"',
-  );
-  assert.equal(
-    canvasModule.edgeLabel("output_field", null, "findings", "exists", null),
-    "findings exists",
-  );
-
-  workflow = canvasModule.removeWorkflowNode(workflow, "a");
-  assert.deepEqual(workflow.nodes.map((node) => node.id), ["b"]);
-  assert.deepEqual(workflow.edges, []);
-});
-
-test("DagCanvas layout, search, and fit helpers handle large directed graphs deterministically", () => {
+test("DagCanvas layout and fit helpers handle large directed graphs deterministically", () => {
   const workflow = {
     id: "wf",
     agents: {},
@@ -12501,9 +11790,6 @@ test("DagCanvas layout, search, and fit helpers handle large directed graphs det
   assert.equal(byId.finalize.x, 650);
   assert.ok(byId.archive.y < byId["read-doc"].y);
   assert.deepEqual(laidOut.edges, workflow.edges);
-  assert.deepEqual(canvasModule.matchingNodeIds(workflow.nodes, "writer"), ["finalize"]);
-  assert.deepEqual(canvasModule.matchingNodeIds(workflow.nodes, "docs/spec"), ["read-doc"]);
-  assert.deepEqual(canvasModule.matchingNodeIds(workflow.nodes, "move_file"), ["archive"]);
 
   const fit = canvasModule.fitViewportToNodes(laidOut.nodes, { width: 900, height: 420 }, { padding: 40 });
   assert.ok(fit.scale >= 0.45 && fit.scale <= 1.8);
@@ -12862,6 +12148,7 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
     "searchProject",
     "selectPath",
     "trustProjectRoot",
+    "undoReplace",
     "watchGit",
   ]);
   assert.deepEqual(Object.keys(exposed.goferDesktop.textFiles).sort(), ["closePreview", "openPreview", "read", "readAttachment", "readPreview", "write"]);
@@ -12909,7 +12196,6 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
     "onMedia",
     "onOpenFile",
     "onOpenTab",
-    "onPrompt",
     "onState",
     "openBlockedPopup",
     "openExternal",
@@ -12917,7 +12203,6 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
     "pauseRem",
     "place",
     "platform",
-    "preloadPath",
     "print",
     "recover",
     "reload",
@@ -12943,12 +12228,10 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
   ]);
   assert.deepEqual(Object.keys(exposed.goferUpdates).sort(), [
     "check",
-    "dismissReminder",
     "downloadAndInstall",
     "getState",
     "installDownloaded",
     "onState",
-    "openRelease",
     "setAutomatic",
   ]);
   // Only a real true turns automatic update checks on.
@@ -13159,6 +12442,10 @@ test("Electron preload keeps file grants private while attaching them to later c
   assert.deepEqual(toPlainObject(await exposed.goferDesktop.workspace.replaceProject("/outside/shared", { query: "hello", replacement: "hi", files: [], grantId: "spoofed" })), {
     channel: "gofer:replace-project",
     payload: { projectRoot: "/outside/shared", query: "hello", replacement: "hi", files: [], grantId: "grant-1" },
+  });
+  assert.deepEqual(toPlainObject(await exposed.goferDesktop.workspace.undoReplace("/outside/shared")), {
+    channel: "gofer:undo-replace",
+    payload: { projectRoot: "/outside/shared", grantId: "grant-1" },
   });
   assert.deepEqual(toPlainObject(await exposed.goferDesktop.workspace.listDirectory({ currentPath: "/outside/shared" })), {
     channel: "gofer:list-directory",
@@ -13393,7 +12680,7 @@ function DagCanvasHarness({
 
   async function handleRattishMutation(mutations) {
     const nextDocument = await onRattishMutation?.(mutations);
-    if (nextDocument) {
+    if (nextDocument && !nextDocument.error) {
       setCurrentRattishDocument(nextDocument);
       setCurrentWorkflow((current) => appModule.rattishGraphWorkflow(current, nextDocument));
     }
@@ -13428,75 +12715,6 @@ function DagCanvasHarness({
     onDecideApproval: onDecideApproval ?? (() => {}),
     onWorkflowChange: handleChange,
   });
-}
-
-async function openWorkflowSettingsFromMenu(dom) {
-  assert.equal(
-    allElements(dom.container).some((element) =>
-      String(element.getAttribute?.("title") ?? "").startsWith("Show workflow settings")),
-    false,
-  );
-  await dom.click(dom.byTitle("More graph actions"));
-  await dom.click(dom.byText("Workflow settings"));
-}
-
-function headingByText(dom, text) {
-  return allElements(dom.container).find(
-    (element) => element.tagName === "H2" && textOf(element) === text,
-  );
-}
-
-function InspectorDraftHarness({ changes }) {
-  const [keyValue, setKeyValue] = React.useState({});
-  const [list, setList] = React.useState([]);
-  const [number, setNumber] = React.useState(3);
-  const [pathValue, setPathValue] = React.useState("scripts/run.sh");
-
-  return React.createElement(
-    "div",
-    null,
-    React.createElement(canvasModule.NumberField, {
-      label: "Draft number",
-      min: "-10",
-      step: "0.1",
-      value: number,
-      onChange(nextValue) {
-        changes.number.push(nextValue);
-        setNumber(nextValue);
-      },
-    }),
-    React.createElement(
-      "button",
-      { type: "button", onClick: () => setNumber(11) },
-      "Update number externally",
-    ),
-    React.createElement(canvasModule.ListField, {
-      label: "Draft list",
-      value: list,
-      onChange(nextValue) {
-        changes.list.push(nextValue);
-        setList(nextValue);
-      },
-    }),
-    React.createElement(canvasModule.KeyValueField, {
-      label: "Draft key/value",
-      value: keyValue,
-      onChange(nextValue) {
-        changes.keyValue.push(nextValue);
-        setKeyValue(nextValue);
-      },
-    }),
-    React.createElement(canvasModule.TextField, {
-      label: "Draft path",
-      pathBasePath: "/workspace",
-      pathPicker: true,
-      value: pathValue,
-      onChange(nextValue) {
-        changes.path.push(nextValue);
-        setPathValue(nextValue);
-      },
-    }),
-  );
 }
 
 function workflowFixture({ id = "demo", name = "Demo", label = "Run command", status = "Ready" } = {}) {
@@ -13535,18 +12753,6 @@ function jsonResponse(url, payload, { method = "GET", ok = true, status = ok ? 2
       ok,
       status,
       json: async () => payload,
-    };
-  };
-}
-
-function saveWorkflowResponse() {
-  return (url, options = {}) => {
-    if (!url.startsWith("/api/workflows/") || options.method !== "PUT") return null;
-    const workflow = JSON.parse(options.body);
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({ workflow }),
     };
   };
 }
@@ -13705,7 +12911,7 @@ function experimentalPluginStorage() {
   return { [settingsModule.SETTINGS_STORAGE_KEY]: JSON.stringify({ plugins: { enabled: EXPERIMENTAL_PLUGINS_ON } }) };
 }
 
-async function mountReact(element, fetchMock, { browser, desktop = {}, storage = {} } = {}) {
+async function mountReact(element, fetchMock, { browser, desktop = {}, storage = {}, updates } = {}) {
   const dom = installTestDom();
   const { createRoot } = require("react-dom/client");
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -13714,11 +12920,12 @@ async function mountReact(element, fetchMock, { browser, desktop = {}, storage =
   globalThis.window.goferApiBaseUrl = undefined;
   globalThis.window.goferBrowser = browser;
   globalThis.window.goferDesktop = desktop;
-  globalThis.window.goferUpdates = undefined;
+  globalThis.window.goferUpdates = updates;
   for (const [key, value] of Object.entries(storage)) {
     globalThis.window.localStorage.setItem(key, value);
   }
-  globalThis.window.confirm = () => true;
+  // Screens ask in ConfirmDialog; a native box would mean a screen went back to it.
+  globalThis.window.confirm = (message) => assert.fail(`Raticode asks in its own dialog, not window.confirm: ${message}`);
   globalThis.window.requestAnimationFrame = (callback) => {
     callback();
     return 1;
@@ -14209,6 +13416,63 @@ function textOf(node) {
   return node.textContent ?? "";
 }
 
+// The app asks before risky actions in its own dialog (ConfirmDialog.jsx), not window.confirm.
+function confirmDialogIn(dom) {
+  return allElements(dom.container).find(node => node.getAttribute?.("data-testid") === "confirm-dialog");
+}
+
+// Presses the open confirm dialog's action (accept) or "Keep as is", and returns what it asked.
+async function answerConfirm(dom, accept) {
+  for (let i = 0; i < 5 && !confirmDialogIn(dom); i++) await dom.flush();
+  const dialog = confirmDialogIn(dom);
+  assert.ok(dialog, "an in-app confirm dialog is open");
+  const [keep, action] = allElements(dialog).filter(node => node.tagName === "BUTTON");
+  const asked = { message: textOf(allElements(dialog).find(node => node.tagName === "P")), confirmLabel: textOf(action) };
+  await dom.click(accept ? action : keep);
+  for (let i = 0; i < 3; i++) await dom.flush();
+  return asked;
+}
+
+// The open confirm dialog's tone: "danger" for actions that lose data, else "primary".
+async function confirmTone(dom) {
+  for (let i = 0; i < 5 && !confirmDialogIn(dom); i++) await dom.flush();
+  const action = allElements(confirmDialogIn(dom)).filter(node => node.tagName === "BUTTON")[1];
+  return /ui-button--danger/.test(action.getAttribute("class")) ? "danger" : "primary";
+}
+
+// Presses a dialog's overlay the way a click lands: pointer down, then the click. A
+// `startedOn` node is where the pointer went down, as when a text selection is dragged out.
+async function pressOverlay(dom, overlay, startedOn = overlay) {
+  await dom.pointer(overlay, "onPointerDown", { target: startedOn });
+  await dom.click(overlay);
+}
+
+// Types into a field the way React delivers it: the field's onChange, then each ancestor's
+// as the change bubbles up (Second Brain's dialogs notice a change on their panel).
+async function typeBubbling(node, value) {
+  await React.act(async () => {
+    node.value = value;
+    for (let current = node; current; current = current.parentNode) {
+      const key = Object.keys(current).find(candidate => candidate.startsWith("__reactProps$"));
+      if (key) current[key].onChange?.({ target: node, currentTarget: current });
+    }
+  });
+}
+
+// Answers the "Discard?" question a changed dialog asks on Escape and returns what it showed.
+async function answerDiscard(dom, discard) {
+  for (let i = 0; i < 5 && !confirmDialogIn(dom); i++) await dom.flush();
+  const dialog = confirmDialogIn(dom);
+  assert.ok(dialog, "Escape asks before discarding");
+  const buttons = allElements(dialog).filter(node => node.tagName === "BUTTON");
+  const shown = { message: textOf(allElements(dialog).find(node => node.tagName === "P")), buttons: buttons.map(textOf), focused: document.activeElement === buttons[0] };
+  await dom.click(discard ? buttons[1] : buttons[0]);
+  for (let i = 0; i < 3; i++) await dom.flush();
+  return shown;
+}
+
+const modalPanel = dom => allElements(dom.container).find(node => node.getAttribute?.("role") === "dialog" && node.getAttribute("aria-modal") === "true" && !node.getAttribute("data-testid"));
+
 function threadGroupSection(dom, label) {
   return allElements(dom.container).find(node => node.tagName === "SECTION" && node.getAttribute?.("aria-label") === `${label} threads`);
 }
@@ -14225,10 +13489,10 @@ async function openThreadGroup(dom, label) {
 
 test("Rem pages older threads and bumps active history without loading messages", async () => {
   const threads = Array.from({ length: 31 }, (_, index) => ({ id: `t${index}`, title: `Thread ${index}`, updatedAt: new Date(2026, 0, 31 - index).toISOString() }));
-  const bumped = appModule.bumpChatThread(threads, "t30", "2026-09-08T12:00:00Z");
+  const bumped = chatThreadsModule.bumpChatThread(threads, "t30", "2026-09-08T12:00:00Z");
   assert.equal(bumped[0].id, "t30");
   assert.deepEqual(bumped.slice(1).map((thread) => thread.id), threads.slice(0, 30).map((thread) => thread.id));
-  const dom = await mountReact(React.createElement(appModule.ThreadList, { threads: bumped, onOpen() {}, onDelete() {} }), createFetchMock([]));
+  const dom = await mountReact(React.createElement(chatPaneModule.ThreadList, { threads: bumped, onOpen() {}, onDelete() {} }), createFetchMock([]));
   assert.equal(dom.allByTitle("Archive thread").length, 15);
   await dom.click(dom.byText("Show older threads"));
   assert.equal(dom.allByTitle("Archive thread").length, 30);
@@ -14243,7 +13507,7 @@ test("thread rows show each thread's scope beside its date", async () => {
     { id: "global", title: "Global thread", updatedAt: "2026-10-28T09:00:00Z", projectRoot: "", scopeMode: "global" },
     { id: "none", title: "Unscoped thread", updatedAt: "2026-10-28T08:00:00Z", projectRoot: "" },
   ];
-  const dom = await mountReact(React.createElement(appModule.ThreadList, { threads, onOpen() {}, onDelete() {} }), createFetchMock([]));
+  const dom = await mountReact(React.createElement(chatPaneModule.ThreadList, { threads, onOpen() {}, onDelete() {} }), createFetchMock([]));
   try {
     const badges = allElements(dom.container).filter(node => node.getAttribute?.("data-thread-scope"));
     assert.deepEqual(badges.map(node => [node.getAttribute("data-thread-scope"), node.textContent, node.getAttribute("title")]), [
@@ -14259,7 +13523,7 @@ test("Rem large pastes become text attachments without entering the draft", asyn
   assert.equal(await file.text(), text);
   assert.equal(file.type, "text/plain");
   assert.equal(chatAttachmentsModule.largePasteFile("small edit"), null);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { workflows: [], width: 380 }), createFetchMock([jsonResponse("/api/provider/capabilities", { providers: [] })]));
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { workflows: [], width: 380 }), createFetchMock([jsonResponse("/api/provider/capabilities", { providers: [] })]));
   const pane = allElements(dom.container).find((node) => node.getAttribute?.("data-chat-pane") === "true");
   await dom.pointer(pane, "onPaste", { clipboardData: { items: [], getData: () => text } });
   assert.equal(dom.first("textarea").value, "");
@@ -14436,6 +13700,141 @@ test("Rem tools list Second Brains on by default only while Settings > Memory en
   } finally { await off.unmount(); resetSecondBrainStore(); }
 });
 
+test("Second Brain version dialogs load a document's stored versions when they open", async () => {
+  const { default: SecondBrainDialogs } = await viteServer.ssrLoadModule("/src/components/SecondBrainDialogs.jsx");
+  const store = await viteServer.ssrLoadModule("/src/lib/secondBrainStore.js");
+  const brain = { id: "brain-1", name: "Notes", root: "/notes", state: "available", settings: {}, index: {} };
+  const doc = { id: "doc-1", brainId: brain.id, title: "Plan", path: "plan.md", type: "markdown", version: "v2", dates: { modified: "2026-11-20T00:00:00Z" }, passageCount: 1, versionCount: 1, historySize: 60 };
+  const snapshot = { brains: [brain], activeBrainId: brain.id, documents: [doc], collections: [], savedSearches: [], reports: [], citations: [], jobs: [], projects: [], topics: [], health: [], families: [], tasks: [], views: {}, revision: "1.a.1" };
+  const history = createDeferred();
+  const asked = [];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/second-brains", { result: snapshot }),
+    (url, options = {}) => {
+      if (url !== "/api/second-brains" || options.method !== "POST") return null;
+      const { action, params } = JSON.parse(options.body);
+      if (action !== "passages") return null;
+      asked.push(params);
+      const result = { documents: [{ id: doc.id, brainId: brain.id, version: "v2", blocks: [{ id: "b1", heading: "Plan", text: "Ship on Friday." }] }], missing: [] };
+      if (!params.history) return { ok: true, status: 200, json: async () => ({ result }) };
+      return { ok: true, status: 200, json: async () => { await history.promise; return { result: { ...result, documents: [{ ...result.documents[0], versions: [{ hash: "v1", at: "2026-11-01T00:00:00Z", note: "First draft", blocks: { b1: "Ship on Monday." } }] }] } }; } };
+    },
+  ]);
+  store.resetSecondBrainStore();
+  const dom = await mountReact(React.createElement(SecondBrainDialogs, { provider: { id: "codex", name: "Codex", model: "cli-default" } }), fetchMock);
+  try {
+    await React.act(async () => { await store.refreshLibrary({ initial: true }); });
+    assert.deepEqual(asked, [{ ids: ["doc-1"] }], "the snapshot's passages come in one batch, without history");
+    // The reader's Compare with current.
+    await React.act(async () => { store.openDialog("version-diff", { docId: doc.id, from: "v1" }); });
+    assert.match(dom.text(), /Loading older versions/);
+    await React.act(async () => { history.resolve(); });
+    await dom.flush(10);
+    assert.deepEqual(asked.at(-1), { ids: ["doc-1"], history: true });
+    assert.match(dom.text(), /Version v1/);
+    assert.match(dom.text(), /Ship on Monday\./);
+    assert.match(dom.text(), /Ship on Friday\./);
+    // A report's changed citation opens the same dialog; the versions are already here.
+    await React.act(async () => { store.closeDialog(); });
+    const citation = { id: "cit-1", docId: doc.id, blockId: "b1", quote: "Ship on Monday", version: "v1", state: "changed" };
+    await React.act(async () => { store.openDialog("version-diff", { docId: doc.id, from: "v1", blockId: "b1", citation, reportId: "report-1" }); });
+    assert.doesNotMatch(dom.text(), /Loading older versions/);
+    assert.match(dom.text(), /no longer appears/);
+    assert.equal(asked.length, 2, "the stored versions were fetched once");
+  } finally { await dom.unmount(); store.resetSecondBrainStore(); }
+});
+
+test("Second Brain dialogs stay open on a press outside once a field changes, and Escape asks first", async () => {
+  const { default: SecondBrainDialogs } = await viteServer.ssrLoadModule("/src/components/SecondBrainDialogs.jsx");
+  const store = await viteServer.ssrLoadModule("/src/lib/secondBrainStore.js");
+  const brain = { id: "brain-1", name: "Notes", root: "/notes", state: "available", settings: {}, index: {} };
+  const snapshot = { brains: [brain], activeBrainId: brain.id, documents: [], collections: [], savedSearches: [], reports: [], citations: [], jobs: [], projects: [], topics: [], health: [], families: [], tasks: [], views: {}, revision: "1.a.1" };
+  const fetchMock = createFetchMock([jsonResponse("/api/second-brains", { result: snapshot })]);
+  store.resetSecondBrainStore();
+  const dom = await mountReact(React.createElement(SecondBrainDialogs, { provider: { id: "codex", name: "Codex", model: "cli-default" } }), fetchMock);
+  const open = () => /Captured sources wait in Inbox/.test(dom.text());
+  try {
+    await React.act(async () => { await store.refreshLibrary({ initial: true }); });
+    await React.act(async () => { store.openDialog("capture"); });
+    assert.ok(open());
+    await pressOverlay(dom, modalPanel(dom).parentNode);
+    assert.ok(!open(), "an untouched dialog closes on a press outside");
+
+    await React.act(async () => { store.openDialog("capture"); });
+    await typeBubbling(dom.controlAfterLabel("Page address"), "https://example.com/notes");
+    await pressOverlay(dom, modalPanel(dom).parentNode, dom.controlAfterLabel("Page address"));
+    await pressOverlay(dom, modalPanel(dom).parentNode);
+    assert.ok(open(), "a press outside keeps the typed address");
+    assert.equal(dom.controlAfterLabel("Page address").value, "https://example.com/notes");
+
+    await dom.keyDown(modalPanel(dom), "Escape");
+    assert.deepEqual(await answerDiscard(dom, false), { message: "Discard what you entered in this dialog?", buttons: ["Keep editing", "Discard"], focused: true });
+    assert.ok(open());
+    assert.equal(dom.controlAfterLabel("Page address").value, "https://example.com/notes");
+    await dom.keyDown(modalPanel(dom), "Escape");
+    await answerDiscard(dom, true);
+    assert.ok(!open(), "Discard closes it");
+  } finally { await dom.unmount(); store.resetSecondBrainStore(); }
+});
+
+test("Second Brain Delete collection offers Undo on a notice that stays at least 10 seconds", async () => {
+  const { default: SecondBrainWorkspace } = await viteServer.ssrLoadModule("/src/components/SecondBrainWorkspace.jsx");
+  const store = await viteServer.ssrLoadModule("/src/lib/secondBrainStore.js");
+  const brain = { id: "brain-1", name: "Notes", root: "/notes", state: "available", settings: {}, index: { state: "ready" } };
+  const collection = { id: "col-1", brainId: brain.id, name: "Reading list", brief: "What to read", updated: "2026-11-20T00:00:00Z", sections: [{ id: "sec-1", title: "Evidence", items: [] }], questions: [] };
+  // The library service: mutate writes go to this copy and later snapshots return it.
+  const server = { brains: [brain], activeBrainId: brain.id, documents: [], collections: [collection], savedSearches: [], reports: [], citations: [], jobs: [], projects: [], topics: [], health: [], families: [], tasks: [], views: {}, revision: "1" };
+  const mutations = [];
+  const fetchMock = createFetchMock([
+    (url, options = {}) => {
+      if (!url.startsWith("/api/second-brains")) return null;
+      let result = structuredClone(server);
+      if (options.method === "POST") {
+        const { action, params } = JSON.parse(options.body);
+        result = {};
+        if (action === "mutate") {
+          mutations.push(params);
+          const rest = server[params.kind].filter(item => item.id !== params.id);
+          server[params.kind] = params.delete ? rest : [...rest, params.item];
+          server.revision = String(Number(server.revision) + 1);
+        }
+      }
+      return { ok: true, status: 200, json: async () => ({ result }) };
+    },
+  ]);
+  store.resetSecondBrainStore();
+  const dom = await mountReact(React.createElement(SecondBrainWorkspace, { onClose() {} }), fetchMock);
+  try {
+    for (let attempt = 0; attempt < 60 && !store.getState().loaded; attempt++) await dom.flush();
+    await React.act(async () => { store.navigate("collections", { collectionId: collection.id }); });
+    await dom.click(dom.byLabel("More collection actions"));
+    await dom.click(dom.ancestor(dom.byExactText("Delete collection"), "BUTTON"));
+    await React.act(async () => { await store.flushLibraryWrites(); });
+    assert.deepEqual(mutations.at(-1), { kind: "collections", id: collection.id, delete: true });
+    assert.match(dom.text(), /Deleted collection “Reading list”\./);
+    assert.match(dom.text(), /All collections|No collections yet/, "the page went back to the list");
+    // Every timer up to 9.999 seconds runs: the notice and its Undo button are still there.
+    await dom.flush(9999);
+    assert.match(dom.text(), /Deleted collection “Reading list”\./);
+    const toast = dom.ancestor(dom.byExactText("Undo"), node => node.getAttribute?.("class") === "sb-toast");
+    // While the pointer is on it, even the 10-second timer doesn't close it.
+    await dom.pointer(toast, "onMouseEnter");
+    await dom.flush(60000);
+    assert.match(dom.text(), /Deleted collection “Reading list”\./);
+    await dom.pointer(toast, "onMouseLeave");
+    await dom.click(dom.ancestor(dom.byExactText("Undo"), "BUTTON"));
+    await React.act(async () => { await store.flushLibraryWrites(); });
+    assert.doesNotMatch(dom.text(), /Deleted collection/);
+    assert.deepEqual(mutations.at(-1), { kind: "collections", id: collection.id, item: collection });
+    assert.deepEqual(store.getState().collections, [collection]);
+    assert.equal(store.viewFor(store.getState()).collectionId, "", "Undo restores without opening the collection again");
+    // A notice left alone closes after its 10 seconds.
+    await React.act(async () => { store.deleteCollection(collection.id); });
+    await dom.flush(10000);
+    assert.doesNotMatch(dom.text(), /Deleted collection/);
+  } finally { await dom.unmount(); store.resetSecondBrainStore(); }
+});
+
 test("Rem tools fall back to selection-only entries when the library is unavailable", async () => {
   const { default: RemResources } = await viteServer.ssrLoadModule("/src/components/RemResources.jsx");
   let saved;
@@ -14537,15 +13936,15 @@ test("Rem migrates history once and loads only requested metadata pages", () => 
   const stored = new Map([["gofer-flow-chat-threads", JSON.stringify(legacy)]]);
   const reads = [];
   window.localStorage = { getItem: (key) => { reads.push(key); return stored.get(key) || null; }, setItem: (key, value) => stored.set(key, value), removeItem: (key) => stored.delete(key) };
-  assert.equal(appModule.loadChatThreads().length, 15);
+  assert.equal(chatThreadsModule.loadChatThreads().length, 15);
   reads.length = 0;
-  const recent = appModule.loadChatThreads();
+  const recent = chatThreadsModule.loadChatThreads();
   assert.equal(reads.filter((key) => key.startsWith("gofer-flow-chat-thread-meta:")).length, 15);
-  assert.equal(appModule.loadChatThreads(30).length, 30);
-  appModule.persistChatThreads(appModule.bumpChatThread(recent, "thread-5", "2026-09-08T12:00:00Z"));
-  assert.equal(appModule.chatThreadIndex().length, 35);
-  assert.equal(appModule.loadChatThreads()[0].id, "thread-5");
-  assert.deepEqual(appModule.loadChatThreads()[0].resources, legacy[5].resources);
+  assert.equal(chatThreadsModule.loadChatThreads(30).length, 30);
+  chatThreadsModule.persistChatThreads(chatThreadsModule.bumpChatThread(recent, "thread-5", "2026-09-08T12:00:00Z"));
+  assert.equal(chatThreadsModule.chatThreadIndex().length, 35);
+  assert.equal(chatThreadsModule.loadChatThreads()[0].id, "thread-5");
+  assert.deepEqual(chatThreadsModule.loadChatThreads()[0].resources, legacy[5].resources);
 });
 
 test("browser Ctrl+T always yields to the terminal command", () => {
@@ -14630,7 +14029,8 @@ test("conversation archive retains structured revisions, attachments, and determ
     archiveConversation(archive, thread, [{ ...messages[0], body: "Use Postgres" }], { dataDir: root, deleted: true });
     assert.ok(fs.readFileSync(journal, "utf8").startsWith(original));
     const index = JSON.parse(fs.readFileSync(path.join(archive, "index.json"), "utf8"));
-    assert.equal(index.threads[id].deleted, true); assert.ok(index.threads[id].terms.includes("postgres"));
+    assert.equal(index.threads[id].deleted, true); assert.equal("terms" in index.threads[id], false);
+    assert.ok(fs.readFileSync(path.join(archive, "threads", `${id}.terms`), "utf8").split("\n").includes("postgres"));
     // Missing snapshots are recovered from the journal without replacing history.
     fs.unlinkSync(snapshot);
     archiveConversation(archive, thread, [{ ...messages[0], body: "Use Postgres" }], { dataDir: root, deleted: true });
@@ -14840,11 +14240,12 @@ test("source control bulk actions stay within their group and confirm discards o
     await dom.click(dom.byLabel("Source control")); await showSourceChanges(dom);
     await dom.flush();
     window.dispatchEvent = () => true;
-    window.confirm = (message) => { confirmations.push(message); return false; };
     assert.equal(dom.byText("Changes").textContent, "Changes");
     await dom.click(dom.byLabel("Discard all unstaged changes"));
+    const kept = await answerConfirm(dom, false);
+    confirmations.push(kept.message);
+    assert.equal(kept.confirmLabel, "Discard changes");
     assert.deepEqual(actions, []);
-    window.confirm = (message) => { confirmations.push(message); return true; };
     await dom.click(dom.byLabel("Stage all changes"));
     await dom.flush();
     assert.deepEqual(actions.splice(0), [["stage", "one.txt"], ["stage", "two.txt"]]);
@@ -14853,6 +14254,7 @@ test("source control bulk actions stay within their group and confirm discards o
     await dom.flush();
     assert.deepEqual(actions.splice(0), [["unstage", "staged.txt"], ["unstage", "one.txt"], ["unstage", "two.txt"]]);
     await dom.click(dom.byLabel("Discard all unstaged changes"));
+    confirmations.push((await answerConfirm(dom, true)).message);
     await dom.flush();
     assert.deepEqual(actions.splice(0), [["revert", "staged.txt"], ["revert", "one.txt"], ["revert", "two.txt"]]);
     assert.equal(confirmations.length, 2);
@@ -14862,6 +14264,7 @@ test("source control bulk actions stay within their group and confirm discards o
     await dom.click(dom.byLabel("Refresh source control"));
     await dom.flush();
     await dom.click(dom.byLabel("Discard all staged changes"));
+    confirmations.push((await answerConfirm(dom, true)).message);
     await dom.flush();
     assert.deepEqual(actions.splice(0), [["revert-staged", "staged.txt"]]);
     assert.ok(dom.byLabel("Stage one.txt"));
@@ -14870,6 +14273,7 @@ test("source control bulk actions stay within their group and confirm discards o
     await dom.flush();
     await dom.click(dom.byLabel("Discard all staged changes"));
     assert.deepEqual(actions, []);
+    assert.equal(confirmDialogIn(dom), undefined);
     assert.equal(confirmations.length, 3);
     assert.ok(dom.byText("Technical details"));
   } finally { await dom.unmount(); }
@@ -14984,8 +14388,6 @@ test("project search sends regex and exclusion drafts and replaces a file", asyn
   const originalDispatch = window.dispatchEvent;
   const events = [];
   window.dispatchEvent = (event) => { events.push(event); return true; };
-  const originalConfirm = window.confirm;
-  window.confirm = () => true;
   try {
     await dom.click(dom.byLabel("Search"));
     await dom.change(dom.byLabel("Search project"), "(hello)");
@@ -15015,6 +14417,7 @@ test("project search sends regex and exclusion drafts and replaces a file", asyn
     await dom.change(replacement, "$1!");
     replacement.blur();
     await dom.click(dom.byLabel("Replace matches in example.js"));
+    assert.deepEqual(await answerConfirm(dom, true), { message: "Replace 1 match in 1 file? This changes files on disk.", confirmLabel: "Replace in 1 file" });
     await dom.flush();
     assert.deepEqual(events.map((event) => event.detail.busy), [true, false]);
     assert.equal(replacements[0].include, "src/**, *.js");
@@ -15022,7 +14425,7 @@ test("project search sends regex and exclusion drafts and replaces a file", asyn
     assert.deepEqual(replacements[0].files, [{ path: file.path, hash: "snapshot" }]);
     assert.equal(changed.at(-1).rootPath, "/workspace/project");
     assert.ok(dom.byText("Replaced 1 match in 1 file."));
-  } finally { window.confirm = originalConfirm; window.dispatchEvent = originalDispatch; await dom.unmount(); }
+  } finally { window.dispatchEvent = originalDispatch; await dom.unmount(); }
 });
 
 test("search UI applies regex queries and regex exclusions through the real worker", async () => {
@@ -15072,6 +14475,56 @@ test("search UI applies regex queries and regex exclusions through the real work
   } finally { await dom.unmount(); fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("project search previews each replacement with regex captures and undoes Replace all", async () => {
+  const { searchProject, replaceProject, undoReplace } = require("../../electron/project-search.cjs");
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "raticode-replace-preview-")));
+  fs.writeFileSync(path.join(root, "a.py"), "say(hello12) say(hello3)\n");
+  fs.writeFileSync(path.join(root, "b.py"), "hello7\n");
+  const searches = [];
+  const workspace = {
+    trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }), gitStatus: async () => ({ active: false, entries: [] }),
+    searchProject: (searchRoot, options) => { searches.push(options); return searchProject(searchRoot, options); },
+    replaceProject, undoReplace,
+  };
+  const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: root } }), createFetchMock([]), { desktop: { workspace } });
+  const tagged = (tagName) => allElements(dom.container).filter((node) => node.tagName === tagName).map(textOf);
+  async function waitFor(check, what) {
+    for (let attempt = 0; attempt < 80; attempt++) {
+      await React.act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+      if (check()) return;
+    }
+    assert.fail(`Search did not show: ${what}`);
+  }
+  try {
+    await dom.click(dom.byLabel("Search"));
+    await dom.click(dom.byLabel("Use regular expression"));
+    await dom.change(dom.byLabel("Search project"), "hello(\\d+)");
+    await waitFor(() => textOf(dom.container).includes("3 results in 2 files"), "3 results");
+    assert.deepEqual(tagged("MARK"), ["hello12", "hello3", "hello7"]);
+    assert.equal(searches.at(-1).replacement, undefined);
+    await dom.click(dom.byText("Replace"));
+    await dom.change(dom.byLabel("Replace with"), "n$1<$&>");
+    await waitFor(() => tagged("INS").length === 3, "the replacement preview");
+    assert.equal(searches.at(-1).replacement, "n$1<$&>");
+    assert.deepEqual(tagged("DEL"), ["hello12", "hello3", "hello7"]);
+    assert.deepEqual(tagged("INS"), ["n12<hello12>", "n3<hello3>", "n7<hello7>"]);
+    assert.deepEqual(tagged("MARK"), []);
+    assert.equal(textOf(dom.byTitle("a.py:1:5")).replace(/\s+/g, " "), "1say(hello12n12<hello12>) say(hello3)");
+
+    await dom.click(dom.byExactText("Replace all"));
+    assert.equal((await answerConfirm(dom, true)).confirmLabel, "Replace in 2 files");
+    await waitFor(() => textOf(dom.container).includes("Replaced 3 matches in 2 files."), "the replace notice");
+    assert.equal(fs.readFileSync(path.join(root, "a.py"), "utf8"), "say(n12<hello12>) say(n3<hello3>)\n");
+    fs.writeFileSync(path.join(root, "b.py"), "edited after the replace\n");
+    await dom.click(dom.byExactText("Undo"));
+    await waitFor(() => textOf(dom.container).includes("Undid the replace in 1 file."), "the undo notice");
+    assert.ok(dom.byText("Not undone: b.py changed after the replace."));
+    assert.equal(fs.readFileSync(path.join(root, "a.py"), "utf8"), "say(hello12) say(hello3)\n");
+    assert.equal(fs.readFileSync(path.join(root, "b.py"), "utf8"), "edited after the replace\n");
+    assert.equal(allElements(dom.container).some((node) => node.tagName === "BUTTON" && textOf(node) === "Undo"), false);
+  } finally { await dom.unmount(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("regex exclusions preserve escapes and quantifier commas during replacement", async () => {
   const { searchProject, replaceProject } = require("../../electron/project-search.cjs");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-regex-exclude-"));
@@ -15097,7 +14550,6 @@ test("source control orders groups, omits tab counts, and scopes bulk actions", 
   ];
   const calls = [];
   const confirmations = [];
-  let approved = false;
   let failPath = "";
   const workspace = {
     trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }),
@@ -15114,8 +14566,6 @@ test("source control orders groups, omits tab counts, and scopes bulk actions", 
   const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: "/workspace/project" } }), createFetchMock([]), { desktop: { workspace } });
   const originalDispatch = window.dispatchEvent;
   window.dispatchEvent = () => true;
-  const originalConfirm = window.confirm;
-  window.confirm = (message) => { confirmations.push(message); return approved; };
   try {
     await dom.click(dom.byLabel("Source control")); await showSourceChanges(dom);
     await dom.flush();
@@ -15133,9 +14583,10 @@ test("source control orders groups, omits tab counts, and scopes bulk actions", 
     assert.deepEqual(calls.slice(2), [["staged.txt", "unstage"], ["first.txt", "unstage"], ["second.txt", "unstage"]]);
     calls.length = 0;
     await dom.click(dom.byLabel("Discard all unstaged changes"));
+    confirmations.push((await answerConfirm(dom, false)).message);
     assert.deepEqual(calls, []);
-    approved = true;
     await dom.click(dom.byLabel("Discard all unstaged changes"));
+    confirmations.push((await answerConfirm(dom, true)).message);
     await dom.flush();
     assert.equal(confirmations.length, 2);
     assert.match(confirmations[1], /all 3 unstaged files/);
@@ -15155,11 +14606,12 @@ test("source control orders groups, omits tab counts, and scopes bulk actions", 
     await dom.flush();
     failPath = "two.txt";
     await dom.click(dom.byLabel("Discard all staged changes"));
+    await answerConfirm(dom, true);
     await dom.flush();
     assert.deepEqual(calls, [["one.txt", "revert-staged"], ["two.txt", "revert-staged"]]);
     assert.match(dom.text(), /Staged · 1/);
     assert.match(dom.text(), /File changed during bulk action/);
-  } finally { window.confirm = originalConfirm; window.dispatchEvent = originalDispatch; await dom.unmount(); }
+  } finally { window.dispatchEvent = originalDispatch; await dom.unmount(); }
 });
 
 for (const fail of [false, true]) {
@@ -15594,7 +15046,7 @@ test("editor Rem context actions capture the exact selection and its location", 
 
 test("Ask Rem keeps the selected text attached in a new thread scoped to its own project", async () => {
   const fetchMock = createFetchMock([jsonResponse("/api/provider/capabilities", { providers: [] })]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     workflows: [], width: 380, recentProjectRoots: ["/projects/alpha", "/projects/beta"], workflow: { projectRoot: "/projects/alpha" },
   }), fetchMock);
   await dom.dispatchWindow("gofer:rem-context", { detail: { mode: "ask", path: "/projects/beta/code.py", text: "print('selected')", startLine: 2, endLine: 2 } });
@@ -15611,7 +15063,7 @@ test("Ask Rem keeps the selected text attached in a new thread scoped to its own
 
 test("thread composer takes selected log entries asked about when Rem's plugin is off", async () => {
   const fetchMock = createFetchMock([jsonResponse("/api/provider/capabilities", { providers: [] })]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { workflows: [], width: 380 }), fetchMock);
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { workflows: [], width: 380 }), fetchMock);
   const file = () => new File(["Raticode application log entries selected in Settings > Developer.\n"], "raticode-log-2-entries.txt", { type: "text/plain" });
   try {
     await dom.dispatchWindow("gofer:rem-thread-attach-files", { detail: { files: [file()], draft: "" } });
@@ -15632,7 +15084,7 @@ test("thread composer attaches files asked about or copied in Raticode", async (
   const fetchMock = createFetchMock([jsonResponse("/api/provider/capabilities", { providers: [] })]);
   const reads = [];
   const desktop = { textFiles: { readAttachment: async path => { reads.push(path); return { name: path.split("/").at(-1), type: "text/plain", data: Buffer.from("x").toString("base64") }; } } };
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { workflows: [], width: 380 }), fetchMock, { desktop });
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { workflows: [], width: 380 }), fetchMock, { desktop });
   try {
     await dom.change(dom.first("textarea"), "Look at these");
     await dom.dispatchWindow("gofer:rem-thread-attach-files", { detail: { paths: ["/p/code.py"] } });
@@ -15668,7 +15120,7 @@ test("Workflow repair sends once in a fresh thread in the workflow project", asy
     },
     url => url === "/api/chat/stream" ? chatStream(url) : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     workflows: [], width: 380, workflow: { projectRoot: "/projects/alpha" },
   }), fetchMock);
   await dom.click(dom.byLabel("New thread"));
@@ -15697,7 +15149,7 @@ test("Rem project picker discovers worktrees and scopes a thread to their exact 
       { path: "/worktrees/feature", branch: "feature" },
       { path: "/missing", missing: true }, { path: "/pruned", prunable: true }] };
   } };
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     workflows: [], width: 380, recentProjectRoots: ["/repo", "/broken"], workflow: { projectRoot: "/repo" },
   }), createFetchMock([jsonResponse("/api/provider/capabilities", { providers: [] })]), { desktop: { workspace } });
   await dom.click(dom.byLabel("New thread"));
@@ -15725,7 +15177,7 @@ test("Rem project picker rechecks saved workspace folders on every opening", asy
       ? [{ path: "/repo" }, { path: "/worktrees/feature" }, { path: "/stale-discovered" }]
       : [] }),
   };
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     workflows: [{ projectRoot: "/deleted-workflow" }], width: 380,
     recentProjectRoots: ["/repo", "/worktrees/feature", "/plain-folder", "/file", "/unavailable"],
     workflow: { projectRoot: "/worktrees/feature" },
@@ -15749,7 +15201,7 @@ test("Rem project picker rechecks saved workspace folders on every opening", asy
 });
 
 test("Rem project picker excludes roots reported missing by the desktop Git bridge", async () => {
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     workflows: [], width: 380, workflow: { projectRoot: "/deleted" },
   }), createFetchMock([jsonResponse("/api/provider/capabilities", { providers: [] })]), {
     desktop: { workspace: { gitWorktrees: async () => ({ missing: true, worktrees: [] }) } },
@@ -15774,7 +15226,7 @@ test("Explain with Rem sends the selection once in a fresh project thread", asyn
     },
     url => url === "/api/chat/stream" ? chatStream(url) : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { workflows: [], width: 380 }), fetchMock);
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { workflows: [], width: 380 }), fetchMock);
   await dom.dispatchWindow("gofer:rem-context", { detail: { mode: "explain", projectRoot: "/projects/beta", path: "/projects/beta/code.py", text: "print('selected')", startLine: 2, endLine: 2 } });
   await dom.flush();
   assert.ok(uploaded.threadId);
@@ -15799,7 +15251,7 @@ test("Resolve conflicts with Rem sends completion and reporting instructions in 
     },
     url => url === "/api/chat/stream" ? chatStream(url) : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { workflows: [], width: 380 }), fetchMock);
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { workflows: [], width: 380 }), fetchMock);
   await dom.dispatchWindow("gofer:rem-context", { detail: { mode: "conflicts", projectRoot: "/worktrees/feature", text: "src/code.py\nremoved.txt" } });
   await dom.flush();
   const requests = fetchMock.calls.filter(call => call.url === "/api/chat/stream");
@@ -15822,6 +15274,34 @@ test("Resolve conflicts with Rem sends completion and reporting instructions in 
   assert.doesNotMatch(prompt, /Leave the results for me to review/);
   assert.equal(Buffer.from(uploaded.files[0].data, "base64").toString(), prompt);
   await dom.unmount();
+});
+
+test("aborting a paused rebase asks in Raticode's dialog and does nothing when kept as is", async () => {
+  const calls = [];
+  let snapshot = { active: true, root: "/repo", branch: "main", branches: ["main"], stashCount: 0, entries: [{ path: "code.py", status: "M", staged: false, unstaged: true }], operation: "rebase" };
+  const workspace = { trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }), gitStatus: async () => snapshot,
+    gitHistory: async () => ({ active: true, commits: [] }), gitWorktrees: async () => ({ active: true, worktrees: [{ path: "/repo", branch: "main" }] }),
+    gitRepoAction: async (_root, action, value) => {
+      if (action === "stash-list") return { stashes: [] };
+      calls.push([action, value]);
+      snapshot = { ...snapshot, operation: undefined };
+      return snapshot;
+    },
+  };
+  const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: "/repo" } }), createFetchMock([]), { desktop: { workspace } });
+  const originalDispatch = window.dispatchEvent;
+  window.dispatchEvent = () => true;
+  try {
+    await dom.click(dom.byLabel("Source control")); await showSourceChanges(dom); await dom.flush();
+    await dom.click(dom.byText("Abort rebase"));
+    assert.equal(await confirmTone(dom), "danger");
+    assert.deepEqual(await answerConfirm(dom, false), { message: "Abort this rebase? Conflict resolution edits will be discarded.", confirmLabel: "Abort rebase" });
+    assert.deepEqual(calls, []);
+    await dom.click(dom.byText("Abort rebase"));
+    await answerConfirm(dom, true);
+    await dom.flush();
+    assert.deepEqual(calls, [["rebase-abort", undefined]]);
+  } finally { window.dispatchEvent = originalDispatch; await dom.unmount(); }
 });
 
 test("source control exposes conflicts and locks parent controls during integration previews", async () => {
@@ -15850,19 +15330,18 @@ test("source control exposes conflicts and locks parent controls during integrat
   assert.equal(reactProps(dom.byLabel("Remove feature worktree")).disabled, false);
   assert.match(dom.text(), /Conflicts found in merge to main. Continue anyway/); assert.ok(dom.byLabel("Merge"));
   assert.throws(() => dom.byLabel("Preview diff"));
-  const previousConfirm = window.confirm;
-  window.confirm = () => assert.fail("Branch integration must not ask for another confirmation");
   window.dispatchEvent = () => true;
   try {
     await dom.click(dom.byLabel("Merge"));
+    assert.equal(confirmDialogIn(dom), undefined, "Branch integration must not ask for another confirmation");
     await React.act(async () => { finishPreview({ ...snapshot, destinationRoot: "/feature", destinationStatus: snapshot, conflicts: ["code.py"], notice: "Merge paused. Resolve the files marked !." }); });
     await dom.flush();
     assert.deepEqual(selected, ["/feature"]);
     assert.equal(dom.byText("Changes").getAttribute("aria-selected"), "true");
     assert.ok(dom.byTitle("code.py"));
     assert.doesNotMatch(dom.text(), /Command failed/);
-  } finally { window.confirm = previousConfirm; }
-  await dom.unmount();
+    assert.equal(confirmDialogIn(dom), undefined);
+  } finally { await dom.unmount(); }
 });
 
 test("worktree context menus preview each selected operation without Git mutations", async () => {
@@ -15964,7 +15443,7 @@ test("Git merge strategies, commit resets, and worktree starting commits preserv
 });
 
 test("Conventional Commit generation uses the restricted endpoint and rejects invalid output", async () => {
-  const { generateConventionalCommit, conventionalCommitMessage } = await import("../lib/commit-message.js");
+  const { generateConventionalCommit, conventionalCommitMessage } = await import("../lib/commitMessage.js");
   assert.equal(conventionalCommitMessage("fix(git): expose resolved edits"), "fix(git): expose resolved edits");
   assert.throws(() => conventionalCommitMessage("Here is your message"), /Conventional Commit/);
   const previousFetch = globalThis.fetch;
@@ -16033,8 +15512,6 @@ test("commit history opens a reusable editor diff tab and keeps it out of file r
     );
   }
   const dom = await mountReact(React.createElement(Harness), createFetchMock([]), { desktop: { workspace } });
-  const confirm = window.confirm;
-  window.confirm = () => { assert.fail("Reading a diff should not ask to change the repository"); };
   try {
     window.innerWidth = 1024; window.innerHeight = 768;
     await dom.click(dom.byLabel("Source control")); await dom.click(dom.byText("History")); await dom.flush();
@@ -16053,7 +15530,8 @@ test("commit history opens a reusable editor diff tab and keeps it out of file r
     assert.equal(calls.length, 1);
     await dom.click(dom.byLabel("Close Diff aaaaaaaa"));
     assert.equal(allElements(document.body).some(el => el.getAttribute("aria-label") === "Commit diff aaaaaaaa"), false);
-  } finally { window.confirm = confirm; await dom.unmount(); }
+    assert.equal(confirmDialogIn(dom), undefined, "Reading a diff should not ask to change the repository");
+  } finally { await dom.unmount(); }
 });
 
 test("commit diff tabs report read failures and retry", async () => {
@@ -16086,7 +15564,6 @@ test("commit history menu requests resets and prepopulates a worktree at the sel
     gitRepoAction: async (_root, action, value) => { calls.push({ action, value }); return { active: true, branch: "main", branches: ["main"], entries: [], stashes: [] }; },
   };
   const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: "/repo" } }), createFetchMock([]), { desktop: { workspace } });
-  const confirm = window.confirm; window.confirm = () => false;
   window.dispatchEvent = () => true;
   try {
     window.innerWidth = 1024; window.innerHeight = 768;
@@ -16095,9 +15572,15 @@ test("commit history menu requests resets and prepopulates a worktree at the sel
       const button = dom.byText("Historic change").parentNode.parentNode;
       await dom.pointer(button.parentNode.parentNode, "onContextMenu", { target: button, clientX: 50, clientY: 50 });
     };
-    await open(); await dom.click(allElements(document.body).find(el => el.getAttribute("data-operation") === "reset-hard")); assert.equal(calls.length, 0);
-    window.confirm = () => true;
-    await open(); await dom.click(allElements(document.body).find(el => el.getAttribute("data-operation") === "reset-soft")); await dom.flush();
+    await open(); await dom.click(allElements(document.body).find(el => el.getAttribute("data-operation") === "reset-hard"));
+    assert.equal(await confirmTone(dom), "danger");
+    const hardReset = await answerConfirm(dom, false);
+    assert.equal(hardReset.confirmLabel, "Hard reset");
+    assert.match(hardReset.message, /^Hard reset to aaaaaaaa\? .*permanently discards/);
+    assert.equal(calls.length, 0);
+    await open(); await dom.click(allElements(document.body).find(el => el.getAttribute("data-operation") === "reset-soft"));
+    assert.equal((await answerConfirm(dom, true)).confirmLabel, "Soft reset");
+    await dom.flush();
     assert.deepEqual(calls[0], { action: "reset-soft", value: { hash } });
     await open(); await dom.click(allElements(document.body).find(el => el.getAttribute("data-operation") === "branch-commit"));
     await dom.focus(dom.byLabel("New branch name"));
@@ -16110,7 +15593,7 @@ test("commit history menu requests resets and prepopulates a worktree at the sel
     await open(); await dom.click(allElements(document.body).find(el => el.getAttribute("data-operation") === "worktree-commit"));
     assert.equal(dom.byText("Branches").getAttribute("aria-selected"), "true");
     assert.match(dom.text(), /Starting at aaaaaaaa/);
-  } finally { window.confirm = confirm; await dom.unmount(); }
+  } finally { await dom.unmount(); }
 });
 
 test("Rem commit jobs survive leaving the explorer and restore branch-specific drafts", async () => {
@@ -16183,23 +15666,23 @@ test("Run on lists paired computers, sends the choice, and locks once a thread s
   assert.equal(reactProps(select).value, "");
   await dom.change(select, machines[0].id);
   assert.equal(reactProps(dom.byLabel("Run on")).value, machines[0].id);
-  assert.equal(appModule.chatStreamRequestBody({ provider: "codex", machine: reactProps(select).value }).machine, machines[0].id);
-  assert.equal("machine" in appModule.chatStreamRequestBody({ provider: "codex" }), false);
+  assert.equal(chatThreadsModule.chatStreamRequestBody({ provider: "codex", machine: reactProps(select).value }).machine, machines[0].id);
+  assert.equal("machine" in chatThreadsModule.chatStreamRequestBody({ provider: "codex" }), false);
   // Claude Code threads name their account; other providers and remote desktops never do.
-  assert.equal(appModule.chatStreamRequestBody({ provider: "claude_code", claudeAccount: "work" }).providerProfile, "work");
-  assert.equal("providerProfile" in appModule.chatStreamRequestBody({ provider: "codex", claudeAccount: "work" }), false);
-  assert.equal("providerProfile" in appModule.chatStreamRequestBody({ provider: "claude_code", claudeAccount: "work", machine: machines[0].id }), false);
+  assert.equal(chatThreadsModule.chatStreamRequestBody({ provider: "claude_code", claudeAccount: "work" }).providerProfile, "work");
+  assert.equal("providerProfile" in chatThreadsModule.chatStreamRequestBody({ provider: "codex", claudeAccount: "work" }), false);
+  assert.equal("providerProfile" in chatThreadsModule.chatStreamRequestBody({ provider: "claude_code", claudeAccount: "work", machine: machines[0].id }), false);
   // Every provider with accounts names its own account from Settings > Rem.
   const providerAccounts = { claude_code: "work", codex: "auto" };
-  assert.equal(appModule.chatStreamRequestBody({ provider: "codex", providerAccounts }).providerProfile, "auto");
-  assert.equal(appModule.chatStreamRequestBody({ provider: "claude_code", providerAccounts }).providerProfile, "work");
-  assert.equal("providerProfile" in appModule.chatStreamRequestBody({ provider: "grok", providerAccounts }), false);
-  assert.equal("providerProfile" in appModule.chatStreamRequestBody({ provider: "codex", providerAccounts, machine: machines[0].id }), false);
+  assert.equal(chatThreadsModule.chatStreamRequestBody({ provider: "codex", providerAccounts }).providerProfile, "auto");
+  assert.equal(chatThreadsModule.chatStreamRequestBody({ provider: "claude_code", providerAccounts }).providerProfile, "work");
+  assert.equal("providerProfile" in chatThreadsModule.chatStreamRequestBody({ provider: "grok", providerAccounts }), false);
+  assert.equal("providerProfile" in chatThreadsModule.chatStreamRequestBody({ provider: "codex", providerAccounts, machine: machines[0].id }), false);
   // The thread's own account wins over Rem's setting, including the default sign-in.
-  assert.equal(appModule.chatStreamRequestBody({ provider: "codex", providerAccounts, threadAccount: "home" }).providerProfile, "home");
-  assert.equal(appModule.chatStreamRequestBody({ provider: "claude_code", providerAccounts, threadAccount: "@default" }).providerProfile, "@default");
-  assert.equal(appModule.chatStreamRequestBody({ provider: "grok", threadAccount: "spare" }).providerProfile, "spare");
-  assert.equal("providerProfile" in appModule.chatStreamRequestBody({ provider: "codex", threadAccount: "home", machine: machines[0].id }), false);
+  assert.equal(chatThreadsModule.chatStreamRequestBody({ provider: "codex", providerAccounts, threadAccount: "home" }).providerProfile, "home");
+  assert.equal(chatThreadsModule.chatStreamRequestBody({ provider: "claude_code", providerAccounts, threadAccount: "@default" }).providerProfile, "@default");
+  assert.equal(chatThreadsModule.chatStreamRequestBody({ provider: "grok", threadAccount: "spare" }).providerProfile, "spare");
+  assert.equal("providerProfile" in chatThreadsModule.chatStreamRequestBody({ provider: "codex", threadAccount: "home", machine: machines[0].id }), false);
   await dom.unmount();
   const locked = await mountReact(React.createElement(Harness, { locked: true }), createFetchMock([]));
   assert.equal(reactProps(locked.byLabel("Run on")).disabled, true);
@@ -16228,7 +15711,7 @@ test("Rem permissions show provider-specific choices and update the request", as
   assert.equal(select.getAttribute("aria-label"), "Rem permissions");
   await dom.change(select, "danger-full-access");
   assert.equal(reactProps(select).value, "danger-full-access");
-  assert.equal(appModule.chatStreamRequestBody({ provider: "codex", permissionMode: reactProps(select).value }).permissionMode, "danger-full-access");
+  assert.equal(chatThreadsModule.chatStreamRequestBody({ provider: "codex", permissionMode: reactProps(select).value }).permissionMode, "danger-full-access");
   await dom.click(dom.byText("Switch provider"));
   select = dom.selectWithOption("bypassPermissions");
   assert.equal(reactProps(select).value, "dontAsk");
@@ -16327,7 +15810,7 @@ test("Rem stops before sending chat when folder renewal fails and allows retry",
     jsonResponse("/api/provider/capabilities", { providers: [] }),
     url => url === "/api/chat/stream" ? chatStream(url) : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     workflows: [], width: 380,
     memorySettings: { secondBrainEnabled: true, secondBrainRoot: "/outside/brain", secondBrainFormat: "html" },
   }), fetchMock, { desktop });
@@ -16355,7 +15838,7 @@ async function sentSecondBrain({ memory, resources }) {
     url => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url) : null,
   ]);
   const desktop = { workspace: { trustProjectRoot: async () => {}, pathGrantForApi: (root) => `grant:${root}` } };
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     workflows: [], width: 380, assistantDefaults: { resources },
     memorySettings: { secondBrainEnabled: true, secondBrainRoot: "/brains/school", secondBrainFormat: "html", ...memory },
   }), fetchMock, { desktop });
@@ -16581,8 +16064,8 @@ test("source control updates on its own when worktrees are created or deleted ou
 
 test("relative chat file links show resolved hover paths and preserve line targets", async () => {
   const opened = [];
-  const sourcePath = appModule.assistantMarkdownSourcePath("/repo/project");
-  const dom = await mountReact(React.createElement(appModule.MarkdownMessage, {
+  const sourcePath = projectsModule.assistantMarkdownSourcePath("/repo/project");
+  const dom = await mountReact(React.createElement(chatMessagesModule.MarkdownMessage, {
     sourcePath,
     value: "[Source](README.md:12:3) [Guide](../notes/guide%20one.md) [Web](//example.com/docs)",
     onOpenLink: (href) => opened.push(codeWorkspaceModule.markdownFileLinkTarget(sourcePath, href)),
@@ -16639,7 +16122,7 @@ test("Rem and Markdown previews open absolute paths and file URLs with spaces", 
       ? { value: content, sourcePath: "/repo/chat.md", onOpenLink: href => opened.push(href) }
       : { content, path: "/repo/guide.md", onOpenRelativeLink: href => opened.push(href) };
     const dom = await mountReact(React.createElement(
-      chat ? appModule.MarkdownMessage : codeWorkspaceModule.MarkdownPreview, props,
+      chat ? chatMessagesModule.MarkdownMessage : codeWorkspaceModule.MarkdownPreview, props,
     ), createFetchMock([]));
     try {
       for (const label of ["Absolute", "File"]) await dom.click(dom.ancestor(dom.byText(label), "A"));
@@ -16680,7 +16163,7 @@ test("Rem and Markdown website links open HTTP, HTTPS, and scheme-relative URLs"
       ? { value: content, sourcePath: "/repo/chat.md", onOpenLink: href => localLinks.push(href) }
       : { content, path: "/repo/guide.md", onOpenRelativeLink: href => localLinks.push(href) };
     const dom = await mountReact(React.createElement(
-      chat ? appModule.MarkdownMessage : codeWorkspaceModule.MarkdownPreview, props,
+      chat ? chatMessagesModule.MarkdownMessage : codeWorkspaceModule.MarkdownPreview, props,
     ), createFetchMock([]));
     window.open = (...args) => opened.push(args);
     try {
@@ -16769,8 +16252,6 @@ test("Branches lists inactive branches without checkout and offers deletion and 
     },
   };
   const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: '/repo' }, onSelectProject: path => selected.push(path) }), createFetchMock([]), { desktop: { workspace } });
-  const oldConfirm = window.confirm;
-  window.confirm = () => { assert.fail("Merged branch deletion must not prompt"); };
   try {
     await dom.click(dom.byLabel('Source control')); await dom.flush(); await dom.click(dom.byText('Branches'));
     const row = dom.byLabel('Branch feature');
@@ -16799,7 +16280,8 @@ test("Branches lists inactive branches without checkout and offers deletion and 
     // The open target picker re-reads its branch list when branches change; that is read-only.
     assert.deepEqual(calls.filter(([action]) => action !== 'integration-targets').at(-1), ['branch-delete', 'feature']);
     assert.equal(allElements(dom.container).some(el => el.getAttribute('aria-label') === 'Branch feature'), false);
-  } finally { window.confirm = oldConfirm; await dom.unmount(); }
+    assert.equal(confirmDialogIn(dom), undefined, "Merged branch deletion must not prompt");
+  } finally { await dom.unmount(); }
 });
 
 
@@ -16813,8 +16295,10 @@ test("inactive graph tabs ignore global node shortcuts and relinquish fullscreen
       React.createElement("button", { onClick: () => setActiveId("beta") }, "Activate beta"),
       [alpha, beta].map(workflow => React.createElement(canvasModule.default, {
         key: workflow.id, active: activeId === workflow.id, workflow,
+        rattishDocument: { workflowId: workflow.id, source: "", graph: { nodes: [], edges: [] } },
         logState: { runs: [], loading: false }, approvalState: { approvals: [] }, runState: { running: false },
-        onWorkflowChange: next => changes.push(next),
+        onRattishMutation: mutations => { changes.push({ id: workflow.id, mutations }); },
+        onWorkflowChange() {},
       })),
     );
   }
@@ -16828,7 +16312,7 @@ test("inactive graph tabs ignore global node shortcuts and relinquish fullscreen
   await dom.dispatchWindow("keydown", { key: "a", code: "KeyA", ctrlKey: true });
   await dom.dispatchWindow("keydown", { key: "Delete", code: "Delete" });
   assert.deepEqual(changes.map(item => item.id), ["beta"], "hidden selected graph consumed Delete");
-  assert.deepEqual(changes[0].nodes, []);
+  assert.deepEqual(changes[0].mutations, [{ kind: "delete_node", node: "step" }]);
   await dom.unmount();
 });
 
@@ -16868,19 +16352,21 @@ function workflowDocumentWriteHarness(request) {
   function documentSession(id) {
     if (!sessions.has(id)) {
       const state = { current: null };
-      sessions.set(id, { documentWritesRef: { current: Promise.resolve() }, rattishEditorStateRef: state,
+      sessions.set(id, { documentWritesRef: { current: Promise.resolve() }, rattishEditorStateRef: state, graphHistoryRef: { current: graphEditHistoryModule.EMPTY_GRAPH_HISTORY },
         rattishAnalysisTimerRef: { current: null }, rattishAnalysisRequestRef: { current: 0 }, rattishMetadataPendingRef: { current: false }, rattishMetadataSavingRef: { current: null },
         setRattishEditorState(next) { state.current = next; } });
     }
     return sessions.get(id);
   }
-  const functions = vm.runInNewContext(`(function () { ${block}; return { saveWorkflowDocument, mutateActiveRattish }; })()`, {
+  const notices = [];
+  const functions = vm.runInNewContext(`(function () { ${block}; return { saveWorkflowDocument, mutateActiveRattish, stepGraphHistory }; })()`, {
     documentSession, fetch: request, apiUrl: value => value, window: { clearTimeout },
+    ...graphEditHistoryModule, graphHistoryChanged() {},
     scheduleRattishAnalysis: (...args) => analyses.push(args),
     rattishEditorRef: { current: { acceptDocument: (...args) => accepted.push(args) } },
-    setTopBarNotice() {}, loadWorkflows: async () => {}, saveRattishMetadataNow: async () => true,
+    setTopBarNotice: notice => notices.push(notice), loadWorkflows: async () => {}, saveRattishMetadataNow: async () => true,
   });
-  return { ...functions, documentSession, accepted, analyses };
+  return { ...functions, documentSession, accepted, analyses, notices };
 }
 
 function deferredDocumentResponse() {
@@ -16949,7 +16435,7 @@ test('workflow graph mutation cannot overwrite source typed while its request is
   await requested;
   session.setRattishEditorState({ document: writeTestDocument('newer source', 'r1', true) });
   pending.resolve(writeTestDocument('graph edit', 'r2'));
-  assert.equal(await mutation, null);
+  assert.equal((await mutation).error, 'Graph changes were saved. Your newer source edits are still unsaved.');
   assert.equal(session.rattishEditorStateRef.current.document.source, 'newer source');
   assert.equal(session.rattishEditorStateRef.current.document.savedRevision, 'r2');
   assert.equal(session.rattishEditorStateRef.current.document.dirty, true);
@@ -16979,6 +16465,209 @@ test('workflow document writes serialize per workflow and run independently acro
   pending[2].resolve(writeTestDocument('alpha second', 'r3')); await second;
   assert.equal(harness.documentSession('alpha').rattishEditorStateRef.current.document.savedRevision, 'r3');
   assert.equal(harness.documentSession('beta').rattishEditorStateRef.current.document.savedRevision, 'b2');
+});
+
+// A fake workflow.rattish on disk for graph Undo and Redo: mutate and save advance its
+// revision, and a save against an older revision gets 409 like the real server.
+const UNDO_BEFORE = 'Rattish: 1\nWorkflow:\n  name: Picker\n\nprepare:\n  type: bash-command\n\nfetch:\n  type: bash-command\n';
+const UNDO_AFTER = 'Rattish: 1\nWorkflow:\n  name: Picker\n\nprepare:\n  type: bash-command\n';
+
+function graphUndoFixture() {
+  const workflow = { ...workflowFixture({ id: 'undo-demo', name: 'Undo demo' }), sourceFormat: 'rattish', sourcePath: '/workspace/.raticode/undo-demo/workflow.rattish' };
+  const disk = { source: UNDO_BEFORE, revision: 1 };
+  const documentFor = () => {
+    const nodes = [pickerGraphNode('prepare', 'bash-command'), ...(disk.source.includes('fetch:') ? [pickerGraphNode('fetch', 'bash-command')] : [])];
+    return { ...pickerDocument(nodes), source: disk.source, workflowId: workflow.id, compilation: { state: 'valid' }, runnable: true,
+      diagnostics: [], preflight: { diagnostics: [] }, savedRevision: `r${disk.revision}`, dirty: false };
+  };
+  const writes = [];
+  const fetchMock = createFetchMock([
+    jsonResponse('/api/workflows', workflowsPayload([workflow])),
+    (url, options = {}) => url === '/api/workflows/undo-demo/document' && (options.method ?? 'GET') === 'GET'
+      ? { ok: true, status: 200, json: async () => ({ document: documentFor() }) } : null,
+    (url, options = {}) => {
+      const kind = { '/api/workflows/undo-demo/document/mutate': 'mutate', '/api/workflows/undo-demo/document/save': 'save' }[url];
+      if (!kind || options.method !== 'POST') return null;
+      const body = JSON.parse(options.body);
+      writes.push({ kind, body });
+      if (body.expectedRevision !== `r${disk.revision}`) return { ok: false, status: 409, json: async () => ({ error: 'workflow.rattish changed on disk' }) };
+      if (kind === 'mutate') {
+        assert.deepEqual(body.mutations, [{ kind: 'delete_node', node: 'fetch' }]);
+        disk.source = UNDO_AFTER;
+      } else {
+        disk.source = body.source;
+      }
+      disk.revision += 1;
+      return { ok: true, status: 200, json: async () => ({ document: documentFor() }) };
+    },
+  ]);
+  return { disk, fetchMock, writes };
+}
+
+async function deleteGraphNode(dom, nodeId) {
+  await dom.pointer(dom.ancestor(dom.byExactText(nodeId), 'ARTICLE'), 'onPointerDown');
+  await dom.flush();
+  await dom.click(dom.byTitle('Delete selected node'));
+  for (let index = 0; index < 4; index += 1) await dom.flush();
+}
+
+async function pressGraphKey(dom, target, patch) {
+  await dom.dispatchWindow('keydown', { key: 'z', code: 'KeyZ', ctrlKey: true, target, ...patch });
+  for (let index = 0; index < 4; index += 1) await dom.flush();
+}
+
+test('Ctrl+Z on the graph undoes a node delete by saving the text from before it, and Ctrl+Shift+Z deletes it again', async () => {
+  const { fetchMock, writes } = graphUndoFixture();
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock);
+  try {
+    await dom.flush(); await dom.flush();
+    assert.equal(Boolean(reactProps(dom.byLabel('Nothing to undo')).disabled), true);
+    assert.equal(Boolean(reactProps(dom.byLabel('Nothing to redo')).disabled), true);
+
+    await deleteGraphNode(dom, 'fetch');
+    assert.deepEqual(writes.map(write => write.kind), ['mutate']);
+    const undoButton = dom.byLabel('Undo delete node fetch');
+    assert.equal(Boolean(reactProps(undoButton).disabled), false);
+    assert.equal(undoButton.getAttribute('title'), 'Undo delete node fetch');
+
+    // A text field keeps its own undo: Ctrl+Z there leaves the graph alone.
+    const textField = allElements(dom.container).find(element => element.tagName === 'TEXTAREA');
+    assert.ok(textField);
+    await pressGraphKey(dom, textField);
+    assert.deepEqual(writes.map(write => write.kind), ['mutate']);
+
+    const graph = dom.byLabel('Workflow graph visualization');
+    await pressGraphKey(dom, graph);
+    assert.deepEqual(writes.map(write => write.kind), ['mutate', 'save']);
+    assert.equal(writes[1].body.source, UNDO_BEFORE);
+    assert.equal(writes[1].body.expectedRevision, 'r2');
+    assert.ok(dom.byExactText('fetch'), 'the deleted node is back on the graph');
+    assert.match(dom.text(), /Undid delete node fetch/);
+    assert.equal(Boolean(reactProps(dom.byLabel('Redo delete node fetch')).disabled), false);
+    assert.equal(Boolean(reactProps(dom.byLabel('Nothing to undo')).disabled), true);
+
+    await pressGraphKey(dom, graph, { key: 'Z', shiftKey: true });
+    assert.deepEqual(writes.map(write => write.kind), ['mutate', 'save', 'save']);
+    assert.equal(writes[2].body.source, UNDO_AFTER);
+    assert.equal(writes[2].body.expectedRevision, 'r3');
+    assert.equal(allElements(dom.container).some(element => directText(element) === 'fetch'), false);
+    assert.equal(Boolean(reactProps(dom.byLabel('Undo delete node fetch')).disabled), false);
+    assert.equal(Boolean(reactProps(dom.byLabel('Nothing to redo')).disabled), true);
+
+    // Edit > Undo acts on the graph while it's in front.
+    await dom.click(allElements(dom.container).find(element => element.getAttribute?.('data-menu-trigger') === 'Edit'));
+    const editMenu = allElements(dom.container).find(element => element.getAttribute?.('role') === 'menu');
+    await dom.click(allElements(editMenu).find(element => element.getAttribute?.('role') === 'menuitem' && textOf(element).startsWith('Undo')));
+    for (let index = 0; index < 4; index += 1) await dom.flush();
+    assert.deepEqual(writes.map(write => write.kind), ['mutate', 'save', 'save', 'save']);
+    assert.equal(writes[3].body.source, UNDO_BEFORE);
+    assert.equal(writes[3].body.expectedRevision, 'r4');
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test('Edit > Undo undoes typing in a text field that had focus, and goes back to the graph once the graph has focus', async () => {
+  const { fetchMock, writes } = graphUndoFixture();
+  const edits = [];
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { desktop: { editFocused: async method => { edits.push(method); } } });
+  const editMenuUndo = async (focused) => {
+    // The menu remembers the field that had focus when it was pressed, before taking focus itself.
+    await dom.focus(focused);
+    const trigger = allElements(dom.container).find(element => element.getAttribute?.('data-menu-trigger') === 'Edit');
+    await dom.pointer(trigger, 'onPointerDown');
+    await dom.focus(trigger);
+    await dom.click(trigger);
+    const menu = allElements(dom.container).find(element => element.getAttribute?.('role') === 'menu');
+    await dom.click(allElements(menu).find(element => element.getAttribute?.('role') === 'menuitem' && textOf(element).startsWith('Undo')));
+    for (let index = 0; index < 4; index += 1) await dom.flush();
+  };
+  try {
+    await dom.flush(); await dom.flush();
+    await deleteGraphNode(dom, 'fetch');
+    const inspector = dom.byLabel('Rattish workflow settings and node inspector');
+    const field = allElements(inspector).find(element => element.tagName === 'INPUT' && element.getAttribute('type') !== 'file');
+    assert.ok(field);
+    Object.defineProperty(field, 'isConnected', { value: true });
+
+    await editMenuUndo(field);
+    assert.deepEqual(edits, ['undo'], 'the text field undid its own typing');
+    assert.deepEqual(writes.map(write => write.kind), ['mutate'], 'no graph Undo while a text field had focus');
+    assert.equal(Boolean(reactProps(dom.byLabel('Undo delete node fetch')).disabled), false);
+
+    await editMenuUndo(dom.byLabel('Workflow graph visualization'));
+    assert.deepEqual(edits, ['undo']);
+    assert.deepEqual(writes.map(write => write.kind), ['mutate', 'save']);
+    assert.equal(writes[1].body.source, UNDO_BEFORE);
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test('Ctrl+Z sends no save and says why after workflow.rattish changed since the graph edit', async () => {
+  const { disk, fetchMock, writes } = graphUndoFixture();
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock);
+  try {
+    await dom.flush(); await dom.flush();
+    await deleteGraphNode(dom, 'fetch');
+    assert.equal(Boolean(reactProps(dom.byLabel('Undo delete node fetch')).disabled), false);
+
+    // Rem edits the file; running the workflow picks up the new revision first.
+    disk.source = `${UNDO_AFTER}# edited by Rem\n`;
+    disk.revision += 1;
+    await dom.click(dom.byTitle('Run workflow now'));
+    for (let index = 0; index < 4; index += 1) await dom.flush();
+
+    await pressGraphKey(dom, dom.byLabel('Workflow graph visualization'));
+    assert.deepEqual(writes.map(write => write.kind), ['mutate']);
+    assert.match(dom.text(), /workflow\.rattish changed since that edit, so it can't be undone here/);
+    assert.equal(Boolean(reactProps(dom.byLabel('Nothing to undo')).disabled), true);
+    assert.equal(Boolean(reactProps(dom.byLabel('Nothing to redo')).disabled), true);
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test('graph Undo treats a 409 from the save as a changed file and clears both stacks', async () => {
+  const calls = [];
+  const harness = workflowDocumentWriteHarness((url, init) => {
+    calls.push({ url, body: JSON.parse(init.body) });
+    if (url.endsWith('/mutate')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ document: writeTestDocument('after', 'r2') }) });
+    return Promise.resolve({ ok: false, status: 409, json: async () => ({ error: 'conflict' }) });
+  });
+  const target = writeTestWorkflow('alpha');
+  const session = harness.documentSession(target.id);
+  session.setRattishEditorState({ document: writeTestDocument('before', 'r1') });
+  await harness.mutateActiveRattish([{ kind: 'rename_node', node: 'fetch', name: 'load' }], target);
+  assert.deepEqual(JSON.parse(JSON.stringify(session.graphHistoryRef.current.undo)), [{ label: 'rename node fetch', sourceBefore: 'before', revisionAfter: 'r2' }]);
+  assert.equal(await harness.stepGraphHistory(target, 'undo'), null);
+  assert.deepEqual(calls.map(call => call.url), ['/workflows/alpha/document/mutate', '/workflows/alpha/document/save']);
+  assert.deepEqual(calls[1].body, { source: 'before', expectedRevision: 'r2' });
+  assert.deepEqual(JSON.parse(JSON.stringify(session.graphHistoryRef.current)), { undo: [], redo: [] });
+  assert.equal(harness.notices.at(-1).message, "workflow.rattish changed since that edit, so it can't be undone here.");
+  assert.equal(session.rattishEditorStateRef.current.document.source, 'after');
+});
+
+test('graph edit labels name the edit, Undo and Redo keys match per platform, and each stack keeps the newest 50', () => {
+  const { graphEditLabel, pushGraphHistoryEntry } = graphEditHistoryModule;
+  assert.equal(graphEditLabel([{ kind: 'delete_node', node: 'fetch' }]), 'delete node fetch');
+  assert.equal(graphEditLabel([{ kind: 'set_routes', node: 'prepare', routes: ['next'] }, { kind: 'add_node', node: 'next', node_type: 'agent' }]), 'add node next');
+  assert.equal(graphEditLabel([{ kind: 'set_field', target: { node: 'fetch' }, field: 'command', value: 'ls' }]), 'change command of node fetch');
+  assert.equal(graphEditLabel([{ kind: 'set_field', target: 'workflow', field: 'name', value: 'New' }]), 'change workflow name');
+  assert.equal(graphEditLabel([{ kind: 'remove_field', target: { node: 'fetch' }, field: 'retry' }]), 'remove retry of node fetch');
+  const { DEFAULT_APP_SETTINGS, matchesCommand } = settingsModule;
+  const key = (code, patch = {}) => ({ code, key: code.slice(3).toLowerCase(), ctrlKey: true, shiftKey: false, altKey: false, metaKey: false, ...patch });
+  assert.equal(matchesCommand(key('KeyZ'), DEFAULT_APP_SETTINGS, 'graph.undo', 'Linux x86_64'), true);
+  assert.equal(matchesCommand(key('KeyZ', { shiftKey: true }), DEFAULT_APP_SETTINGS, 'graph.undo', 'Linux x86_64'), false);
+  assert.equal(matchesCommand(key('KeyZ', { shiftKey: true }), DEFAULT_APP_SETTINGS, 'graph.redo', 'Linux x86_64'), true);
+  assert.equal(matchesCommand(key('KeyY'), DEFAULT_APP_SETTINGS, 'graph.redo', 'Win32'), true);
+  assert.equal(matchesCommand(key('KeyY'), DEFAULT_APP_SETTINGS, 'graph.redo', 'Linux x86_64'), false);
+  assert.equal(matchesCommand(key('KeyZ', { ctrlKey: false, metaKey: true }), DEFAULT_APP_SETTINGS, 'graph.undo', 'MacIntel'), true);
+  let stack = [];
+  for (let index = 0; index < 55; index += 1) stack = pushGraphHistoryEntry(stack, { label: `edit ${index}` });
+  assert.equal(stack.length, 50);
+  assert.equal(stack[0].label, 'edit 5');
+  assert.equal(stack.at(-1).label, 'edit 54');
 });
 
 test('starting a run leaves a pinned run review so the new run is visible', async () => {
@@ -17254,14 +16943,14 @@ test("Rattish background submissions bind the reviewed source revision and prese
 
 function rattishValidationHarness(initialDocument, request) {
   const source = fs.readFileSync(path.join(frontendRoot, 'src/pages/App.jsx'), 'utf8');
-  const block = source.slice(source.indexOf('  async function validateWorkflow('), source.indexOf('  async function loadWorkflowHistory('));
+  const block = source.slice(source.indexOf('  async function validateWorkflow('), source.indexOf('  async function importWorkflow('));
   const state = { current: { document: initialDocument, saving: false } };
   const notices = [];
   const session = { rattishEditorStateRef: state, rattishAnalysisRequestRef: { current: 0 }, rattishAnalysisTimerRef: { current: null }, setRattishEditorState: next => { state.current = next; } };
   const validate = vm.runInNewContext(`(function () { ${block}; return validateWorkflow; })()`, {
     documentSession: () => session, window: { clearTimeout }, apiUrl: value => value, fetch: request,
     loadWorkflowDraft: () => null, mergeRattishAnalysisState: appModule.mergeRattishAnalysisState,
-    setTopBarNotice: notice => notices.push(notice), persistWorkflow() { throw new Error('Validation must not persist Rattish'); }, summarizeWorkflow() { throw new Error('Rattish source must not be converted'); },
+    setTopBarNotice: notice => notices.push(notice),
   });
   return { validate, state, notices };
 }
@@ -17417,7 +17106,7 @@ for (const enabled of [true, false]) {
       url => url === "/api/chat/stream" ? chatStream(url) : null,
     ]);
     const workflow = { ...workflowFixture({ id: "team-project" }), projectRoot: "/projects/team", projectName: "team" };
-    const dom = await mountReact(React.createElement(appModule.ChatPane, {
+    const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
       workflows: [workflow], workflow, width: 380,
       assistantDefaults: { swarmAccessEnabled: enabled },
       swarmProjectPaths: ["/projects/mobile", "/projects/mobile"],
@@ -17459,15 +17148,18 @@ for (const scenario of ["confirm", "cancel", "unrelated-error", "force-error"]) 
       },
     };
     const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: '/repo' } }), createFetchMock([]), { desktop: { workspace } });
-    const oldConfirm = window.confirm;
-    window.confirm = message => {
-      assert.deepEqual(calls, [['branch-delete', 'feature']]);
-      prompts.push(message);
-      return scenario !== 'cancel';
-    };
     try {
       await dom.click(dom.byLabel('Source control')); await dom.flush(); await dom.click(dom.byText('Branches'));
       await dom.click(dom.byLabel('Delete branch feature'));
+      if (scenario !== 'unrelated-error') {
+        assert.deepEqual(calls, [['branch-delete', 'feature']]);
+        assert.equal(await confirmTone(dom), 'danger');
+        const asked = await answerConfirm(dom, scenario !== 'cancel');
+        assert.equal(asked.confirmLabel, 'Delete branch');
+        prompts.push(asked.message);
+        await dom.flush();
+      }
+      assert.equal(confirmDialogIn(dom), undefined);
       assert.equal(prompts.length, scenario === 'unrelated-error' ? 0 : 1);
       if (prompts.length) assert.match(prompts[0], /feature.*unmerged/);
       assert.deepEqual(calls, scenario === 'confirm' || scenario === 'force-error'
@@ -17477,7 +17169,7 @@ for (const scenario of ["confirm", "cancel", "unrelated-error", "force-error"]) 
       if (scenario === 'unrelated-error') assert.ok(dom.byText('Permission denied'));
       if (scenario === 'force-error') assert.ok(dom.byText('Branch is checked out'));
       if (scenario === 'cancel') assert.equal(allElements(dom.container).some(el => el.textContent === 'Technical details'), false);
-    } finally { window.confirm = oldConfirm; await dom.unmount(); }
+    } finally { await dom.unmount(); }
   });
 }
 
@@ -17496,7 +17188,7 @@ test("Rem archives are collapsed without metadata reads and load ten at a time",
       const getItem = window.localStorage.getItem.bind(window.localStorage);
       window.localStorage.getItem = key => { reads.push(key); return getItem(key); };
     }
-    return React.createElement(appModule.ThreadSections, { threads: [], onOpen() {}, onDelete() {} });
+    return React.createElement(chatPaneModule.ThreadSections, { threads: [], onOpen() {}, onDelete() {} });
   }
   const dom = await mountReact(React.createElement(Harness), createFetchMock([]), {
     storage, desktop: { workspace: { missingThreadRoots: async () => ["/gone"] } },
@@ -17535,7 +17227,7 @@ test("Rem orders thread groups and keeps only the seven most recently read threa
   ];
   const storage = Object.fromEntries(threads.map(thread => [`gofer-flow-chat-thread-meta:${thread.id}`, JSON.stringify(thread)]));
   storage["gofer-flow-chat-threads"] = JSON.stringify(threads.map(thread => ({ ...thread, scopeIndexed: true })));
-  const dom = await mountReact(React.createElement(appModule.ThreadSections, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ThreadSections, {
     threads: [], onOpen() {}, onDelete() {}, activityByThread: { busy: { sending: true } },
   }), createFetchMock([]), { storage });
   try {
@@ -17567,29 +17259,25 @@ test("Rem clears the archive after confirmation and keeps Rem task threads", asy
     jsonResponse("/api/provider/capabilities", { providers: [] }),
     (url) => url.startsWith("/api/chat/threads/") ? { ok: true, json: async () => ({}) } : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, { storage });
-  const previousConfirm = window.confirm;
-  const prompts = [];
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, { storage });
   try {
     await dom.flush();
-    window.confirm = message => { prompts.push(message); return false; };
     assert.equal(dom.allByTitle("Delete every archived thread").length, 0);
     await openThreadGroup(dom, "Archived");
     assert.match(dom.text(), /Kept until you clear them/);
     await dom.click(dom.byLabel("Clear archive, 2 threads"));
-    assert.match(prompts[0], /Delete 2 archived threads\? This cannot be undone\./);
-    assert.ok(appModule.loadChatThread("old-a"));
-    window.confirm = () => true;
+    assert.deepEqual(await answerConfirm(dom, false), { message: "Delete 2 archived threads? This cannot be undone.", confirmLabel: "Clear archive" });
+    assert.ok(chatThreadsModule.loadChatThread("old-a"));
     await dom.click(dom.byLabel("Clear archive, 2 threads"));
-    await dom.flush();
-    assert.equal(appModule.loadChatThread("old-a"), null);
-    assert.equal(appModule.loadChatThread("old-b"), null);
-    assert.ok(appModule.loadChatThread("keep"));
-    assert.ok(appModule.loadChatThread("worker"));
+    await answerConfirm(dom, true);
+    assert.equal(chatThreadsModule.loadChatThread("old-a"), null);
+    assert.equal(chatThreadsModule.loadChatThread("old-b"), null);
+    assert.ok(chatThreadsModule.loadChatThread("keep"));
+    assert.ok(chatThreadsModule.loadChatThread("worker"));
     assert.deepEqual(fetchMock.calls.filter(call => call.options?.method === "DELETE").map(call => call.url), ["/api/chat/threads/old-a", "/api/chat/threads/old-b"]);
     assert.match(dom.text(), /Archived1 thread/);
     assert.equal(dom.allByTitle("Delete every archived thread").length, 0);
-  } finally { window.confirm = previousConfirm; await dom.unmount(); }
+  } finally { await dom.unmount(); }
 });
 
 test("thread rows can be selected in bulk, read, archived and deleted from the header, toolbar and right-click menu", async () => {
@@ -17607,13 +17295,12 @@ test("thread rows can be selected in bulk, read, archived and deleted from the h
     jsonResponse("/api/provider/capabilities", { providers: [] }),
     (url) => url.startsWith("/api/chat/threads/") ? { ok: true, json: async () => ({}) } : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, { storage });
-  const saved = id => appModule.loadChatThread(id);
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, { storage });
+  const saved = id => chatThreadsModule.loadChatThread(id);
   const row = title => dom.ancestor(dom.byExactText(title), "BUTTON");
   const inSection = (label, title) => textOf(threadGroupSection(dom, label) || { textContent: "" }).includes(title);
   const fire = async (node, handler, patch) => { await React.act(async () => { reactProps(node)[handler](testEvent(node, patch)); }); await dom.flush(); };
   const button = (root, text) => allElements(root).find(node => node.tagName === "BUTTON" && textOf(node) === text);
-  const previousConfirm = window.confirm;
   try {
     await dom.flush();
     // Activating the Unread header selects both unread threads.
@@ -17663,11 +17350,8 @@ test("thread rows can be selected in bulk, read, archived and deleted from the h
     await dom.click(button(dom.byLabel("Selected threads"), "More actions"));
     const archivedMenu = dom.byLabel("Actions for 2 selected threads");
     assert.ok(button(archivedMenu, "Restore"));
-    const prompts = [];
-    window.confirm = message => { prompts.push(message); return true; };
     await dom.click(button(archivedMenu, "Delete"));
-    await dom.flush();
-    assert.deepEqual(prompts, ["Delete 2 threads? This cannot be undone."]);
+    assert.deepEqual(await answerConfirm(dom, true), { message: "Delete 2 threads? This cannot be undone.", confirmLabel: "Delete 2 threads" });
     assert.equal(saved("old"), null);
     assert.equal(saved("u1"), null);
     assert.ok(saved("r1"));
@@ -17676,7 +17360,7 @@ test("thread rows can be selected in bulk, read, archived and deleted from the h
     await dom.click(row("Read one"));
     await dom.flush();
     assert.equal(allElements(dom.container).some(node => node.getAttribute?.("aria-label") === "Selected threads"), false);
-  } finally { window.confirm = previousConfirm; await dom.unmount(); }
+  } finally { await dom.unmount(); }
 });
 
 test("Rem deletes archived threads after the configured time without activity", async () => {
@@ -17692,20 +17376,20 @@ test("Rem deletes archived threads after the configured time without activity", 
     jsonResponse("/api/provider/capabilities", { providers: [] }),
     (url) => url.startsWith("/api/chat/threads/") ? { ok: true, json: async () => ({}) } : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380, archiveRetention: "30" }), fetchMock, { storage });
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { activeProjectRoot: "/repo", width: 380, archiveRetention: "30" }), fetchMock, { storage });
   try {
     await dom.flush(6000);
     for (let i = 0; i < 5; i++) await dom.flush();
-    assert.equal(appModule.loadChatThread("stale"), null);
-    assert.ok(appModule.loadChatThread("fresh"));
-    assert.ok(appModule.loadChatThread("stale-read"));
+    assert.equal(chatThreadsModule.loadChatThread("stale"), null);
+    assert.ok(chatThreadsModule.loadChatThread("fresh"));
+    assert.ok(chatThreadsModule.loadChatThread("stale-read"));
   } finally { await dom.unmount(); }
 });
 
 test("Rem retains a thread's branch and archives it after that branch is deleted", async () => {
   let branch = "feature";
   let branches = ["main", "feature"];
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), createFetchMock([
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), createFetchMock([
     jsonResponse("/api/provider/capabilities", { providers: [] }),
   ]), { desktop: { workspace: {
     gitStatus: async () => ({ active: true, branch, branches }),
@@ -17714,7 +17398,7 @@ test("Rem retains a thread's branch and archives it after that branch is deleted
   } } });
   await dom.click(dom.byLabel("New thread"));
   await dom.flush();
-  assert.equal(appModule.loadChatThreads()[0].projectBranch, "feature");
+  assert.equal(chatThreadsModule.loadChatThreads()[0].projectBranch, "feature");
   branch = "main";
   await dom.click(dom.byTitle("Back to active threads"));
   assert.match(dom.text(), /New thread/);
@@ -17723,7 +17407,7 @@ test("Rem retains a thread's branch and archives it after that branch is deleted
   assert.equal(dom.allByTitle("Delete thread").length, 0);
   await openThreadGroup(dom, "Archived");
   assert.equal(dom.allByTitle("Delete thread").length, 1);
-  assert.equal(appModule.loadChatThreads()[0].projectBranch, "feature");
+  assert.equal(chatThreadsModule.loadChatThreads()[0].projectBranch, "feature");
   await dom.unmount();
 });
 
@@ -17733,44 +17417,96 @@ test("Rem archives, pins and confirms deletion with persisted organization", asy
     jsonResponse("/api/provider/capabilities", { providers: [] }),
     jsonResponse("/api/chat/threads/organize", {}),
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, {
     storage: { "gofer-flow-chat-threads": JSON.stringify([thread]) },
   });
-  const previousConfirm = window.confirm;
-  const prompts = [];
-  window.confirm = message => { prompts.push(message); return false; };
   try {
     await dom.flush();
     await dom.click(dom.byTitle("Thread options"));
     await dom.click(dom.byText("Pin thread"));
     assert.match(dom.text(), /Pinned1 thread[\s\S]*Organize this conversation[\s\S]*Archived0 threads/);
-    assert.equal(appModule.loadChatThread(thread.id).pinned, true);
-    assert.equal(appModule.chatThreadIndex()[0].pinned, true);
+    assert.equal(chatThreadsModule.loadChatThread(thread.id).pinned, true);
+    assert.equal(chatThreadsModule.chatThreadIndex()[0].pinned, true);
     await dom.click(dom.byTitle("Thread options"));
     await dom.click(dom.byText("Unpin thread"));
     assert.match(dom.text(), /Read1 thread[\s\S]*Organize this conversation/);
     assert.doesNotMatch(dom.text(), /Pinned\d/);
     await dom.click(dom.byTitle("Thread options"));
     await dom.click(dom.byText("Delete thread"));
-    assert.equal(prompts.length, 1);
-    assert.match(prompts[0], /Organize this conversation.*cannot be undone/);
-    assert.ok(appModule.loadChatThread(thread.id));
+    assert.match((await answerConfirm(dom, false)).message, /Organize this conversation.*cannot be undone/);
+    assert.ok(chatThreadsModule.loadChatThread(thread.id));
     assert.equal(fetchMock.calls.some(call => call.options?.method === "DELETE"), false);
     await dom.click(dom.byTitle("Archive thread"));
     assert.doesNotMatch(dom.text(), /Organize this conversation/);
-    assert.equal(appModule.loadChatThread(thread.id).archived, true);
-    assert.equal(appModule.chatThreadIndex()[0].archived, true);
+    assert.equal(chatThreadsModule.loadChatThread(thread.id).archived, true);
+    assert.equal(chatThreadsModule.chatThreadIndex()[0].archived, true);
     await openThreadGroup(dom, "Archived");
     assert.match(dom.text(), /Organize this conversation/);
     await dom.click(dom.byTitle("Delete thread"));
-    assert.equal(prompts.length, 2);
-    assert.ok(appModule.loadChatThread(thread.id));
-    window.confirm = () => true;
+    assert.equal((await answerConfirm(dom, false)).confirmLabel, "Delete thread");
+    assert.ok(chatThreadsModule.loadChatThread(thread.id));
     await dom.click(dom.byTitle("Delete thread"));
-    await dom.flush();
-    assert.equal(appModule.loadChatThread(thread.id), null);
-    assert.equal(appModule.chatThreadIndex().length, 0);
+    await answerConfirm(dom, true);
+    assert.equal(chatThreadsModule.loadChatThread(thread.id), null);
+    assert.equal(chatThreadsModule.chatThreadIndex().length, 0);
     assert.equal(fetchMock.calls.some(call => call.options?.method === "DELETE"), true);
+  } finally { await dom.unmount(); }
+});
+
+test("deleting a thread asks in an in-app dialog named for the action, and Escape or Keep as is keeps the thread", async () => {
+  const thread = { id: "ask-first", title: "Ask before deleting", updatedAt: new Date().toISOString(), projectRoot: "/repo" };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [] }),
+    jsonResponse("/api/chat/threads/ask-first", {}),
+  ]);
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, {
+    storage: { "gofer-flow-chat-threads": JSON.stringify([thread]) },
+  });
+  const previousConfirm = window.confirm;
+  window.confirm = () => assert.fail("Raticode asks in its own dialog, not window.confirm");
+  const deleted = () => fetchMock.calls.some(call => call.options?.method === "DELETE");
+  const openQuestion = async () => {
+    await dom.click(dom.byTitle("Thread options"));
+    await dom.click(dom.byText("Delete thread"));
+    await dom.flush();
+    const dialog = confirmDialogIn(dom);
+    assert.ok(dialog, "Delete thread opens the in-app dialog");
+    return dialog;
+  };
+  try {
+    await dom.flush();
+    const dialog = await openQuestion();
+    assert.equal(dialog.getAttribute("role"), "dialog");
+    assert.equal(dialog.getAttribute("aria-modal"), "true");
+    const message = allElements(dialog).find(node => node.tagName === "P");
+    assert.equal(textOf(message), 'Delete thread "Ask before deleting"? This cannot be undone.');
+    assert.equal(dialog.getAttribute("aria-describedby"), message.getAttribute("id"));
+    const buttons = allElements(dialog).filter(node => node.tagName === "BUTTON");
+    assert.deepEqual(buttons.map(textOf), ["Keep as is", "Delete thread"]);
+    assert.match(buttons[1].getAttribute("class"), /ui-button--danger/, "deleting uses the danger tone");
+    assert.equal(document.activeElement, buttons[0], "Keep as is starts focused");
+    // The light theme styles the chat pane's last child as the composer, so the dialog must not take that place.
+    const chatPane = allElements(dom.container).find(node => node.getAttribute?.("data-chat-pane") === "true");
+    const lastChild = allElements(chatPane).filter(node => node.parentNode === chatPane).at(-1);
+    assert.ok(allElements(lastChild).some(node => node.tagName === "TEXTAREA"), "the composer stays the chat pane's last child");
+    assert.equal(allElements(lastChild).includes(dialog) || lastChild === dialog.parentNode, false);
+
+    await dom.dispatchWindow("keydown", { key: "Escape" });
+    await dom.flush();
+    assert.equal(confirmDialogIn(dom), undefined, "Escape closes the dialog");
+    assert.ok(chatThreadsModule.loadChatThread(thread.id));
+    assert.equal(deleted(), false);
+
+    await openQuestion();
+    assert.deepEqual(await answerConfirm(dom, false), { message: 'Delete thread "Ask before deleting"? This cannot be undone.', confirmLabel: "Delete thread" });
+    assert.equal(confirmDialogIn(dom), undefined, "Keep as is closes the dialog");
+    assert.ok(chatThreadsModule.loadChatThread(thread.id));
+    assert.equal(deleted(), false);
+
+    await openQuestion();
+    await answerConfirm(dom, true);
+    assert.equal(chatThreadsModule.loadChatThread(thread.id), null);
+    assert.equal(deleted(), true);
   } finally { window.confirm = previousConfirm; await dom.unmount(); }
 });
 
@@ -17788,12 +17524,10 @@ test("Delete permanently confirms by name and removes the thread's archive files
     archive: async (item, messages, deleted) => archiveConversation(root, item, messages, { deleted }),
     purge: async ids => { purges.push(ids); if (failPurge) throw new Error("The archive folder is unavailable."); return purgeConversations(root, ids); },
   } };
-  const previousConfirm = window.confirm;
-  const prompts = [];
   let dom;
   try {
     // Without an archive folder there is nothing extra to remove, so the menu keeps plain Delete only.
-    dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock(), {
+    dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock(), {
       desktop, storage: { "gofer-flow-chat-threads": JSON.stringify([thread]) },
     });
     await dom.flush();
@@ -17804,41 +17538,40 @@ test("Delete permanently confirms by name and removes the thread's archive files
 
     archiveConversation(root, thread, [{ id: "m1", role: "user", body: "secret plan" }]);
     const calls = fetchMock();
-    dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380, memorySettings: { archiveFolder: root } }), calls, {
+    dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { activeProjectRoot: "/repo", width: 380, memorySettings: { archiveFolder: root } }), calls, {
       desktop, storage: { "gofer-flow-chat-threads": JSON.stringify([thread]) },
     });
     await dom.flush();
-    window.confirm = message => { prompts.push(message); return false; };
     await dom.click(dom.byTitle("Thread options"));
     await dom.click(dom.byText("Delete permanently"));
-    assert.equal(prompts.length, 1);
-    assert.match(prompts[0], /^Delete "Plans to forget" permanently\?/);
-    assert.match(prompts[0], /snapshot, journal and the attachments no other thread uses/);
-    assert.match(prompts[0], /can't remove copies already in Git commits/);
+    const asked = await answerConfirm(dom, false);
+    assert.equal(asked.confirmLabel, "Delete permanently");
+    assert.match(asked.message, /^Delete "Plans to forget" permanently\?/);
+    assert.match(asked.message, /snapshot, journal and the attachments no other thread uses/);
+    assert.match(asked.message, /can't remove copies already in Git commits/);
     assert.equal(purges.length, 0, "cancelling changes nothing");
-    assert.ok(appModule.loadChatThread(thread.id));
+    assert.ok(chatThreadsModule.loadChatThread(thread.id));
 
     // A failed purge keeps the thread, so the user can retry.
-    window.confirm = () => true;
     await dom.click(dom.byTitle("Thread options"));
     await dom.click(dom.byText("Delete permanently"));
-    await dom.flush();
+    await answerConfirm(dom, true);
     assert.deepEqual(purges, [["purge-me"]]);
-    assert.ok(appModule.loadChatThread(thread.id));
+    assert.ok(chatThreadsModule.loadChatThread(thread.id));
     assert.equal(calls.calls.some(call => call.options?.method === "DELETE"), false);
-    assert.equal(fs.readdirSync(path.join(root, "threads")).length, 2);
+    // The snapshot, journal and word list (.terms, since 77ef3ee6) all stay until a purge works.
+    assert.deepEqual(fs.readdirSync(path.join(root, "threads")).map(name => name.split(".").pop()).sort(), ["json", "jsonl", "terms"]);
 
     failPurge = false;
     await dom.click(dom.byTitle("Thread options"));
     await dom.click(dom.byText("Delete permanently"));
-    await dom.flush();
+    await answerConfirm(dom, true);
     assert.equal(purges.length, 2);
-    assert.equal(appModule.loadChatThread(thread.id), null);
+    assert.equal(chatThreadsModule.loadChatThread(thread.id), null);
     assert.equal(calls.calls.some(call => call.options?.method === "DELETE"), true);
     assert.deepEqual(fs.readdirSync(path.join(root, "threads")), []);
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "index.json"), "utf8")).threads, {});
   } finally {
-    window.confirm = previousConfirm;
     await dom?.unmount();
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -17848,7 +17581,7 @@ for (const organization of [{}, { pinned: true }, { archived: true }]) {
   test(`Rem renames ${organization.pinned ? "pinned" : organization.archived ? "archived" : "active"} threads and persists custom names`, async () => {
     const thread = { id: "rename", title: "Original name", updatedAt: new Date().toISOString(), projectRoot: "/repo", ...organization };
     const fetchMock = createFetchMock([jsonResponse("/api/provider/capabilities", { providers: [] })]);
-    let dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, {
+    let dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, {
       storage: { "gofer-flow-chat-threads": JSON.stringify([thread]) },
     });
     try {
@@ -17865,14 +17598,14 @@ for (const organization of [{}, { pinned: true }, { archived: true }]) {
       assert.equal(reactProps(dom.byText("Save")).disabled, true);
       await dom.change(input, "   ");
       await dom.pointer(dom.ancestor(input, "FORM"), "onSubmit");
-      assert.equal(appModule.loadChatThread(thread.id).title, thread.title);
+      assert.equal(chatThreadsModule.loadChatThread(thread.id).title, thread.title);
       await dom.change(input, "  Release planning  ");
       await dom.blur(input);
       assert.equal(reactProps(input).value, "  Release planning  ");
-      assert.equal(appModule.loadChatThread(thread.id).title, thread.title);
+      assert.equal(chatThreadsModule.loadChatThread(thread.id).title, thread.title);
       await dom.pointer(dom.ancestor(input, "FORM"), "onSubmit");
       await dom.flush();
-      const saved = appModule.loadChatThread(thread.id);
+      const saved = chatThreadsModule.loadChatThread(thread.id);
       assert.deepEqual(saved, { ...thread, title: "Release planning", titleCustomized: true });
       assert.match(dom.text(), /Release planning/);
       assert.equal(allElements(dom.container).some(el => el.getAttribute?.("role") === "dialog"), false);
@@ -17881,11 +17614,11 @@ for (const organization of [{}, { pinned: true }, { archived: true }]) {
         [`gofer-flow-chat-thread-meta:${thread.id}`]: window.localStorage.getItem(`gofer-flow-chat-thread-meta:${thread.id}`),
       };
       await dom.unmount();
-      dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, { storage });
+      dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, { storage });
       await dom.flush();
       if (thread.archived) await openThreadGroup(dom, "Archived");
       assert.match(dom.text(), /Release planning/);
-      assert.equal(appModule.loadChatThread(thread.id).titleCustomized, true);
+      assert.equal(chatThreadsModule.loadChatThread(thread.id).titleCustomized, true);
     } finally { await dom.unmount(); }
   });
 }
@@ -17896,7 +17629,7 @@ test("Rem cancels thread renames and keeps a custom New thread title after sendi
     jsonResponse("/api/provider/capabilities", { providers: [] }),
     (url, options) => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url, options) : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, {
     storage: { "gofer-flow-chat-threads": JSON.stringify([thread]) },
   });
   try {
@@ -17907,7 +17640,7 @@ test("Rem cancels thread renames and keeps a custom New thread title after sendi
       await dom.change(dom.byLabel("Thread name"), "Discard this name");
       if (cancel === "Escape") await dom.dispatchWindow("keydown", { key: "Escape" });
       else await dom.click(dom.byText("Cancel"));
-      assert.equal(appModule.loadChatThread(thread.id).title, thread.title);
+      assert.equal(chatThreadsModule.loadChatThread(thread.id).title, thread.title);
       assert.equal(document.activeElement, dom.byTitle("Thread options"));
     }
     await dom.click(dom.ancestor(dom.byText(thread.title), "BUTTON"));
@@ -17919,7 +17652,7 @@ test("Rem cancels thread renames and keeps a custom New thread title after sendi
     await dom.change(dom.first("textarea"), "This message must not replace my custom title");
     await dom.click(dom.byTitle("Send message"));
     await dom.flush();
-    assert.equal(appModule.loadChatThread(thread.id).title, "New thread");
+    assert.equal(chatThreadsModule.loadChatThread(thread.id).title, "New thread");
     const request = JSON.parse(fetchMock.calls.find(call => call.url === "/api/chat/stream").options.body);
     assert.equal(request.conversationId, thread.id);
   } finally { await dom.unmount(); }
@@ -17932,7 +17665,7 @@ test("Rem loads old pinned threads from the index above read threads and archive
   const storage = {
     "gofer-flow-chat-threads": JSON.stringify([active, pinned, removed]),
   };
-  const dom = await mountReact(React.createElement(appModule.ThreadSections, { threads: [], onOpen() {}, onDelete() {} }), createFetchMock([]), {
+  const dom = await mountReact(React.createElement(chatPaneModule.ThreadSections, { threads: [], onOpen() {}, onDelete() {} }), createFetchMock([]), {
     storage, desktop: { workspace: { missingThreadRoots: async () => ["/gone"] } },
   });
   try {
@@ -17967,7 +17700,7 @@ for (const provider of ["cursor", "copilot", "opencode", "antigravity", "grok"])
         return null;
       },
     ]);
-    const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380, assistantDefaults: { provider, model: "model-a" } }), fetchMock);
+    const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { width: 380, assistantDefaults: { provider, model: "model-a" } }), fetchMock);
     try {
       await dom.flush();
       await dom.change(dom.first("textarea"), "Build the feature");
@@ -18019,7 +17752,7 @@ for (const provider of ["cursor", "copilot", "opencode", "antigravity", "grok"])
       assert.ok(checkpoint.messages.some(message => message.body === "Continue with steering"));
       assert.ok(checkpoint.messages.some(message => message.body === "Partial work"));
       assert.ok(fetchMock.calls.some(call => call.url.startsWith("/api/chat/steering?conversationId=")));
-      const submitted = JSON.parse(window.localStorage.getItem(appModule.chatStorageKeyFor(request.conversationId))).filter(message => message.role === "user");
+      const submitted = JSON.parse(window.localStorage.getItem(chatThreadsModule.chatStorageKeyFor(request.conversationId))).filter(message => message.role === "user");
       assert.deepEqual(submitted.at(-1).remModelSelection, submitted[0].remModelSelection);
       await dom.click(dom.byTitle("Send message")); await dom.flush();
       const followup = JSON.parse(fetchMock.calls.filter(call => call.url === "/api/chat/stream").at(-1).options.body);
@@ -18052,7 +17785,7 @@ test("Rem retries an uncertain steering receipt with the same ID and Stop uses t
       return null;
     },
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock);
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { width: 380 }), fetchMock);
   try {
     await dom.flush();
     await dom.change(dom.first("textarea"), "Start"); await dom.click(dom.byTitle("Send message")); await dom.flush();
@@ -18073,33 +17806,24 @@ test("Rem retries an uncertain steering receipt with the same ID and Stop uses t
   } finally { await dom.unmount(); }
 });
 
-for (const surface of ["Rem", "Swarm", "Agent node"]) {
+for (const surface of ["Rem", "Swarm"]) {
   test(`${surface} selects and saves all new providers using model dropdowns`, async () => {
     const ids = ["cursor", "copilot", "opencode", "antigravity", "grok"];
     const providers = ["codex", ...ids].map(id => ({ id, displayName: id, available: true, discoveryStatus: "ready", defaultModel: "cli-default", models: [{ id: "cli-default" }, { id: `${id}/catalog-v2` }], supportsCustomModel: true }));
-    const changes = [];
     const fetchMock = createFetchMock([
       jsonResponse("/api/provider/capabilities", { providers }),
       (url, options) => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Saved selection"}}\n'])(url, options) : null,
       (url, options) => url.startsWith("/api/swarms") && options.method === "POST" ? { ok: true, json: async () => ({ swarm: { id: "saved" } }) } : null,
     ]);
     let element;
-    if (surface === "Rem") element = React.createElement(appModule.ChatPane, { width: 380 });
-    else if (surface === "Swarm") {
+    if (surface === "Rem") element = React.createElement(chatPaneModule.ChatPane, { width: 380 });
+    else {
       const { default: SwarmWorkspace } = await viteServer.ssrLoadModule("/src/components/SwarmWorkspace.jsx");
       element = React.createElement(SwarmWorkspace, { rootPath: "/workspace", swarmId: "new", onSelect() {} });
-    } else element = React.createElement(DagCanvasHarness, {
-      dataDir: "/workspace", workflow: {
-        ...workflowFixture(), agents: { reviewer: { subscription: "codex", model: "cli-default" } },
-        nodes: [{ id: "review", type: "agent", label: "Review", x: 0, y: 0, operation: { type: "agent", agent_id: "reviewer" } }],
-      }, onWorkflowChange: next => changes.push(next),
-    });
+    }
     const dom = await mountReact(element, fetchMock);
     try {
       await dom.flush();
-      if (surface === "Agent node") {
-        await dom.pointer(dom.ancestor(dom.byText("Review"), "ARTICLE"), "onPointerDown"); await dom.flush();
-      }
       for (const id of ids) {
         const trigger = allElements(dom.container).find(el => el.getAttribute?.("data-picker-trigger") === "provider");
         assert.ok(trigger, `${surface} provider picker exists`);
@@ -18110,10 +17834,7 @@ for (const surface of ["Rem", "Swarm", "Agent node"]) {
         await dom.click(allElements(dom.container).filter(el => el.getAttribute?.("data-picker-trigger") === "model").at(-1));
         await dom.click(allElements(dom.container).find(el => el.getAttribute?.("role") === "option" && textOf(el).includes(`${id}/catalog-v2`)));
         await dom.flush();
-        if (surface === "Agent node") {
-          assert.equal(changes.at(-1).agents.reviewer.subscription, id);
-          assert.equal(changes.at(-1).agents.reviewer.model, `${id}/catalog-v2`);
-        } else if (surface === "Rem") {
+        if (surface === "Rem") {
           if (id === "antigravity") await dom.click(dom.byText("Use CLI-managed permissions"));
           await dom.change(dom.first("textarea"), `Use ${id}`); await dom.click(dom.byTitle("Send message")); await dom.flush();
           const request = JSON.parse(fetchMock.calls.filter(call => call.url === "/api/chat/stream").at(-1).options.body);
@@ -18134,7 +17855,7 @@ for (const surface of ["Rem", "Swarm", "Agent node"]) {
 
 test("Rem keeps an unavailable saved provider and custom model instead of switching silently", async () => {
   const fetchMock = createFetchMock([jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, discoveryStatus: "ready", defaultModel: "ready-model", models: [{ id: "ready-model" }] }] })]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380, assistantDefaults: { provider: "grok", model: "saved-model" } }), fetchMock);
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { width: 380, assistantDefaults: { provider: "grok", model: "saved-model" } }), fetchMock);
   try {
     await dom.flush();
     assert.match(dom.text(), /Provider grok is not in the current catalog/);
@@ -18156,7 +17877,7 @@ for (const status of [400, 409, 500]) {
         return null;
       },
     ]);
-    const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock);
+    const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { width: 380 }), fetchMock);
     try {
       await dom.flush(); await dom.change(dom.first("textarea"), "Start"); await dom.click(dom.byTitle("Send message")); await dom.flush();
       await dom.change(dom.first("textarea"), "Do not lose this draft"); await dom.click(dom.byLabel("Steer Rem")); await dom.flush();
@@ -18172,22 +17893,6 @@ for (const status of [400, 409, 500]) {
 }
 
 
-test("swarm digest shows orchestrator summaries, current states, and idle diagnosis", async () => {
-  const { SwarmDigest } = await viteServer.ssrLoadModule("/src/components/SwarmWorkspace.jsx");
-  const agents = [{ id: "lead", name: "Development lead" }, { id: "worker", name: "Backend" }];
-  const run = { state: "failed", agentStates: { lead: { state: "idle" }, worker: { state: "retry_wait" } },
-    digest: { updatedAt: "2026-09-16T16:00:00Z", agents: [
-      { agentId: "lead", summary: "Reviewing the parser change" }, { agentId: "worker", summary: "Fixing route validation" },
-    ] }, idleDiagnosis: { body: "The next assignment was never queued." } };
-  const html = renderToStaticMarkup(React.createElement(SwarmDigest, { run, agents }));
-  assert.match(html, /aria-label="Team status"/);
-  assert.match(html, /Reviewing the parser change/);
-  assert.match(html, /Fixing route validation/);
-  assert.match(html, /retry wait/);
-  assert.match(html, /The next assignment was never queued/);
-  assert.match(html, /Orchestrator update/);
-});
-
 test("a running swarm says when its next turn waits for a free worker", async () => {
   const { RunWaiting } = await viteServer.ssrLoadModule("/src/components/SwarmWorkspace.jsx");
   const reason = "Waiting for a free worker on Studio desktop";
@@ -18197,19 +17902,6 @@ test("a running swarm says when its next turn waits for a free worker", async ()
   // A paused or finished run no longer waits, even if an old reason is left on it.
   assert.equal(renderToStaticMarkup(React.createElement(RunWaiting, { run: { state: "paused", waitReason: reason } })), "");
   assert.equal(renderToStaticMarkup(React.createElement(RunWaiting, { run: { state: "running" } })), "");
-});
-
-test("swarm digest falls back to assignments and escapes provider text", async () => {
-  const { SwarmDigest } = await viteServer.ssrLoadModule("/src/components/SwarmWorkspace.jsx");
-  const html = renderToStaticMarkup(React.createElement(SwarmDigest, {
-    agents: [{ id: "worker", name: "Backend" }], run: { state: "running",
-      agentStates: { worker: { state: "working", milestoneId: "m1" } },
-      objectives: [{ milestones: [{ id: "m1", title: "Fix <script>parser</script>", status: "working" }] }],
-    },
-  }));
-  assert.match(html, /Fix &lt;script&gt;parser&lt;\/script&gt;/);
-  assert.doesNotMatch(html, /<script>/);
-  assert.match(html, /working/);
 });
 
 test("CLI-managed Rem permissions omit the composer blurb", () => {
@@ -18559,7 +18251,7 @@ test("Cursor catalog uses model and effort dropdowns without resetting Rem effor
     jsonResponse("/api/provider/capabilities", { providers }),
     (url, options) => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url, options) : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     width: 380, assistantDefaults: { provider: "cursor", model: "auto" },
   }), fetchMock);
   const trigger = kind => allElements(dom.container).find(el => el.getAttribute?.("data-picker-trigger") === kind);
@@ -18599,7 +18291,7 @@ test("thread model picker chooses the thread's account, sends it each turn and w
     jsonResponse("/api/provider/accounts", accountList, { method: "POST" }),
     (url, options) => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url, options) : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     width: 380, assistantDefaults: { provider: "claude_code", model: "fable", providerAccounts: { claude_code: "auto" } },
   }), fetchMock);
   const accountTrigger = () => allElements(dom.container).find(el => el.getAttribute?.("data-model-picker-part") === "account");
@@ -18675,7 +18367,7 @@ test("provider discovery renders an animated status until the catalog arrives", 
   const fetchMock = createFetchMock([
     url => url === "/api/provider/capabilities" ? catalog : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     width: 380, assistantDefaults: { provider: "cursor", model: "auto" },
   }), fetchMock);
   try {
@@ -18728,7 +18420,7 @@ test("Copilot catalog keeps model and reasoning effort selections in the chat re
     jsonResponse("/api/provider/capabilities", { providers }),
     (url, options) => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url, options) : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     width: 380, assistantDefaults: { provider: "copilot", model: "cli-default" },
   }), fetchMock);
   const trigger = kind => allElements(dom.container).find(el => el.getAttribute?.("data-picker-trigger") === kind);
@@ -18785,11 +18477,11 @@ test("Rem sends current editor file references without workflow contents or stal
   const thread = { projectRoot: "/repo", selectedWorkflowId: "daily" };
   const paths = appModule.editorFileReferences(["workflow-graph:daily", "/repo/workflow.rattish", "/repo/notes.md", "raticode-browser:1"], { "workflow-graph:daily": workflow });
   assert.deepEqual(paths, ["/repo/workflow.rattish", "/repo/notes.md"]);
-  const context = appModule.chatWorkflowContextForThread(thread, [workflow], paths);
+  const context = chatThreadsModule.chatWorkflowContextForThread(thread, [workflow], paths);
   assert.equal(context.selectedWorkflowId, null);
   assert.deepEqual(context.openFiles, paths);
   assert.deepEqual(context.workflows, [{ id: "daily", name: "Daily", sourcePath: "/repo/workflow.rattish" }]);
-  assert.deepEqual(appModule.chatWorkflowContextForThread(thread, [workflow], []).openFiles, []);
+  assert.deepEqual(chatThreadsModule.chatWorkflowContextForThread(thread, [workflow], []).openFiles, []);
   assert.ok(!JSON.stringify(context).includes("private"));
 });
 
@@ -18800,7 +18492,7 @@ test("steering splits the visible trace without exposing continuation context", 
     { id: "steer", role: "user", body: "New direction" },
     { id: "after", role: "assistant", kind: "thought", groupId: "turn", body: "After" },
   ];
-  const items = appModule.buildChatItems(messages);
+  const items = chatThreadsModule.buildChatItems(messages);
   assert.deepEqual(items.map(item => item.type), ["thought-group", "message", "thought-group"]);
   assert.equal(items[1].message.body, "New direction");
   assert.notEqual(items[0].id, items[2].id);
@@ -18891,7 +18583,7 @@ test("Rem steering uploads files while running and retains them for an uncertain
       return null;
     },
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock);
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { width: 380 }), fetchMock);
   try {
     await dom.flush();
     await dom.change(dom.first("textarea"), "Start working");
@@ -18923,7 +18615,7 @@ test("Grok defaults to CLI-managed and warns when changed, persisting the thread
     jsonResponse("/api/provider/capabilities", { providers: [{ id: "grok", displayName: "Grok", models: [{ id: "grok-4.6" }], defaultModel: "grok-4.6", available: true }] }),
     url => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url) : null,
   ]);
-  let dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380, assistantDefaults: { provider: "grok", model: "grok-4.6" } }), fetchMock);
+  let dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { width: 380, assistantDefaults: { provider: "grok", model: "grok-4.6" } }), fetchMock);
   let storage;
   try {
     await dom.flush();
@@ -18939,14 +18631,14 @@ test("Grok defaults to CLI-managed and warns when changed, persisting the thread
     await dom.click(dom.byTitle("Send message")); await dom.flush();
     const request = JSON.parse(fetchMock.calls.find(call => call.url === "/api/chat/stream").options.body);
     assert.equal(request.permissionMode, "cli-managed");
-    assert.equal(appModule.loadChatThread(request.conversationId).permissionsByProvider.grok, "cli-managed");
+    assert.equal(chatThreadsModule.loadChatThread(request.conversationId).permissionsByProvider.grok, "cli-managed");
     storage = Object.fromEntries([
       "gofer-flow-chat-threads",
       `gofer-flow-chat-thread-meta:${request.conversationId}`,
       `gofer-flow-chat-thread:${request.conversationId}`,
     ].map(key => [key, window.localStorage.getItem(key)]));
   } finally { await dom.unmount(); }
-  dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock, { storage });
+  dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { width: 380 }), fetchMock, { storage });
   try {
     await dom.flush();
     await dom.click(dom.ancestor(dom.byText("Hello"), "BUTTON")); await dom.flush();
@@ -18959,10 +18651,10 @@ test("equivalent Windows roots keep discovered workflows visible and available t
   const workflow = { id: "windows-flow", name: "Windows flow", projectRoot: "C:\\Users\\Alice\\repo", sourcePath: "C:\\Users\\Alice\\repo\\.raticode\\flow\\workflow.rattish" };
   for (const root of ["c:/Users/Alice/repo", "C:/Users/Alice/repo/", "C:\\Users\\Alice\\repo\\"]) {
     assert.equal(appModule.activeWorkspaceForProject([workflow], workflow.id, root), workflow);
-    assert.equal(appModule.chatWorkflowContextForThread({ projectRoot: root }, [workflow]).workflows.length, 1);
-    assert.deepEqual(appModule.mergeRecentProjects([workflow.projectRoot], [root]), [workflow.projectRoot]);
+    assert.equal(chatThreadsModule.chatWorkflowContextForThread({ projectRoot: root }, [workflow]).workflows.length, 1);
+    assert.deepEqual(projectsModule.mergeRecentProjects([workflow.projectRoot], [root]), [workflow.projectRoot]);
     assert.deepEqual(appModule.rememberRecentProject([workflow.projectRoot], root), [root]);
-    assert.equal(appModule.scopeChatThreadToProject({ projectRoot: workflow.projectRoot, projectBranch: "main" }, root).projectBranch, "main");
+    assert.equal(chatThreadsModule.scopeChatThreadToProject({ projectRoot: workflow.projectRoot, projectBranch: "main" }, root).projectBranch, "main");
     const groups = appModule.groupWorkflowsByProject([workflow, { ...workflow, id: "second", projectRoot: root }], { [root]: "My project" });
     assert.equal(groups.length, 1);
     assert.equal(groups[0].name, "My project");
@@ -19028,7 +18720,7 @@ test("active threads are clickable before Git resolves and metadata reads follow
       const get = window.localStorage.getItem.bind(window.localStorage);
       window.localStorage.getItem = key => { reads.push(key); return get(key); };
     }
-    return React.createElement(appModule.ThreadSections, { threads: [], onOpen: id => opened.push(id), onDelete() {} });
+    return React.createElement(chatPaneModule.ThreadSections, { threads: [], onOpen: id => opened.push(id), onDelete() {} });
   }
   const dom = await mountReact(React.createElement(Harness), createFetchMock([]), { storage, desktop: { workspace } });
   try {
@@ -19100,7 +18792,7 @@ test("Stop during Rem startup waits for the turn identity and explicitly stops b
       return null;
     },
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock);
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { width: 380 }), fetchMock);
   try {
     await dom.flush();
     await dom.change(dom.first("textarea"), "Start");
@@ -19217,7 +18909,7 @@ test("Rem sends provider model and effort overrides on startup and after switchi
     jsonResponse("/api/provider/capabilities", { providers }),
     (url, options) => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url, options) : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock);
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { width: 380 }), fetchMock);
   try {
     await dom.flush();
     for (const switchBack of [false, true]) {
@@ -19251,7 +18943,7 @@ test("Rem shows one model switch divider on send, persists it, and keeps picker 
     jsonResponse("/api/provider/capabilities", { providers }),
     (url, options) => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url, options) : null,
   ]);
-  let dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock);
+  let dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { width: 380 }), fetchMock);
   const banners = () => allElements(dom.container).filter(el => el.getAttribute?.("aria-label") === "Model changed");
   async function choose(picker, label) {
     await dom.click(allElements(dom.container).find(el => el.getAttribute?.("data-picker-trigger") === picker));
@@ -19292,12 +18984,12 @@ test("Rem shows one model switch divider on send, persists it, and keeps picker 
     const requests = fetchMock.calls.filter(call => call.url === "/api/chat/stream").map(call => JSON.parse(call.options.body));
     assert.ok(requests.every(request => request.messages.every(message => !("modelSwitchBanner" in message) && !("remModelSelection" in message))));
     assert.ok(requests.every(request => request.messages.every(message => !message.body.startsWith("switched to"))));
-    const [thread] = appModule.loadChatThreads();
-    const stored = JSON.parse(window.localStorage.getItem(appModule.chatStorageKeyFor(thread.id)));
+    const [thread] = chatThreadsModule.loadChatThreads();
+    const stored = JSON.parse(window.localStorage.getItem(chatThreadsModule.chatStorageKeyFor(thread.id)));
     assert.equal(stored.filter(message => message.modelSwitchBanner).length, 3);
-    const storage = Object.fromEntries(["gofer-flow-chat-threads", `gofer-flow-chat-thread-meta:${thread.id}`, appModule.chatStorageKeyFor(thread.id)].map(key => [key, window.localStorage.getItem(key)]));
+    const storage = Object.fromEntries(["gofer-flow-chat-threads", `gofer-flow-chat-thread-meta:${thread.id}`, chatThreadsModule.chatStorageKeyFor(thread.id)].map(key => [key, window.localStorage.getItem(key)]));
     await dom.unmount();
-    dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock, { storage });
+    dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { width: 380 }), fetchMock, { storage });
     await dom.click(dom.ancestor(dom.byText(thread.title), "BUTTON")); await dom.flush();
     assert.equal(banners().length, 3);
     await send("After reopening");
@@ -19625,7 +19317,7 @@ test("Ctrl+Enter starts background threads while Enter opens the new thread", as
     jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
     url => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url) : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     activeProjectRoot: "/projects/mobile", recentProjectRoots: ["/projects/mobile"], workflows: [], width: 380,
   }), fetchMock);
   await dom.flush();
@@ -19679,7 +19371,7 @@ test("an existing Codex thread sends edited tools, skills and MCP to steering an
       return null;
     },
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     width: 380, assistantDefaults: { provider: "codex", resources: { shell: false, web: false, skills: [], mcpServers: [] } },
   }), fetchMock);
   const checkbox = label => dom.byLabel(label);
@@ -19722,7 +19414,7 @@ test("an existing Codex thread sends edited tools, skills and MCP to steering an
     const followup = JSON.parse(fetchMock.calls.filter(call => call.url === "/api/chat/stream").at(-1).options.body);
     assert.equal(followup.conversationId, initial.conversationId);
     assert.deepEqual(followup.workflow.remResources, receipt.resources);
-    assert.deepEqual(appModule.loadChatThreads().find(thread => thread.id === initial.conversationId).resources, receipt.resources);
+    assert.deepEqual(chatThreadsModule.loadChatThreads().find(thread => thread.id === initial.conversationId).resources, receipt.resources);
   } finally { await dom.unmount(); }
 });
 
@@ -19748,7 +19440,7 @@ test("background first turn captures tools, skills, MCP and permissions before a
     jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
     url => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url) : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     activeProjectRoot: "/repo", width: 380,
     assistantDefaults: { provider: "codex", model: "gpt-6-luna", resources },
   }), fetchMock, { desktop: { workspace: {
@@ -19774,7 +19466,7 @@ test("background first turn captures tools, skills, MCP and permissions before a
     assert.throws(() => dom.byLabel("Back to active threads"));
     assert.equal(requests().length, 0, "provider must wait for the project grant");
     const expected = { ...resources, shell: true, web: true, agents: false, browser: true };
-    const thread = appModule.loadChatThreads()[0];
+    const thread = chatThreadsModule.loadChatThreads()[0];
     assert.deepEqual(thread.resources, expected, "configuration is saved before dispatch");
     // Configure the next thread while the first one is waiting to start.
     await dom.change(checkbox("Search the web"), false);
@@ -19813,7 +19505,7 @@ test("new thread tools are saved as Rem defaults so they survive a restart", asy
   const changes = [];
   function Harness() {
     const [settings, setSettings] = React.useState(settingsModule.DEFAULT_APP_SETTINGS);
-    return React.createElement(appModule.ChatPane, {
+    return React.createElement(chatPaneModule.ChatPane, {
       width: 380,
       assistantDefaults: settings.assistant,
       onNewThreadResourcesChange: resources => {
@@ -19844,19 +19536,19 @@ test("invalid new thread resources block background dispatch until corrected", a
     jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
     url => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url) : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     width: 380,
     assistantDefaults: { resources: { shell: true, web: true, skills: [{ path: "/skills/weather", enabled: true }], mcpServers: [{ name: "broken", type: "stdio", command: "", enabled: true }] } },
   }), fetchMock);
   try {
     await dom.flush();
-    const threadCount = appModule.loadChatThreads().length;
+    const threadCount = chatThreadsModule.loadChatThreads().length;
     assert.match(dom.text(), /Needs attention/);
     await dom.change(dom.first("textarea"), "Use my skill");
     await dom.keyDown(dom.first("textarea"), "Enter", { ctrlKey: true });
     await dom.flush();
     assert.equal(fetchMock.calls.filter(call => call.url === "/api/chat/stream").length, 0);
-    assert.equal(appModule.loadChatThreads().length, threadCount);
+    assert.equal(chatThreadsModule.loadChatThreads().length, threadCount);
     assert.equal(reactProps(dom.first("textarea")).value, "Use my skill");
     await dom.click(dom.byLabel("New thread tools, skills & MCP"));
     assert.match(dom.text(), /Enter an executable for each local MCP server/);
@@ -19874,7 +19566,7 @@ test("a thread history error does not block starting a background thread from th
     jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
     url => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url) : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     activeProjectRoot: "/repo", workflows: [], width: 380,
   }), fetchMock);
   const { conversationRepository } = await viteServer.ssrLoadModule("/src/lib/conversationRepository.js");
@@ -19915,7 +19607,7 @@ test("global Rem scope becomes the selected project before the final response", 
       '{"type":"final","message":{"body":"Changed mobile"}}\n',
     ])(url) : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     activeProjectRoot: "/projects/desktop", recentProjectRoots: ["/projects/mobile", "/projects/desktop"],
     assistantDefaults: { defaultScope: "global" }, workflows: [], width: 380,
   }), fetchMock);
@@ -19942,7 +19634,7 @@ test("global research sends selected web, skill and MCP settings with the saved 
     jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
     url => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Research complete"}}\n'])(url) : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     activeProjectRoot: "/projects/desktop", recentProjectRoots: ["/projects/desktop"],
     assistantDefaults: { defaultScope: "global", resources }, workflows: [], width: 380,
   }), fetchMock);
@@ -19974,7 +19666,7 @@ test("Rem new-thread events start one scoped child and keep the parent visible",
       return streamResponse(count === 1 ? [event, event, '{"type":"final","message":{"body":"Started"}}\n'] : ['{"type":"final","message":{"body":"Experiment complete"}}\n'])(url);
     },
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
     activeProjectRoot: "/projects/desktop", recentProjectRoots: ["/projects/mobile"], workflows: [], width: 380,
   }), fetchMock);
   await dom.flush();
@@ -20190,14 +19882,14 @@ test("Each provider's accounts sit inside its settings behind Add account, which
     assert.deepEqual(sent.at(-1), { action: "sign_in", provider: "claude_code", name: "work" });
     assert.equal(menu(), undefined);
     // Remove still asks first, and does nothing when the answer is no.
-    const confirms = [];
-    window.confirm = message => { confirms.push(message); return false; };
     const before = sent.length;
     await dom.click(trigger);
     await dom.click(menuItem("Remove")); await dom.flush();
-    assert.match(confirms.at(-1), /Sign out "work" and delete its Claude Code folder/);
+    assert.equal(await confirmTone(dom), "danger");
+    const asked = await answerConfirm(dom, false);
+    assert.match(asked.message, /Sign out "work" and delete its Claude Code folder/);
+    assert.equal(asked.confirmLabel, "Sign out and delete");
     assert.equal(sent.length, before);
-    window.confirm = () => true;
     // Import setup into an existing account, from the provider's own folder: its form opens on the row.
     await dom.click(trigger);
     await dom.click(menuItem("Import setup"));
@@ -20346,16 +20038,6 @@ test("local model server settings list, check, add with a keychain key and remov
     assert.ok(sent.some(call => call.method === "DELETE" && call.url === "/api/provider/profiles/gpu-box"));
     assert.doesNotMatch(dom.text(), /192\.168\.1\.20:11434/);
   } finally { await dom.unmount(); }
-});
-
-test("Studio's profile editor keeps a local model server's hidden fields when it saves", async () => {
-  const { profileEditorDraft, profilePayloadFromDraft } = await viteServer.ssrLoadModule("/src/components/DagCanvas.jsx");
-  const local = { name: "ollama", subscription: "openai_api", local: true, loopback: true, api_base_url: "http://127.0.0.1:11434/v1", model: "qwen3:8b" };
-  const draft = profileEditorDraft(local, "openai_api");
-  assert.deepEqual(profilePayloadFromDraft({ ...draft, timeout: "900" }), {
-    local: true, api_base_url: "http://127.0.0.1:11434/v1", name: "ollama", subscription: "openai_api", model: "qwen3:8b", timeout: 900,
-  });
-  assert.deepEqual(profilePayloadFromDraft({ ...draft, subscription: "codex" }), { name: "ollama", subscription: "codex", model: "qwen3:8b" });
 });
 
 test("provider settings reuse cached rows on remount and survive failed background refreshes", async () => {
@@ -20671,7 +20353,7 @@ test("forking an earlier message preserves the original and sends only the copie
     jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
     url => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Fork answer"}}\n'])(url) : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, { storage: {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, { storage: {
     "gofer-flow-chat-threads": JSON.stringify([parent]),
     "gofer-flow-chat-thread-meta:fork-parent": JSON.stringify(parent),
     "gofer-flow-chat-thread:fork-parent": JSON.stringify(history),
@@ -20681,7 +20363,7 @@ test("forking an earlier message preserves the original and sends only the copie
     const forks = allElements(dom.container).filter(element => element.getAttribute("aria-label") === "Fork thread from here");
     assert.equal(forks.length, 4, dom.text());
     await dom.click(forks[1]); await dom.flush();
-    const child = appModule.loadChatThreads().find(thread => thread.forkedFromThreadId === parent.id);
+    const child = chatThreadsModule.loadChatThreads().find(thread => thread.forkedFromThreadId === parent.id);
     assert.ok(child);
     assert.equal(child.provider, parent.provider);
     assert.deepEqual(child.resources, parent.resources);
@@ -20715,7 +20397,7 @@ for (const body of ["Repeat this question", ""]) {
       jsonResponse("/api/chat/attachments/copy", { attachments: [attachment] }, { method: "POST" }),
       url => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"New fork reply"}}\n'])(url) : null,
     ]);
-    const dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, { storage: {
+    const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, { storage: {
       "gofer-flow-chat-threads": JSON.stringify([parent]),
       "gofer-flow-chat-thread-meta:replay-parent": JSON.stringify(parent),
       "gofer-flow-chat-thread:replay-parent": JSON.stringify(history),
@@ -20724,7 +20406,7 @@ for (const body of ["Repeat this question", ""]) {
       await dom.click(dom.ancestor(dom.byText(parent.title), "BUTTON")); await dom.flush();
       const forks = allElements(dom.container).filter(element => element.getAttribute("aria-label") === "Fork thread from here");
       await dom.click(forks[2]); await dom.flush();
-      const child = appModule.loadChatThreads().find(thread => thread.forkedFromThreadId === parent.id);
+      const child = chatThreadsModule.loadChatThreads().find(thread => thread.forkedFromThreadId === parent.id);
       assert.ok(child);
       assert.equal(child.forkedFromMessageId, "selected");
       const calls = fetchMock.calls.filter(call => call.url === "/api/chat/stream");
@@ -20760,7 +20442,7 @@ test("thread order changes on user submission and completion, never streamed tho
     jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
     url => url === "/api/chat/stream" ? streams[submitted++].response(url) : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock);
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { width: 380 }), fetchMock);
   const ids = () => allElements(dom.container).map(el => el.getAttribute("data-thread-id")).filter(Boolean);
   const savedTime = id => JSON.parse(window.localStorage.getItem(`gofer-flow-chat-thread-meta:${id}`)).updatedAt;
   try {
@@ -21274,7 +20956,7 @@ test("commit progress updates within one running job and clears after interrupti
 
 test("Rem merges consecutive thought groups and keeps tool identities scoped to their turns", () => {
   const thought = (id, groupId, status) => ({ id, role: "assistant", kind: "thought", groupId, body: id, trace: { id: "tool-1", kind: "tool", title: "Read", status } });
-  const items = appModule.buildChatItems([
+  const items = chatThreadsModule.buildChatItems([
     thought("first", "one", "running"), thought("result", "one", "complete"),
     { id: "hidden", role: "assistant", kind: "memory", body: "hidden" },
     thought("second", "two", "running"),
@@ -21284,19 +20966,19 @@ test("Rem merges consecutive thought groups and keeps tool identities scoped to 
   ]);
   assert.equal(items.filter(item => item.type === "thought-group").length, 1);
   assert.equal(items[0].thoughts.length, 4);
-  const trace = appModule.buildThoughtTrace(items[0].thoughts);
+  const trace = chatThreadsModule.buildThoughtTrace(items[0].thoughts);
   assert.equal(trace.length, 3);
   assert.equal(trace[0].status, "complete");
   assert.equal(trace[1].status, "running");
   assert.equal(new Set(trace.map(item => item.key)).size, 3);
   assert.equal(items[0].replyId, "reply");
-  assert.equal(appModule.isThoughtGroupExpanded(items[0], {}), false);
-  assert.equal(appModule.isThoughtGroupExpanded(items[0], {}, false), true);
+  assert.equal(chatThreadsModule.isThoughtGroupExpanded(items[0], {}), false);
+  assert.equal(chatThreadsModule.isThoughtGroupExpanded(items[0], {}, false), true);
 });
 
 test("earlier thought placeholders stay collapsed until the user expands them", () => {
   const stub = { id: "t-1", anchorId: "next", ids: ["t-1", "t-2"] };
-  const items = appModule.buildChatItems([
+  const items = chatThreadsModule.buildChatItems([
     { id: "question", role: "user", body: "Question" },
     { id: stub.id, kind: "thought", lazy: stub },
     { id: "next", role: "user", body: "Interrupted, ask again" },
@@ -21304,13 +20986,13 @@ test("earlier thought placeholders stay collapsed until the user expands them", 
   assert.equal(items[1].lazy, stub);
   assert.equal(items[1].replyId, null);
   // Thought groups without a reply normally open; placeholders do not, even with auto-hide off.
-  assert.equal(appModule.isThoughtGroupExpanded(items[1], {}, false), false);
-  assert.equal(appModule.isThoughtGroupExpanded(items[1], { [items[1].id]: { replyId: null, expanded: true } }), true);
+  assert.equal(chatThreadsModule.isThoughtGroupExpanded(items[1], {}, false), false);
+  assert.equal(chatThreadsModule.isThoughtGroupExpanded(items[1], { [items[1].id]: { replyId: null, expanded: true } }), true);
 });
 
 for (const provider of ["codex", "claude_code", "cursor", "copilot", "opencode", "grok"]) {
   test(`Rem accepts pasted images for ${provider}`, async () => {
-    const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380, assistantDefaults: { provider } }), createFetchMock([
+    const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { width: 380, assistantDefaults: { provider } }), createFetchMock([
       jsonResponse("/api/provider/capabilities", { providers: [{ id: provider, displayName: provider, available: true, models: [], supportsImages: true }] }),
     ]));
     try {
@@ -21323,7 +21005,7 @@ for (const provider of ["codex", "claude_code", "cursor", "copilot", "opencode",
 }
 
 test("Rem rejects unsupported pasted images in the attachment area and dismisses the warning", async () => {
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380, assistantDefaults: { provider: "antigravity" } }), createFetchMock([
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { width: 380, assistantDefaults: { provider: "antigravity" } }), createFetchMock([
     jsonResponse("/api/provider/capabilities", { providers: [{ id: "antigravity", displayName: "Antigravity", available: true, models: [], supportsImages: false }] }),
   ]));
   const originalSet = window.setTimeout, originalClear = window.clearTimeout;
@@ -21363,7 +21045,7 @@ for (const autoHideThoughts of [true, false]) {
       '{"type":"thought","text":"Inspecting the screenshot"}\n',
       '{"type":"final","message":{"body":"Finished checking"}}\n',
     ]);
-    const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380, assistantDefaults: { autoHideThoughts } }), createFetchMock([
+    const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { width: 380, assistantDefaults: { autoHideThoughts } }), createFetchMock([
       jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
       url => url === "/api/chat/stream" ? stream.response(url) : null,
     ]));
@@ -21403,7 +21085,7 @@ test("Rem thought and web defaults survive existing settings and preserve opt-ou
 
 test("switching Rem to a provider without images removes queued images and preserves text files", async () => {
   const providers = ["codex", "antigravity"].map(id => ({ id, displayName: id, available: true, models: [], supportsImages: id === "codex" }));
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), createFetchMock([jsonResponse("/api/provider/capabilities", { providers })]));
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { width: 380 }), createFetchMock([jsonResponse("/api/provider/capabilities", { providers })]));
   try {
     const pane = allElements(dom.container).find(node => node.getAttribute?.("data-chat-pane") === "true");
     await dom.pointer(pane, "onPaste", { clipboardData: { files: [
@@ -21416,6 +21098,49 @@ test("switching Rem to a provider without images removes queued images and prese
     assert.doesNotMatch(dom.text(), /queued\.png/);
     assert.match(dom.text(), /context\.txt/);
     assert.match(dom.text(), /can't accept images/);
+  } finally { await dom.unmount(); }
+});
+
+// Capabilities with only Claude Code usable; Codex is missing or, with codexOff, installed and turned off.
+function remProviderCapabilities({ codexOff = false } = {}) {
+  const discoveredAt = new Date().toISOString();
+  return { providers: [
+    { id: "claude_code", displayName: "Claude Code", available: true, enabled: true, discoveryStatus: "ready", discoveredAt, models: [{ id: "opus", displayName: "Opus", efforts: [] }], defaultModel: "opus" },
+    codexOff
+      ? { id: "codex", displayName: "Codex", available: true, enabled: false, discoveryStatus: "ready", discoveredAt, models: [] }
+      : { id: "codex", displayName: "Codex", available: false, enabled: false, discoveryStatus: "missing", discoveredAt, models: [] },
+  ] };
+}
+
+test("Settings › Rem shows Rem's saved provider when it isn't installed instead of the first available one", async () => {
+  const props = (assistant) => ({
+    open: true, initialCategory: "assistant", settings: settingsModule.normalizeAppSettings({ assistant }),
+    onChange() {}, onClose() {}, onResetAll() {},
+  });
+  const chosen = (select) => [...select.options].find(option => option.value === reactProps(select).value)?.textContent;
+  const settle = async (dom, ready) => { for (let n = 0; n < 40 && !ready(); n++) { await new Promise(resolve => setTimeout(resolve, 5)); await dom.flush(); } };
+  const missing = createFetchMock([jsonResponse("/api/provider/capabilities?snapshot=1", remProviderCapabilities())]);
+  let dom = await mountReact(React.createElement(settingsPopoverModule.default, props({ provider: "codex" })), missing);
+  try {
+    await settle(dom, () => /not installed/.test(dom.text()));
+    const select = dom.byLabel("Default provider");
+    assert.equal(chosen(select), "Codex (not installed)", "the saved app stays chosen, labeled with why");
+    assert.notEqual(chosen(select), "Claude Code");
+    assert.deepEqual([...select.options].map(option => option.textContent), ["Claude Code", "Codex (not installed)"]);
+    assert.match(dom.text(), /Codex isn't installed on this computer, so Rem can’t use it\./);
+    assert.equal(chosen(dom.byLabel("Rem chat provider")), "Same as tasks and threads");
+    await dom.click(dom.byText("Settings › Providers"));
+    await settle(dom, () => /Coding apps/.test(dom.text()));
+    assert.match(dom.text(), /Coding apps/, "the link opens Settings › Providers");
+  } finally { await dom.unmount(); }
+
+  dom = await mountReact(React.createElement(settingsPopoverModule.default, props({ provider: "claude_code", chatProvider: "codex" })),
+    createFetchMock([jsonResponse("/api/provider/capabilities?snapshot=1", remProviderCapabilities({ codexOff: true }))]));
+  try {
+    await settle(dom, () => /turned off/.test(dom.text()));
+    assert.equal(chosen(dom.byLabel("Default provider")), "Claude Code");
+    assert.equal(chosen(dom.byLabel("Rem chat provider")), "Codex (turned off)", "the chat select no longer falls back to Same as tasks and threads");
+    assert.match(dom.text(), /Codex is turned off, so Rem can’t use it\./);
   } finally { await dom.unmount(); }
 });
 
@@ -21960,6 +21685,381 @@ test("The board marks a ticket self-work approved on its own and says so in its 
   } finally { await dom.unmount(); }
 });
 
+test("The board names the paired desktop a waiting proposal came from", async () => {
+  const kanbanModule = await viteServer.ssrLoadModule("/src/components/KanbanWorkspace.jsx");
+  const base = selfWorkFixture();
+  const idea = { ticket_id: "t-there", scope: "rem", organization_id: "", organization_name: "", key: "REM-8", title: "Cache the index", description: "Faster startup",
+    status: "backlog", priority: "medium", assignee_id: "rem", assignee: "Rem", proposed: true, auto_approved: false, proposed_on: "Desk B", proposal_reason: "Slow startup",
+    duplicate_of: "", created_by: "self_work", created_at: "2026-11-10T11:00:00Z", updated_at: "2026-11-10T11:00:00Z", revision: 1, running: false, paused: "",
+    block_reason: "", summary: "", type: "develop", project_dir: "/work/app", project: "app", backlog_score: 0, skip_reason: "", self_work_scope: "assigned",
+    run_id: "", thread_id: "", branch: "", landed: false };
+  const fixture = { ...base, board: { ...base.board, tickets: [idea] } };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/kanban", fixture),
+    jsonResponse("/api/rem/kanban/timeline", { ticket: idea, comments: [], earlier: 0, can_comment: true }, { method: "POST" }),
+  ]);
+  const dom = await mountReact(React.createElement(kanbanModule.default), fetchMock);
+  try {
+    for (let attempt = 0; attempt < 40 && !textOf(dom.container).includes("From Desk B"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    assert.ok(dom.byText("From Desk B"), "the card names the desktop");
+    assert.ok(dom.byText("Your approval"), "it waits for the user");
+    assert.ok(!textOf(dom.container).includes("Auto-approved"));
+    const card = allElements(dom.container).find(el => el.getAttribute?.("aria-label") === "REM-8 Cache the index");
+    await dom.click(card);
+    let note;
+    for (let attempt = 0; attempt < 30 && !note; attempt += 1) {
+      await dom.flush();
+      note = allElements(dom.container).find(el => el.getAttribute?.("data-testid") === "ticket-proposed-on-note");
+    }
+    assert.match(textOf(note), /ran on Desk B\. What another computer proposes always waits for your approval/);
+    assert.ok(dom.byText("Approve for To do"));
+  } finally { await dom.unmount(); }
+});
+
+test("Cancelling a Rem ticket on the global board names it on a notice whose Undo puts it back in its column", async () => {
+  const kanbanModule = await viteServer.ssrLoadModule("/src/components/KanbanWorkspace.jsx");
+  const base = selfWorkFixture();
+  let ticket = { ticket_id: "t-12", scope: "rem", organization_id: "", organization_name: "", key: "REM-12", title: "Tidy the settings page", description: "",
+    status: "todo", priority: "medium", assignee_id: "rem", assignee: "Rem", proposed: false, auto_approved: false, proposal_reason: "",
+    duplicate_of: "", created_by: "user", created_at: "2026-11-10T11:00:00Z", updated_at: "2026-11-10T11:00:00Z", revision: 3, running: false, paused: "",
+    block_reason: "", summary: "", type: "develop", project_dir: "/work/app", project: "app", backlog_score: 0, skip_reason: "", self_work_scope: "assigned",
+    run_id: "", thread_id: "", branch: "", landed: false };
+  const moves = [];
+  const state = () => ({ ...base, board: { ...base.board, tickets: [ticket] } });
+  const fetchMock = createFetchMock([
+    (url, options = {}) => {
+      if (url !== "/api/rem/kanban/ticket" || options.method !== "POST") return null;
+      const body = JSON.parse(options.body);
+      moves.push(body);
+      // The backend refuses a change made for an older revision.
+      if (body.expected_revision !== ticket.revision) return { ok: false, status: 409, json: async () => ({ error: "This ticket changed. Check it and try again." }) };
+      ticket = { ...ticket, status: body.column, revision: ticket.revision + 1 };
+      return { ok: true, status: 200, json: async () => state() };
+    },
+    (url) => url === "/api/rem/kanban/timeline" ? { ok: true, status: 200, json: async () => ({ ticket, comments: [], earlier: 0, can_comment: true }) } : null,
+    (url, options = {}) => url === "/api/rem/kanban" && (options.method ?? "GET") === "GET" ? { ok: true, status: 200, json: async () => state() } : null,
+  ]);
+  const dom = await mountReact(React.createElement(kanbanModule.default), fetchMock);
+  const column = label => allElements(dom.container).find(el => el.tagName === "SECTION" && el.getAttribute?.("aria-label") === label);
+  const notice = () => allElements(dom.container).find(el => el.getAttribute?.("class") === "oh-toast");
+  try {
+    for (let attempt = 0; attempt < 40 && !textOf(dom.container).includes("Tidy the settings page"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    assert.match(textOf(column("To do")), /REM-12/);
+    await dom.click(allElements(dom.container).find(el => el.getAttribute?.("aria-label") === "REM-12 Tidy the settings page"));
+    await dom.click(dom.byExactText("Cancel ticket"));
+    for (let attempt = 0; attempt < 20 && !notice(); attempt += 1) await dom.flush();
+    assert.deepEqual(moves.map(({ action, column: to, expected_revision }) => [action, to, expected_revision]), [["move", "cancelled", 3]]);
+    assert.match(textOf(notice()), /^REM-12 cancelled\.Undo$/, "the notice names the ticket and offers Undo");
+    assert.ok(!textOf(column("To do")).includes("REM-12"), "the ticket left To do");
+    await dom.click(dom.ancestor(dom.byExactText("Undo"), "BUTTON"));
+    for (let attempt = 0; attempt < 20 && !textOf(column("To do")).includes("REM-12"); attempt += 1) await dom.flush();
+    assert.deepEqual(moves.at(-1), { ...moves.at(-1), action: "move", column: "todo", expected_revision: 4, ticket_id: "t-12", scope: "rem" }, "Undo moves it back with the new revision");
+    assert.match(textOf(column("To do")), /REM-12/, "the ticket is back in To do");
+    assert.match(textOf(notice()), /^REM-12 moved back to To do\./);
+    assert.ok(!textOf(dom.container).includes("Undo"), "the confirmation has no Undo of its own");
+    // Starting work gets a notice, but nothing to undo.
+    await dom.click(allElements(dom.container).find(el => el.getAttribute?.("aria-label") === "REM-12 Tidy the settings page"));
+    await dom.click(dom.byExactText("Start now"));
+    for (let attempt = 0; attempt < 20 && !textOf(dom.container).includes("REM-12 started."); attempt += 1) await dom.flush();
+    assert.match(textOf(dom.container), /REM-12 started\./);
+    assert.ok(!textOf(dom.container).includes("Undo"));
+  } finally { await dom.unmount(); }
+});
+
+test("New ticket keeps typed text on a press outside and asks on Escape; the sheet keeps a typed Decline reason", async () => {
+  const kanbanModule = await viteServer.ssrLoadModule("/src/components/KanbanWorkspace.jsx");
+  const base = selfWorkFixture();
+  const idea = { ticket_id: "t-keep", scope: "rem", organization_id: "", organization_name: "", key: "REM-12", title: "Tidy logs", description: "Shorter lines",
+    status: "backlog", priority: "medium", assignee_id: "rem", assignee: "Rem", proposed: true, auto_approved: false, proposed_on: "", proposal_reason: "Noisy logs",
+    duplicate_of: "", created_by: "self_work", created_at: "2026-11-10T11:00:00Z", updated_at: "2026-11-10T11:00:00Z", revision: 1, running: false, paused: "",
+    block_reason: "", summary: "", type: "develop", project_dir: "/work/app", project: "app", backlog_score: 0, skip_reason: "", self_work_scope: "assigned",
+    run_id: "", thread_id: "", branch: "", landed: false };
+  const fixture = { ...base, board: { ...base.board, tickets: [idea] } };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/kanban", fixture),
+    jsonResponse("/api/rem/kanban/timeline", { ticket: idea, comments: [], earlier: 0, can_comment: true }, { method: "POST" }),
+  ]);
+  const dom = await mountReact(React.createElement(kanbanModule.default), fetchMock);
+  const newTicket = () => allElements(dom.container).find(node => node.getAttribute?.("role") === "dialog" && textOf(node).includes("Add ticket"));
+  const writes = () => fetchMock.calls.filter(call => call.url === "/api/rem/kanban/ticket");
+  try {
+    for (let attempt = 0; attempt < 40 && !textOf(dom.container).includes("Tidy logs"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    const openNewTicket = () => dom.click(allElements(dom.container).find(node => node.tagName === "BUTTON" && textOf(node) === "New ticket"));
+    // Unchanged, a press outside still closes it.
+    await openNewTicket();
+    assert.equal(newTicket().getAttribute("aria-modal"), "true", "New ticket is a modal dialog");
+    await pressOverlay(dom, newTicket().parentNode);
+    assert.equal(newTicket(), undefined);
+
+    await openNewTicket();
+    const title = dom.controlAfterLabel("Title");
+    assert.equal(document.activeElement, title, "the title field starts focused");
+    await dom.change(title, "Fix the login page");
+    // A text selection that starts in the dialog and ends outside isn't a press outside.
+    await pressOverlay(dom, newTicket().parentNode, title);
+    assert.ok(newTicket());
+    await pressOverlay(dom, newTicket().parentNode);
+    assert.ok(newTicket(), "a press outside never closes a changed dialog");
+    assert.equal(dom.controlAfterLabel("Title").value, "Fix the login page");
+
+    await dom.dispatchWindow("keydown", { key: "Escape" });
+    assert.deepEqual(await answerDiscard(dom, false), { message: "Discard this ticket? What you entered isn't saved.", buttons: ["Keep editing", "Discard"], focused: true });
+    assert.ok(newTicket(), "Keep editing returns to the dialog");
+    assert.equal(dom.controlAfterLabel("Title").value, "Fix the login page");
+    assert.equal(document.activeElement, dom.controlAfterLabel("Title"), "focus goes back to the field");
+    await dom.dispatchWindow("keydown", { key: "Escape" });
+    await answerDiscard(dom, true);
+    assert.equal(newTicket(), undefined, "Discard closes it");
+    assert.equal(writes().length, 0, "nothing was created");
+
+    // The ticket sheet: Escape closes it, but not while a Decline reason is typed.
+    const openSheet = async () => {
+      await dom.click(allElements(dom.container).find(el => el.getAttribute?.("aria-label") === "REM-12 Tidy logs"));
+      await dom.flush();
+    };
+    const sheet = () => allElements(dom.container).find(el => el.getAttribute?.("aria-label") === "Ticket REM-12");
+    await openSheet();
+    const reason = allElements(dom.container).find(el => el.getAttribute?.("placeholder") === "Reason (optional)");
+    await dom.change(reason, "Already done elsewhere");
+    await dom.dispatchWindow("keydown", { key: "Escape" });
+    assert.ok(sheet(), "a typed reason keeps the sheet open");
+    assert.equal(reason.value, "Already done elsewhere");
+    await dom.change(reason, "");
+    await dom.dispatchWindow("keydown", { key: "Escape" });
+    assert.equal(sheet(), undefined, "with no reason Escape closes it");
+  } finally { await dom.unmount(); }
+});
+
+test("Opening a ticket with Enter or Space moves focus into its sheet, and closing it gives focus back to the card", async () => {
+  const kanbanModule = await viteServer.ssrLoadModule("/src/components/KanbanWorkspace.jsx");
+  const base = selfWorkFixture();
+  const make = (id, key, title) => ({ ticket_id: id, scope: "rem", organization_id: "", organization_name: "", key, title, description: "",
+    status: "todo", priority: "medium", assignee_id: "rem", assignee: "Rem", proposed: false, auto_approved: false, proposal_reason: "",
+    duplicate_of: "", created_by: "user", created_at: "2026-11-10T11:00:00Z", updated_at: "2026-11-10T11:00:00Z", revision: 1, running: false, paused: "",
+    block_reason: "", summary: "", type: "develop", project_dir: "/work/app", project: "app", backlog_score: 0, skip_reason: "", self_work_scope: "assigned",
+    run_id: "", thread_id: "", branch: "", landed: false });
+  let tickets = [make("t-1", "REM-1", "Tidy the settings page"), make("t-2", "REM-2", "Shorter log lines")];
+  const state = () => ({ ...base, board: { ...base.board, tickets } });
+  const fetchMock = createFetchMock([
+    (url, options = {}) => {
+      if (url !== "/api/rem/kanban/ticket" || options.method !== "POST") return null;
+      const body = JSON.parse(options.body);
+      tickets = tickets.map(ticket => ticket.ticket_id === body.ticket_id ? { ...ticket, status: body.column, revision: ticket.revision + 1 } : ticket);
+      return { ok: true, status: 200, json: async () => state() };
+    },
+    (url, options = {}) => url === "/api/rem/kanban/timeline" ? { ok: true, status: 200, json: async () => ({ ticket: tickets.find(item => item.ticket_id === JSON.parse(options.body).ticket_id), comments: [], earlier: 0, can_comment: true }) } : null,
+    (url, options = {}) => url === "/api/rem/kanban" && (options.method ?? "GET") === "GET" ? { ok: true, status: 200, json: async () => state() } : null,
+  ]);
+  const dom = await mountReact(React.createElement(kanbanModule.default), fetchMock);
+  const card = label => allElements(dom.container).find(el => el.tagName === "ARTICLE" && el.getAttribute?.("aria-label") === label);
+  const sheet = key => allElements(dom.container).find(el => el.tagName === "ASIDE" && el.getAttribute?.("aria-label") === `Ticket ${key}`);
+  const inside = (node, root) => { for (let current = node; current; current = current.parentNode) if (current === root) return true; return false; };
+  const press = async (node, key) => {
+    const event = testEvent(node, { key });
+    await React.act(async () => { reactProps(node).onKeyDown(event); });
+    await dom.flush();
+    return event;
+  };
+  const closeButton = key => allElements(sheet(key)).find(el => el.tagName === "BUTTON" && el.getAttribute?.("aria-label") === "Close");
+  try {
+    for (let attempt = 0; attempt < 40 && !card("REM-2 Shorter log lines"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    const second = card("REM-2 Shorter log lines");
+    await dom.focus(second);
+    const enter = await press(second, "Enter");
+    assert.ok(enter.defaultPrevented);
+    assert.ok(sheet("REM-2"), "Enter opens the ticket");
+    assert.ok(inside(document.activeElement, sheet("REM-2")), "focus moved into the sheet");
+    assert.equal(document.activeElement.tagName, "H2");
+    assert.equal(textOf(document.activeElement), "Shorter log lines");
+    await dom.click(closeButton("REM-2"));
+    assert.equal(sheet("REM-2"), undefined);
+    assert.equal(document.activeElement, card("REM-2 Shorter log lines"), "the X button gives focus back to the card");
+
+    const space = await press(card("REM-2 Shorter log lines"), " ");
+    assert.ok(space.defaultPrevented, "Space doesn't scroll the board");
+    assert.ok(inside(document.activeElement, sheet("REM-2")), "Space opens it too");
+    await dom.dispatchWindow("keydown", { key: "Escape" });
+    assert.equal(sheet("REM-2"), undefined);
+    assert.equal(document.activeElement, card("REM-2 Shorter log lines"), "Escape gives focus back to the card");
+    const other = await press(card("REM-2 Shorter log lines"), "a");
+    assert.ok(!other.defaultPrevented);
+    assert.equal(sheet("REM-2"), undefined, "other keys don't open it");
+
+    // Cancelling closes the sheet; once the ticket leaves the board, focus moves to the first card.
+    await press(card("REM-2 Shorter log lines"), "Enter");
+    await dom.click(dom.byExactText("Cancel ticket"));
+    for (let attempt = 0; attempt < 20 && card("REM-2 Shorter log lines"); attempt += 1) await dom.flush();
+    assert.equal(card("REM-2 Shorter log lines"), undefined);
+    assert.equal(document.activeElement, card("REM-1 Tidy the settings page"), "focus isn't lost with the card");
+  } finally { await dom.unmount(); }
+});
+
+test("A card reads out its status lines as its description and is marked current while its sheet is open", async () => {
+  const kanbanModule = await viteServer.ssrLoadModule("/src/components/KanbanWorkspace.jsx");
+  const base = selfWorkFixture();
+  const stuck = { ticket_id: "t-stuck", scope: "rem", organization_id: "", organization_name: "", key: "REM-4", title: "Cache the index", description: "",
+    status: "blocked", priority: "medium", assignee_id: "rem", assignee: "Rem", proposed: false, auto_approved: true, proposal_reason: "",
+    duplicate_of: "", created_by: "self_work", created_at: "2026-11-10T11:00:00Z", updated_at: "2026-11-10T11:00:00Z", revision: 1, running: false, paused: "",
+    block_reason: "The tests need a network", summary: "", type: "develop", project_dir: "/work/app", project: "app", backlog_score: 0, skip_reason: "",
+    self_work_scope: "assigned", objective: { text: "Make startup faster" }, run_id: "", thread_id: "", branch: "", landed: false };
+  const plain = { ...stuck, ticket_id: "t-plain", key: "REM-5", title: "Plain ticket", status: "todo", block_reason: "", auto_approved: false, objective: null };
+  const fixture = { ...base, board: { ...base.board, tickets: [stuck, plain] } };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/kanban", fixture),
+    jsonResponse("/api/rem/kanban/timeline", { ticket: stuck, comments: [], earlier: 0, can_comment: true }, { method: "POST" }),
+  ]);
+  const dom = await mountReact(React.createElement(kanbanModule.default), fetchMock);
+  const card = label => allElements(dom.container).find(el => el.tagName === "ARTICLE" && el.getAttribute?.("aria-label") === label);
+  const description = node => (node.getAttribute("aria-describedby") || "").split(" ").filter(Boolean)
+    .map(id => textOf(allElements(dom.container).find(el => el.getAttribute?.("id") === id))).join(" | ");
+  try {
+    for (let attempt = 0; attempt < 40 && !card("REM-4 Cache the index"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    const stuckCard = card("REM-4 Cache the index");
+    assert.equal(description(stuckCard), "The tests need a network | Make startup faster | Auto-approved",
+      "the blocked reason, objective and badge are read out in the order they show");
+    assert.equal(card("REM-5 Plain ticket").getAttribute("aria-describedby"), null, "a card with no status lines has no description");
+    assert.equal(stuckCard.getAttribute("aria-current"), null);
+    await dom.click(stuckCard);
+    await dom.flush();
+    assert.equal(card("REM-4 Cache the index").getAttribute("aria-current"), "true", "the open card is marked");
+    assert.equal(card("REM-5 Plain ticket").getAttribute("aria-current"), null);
+    await dom.dispatchWindow("keydown", { key: "Escape" });
+    assert.equal(card("REM-4 Cache the index").getAttribute("aria-current"), null);
+  } finally { await dom.unmount(); }
+});
+
+test("A ticket's sheet lists its Done when lines between the description and why Rem suggests it, on a proposal too", async () => {
+  const kanbanModule = await viteServer.ssrLoadModule("/src/components/KanbanWorkspace.jsx");
+  const base = selfWorkFixture();
+  const idea = { ticket_id: "t-finish", scope: "rem", organization_id: "", organization_name: "", key: "REM-10", title: "Faster board", description: "Render less",
+    done_when: "The board opens in under 1 s\n\n  npm test passes  \n", status: "backlog", priority: "medium", assignee_id: "rem", assignee: "Rem", proposed: true,
+    auto_approved: false, proposed_on: "", proposal_reason: "The board is slow", duplicate_of: "", created_by: "self_work", created_at: "2026-11-10T11:00:00Z",
+    updated_at: "2026-11-10T11:00:00Z", revision: 1, running: false, paused: "", block_reason: "", summary: "", type: "develop", project_dir: "/work/app",
+    project: "app", backlog_score: 0, skip_reason: "", self_work_scope: "assigned", run_id: "", thread_id: "", branch: "", landed: false };
+  const plain = { ...idea, ticket_id: "t-open", key: "REM-11", title: "Open-ended", done_when: "", proposed: false, proposal_reason: "", status: "todo" };
+  const fixture = { ...base, board: { ...base.board, tickets: [idea, plain] } };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/kanban", fixture),
+    jsonResponse("/api/rem/kanban/timeline", { ticket: idea, comments: [], earlier: 0, can_comment: true }, { method: "POST" }),
+  ]);
+  const dom = await mountReact(React.createElement(kanbanModule.default), fetchMock);
+  const byTestId = id => allElements(dom.container).filter(el => el.getAttribute?.("data-testid") === id);
+  const card = label => allElements(dom.container).find(el => el.getAttribute?.("aria-label") === label);
+  try {
+    for (let attempt = 0; attempt < 40 && !card("REM-10 Faster board"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    await dom.click(card("REM-10 Faster board"));
+    let section;
+    for (let attempt = 0; attempt < 30 && !section; attempt += 1) {
+      await dom.flush();
+      section = byTestId("ticket-done-when")[0];
+    }
+    assert.ok(section, "the sheet has a Done when section");
+    const heading = el => allElements(el).find(child => child.tagName === "H3");
+    assert.equal(textOf(heading(section)), "Done when");
+    // One item per non-empty line, trimmed.
+    assert.deepEqual(allElements(section).filter(el => el.tagName === "LI").map(textOf), ["The board opens in under 1 s", "npm test passes"]);
+    const order = (section.parentNode.childNodes ?? []).filter(el => el.nodeType === 1);
+    const description = order.findIndex(el => el.getAttribute?.("class") === "kb-description");
+    const why = order.findIndex(el => heading(el) && textOf(heading(el)) === "Why Rem suggests this");
+    assert.ok(description >= 0 && why >= 0, "the sheet shows the description and why");
+    assert.ok(description < order.indexOf(section) && order.indexOf(section) < why, "Done when sits between them");
+    assert.ok(dom.byText("Approve for To do"), "it's still a proposal waiting for approval");
+    // A ticket without a finish line has no empty section.
+    await dom.click(card("REM-11 Open-ended"));
+    for (let attempt = 0; attempt < 30 && byTestId("ticket-done-when").length; attempt += 1) await dom.flush();
+    assert.equal(byTestId("ticket-done-when").length, 0);
+  } finally { await dom.unmount(); }
+});
+
+test("A ticket's sheet shows Rem's description, reason and result as Markdown and folds a long description", async () => {
+  const kanbanModule = await viteServer.ssrLoadModule("/src/components/KanbanWorkspace.jsx");
+  const base = selfWorkFixture();
+  const long = ["Run `npm test` after **each** step:", "", ...Array.from({ length: 16 }, (_, index) => `- step ${index + 1}`), "", "Last line ![chart](https://example.test/chart.png)"].join("\n");
+  const marked = { ticket_id: "t-md", scope: "rem", organization_id: "", organization_name: "", key: "REM-20", title: "Use `fold` **here**", description: long,
+    done_when: "Tests pass", status: "done", priority: "medium", assignee_id: "rem", assignee: "Rem", proposed: false, auto_approved: false, proposed_on: "",
+    proposal_reason: "The sheet shows `**raw**` marks:\n- one\n- two", duplicate_of: "", created_by: "self_work", created_at: "2026-11-10T11:00:00Z",
+    updated_at: "2026-11-10T11:00:00Z", revision: 1, running: false, paused: "", block_reason: "", summary: "Changed **two** files in `src/`.", type: "develop",
+    project_dir: "/work/app", project: "app", backlog_score: 0, skip_reason: "", self_work_scope: "assigned", run_id: "", thread_id: "", branch: "", landed: false };
+  const short = { ...marked, ticket_id: "t-short", key: "REM-21", title: "Short", description: "Line one\nLine two", proposal_reason: "", summary: "", status: "todo" };
+  const fixture = { ...base, board: { ...base.board, tickets: [marked, short] } };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/kanban", fixture),
+    jsonResponse("/api/rem/kanban/timeline", { ticket: marked, comments: [], earlier: 0, can_comment: true }, { method: "POST" }),
+  ]);
+  const dom = await mountReact(React.createElement(kanbanModule.default), fetchMock);
+  const card = label => allElements(dom.container).find(el => el.tagName === "ARTICLE" && el.getAttribute?.("aria-label") === label);
+  const sheet = () => allElements(dom.container).find(el => el.tagName === "ASIDE");
+  const tags = (root, name) => allElements(root).filter(el => el.tagName === name);
+  const toggle = () => allElements(sheet()).find(el => el.getAttribute?.("class") === "kb-fold-toggle");
+  try {
+    for (let attempt = 0; attempt < 40 && !card("REM-20 Use `fold` **here**"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    // The card's title stays plain text.
+    assert.equal(textOf(allElements(card("REM-20 Use `fold` **here**")).find(el => el.getAttribute?.("class") === "title")), "Use `fold` **here**");
+    await dom.click(card("REM-20 Use `fold` **here**"));
+    for (let attempt = 0; attempt < 30 && !sheet(); attempt += 1) await dom.flush();
+    const section = heading => allElements(sheet()).find(el => el.getAttribute?.("class") === "kb-section" && textOf(tags(el, "H3")[0]) === heading);
+    const description = allElements(sheet()).find(el => el.getAttribute?.("class") === "kb-description");
+    assert.ok(description, "the sheet shows the description");
+    assert.deepEqual(tags(description, "CODE").map(textOf), ["npm test"]);
+    assert.deepEqual(tags(description, "STRONG").map(textOf), ["each"]);
+    assert.equal(tags(description, "LI").length, 16);
+    assert.equal(tags(description, "IMG").length, 0, "images stay off");
+    assert.match(textOf(description), /Last line chart/, "an image shows as its alt text");
+    const why = section("Why Rem suggests this");
+    assert.deepEqual(tags(why, "CODE").map(textOf), ["**raw**"], "a code span keeps its marks as text");
+    assert.deepEqual(tags(why, "LI").map(textOf), ["one", "two"]);
+    const result = section("Result");
+    assert.deepEqual(tags(result, "STRONG").map(textOf), ["two"]);
+    assert.deepEqual(tags(result, "CODE").map(textOf), ["src/"]);
+    for (const part of [description, why, result]) {
+      const text = textOf(part).replace("**raw**", "");
+      assert.doesNotMatch(text, /`|\*\*/, "no Markdown marks are left showing");
+    }
+    // The long description starts folded under Show all, which opens and closes it.
+    const fold = allElements(sheet()).find(el => el.getAttribute?.("class") === "kb-fold");
+    assert.equal(fold.getAttribute("data-folded"), "true");
+    assert.equal(toggle().tagName, "BUTTON");
+    assert.equal(toggle().getAttribute("type"), "button", "a real button, reachable with Tab");
+    assert.equal(toggle().getAttribute("aria-expanded"), "false");
+    assert.equal(toggle().getAttribute("aria-controls"), fold.getAttribute("id"));
+    assert.equal(textOf(toggle()), "Show all");
+    assert.match(textOf(fold), /step 16[\s\S]*Last line/, "the whole text stays in the page for screen readers and find");
+    await dom.click(toggle());
+    assert.equal(toggle().getAttribute("aria-expanded"), "true");
+    assert.equal(textOf(toggle()), "Show less");
+    assert.equal(allElements(sheet()).find(el => el.getAttribute?.("class") === "kb-fold").getAttribute("data-folded"), null);
+    await dom.click(toggle());
+    assert.equal(toggle().getAttribute("aria-expanded"), "false");
+    // A short plain description shows as it was, with no fold.
+    await dom.click(card("REM-21 Short"));
+    for (let attempt = 0; attempt < 30 && !/Line one/.test(textOf(sheet())); attempt += 1) await dom.flush();
+    const plain = allElements(sheet()).find(el => el.getAttribute?.("class") === "kb-description");
+    assert.equal(textOf(plain), "Line one\nLine two");
+    assert.equal(toggle(), undefined);
+  } finally { await dom.unmount(); }
+});
+
 test("The board marks a ticket that violates decisions and its sheet says why and what to change", async () => {
   const kanbanModule = await viteServer.ssrLoadModule("/src/components/KanbanWorkspace.jsx");
   const base = selfWorkFixture();
@@ -22227,6 +22327,25 @@ test("Each organization's board keeps its own filters, and a project that is gon
   } finally { await dom.unmount(); }
 });
 
+test("An organization board's Undo notice stays past 9 seconds, and past 15 seconds while the pointer is on it", async () => {
+  const dom = await mountOrganizationBoard("studio");
+  const notice = () => allElements(dom.container).find(el => el.getAttribute?.("class") === "oh-toast");
+  try {
+    const backlog = allElements(dom.container).find(el => el.getAttribute?.("data-col") === "backlog");
+    await dom.pointer(backlog, "onDrop", { dataTransfer: { getData: () => "t1" } });
+    for (let attempt = 0; attempt < 20 && !notice(); attempt += 1) await dom.flush();
+    assert.match(textOf(notice()), /^STU-1 moved to Backlog\. It won't run from Backlog\.Undo$/);
+    await dom.flush(9000);
+    assert.ok(notice(), "the Undo notice is still there after 9 seconds");
+    await dom.pointer(notice(), "onMouseEnter");
+    await dom.flush(15000);
+    assert.match(textOf(notice()), /STU-1 moved to Backlog/, "it doesn't close while the pointer is on it");
+    await dom.pointer(notice(), "onMouseLeave");
+    await dom.flush(10000);
+    assert.equal(notice(), undefined, "left alone, it closes after its 10 seconds");
+  } finally { await dom.unmount(); }
+});
+
 test("With the board off, Settings > Rem says self-work uses no tickets and turns off backlog pulling", async () => {
   const fetchMock = createFetchMock([jsonResponse("/api/rem/kanban", selfWorkFixture({ board: false, autoPull: true }))]);
   const dom = await mountReact(React.createElement(settingsPopoverModule.default, {
@@ -22411,9 +22530,9 @@ test("phone attachments keep their media type in desktop requests", async () => 
 
 test("Rem starts a fresh provider session only for an explicit edit and resend", () => {
   const request = { provider: "codex", model: "cli-default", messages: [], workflow: {}, conversationId: "thread", turnId: "turn" };
-  assert.equal(appModule.chatStreamRequestBody(request).resetSession, undefined);
-  assert.equal(appModule.chatStreamRequestBody({ ...request, resetSession: false }).resetSession, undefined);
-  assert.equal(appModule.chatStreamRequestBody({ ...request, resetSession: true }).resetSession, true);
+  assert.equal(chatThreadsModule.chatStreamRequestBody(request).resetSession, undefined);
+  assert.equal(chatThreadsModule.chatStreamRequestBody({ ...request, resetSession: false }).resetSession, undefined);
+  assert.equal(chatThreadsModule.chatStreamRequestBody({ ...request, resetSession: true }).resetSession, true);
 });
 
 test("Rem keeps all eight turns in the UI, storage and archive across Codex Cursor Codex", async () => {
@@ -22440,7 +22559,7 @@ test("Rem keeps all eight turns in the UI, storage and archive across Codex Curs
       ])(url, options);
     },
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock, {
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { width: 380 }), fetchMock, {
     desktop: { rem: { archive: async (thread, messages, deleted) => {
       const result = archiveConversation(root, thread, messages, { dataDir: root, deleted });
       archiveId = result.id;
@@ -22464,7 +22583,7 @@ test("Rem keeps all eight turns in the UI, storage and archive across Codex Curs
       assert.equal(request.conversationId, JSON.parse(calls[0].options.body).conversationId);
       assert.equal(request.resetSession, undefined);
       assert.equal(request.messages.filter(message => message.role === "user").length, index);
-      assert.equal(window.localStorage.getItem(`${appModule.chatStorageKeyFor(request.conversationId)}:context`), null);
+      assert.equal(window.localStorage.getItem(`${chatThreadsModule.chatStorageKeyFor(request.conversationId)}:context`), null);
     }
     const threadId = JSON.parse(fetchMock.calls.find(call => call.url === "/api/chat/stream").options.body).conversationId;
     const repositoryModule = await viteServer.ssrLoadModule("/src/lib/conversationRepository.js");
@@ -22603,7 +22722,6 @@ test("branch previews follow selections, ignore stale results, and hand actual c
     rootPath: "/repo", source: "feature", sourceControl: { branch: "main", branches: ["main", "feature", "release"] }, worktrees: [],
     onSourceChange: source => closed.push(source), onChanged() {}, onSelectProject: root => selected.push(root),
   }), createFetchMock([]), { desktop: { workspace } });
-  window.confirm = () => assert.fail("No second confirmation");
   window.dispatchEvent = event => { events.push(event); return true; };
   try {
     assert.equal(pending.length, 1);
@@ -22629,6 +22747,7 @@ test("branch previews follow selections, ignore stale results, and hand actual c
     assert.deepEqual(calls.at(-1), { root: "/repo", action: "rebase-branch", value: { source: "feature", target: "release", sourceHash: "s2", targetHash: "r2" } });
     assert.deepEqual(selected, ["/feature"]); assert.deepEqual(closed, [""]);
     assert.deepEqual(events.filter(event => event.type === "gofer:rem-context").map(event => event.detail), [{ mode: "conflicts", projectRoot: "/feature", text: "actual.py" }]);
+    assert.equal(confirmDialogIn(dom), undefined, "No second confirmation");
   } finally { await dom.unmount(); }
 });
 
@@ -22644,17 +22763,86 @@ for (const [kind, label] of [["merge", "Merge"], ["squash", "Squash merge"], ["f
       rootPath: "/repo", source: "feature", request: { kind }, sourceControl: { branch: "main", branches: ["main", "feature"] },
       worktrees: [], onSourceChange() {}, onChanged() {},
     }), createFetchMock([]), { desktop: { workspace } });
-    window.confirm = () => assert.fail("No second confirmation"); window.dispatchEvent = () => true;
+    window.dispatchEvent = () => true;
     try {
       await dom.flush();
       assert.match(dom.text(), /No conflicts, safe to/); assert.throws(() => dom.byLabel("Preview diff"));
       await dom.click(dom.byLabel(label)); await dom.flush();
+      assert.equal(confirmDialogIn(dom), undefined, "No second confirmation");
       assert.deepEqual(calls.at(-1), { action: `${kind === "rebase" ? "rebase" : "merge"}-branch`, value: {
         source: "feature", target: "main", ...(["merge", "rebase"].includes(kind) ? {} : { strategy: kind }), sourceHash: "source", targetHash: "target",
       } });
     } finally { await dom.unmount(); }
   });
 }
+
+test("stash discards and applies ask in Raticode's dialog with a button that names the action", async () => {
+  const { default: Controls } = await viteServer.ssrLoadModule("/src/components/GitIntegrationControls.jsx");
+  const calls = [];
+  const stashes = [{ hash: "s1", ref: "stash@{0}", subject: "WIP on main" }, { hash: "s2", ref: "stash@{1}", subject: "Old idea" }];
+  const workspace = { gitRepoAction: async (_root, action, value) => {
+    if (action === "stash-list") return { stashes };
+    calls.push([action, value]);
+    if (action === "stash-preview") return { diff: "+line", notice: "Applies cleanly.", conflicts: [] };
+    return { active: true };
+  } };
+  const dom = await mountReact(React.createElement(Controls, {
+    rootPath: "/repo", source: "", sourceControl: { branch: "main", branches: ["main"], stashCount: 2 }, worktrees: [],
+    onSourceChange() {}, onChanged() {},
+  }), createFetchMock([]), { desktop: { workspace } });
+  const originalDispatch = window.dispatchEvent;
+  window.dispatchEvent = () => true;
+  try {
+    await dom.flush();
+    await dom.click(dom.byText("Discard stashes"));
+    assert.equal(await confirmTone(dom), "danger");
+    assert.deepEqual(await answerConfirm(dom, false), { message: "Permanently discard all 2 stashes? This cannot be undone in Raticode.", confirmLabel: "Discard stashes" });
+    assert.deepEqual(calls, []);
+    await dom.click(dom.byText("Discard stashes"));
+    await answerConfirm(dom, true);
+    assert.deepEqual(calls.splice(0), [["stash-clear", { hashes: ["s1", "s2"] }]]);
+
+    await dom.click(allElements(dom.container).find(el => el.tagName === "BUTTON" && textOf(el) === "Discard"));
+    assert.equal(await confirmTone(dom), "danger");
+    assert.deepEqual(await answerConfirm(dom, true), { message: "Permanently discard stash@{0}: WIP on main?", confirmLabel: "Discard stash" });
+    assert.deepEqual(calls.splice(0), [["stash-drop", { hash: "s1" }]]);
+
+    await dom.click(dom.byText("Preview stash"));
+    await dom.flush();
+    calls.length = 0;
+    await dom.click(dom.byText("Apply stash"));
+    assert.equal(await confirmTone(dom), "primary", "applying keeps the stash, so it is not a danger action");
+    assert.equal((await answerConfirm(dom, true)).confirmLabel, "Apply stash");
+    assert.deepEqual(calls, [["stash-apply-selected", { hash: "s1" }]]);
+  } finally { window.dispatchEvent = originalDispatch; await dom.unmount(); }
+});
+
+test("choosing an archive purge period asks first, and keeping as is leaves the setting alone", async () => {
+  const { RemMemorySettings } = await viteServer.ssrLoadModule("/src/components/DeveloperSettings.jsx");
+  const configured = [], changes = [];
+  const rem = { configure: async (key, value) => { configured.push([key, value]); return { [key]: value }; } };
+  const dom = await mountReact(React.createElement(RemMemorySettings, {
+    value: { archiveFolder: "/archive", archivePurgeDays: "never", secondBrainRoot: "", secondBrainEnabled: false },
+    onChange: (key, value) => changes.push([key, value]), providerState: {},
+  }), createFetchMock([]), { desktop: { rem } });
+  try {
+    const select = allElements(dom.container).find(el => el.getAttribute?.("id") === "rem-archive-purge");
+    await dom.change(select, "30");
+    assert.equal(await confirmTone(dom), "danger");
+    const asked = await answerConfirm(dom, false);
+    assert.equal(asked.confirmLabel, "Purge archive copies");
+    assert.match(asked.message, /^Purge archive copies of threads deleted more than 30 days ago\?/);
+    assert.deepEqual(configured, []);
+    await dom.change(select, "30");
+    await answerConfirm(dom, true);
+    await dom.flush();
+    assert.deepEqual(configured, [["archivePurgeDays", "30"]]);
+    await dom.change(select, "never");
+    await dom.flush();
+    assert.equal(confirmDialogIn(dom), undefined, "turning purging off needs no question");
+    assert.deepEqual(configured.at(-1), ["archivePurgeDays", "never"]);
+  } finally { await dom.unmount(); }
+});
 
 test("final answers remove duplicate stream fragments across tools and retain reasoning", () => {
   const thoughts = [
@@ -22664,7 +22852,7 @@ test("final answers remove duplicate stream fragments across tools and retain re
     { id: "part-2", kind: "thought", groupId: "g", body: "world", deltaStreamId: "answer" },
     { id: "other-turn", kind: "thought", groupId: "other", body: "Hello world", deltaStreamId: "answer" },
   ];
-  assert.deepEqual(appModule.removeTrailingDuplicateOutputThought(thoughts, "Hello world", "g").map(item => item.id), ["reason", "tool", "other-turn"]);
+  assert.deepEqual(chatThreadsModule.removeTrailingDuplicateOutputThought(thoughts, "Hello world", "g").map(item => item.id), ["reason", "tool", "other-turn"]);
 });
 
 test("Rem's answer text shows as a live reply while it streams", () => {
@@ -22673,15 +22861,15 @@ test("Rem's answer text shows as a live reply while it streams", () => {
     { id: "tool", kind: "thought", groupId: "g", body: "Read", trace: { kind: "tool", id: "r", title: "Read" } },
     { id: "text", role: "assistant", kind: "thought", groupId: "g", body: "Here is", deltaStreamId: "claude-text-m-1" },
   ];
-  const items = appModule.withLiveReply(appModule.buildChatItems([{ id: "u", role: "user", body: "Hi" }, ...thoughts]));
+  const items = chatThreadsModule.withLiveReply(chatThreadsModule.buildChatItems([{ id: "u", role: "user", body: "Hi" }, ...thoughts]));
   assert.deepEqual(items.map(item => item.type), ["message", "thought-group", "message"]);
   assert.deepEqual(items[1].thoughts.map(thought => thought.id), ["reason", "tool"]);
   assert.equal(items[2].message.kind, "streaming");
   assert.equal(items[2].message.body, "Here is");
   // Reasoning streams and tool steps stay in the thoughts.
   for (const last of [thoughts[0], thoughts[1]]) {
-    const unchanged = appModule.buildChatItems([last]);
-    assert.equal(appModule.withLiveReply(unchanged), unchanged);
+    const unchanged = chatThreadsModule.buildChatItems([last]);
+    assert.equal(chatThreadsModule.withLiveReply(unchanged), unchanged);
   }
 });
 
@@ -22697,7 +22885,7 @@ test("editing paste preserves saved attachments and the separate composer draft"
     },
     url => url === "/api/chat/stream" ? chatStream(url) : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock);
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { width: 380 }), fetchMock);
   const file = (name, type) => ({ name, type, size: 3, arrayBuffer: async () => Uint8Array.from([1, 2, 3]).buffer });
   const clipboard = value => ({ items: [{ kind: "file", getAsFile: () => value }] });
   try {
@@ -22723,8 +22911,8 @@ test("editing paste preserves saved attachments and the separate composer draft"
     const sent = JSON.parse(requests.at(-1).options.body).messages.at(-1);
     assert.equal(sent.body, "Edited message"); assert.deepEqual(sent.attachments.map(file => file.name), ["old.txt", "edited.png"]);
     assert.equal(dom.first("textarea").value, "Next draft"); assert.match(textOf(composer()), /next\.png/);
-    const [thread] = appModule.loadChatThreads();
-    const stored = JSON.parse(window.localStorage.getItem(appModule.chatStorageKeyFor(thread.id)));
+    const [thread] = chatThreadsModule.loadChatThreads();
+    const stored = JSON.parse(window.localStorage.getItem(chatThreadsModule.chatStorageKeyFor(thread.id)));
     assert.equal(stored.filter(item => item.role === "user").length, 1);
     assert.deepEqual(stored.find(item => item.role === "user").attachments.map(file => file.name), ["old.txt", "edited.png"]);
     await dom.click(dom.byLabel("Edit message"));
@@ -23147,15 +23335,16 @@ for (const scenario of ["keyboard", "context-menu", "partial-failure"]) {
         entries = entries.filter(entry => entry.path !== target);
       },
     } } });
-    const originalConfirm = window.confirm;
     let approved = false;
-    window.confirm = message => { confirmations.push(message); return approved; };
     const remove = async () => {
       if (scenario === "context-menu") {
         await dom.pointer(dom.byTitle("/repo/b.txt"), "onContextMenu", { clientX: 10, clientY: 10 });
         const button = allElements(dom.byLabel("File actions")).find(element => element.tagName === "BUTTON" && textOf(element).startsWith("Delete"));
         await dom.click(button);
       } else await dom.keyDown(dom.byLabel("Project files"), "Delete");
+      const asked = await answerConfirm(dom, approved);
+      assert.equal(asked.confirmLabel, "Move to trash");
+      confirmations.push(asked.message);
       await dom.flush();
     };
     try {
@@ -23163,7 +23352,7 @@ for (const scenario of ["keyboard", "context-menu", "partial-failure"]) {
       await dom.click(dom.byTitle("/repo/a.txt"));
       await dom.pointer(dom.byTitle("/repo/c.txt"), "onClick", { shiftKey: true });
       await remove();
-      assert.deepEqual(confirmations, ["Are you sure you want to delete 3 files?"]);
+      assert.deepEqual(confirmations, ["Move 3 items to the trash? They can be restored from the operating system trash."]);
       assert.deepEqual(calls, []);
       for (const name of ["a.txt", "b.txt", "c.txt"]) assert.equal(dom.byTitle(`/repo/${name}`).getAttribute("aria-selected"), "true");
       approved = true;
@@ -23176,7 +23365,7 @@ for (const scenario of ["keyboard", "context-menu", "partial-failure"]) {
         assert.match(dom.text(), /Trash unavailable/);
         assert.ok(dom.byTitle("/repo/b.txt")); assert.ok(dom.byTitle("/repo/c.txt"));
       }
-    } finally { window.confirm = originalConfirm; await dom.unmount(); }
+    } finally { await dom.unmount(); }
   });
 }
 
@@ -23273,6 +23462,37 @@ test("update notices and upgrade actions share the toolbar group with the check 
   }
   assert.equal(checks, 2);
   assert.equal(upgrades, 1);
+});
+
+test("an available update shows only the toolbar's update button, with no separate banner", async () => {
+  // The state an older main process sent with its daily reminder still has the reminder in it.
+  const available = { available: true, currentVersion: "0.6.0", info: { version: "0.6.1" }, reminder: { version: "0.6.1", day: "2026-11-24" } };
+  let checks = 0, installs = 0;
+  const updates = {
+    check: async () => { checks++; return available; },
+    downloadAndInstall: async () => { installs++; return { ...available, downloading: true }; },
+    getState: async () => available,
+    onState: () => () => {},
+    setAutomatic: async () => available,
+  };
+  const fetchMock = createFetchMock([jsonResponse("/api/workflows", workflowsPayload([workflowFixture()]))]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { updates });
+  try {
+    await dom.flush();
+    await dom.click(dom.byLabel("Check for updates"));
+    await dom.flush();
+    assert.equal(checks, 1);
+    const group = dom.byLabel("Application updates");
+    const upgrade = dom.byText("Update 0.6.1");
+    assert.equal(upgrade.parentNode, group);
+    const elements = allElements(dom.container);
+    assert.equal(elements.some((node) => node.getAttribute?.("aria-label") === "Update reminder"), false);
+    assert.equal(elements.some((node) => node.getAttribute?.("aria-label") === "Not now"), false);
+    assert.equal(elements.filter((node) => node.tagName === "BUTTON" && /Update (Raticode|0\.6\.1)/.test(textOf(node))).length, 1);
+    assert.doesNotMatch(dom.text(), /You have 0\.6\.0/);
+    await dom.click(upgrade);
+    assert.equal(installs, 1);
+  } finally { await dom.unmount(); }
 });
 
 test("Rem leads the activity rail and Second Brain follows Swarms in arrow-key traversal", async () => {
@@ -24060,6 +24280,270 @@ test("the Rem sidebar lists self-work objectives above the tasks as a checklist 
     await dom.click(find(node => node.tagName === "BUTTON" && node.getAttribute("aria-expanded") === "true" && node.textContent.includes("Objectives")));
     assert.equal(checkbox("Raise UX quality of the workflow studio"), undefined, "a folded section hides its list");
     assert.equal(globalThis.window.localStorage.getItem("raticode.rem.objectivesOpen"), "closed");
+  } finally {
+    await dom.unmount();
+    remStore.resetRemHomeStore();
+  }
+});
+
+test("a Rem sidebar objective opens from the keyboard to show its full text, Done when and how it was met", async () => {
+  const remStore = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  remStore.resetRemHomeStore();
+  const longText = "Make every Second Brain search answer in under a second on a ten-thousand-note brain, including the first search after the app starts, without dropping any results";
+  const objectives = {
+    revision: 5, open: 1, done: 1,
+    items: [
+      { id: "o1", text: "Raise UX quality of the workflow studio", done_when: "", done: false, created_by: "user" },
+      { id: "o2", text: longText, done_when: "The search benchmark stays under 1 s for 3 runs", done: true, done_by: "rem", done_evidence: "Benchmark runs took 0.41 s, 0.38 s and 0.44 s", created_by: "rem" },
+    ],
+  };
+  const changes = [];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    (url, options) => {
+      if (!url.startsWith("/api/rem/objectives") || options?.method !== "POST") return null;
+      changes.push(JSON.parse(options.body));
+      return { ok: true, status: 200, json: async () => objectives };
+    },
+    url => url.startsWith("/api/rem/tasks") ? { ok: true, status: 200, json: async () => ({ objectives, tasks: [] }) } : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  const find = predicate => allElements(dom.container).find(predicate);
+  const until = async predicate => {
+    for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  const rowButton = text => find(node => node.tagName === "BUTTON" && node.getAttribute("class") === "rem-objective-text" && textOf(node).startsWith(text));
+  const details = () => allElements(dom.container).filter(node => node.getAttribute?.("class") === "rem-objective-details");
+  try {
+    await until(() => find(node => node.getAttribute?.("aria-label") === "Rem"));
+    await dom.click(dom.byLabel("Rem"));
+    await until(() => rowButton(longText));
+    const done = rowButton(longText);
+    assert.equal(done.getAttribute("aria-expanded"), "false");
+    assert.deepEqual(details(), [], "details stay closed until a row is opened");
+    // The hover text stays for mouse users.
+    assert.match(dom.ancestor(done, "LI").getAttribute("title"), /^Done when: The search benchmark/);
+
+    // Enter on the text opens the details under that row.
+    const enter = testEvent(done, { key: "Enter" });
+    await React.act(async () => { reactProps(done).onKeyDown(enter); });
+    assert.ok(enter.defaultPrevented, "the browser's own Enter click doesn't toggle it a second time");
+    assert.equal(rowButton(longText).getAttribute("aria-expanded"), "true");
+    const row = dom.ancestor(rowButton(longText), "LI");
+    assert.equal(row.getAttribute("data-expanded"), "true", "an open row drops the two-line clamp on its text");
+    assert.equal(details().length, 1);
+    const block = details()[0];
+    assert.equal(rowButton(longText).getAttribute("aria-controls"), block.getAttribute("id"));
+    assert.ok(textOf(row).includes(longText), "the full objective text is in the open row");
+    assert.deepEqual(allElements(block).filter(node => node.tagName === "P").map(textOf), [
+      "Done when: The search benchmark stays under 1 s for 3 runs",
+      "Rem checked it off: Benchmark runs took 0.41 s, 0.38 s and 0.44 s",
+      "Written by Rem.",
+    ]);
+
+    // One row at a time: opening another closes the first.
+    await dom.click(rowButton("Raise UX quality"));
+    assert.equal(rowButton(longText).getAttribute("aria-expanded"), "false");
+    assert.equal(rowButton("Raise UX quality").getAttribute("aria-expanded"), "true");
+    assert.deepEqual(details().map(textOf), ["Open-ended: no finish line, so Rem never checks it off."]);
+
+    // Escape closes it, and so does a second click.
+    await dom.keyDown(rowButton("Raise UX quality"), "Escape");
+    assert.deepEqual(details(), []);
+    assert.equal(rowButton("Raise UX quality").getAttribute("aria-expanded"), "false");
+    await dom.click(rowButton(longText));
+    assert.equal(details().length, 1);
+    await dom.click(rowButton(longText));
+    assert.deepEqual(details(), []);
+
+    // The checkbox still checks off without opening anything.
+    await dom.change(find(node => node.tagName === "INPUT" && node.getAttribute("aria-label") === "Check off: Raise UX quality of the workflow studio"), true);
+    await until(() => changes.length === 1);
+    assert.deepEqual(changes[0], { action: "check", id: "o1", expected_revision: 5 });
+    assert.deepEqual(details(), []);
+  } finally {
+    await dom.unmount();
+    remStore.resetRemHomeStore();
+  }
+});
+
+test("the Rem sidebar starts and stops self-work with one button and shows its real state", async () => {
+  const remStore = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  remStore.resetRemHomeStore();
+  const objectives = { revision: 3, open: 1, done: 0, items: [{ id: "o1", text: "Raise UX quality of the workflow studio", done_when: "", done: false, created_by: "user" }] };
+  let kanban = selfWorkFixture({ enabled: false, revision: 3 });
+  const saves = [];
+  const objectiveChanges = [];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    (url, options) => {
+      if (url !== "/api/rem/kanban/settings" || options?.method !== "PUT") return null;
+      const change = JSON.parse(options.body);
+      saves.push(change);
+      const on = change.start_now === true || change.enabled === true;
+      kanban = selfWorkFixture({ enabled: on, revision: change.expected_revision + 1 });
+      if (on) kanban.self_work.state = { ...kanban.self_work.state, mode: "working", starts_at: "", started_now_at: "2026-11-24T18:00:00Z", detail: "Working on 1 task." };
+      return { ok: true, status: 200, json: async () => kanban };
+    },
+    url => url.startsWith("/api/rem/kanban") && !url.startsWith("/api/rem/kanban/") ? { ok: true, status: 200, json: async () => kanban } : null,
+    (url, options) => { if (url.startsWith("/api/rem/objectives") && options?.method === "POST") objectiveChanges.push(options.body); return null; },
+    url => url.startsWith("/api/rem/tasks") ? { ok: true, status: 200, json: async () => ({ objectives, tasks: [] }) } : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  const find = predicate => allElements(dom.container).find(predicate);
+  const until = async predicate => {
+    for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  const panel = () => find(node => node.getAttribute?.("data-testid") === "rem-self-work");
+  const button = label => find(node => node.tagName === "BUTTON" && node.getAttribute("class") === "rem-self-work-toggle" && textOf(node).startsWith(label));
+  try {
+    await until(() => find(node => node.getAttribute?.("aria-label") === "Rem"));
+    await dom.click(dom.byLabel("Rem"));
+    await until(() => button("Start self-work") && find(node => node.getAttribute?.("aria-label") === "Objectives" && node.tagName === "SECTION"));
+    assert.ok(button("Start self-work"), "with self-work off, the side pane offers to start it");
+    assert.equal(panel().getAttribute("data-on"), null);
+    assert.match(textOf(panel()), /Rem starts on its objectives now and keeps going until you stop it\./);
+    const order = allElements(dom.container);
+    const objectivesSection = find(node => node.getAttribute?.("aria-label") === "Objectives" && node.tagName === "SECTION");
+    assert.ok(order.indexOf(panel()) < order.indexOf(objectivesSection), "the button sits above the objectives, always in view");
+
+    // Start starts self-work now, not the switch that waits for quiet minutes: no window, no
+    // stop condition, and the objectives stay.
+    await dom.click(button("Start self-work"));
+    await until(() => button("Stop self-work"));
+    assert.deepEqual(saves, [{ start_now: true, expected_revision: 3 }]);
+    assert.equal(panel().getAttribute("data-on"), "true");
+    assert.equal(panel().getAttribute("data-mode"), "working");
+    assert.match(textOf(button("Stop self-work")), /Working$/, "the button names what self-work is doing");
+    assert.match(textOf(panel()), /Working on 1 task\./);
+
+    // Stop turns the switch off with the revision the pane shows.
+    await dom.click(button("Stop self-work"));
+    await until(() => button("Start self-work"));
+    assert.deepEqual(saves[1], { enabled: false, expected_revision: 4 });
+    assert.deepEqual(objectiveChanges, [], "starting and stopping never change the objectives");
+  } finally {
+    await dom.unmount();
+    remStore.resetRemHomeStore();
+  }
+});
+
+test("the Rem sidebar's Start now starts self-work that is on but waiting for quiet minutes", async () => {
+  const remStore = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  remStore.resetRemHomeStore();
+  let kanban = selfWorkFixture({ enabled: true, revision: 5 });
+  kanban.self_work.state.detail = "Starts after 15 minutes without a prompt.";
+  const saves = [];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    (url, options) => {
+      if (url !== "/api/rem/kanban/settings" || options?.method !== "PUT") return null;
+      const change = JSON.parse(options.body);
+      saves.push(change);
+      kanban = selfWorkFixture({ enabled: true, revision: change.expected_revision });
+      kanban.self_work.state = { ...kanban.self_work.state, starts_at: "", started_now_at: "2026-11-24T18:00:00Z", detail: "Starts work on its next check." };
+      return { ok: true, status: 200, json: async () => kanban };
+    },
+    url => url.startsWith("/api/rem/kanban") && !url.startsWith("/api/rem/kanban/") ? { ok: true, status: 200, json: async () => kanban } : null,
+    url => url.startsWith("/api/rem/tasks") ? { ok: true, status: 200, json: async () => ({ objectives: { revision: 1, open: 0, done: 0, items: [] }, tasks: [] }) } : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  const find = predicate => allElements(dom.container).find(predicate);
+  const until = async predicate => {
+    for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  const panel = () => find(node => node.getAttribute?.("data-testid") === "rem-self-work");
+  const startNow = () => find(node => node.tagName === "BUTTON" && node.getAttribute("class") === "rem-self-work-now");
+  try {
+    await until(() => find(node => node.getAttribute?.("aria-label") === "Rem"));
+    await dom.click(dom.byLabel("Rem"));
+    await until(() => startNow());
+    assert.match(textOf(panel()), /Starts after 15 quiet minutes/);
+    assert.equal(textOf(startNow()), "Start now");
+    await dom.click(startNow());
+    await until(() => !startNow());
+    assert.deepEqual(saves, [{ start_now: true, expected_revision: 5 }], "Start now asks for start-now, never the switch alone");
+    assert.match(textOf(panel()), /Starts work on its next check\./);
+    assert.equal(panel().getAttribute("data-on"), "true");
+  } finally {
+    await dom.unmount();
+    remStore.resetRemHomeStore();
+  }
+});
+
+test("the Rem sidebar folds stale objectives below the current ones and loads more on scroll", async () => {
+  const remStore = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  remStore.resetRemHomeStore();
+  const at = minutes => new Date(Date.UTC(2026, 10, 24, 12, minutes)).toISOString();
+  // As the backend sends it: open newest first, then this session's done, then stale ones.
+  const all = [
+    { id: "n1", text: "Newest open goal for the studio", done: false, created_at: at(50) },
+    { id: "n2", text: "Older open goal carried over", done: false, created_at: at(10) },
+    { id: "d1", text: "Goal finished this session", done: true, done_by: "user", created_at: at(40) },
+    ...Array.from({ length: 40 }, (_, n) => ({ id: `s${n}`, text: `Stale goal number ${n}`, done: true, stale: true, done_by: "rem", created_at: at(9 - n / 10) })),
+  ];
+  const page = limit => ({ revision: 8, open: 2, done: 1, stale: 40, total: all.length, offset: 0, items: all.slice(0, limit) });
+  const loads = [];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    (url, options) => {
+      if (!url.startsWith("/api/rem/objectives") || options?.method === "POST") return null;
+      const limit = Number(new URL(url, "http://x").searchParams.get("limit"));
+      loads.push(limit);
+      return { ok: true, status: 200, json: async () => page(limit) };
+    },
+    url => url.startsWith("/api/rem/tasks") ? { ok: true, status: 200, json: async () => ({ objectives: page(30), tasks: [] }) } : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  const find = predicate => allElements(dom.container).find(predicate);
+  const until = async predicate => {
+    for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  const checkbox = text => find(node => node.tagName === "INPUT" && node.getAttribute("aria-label")?.endsWith(`: ${text}`));
+  const staleHeading = () => find(node => node.tagName === "BUTTON" && node.getAttribute("class") === "rem-objectives-stale-heading");
+  const more = () => find(node => node.tagName === "BUTTON" && node.textContent === "Show more");
+  try {
+    await until(() => find(node => node.getAttribute?.("aria-label") === "Rem"));
+    await dom.click(dom.byLabel("Rem"));
+    await until(() => checkbox("Newest open goal for the studio"));
+    // The heading counts this session only: 1 of 3 done, the 40 stale ones left out.
+    const heading = find(node => node.tagName === "BUTTON" && node.getAttribute("class") === "rem-side-group-heading" && node.textContent.startsWith("Objectives"));
+    assert.equal(heading.textContent, "Objectives1/3");
+    const order = allElements(dom.container);
+    const labels = ["Newest open goal for the studio", "Older open goal carried over", "Goal finished this session"].map(checkbox);
+    assert.ok(labels.every(Boolean) && order.indexOf(labels[0]) < order.indexOf(labels[1]) && order.indexOf(labels[1]) < order.indexOf(labels[2]), "open newest first, done below");
+    // Stale ones are folded away below, apart from the current ones.
+    assert.equal(staleHeading().getAttribute("aria-expanded"), "false");
+    assert.equal(staleHeading().textContent, "Stale40");
+    assert.ok(order.indexOf(labels[2]) < order.indexOf(staleHeading()), "the stale group sits below the current ones");
+    assert.equal(checkbox("Stale goal number 0"), undefined, "folded, its rows don't show");
+    assert.equal(more(), undefined, "nothing current is left to load");
+    // Open, it shows the 27 loaded of the first 30, and the bottom loads the next page.
+    await dom.click(staleHeading());
+    assert.ok(checkbox("Stale goal number 0"));
+    assert.ok(checkbox("Stale goal number 26"));
+    assert.equal(checkbox("Stale goal number 27"), undefined, "only the first 30 load at first");
+    assert.equal(dom.ancestor(checkbox("Stale goal number 0"), "LI").getAttribute("data-stale"), "true");
+    await dom.click(more());
+    await until(() => checkbox("Stale goal number 39"));
+    assert.deepEqual(loads, [60]);
+    assert.equal(more(), undefined, "everything is loaded");
   } finally {
     await dom.unmount();
     remStore.resetRemHomeStore();
@@ -24882,6 +25366,81 @@ test("the Browser offers to pop out into its own window and says so plainly when
     assert.deepEqual(windowCalls, []);
   } finally {
     globalThis.window.open = previousOpen;
+    await dom.unmount();
+  }
+});
+
+test("Rem's new approval request in a tab shows one notification naming the tab while Raticode is in the background, which opens the tab", async () => {
+  const backgroundNotices = await viteServer.ssrLoadModule("/src/lib/backgroundNotices.js");
+  backgroundNotices.setBackgroundNotices(true);
+  const stateListeners = [];
+  const sendState = (state) => stateListeners.forEach(listener => listener(state));
+  const sessions = [];
+  const browser = {
+    adopt: async () => null,
+    close: async () => null,
+    create: async (options) => { sessions.push(options); return { clientId: options.clientId, id: `session-${sessions.length}`, loading: false, src: "data:text/html,page", url: options.url, engine: "raticode" }; },
+    gecko: async () => ({ available: true, supported: true, executable: "/usr/bin/firefox", running: false, placed: false }),
+    library: async () => ({}),
+    onBrowserWindow: () => () => {},
+    onCommand: () => () => {},
+    onGecko: () => () => {},
+    onState: (callback) => { stateListeners.push(callback); return () => {}; },
+    platform: "linux",
+    setPolicy: async () => null,
+    setPreferences: async () => null,
+  };
+  const tab = "raticode-browser:shop";
+  const other = "raticode-browser:news";
+  const dom = await mountReact(React.createElement(appModule.default), createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+  ]), { browser, storage: {
+    "raticode.editorSession.v2": JSON.stringify({ version: 2, paths: [tab, other], activePath: other, activity: "files", mainContent: "editor", browserTabs: { [tab]: { url: "https://shop.test/", title: "Checkout", engine: "raticode" }, [other]: { url: "https://news.test/", title: "News", engine: "raticode" } } }),
+  } });
+  const settle = async (check) => {
+    for (let attempt = 0; attempt < 200 && !check(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  const notices = fakeNotifications();
+  let focused = false;
+  document.hasFocus = () => focused;
+  const browserShown = () => allElements(dom.container).find(node => node.getAttribute?.("aria-label") === "Browser")?.getAttribute("aria-selected") === "true";
+  const shopSession = () => sessions.findIndex(options => options.url === "https://shop.test/");
+  const selectedTab = () => allElements(dom.container).find(node => node.getAttribute?.("role") === "tab" && node.getAttribute("aria-selected") === "true" && /Checkout|News/.test(textOf(node)));
+  const ask = async (requestId, label = "Place order") => React.act(async () => sendState({ id: `session-${shopSession() + 1}`, clientId: sessions[shopSession()].clientId, prompts: [{ requestId, kind: "rem-confirm", action: "click", label, url: "https://shop.test/", agentLabel: "Rem" }] }));
+  try {
+    await settle(() => shopSession() >= 0 && stateListeners.length > 0);
+    assert.ok(shopSession() >= 0, "the tab's page opened");
+    // Rem works in the tab while the user is in Workflows and Raticode is in the background.
+    await dom.click(dom.byLabel("Workflows"));
+    await dom.flush();
+    assert.equal(browserShown(), false);
+    await ask("approve-1");
+    await settle(() => notices.shown.length > 0);
+    await ask("approve-1");
+    await dom.flush();
+    assert.deepEqual(notices.titles(), ["Rem needs your approval in Checkout"]);
+    assert.equal(notices.shown[0].options.body, "");
+    assert.match(textOf(selectedTab()), /News/, "another tab was in front");
+    await React.act(async () => notices.shown[0].onclick());
+    await settle(browserShown);
+    assert.equal(browserShown(), true, "the notification brought the Browser forward");
+    assert.match(textOf(selectedTab()), /Checkout/, "and opened the tab it names");
+
+    // A request made while Raticode is focused, or with the switch off, shows nothing.
+    focused = true;
+    await ask("approve-2");
+    await dom.flush();
+    focused = false;
+    backgroundNotices.setBackgroundNotices(false);
+    await ask("approve-3");
+    await dom.flush();
+    assert.equal(notices.shown.length, 1);
+  } finally {
+    backgroundNotices.setBackgroundNotices(true);
+    notices.restore();
     await dom.unmount();
   }
 });
@@ -25847,7 +26406,7 @@ test("chat Markdown loads web images by itself only where the caller allows it",
   assert.match(source, /loadWebImages = false/);
   assert.match(source, /autoLoad=\{loadWebImages\}/);
   assert.ok(markdown.default);
-  const app = await import("node:fs").then(fs => fs.readFileSync(new URL("./App.jsx", import.meta.url), "utf8"));
+  const app = await import("node:fs").then(fs => fs.readFileSync(new URL("../components/ChatMessages.jsx", import.meta.url), "utf8"));
   assert.match(app, /loadWebImages=\{Boolean\(message\.sources\?\.length\)\}/);
 });
 
@@ -25996,7 +26555,7 @@ test("Rem task threads leave the archive on new activity and land in Unread or R
     (url) => url === "/api/rem/threads/worker" ? { ok: true, json: async () => snapshot } : null,
     (url) => url.startsWith("/api/chat/threads/") ? { ok: true, json: async () => ({}) } : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "", width: 380 }), fetchMock, { storage });
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { activeProjectRoot: "", width: 380 }), fetchMock, { storage });
   const section = name => allElements(dom.container).find(node => node.tagName === "SECTION" && node.getAttribute("aria-label") === `${name} threads`);
   const placed = async () => {
     await dom.flush();
@@ -26841,6 +27400,48 @@ test("Rem's memory end dates show in the save note, dim ended memories and offer
   }
 });
 
+test("Rem home's welcome says Rem's app isn't installed and opens its setting", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  const workspace = await viteServer.ssrLoadModule("/src/components/RemHomeWorkspace.jsx");
+  const mount = async (remProvider, capabilities) => {
+    store.resetRemHomeStore();
+    const fetchMock = createFetchMock([
+      jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+      jsonResponse("/api/rem/tasks", { tasks: [] }),
+      jsonResponse("/api/provider/capabilities?snapshot=1", capabilities),
+    ]);
+    const opened = [];
+    const dom = await mountReact(React.createElement(workspace.default, { remProvider, onOpenSettings: target => opened.push(target) }), fetchMock);
+    await store.refreshRemHome();
+    for (let n = 0; n < 40 && !dom.container.querySelector?.(".rem-provider-problem"); n++) { await new Promise(resolve => setTimeout(resolve, 5)); await dom.flush(); }
+    return { dom, opened };
+  };
+  let { dom, opened } = await mount({ provider: "codex", chatProvider: "" }, remProviderCapabilities());
+  try {
+    assert.match(dom.text(), /Rem's app, Codex, isn't installed on this computer\. Choose another in Settings › Rem\./);
+    assert.doesNotMatch(dom.text(), /What's running right now\?/, "the warning replaces the ideas");
+    await dom.click(dom.ancestor(dom.byText("Open Settings › Rem"), "BUTTON"));
+    assert.deepEqual(opened, [{ selectors: ['[data-setting-row="provider"] select'] }]);
+  } finally { await dom.unmount(); store.resetRemHomeStore(); }
+
+  // Rem's chat provider wins over the default one, and sign-in gets its own wording.
+  const signIn = remProviderCapabilities();
+  signIn.providers[0] = { ...signIn.providers[0], discoveryStatus: "unauthenticated" };
+  ({ dom, opened } = await mount({ provider: "codex", chatProvider: "claude_code" }, signIn));
+  try {
+    assert.match(dom.text(), /Rem's app, Claude Code, needs you to sign in\./);
+    await dom.click(dom.ancestor(dom.byText("Open Settings › Rem"), "BUTTON"));
+    assert.deepEqual(opened, [{ selectors: ['[data-setting-row="chatProvider"] select'] }]);
+  } finally { await dom.unmount(); store.resetRemHomeStore(); }
+
+  // A usable app keeps the ideas.
+  ({ dom } = await mount({ provider: "claude_code", chatProvider: "" }, remProviderCapabilities()));
+  try {
+    assert.match(dom.text(), /What's running right now\?/);
+    assert.doesNotMatch(dom.text(), /isn't installed/);
+  } finally { await dom.unmount(); store.resetRemHomeStore(); }
+});
+
 test("Rem folder links open projects, and its menu opens provider settings", async () => {
   const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
   store.resetRemHomeStore();
@@ -26869,17 +27470,15 @@ test("Rem folder links open projects, and its menu opens provider settings", asy
     assert.ok(textOf(dom.container).includes("Default provider"));
     await dom.click(dom.byLabel("Close settings"));
     // A folder outside the open project opens only after the user agrees.
-    const asked = [];
-    window.confirm = (message) => { asked.push(message); return false; };
     await dom.click(dom.ancestor(dom.byText("Tool folder"), "A"));
     await dom.flush();
-    assert.equal(asked.length, 1);
-    assert.match(asked[0], /Open "\/linked-project" as a project\?/);
+    const asked = await answerConfirm(dom, false);
+    assert.match(asked.message, /Open "\/linked-project" as a project\?/);
+    assert.equal(asked.confirmLabel, "Open project");
     assert.equal(fetchMock.calls.some(call => call.url === "/api/projects/open"), false);
-    window.confirm = (message) => { asked.push(message); return true; };
     await dom.click(dom.ancestor(dom.byText("Tool folder"), "A"));
     await dom.flush();
-    assert.equal(asked.length, 2);
+    await answerConfirm(dom, true);
     assert.ok(opened.includes("/linked-project"));
     assert.ok(fetchMock.calls.some(call => call.url === "/api/projects/open" && JSON.parse(call.options.body).projectRoot === "/linked-project"));
     assert.equal(dom.byLabel("File explorer").getAttribute("aria-selected"), "true");
@@ -27031,7 +27630,7 @@ test("Ask Rem about this failure attaches a run's summary from every run surface
 
 test("Run Timeline and Workflow runs offer Ask Rem on failed rows only", async () => {
   const askedRows = [];
-  const timeline = await mountReact(React.createElement(canvasModule.RunTimelinePanel, {
+  const timeline = await mountReact(React.createElement(runTimelineModule.RunTimelinePanel, {
     embedded: true,
     text: "run",
     title: "Workflow log",
@@ -27071,6 +27670,61 @@ test("Run Timeline and Workflow runs offer Ask Rem on failed rows only", async (
     await dom.flush();
     assert.deepEqual(askedRuns.map(run => [run.workflowId, run.id]), [["release", "r-3"]]);
     assert.deepEqual(opened, [], "asking doesn't open the run");
+  } finally { await dom.unmount(); }
+});
+
+test("workflow runs view shows why a run failed in the row, not only in a tooltip", async () => {
+  const View = workflowRunsViewModule.default;
+  const opened = [];
+  const error = "Node test exited with code 1\nAssertionError: expected 2 to equal 3";
+  const load = async () => {
+    const payload = allRunsPayload();
+    payload.runs[0] = { ...payload.runs[0], error };
+    payload.runs.push({ ...payload.runs[0], id: "r-0", status: "disconnected", error: "The runner stopped answering." });
+    return payload;
+  };
+  const dom = await mountReact(React.createElement(View, { load, poll: () => () => {}, onOpenRun: run => opened.push(run) }), createFetchMock([]));
+  try {
+    await dom.flush();
+    const reasons = allElements(dom.container).filter(node => node.getAttribute?.("data-testid") === "run-error-reason");
+    const reasonText = node => allElements(node).find(child => child.tagName === "P");
+    assert.deepEqual(reasons.map(node => reasonText(node).textContent), ["Node test exited with code 1", "The runner stopped answering."]);
+    const row = dom.ancestor(reasons[0], "TR");
+    assert.match(row.textContent, /Failed.*Node test exited with code 1/s);
+    // Only the first line shows, clamped to two lines, and no cell keeps it as a tooltip.
+    assert.doesNotMatch(row.textContent, /AssertionError/);
+    assert.match(reasonText(reasons[0]).getAttribute("class"), /line-clamp-2/);
+    assert.ok(!allElements(row).some(node => node.getAttribute?.("title")?.includes("Node test exited")));
+    // A succeeded or running run has no reason line.
+    assert.doesNotMatch(dom.ancestor(dom.byExactText("Succeeded"), "TR").textContent, /Show full error/);
+
+    await dom.click(dom.byExactText("Show full error"));
+    assert.match(row.textContent, /Node test exited with code 1\nAssertionError: expected 2 to equal 3/);
+    assert.equal(dom.byExactText("Show less").getAttribute("aria-expanded"), "true");
+    assert.deepEqual(opened, [], "expanding the error doesn't open the run");
+  } finally { await dom.unmount(); }
+});
+
+test("Studio's All runs list names each run's status and why a failed run stopped", async () => {
+  const runs = [
+    { id: "run-3", status: "running", startedAt: "2026-11-25T09:30:00Z" },
+    { id: "run-2", status: "error", startedAt: "2026-11-25T09:20:00Z", error: "Node test exited with code 1\nTraceback (most recent call last):" },
+    { id: "run-1", status: "success", startedAt: "2026-11-25T09:10:00Z", error: "" },
+  ];
+  const dom = await mountReact(React.createElement(runTimelineModule.RunTimelinePanel, { embedded: true, text: "run", title: "Workflow log", runs }), createFetchMock([]));
+  try {
+    await dom.flush();
+    await dom.click(dom.byExactText("All runs"));
+    const row = (id) => dom.ancestor(dom.byExactText(id), "BUTTON");
+    assert.match(row("run-2").textContent, /Failed/);
+    assert.match(row("run-2").textContent, /Node test exited with code 1/);
+    assert.doesNotMatch(row("run-2").textContent, /Traceback/);
+    assert.match(row("run-1").textContent, /Succeeded/);
+    assert.doesNotMatch(row("run-1").textContent, /exited/);
+    assert.match(row("run-3").textContent, /Running/);
+    // The running spinner stays still for people who ask for less motion.
+    const spinner = allElements(row("run-3")).find(node => /animate-spin/.test(node.getAttribute?.("class") ?? ""));
+    assert.match(spinner.getAttribute("class"), /motion-reduce:animate-none/);
   } finally { await dom.unmount(); }
 });
 
@@ -27380,6 +28034,302 @@ test("browser menu keeps keyboard focus when tab state updates arrive", async ()
   await dom.keyDown(menu, "Escape");
   assert.equal(allElements(dom.container).some((element) => element.getAttribute?.("role") === "menu"), false);
   await dom.unmount();
+});
+
+// The test DOM has no selectors. Menus find their enabled items with one, so this answers
+// that selector for the length of a test.
+function withMenuItemQueries() {
+  const proto = TestElement.prototype;
+  const original = proto.querySelector;
+  const selector = "[role=menuitem]:not([disabled])";
+  const items = (root) => allElements(root).filter((node) => node.getAttribute?.("role") === "menuitem" && !node.disabled && node.getAttribute("disabled") === null);
+  proto.querySelectorAll = function querySelectorAll(query) { return query === selector ? items(this) : []; };
+  proto.querySelector = function querySelector(query) { return query === selector ? items(this)[0] ?? null : original.call(this, query); };
+  return () => { proto.querySelector = original; delete proto.querySelectorAll; };
+}
+
+// Opens nothing itself: checks an open menu starts on its first enabled item, moves with
+// ArrowDown, ArrowUp, Home and End, and on Escape closes with focus back on `trigger`.
+async function checkMenuKeys(dom, name, trigger) {
+  const menu = () => allElements(dom.container).find((node) => node.getAttribute?.("role") === "menu" && node.getAttribute("aria-label") === name);
+  const items = () => allElements(menu()).filter((node) => node.getAttribute?.("role") === "menuitem" && !node.disabled && node.getAttribute("disabled") === null);
+  assert.ok(menu(), `${name} is open`);
+  assert.ok(items().length >= 2, `${name} has items to move between`);
+  assert.equal(document.activeElement, items()[0], `${name} starts on its first item`);
+  await dom.keyDown(menu(), "ArrowDown");
+  assert.equal(document.activeElement, items()[1], `ArrowDown moves down in ${name}`);
+  await dom.keyDown(menu(), "End");
+  assert.equal(document.activeElement, items().at(-1), `End goes to the last item in ${name}`);
+  await dom.keyDown(menu(), "ArrowDown");
+  assert.equal(document.activeElement, items()[0], `ArrowDown wraps to the first item in ${name}`);
+  await dom.keyDown(menu(), "ArrowUp");
+  assert.equal(document.activeElement, items().at(-1), `ArrowUp wraps to the last item in ${name}`);
+  await dom.keyDown(menu(), "Home");
+  assert.equal(document.activeElement, items()[0], `Home goes to the first item in ${name}`);
+  await dom.keyDown(menu(), "Escape");
+  assert.equal(menu(), undefined, `Escape closes ${name}`);
+  assert.equal(document.activeElement, trigger, `Escape puts focus back on what opened ${name}`);
+}
+
+test("terminal, code tab, project, Rem scope and Second Brain menus move with the arrow keys", async () => {
+  const restoreQueries = withMenuItemQueries();
+  const terminalModule = await viteServer.ssrLoadModule("/src/components/TerminalWorkspace.jsx");
+  const parts = await viteServer.ssrLoadModule("/src/components/SecondBrainParts.jsx");
+  const settings = settingsModule.normalizeAppSettings({});
+  // The context-menu key opens a row's menu from the control focused in it.
+  const openFromKeyboard = async (dom, row, focused) => {
+    await dom.focus(focused);
+    await React.act(async () => reactProps(row).onContextMenu(testEvent(row, { target: focused })));
+  };
+  try {
+    // Terminal group actions and terminal tab actions.
+    let dom = await mountReact(React.createElement(terminalModule.default, { active: true, projectRoot: "/repo", settings }), createFetchMock([]));
+    try {
+      Object.assign(window, { innerWidth: 1280, innerHeight: 800 });
+      const section = allElements(dom.container).find((node) => node.tagName === "SECTION" && node.getAttribute("aria-label")?.endsWith(" terminals"));
+      const groupName = section.getAttribute("aria-label").replace(/ terminals$/, "");
+      const header = section.childNodes[0];
+      const groupButton = allElements(header).find((node) => node.tagName === "BUTTON");
+      await openFromKeyboard(dom, header, groupButton);
+      await checkMenuKeys(dom, `${groupName} terminal group actions`, groupButton);
+      const tabButton = allElements(section).find((node) => node.tagName === "BUTTON" && node.getAttribute("title")?.startsWith("Terminal 1 "));
+      await openFromKeyboard(dom, tabButton.parentNode, tabButton);
+      await checkMenuKeys(dom, "Terminal 1 actions", tabButton);
+    } finally { await dom.unmount(); }
+
+    // Code tab actions, on a terminal tab in the editor: disabled items are skipped.
+    function TerminalTabHarness() {
+      const [openPaths, setOpenPaths] = React.useState([]);
+      return React.createElement(codeWorkspaceModule.default, {
+        active: false, activePath: "", openPaths, onOpenPathsChange: setOpenPaths, onActivePathChange() {}, onClosePaths() {},
+        settings: settingsModule.normalizeAppSettings({ layout: { terminalLocation: "editor" } }),
+        terminalProjectRoot: "/repo", workflow: { projectRoot: "/repo" },
+      });
+    }
+    dom = await mountReact(React.createElement(TerminalTabHarness), createFetchMock([]));
+    try {
+      await dom.dispatchWindow("gofer:open-terminal-tab", { detail: { background: true } });
+      await dom.flush();
+      const row = dom.ancestor(dom.byLabel("Close Terminal"), (node) => Boolean(reactProps(node).onContextMenu));
+      const tab = allElements(row).find((node) => node.tagName === "BUTTON");
+      await openFromKeyboard(dom, row, tab);
+      const menu = allElements(dom.container).find((node) => node.getAttribute?.("role") === "menu");
+      assert.match(menu.getAttribute("aria-label"), / tab actions$/);
+      await checkMenuKeys(dom, menu.getAttribute("aria-label"), tab);
+    } finally { await dom.unmount(); }
+
+    // The sidebar's project actions, from the row's ⋯ button.
+    dom = await mountReact(React.createElement(appModule.WorkflowSidebar, {
+      activeWorkflowId: "review", loading: false, query: "", runState: {}, width: 272,
+      workflows: [{ ...workflowFixture({ id: "review", name: "Review PR" }), projectRoot: "/workspace/gofer-flow" }],
+      onCreate() {}, onDeleteWorkflow() {}, onDuplicateWorkflow() {}, onQueryChange() {}, onRefresh() {}, onRenameWorkflow() {},
+      onResizeKeyDown() {}, onResizeStart() {}, onRunWorkflow() {}, onSelect() {},
+    }), createFetchMock([]));
+    try {
+      const more = dom.byTitle("gofer-flow project actions");
+      await dom.click(more);
+      await checkMenuKeys(dom, "gofer-flow project actions", more);
+    } finally { await dom.unmount(); }
+
+    // Rem's project scope: focus moves in once the folders finish loading.
+    const workspace = { gitWorktrees: async (root) => ({ worktrees: [{ path: root }, { path: "/worktrees/feature" }] }) };
+    dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
+      workflows: [], width: 380, recentProjectRoots: ["/repo"], workflow: { projectRoot: "/repo" },
+    }), createFetchMock([jsonResponse("/api/provider/capabilities", { providers: [] })]), { desktop: { workspace } });
+    try {
+      await dom.click(dom.byLabel("New thread"));
+      const scope = dom.byLabel("Scoped to repo. Change project scope");
+      await dom.click(scope);
+      await dom.flush();
+      await checkMenuKeys(dom, "Rem project scope", scope);
+    } finally { await dom.unmount(); }
+
+    // Second Brain's shared Menu, inside its popover; Escape from the page still refocuses the button.
+    const picked = [];
+    dom = await mountReact(React.createElement(parts.Menu, {
+      label: "Note actions", trigger: "More",
+      items: [
+        { label: "Open", onSelect: () => picked.push("open") },
+        { label: "Rename", disabled: true, onSelect() {} },
+        { separator: true, key: "split" },
+        { label: "Copy link", onSelect: () => picked.push("copy") },
+        { label: "Delete", danger: true, onSelect: () => picked.push("delete") },
+      ],
+    }), createFetchMock([]));
+    try {
+      const button = dom.byLabel("Note actions");
+      await dom.click(button);
+      await checkMenuKeys(dom, "Note actions", button);
+      await dom.click(button);
+      assert.equal(document.activeElement && textOf(document.activeElement), "Open");
+      await dom.dispatchWindow("keydown", { key: "Escape" });
+      assert.equal(document.activeElement, button);
+      assert.deepEqual(picked, []);
+    } finally { await dom.unmount(); }
+  } finally { restoreQueries(); }
+});
+
+// Presses ArrowRight once per item in the radio group or tab list called `label`, starting on
+// its chosen item: focus and the choice move to the next item each time and wrap from last to
+// first, and only the chosen item is a Tab stop. A group that saves its choice settles first.
+async function checkArrowRight(dom, label) {
+  const group = () => allElements(dom.container).find((node) => ["radiogroup", "tablist"].includes(node.getAttribute?.("role")) && node.getAttribute("aria-label") === label);
+  assert.ok(group(), `${label} is showing`);
+  const role = group().getAttribute("role") === "radiogroup" ? "radio" : "tab";
+  const chosen = role === "radio" ? "aria-checked" : "aria-selected";
+  const items = () => allElements(group()).filter((node) => node.getAttribute?.("role") === role);
+  const count = items().length;
+  assert.ok(count >= 2, `${label} has items to move between`);
+  let index = items().findIndex((node) => node.getAttribute(chosen) === "true");
+  assert.ok(index >= 0, `${label} starts with a chosen item`);
+  await dom.focus(items()[index]);
+  for (let step = 0; step < count; step += 1) {
+    await dom.keyDown(items()[index], "ArrowRight");
+    index = (index + 1) % count;
+    const expected = items().map((_, at) => String(at === index));
+    for (let attempt = 0; attempt < 60 && JSON.stringify(items().map((node) => node.getAttribute(chosen))) !== JSON.stringify(expected); attempt += 1) {
+      await React.act(async () => { await new Promise((resolve) => setTimeout(resolve, 5)); });
+    }
+    const where = `${label}, ArrowRight ${step + 1} of ${count}`;
+    assert.equal(document.activeElement, items()[index], `${where}: focus moves to item ${index + 1}`);
+    assert.deepEqual(items().map((node) => node.getAttribute(chosen)), expected, `${where}: item ${index + 1} is chosen`);
+    assert.deepEqual(items().map((node) => node.getAttribute("tabindex")), expected.map((on) => (on === "true" ? "0" : "-1")), `${where}: only the chosen item is a Tab stop`);
+  }
+}
+
+test("each radio group and tab list moves its choice with ArrowRight and wraps", async () => {
+  const mounts = [];
+  const mount = async (element, fetchMock = createFetchMock([]), options) => {
+    const dom = await mountReact(element, fetchMock, options);
+    mounts.push(dom);
+    return dom;
+  };
+  const done = async (dom) => { mounts.splice(mounts.indexOf(dom), 1); await dom.unmount(); };
+  const wait = async (dom, ready) => {
+    for (let attempt = 0; attempt < 80 && !ready(); attempt += 1) {
+      await React.act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+    }
+    await dom.flush();
+  };
+  const secondBrain = await viteServer.ssrLoadModule("/src/lib/secondBrainStore.js");
+  const frame = globalThis.requestAnimationFrame;
+  try {
+    // Rem task sheet: Kind of work and How often.
+    const { default: TaskSheet } = await viteServer.ssrLoadModule("/src/components/RemTaskSheet.jsx");
+    let dom = await mount(React.createElement(TaskSheet, { sheet: { mode: "new" }, tasks: [], projectOptions: [], now: Date.now(), messages: [] }));
+    await checkArrowRight(dom, "Kind of work");
+    await checkArrowRight(dom, "How often");
+    await done(dom);
+
+    // Settings > Rem tools: a new MCP server's Connection.
+    const { default: RemResources } = await viteServer.ssrLoadModule("/src/components/RemResources.jsx");
+    function Tools() {
+      const [value, setValue] = React.useState({ shell: true, web: false, skills: [], mcpServers: [] });
+      return React.createElement(RemResources, { value, onChange: setValue });
+    }
+    dom = await mount(React.createElement(Tools), createFetchMock([jsonResponse("/api/rem-resources", { skills: [], mcpServers: [] })]));
+    await dom.flush();
+    await dom.click(dom.byLabel("Add MCP server"));
+    await checkArrowRight(dom, "Connection");
+    await done(dom);
+
+    // Settings > Rem: self-work Allowance use, saved on each move.
+    const base = selfWorkFixture({ revision: 3 });
+    const withMode = (mode) => ({ ...base, self_work: { ...base.self_work,
+      settings: { ...base.self_work.settings, session_token_limit: 0, daily_token_limit: 0, rate_limit_percent: 0,
+        daily_allowance_percent: mode === "daily" ? 14 : 0, allowance_mode: mode, pace_aim_percent: 97, pace_lead_hours: 3 },
+      limits: { ...base.self_work.limits, token_limit_max: 1e12, rate_limit_percent_max: 100, daily_allowance_percent_max: 100,
+        pace_aim_percent_min: 1, pace_aim_percent_max: 100, pace_lead_hours_max: 24 },
+      state: { ...base.self_work.state, limit_reason: "", daily_allowance: { cap_percent: 0, message: "" }, allowance_pace: { mode, message: "" } } } });
+    let kanban = withMode("off");
+    dom = await mount(React.createElement(settingsPopoverModule.default, {
+      open: true, initialCategory: "assistant", settings: settingsModule.normalizeAppSettings({}), onChange() {}, onClose() {}, onResetAll() {},
+    }), createFetchMock([(url, options = {}) => {
+      if (url === "/api/rem/kanban/settings" && options.method === "PUT") kanban = withMode(JSON.parse(options.body).allowance_mode);
+      else if (url !== "/api/rem/kanban") return null;
+      return { ok: true, status: 200, json: async () => kanban };
+    }]));
+    await wait(dom, () => allElements(dom.container).some((node) => node.getAttribute?.("aria-label") === "Allowance use"));
+    await checkArrowRight(dom, "Allowance use");
+    await done(dom);
+
+    // Posts > Accounts: the late limit, saved on each move. Posts board: a post's Platforms.
+    const postsModule = await viteServer.ssrLoadModule("/src/components/SocialPostsWorkspace.jsx");
+    const variant = (id, platform, label) => ({ id, account_id: `${platform}-1`, account_name: label, platform, platform_label: label, delivery: "api", text: "Hello", link: "",
+      media: [], options: {}, state: "pending", remote_id: "", url: "", message: "", chars: 5, limit: 280, cost_usd: null, next_retry_at: null, open_url: "" });
+    const post = { id: "p1", title: "Release note", state: "proposed", review_state: "proposed", revision: 1, scheduled_at: "2026-11-30T15:00:00Z", timezone: "UTC",
+      late_window_minutes: 120, created_by: "user", created_at: "2026-11-25T10:00:00Z", updated_at: "2026-11-25T10:00:00Z", rationale: "", sources: [], content_hash: "h",
+      approval: null, flags: [], filled_in: false, previous: null, variants: [variant("v1", "x", "X"), variant("v2", "linkedin", "LinkedIn"), variant("v3", "discord", "Discord")] };
+    const social = postsFixture({ posts: [post] });
+    dom = await mount(React.createElement(postsModule.default), createFetchMock([(url, options = {}) => {
+      if (url === "/api/social/settings" && options.method === "PUT") social.settings = { ...social.settings, ...JSON.parse(options.body) };
+      else if (url !== "/api/social") return null;
+      return { ok: true, status: 200, json: async () => structuredClone(social) };
+    }]));
+    await wait(dom, () => textOf(dom.container).includes("Release note"));
+    await checkArrowRight(dom, "Platforms");
+    await dom.click(allElements(dom.byLabel("Posts view")).find((node) => textOf(node).startsWith("Accounts")));
+    await checkArrowRight(dom, "Still post when late by up to");
+    await done(dom);
+
+    // A workflow's Triggers: a new trigger's type.
+    const triggers = { payload: rattishTriggersPayload(), saved: [], respond: () => null };
+    dom = await mount(React.createElement(triggersSectionModule.RattishTriggersSection, { workflowId: "digest" }), rattishTriggersFetch(triggers));
+    await dom.flush();
+    await dom.click(dom.byExactText("Add trigger"));
+    await checkArrowRight(dom, "Trigger type");
+    await done(dom);
+
+    // The bottom panel's views.
+    dom = await mount(React.createElement(bottomPanelModule.default, {}));
+    await checkArrowRight(dom, "Bottom panel views");
+    await done(dom);
+
+    // The browser's library sections.
+    const { LibraryPanel } = await viteServer.ssrLoadModule("/src/components/BrowserPanels.jsx");
+    function Library() {
+      const [view, setView] = React.useState("history");
+      return React.createElement(LibraryPanel, { view, onViewChange: setView, onClose() {}, onOpenUrl() {}, onOpenFile() {} });
+    }
+    dom = await mount(React.createElement(Library));
+    await checkArrowRight(dom, "Library sections");
+    await done(dom);
+
+    // Second Brain search: the Results and reader switch and the reader's open documents.
+    // The reader scrolls to a passage on the next frame; here frames never come.
+    globalThis.requestAnimationFrame = () => 1;
+    secondBrain.resetSecondBrainStore();
+    await secondBrain.loadSampleLibrary();
+    const { default: SearchView } = await viteServer.ssrLoadModule("/src/components/SecondBrainSearch.jsx");
+    const state = secondBrain.getState();
+    const brain = state.brains.find((item) => item.id === state.activeBrainId);
+    const docs = state.documents.filter((doc) => doc.brainId === brain.id).slice(0, 3);
+    assert.equal(docs.length, 3, "the sample library has documents to open");
+    dom = await mount(React.createElement(SearchView, { brain }));
+    await React.act(async () => { for (const doc of docs) secondBrain.openDocument(doc.id, { preview: false }); });
+    await dom.flush();
+    await checkArrowRight(dom, "Results and reader");
+    await checkArrowRight(dom, "Open documents");
+    await done(dom);
+
+    // Settings > Browser > Firefox.
+    const { default: FirefoxSettings } = await viteServer.ssrLoadModule("/src/components/FirefoxSettings.jsx");
+    dom = await mount(React.createElement(FirefoxSettings), createFetchMock([]), { browser: { library: async () => ({ settings: [], custom: [], required: [], extensions: [], profiles: [] }) } });
+    await dom.flush();
+    await checkArrowRight(dom, "Firefox");
+    await done(dom);
+
+    // The New workflow dialog's source switch.
+    dom = await mount(React.createElement(appModule.CreateWorkflowDialog, {
+      defaultProjectRoot: "/repos/raticode", error: "", open: true, saving: false, onClose() {}, onCreate() {}, onImport() {},
+    }));
+    await checkArrowRight(dom, "Workflow source");
+    await done(dom);
+  } finally {
+    for (const dom of mounts) await dom.unmount();
+    secondBrain.resetSecondBrainStore();
+    globalThis.requestAnimationFrame = frame;
+  }
 });
 
 test("web tabs save a bounded back/forward history for restore", async () => {
@@ -27811,6 +28761,34 @@ test("Quick open chooses a Settings section and remembers it as recent", async (
   }
 });
 
+test("Go to entries in the palette open the rail's plugins, and Go to Rem opens Rem's home", async () => {
+  const dom = await mountReact(React.createElement(appModule.default), createFetchMock([jsonResponse("/api/workflows", workflowsPayload([]))]));
+  const railTab = (id) => allElements(dom.container).find((element) => element.getAttribute?.("id") === `sidebar-tab-${id}`);
+  async function goTo(query) {
+    // Recent items come first, so the last Go to would win the next query.
+    window.localStorage.setItem("raticode.palette.recent.v1", "{}");
+    await dom.dispatchWindow("keydown", { code: "KeyP", ctrlKey: true, shiftKey: true, key: "P" });
+    await flushPalette(dom, { open: true });
+    const input = allElements(dom.container).find((element) => element.getAttribute?.("role") === "combobox");
+    await dom.change(input, query);
+    await dom.keyDown(input, "Enter");
+    await flushPalette(dom);
+    await dom.flush();
+  }
+  try {
+    await dom.flush();
+    for (const [query, id] of [["git", "source-control"], ["go to search", "search"], ["go to workflows", "workflows"], ["tickets", "kanban"]]) {
+      await goTo(query);
+      assert.equal(railTab(id)?.getAttribute("aria-selected"), "true", `"${query}" goes to ${id}`);
+    }
+    await goTo("go to rem");
+    assert.equal(railTab("rem")?.getAttribute("aria-selected"), "true");
+    assert.ok(allElements(dom.container).some((element) => element.getAttribute?.("data-rem-slot") === "true"), "Rem's home is open");
+  } finally {
+    await dom.unmount();
+  }
+});
+
 test("A palette command that starts work names the workflow before Enter", async () => {
   const { default: CommandPalette, paletteFooterText } = await viteServer.ssrLoadModule("/src/components/CommandPalette.jsx");
   const chosen = [];
@@ -28100,7 +29078,7 @@ test("swarm execution shows limits, usage by agent and where results are", async
 });
 
 test("Rem task threads show whether Rem or the user wrote each instruction", () => {
-  const render = (message, props = {}) => renderToStaticMarkup(React.createElement(appModule.ChatMessageBubble, { message, canEdit: true, ...props }));
+  const render = (message, props = {}) => renderToStaticMarkup(React.createElement(chatMessagesModule.ChatMessageBubble, { message, canEdit: true, ...props }));
   const rem = render({ id: "prompt", role: "user", sender: "rem", body: "Implement the feature" });
   assert.match(rem, /data-author="rem"/);
   assert.match(rem, /Written by <\/span>Rem/);
@@ -28173,13 +29151,13 @@ test("Settings > Browser offers Chrome, with Chrome's own pages opening in a Chr
   assert.equal(appModule.browserPolicyFromSettings({ engine: "edge-of-tomorrow" }).engine, "raticode");
   assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("chrome"), ["browser"]);
 
-  const { default: ChromeSettings } = await viteServer.ssrLoadModule("/src/components/ChromeSettings.jsx");
+  const { default: ChromiumBrowserSettings, CHROMIUM_BROWSERS } = await viteServer.ssrLoadModule("/src/components/ChromiumBrowserSettings.jsx");
   const calls = [];
   const browser = {
     engineStatus: async () => ({ chrome: { available: true, executable: "/opt/google/chrome/chrome", profile: "/data/chrome-profile", version: "" } }),
     library: async (action, options) => { calls.push([action, options]); return { opened: true }; },
   };
-  const view = await mountReact(React.createElement(ChromeSettings), createFetchMock([]), { browser });
+  const view = await mountReact(React.createElement(ChromiumBrowserSettings, { browser: CHROMIUM_BROWSERS.chrome }), createFetchMock([]), { browser });
   try {
     await view.flush();
     const root = allElements(view.container).find((node) => node.getAttribute?.("data-testid") === "chrome-settings");
@@ -28211,13 +29189,13 @@ test("Settings > Browser offers Microsoft Edge, with Edge's own pages opening in
   assert.ok(settingsPopoverModule.settingsCategoriesForQuery("edge").includes("browser"));
   assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("microsoft edge"), ["browser"]);
 
-  const { default: EdgeSettings } = await viteServer.ssrLoadModule("/src/components/EdgeSettings.jsx");
+  const { default: ChromiumBrowserSettings, CHROMIUM_BROWSERS } = await viteServer.ssrLoadModule("/src/components/ChromiumBrowserSettings.jsx");
   const calls = [];
   const browser = {
     engineStatus: async () => ({ edge: { available: true, executable: "/opt/microsoft/msedge/msedge", profile: "/data/edge-profile", version: "" } }),
     library: async (action, options) => { calls.push([action, options]); return calls.length > 1 ? { alreadyOpen: true } : { opened: true }; },
   };
-  const view = await mountReact(React.createElement(EdgeSettings), createFetchMock([]), { browser });
+  const view = await mountReact(React.createElement(ChromiumBrowserSettings, { browser: CHROMIUM_BROWSERS.edge }), createFetchMock([]), { browser });
   try {
     await view.flush();
     const root = allElements(view.container).find((node) => node.getAttribute?.("data-testid") === "edge-settings");
@@ -28237,7 +29215,7 @@ test("Settings > Browser offers Microsoft Edge, with Edge's own pages opening in
   } finally { await view.unmount(); }
 
   // Without Edge, the panel says so and its buttons are off.
-  const missing = await mountReact(React.createElement(EdgeSettings), createFetchMock([]), { browser: { engineStatus: async () => ({ edge: { available: false } }), library: async () => ({}) } });
+  const missing = await mountReact(React.createElement(ChromiumBrowserSettings, { browser: CHROMIUM_BROWSERS.edge }), createFetchMock([]), { browser: { engineStatus: async () => ({ edge: { available: false } }), library: async () => ({}) } });
   try {
     await missing.flush();
     const root = allElements(missing.container).find((node) => node.getAttribute?.("data-testid") === "edge-settings");
@@ -29263,6 +30241,26 @@ test("an organization ticket's conversation shows each comment once and counts w
   assert.match(markup, /In review → Done/);
 });
 
+test("an organization ticket's Details and an epic's About show as Markdown without images", () => {
+  const text = "Run `npm test` with **care**:\n\n- one\n- two\n\n![diagram](https://example.test/d.png) [docs](https://example.test/docs) [bad](javascript:alert(1))";
+  const organization = {
+    revision: 1,
+    config: { name: "Desk", projectRoots: [], employees: [{ id: "builder", name: "Builder" }], epics: [{ id: "e1", title: "Faster board", description: text }] },
+    runtime: { tasks: [{ id: "t1", title: "Build `it`", description: text, epicId: "e1", status: "todo", number: 1, key: "DESK-1", revision: 1, assignee: "builder", comments: [], knowledge: [] }], claims: {}, knowledge: {}, links: {}, attempts: {} },
+  };
+  const model = organizationModelModule.buildModel(organization);
+  const ctx = { organizationId: "o1", busy: false, onAct: async () => true, onOpen: () => {}, close: () => {} };
+  for (const trail of [["ticket:t1"], ["epic:e1"]]) {
+    const markup = renderToStaticMarkup(React.createElement(organizationSheetModule.default, { model, trail, setTrail: () => {}, listLabel: "Board", ctx }));
+    assert.match(markup, /<code[^>]*>npm test<\/code>/, trail[0]);
+    assert.match(markup, /<strong>care<\/strong>/, trail[0]);
+    assert.equal(markup.split("<li>").length - 1, 2, trail[0]);
+    assert.doesNotMatch(markup, /<img|`npm test`|\*\*care\*\*/, trail[0]);
+    assert.match(markup, /href="https:\/\/example.test\/docs"/, "links stay links");
+    assert.doesNotMatch(markup, /javascript:/, "the link filter drops unsafe addresses");
+  }
+});
+
 test("the worker editor lists its provider's accounts and saves the chosen account's ID", async () => {
   const organization = {
     revision: 3,
@@ -29531,6 +30529,70 @@ test("the Tests panel shows expected cost, results per case and the change since
     const run = posts.find((item) => item.url.endsWith("/tests/run"));
     assert.deepEqual(run.body, { skipJudge: false, expectedRevision: payload.revision });
     assert.ok(dom.byText("Stop"));
+  } finally { await dom.unmount(); }
+});
+
+test("a deleted test case can be undone until the next save, and Undo never overwrites a test set that changed since", async () => {
+  const payload = workflowTestsFixture();
+  const original = structuredClone(payload.testSet.cases);
+  let stored = structuredClone(payload.testSet);
+  const saves = [];
+  const dom = await mountReact(
+    React.createElement(workflowTestsPanelModule.default, { workflowId: "summarizer", workflowName: "Summarizer" }),
+    createFetchMock([
+      (url, options = {}) => {
+        if (!String(url).endsWith("/workflows/summarizer/tests")) return null;
+        if ((options.method ?? "GET") !== "GET") {
+          stored = JSON.parse(options.body).testSet;
+          saves.push(structuredClone(stored));
+        }
+        return { ok: true, status: 200, json: async () => ({ ...payload, testSet: structuredClone(stored) }) };
+      },
+    ]),
+  );
+  const notice = () => allElements(dom.container).find((node) => node.getAttribute?.("role") === "status") ?? null;
+  const undoButton = () => allElements(dom.container).find((node) => node.tagName === "BUTTON" && directText(node) === "Undo") ?? null;
+  const caseButton = (name) => dom.ancestor(dom.byExactText(name), "BUTTON");
+  try {
+    await dom.flush();
+    await dom.click(dom.byLabel("Delete case cats"));
+    await dom.flush();
+    assert.deepEqual(saves.at(-1).cases.map((item) => item.id), ["dogs"]);
+    assert.equal(textOf(notice()), "Deleted case “Cats”.Undo");
+
+    // Undo saves the original cases in their original order and selects the case again.
+    await dom.click(undoButton());
+    await dom.flush();
+    assert.equal(saves.length, 2);
+    assert.deepEqual(saves.at(-1).cases, original);
+    assert.equal(caseButton("Cats").getAttribute("aria-current"), "true");
+    assert.equal(notice(), null);
+
+    // Saving the test set again ends the chance to undo.
+    await dom.click(dom.byLabel("Delete case cats"));
+    await dom.flush();
+    assert.ok(undoButton());
+    await dom.click(dom.byText("Add case"));
+    await dom.change(dom.controlAfterLabel("Name"), "Birds");
+    await dom.click(dom.byExactText("Save case"));
+    await dom.flush();
+    assert.deepEqual(saves.at(-1).cases.map((item) => item.id), ["dogs", "case-2"]);
+    assert.equal(undoButton(), null);
+    assert.equal(notice(), null);
+
+    // Another writer changes the file after a delete: Undo reads it first and leaves it alone.
+    await dom.click(caseButton("Dogs"));
+    await dom.click(dom.byLabel("Delete case dogs"));
+    await dom.flush();
+    const savesBeforeUndo = saves.length;
+    stored = { ...stored, cases: [...stored.cases, { id: "fish", name: "Fish", inputs: { topic: "fish" }, checks: [] }] };
+    await dom.click(undoButton());
+    await dom.flush();
+    assert.equal(saves.length, savesBeforeUndo);
+    assert.deepEqual(stored.cases.map((item) => item.id), ["case-2", "fish"]);
+    assert.equal(undoButton(), null);
+    assert.match(textOf(notice()), /Deleted case “Dogs”\.The test set changed since, so the delete can't be undone here\./);
+    assert.ok(dom.byExactText("Fish"));
   } finally { await dom.unmount(); }
 });
 
@@ -30042,8 +31104,8 @@ test("the run timeline shows a cached step as Cached with zero usage", async () 
   };
   const dom = await mountReact(
     React.createElement(React.Fragment, null,
-      React.createElement(canvasModule.RunUsageStrip, { usage }),
-      React.createElement(canvasModule.RunTimelinePanel, {
+      React.createElement(runTimelineModule.RunUsageStrip, { usage }),
+      React.createElement(runTimelineModule.RunTimelinePanel, {
         embedded: true,
         text: "cached run",
         title: "Workflow log",
@@ -30875,6 +31937,35 @@ test("Posts editor: a scheduled time is read in the chosen time zone, and Duplic
   } finally { await dom.unmount(); }
 });
 
+test("Posts editor: a press outside keeps a changed draft, and Escape asks before discarding it", async () => {
+  const account = { id: "x-1", platform: "x", platform_label: "X", name: "@raticode", enabled: true, quiet: false, status: "connected" };
+  const { dom, fetchMock } = await mountPosts(postsFixture({ accounts: [account] }));
+  const editorForm = () => allElements(dom.container).find(node => node.tagName === "FORM" && node.getAttribute("aria-labelledby") === "sp-editor-h");
+  const textArea = () => allElements(dom.container).find(node => node.tagName === "TEXTAREA");
+  try {
+    // An untouched editor still closes on a press outside.
+    await dom.click(dom.byText("New post"));
+    await pressOverlay(dom, editorForm().parentNode);
+    assert.equal(editorForm(), undefined);
+
+    await dom.click(dom.byText("New post"));
+    await dom.click(allElements(dom.container).find(node => node.tagName === "BUTTON" && textOf(node).includes("@raticode") && node.getAttribute("aria-pressed") === "false"));
+    await dom.change(textArea(), "Raticode 0.7 is out");
+    await pressOverlay(dom, editorForm().parentNode, textArea());
+    await pressOverlay(dom, editorForm().parentNode);
+    assert.ok(editorForm(), "a press outside never throws the draft away");
+
+    await dom.keyDown(editorForm(), "Escape");
+    assert.deepEqual(await answerDiscard(dom, false), { message: "Discard this post?", buttons: ["Keep editing", "Discard"], focused: true });
+    assert.ok(editorForm(), "Keep editing returns to the editor");
+    assert.equal(textArea().value, "Raticode 0.7 is out", "the draft is unchanged");
+    await dom.keyDown(editorForm(), "Escape");
+    await answerDiscard(dom, true);
+    assert.equal(editorForm(), undefined, "Discard closes the editor");
+    assert.equal(sentBodies(fetchMock, "/api/social/posts").length, 0, "nothing was saved");
+  } finally { await dom.unmount(); }
+});
+
 test("the tab in front of Raticode (gecko) can be shared with Rem from the tab menu, and its approvals show above Firefox's window", async () => {
   const geckoCalls = [];
   let sharedListener = null;
@@ -31087,4 +32178,136 @@ test("a waiting question says which ticket asked it and that its run waits, and 
   assert.match(wentOn, /REM-1 went on without it/);
   const chat = renderToStaticMarkup(React.createElement(RemDecisions, { decisions: { ...decisions, items: [{ ...item, asked: { by: "chat", label: "Rem's chat", at: item.asked.at, waiting: [], went_on: [], opens: "" } }] }, project: "/workspace" }));
   assert.match(chat, /<p class="rem-decision-asked"[^>]*>Asked by Rem/);
+});
+
+test("Unsent thread and Rem messages come back after a restart, and a sent one's saved draft goes away", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  const workspace = await viteServer.ssrLoadModule("/src/components/RemHomeWorkspace.jsx");
+  const composer = await viteServer.ssrLoadModule("/src/lib/remComposer.js");
+  store.resetRemHomeStore();
+  composer.resetRemComposer();
+  store.setRemHomeContext(null);
+  const requests = [];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", displayName: "Codex", available: true, models: [] }] }),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+    (url, options) => {
+      if (url !== "/api/chat/stream") return null;
+      requests.push(JSON.parse(options.body));
+      return streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url);
+    },
+  ]);
+  const app = () => React.createElement(React.Fragment, null,
+    React.createElement(chatPaneModule.ChatPane, { width: 380 }), React.createElement(workspace.default));
+  const threadComposer = dom => allElements(dom.container).find(node => node.tagName === "TEXTAREA" && node.getAttribute("aria-label") !== "Message Rem");
+  const savedDrafts = () => JSON.parse(window.localStorage.getItem("raticode.chatDrafts.v1") || "[]");
+  const first = await mountReact(app(), fetchMock);
+  let storage;
+  try {
+    await store.refreshRemHome();
+    await first.flush();
+    await first.change(threadComposer(first), "First request");
+    await first.click(first.byTitle("Send message"));
+    await first.flush();
+    const threadId = requests[0].conversationId;
+    await first.change(threadComposer(first), "Half-written follow-up");
+    await first.change(first.byLabel("Message Rem"), "Remind me about the release notes");
+    // Closing the window saves at once, without waiting for the typing pause.
+    window.dispatchEvent({ type: "pagehide" });
+    assert.deepEqual(savedDrafts(), [[`thread:${threadId}`, "Half-written follow-up"], ["rem", "Remind me about the release notes"]]);
+    const keys = ["gofer-flow-chat-threads", `gofer-flow-chat-thread-meta:${threadId}`, chatThreadsModule.chatStorageKeyFor(threadId), "raticode.chatDrafts.v1"];
+    storage = Object.fromEntries(keys.map(key => [key, window.localStorage.getItem(key)]));
+  } finally { await first.unmount(); }
+
+  // A restart starts with nothing in memory: only what was saved on this computer.
+  store.resetRemHomeStore();
+  composer.resetRemComposer();
+  store.setRemHomeContext(null);
+  const reopened = await mountReact(app(), fetchMock, { storage });
+  try {
+    await store.refreshRemHome();
+    await reopened.flush();
+    assert.equal(reopened.byLabel("Message Rem").value, "Remind me about the release notes");
+    await reopened.click(allElements(reopened.container).find(element => element.tagName === "BUTTON" && textOf(element).startsWith("First request")));
+    await reopened.flush();
+    assert.equal(threadComposer(reopened).value, "Half-written follow-up");
+    await reopened.click(reopened.byTitle("Send message"));
+    await reopened.flush();
+    assert.equal(requests.at(-1).messages.at(-1).body, "Half-written follow-up");
+    window.dispatchEvent({ type: "pagehide" });
+    assert.deepEqual(savedDrafts(), [["rem", "Remind me about the release notes"]]);
+    await reopened.change(reopened.byLabel("Message Rem"), "");
+    window.dispatchEvent({ type: "pagehide" });
+    assert.equal(window.localStorage.getItem("raticode.chatDrafts.v1"), null);
+  } finally { store.resetRemHomeStore(); composer.resetRemComposer(); await reopened.unmount(); }
+});
+
+test("An instruction sent to a managed task thread doesn't come back as a draft after switching threads", async () => {
+  const drafts = await viteServer.ssrLoadModule("/src/lib/chatDrafts.js");
+  const updatedAt = new Date().toISOString();
+  const sent = [];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [] }),
+    (url, options) => {
+      if (url !== "/api/rem/threads/worker/messages" || options.method !== "POST") return null;
+      sent.push(JSON.parse(options.body).body);
+      return { ok: true, status: 200, json: async () => ({ run: { thread_id: "worker" } }) };
+    },
+  ]);
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, { workflows: [], width: 380 }), fetchMock, { storage: {
+    "gofer-flow-chat-threads": JSON.stringify([{ id: "worker", updatedAt }, { id: "mine", updatedAt }]),
+    "gofer-flow-chat-thread-meta:worker": JSON.stringify({ id: "worker", title: "Digest worker", managedRunId: "run", managedRole: "execute", scopeMode: "global", projectRoot: "", updatedAt }),
+    "gofer-flow-chat-thread-meta:mine": JSON.stringify({ id: "mine", title: "My own thread", scopeMode: "global", projectRoot: "", updatedAt }),
+  } });
+  const open = async threadId => { await dom.dispatchWindow("gofer:rem-open-thread", { detail: { threadId } }); await dom.flush(); };
+  try {
+    await open("worker");
+    await dom.change(dom.first("textarea"), "Skip the archived feeds");
+    assert.equal(drafts.getChatDraft("thread:worker"), "Skip the archived feeds");
+    await dom.click(dom.byTitle("Send message"));
+    await dom.flush();
+    assert.deepEqual(sent, ["Skip the archived feeds"]);
+    assert.equal(dom.first("textarea").value, "");
+    await open("mine");
+    await open("worker");
+    assert.equal(dom.first("textarea").value, "");
+    assert.equal(drafts.getChatDraft("thread:worker"), "");
+  } finally { await dom.unmount(); }
+});
+
+test("Text Ask Rem puts in a new thread's composer is still there after switching away and back", async () => {
+  const drafts = await viteServer.ssrLoadModule("/src/lib/chatDrafts.js");
+  const updatedAt = new Date().toISOString();
+  const dom = await mountReact(React.createElement(chatPaneModule.ChatPane, {
+    workflows: [], width: 380, recentProjectRoots: ["/projects/beta"],
+  }), createFetchMock([jsonResponse("/api/provider/capabilities", { providers: [] })]), { storage: {
+    "gofer-flow-chat-threads": JSON.stringify([{ id: "mine", updatedAt }]),
+    "gofer-flow-chat-thread-meta:mine": JSON.stringify({ id: "mine", title: "My own thread", scopeMode: "global", projectRoot: "", updatedAt }),
+  } });
+  try {
+    await dom.dispatchWindow("gofer:rem-context", { detail: { mode: "ask", path: "/projects/beta/code.py", text: "print('selected')", startLine: 2, endLine: 2, draft: "Why does this print twice?" } });
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Why does this print twice?");
+    const threadId = JSON.parse(window.localStorage.getItem("gofer-flow-chat-threads")).map(entry => entry.id).find(id => id !== "mine");
+    assert.equal(drafts.getChatDraft(`thread:${threadId}`), "Why does this print twice?");
+    for (const id of ["mine", threadId]) { await dom.dispatchWindow("gofer:rem-open-thread", { detail: { threadId: id } }); await dom.flush(); }
+    assert.equal(dom.first("textarea").value, "Why does this print twice?");
+  } finally { await dom.unmount(); }
+});
+
+test("Only ChatPane's two draft helpers set a thread's composer text, so every change is saved", () => {
+  const source = fs.readFileSync(path.join(frontendRoot, "src/components/ChatPane.jsx"), "utf8");
+  const helper = name => {
+    const start = source.indexOf(`const ${name} = useCallback(`);
+    assert.ok(start >= 0, `${name} is missing`);
+    return [start, source.indexOf("\n  }, []);", start)];
+  };
+  const helpers = [helper("loadThreadDraft"), helper("changeThreadDraft")];
+  const outside = pattern => [...source.matchAll(pattern)]
+    .filter(match => !helpers.some(([start, end]) => match.index > start && match.index < end))
+    .map(match => source.slice(0, match.index).split("\n").length);
+  assert.deepEqual(outside(/\bsetDraft\(/g), [], "Use changeThreadDraft (or loadThreadDraft for a thread switch) instead of setDraft");
+  assert.deepEqual(outside(/\bsetChatDraft\(/g), [], "Save thread drafts through changeThreadDraft");
+  assert.deepEqual(outside(/\bsetDraft\b(?!\] = useState)/g).filter(line => !source.split("\n")[line - 1].trim().startsWith("//")), [], "Don't pass setDraft around");
 });

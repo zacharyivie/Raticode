@@ -52,7 +52,9 @@ class AcpTransportError(RuntimeError):
 class AcpRpcError(AcpTransportError):
     def __init__(self, code: int, message: str) -> None:
         self.code = code
-        super().__init__(f"ACP request rejected ({code}): {message[:2000]}")
+        # The agent's own words, without the prefix, for callers that show them.
+        self.detail = message[:2000]
+        super().__init__(f"ACP request rejected ({code}): {self.detail}")
 
 
 class AcpTransport:

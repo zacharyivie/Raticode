@@ -138,7 +138,10 @@ test("the Edge window opens Raticode's Edge profile without remote control, at w
 });
 
 test("the Settings panel's Edge pages are all ones the Edge window accepts", () => {
-  const source = fs.readFileSync(path.join(__dirname, "..", "..", "src", "components", "EdgeSettings.jsx"), "utf8");
+  const file = fs.readFileSync(path.join(__dirname, "..", "..", "src", "components", "ChromiumBrowserSettings.jsx"), "utf8");
+  const start = file.indexOf("const EDGE_PAGES = [");
+  assert.ok(start >= 0, "ChromiumBrowserSettings.jsx lists Edge's pages in EDGE_PAGES");
+  const source = file.slice(start, file.indexOf("\n];", start));
   const pages = [...source.matchAll(/^\s*\["((?:https|edge):\/\/[^"]+)"/gm)].map((match) => match[1]);
   assert.ok(pages.length >= 6);
   for (const page of pages) {

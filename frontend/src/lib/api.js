@@ -13,7 +13,7 @@ export function installGoferApiFetchAuth() {
         input = apiUrl("/") + input.slice(previousBase.length);
       }
     }
-    const request = () => nativeFetch(...withGoferApiAuth(input, init));
+    const request = () => reachBackend(input, () => nativeFetch(...withGoferApiAuth(input, init)));
     const method = String(init.method || input?.method || "GET").toUpperCase();
     const mutation = !["GET", "HEAD", "OPTIONS"].includes(method) && isGoferApiRequest(input);
     if (mutation) window.__goferApiReadGeneration = (window.__goferApiReadGeneration || 0) + 1;
@@ -26,7 +26,7 @@ export function installGoferApiFetchAuth() {
       const previousToken = currentApiToken();
       const token = await ensureGoferApiToken(nativeFetch, { refresh: true });
       if (token && token !== previousToken) {
-        return nativeFetch(...withGoferApiAuth(input, init));
+        return request();
       }
     }
     return response;
@@ -34,11 +34,56 @@ export function installGoferApiFetchAuth() {
   window.__goferApiFetchAuthInstalled = true;
 }
 
+const BACKEND_UNREACHABLE = "Raticode's backend isn't reachable. It may be restarting; try again in a moment.";
+
+// The browser rejects with "Failed to fetch" (or "NetworkError…", "Load failed") when
+// nothing answers. For Raticode's own API that means the backend is down or restarting,
+// so say that. Cancelled requests and other origins keep their own error.
+async function reachBackend(input, send) {
+  try {
+    return await send();
+  } catch (error) {
+    if (error?.name === "AbortError" || !isGoferApiRequest(input)) throw error;
+    throw new Error(BACKEND_UNREACHABLE, { cause: error });
+  }
+}
+
 export function apiUrl(path) {
   const baseUrl = normalizeApiBaseUrl(window.__goferSessionBaseUrl || window.goferApiBaseUrl || DEFAULT_API_BASE_URL);
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
 
   return `${baseUrl}${normalizedPath}`;
+}
+
+// One JSON call to Raticode's API. A body goes as JSON. A non-2xx status throws an Error
+// with the server's error text, or `failure` (a sentence, or status => sentence) when the
+// body has none; the error keeps the status, and the files the server couldn't show
+// (unseen) and its reason code when it names them. detailFirst prefers payload.detail.
+// Auth, read sharing and the 401 retry stay in installGoferApiFetchAuth's fetch patch, so
+// headers and signal are only sent when given: a plain GET stays shareable.
+export async function apiJson(path, {
+  method, body, headers, signal, cache, failure = "Raticode couldn't complete that request.", detailFirst = false, fetchImpl,
+} = {}) {
+  const init = {};
+  if (method) init.method = method;
+  const sent = body === undefined ? headers : { "Content-Type": "application/json", ...headers };
+  if (sent && Object.keys(sent).length) init.headers = sent;
+  if (body !== undefined) init.body = JSON.stringify(body);
+  if (signal) init.signal = signal;
+  if (cache) init.cache = cache;
+  const response = await (fetchImpl || globalThis.fetch)(apiUrl(path), init);
+  let payload;
+  try { payload = await response.json(); } catch { /* an empty or non-JSON body */ }
+  payload ??= {};
+  if (!response.ok) {
+    const serverText = detailFirst ? payload.detail || payload.error : payload.error;
+    const error = new Error(serverText || (typeof failure === "function" ? failure(response.status) : failure));
+    error.status = response.status;
+    if (Array.isArray(payload.unseen)) error.unseen = payload.unseen;
+    if (typeof payload.code === "string") error.code = payload.code;
+    throw error;
+  }
+  return payload;
 }
 
 export function withGoferApiAuth(input, init = {}) {

@@ -16,20 +16,14 @@ if TYPE_CHECKING:
 console = Console()
 
 
-def run_health_checks(*, data_dir: Path | None, workflow: str | None) -> HealthReport:
-    """Load the health checks only when doctor runs; they pull in the workflow engine."""
+def run_health_checks(*, data_dir: Path | None) -> HealthReport:
+    """Load the health checks only when doctor runs."""
     from gofer.core.health import run_health_checks as run_checks
 
-    return run_checks(data_dir=data_dir, workflow=workflow)
+    return run_checks(data_dir=data_dir)
 
 
 def doctor(
-    workflow: str | None = typer.Option(
-        None,
-        "--workflow",
-        "-w",
-        help="Workflow ID, file stem, or TOML path to include in diagnostics.",
-    ),
     output_format: str = format_option(),
     json_output: bool = json_alias_option(),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
@@ -45,7 +39,7 @@ def doctor(
     """Inspect local Raticode readiness without making network calls."""
     json_output = wants_json(output_format, json_output)
     folder_note = _use_secrets_dir(secrets_dir, data_dir)
-    report = run_health_checks(data_dir=data_dir, workflow=workflow)
+    report = run_health_checks(data_dir=data_dir)
     if folder_note is not None:
         report.diagnostics.insert(0, folder_note)
     if json_output:

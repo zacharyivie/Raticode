@@ -139,11 +139,6 @@ export function terminalWordEraseInput(event) {
   return "\x17";
 }
 
-export function isBottomPanelShortcut(event) {
-  const backquoteKey = event.code === "Backquote" || event.key === "`";
-  return backquoteKey && (event.ctrlKey || event.metaKey) && !event.altKey;
-}
-
 export function bottomPanelTabForShortcut(activeTab, hasExplicitPanelSelection) {
   return hasExplicitPanelSelection ? activeTab : "terminal";
 }

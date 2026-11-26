@@ -857,7 +857,9 @@ def test_leftover_check_worktrees_are_swept_at_the_next_check_and_at_startup(tmp
     def left_behind() -> Path:
         """What a backend stopped in the middle of a check leaves."""
         box = checks._new_box(data)
-        checks._make_fresh(root, box, data_dir=data, source=root, cancel=None)
+        checks._make_fresh(
+            checks.recorded_commit(root), box, data_dir=data, source=root, cancel=None
+        )
         return box
 
     left_behind()
@@ -896,17 +898,22 @@ def test_outside_git_the_check_runs_in_place_and_says_why(tmp_path: Path):
         checks.summary(result)
     )
     assert "ran_in_reason says why" in checks.REVIEW_GUIDANCE
-    # A repository with no commit yet has nothing to check out.
+    # A repository with no commit yet has nothing to check out: in git, that fails the
+    # check without running the command anywhere.
     empty = tmp_path / "empty"
     empty.mkdir()
     git(empty, "init", "-q")
-    unborn = checks.run_check("true", empty, data_dir=data)
-    assert unborn["passed"] and unborn["ran_in"] == checks.TASK_WORKTREE
+    unborn = checks.run_check("echo here > ran.txt", empty, data_dir=data)
+    assert not unborn["passed"] and unborn["ran_in"] == checks.NOT_RUN, unborn
     assert unborn["ran_in_reason"].startswith("its commit can't be read")
+    assert not (empty / "ran.txt").exists()
+    assert "so the check failed" in checks.summary(unborn)
+    assert "didn't run and the check failed" in checks.feedback(unborn, "D-3")
+    assert not checks.may_rerun(unborn) and not checks.reusable(unborn)
     assert check_folders(data) == []
 
 
-def test_the_approved_setup_runs_in_the_fresh_worktree_and_a_failing_one_falls_back(
+def test_the_approved_setup_runs_in_the_fresh_worktree_and_a_failing_one_fails_the_check(
     tmp_path: Path,
 ):
     from gofer.ui import worktree_setup
@@ -935,9 +942,10 @@ def test_the_approved_setup_runs_in_the_fresh_worktree_and_a_failing_one_falls_b
     setup_file.write_text(json.dumps({"link": ["deps", "missing"]}))
     git(root, "commit", "-qam", "Break the setup")
     approve()
-    fallback = checks.run_check("cat deps/lib.txt", root, data_dir=data)
-    assert fallback["passed"] and fallback["ran_in"] == checks.TASK_WORKTREE, fallback
-    assert fallback["ran_in_reason"].startswith("the project's worktree setup didn't finish")
+    failed = checks.run_check("cat deps/lib.txt", root, data_dir=data)
+    assert not failed["passed"] and failed["ran_in"] == checks.NOT_RUN, failed
+    assert failed["ran_in_reason"].startswith("the project's worktree setup didn't finish")
+    assert failed["head"] == git(root, "rev-parse", "HEAD")
     assert check_worktrees(root, data) == [] and check_folders(data) == []
 
 
@@ -1022,6 +1030,121 @@ def test_the_check_runs_in_a_fresh_worktree_inside_its_sandbox(real_sandbox: Non
     assert result["passed"] and "WROTE-OK" in result["output"], result
     assert not (root / "written.txt").exists()
     assert check_worktrees(root, data) == [] and check_folders(data) == []
+
+
+# The commit that lands comes from Raticode's records, never the task's folder ------------
+
+
+def test_a_task_worktree_pointed_at_the_main_repository_still_checks_the_work_branchs_tip(
+    home: RemHome,  # noqa: F811
+    tmp_path: Path,
+):
+    """The worker can write its worktree's .git file. Pointed at the project's main
+    repository, the folder's HEAD is the base commit, so a check that read the folder
+    checked the base instead of the work. The commit comes from the work branch's tip in
+    the project's repository instead."""
+    from tests.unit.test_rem_home_landing import decide_branch, feature, repository
+    from tests.unit.test_rem_thread_parity import thread_defaults
+
+    project = repository(tmp_path)
+    base = git(project, "rev-parse", "HEAD")
+    home.configure({"provider": "claude_code", "resources": thread_defaults(tmp_path)})
+    decide_branch(home, project)
+    decide(home, project, "test -f fix-rem-change.txt && echo work-file-there")
+    turns: list[dict[str, Any]] = []
+
+    async def source(**kwargs: Any):
+        if "independent read-only reviewer" in kwargs["agent_instructions"]:
+            for event in passing_review():
+                yield event
+            return
+        turns.append(kwargs)
+        if len(turns) == 1:
+            folder, commands = feature(project, tmp_path, "fix/rem-change")
+            git(tmp_path / "dev-home", "merge", "-q", "--ff-only", "fix/rem-change")
+            commands.append(f"git -C {tmp_path / 'dev-home'} merge --ff-only fix/rem-change")
+            # The folder's own HEAD now reads as the main checkout's: the base commit.
+            (folder / ".git").write_text(f"gitdir: {project / '.git'}\n")
+            assert git(folder, "rev-parse", "HEAD") == base
+            for command in commands:
+                yield shell(command)
+        yield {"type": "final", "message": {"body": f"Turn {len(turns)} done."}}
+
+    home.source = source
+    task = home.create_task({"request_id": "redirected", **recipe(project)})["task"]
+    run = wait_run(home, task["id"], {"succeeded", "blocked"}, timeout=30)
+    tip = git(project, "rev-parse", "fix/rem-change")
+    with home.store.read() as db:
+        check = home.store.get(db, "runs", run["id"])["project_check"]
+    assert check["head"] == tip != base, check
+    assert check["ran_in"] == checks.FRESH_WORKTREE and check["passed"], check
+    assert "work-file-there" in check["output"]
+    assert run["state"] == "succeeded", run
+    assert len(turns) == 1
+    assert check_folders(home.data_dir) == []
+
+
+def test_rems_worktree_record_names_the_repository_branch_and_subfolder(tmp_path: Path):
+    """Rem's own worktree: the repository and branch it recorded, and the project's
+    subfolder in it, whatever the checkout's .git file says."""
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    git(repo, "init", "-q")
+    (repo / "app" / "README.md").write_text("base\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    checkout = tmp_path / "rem-worktrees" / "run-1"
+    git(repo, "worktree", "add", "-q", "-b", "rem/feature-1", str(checkout))
+    (checkout / "app" / "work.txt").write_text("done\n")
+    git(checkout, "add", ".")
+    git(checkout, "commit", "-qm", "work")
+    tip = git(checkout, "rev-parse", "HEAD")
+    (checkout / ".git").write_text(f"gitdir: {repo / '.git'}\n")
+    data = tmp_path / "data"
+    result = checks.run_check(
+        "cat work.txt",
+        checkout / "app",
+        data_dir=data,
+        repository=repo,
+        branch="rem/feature-1",
+        project=repo / "app",
+    )
+    assert result["passed"] and result["head"] == tip != base, result
+    assert result["ran_in"] == checks.FRESH_WORKTREE
+    assert Path(result["ran_folder"]).name == "app" and "done" in result["output"]
+    # A branch the repository doesn't have fails without running anything.
+    missing = checks.run_check(
+        "echo here > ran.txt", checkout / "app", data_dir=data, repository=repo, branch="nope"
+    )
+    assert not missing["passed"] and missing["ran_in"] == checks.NOT_RUN, missing
+    assert "the tip of branch nope can't be read" in missing["ran_in_reason"]
+    assert not (checkout / "app" / "ran.txt").exists()
+    assert check_worktrees(repo, data) == [] and check_folders(data) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes to read-only folders")
+def test_a_fresh_worktree_git_cant_make_fails_the_check_without_running_it_in_place(
+    tmp_path: Path,
+):
+    """In a git project with no setup commands, a fresh worktree git can't add used to
+    run the command in the task's folder, where uncommitted files help it pass."""
+    root = task_worktree(tmp_path, commit_helper=True)
+    data = tmp_path / "data"
+    locked = root / ".git" / "worktrees"
+    locked.mkdir(exist_ok=True)
+    locked.chmod(0o555)
+    try:
+        result = checks.run_check("echo here > marker.txt", root, data_dir=data)
+    finally:
+        locked.chmod(0o755)
+    assert result["passed"] is False, result
+    assert result["ran_in"] != checks.TASK_WORKTREE
+    assert result["ran_in"] == checks.NOT_RUN
+    assert result["ran_in_reason"].startswith("git couldn't check out commit")
+    assert result["head"] == git(root, "rev-parse", "HEAD")
+    assert not (root / "marker.txt").exists()
+    assert check_folders(data) == []
 
 
 # Raticode runs the proving test itself: before the change and after it ----------------------
@@ -1260,6 +1383,171 @@ def test_a_python_the_worker_put_in_its_worktree_never_runs_the_proving_test(
     committed = proving.run(PROVING, folder, data_dir=data, base=base)
     assert not committed["ran"] and ".venv" in committed["not_run_reason"], committed
     assert check_worktrees(root, data) == [] and check_folders(data) == []
+
+
+def test_a_committed_pytest_stand_in_or_collect_only_setting_never_proves_a_test(
+    tmp_path: Path, proving_python: None
+):
+    """Nightly audit, 24 November: ``python -m pytest`` ran a ``pytest`` folder the work
+    committed in place of the real one, and ``addopts = "--co"`` made pytest only list the
+    test and exit 0. Either gave "fails before the change and passes after it" for a test
+    that still failed."""
+    from gofer.ui import rem_proving_test as proving
+
+    root, _ = calc_repo(tmp_path, broken=True)
+    base = git(root, "rev-parse", "dev")
+    # The work adds the test but doesn't fix calc.py, so the real test fails after it too.
+    folder, _ = calc_work(root, tmp_path, fix=False)
+    data = tmp_path / "data"
+    (folder / "pytest").mkdir()
+    (folder / "pytest" / "__init__.py").write_text("")
+    (folder / "pytest" / "__main__.py").write_text('print("1 passed")\n')
+    git(folder, "add", "pytest")
+    git(folder, "commit", "-qm", "Add a stand-in")
+    stand_in = proving.run(PROVING, folder, data_dir=data, base=base)
+    assert stand_in["ran"], stand_in
+    assert stand_in["after"]["outcome"] == "failed", stand_in["after"]
+    assert "assert 41 == 42" in stand_in["after"]["output"]
+    assert not stand_in["passes_after"]
+    # Only listing the test exits 0 too, but pytest's results show nothing ran.
+    (folder / "pyproject.toml").write_text('[tool.pytest.ini_options]\naddopts = "--co"\n')
+    git(folder, "add", "pyproject.toml")
+    git(folder, "commit", "-qm", "Only collect")
+    listed = proving.run(PROVING, folder, data_dir=data, base=base)
+    assert listed["ran"], listed
+    assert listed["after"]["exit_code"] == 0
+    assert listed["after"]["outcome"] == "not_found", listed["after"]
+    assert f"don't show {PROVING} ran and passed" in listed["after"]["detail"]
+    assert not listed["passes_after"]
+    assert check_worktrees(root, data) == [] and check_folders(data) == []
+
+
+def test_a_deselected_proving_test_with_another_test_passing_never_proves_it(
+    tmp_path: Path, proving_python: None
+):
+    """Review of the 24 November nightly fix: the work deselected the named test in
+    ``addopts`` and added a trivial test elsewhere, so pytest exited 0 with one test passed
+    and the pair read "fails before the change and passes after it". Only the named test's
+    own result counts."""
+    from gofer.ui import rem_proving_test as proving
+
+    root, _ = calc_repo(tmp_path, broken=True)
+    base = git(root, "rev-parse", "dev")
+    # The work adds the test but doesn't fix calc.py, so the named test still fails.
+    folder, _ = calc_work(root, tmp_path, fix=False)
+    data = tmp_path / "data"
+    (folder / "extra").mkdir()
+    (folder / "extra" / "check_ok.py").write_text("def test_ok():\n    pass\n")
+    (folder / "pyproject.toml").write_text(
+        f'[tool.pytest.ini_options]\naddopts = "--deselect {PROVING} extra/check_ok.py"\n'
+    )
+    git(folder, "add", "extra", "pyproject.toml")
+    git(folder, "commit", "-qm", "Run another test")
+    swapped = proving.run(PROVING, folder, data_dir=data, base=base)
+    assert swapped["ran"], swapped
+    assert swapped["before"]["outcome"] == "failed", swapped["before"]
+    assert swapped["after"]["exit_code"] == 0 and "1 passed" in swapped["after"]["output"]
+    assert swapped["after"]["outcome"] == "not_found", swapped["after"]
+    assert not swapped["passes_after"]
+    assert check_worktrees(root, data) == [] and check_folders(data) == []
+
+
+def test_a_passing_test_whose_dotted_path_matches_the_named_one_never_proves_it(
+    tmp_path: Path, proving_python: None
+):
+    """Review of the 24 November follow-up: a root ``tests.test_calc.py`` collected with
+    ``--import-mode=importlib`` gives the same class path and name as
+    ``tests/test_calc.py::test_answer``, so with the named test deselected its pass was
+    taken for the named test's. Only a result from the named test's own file counts, and
+    any other result means the run wasn't the named test alone."""
+    from gofer.ui import rem_proving_test as proving
+
+    root, _ = calc_repo(tmp_path, broken=True)
+    base = git(root, "rev-parse", "dev")
+    # The work adds the test but doesn't fix calc.py, so the named test still fails.
+    folder, _ = calc_work(root, tmp_path, fix=False)
+    data = tmp_path / "data"
+    (folder / "tests.test_calc.py").write_text("def test_answer():\n    pass\n")
+    (folder / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\n"
+        f'addopts = "--import-mode=importlib --deselect {PROVING} tests.test_calc.py"\n'
+    )
+    git(folder, "add", "tests.test_calc.py", "pyproject.toml")
+    git(folder, "commit", "-qm", "Same name elsewhere")
+    collided = proving.run(PROVING, folder, data_dir=data, base=base)
+    assert collided["ran"], collided
+    assert collided["before"]["outcome"] == "failed", collided["before"]
+    assert collided["after"]["exit_code"] == 0 and "1 passed" in collided["after"]["output"]
+    assert collided["after"]["outcome"] == "not_found", collided["after"]
+    assert "1 other test besides" in collided["after"]["detail"]
+    assert not collided["passes_after"]
+    assert check_worktrees(root, data) == [] and check_folders(data) == []
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no named pipes here")
+def test_a_results_file_turned_into_a_pipe_is_skipped_at_once(tmp_path: Path):
+    """Nightly audit, 25 November: the results file was opened for reading without
+    O_NONBLOCK, so a test that left a named pipe in its place blocked the backend, and
+    every later check behind it, waiting for a writer."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    pipe = scratch / "proving-test-results.xml"
+    os.mkfifo(pipe)
+    result: dict[str, Any] = {}
+    reader = threading.Thread(
+        target=lambda: result.update(kept=checks._read_kept(pipe, scratch, 100)), daemon=True
+    )
+    reader.start()
+    reader.join(timeout=5)
+    assert not reader.is_alive(), "reading the pipe blocked"
+    assert result == {"kept": None}
+    plain = scratch / "plain.xml"
+    plain.write_bytes(b"<testsuites/>")
+    assert checks._read_kept(plain, scratch, 100) == b"<testsuites/>"
+
+
+def test_only_the_named_tests_own_results_count_as_its_pass():
+    from gofer.ui import rem_proving_test as proving
+
+    def results(*cases: str) -> bytes:
+        return ("<testsuites><testsuite>" + "".join(cases) + "</testsuite></testsuites>").encode()
+
+    def case(file: str, classname: str, name: str, inner: str = "") -> str:
+        return f'<testcase file="{file}" classname="{classname}" name="{name}">{inner}</testcase>'
+
+    node = "tests/a/test_b.py::TestC::test_d"
+    own = ("tests/a/test_b.py", "tests.a.test_b.TestC")
+
+    def counted(found: bytes, named: str = node) -> tuple[int, int, int, bool]:
+        got = proving.ran_tests(found, named)
+        assert got is not None
+        return got.ran, got.passed, got.others, got.proven
+
+    assert counted(results(case(*own, "test_d"))) == (1, 1, 0, True)
+    # Each parametrized run of a test named without parameters counts.
+    both = results(case(*own, "test_d[1]"), case(*own, "test_d[2]"))
+    assert counted(both) == (2, 2, 0, True)
+    assert counted(both, node + "[2]") == (1, 1, 1, False)
+    assert counted(results(case(*own, "test_d[2]")), node + "[2]") == (1, 1, 0, True)
+    # The same class path from another file, such as a root tests.a.test_b.py or a
+    # tests/a.py class named test_b, isn't the named test; nor is a longer name.
+    for other in (
+        case("tests.a.test_b.py", "tests.a.test_b.TestC", "test_d"),
+        case("tests/a.py", "tests.a.test_b.TestC", "test_d"),
+        case("tests/a/test_b.py", "tests.a.test_b.TestC", "test_dx"),
+        case("extra/check_ok.py", "extra.check_ok", "test_ok"),
+    ):
+        assert counted(results(other)) == (0, 0, 1, False), other
+        # Any other result beside the named test's pass means it didn't run alone.
+        assert counted(results(case(*own, "test_d"), other)) == (1, 1, 1, False), other
+    # A skipped, failed or erroring run of the named test isn't a pass.
+    for inner in ("<skipped/>", "<failure/>", "<error/>"):
+        assert counted(results(case(*own, "test_d", inner))) == (1, 0, 0, False), inner
+    # One skipped parametrized run of two isn't a pass either.
+    half = results(case(*own, "test_d[1]"), case(*own, "test_d[2]", "<skipped/>"))
+    assert counted(half) == (2, 1, 0, False)
+    assert proving.ran_tests(None, node) is None
+    assert proving.ran_tests(b"not xml", node) is None
 
 
 def test_the_proving_test_runs_inside_the_check_sandbox(

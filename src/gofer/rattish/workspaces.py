@@ -268,18 +268,6 @@ class ProjectDiscovery:
     limited: bool = False
 
 
-def discover_registered_workflows(
-    project_root: Path,
-    *,
-    registry_dir: Path | None = None,
-    check_cancelled: Callable[[], None] = lambda: None,
-) -> tuple[RegisteredWorkflow, ...]:
-    """Register every workflow in a project: see discover_project_workflows."""
-    return discover_project_workflows(
-        project_root, registry_dir=registry_dir, check_cancelled=check_cancelled
-    ).workflows
-
-
 def discover_project_workflows(
     project_root: Path,
     *,

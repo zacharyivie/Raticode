@@ -19,7 +19,15 @@ from gofer.ui.headless import agent_request_refusal
 from gofer.ui.rem_home import RemHome
 from gofer.ui.rem_home_models import Decision
 from gofer.ui.rem_kanban import get_ticket, read_tickets
-from tests.unit.test_rem_kanban import add, api_server, at, project_of, set_options, tick, wait_for
+from tests.unit.test_rem_kanban import (
+    add,
+    api_server,
+    at,
+    project_of,
+    set_options,
+    tick,
+    wait_for,
+)
 from tests.unit.test_rem_kanban import board as board
 from tests.unit.test_rem_pause_resume import reply_to
 from tests.unit.test_self_work_auto_approve import Rankings, ideas, turn_on
@@ -136,14 +144,13 @@ def report_rows(home: RemHome, kind: str) -> list[dict[str, Any]]:
 # The store's rules ---------------------------------------------------------------------
 
 
-def test_the_user_adds_edits_reorders_checks_and_removes_objectives(board):
+def test_the_user_adds_edits_checks_and_removes_objectives(board):
     home, _, _ = board
     first = change(home, {"action": "add", "text": "Raise UX quality of the studio"}, actor="user")
     assert first["revision"] == 1
     change(home, {"action": "add", "text": "Speed", "done_when": "Opens in 1 s"}, actor="user")
-    a, b = listed(home)
+    b, a = listed(home)  # newest first
     assert b["done_when"] == "Opens in 1 s" and b["created_by"] == "user"
-    change(home, {"action": "move", "id": b["id"], "index": 0}, actor="user")
     assert texts(home) == ["Speed", "Raise UX quality of the studio"]
     change(home, {"action": "edit", "id": a["id"], "text": "Raise UX quality"}, actor="user")
     # The user's own judgment is enough: no criteria or evidence needed.
@@ -182,17 +189,26 @@ def test_rem_writes_only_high_order_goals(board, text):
 
 def test_rem_keeps_only_a_few_open_objectives_of_its_own(board):
     home, _, _ = board
+    finish = "Its open reliability tickets are all done"
     for number in range(objectives.MAX_OPEN_BY_REM):
         change(
             home,
-            {"action": "add", "text": f"Improve the reliability of area {number}"},
+            {
+                "action": "add",
+                "text": f"Improve the reliability of area {number}",
+                "done_when": finish,
+            },
             actor="rem",
             source="self_work",
         )
     with pytest.raises(objectives.ObjectiveRefused, match="at most"):
         change(
             home,
-            {"action": "add", "text": "Improve the reliability of one more area"},
+            {
+                "action": "add",
+                "text": "Improve the reliability of one more area",
+                "done_when": finish,
+            },
             actor="rem",
             source="self_work",
         )
@@ -210,7 +226,7 @@ def test_rem_checks_off_only_against_written_criteria_with_evidence(board):
         },
         actor="user",
     )
-    open_ended, finite = listed(home)
+    finite, open_ended = listed(home)  # newest first
     # Open-ended objectives stay open: there is no finish line to meet.
     with pytest.raises(objectives.ObjectiveRefused, match="open-ended"):
         change(
@@ -247,6 +263,105 @@ def test_rem_checks_off_only_against_written_criteria_with_evidence(board):
         assert refused.value.code == "unauthorized"
 
 
+def test_the_list_is_newest_first_with_open_objectives_above_done_ones(board):
+    home, _, _ = board
+    for text in ("Oldest goal of all", "Middle goal here", "Newest goal yet"):
+        change(home, {"action": "add", "text": text}, actor="user")
+    middle = next(i for i in listed(home) if i["text"] == "Middle goal here")
+    newest = next(i for i in listed(home) if i["text"] == "Newest goal yet")
+    change(home, {"action": "check", "id": newest["id"]}, actor="user")
+    change(home, {"action": "check", "id": middle["id"]}, actor="user")
+    assert texts(home) == ["Oldest goal of all", "Newest goal yet", "Middle goal here"]
+    # Reopened, it goes back above the done ones, still by age.
+    change(home, {"action": "uncheck", "id": newest["id"]}, actor="user")
+    assert texts(home) == ["Newest goal yet", "Oldest goal of all", "Middle goal here"]
+    # There is no manual order any more; an old client's move is refused.
+    with pytest.raises(objectives.ObjectiveRefused) as moved:
+        change(home, {"action": "move", "id": middle["id"], "index": 0}, actor="user")
+    assert moved.value.code == "invalid" and "newest first" in str(moved.value)
+
+
+def stored_list(home: RemHome, items: list[dict[str, Any]]) -> None:
+    with home.store.connect() as db:
+        home.store.set_setting(db, objectives.SETTING, {"revision": 7, "items": items})
+
+
+def test_clients_load_the_newest_thirty_first_and_page_through_the_rest(board):
+    home, _, _ = board
+    stamp = datetime(2026, 11, 1, tzinfo=UTC)
+    items = [
+        {
+            "id": f"o{n:02d}",
+            "text": f"Goal number {n:02d} of the list",
+            "done": n < 40,
+            "stale": n < 30,
+            "created_at": (stamp + timedelta(minutes=n)).isoformat(),
+        }
+        for n in range(45)
+    ]
+    stored_list(home, items)
+    first = home.self_work.objectives()
+    assert len(first["items"]) == objectives.PAGE == 30
+    assert first["total"] == 45 and first["offset"] == 0
+    assert (first["open"], first["done"], first["stale"]) == (5, 10, 30)
+    # Open ones newest first, then this session's done ones, then stale ones.
+    ids = [i["id"] for i in first["items"]]
+    assert ids[:15] == [f"o{n:02d}" for n in [*range(44, 39, -1), *range(39, 29, -1)]]
+    assert ids[15:] == [f"o{n:02d}" for n in range(29, 14, -1)]
+    rest = home.self_work.objectives(objectives.PAGE, 30)
+    assert [i["id"] for i in rest["items"]] == [f"o{n:02d}" for n in range(14, -1, -1)]
+    assert len(home.self_work.objectives(60)["items"]) == 45
+    # A worker or Rem's model reads only the current ones, never the stale history.
+    with home.store.read() as db:
+        prompt_ids = {i["id"] for i in objectives.for_prompt(objectives.read(db, home.store))}
+    assert prompt_ids == {f"o{n:02d}" for n in range(30, 45)}
+
+
+def test_a_session_end_makes_its_done_objectives_stale_and_open_ones_carry_over(board):
+    home, _, _ = board
+    for text in ("Finished in session one", "Still open after session one"):
+        change(home, {"action": "add", "text": text}, actor="user")
+    finished = next(i for i in listed(home) if i["text"] == "Finished in session one")
+    change(home, {"action": "check", "id": finished["id"]}, actor="user")
+    set_options(home, enabled=True)
+    tick(home)
+    with home.store.read() as db:
+        assert windows.current_period(db) is not None
+    assert home.self_work.objectives()["done"] == 1
+    # Self-work turns off: the session ends.
+    set_options(home, enabled=False)
+    with home.store.read() as db:
+        assert windows.current_period(db) is None
+    view = home.self_work.objectives()
+    by_text = {i["text"]: i for i in view["items"]}
+    assert by_text["Finished in session one"]["stale"] is True
+    assert "stale" not in by_text["Still open after session one"]
+    assert (view["open"], view["done"], view["stale"]) == (1, 0, 1)
+    # The next session: a new one done there counts, the stale one doesn't.
+    set_options(home, enabled=True)
+    tick(home)
+    change(home, {"action": "add", "text": "Added in session two"}, actor="user")
+    carried = next(i for i in listed(home) if i["text"] == "Still open after session one")
+    change(home, {"action": "check", "id": carried["id"]}, actor="user")
+    view = home.self_work.objectives()
+    assert (view["open"], view["done"], view["stale"]) == (1, 1, 1)
+    assert [i["text"] for i in view["items"]] == [
+        "Added in session two",
+        "Still open after session one",
+        "Finished in session one",
+    ]
+    # Open objectives never go stale, however many sessions end.
+    set_options(home, enabled=False)
+    view = home.self_work.objectives()
+    assert (view["open"], view["done"], view["stale"]) == (1, 0, 2)
+    assert not any(i.get("stale") for i in view["items"] if not i.get("done"))
+    # Reopened, a stale one is current again.
+    change(home, {"action": "uncheck", "id": finished["id"]}, actor="user")
+    reopened = next(i for i in listed(home) if i["id"] == finished["id"])
+    assert "stale" not in reopened and not reopened["done"]
+    assert home.self_work.objectives()["stale"] == 1
+
+
 # Rem sets them from the user's instructions in chat -------------------------------------
 
 
@@ -271,6 +386,7 @@ def test_chat_instructions_set_the_objectives_and_keep_done_ones(board):
             ],
         },
     )
+    # The new ones in the order given, with the finished one below the open ones.
     assert texts(home) == [
         "Raise UX quality of the workflow studio",
         "Improve reliability of the Second Brain tools",
@@ -322,8 +438,11 @@ def test_an_empty_list_at_session_start_gets_rems_own_high_order_objectives(boar
         home,
         {
             "objectives": [
-                {"text": "Raise UX quality of the workflow studio"},
-                {"text": "Fix typo"},  # task-sized: left out
+                {
+                    "text": "Raise UX quality of the workflow studio",
+                    "done_when": "Every studio usability ticket in Backlog is done",
+                },
+                {"text": "Fix typo", "done_when": "The typo is gone from the page"},  # task-sized
                 {
                     "text": "Improve reliability of the Second Brain tools",
                     "done_when": "No open Second Brain reliability tickets",
@@ -373,7 +492,7 @@ def test_each_new_task_reads_the_objectives_fresh_and_names_the_one_it_serves(bo
     assert "Raise UX quality of the studio" in task_prompt(home, "Polish the node picker")
     # The user changes the list while that task runs; the next task sees the new list.
     change(home, {"action": "add", "text": "Optimize performance of file handling"}, actor="user")
-    perf = listed(home)[1]["id"]
+    perf = listed(home)[0]["id"]  # newest first
     second = add(home, "Cache file listings")
     with home.store.connect() as db:
         ticket = get_ticket(db, second["id"])
@@ -396,7 +515,7 @@ def test_research_proposals_record_the_objective_they_serve(board):
     home, fake, _ = board
     change(home, {"action": "add", "text": UX}, actor="user")
     change(home, {"action": "add", "text": "Optimize performance of file handling"}, actor="user")
-    goal, perf = (item["id"] for item in listed(home))
+    perf, goal = (item["id"] for item in listed(home))  # newest first
     # Only the studio objective concerns this project, so research looks only for that one.
     checker(home, scopes={UX: [project_of(home)], "Optimize performance of file handling": []})
     title = f"Find work for “{UX}” in project"
@@ -435,7 +554,17 @@ def test_running_out_of_work_lets_rem_add_objectives_and_research_again(board):
     fake.answers[f"Find work for “{UX}” in project"] = (
         'Done.\n```json\n{"proposals":[],"duplicates":[]}\n```'
     )
-    prompts = planner(home, {"objectives": [{"text": "Harden the command line against bad input"}]})
+    prompts = planner(
+        home,
+        {
+            "objectives": [
+                {
+                    "text": "Harden the command line against bad input",
+                    "done_when": "Every CLI command rejects a malformed path with a clear error",
+                }
+            ]
+        },
+    )
     at(home, 15)
     tick(home)
     wait_for(lambda: quiet(home) and home.self_work._planner is not None, 8)
@@ -704,6 +833,105 @@ def test_a_ticket_judged_for_older_objectives_or_text_is_judged_again():
     assert objective_fit.judge(ticket, other)[0] == "unknown"
 
 
+def stored_objectives(home: RemHome) -> dict[str, Any]:
+    with home.store.read() as db:
+        return objectives.read(db, home.store)
+
+
+def test_a_linked_ticket_whose_title_changes_is_judged_again():
+    goal: dict[str, Any] = {"id": "a1", "text": "Improve speed", "done": False}
+    open_list: dict[str, Any] = {"revision": 1, "items": [goal]}
+    ticket = {"id": "t", "title": "Cache", "description": "", "project_dir": "/p", "status": "todo"}
+    objective_fit.record(ticket, open_list, "a1", "Yes", "now")
+    assert ticket["objective_id"] == "a1" and objective_fit.LINK in ticket
+    assert objective_fit.judge(ticket, open_list)[0] == "related"
+    ticket["title"] = "Rewrite the README"
+    assert objective_fit.judge(ticket, open_list)[0] == "unknown"
+    # Judged again: unrelated now, so the link goes.
+    objective_fit.record(ticket, open_list, "", "No longer about speed.", "later")
+    assert "objective_id" not in ticket and objective_fit.LINK not in ticket
+    assert objective_fit.judge(ticket, open_list)[0] == "unrelated"
+    # Or related again, with the link renewed for the ticket as it reads now.
+    ticket["title"] = "Cache file listings"
+    objective_fit.record(ticket, open_list, "a1", "Yes", "later")
+    assert objective_fit.judge(ticket, open_list)[0] == "related"
+    # A link stored before links carried hashes counts until it gets them and the ticket changes.
+    legacy = {**ticket, "objective_fit": {}, "objective_id": "a1"}
+    legacy.pop(objective_fit.LINK)
+    assert objective_fit.judge(legacy, open_list)[0] == "related"
+    assert objective_fit.stamp(legacy, open_list) and not objective_fit.stamp(legacy, open_list)
+    assert objective_fit.judge(legacy, open_list)[0] == "related"
+    legacy["description"] = "Now also rewrite the docs."
+    assert objective_fit.judge(legacy, open_list)[0] == "unknown"
+
+
+def test_a_linked_ticket_whose_objective_is_reworded_is_judged_again(board):
+    home, _, _ = board
+    change(home, {"action": "add", "text": "Improve speed of the studio"}, actor="user")
+    change(home, {"action": "add", "text": "Raise UX quality of the studio"}, actor="user")
+    ux, speed = (item["id"] for item in listed(home))  # newest first
+    ticket = {"id": "t", "title": "Cache", "description": "", "project_dir": "/p", "status": "todo"}
+    objective_fit.record(ticket, stored_objectives(home), speed, "Yes", "now")
+    assert objective_fit.judge(ticket, stored_objectives(home))[0] == "related"
+    # Rewording another objective leaves this link alone.
+    change(home, {"action": "edit", "id": ux, "text": "Raise UX quality"}, actor="user")
+    assert objective_fit.judge(ticket, stored_objectives(home))[0] == "related"
+    change(home, {"action": "edit", "id": speed, "text": "Raise UX quality too"}, actor="user")
+    assert objective_fit.judge(ticket, stored_objectives(home))[0] == "unknown"
+    objective_fit.record(ticket, stored_objectives(home), speed, "Still fits.", "later")
+    assert objective_fit.judge(ticket, stored_objectives(home))[0] == "related"
+    # A new finish line counts as a change too.
+    change(home, {"action": "edit", "id": speed, "done_when": "Opens in 1 s"}, actor="user")
+    assert objective_fit.judge(ticket, stored_objectives(home))[0] == "unknown"
+
+
+def test_a_ticket_the_ranking_linked_is_checked_again_after_an_edit(board):
+    home, fake, _ = board
+    change(home, {"action": "add", "text": "Improve Raticode UI responsiveness"}, actor="user")
+    goal = listed(home)[0]["id"]
+    added = add(home, "Debounce board polling", status="backlog")
+    ranked = {"ticket_id": added["id"], "impact": 4, "relevance": 4, "objective": goal}
+    ranking = {"tickets": [ranked]}
+    with home.store.connect() as db:
+        current = get_ticket(db, added["id"])
+        home.self_work._ingest_ranking(
+            db,
+            {"id": "run-rank", "worker_result": f"```json\n{json.dumps(ranking)}\n```"},
+            {
+                "target": project_of(home),
+                "title": "Rank the backlog",
+                "offered": {added["id"]: objective_fit.ticket_fingerprint(current)},
+            },
+            {project_of(home)},
+        )
+    linked = stored(home, "Debounce board polling")
+    assert linked["objective_id"] == goal
+    assert objective_fit.judge(linked, stored_objectives(home))[0] == "related"
+    view = next(t for t in home.kanban.board()["tickets"] if t["title"] == "Debounce board polling")
+    home.kanban.edit(
+        "user",
+        {
+            "ticket_id": added["id"],
+            "expected_revision": view["revision"],
+            "description": "Also move the board export to a new CSV writer.",
+        },
+    )
+    edited = stored(home, "Debounce board polling")
+    assert objective_fit.judge(edited, stored_objectives(home))[0] == "unknown"
+    # Self-work checks it before starting it; judged unrelated now, it stays in Backlog.
+    shown = checker(home)
+    set_options(home, max_threads=2, auto_pull_backlog=True)
+    fake.answers = Rankings(home, lambda t: {"impact": 4, "relevance": 4})
+    at(home, 15)
+    step(home)
+    wait_for(lambda: calm(home), 8)
+    assert any(t["title"] == "Debounce board polling" for s in shown for t in s["tickets"])
+    assert "Debounce board polling" not in worker_titles(fake)
+    after = stored(home, "Debounce board polling")
+    assert after["status"] == "backlog" and "objective_id" not in after
+    assert objective_fit.judge(after, stored_objectives(home))[0] == "unrelated"
+
+
 # The user's HTTP route ----------------------------------------------------------------
 
 
@@ -723,6 +951,18 @@ def test_the_side_pane_reads_objectives_with_the_tasks_and_only_the_user_writes(
     )
     assert stale.status == 409 and stale.json()["code"] == "conflict"
     assert request("GET", "/api/rem/objectives").json()["open"] == 1
+    # Clients page through the list: the first 30 by default, more on request.
+    request("POST", "/api/rem/objectives", body={"action": "add", "text": "Newer goal"})
+    page = request("GET", "/api/rem/objectives?limit=1").json()
+    assert [i["text"] for i in page["items"]] == ["Newer goal"] and page["total"] == 2
+    page = request("GET", "/api/rem/objectives?limit=1&offset=1").json()
+    assert [i["text"] for i in page["items"]] == ["Raise UX quality"] and page["offset"] == 1
+    assert request("GET", "/api/rem/objectives?limit=many").status == 400
+    # A change answers with as many as the client has loaded.
+    two = request(
+        "POST", "/api/rem/objectives", body={"action": "add", "text": "Third", "limit": 2}
+    )
+    assert len(two.json()["items"]) == 2 and two.json()["total"] == 3
     # Agent tokens, such as a worker's, can read but never change them.
     assert agent_request_refusal("POST", "/api/rem/objectives")
     assert agent_request_refusal("GET", "/api/rem/objectives") is None

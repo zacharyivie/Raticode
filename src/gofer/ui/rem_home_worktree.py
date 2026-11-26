@@ -9,11 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from gofer.core.commit_attribution import clean_commit_message
-from gofer.utils.process import (
-    NO_REPOSITORY_PROGRAMS,
-    build_subprocess_env,
-    untrusted_repository_git_env,
-)
+from gofer.utils.process import run_repository_git
 
 GIT_TIMEOUT_SECONDS = 60
 
@@ -24,14 +20,7 @@ class WorktreeError(RuntimeError):
 
 def _git(cwd: Path | str, *args: str) -> str:
     try:
-        result = subprocess.run(
-            ["git", *NO_REPOSITORY_PROGRAMS, "-C", str(cwd), *args],
-            capture_output=True,
-            text=True,
-            timeout=GIT_TIMEOUT_SECONDS,
-            check=False,
-            env=untrusted_repository_git_env(cwd, build_subprocess_env()),
-        )
+        result = run_repository_git(cwd, *args, timeout=GIT_TIMEOUT_SECONDS)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise WorktreeError(str(exc)) from exc
     if result.returncode:

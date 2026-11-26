@@ -29,15 +29,6 @@ export function coverSamples(rect, columns = 5, rows = 5) {
   return points;
 }
 
-// Whether something other than the slot is on top at any sample point.
-// elementAt returns the top element at a point, or null outside the window.
-export function isCovered(slot, rect, elementAt, contains = (element) => slot === element || slot.contains?.(element)) {
-  return coverSamples(rect).some(({ x, y }) => {
-    const element = elementAt(x, y);
-    return Boolean(element) && !contains(element);
-  });
-}
-
 export function sameBounds(a, b) {
   return Boolean(a && b) && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height && a.visible === b.visible
     && JSON.stringify(a.cutouts || []) === JSON.stringify(b.cutouts || []);

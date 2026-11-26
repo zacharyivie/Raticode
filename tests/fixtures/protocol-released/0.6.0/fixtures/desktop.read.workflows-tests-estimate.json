@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000272",
+  "id": "10000000-0000-4000-8000-000000000272",
+  "sequence": 272,
+  "type": "desktop.read",
+  "payload": {
+    "op": "workflows.tests.estimate",
+    "params": {
+      "workflow_id": "release-notes",
+      "expected_revision": "sha256:5d2c9a43e0b1f7c86a4e3d21b09f8c7e6d5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c",
+      "models": [
+        {
+          "node": "draft",
+          "provider": "claude-code",
+          "model": "claude-sonnet-5-5"
+        }
+      ]
+    }
+  }
+}

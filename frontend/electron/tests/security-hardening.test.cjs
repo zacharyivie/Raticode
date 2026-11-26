@@ -28,7 +28,8 @@ function mainFunction(name, context) {
 
 async function fixture(t) {
   const base = await fsp.mkdtemp(path.join(os.tmpdir(), "raticode-security-"));
-  t.after(() => fsp.rm(base, { recursive: true, force: true }));
+  // A backend a test started can still be writing under base while it exits.
+  t.after(() => fsp.rm(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   const inside = path.join(base, "inside");
   const outside = path.join(base, "outside");
   await fsp.mkdir(inside);
@@ -305,6 +306,7 @@ http.server_close()
     env: { ...process.env, GOFER_DESKTOP_GRANT_SECRET: "fixture-secret" },
     stdio: ["pipe", "pipe", "pipe"],
   });
+  const exited = new Promise(resolve => child.once("exit", resolve));
   t.after(() => child.kill());
   child.stderr.resume();
   const lines = createInterface({ input: child.stdout });
@@ -341,6 +343,8 @@ http.server_close()
   assert.throws(() => security.renewPath(path.dirname(inside)), /outside/);
   lines.close();
   child.stdin.end();
+  // Let the backend finish writing its data folder before the fixture removes it.
+  await exited;
 });
 
 test("failed creation cannot redirect cleanup through a replaced parent on the portable path", async (t) => {
@@ -520,6 +524,36 @@ test("desktop Git and files work outside agent roots with absent or stale grants
   for (const name of ["gitStatus", "gitBranches", "gitHistory", "gitWorktrees", "listDirectory"]) {
     assert.equal((await mainFunction(name, context)(null, { projectRoot: outside, currentPath: outside })).missing, true);
   }
+});
+
+test("IPC path checks refuse a network share before any disk call", async (t) => {
+  const { base, inside, outside, security } = await fixture(t);
+  const grant = security.trustPath(outside);
+  await fsp.mkdir(path.join(base, "opened"));
+  const userGrant = security.grantUserPath(path.join(base, "opened"));
+  assert.equal(security.isUserGrant(userGrant.grantId), true);
+  const lstat = t.mock.method(fs, "lstatSync");
+  const realpath = t.mock.method(fs.realpathSync, "native");
+  const realpathPlain = t.mock.method(fs, "realpathSync");
+  const exists = t.mock.method(fs, "existsSync");
+  const shares = ["\\\\host\\share\\x", "//host/share/x", "\\\\?\\UNC\\host\\share\\x", "\\\\.\\UNC\\host\\share\\x", "file://host/share/x"];
+  for (const share of shares) {
+    for (const grantId of ["", grant.grantId, userGrant.grantId]) {
+      assert.throws(() => security.resolveAllowedPath(share, { grantId }), /not files on another computer/, share);
+      assert.throws(() => security.resolveDesktopPath(share), /not files on another computer/, share);
+      assert.throws(() => security.resolveAllowedChildPath(share, "x.txt", { grantId, desktop: !grantId }), /not files on another computer/, share);
+      assert.throws(() => security.resolvePickerPath(share, { grantId }), /not files on another computer/, share);
+      if (grantId) assert.throws(() => security.resolveGrantedPath(share, { grantId }), /not files on another computer/, share);
+    }
+  }
+  assert.equal(lstat.mock.callCount(), 0);
+  assert.equal(realpath.mock.callCount(), 0);
+  assert.equal(realpathPlain.mock.callCount(), 0);
+  assert.equal(exists.mock.callCount(), 0);
+  // \\?\C:\ is a long form of a local path, not a share.
+  assert.equal(require("../security.cjs").isNetworkPath("\\\\?\\C:\\Users\\me\\x"), false);
+  assert.equal(security.resolveDesktopPath(path.join(inside, "new.txt")), path.join(inside, "new.txt"));
+  assert.ok(lstat.mock.callCount() > 0);
 });
 
 test("desktop child paths retain name validation without requiring agent grants", async (t) => {
@@ -753,7 +787,7 @@ test("the UI's API token never travels on the renderer command line", () => {
     BrowserWindow: function BrowserWindow(value) { options = value; throw new Error("stop after options"); },
     trustedProjectStore: () => ({ read: () => ({ legacyRecentProjectsMigrated: true }) }),
     logTrustedRegistryFailure() {}, crypto: { randomUUID: () => "id" }, path, app: { isPackaged: false },
-    __dirname: path.join(__dirname, ".."), pathToFileURL, browserPreloadPath: "/preload.cjs", isSmokeTest: false,
+    __dirname: path.join(__dirname, ".."), isSmokeTest: false,
     lastWindowArgs: null, legacyProjectMigrationToken: "", mainWindow: null,
   });
   assert.throws(() => createWindow("http://127.0.0.1:8765", "secret-session-token"), /stop after options/);

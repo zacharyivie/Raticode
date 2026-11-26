@@ -13,7 +13,7 @@ import stat
 import sys
 import traceback
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import closing
 from pathlib import Path
 from typing import Any, TextIO
@@ -272,10 +272,14 @@ def with_second_brain(
     cli_path: Path | None,
     context: dict[str, str] | None = None,
     data_dir: Path | None = None,
+    library_dir: Path | None = None,
 ) -> dict[str, Any] | None:
     """Add the Second Brain tools. `context` names the thread and project for provenance.
 
-    With data_dir, the rules tool also carries the turn's report theme.
+    With data_dir, the rules tool also carries the turn's report theme. A folder that
+    isn't a registered brain is served from its own index, which leaves out the private
+    brains inside it; they are read from the library in library_dir (data_dir when not
+    given) for every turn, so the server never opens the library itself.
     """
     config = (workflow or {}).get("remSecondBrain") or {}
     if config.get("enabled") is not True:
@@ -292,6 +296,12 @@ def with_second_brain(
         raise ValueError("Report format must be Markdown, HTML, Slides, or PDF.")
     resources = AgentResources.model_validate((workflow or {}).get("remResources") or {})
     task_report_tool = has_task_report_tool(resources)
+    private_folders: set[Path] = set()
+    library = library_dir or data_dir
+    if library is not None and not uses_registered_brains(config):
+        from gofer.ui.brain_privacy import private_folders_inside, registered_brains
+
+        private_folders = private_folders_inside(root.resolve(), registered_brains(library))
     resources.mcpServers = [item for item in resources.mcpServers if item.name != "second_brain"]
     resources.mcpServers.append(
         McpReference(
@@ -328,6 +338,11 @@ def with_second_brain(
                     if uses_registered_brains(config)
                     else []
                 ),
+                *[
+                    part
+                    for folder in sorted(private_folders)
+                    for part in ("--private-brain-folder", str(folder))
+                ],
                 *[
                     part
                     for flag, value in (
@@ -706,8 +721,6 @@ def inline_passages(blocks: Any) -> str:
 
 
 SEARCH_FORMATS = ("text", "json")
-# Each document's search entry in the text reply starts with this line.
-SEARCH_RESULT_LINE = re.compile(r"Result (\d+): ")
 
 
 _UTC_TIME = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.\d+)?\+00:00")
@@ -1237,7 +1250,7 @@ def serve_registered_brains(
                 for brain in brains
             ) + ("\n" + REGISTERED_BRAIN_RULES)
         from gofer.ui.brain_families import replacement_status
-        from gofer.ui.brain_folders import is_left_out
+        from gofer.ui.brain_folders import LEFT_OUT_REFUSAL, is_left_out
 
         chosen = [brain["id"] for brain in brains]
         rules = {brain["id"]: brain["settings"].get("folderRules") or {} for brain in brains}
@@ -1269,9 +1282,7 @@ def serve_registered_brains(
             doc = next(iter(found.values()))
             if is_left_out(doc):
                 # Left out by a folder rule or in Edit metadata: not given to Rem.
-                raise ValueError(
-                    "This document is left out of search in this brain, so it can't be read"
-                )
+                raise ValueError(LEFT_OUT_REFUSAL)
             summary_only = arguments.get("summaryOnly") is True
             max_chars = (
                 None
@@ -1407,10 +1418,13 @@ class SecondBrain:
         report_theme: str = "auto",
         theme_config: dict[str, Any] | None = None,
         task_report_tool: bool = False,
+        private_folders: Iterable[Path] = (),
     ) -> None:
         self.root = root.resolve(strict=True)
         if not self.root.is_dir() or report_format not in REPORT_FORMATS:
             raise ValueError("Second Brain needs a folder and md, html, slides, or pdf format.")
+        # Private brains inside the folder: search leaves them out and read_note refuses them.
+        self.private_folders = tuple(Path(os.path.realpath(folder)) for folder in private_folders)
         self.report_format = report_format
         if report_theme not in {*REPORT_THEME_PROMPTS, "none"}:
             raise ValueError("Unknown Second Brain report theme.")
@@ -1448,6 +1462,7 @@ class SecondBrain:
                 "(id TEXT PRIMARY KEY, mtime_ns INTEGER, size INTEGER)"
             )
             connection.commit()
+            index.leave_out(self.private_folders)
             index.synchronize(database)
             words = query.split()[:20]
             if not words:
@@ -1475,6 +1490,14 @@ class SecondBrain:
     def read(self, relative: str) -> dict[str, Any]:
         """A note's raw text and origin; read_note wraps imported text."""
         target = self.resolve(relative)
+        written = Path(os.path.normpath(self.root / relative))
+        for folder in self.private_folders:
+            if target.is_relative_to(folder) or written.is_relative_to(folder):
+                raise ValueError(
+                    f"{folder} is a Second Brain that keeps Allow cloud processing off, so "
+                    "its notes are left out of this folder. Turn on Allow cloud processing "
+                    "in its Brain settings to read them here."
+                )
         if target.suffix.lower() not in {".md", ".markdown", ".html", ".htm", ".txt"}:
             raise ValueError("Read a Markdown, HTML, or text note.")
         if target.stat().st_size > MAX_NOTE_BYTES:
@@ -1587,10 +1610,13 @@ def serve_second_brain(
     *,
     theme_config: dict[str, Any] | None = None,
     task_report_tool: bool = False,
+    private_folders: Iterable[Path] = (),
     input_stream: TextIO | None = None,
     output_stream: TextIO | None = None,
 ) -> None:
-    brain = SecondBrain(root, report_format, report_theme, theme_config, task_report_tool)
+    brain = SecondBrain(
+        root, report_format, report_theme, theme_config, task_report_tool, private_folders
+    )
     serve_stdio(
         brain.call,
         tool_definitions(),

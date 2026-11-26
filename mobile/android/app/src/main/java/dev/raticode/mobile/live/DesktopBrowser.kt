@@ -38,7 +38,6 @@ object DesktopBrowser {
     data class View(val available: Boolean, val stale: Boolean, val detail: String, val tabs: List<Tab>, val searchUrl: String, val pending: Int,
                     val engine: String = "raticode") {
         val firefox get() = engine == "firefox"
-        val edge get() = engine == "edge"
         /** The computer names each tab's browser, so its tabs can come from several browsers at once. */
         val perTabEngines get() = tabs.any { it.ownEngine }
     }

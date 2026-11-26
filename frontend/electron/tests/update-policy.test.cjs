@@ -416,7 +416,7 @@ test("manual check explains rate limits, refusals and network failures", async (
 test("manual update buttons describe the action accurately", () => {
   const appSource = fs.readFileSync(path.join(__dirname, "../../src/pages/App.jsx"), "utf8");
   const sandbox = {};
-  vm.runInNewContext(appSource.slice(appSource.indexOf("export function updateCheckNotice("), appSource.indexOf("export function ChatPane(")).replace(/^export /gm, ""), sandbox);
+  vm.runInNewContext(appSource.slice(appSource.indexOf("export function updateCheckNotice("), appSource.indexOf("\n}\n", appSource.indexOf("function updateButtonTitle(")) + 3).replace(/^export /gm, ""), sandbox);
   const state = { supported: false, platform: "darwin", info: { installerUrl: "https://github.com/zacharyivie/Raticode/releases/download/v0.5.4/Raticode-0.5.4-arm64.dmg" } };
   assert.equal(sandbox.updateButtonLabel(state), "Download Mac installer");
   assert.match(sandbox.updateButtonTitle(state), /manual installation/);
@@ -437,7 +437,7 @@ test("manual update buttons describe the action accurately", () => {
 test("the renderer never reports a failed check as up to date", () => {
   const appSource = fs.readFileSync(path.join(__dirname, "../../src/pages/App.jsx"), "utf8");
   const sandbox = {};
-  vm.runInNewContext(appSource.slice(appSource.indexOf("export function updateCheckNotice("), appSource.indexOf("export function ChatPane(")).replace(/^export /gm, ""), sandbox);
+  vm.runInNewContext(appSource.slice(appSource.indexOf("export function updateCheckNotice("), appSource.indexOf("\n}\n", appSource.indexOf("function updateButtonTitle(")) + 3).replace(/^export /gm, ""), sandbox);
   assert.deepEqual({ ...sandbox.updateCheckNotice({ available: false, error: "Couldn't reach GitHub to update Raticode." }) }, { type: "error", message: "Couldn't reach GitHub to update Raticode." });
   assert.equal(sandbox.updateCheckNotice(undefined).type, "error");
   assert.deepEqual({ ...sandbox.updateCheckNotice({ available: false, error: "" }) }, { type: "success", message: "Raticode is up to date" });

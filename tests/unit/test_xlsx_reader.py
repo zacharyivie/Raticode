@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 
 from gofer.core import health
-from gofer.core.executor import _load_tabular
 from gofer.utils import xlsx
 from gofer.utils.xlsx import XlsxReadError, open_xlsx_rows
 from tests.helpers.xlsx_files import write_xlsx
@@ -100,12 +99,6 @@ def test_active_sheet_is_read(tmp_path: Path) -> None:
     assert _rows(write_xlsx(tmp_path / "c.xlsx", sheets, active=9)) == [("first",), (1,)]
 
 
-def test_empty_sheet_has_no_rows_and_tabular_load_returns_nothing(tmp_path: Path) -> None:
-    path = write_xlsx(tmp_path / "empty.xlsx", [[]])
-    assert _rows(path) == []
-    assert _load_tabular(path) == []
-
-
 def test_workbook_is_closed_after_use(tmp_path: Path) -> None:
     path = write_xlsx(tmp_path / "rows.xlsx", [[["name"], ["a"]]])
     rows = open_xlsx_rows(path)
@@ -113,21 +106,6 @@ def test_workbook_is_closed_after_use(tmp_path: Path) -> None:
         assert next(rows) == ("name",)
     assert rows.closed
     rows.close()
-
-
-def test_inflated_size_over_the_limit_is_refused_before_parsing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    row = "<row>" + '<c t="inlineStr"><is><t>xxxxxxxxxx</t></is></c>' * 50 + "</row>"
-    sheet = f'<worksheet xmlns="{_NS}"><sheetData>{row * 2000}</sheetData></worksheet>'
-    path = write_xlsx(tmp_path / "bomb.xlsx", [sheet])
-    assert path.stat().st_size < 64 * 1024
-    monkeypatch.setattr(xlsx, "XLSX_MIN_UNCOMPRESSED_BYTES", 1024 * 1024)
-    # The message comes from the zip-directory check, which runs before calamine parses.
-    with pytest.raises(XlsxReadError, match="expands to"):
-        open_xlsx_rows(path)
-    with pytest.raises(XlsxReadError, match="expands to"):
-        _load_tabular(path)
 
 
 def test_limit_scales_with_the_per_file_read_limit() -> None:

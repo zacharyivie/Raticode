@@ -33,6 +33,7 @@ from typing import Any
 from gofer.core.usage_history import UsageRange, _floor, _next, bucket_for
 from gofer.ui import turn_failures
 from gofer.ui.rem_project_checks import FEEDBACK_START
+from gofer.utils.instants import stored_instant
 from gofer.utils.paths import get_data_dir
 
 log = logging.getLogger(__name__)
@@ -141,14 +142,6 @@ class _History:
     since: datetime | None
 
 
-def _instant(value: Any) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-
-
 def _cause(entry: _Entry) -> str:
     """Why a status entry blocked its ticket, or "" when it only waits."""
     title = entry.title.strip().casefold()
@@ -183,7 +176,7 @@ def _entries(db: sqlite3.Connection) -> list[_Entry]:
         return []
     entries = []
     for ticket, at, kind, author, source, target, title, run_id, details, body in rows:
-        moment = _instant(at)
+        moment = stored_instant(at)
         if moment is None:
             continue
         entries.append(
@@ -224,7 +217,7 @@ def _runs(
             "checked": check == "object" and not skipped,
             "flaky": int(flakes) if isinstance(flakes, int) and flakes > 0 else 0,
         }
-        moment = _instant(created)
+        moment = stored_instant(created)
         if ticket and moment is not None:
             by_ticket.setdefault(str(ticket), []).append((moment, identity))
     return runs, by_ticket

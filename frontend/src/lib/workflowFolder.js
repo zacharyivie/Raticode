@@ -6,13 +6,6 @@ export function workflowFolderLabel(workflow) {
   return folder === "." ? "Project folder" : folder;
 }
 
-// The workflow's folder in its project for the editor breadcrumb, or "" at the top.
-export function workflowFolderPath(workflow) {
-  const folder = String(workflow?.relativeFolder ?? "").trim();
-  if (folder === ".") return "";
-  return folder || `.raticode/${workflow?.id ?? ""}`;
-}
-
 // How many of a Rattish workflow's run worktrees still wait to be landed or discarded.
 // Deleting the workflow removes them, so the confirmation names the count. A failed
 // lookup counts none rather than blocking the delete.

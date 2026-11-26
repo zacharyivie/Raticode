@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000275",
+  "id": "10000000-0000-4000-8000-000000000275",
+  "sequence": 275,
+  "type": "desktop.read",
+  "payload": {
+    "op": "provider.accounts",
+    "params": {
+      "thread_id": "00000000-0000-4000-8000-000000000002"
+    }
+  }
+}

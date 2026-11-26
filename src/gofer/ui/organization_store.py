@@ -25,10 +25,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from gofer.core.prompt_envelope import AgentResources
 from gofer.core.provider_permissions import provider_permission_args
 from gofer.core.usage_ledger import ledger_mark, organization_ticket_usage
+from gofer.rattish.triggers import saved_cron_day_names
 from gofer.ui.organization_hours import OperatingHours
 from gofer.ui.organization_schedule import WorkSchedule
 from gofer.ui.rem_ticket_activity import WAITING_REASONS, note_organization_transitions
-from gofer.utils.process import build_subprocess_env
+from gofer.utils.process import run_repository_git
 
 # Block reasons that clear by themselves, so the ticket doesn't wait on the user.
 SELF_CLEARING = frozenset({"dependencies", *WAITING_REASONS})
@@ -53,23 +54,14 @@ def project_identity(value: str) -> tuple[str, str]:
 def _project_identity(value: str, marker: tuple[Any, ...]) -> tuple[str, str]:
     path = Path(value)
     try:
-        result = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            env=build_subprocess_env(),
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=True,
+        result = run_repository_git(
+            path, "rev-parse", "--path-format=absolute", "--git-common-dir", timeout=5
         )
+        result.check_returncode()
         common = str(Path(result.stdout.strip()).resolve())
-        trees = subprocess.run(
-            ["git", "-C", str(path), "worktree", "list", "--porcelain", "-z"],
-            env=build_subprocess_env(),
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=True,
-        ).stdout
+        listed = run_repository_git(path, "worktree", "list", "--porcelain", "-z", timeout=5)
+        listed.check_returncode()
+        trees = listed.stdout
         main = trees.split("\0", 1)[0].removeprefix("worktree ")
         return f"git:{common}", str(Path(main).resolve())
     except (OSError, subprocess.SubprocessError):
@@ -840,6 +832,26 @@ class OrganizationStore:
                 runtime = json.loads(row["runtime"])
                 if "tasks" in runtime:
                     self._write_runtime(db, row["id"], runtime)
+            self._name_cron_weekdays(db)
+
+    @staticmethod
+    def _name_cron_weekdays(db: sqlite3.Connection) -> None:
+        """Store day names in routine cron text saved with numbered weekdays, on the same days."""
+        for row in db.execute(
+            "SELECT organization, id, body FROM organization_records WHERE kind='routines'"
+        ).fetchall():
+            routine = json.loads(row["body"])
+            text = routine.get("cron") if isinstance(routine, dict) else None
+            if not isinstance(text, str) or saved_cron_day_names(text) == text:
+                continue
+            routine["cron"] = saved_cron_day_names(text)
+            # A new revision, so an editor still holding the numbered text reloads first.
+            routine["revision"] = int(routine.get("revision") or 0) + 1
+            db.execute(
+                "UPDATE organization_records SET body=? "
+                "WHERE organization=? AND kind='routines' AND id=?",
+                (json.dumps(routine, sort_keys=True), row["organization"], row["id"]),
+            )
 
     def _migrate_project_ownership(self) -> None:
         with self.connect() as db:

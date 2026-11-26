@@ -321,6 +321,26 @@ def test_board_shows_rem_and_every_organizations_tickets_without_touching_them(b
     assert manager.store.get("", oid)["runtime"]["state"] == "paused"
 
 
+def test_board_shows_each_tickets_done_when_as_stored(board, org):
+    home, _, _ = board
+    manager, oid = org
+    manager.call(
+        "",
+        "user",
+        {
+            "action": "task_create",
+            "organizationId": oid,
+            "params": {"title": "Org finish", "doneWhen": "C passes"},
+        },
+    )
+    add(home, "Finish line", done_when="A\nB")
+    add(home, "Open-ended")
+    tickets = {t["title"]: t for t in home.kanban.board()["tickets"]}
+    assert tickets["Finish line"]["done_when"] == "A\nB"
+    assert tickets["Open-ended"]["done_when"] == ""
+    assert tickets["Org finish"]["done_when"] == "C passes"
+
+
 def test_board_without_organizations_still_works(board):
     home, _, _ = board
     add(home, "Solo")

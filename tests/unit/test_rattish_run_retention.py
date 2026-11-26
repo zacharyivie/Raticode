@@ -138,7 +138,7 @@ def test_default_settings_skip_reading_when_under_keep_last(workflow, monkeypatc
     def fail(*args: object, **kwargs: object) -> None:
         raise AssertionError("records were read")
 
-    monkeypatch.setattr(run_retention, "load_run_records", fail)
+    monkeypatch.setattr(run_retention, "read_run_record", fail)
     monkeypatch.setattr(run_retention, "summary_run_records", fail)
 
     assert (

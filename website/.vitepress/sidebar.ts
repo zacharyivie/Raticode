@@ -17,7 +17,7 @@ export const docsSidebar: DefaultTheme.SidebarItem[] = [
   },
   {
     text: 'Building workflows', collapsed: false,
-    items: [page('Rattish language', 'workflows/rattish'), page('Routes, branches & joins', 'workflows/routes'), page('Inputs, outputs & bindings', 'workflows/inputs'), page('Loops & fan-out', 'workflows/loops'), page('Validation & preflight', 'workflows/validation'), page('Test sets', 'workflows/tests'), page('Jev classifier', 'workflows/jev'), page('Triggers', 'workflows/triggers'), page('Schedules', 'workflows/schedules'), page('File watchers', 'workflows/watchers'), page('Runner queue', 'workflows/runner-queue')],
+    items: [page('Rattish language', 'workflows/rattish'), page('Routes, branches & joins', 'workflows/routes'), page('Inputs, outputs & bindings', 'workflows/inputs'), page('Loops & fan-out', 'workflows/loops'), page('Validation & preflight', 'workflows/validation'), page('Test sets', 'workflows/tests'), page('Jev classifier', 'workflows/jev'), page('Triggers', 'workflows/triggers'), page('Schedules', 'workflows/schedules'), page('File watchers', 'workflows/watchers')],
   },
   {
     text: 'Starter workflows', collapsed: true,

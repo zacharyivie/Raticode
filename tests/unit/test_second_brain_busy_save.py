@@ -19,19 +19,11 @@ from gofer.ui.brain_library import (
     pending_reports,
     queue_pending_report,
 )
+from tests.helpers.brain_library import wait_idle
 
 # Long enough for the library's own reads, short enough to keep the tests quick. The
 # blocker below holds its write lock for longer than this, as a re-index would for 30 s.
 TEST_BUSY_TIMEOUT = 0.4
-
-
-def wait_idle(library: BrainLibrary) -> None:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if all(task["state"] != "running" for task in library.snapshot()["tasks"]):
-            return
-        time.sleep(0.02)
-    pytest.fail("Second Brain tasks did not finish")
 
 
 @pytest.fixture

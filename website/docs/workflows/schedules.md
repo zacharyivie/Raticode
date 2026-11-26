@@ -1,6 +1,6 @@
 ---
 title: Schedules
-description: Schedule Rattish workflows with triggers, and understand the older scheduler.
+description: Schedule Rattish workflows with cron triggers or with an outside scheduler.
 pageClass: docs-layout
 ---
 
@@ -8,8 +8,8 @@ pageClass: docs-layout
 
 To run a `workflow.rattish` on a schedule, add a [cron trigger](./triggers.md#cron-schedules). Schedules fire only while a scheduler process is running.
 
-::: warning Rattish compatibility boundary
-The `Raticode schedule` commands load the legacy workflow configuration. `Raticode schedule add` doesn't accept `workflow.rattish`. Use `Raticode rattish triggers add cron` instead.
+::: info The older scheduler is gone from 0.6.1
+Raticode 0.6.0 and earlier also had `Raticode schedule` commands, which scheduled old TOML workflows only. From 0.6.1 those commands and their scheduler are gone, and Raticode no longer reads `schedules.db` in the data folder. The file stays on disk. [Convert the old workflow](./rattish.md#convert-a-toml-workflow), and the converter prints the `Raticode rattish triggers add cron` command that schedules it again.
 :::
 
 ## Schedule a Rattish command externally
@@ -29,20 +29,6 @@ Before you turn the job on:
 - Keep the job's output and exit status for diagnosis.
 
 An external schedule runs real work.
-
-## Existing built-in schedules
-
-These commands manage workflows that already use the legacy scheduler:
-
-| Command | What it does |
-| --- | --- |
-| `Raticode schedule list` | Show registered jobs |
-| `Raticode schedule start --foreground` | Run the scheduler in this process |
-| `Raticode schedule start` | Start it in the background |
-| `Raticode schedule stop` | Stop the background scheduler |
-| `Raticode schedule remove WORKFLOW_ID` | Remove a registration |
-
-The scheduler uses APScheduler with a SQLite job store. Jobs stay registered when it stops, but they can't run until it starts again. A saved job is not an installed operating-system service.
 
 ## Check the environment
 

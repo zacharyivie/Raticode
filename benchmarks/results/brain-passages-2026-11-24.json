@@ -1,0 +1,97 @@
+{
+  "date": "2026-11-24",
+  "probe": "benchmarks/brain_passages.py",
+  "baseline": "77ef3ee6 (dev before the passages action)",
+  "brain": "A copy of the maintainer's 814 Markdown, HTML and text notes (26 MB, 59,780 passages), 40 of them edited once so they keep a stored version",
+  "notes": "Medians of 7 calls per row. serverMs is BrainLibrary.snapshot() or request('passages'); encodeMs is json.dumps of the answer; clientParseMs is Node 22 JSON.parse. Before and after ran alternately, twice each.",
+  "runs": {
+    "after-1": {
+      "documents": 814,
+      "passages": 59780,
+      "storedVersions": 40,
+      "indexSeconds": 12.3,
+      "rows": [
+        {
+          "what": "snapshot (poll after a change)",
+          "serverMs": 139.7,
+          "encodeMs": 12.9,
+          "bytes": 3052484,
+          "clientParseMs": 5.337407000000006
+        },
+        {
+          "what": "passages, every document (first load)",
+          "serverMs": 133.9,
+          "encodeMs": 64.9,
+          "bytes": 16836902,
+          "clientParseMs": 31.395725999999996
+        },
+        {
+          "what": "passages, one changed document",
+          "serverMs": 0.5,
+          "encodeMs": 0.0,
+          "bytes": 13401,
+          "clientParseMs": 0.02046200000000198
+        }
+      ]
+    },
+    "after-2": {
+      "documents": 814,
+      "passages": 59780,
+      "storedVersions": 40,
+      "indexSeconds": 11.8,
+      "rows": [
+        {
+          "what": "snapshot (poll after a change)",
+          "serverMs": 138.0,
+          "encodeMs": 12.1,
+          "bytes": 3052484,
+          "clientParseMs": 4.980685999999999
+        },
+        {
+          "what": "passages, every document (first load)",
+          "serverMs": 129.5,
+          "encodeMs": 64.0,
+          "bytes": 16836902,
+          "clientParseMs": 31.091594
+        },
+        {
+          "what": "passages, one changed document",
+          "serverMs": 0.5,
+          "encodeMs": 0.0,
+          "bytes": 13401,
+          "clientParseMs": 0.02004100000000264
+        }
+      ]
+    },
+    "before-1": {
+      "documents": 814,
+      "passages": 59780,
+      "storedVersions": 40,
+      "indexSeconds": 12.9,
+      "rows": [
+        {
+          "what": "snapshot (poll after a change)",
+          "serverMs": 138.7,
+          "encodeMs": 74.1,
+          "bytes": 20072439,
+          "clientParseMs": 39.62943100000001
+        }
+      ]
+    },
+    "before-2": {
+      "documents": 814,
+      "passages": 59780,
+      "storedVersions": 40,
+      "indexSeconds": 11.6,
+      "rows": [
+        {
+          "what": "snapshot (poll after a change)",
+          "serverMs": 133.6,
+          "encodeMs": 72.9,
+          "bytes": 20072439,
+          "clientParseMs": 37.385052
+        }
+      ]
+    }
+  }
+}

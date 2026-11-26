@@ -60,7 +60,3 @@ window.goferDesktop.textFiles.write = async ({
     bytesWritten: content.length
   };
 };
-window.confirm = message => {
-  window.__lastConfirm = message;
-  return false;
-};

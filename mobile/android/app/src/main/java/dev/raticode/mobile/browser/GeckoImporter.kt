@@ -33,7 +33,7 @@ internal class GeckoImporter(private val app: Application, private val gecko: Ge
     var unticked by mutableStateOf<Set<String>>(emptySet()); private set
     var favorites by mutableStateOf(true)
     /** Firefox installed on this phone, looked up each time the import opens. */
-    var phoneFirefox by mutableStateOf<FirefoxApps.Found?>(null); private set
+    var phoneFirefox by mutableStateOf<BrowserApp.Found?>(null); private set
     /** The user started the handover from Firefox and it hasn't arrived. The clipboard is only read while this is true. */
     var waitingForFirefox by mutableStateOf(false); private set
 
@@ -48,7 +48,7 @@ internal class GeckoImporter(private val app: Application, private val gecko: Ge
     val hasResults get() = preview.sources.isNotEmpty() || preview.extensions.isNotEmpty() || preview.notes.isNotEmpty()
     fun toggle(key: String) { unticked = if (key in unticked) unticked - key else unticked + key }
     fun reset() { preview = GeckoImport.Preview(); listings = emptyMap(); checked = emptySet(); unticked = emptySet(); favorites = true; error = null; waitingForFirefox = false }
-    fun findFirefox() { phoneFirefox = FirefoxApps.find(app) }
+    fun findFirefox() { phoneFirefox = Firefox.APP.find(app) }
 
     /** Whether an extension can be added: Mozilla's site has it and it isn't here already. */
     fun addable(id: String) = id in listings && gecko.extensions.none { it.id == id }
@@ -107,7 +107,7 @@ internal class GeckoImporter(private val app: Application, private val gecko: Ge
         if (clipboardText()?.let(GeckoImport::isTroubleshootingData) == true) { waitingForFirefox = true; checkClipboard(); return }
         clipboard?.setPrimaryClip(ClipData.newPlainText("Firefox page", GeckoImport.SUPPORT_PAGE))
         waitingForFirefox = true
-        if (!FirefoxApps.launch(context, firefox)) { waitingForFirefox = false; error = "Couldn't open Firefox." }
+        if (!Firefox.APP.launch(context, firefox)) { waitingForFirefox = false; error = "Couldn't open Firefox." }
     }
 
     /** Carries on a handover after Android ended Raticode while Firefox had the screen. Returns whether it is still open. */
@@ -119,7 +119,7 @@ internal class GeckoImporter(private val app: Application, private val gecko: Ge
         return true
     }
 
-    fun openFirefoxAgain(context: Context) { phoneFirefox?.takeIf { it.usable }?.let { FirefoxApps.launch(context, it) } }
+    fun openFirefoxAgain(context: Context) { phoneFirefox?.takeIf { it.usable }?.let { Firefox.APP.launch(context, it) } }
     fun stopWaiting() { waitingForFirefox = false; error = null }
 
     /**

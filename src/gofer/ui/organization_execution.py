@@ -239,6 +239,8 @@ class OrganizationExecution:
             "turnLimit": target["turnLimit"],
             "employeeId": employee["id"],
             "budgetUsd": chosen.get("budget"),
+            # The swarm's agents get the same git push block as the employee's own runs.
+            "blockGitPush": org["config"].get("blockGitPush", True),
         }
         # Persist intent before launch. Recovery can locate a run even if launch loses its reply.
         handle = {

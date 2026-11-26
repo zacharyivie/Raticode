@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { defineConfig, type HeadConfig } from 'vitepress'
-import { securityTxt, securityTxtPath, siteLocation } from '../data/site'
+import { securityTxt, securityTxtPath, siteLocation, supportProjectUrl } from '../data/site'
 import { homeStructuredData, lastChanged, markdownFor, pageUrl, repo, socialImage } from './seo'
 import { docsSidebar } from './sidebar'
 
@@ -99,6 +99,7 @@ export default defineConfig({
       { text: 'Docs', link: '/docs/', activeMatch: '^/docs/' },
       { text: 'Download', link: '/#download' },
       { text: 'Changelog', link: `${repo}/releases` },
+      { text: 'Buy me a coffee', link: supportProjectUrl },
     ],
 
     socialLinks: [{ icon: 'github', link: repo, ariaLabel: 'Raticode on GitHub' }],

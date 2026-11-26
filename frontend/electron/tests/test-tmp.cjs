@@ -1,4 +1,4 @@
-// Gives each test run one temporary folder on disk and removes it when the run ends.
+// Gives each test run one temporary folder and removes it when the run ends.
 //
 // Tests create browser profiles and app builds of 100 MB or more, and /tmp is often
 // RAM-backed, so leftovers can fill it and take memory from everything else. Requiring
@@ -6,12 +6,17 @@
 // browser processes and Python test servers all write there. The folder is removed on
 // exit, a crash or a termination signal. A run that was killed outright is cleared by
 // the next run. Set RATICODE_TEST_TMP_BASE to use a different parent folder.
+//
+// The folder goes in /var/tmp, which is on disk. Where /var/tmp can't be written, such
+// as inside an agent's sandbox, it goes in the normal temp folder instead and is still
+// removed at the end. Raticode itself clears what a killed run leaves there.
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
 const RUN_DIR_ENV = "RATICODE_TEST_TMP";
-const RUN_NAME = /^r(\d+)-/;
+// n<pid namespace>-r<pid>-, or r<pid>- from runs before the namespace was recorded.
+const RUN_NAME = /^(?:n([0-9a-z]+)-)?r(\d+)-/;
 
 // Other accounts can create names in /var/tmp, so never trust one we didn't make.
 function privateDir(dir) {
@@ -31,24 +36,49 @@ function pidAlive(pid) {
   }
 }
 
-function clearDeadRuns(base) {
+// A sandbox can give each command its own process numbers, so a number that looks
+// dead here may be a live run in another sandbox. Runs are named by namespace, and a
+// run is only judged by a process in the same one.
+function pidNamespace() {
+  try {
+    const match = /\[(\d+)\]/.exec(fs.readlinkSync("/proc/self/ns/pid"));
+    return match ? Number(match[1]).toString(36) : "";
+  } catch {
+    return "";
+  }
+}
+
+function clearDeadRuns(base, namespace) {
   for (const name of fs.readdirSync(base)) {
     const match = RUN_NAME.exec(name);
-    if (match && !pidAlive(Number(match[1]))) fs.rmSync(path.join(base, name), { recursive: true, force: true });
+    if (!match || (match[1] !== undefined && (!namespace || match[1] !== namespace))) continue;
+    if (!pidAlive(Number(match[2]))) fs.rmSync(path.join(base, name), { recursive: true, force: true });
   }
+}
+
+function runFolder(parent) {
+  const base = privateDir(path.join(parent, `raticode-tests-${process.getuid()}`));
+  const namespace = pidNamespace();
+  clearDeadRuns(base, namespace);
+  return fs.mkdtempSync(path.join(base, `${namespace ? `n${namespace}-` : ""}r${process.pid}-`));
 }
 
 function installTestTmp(env = process.env) {
   if (process.platform !== "linux") return "";
   // A child of a test that already owns a folder shares it and leaves removal to its parent.
   if (env[RUN_DIR_ENV]) return env[RUN_DIR_ENV];
-  let dir;
-  try {
-    const base = privateDir(path.join(env.RATICODE_TEST_TMP_BASE || "/var/tmp", `raticode-tests-${process.getuid()}`));
-    clearDeadRuns(base);
-    dir = fs.mkdtempSync(path.join(base, `r${process.pid}-`));
-  } catch (error) {
-    console.warn(`Tests will use ${os.tmpdir()}: ${error.message}`);
+  const temp = env.TMPDIR || env.TMP || env.TEMP || os.tmpdir();
+  let dir = "";
+  for (const parent of [...new Set([env.RATICODE_TEST_TMP_BASE || "/var/tmp", temp])]) {
+    try {
+      dir = runFolder(parent);
+      break;
+    } catch (error) {
+      console.warn(`Tests can't use ${parent} for their run folder: ${error.message}`);
+    }
+  }
+  if (!dir) {
+    console.warn(`Tests will use ${temp} without a run folder`);
     return "";
   }
   Object.assign(env, { [RUN_DIR_ENV]: dir, TMPDIR: dir, TEMP: dir, TMP: dir });

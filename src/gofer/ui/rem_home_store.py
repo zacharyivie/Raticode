@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 from collections.abc import Callable, Iterator
@@ -21,11 +22,16 @@ from gofer.ui.rem_home_models import (
     Recipe,
     RemConflict,
     Schedule,
+    legacy_cron_day_names,
     now,
+    saved_schedule,
     worker_config,
 )
 from gofer.ui.rem_self_work_windows import SCHEDULE_KEY as WINDOW_SCHEDULE_KEY
 from gofer.ui.rem_ticket_activity import SCHEMA as TICKET_TIMELINE_SCHEMA
+from gofer.utils.instants import stored_instant
+
+logger = logging.getLogger(__name__)
 
 
 def _change_triggers() -> str:
@@ -104,14 +110,6 @@ SUMMARY_RUN = "json_remove(body, " + ", ".join(f"'$.{key}'" for key in RUN_INTER
 RETENTION = timedelta(days=30)
 
 
-def _instant(value: Any) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-
-
 def retention(task: dict[str, Any]) -> dict[str, Any]:
     """Whether a task view belongs in task lists, and when cleanup removes it.
 
@@ -121,7 +119,7 @@ def retention(task: dict[str, Any]) -> dict[str, Any]:
     """
     run = task.get("last_run") or {}
     finished_at = run.get("finished_at") or ""
-    finished = _instant(finished_at)
+    finished = stored_instant(finished_at)
     done = bool(
         (task.get("schedule") or {}).get("kind", "once") == "once"
         and not task.get("next_occurrence_at")
@@ -194,7 +192,7 @@ def duplicate_notices(messages: list[dict[str, Any]]) -> set[str]:
     replies: dict[str, list[datetime]] = {}
     for message in messages:
         work = message.get("work") or {}
-        written = _instant(message.get("created_at"))
+        written = stored_instant(message.get("created_at"))
         if work.get("run_id") and written and message.get("kind") != "task_update":
             if message.get("id") != f"queued-{work['run_id']}":
                 replies.setdefault(str(work["run_id"]), []).append(written)
@@ -202,7 +200,7 @@ def duplicate_notices(messages: list[dict[str, Any]]) -> set[str]:
     for message in messages:
         work = message.get("work") or {}
         run = str(work.get("run_id") or "")
-        written = _instant(message.get("created_at"))
+        written = stored_instant(message.get("created_at"))
         if (
             message.get("id") == f"queued-{run}"
             and message.get("body") == f"Started {work.get('title')}."
@@ -370,9 +368,9 @@ def ran_at(task: dict[str, Any]) -> str:
         moment
         for run in (task.get("active_run"), task.get("last_run"))
         for key in ("created_at", "finished_at")
-        if run and (moment := _instant(run.get(key)))
+        if run and (moment := stored_instant(run.get(key)))
     ]
-    created = _instant(task.get("created_at"))
+    created = stored_instant(task.get("created_at"))
     if not times:
         return created.astimezone(UTC).isoformat() if created else ""
     return max(times).astimezone(UTC).isoformat()
@@ -501,6 +499,21 @@ class RemHomeStore:
             if not self.setting(db, "conversation"):
                 self.set_setting(db, "conversation", {"id": str(uuid4()), "turn_state": "idle"})
             self.restore_completed_threads(db)
+            self.name_cron_weekdays(db)
+
+    def name_cron_weekdays(self, db: sqlite3.Connection) -> None:
+        """Store day names in cron schedules saved with numbered weekdays, on the same days."""
+        for row in db.execute("SELECT body FROM tasks").fetchall():
+            task = json.loads(row[0])
+            if legacy_cron_day_names(task.get("schedule") or {}):
+                # A new revision, so an editor still showing the numbered text reloads
+                # instead of saving it back, where it would now mean other days.
+                task["revision"] += 1
+                self.put(db, "tasks", task)
+                db.execute(
+                    "INSERT OR REPLACE INTO revisions VALUES(?,?,?)",
+                    (task["id"], task["revision"], encode(task)),
+                )
 
     @contextmanager
     def connect(self, *, write: bool = True) -> Iterator[sqlite3.Connection]:
@@ -1168,7 +1181,7 @@ class RemHomeStore:
             for row in db.execute("SELECT body FROM tasks").fetchall():
                 task = json.loads(row[0])
                 kept = retention(self.task_view(db, task))
-                due = _instant(kept["cleanup_at"])
+                due = stored_instant(kept["cleanup_at"])
                 if kept["listed"] or due is None or due > clock:
                     continue
                 runs = [
@@ -1289,7 +1302,9 @@ class RemHomeStore:
                     for k in Recipe.model_fields
                     if k in payload or k in task
                 }
-                task.update(Recipe.model_validate(fields).model_dump())
+                task.update(
+                    Recipe.model_validate(fields, context=saved_schedule(task)).model_dump()
+                )
                 if "prompt" in payload:
                     # An edited goal replaces any follow-ups folded into the old one.
                     task.pop("base_prompt", None)
@@ -1329,7 +1344,7 @@ class RemHomeStore:
                     or (conditions and not after_tasks.pending(task))
                 ):
                     task["schedule_revision"] += 1
-                    task["next_occurrence_at"] = Schedule.model_validate(task["schedule"]).next(
+                    task["next_occurrence_at"] = Schedule.saved(task["schedule"]).next(
                         datetime.now(UTC), initial=True
                     )
                 if after_tasks.pending(task):
@@ -1577,6 +1592,18 @@ class RemHomeStore:
                 at = task.get("next_occurrence_at")
                 if not task["enabled"] or not at or datetime.fromisoformat(at) > clock:
                     continue
+                try:
+                    schedule = Schedule.saved(task["schedule"])
+                except ValueError as exc:
+                    # Only this task stops: the other due tasks in this pass still run.
+                    logger.warning(
+                        "Rem task %s has a schedule that can't be read, so it stopped: %s",
+                        task["id"],
+                        exc,
+                    )
+                    task["next_occurrence_at"] = None
+                    self.put(db, "tasks", task)
+                    continue
                 occurrence = f"{task['id']}:{task['schedule_revision']}:{at}"
                 run = self.add_run(db, task, occurrence, config, scheduled_for=at)
                 # A one-time request for a file at a later time still answers that
@@ -1590,7 +1617,7 @@ class RemHomeStore:
                 ):
                     run["deliver_files_to"] = source
                     self.put(db, "runs", run)
-                task["next_occurrence_at"] = Schedule.model_validate(task["schedule"]).next(clock)
+                task["next_occurrence_at"] = schedule.next(clock)
                 self.put(db, "tasks", task)
 
     def start_after(

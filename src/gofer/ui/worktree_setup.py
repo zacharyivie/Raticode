@@ -26,9 +26,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from gofer.utils.process import (
-    NO_REPOSITORY_PROGRAMS,
     build_subprocess_env,
-    untrusted_repository_git_env,
+    run_repository_git,
 )
 
 CONFIG_PATH = ".raticode/worktree-setup.json"
@@ -193,14 +192,7 @@ def read_file(folder: Path | str) -> dict[str, Any] | None:
 
 
 def _git(cwd: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", *NO_REPOSITORY_PROGRAMS, "-C", str(cwd), *args],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-        env=untrusted_repository_git_env(cwd, build_subprocess_env()),
-    )
+    result = run_repository_git(cwd, *args, timeout=30)
     if result.returncode:
         raise OSError(result.stderr.strip() or "git failed")
     return result.stdout.strip()
@@ -398,13 +390,7 @@ def revoke(data_dir: Path | str, project: Path | str) -> dict[str, Any]:
 
 def _ignored(worktree: Path, relative: str) -> bool:
     try:
-        result = subprocess.run(
-            ["git", *NO_REPOSITORY_PROGRAMS, "-C", str(worktree), "check-ignore", "-q", relative],
-            capture_output=True,
-            timeout=30,
-            check=False,
-            env=untrusted_repository_git_env(worktree, build_subprocess_env()),
-        )
+        result = run_repository_git(worktree, "check-ignore", "-q", relative, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return False
     return result.returncode == 0

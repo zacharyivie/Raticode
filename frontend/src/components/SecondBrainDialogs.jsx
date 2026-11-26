@@ -2,7 +2,7 @@ import SecondBrainProvider, { useResearchSelection } from "./SecondBrainProvider
 import { useEffect, useState } from "react";
 import { AlertTriangle, CircleCheck, FolderOpen, Library, ShieldCheck, Sparkles, FileArchive, Files, Quote } from "lucide-react";
 import { formatBytes, parseDateBound, searchLibrary, wordDiff, formatDay, formatTime, SUMMARY_MAX, summaryPatch, folderRuleFor } from "../lib/secondBrain.js";
-import { useSecondBrain, viewFor, closeDialog, openDialog, createBrain, removeBrain, updateBrain, createCollection, updateCollection, addToCollection, navigate, saveSearch, documentById, blockById, updateReportCitation, updateClaim, updateReport, updateDocument, confirmReplacement, resolveHealth, startTask, notify, openDocument, captureSource, libraryFor, uid, getState, isSampleLibrary, previewAbsoluteLinks } from "../lib/secondBrainStore.js";
+import { useSecondBrain, viewFor, closeDialog, openDialog, createBrain, removeBrain, updateBrain, createCollection, updateCollection, addToCollection, navigate, saveSearch, documentById, blockById, updateReportCitation, updateClaim, updateReport, updateDocument, confirmReplacement, resolveHealth, startTask, notify, openDocument, captureSource, libraryFor, uid, getState, isSampleLibrary, previewAbsoluteLinks, historySize, passageCount, useDocumentHistory } from "../lib/secondBrainStore.js";
 import { brainRequest } from "../lib/secondBrainApi.js";
 import { DraftInput, Modal, Segmented, TypeIcon, askRem } from "./SecondBrainParts.jsx";
 import { ReportBuilder, reportsAffectedBy } from "./SecondBrainReports.jsx";
@@ -60,19 +60,25 @@ function ImportBrain({ onClose }) {
   const [file, setFile] = useState("");
   const [identity, setIdentity] = useState("copy");
   const [duplicates, setDuplicates] = useState("independent");
-  const [destination, setDestination] = useState(`${getState().capabilities?.home || ""}/Imported brain`);
+  const defaultDestination = `${getState().capabilities?.home || ""}/Imported brain`;
+  const [destination, setDestination] = useState(defaultDestination);
   const [preview, setPreview] = useState(null);
   const [previewError, setPreviewError] = useState("");
   const [checking, setChecking] = useState(false);
   async function previewImport() {
     setChecking(true); setPreviewError("");
-    try { setPreview(await brainRequest("import_preview", { path: file })); setStep("preview"); }
+    try { setPreview(await brainRequest("import_preview", { path: file })); setIdentity("copy"); setStep("preview"); }
     catch (error) { setPreviewError(error.message); }
     finally { setChecking(false); }
   }
-  const run = () => { onClose(); void startTask({ kind: "import", label: `Importing “${preview.name}”`, path: file, destination, identity, duplicates }); };
+  // The package's brain may already be registered here: restoring over it is offered
+  // only when its folder is gone, and keeps its ID, backup settings and Rem's choices.
+  const registered = preview?.registered;
+  const here = identity === "restore-here";
+  const restoreHere = () => { setIdentity("restore-here"); if (destination === defaultDestination) setDestination(registered.root); };
+  const run = () => { onClose(); void startTask({ kind: "import", label: `${here ? "Restoring" : "Importing"} “${preview.name}”`, path: file, destination, identity, duplicates }); };
   return <Modal wide={step === "preview"} title={step === "choose" ? "Import brain" : `Import “${preview.name}”`} description={step === "choose" ? "Import a Raticode brain package (.zip). Nothing is written until you review the preview." : `${preview.format} · exported ${formatDay(preview.exported)} · ${formatBytes(preview.size)}`} onClose={onClose}
-    footer={step === "choose" ? <Footer onCancel={onClose} confirm="Preview import" disabled={!file.trim() || checking} onConfirm={previewImport} /> : <><button type="button" className="sb-button" onClick={() => setStep("choose")}>Back</button><Footer onCancel={onClose} confirm="Import" onConfirm={run} note="Import runs in the background and can be cancelled." /></>}>
+    footer={step === "choose" ? <Footer onCancel={onClose} confirm="Preview import" disabled={!file.trim() || checking} onConfirm={previewImport} /> : <><button type="button" className="sb-button" onClick={() => setStep("choose")}>Back</button><Footer onCancel={onClose} confirm={here ? "Restore" : "Import"} onConfirm={run} note="Import runs in the background and can be cancelled." /></>}>
     {step === "choose" ? <>
       <PathField label="Package" directory={false} value={file} onChange={setFile} placeholder="/home/you/Downloads/field-research.zip" />
       {previewError ? <p role="alert" className="sb-inline-note" data-tone="warning">{previewError}</p> : null}
@@ -89,7 +95,9 @@ function ImportBrain({ onClose }) {
       <div className="sb-form-grid">
         <fieldset className="sb-checklist"><legend>Brain identity</legend>
           <label><input type="radio" name="sb-identity" checked={identity === "copy"} onChange={() => setIdentity("copy")} /><span>Import as a new brain<small>Gets a new identity. Use when you want an independent copy.</small></span></label>
-          <label><input type="radio" name="sb-identity" checked={identity === "restore"} onChange={() => setIdentity("restore")} /><span>Restore this brain<small>Keeps the original identity. Use when moving to a new computer.</small></span></label>
+          {!registered ? <label><input type="radio" name="sb-identity" checked={identity === "restore"} onChange={() => setIdentity("restore")} /><span>Restore this brain<small>Keeps the original identity. Use when moving to a new computer.</small></span></label>
+            : registered.available ? <label><input type="radio" name="sb-identity" disabled /><span>Restore this brain<small>“{registered.name}” is already open from <code className="sb-mono">{registered.root}</code>. Import a copy instead.</small></span></label>
+            : <label><input type="radio" name="sb-identity" checked={here} onChange={restoreHere} /><span>Restore this brain here<small>“{registered.name}” is registered but its folder <code className="sb-mono">{registered.root}</code> is gone. Puts the files in the destination folder and moves the brain there, keeping its backup settings and the threads that use it.</small></span></label>}
         </fieldset>
         <fieldset className="sb-checklist"><legend>Duplicate documents</legend>
           <label><input type="radio" name="sb-dupes" checked={duplicates === "independent"} onChange={() => setDuplicates("independent")} /><span>Keep independent copies</span></label>
@@ -122,7 +130,7 @@ function ExportBrain({ purpose: initialPurpose = "complete", collectionId, onClo
     ["complete", "Export complete brain", "Every document plus collections, saved searches, citations, annotations and report provenance.", FileArchive],
   ];
   const size = store.documents.filter(doc => doc.brainId === brain.id).reduce((sum, doc) => sum + doc.size, 0);
-  const snapshotSize = new TextEncoder().encode(JSON.stringify(store.documents.filter(doc => doc.brainId === brain.id).map(doc => doc.versions))).length;
+  const snapshotSize = store.documents.filter(doc => doc.brainId === brain.id).reduce((sum, doc) => sum + historySize(doc), 0);
   return <Modal wide title={`Export ${brain.name}`} description="Choose what the export is for. Each option includes different data." onClose={onClose}
     footer={<Footer onCancel={onClose} confirm="Export" disabled={purpose === "collection" && !collection} note={`Estimated size ${formatBytes((purpose !== "collection" && fit ? fit.size : size) + (snapshots && purpose !== "documents" ? snapshotSize : 0))}`} onConfirm={() => { onClose(); void startTask({ kind: "export", label: `Exporting ${brain.name}`, destination, purpose, collectionId: collection, snapshots, verify, conversations: includeConversations }); }} />}>
     <div className="sb-option-cards" role="radiogroup" aria-label="Export purpose">{options.map(([id, title, text, Icon]) => <label key={id} className="sb-option-card" data-checked={purpose === id || undefined}><input type="radio" name="sb-export" checked={purpose === id} onChange={() => setPurpose(id)} /><Icon size={18} aria-hidden="true" /><strong>{title}</strong><small>{text}</small></label>)}</div>
@@ -179,8 +187,12 @@ function Summarize({ docIds, onClose, provider: initialProvider }) {
 function VersionDiff({ docId, from, blockId, citation, reportId, onClose }) {
   const store = useSecondBrain();
   const doc = documentById(store, docId);
+  const history = useDocumentHistory(doc);
+  if (history.loading || history.error || (doc.passagesLoading && !doc.blocks.length)) return <Modal wide title={`Changes to “${doc.title}”`} description={`Version ${from} compared with the current version ${doc.version}.`} onClose={onClose} footer={<button type="button" className="sb-button" onClick={onClose}>Close</button>}>
+    <p role={history.error ? "alert" : "status"} className="sb-hint">{history.error ? `Could not load older versions: ${history.error}` : history.loading ? "Loading older versions…" : "Loading passages…"}</p>
+  </Modal>;
   const block = blockById(doc, blockId) || doc.blocks[0];
-  const version = doc.versions.find(item => item.hash === from);
+  const version = history.versions.find(item => item.hash === from);
   const before = version?.blocks?.[block?.id] || citation?.snapshot || citation?.quote || block?.text || Object.values(version?.blocks || {}).join("\n\n");
   const after = block?.text || "No readable passage in the current source.";
   const parts = wordDiff(before, after);
@@ -297,7 +309,7 @@ function ReplaceSuggestion({ issue, onClose }) {
   const newer = documentById(store, issue.newerId);
   const family = (store.families || []).find(item => item.id === issue.familyId);
   if (!older || !newer) return null;
-  const facts = doc => [["Modified", formatDay(doc.dates.modified)], ["Added", formatDay(doc.dates.added)], ["Passages", doc.blocks.length], ["Cited by", `${(libraryFor(store).citedBy[doc.id] || []).length} items`]];
+  const facts = doc => [["Modified", formatDay(doc.dates.modified)], ["Added", formatDay(doc.dates.added)], ["Passages", passageCount(doc)], ["Cited by", `${(libraryFor(store).citedBy[doc.id] || []).length} items`]];
   return <Modal wide title="Is this an older version?" description={`These reports share ${Math.round((issue.share || 0) * 100)}% of their long passages. Marking the older one as replaced keeps both files as they are. Search lists it after current reports and names the newer one.`} onClose={onClose}
     footer={<><span className="sb-footer-note">Stored in this brain’s library metadata.</span><button type="button" className="sb-button" onClick={() => { resolveHealth(issue.id); onClose(); notify("Kept both as current reports."); }}>Not an older version</button><button type="button" className="sb-button sb-primary" onClick={() => { confirmReplacement(older.id, newer.id); onClose(); notify(`Marked “${older.title}” as replaced by “${newer.title}”. No files were changed.`); }}>Mark as replaced</button></>}>
     <div className="sb-diff">{[["Older", older], ["Newer", newer]].map(([label, doc]) => <div key={doc.id}><h4><TypeIcon type={doc.type} size={14} />{label}: {doc.title}<small className="sb-mono">{doc.path}</small></h4><dl className="sb-facts">{facts(doc).map(([term, value]) => <div key={term}><dt>{term}</dt><dd>{value}</dd></div>)}</dl></div>)}</div>

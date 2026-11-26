@@ -198,7 +198,7 @@ def test_rem_adds_a_provisional_record_in_auto_mode_and_it_lands_in_the_repo(
             db, home.store, record_request(), project=str(root), decides_alone=True
         )
     assert outcome == "provisional"
-    home.sync_records(str(root))
+    home.write_records(str(root))
     written = files_on(root)
     assert written == [
         f".raticode/decisions/{int(item['id'][2:]):04d}-how-are-workflows-written.md"
@@ -222,7 +222,7 @@ def test_rem_can_never_change_an_existing_record_and_the_user_can(
         _, first = decisions.file_request(
             db, home.store, record_request(), project=str(root), decides_alone=True
         )
-    home.sync_records(str(root))
+    home.write_records(str(root))
     path = files_on(root)[0]
     before = git(root, "show", f"dev:{path}")
     # Rem's different answer, even in auto mode, only waits for the user.
@@ -246,7 +246,7 @@ def test_rem_can_never_change_an_existing_record_and_the_user_can(
                 actor="rem",
             )
     assert outcome == "pending" and proposal["supersedes"] == first["id"]
-    home.sync_records(str(root))
+    home.write_records(str(root))
     assert files_on(root) == [path] and git(root, "show", f"dev:{path}") == before
     # A file Raticode wrote isn't rewritten when the last change wasn't the user's.
     with home.store.read() as db:
@@ -305,7 +305,7 @@ def test_the_user_replaces_a_record_and_both_files_link(
 
 
 def written_record(tmp_path: Path) -> tuple[sqlite3.Connection, Store, Path, dict[str, Any]]:
-    """A record in force whose file Raticode wrote, as ``sync_records`` leaves it."""
+    """A record in force whose file Raticode wrote, as ``write_records`` leaves it."""
     db, store = sqlite3.connect(":memory:"), Store()
     root = tmp_path / "app"
     (root / "src").mkdir(parents=True)
@@ -406,7 +406,7 @@ def test_retiring_a_record_rewrites_its_file_on_the_landing_branch(
         _, item = decisions.file_request(
             db, home.store, record_request(), project=str(root), decides_alone=True
         )
-    home.sync_records(str(root))
+    home.write_records(str(root))
     [path] = files_on(root)
     count = len(home.decisions()["items"])
     head = git(root, "rev-parse", "dev")
@@ -445,7 +445,8 @@ def test_an_edit_committed_outside_raticode_reaches_the_store(
         i for i in view["items"] if i.get("record_path") == ".raticode/decisions/0001-tabs.md"
     )
     assert item["answer"] == "Use four spaces." and item["status"] == "confirmed"
-    assert item["source"]["via"] == "repository"
+    head = git(root, "rev-parse", "HEAD").strip()
+    assert item["source"] == {"via": "repository", "commit": head[:12], "author": "Tester"}
     (folder / "0001-tabs.md").write_text(
         "---\nstatus: accepted\ntitle: Indentation\n---\n## Decision\n\nUse tabs.\n"
     )
@@ -454,6 +455,46 @@ def test_an_edit_committed_outside_raticode_reaches_the_store(
     assert item["answer"] == "Use tabs." and item["edited_outside"] is True
     # Raticode doesn't write it back over the user's edit.
     assert "Use tabs." in git(root, "show", "dev:.raticode/decisions/0001-tabs.md")
+
+
+def test_a_record_read_from_the_repository_names_the_commit_that_added_it(tmp_path: Path):
+    db, store = sqlite3.connect(":memory:"), Store()
+    root = repo(tmp_path)
+    folder = root / ".raticode" / "decisions"
+    folder.mkdir(parents=True)
+    path = ".raticode/decisions/0001-tabs.md"
+    (root / path).write_text("---\nstatus: accepted\ntitle: Indentation\n---\nUse tabs.\n")
+    git(root, "add", "-A")
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-q", "-m", "record"],
+        check=True,
+        env={
+            **os.environ,
+            **GIT_ENV,
+            "GIT_AUTHOR_NAME": "Other Person",
+            "GIT_AUTHOR_EMAIL": "other.person@example.invalid",
+            "GIT_AUTHOR_DATE": "2026-03-04T05:06:07+02:00",
+        },
+    )
+    added = git(root, "rev-parse", "HEAD").strip()
+    # A later edit by someone else doesn't change who added it.
+    (root / path).write_text("---\nstatus: accepted\ntitle: Indentation\n---\nUse spaces.\n")
+    git(root, "commit", "-qam", "edit")
+    files = records.folder_files(str(root), "dev", ".raticode/decisions")
+    assert files is not None
+    [changed] = records.sync(db, store, str(root), files=files, branch="dev")
+    [item] = decisions.read(db, store)["items"]
+    assert item["id"] == changed and item["source"] == {
+        "via": "repository",
+        "commit": added[:12],
+        "author": "Other Person",
+    }
+    assert "example.invalid" not in json.dumps(item)
+    assert item["decided_at"] == "2026-03-04T03:06:07+00:00"
+    # Status, in force and decided_by are as before: a record file the user adds counts.
+    assert item["status"] == "confirmed" and item["decided_by"] == "user"
+    assert item["history"][-1]["action"] == "read"
+    assert item["history"][-1]["note"] == f"{path}, added in {added[:12]}"
 
 
 def test_a_record_file_naming_a_fact_decision_never_rewrites_it(
@@ -492,7 +533,7 @@ def test_a_dirty_landing_checkout_keeps_the_record_in_the_store(
         _, item = decisions.file_request(
             db, home.store, record_request(), project=str(root), decides_alone=True
         )
-    failed = home.sync_records(str(root))
+    failed = home.write_records(str(root))
     assert failed and "uncommitted changes" in failed[0]["reason"]
     assert files_on(root) == []
     stored = next(i for i in home.decisions()["items"] if i["id"] == item["id"])
@@ -677,7 +718,7 @@ def test_without_a_landing_branch_records_stay_in_the_store(
         decisions.file_request(
             db, home.store, record_request(), project=str(root), decides_alone=True
         )
-    assert home.sync_records(str(root)) == []
+    assert home.write_records(str(root)) == []
     assert files_on(root) == []
 
 
@@ -948,7 +989,7 @@ def test_the_check_still_fails_work_the_worker_already_landed(
     git(root, "merge", "-q", "--ff-only", "work")
     # The run is still going: a sync now leaves the changed record alone.
     monkeypatch.setattr(home, "_writer_running", lambda project: True)
-    home.sync_records(str(root))
+    home.write_records(str(root))
     item = next(i for i in home.decisions()["items"] if i["id"] == record_id)
     assert item["answer"] == "Rattish, never TOML" and not item.get("edited_outside")
     monkeypatch.setattr(home, "_update", lambda *a, **k: None)
@@ -968,7 +1009,7 @@ def test_the_check_still_fails_work_the_worker_already_landed(
     # Once the run's commits are known, its record edit is refused, not read in as the
     # user's: the store keeps the approved decision and Raticode puts the file back.
     monkeypatch.setattr(home, "_writer_running", lambda project: False)
-    home.sync_records(str(root))
+    home.write_records(str(root))
     item = next(i for i in home.decisions()["items"] if i["id"] == record_id)
     assert item["answer"] == "Rattish, never TOML" and not item.get("edited_outside")
     assert any(h["action"] == "kept the approved text" for h in item["history"])
@@ -982,7 +1023,7 @@ def test_the_check_still_fails_work_the_worker_already_landed(
     git(worktree, "commit", "-q", "-m", "more work")
     git(root, "merge", "-q", "--ff-only", "work")
     assert home._decision_check(run, []) is not None
-    home.sync_records(str(root))
+    home.write_records(str(root))
     assert not [i for i in home.decisions()["items"] if i["question"] == "Sneaky"]
 
 
@@ -1028,7 +1069,7 @@ def test_a_record_edit_the_user_commits_mid_run_is_theirs_not_the_runs(
     assert users not in seen["runs"] and len(seen["runs"]) == 1
     # The user's edit is read in as theirs and stays on dev.
     monkeypatch.setattr(home, "_writer_running", lambda project: False)
-    home.sync_records(str(root))
+    home.write_records(str(root))
     item = next(i for i in home.decisions()["items"] if i["id"] == record_id)
     assert item["edited_outside"] is True
     assert item["answer"] == "Rattish only; TOML files are converted on import"
@@ -1075,7 +1116,7 @@ def test_a_worker_commit_that_leaves_no_reflog_entry_is_still_the_runs(
     assert hidden in seen["runs"]
     # Once the run is over, the file it added is still never read in as the user's decision.
     monkeypatch.setattr(home, "_writer_running", lambda project: False)
-    home.sync_records(str(root))
+    home.write_records(str(root))
     assert not [i for i in home.decisions()["items"] if i["question"] == "Sneaky"]
 
 

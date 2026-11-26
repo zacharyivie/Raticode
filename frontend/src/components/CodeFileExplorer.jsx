@@ -53,6 +53,7 @@ import ProjectSearch from "./ProjectSearch.jsx";
 const SecondBrainSidebar = lazy(() => import("./SecondBrainSidebar.jsx"));
 const RemHomeSidebar = lazy(() => import("./RemHomeSidebar.jsx"));
 import { Dialog } from "./Dialog.jsx";
+import { useConfirm } from "./ConfirmDialog.jsx";
 import { hasUnsavedCodeChanges } from "../lib/codeEditorSessions.js";
 import { PathNameDialog } from "./PathNameDialog.jsx";
 import { formatKeybinding, DEFAULT_APP_SETTINGS, matchesCommand } from "../lib/settings.js";
@@ -94,6 +95,7 @@ export default function CodeFileExplorer({
   onSelectProject,
 }) {
   const rootPath = workflow?.projectRoot ?? "";
+  const [confirm, confirmDialog] = useConfirm();
   const gitPanelsLoadingRef = useRef(null);
   const gitStatusLoadingRef = useRef(false);
   const lastNewFileRequestRef = useRef(newFileRequest);
@@ -368,7 +370,14 @@ export default function CodeFileExplorer({
     }
     if (kind === "branch-commit") {
       setBranchRequest({ hash }); setBranchDraft(""); return;
-    } else if (!window.confirm(kind === "reset-hard" ? `Hard reset to ${hash.slice(0, 8)}? This moves the current branch and permanently discards tracked staged and unstaged changes. Untracked files obstructing checkout can also be removed.` : kind === "reset-soft" ? `Soft reset to ${hash.slice(0, 8)}? Move the current branch while keeping the index and working files.` : `Detach HEAD at ${hash.slice(0, 8)}? New commits will need a branch to keep them.`)) return;
+    }
+    const short = hash.slice(0, 8);
+    const question = kind === "reset-hard"
+      ? { confirmLabel: "Hard reset", danger: true, message: `Hard reset to ${short}? This moves the current branch and permanently discards tracked staged and unstaged changes. Untracked files obstructing checkout can also be removed.` }
+      : kind === "reset-soft"
+        ? { confirmLabel: "Soft reset", message: `Soft reset to ${short}? Move the current branch while keeping the index and working files.` }
+        : { confirmLabel: "Detach HEAD", message: `Detach HEAD at ${short}? New commits will need a branch to keep them.` };
+    if (!await confirm(question)) return;
     await changeSourceControl(kind, { hash });
   }
 
@@ -450,7 +459,7 @@ export default function CodeFileExplorer({
       return;
     }
     const discardTarget = bulk ? `all ${value.length} ${action === "revert-staged" ? "staged" : "unstaged"} files` : value;
-    if (action.startsWith("revert") && !window.confirm(`Discard ${action === "revert-staged" ? "staged" : "unstaged"} changes to ${discardTarget}? New files will be moved to the trash.`)) return;
+    if (action.startsWith("revert") && !await confirm({ confirmLabel: "Discard changes", danger: true, message: `Discard ${action === "revert-staged" ? "staged" : "unstaged"} changes to ${discardTarget}? New files will be moved to the trash.` })) return;
     gitOperationRef.current = true;
     setGitBusy(true);
     if (changesWorkingTree) window.dispatchEvent(new CustomEvent("gofer:git-working-tree-busy", { detail: { rootPath, busy: true } }));
@@ -478,7 +487,8 @@ export default function CodeFileExplorer({
       if (!result) throw new Error("Restart the desktop app to enable Git actions.");
       if (action === "branch-delete" && result.branchDeleteUnmerged) {
         if (currentRootRef.current !== rootPath) return;
-        if (!window.confirm(`Branch ${value} may have unmerged changes. Delete it anyway? Those commits may be lost.`)) return;
+        if (!await confirm({ confirmLabel: "Delete branch", danger: true, message: `Branch ${value} may have unmerged changes. Delete it anyway? Those commits may be lost.` })) return;
+        if (currentRootRef.current !== rootPath) return;
         result = await bridge.gitRepoAction(rootPath, "branch-delete-force", value);
         if (!result) throw new Error("Unable to delete branch.");
       }
@@ -951,9 +961,9 @@ export default function CodeFileExplorer({
     if (!entries.length) return;
     const kind = entry.isDirectory ? "folder" : "file";
     const message = entries.length > 1
-      ? `Are you sure you want to delete ${entries.length} files?`
+      ? `Move ${entries.length} items to the trash? They can be restored from the operating system trash.`
       : `Move ${entry.name} to the trash? This ${kind} can be restored from the operating system trash.`;
-    if (!window.confirm(message)) return;
+    if (!await confirm({ message, confirmLabel: "Move to trash", danger: true }) || transferBusyRef.current || currentRootRef.current !== rootPath) return;
     setError("");
     const parents = new Set();
     transferBusyRef.current = true;
@@ -1632,7 +1642,7 @@ export default function CodeFileExplorer({
               <strong>{sourceControl.operation ? `${sourceControl.operation === "rebase" ? "Rebase" : "Merge"} paused` : "Unresolved conflicts"}</strong>
               <p>The ! entry in Staged is an unresolved index conflict. Rem can resolve and stage the fixes, commit them, and continue until the rebase or merge is complete.</p>
               <div className="flex flex-wrap gap-2"><button className="rounded border border-line px-2 py-1.5" type="button" onClick={() => window.dispatchEvent(new CustomEvent("gofer:rem-context", { detail: { mode: "conflicts", projectRoot: rootPath, text: sourceControl.entries.filter(entry => entry.status === "!").map(entry => entry.path).join("\n") } }))}>Resolve conflicts with Rem</button>
-              {sourceControl.operation ? <><button className="rounded border border-line px-2 py-1.5" type="button" disabled={gitBusy || sourceControl.entries.some(entry => entry.status === "!")} onClick={() => void changeSourceControl(`${sourceControl.operation}-continue`)}>Continue {sourceControl.operation}</button><button className="rounded border border-line px-2 py-1.5" type="button" disabled={gitBusy} onClick={() => { if (window.confirm(`Abort this ${sourceControl.operation}? Conflict resolution edits will be discarded.`)) void changeSourceControl(`${sourceControl.operation}-abort`); }}>Abort {sourceControl.operation}</button></> : null}</div>
+              {sourceControl.operation ? <><button className="rounded border border-line px-2 py-1.5" type="button" disabled={gitBusy || sourceControl.entries.some(entry => entry.status === "!")} onClick={() => void changeSourceControl(`${sourceControl.operation}-continue`)}>Continue {sourceControl.operation}</button><button className="rounded border border-line px-2 py-1.5" type="button" disabled={gitBusy} onClick={async () => { const operation = sourceControl.operation; if (await confirm({ confirmLabel: `Abort ${operation}`, danger: true, message: `Abort this ${operation}? Conflict resolution edits will be discarded.` })) void changeSourceControl(`${operation}-abort`); }}>Abort {sourceControl.operation}</button></> : null}</div>
             </section> : null}
             {!sourceControl.active ? <p className="px-2 py-6 text-xs text-muted">This project is not a Git repository.</p> : <>
               {sourceTab === "changes" ? sourceControl.entries.length ? <>
@@ -2027,18 +2037,9 @@ export default function CodeFileExplorer({
             : createChild(nameRequest.kind, nameRequest.directory, name)}
         />
       ) : null}
+      {confirmDialog}
     </div>
   );
-}
-
-export function commitMessageBody(commit = {}) {
-  const message = String(commit.message ?? "").trim();
-  const subject = String(commit.subject ?? "").trim();
-  if (!message || message === subject) return "";
-  const [firstLine, ...remainingLines] = message.split("\n");
-  return firstLine.trim() === subject
-    ? remainingLines.join("\n").trim()
-    : message;
 }
 
 export function relativeCommitTime(authoredAt, now = Date.now()) {

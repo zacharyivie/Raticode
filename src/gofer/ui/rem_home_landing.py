@@ -16,11 +16,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from gofer.utils.process import (
-    NO_REPOSITORY_PROGRAMS,
-    build_subprocess_env,
-    untrusted_repository_git_env,
-)
+from gofer.utils.process import run_repository_git
 
 GIT_TIMEOUT_SECONDS = 30
 # Runs recorded before the landing branch became a per-project decision only landed on
@@ -48,14 +44,7 @@ _OPT_OUT = re.compile(
 
 def _git(cwd: Path | str, *args: str) -> str | None:
     try:
-        result = subprocess.run(
-            ["git", *NO_REPOSITORY_PROGRAMS, "-C", str(cwd), *args],
-            capture_output=True,
-            text=True,
-            timeout=GIT_TIMEOUT_SECONDS,
-            check=False,
-            env=untrusted_repository_git_env(cwd, build_subprocess_env()),
-        )
+        result = run_repository_git(cwd, *args, timeout=GIT_TIMEOUT_SECONDS)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return result.stdout if result.returncode == 0 else None
@@ -220,4 +209,30 @@ def landing_feedback(branches: list[dict[str, Any]], integration: str) -> str:
         "allowed when it has no uncommitted changes. Don't push. If it can't land, for "
         "example because that folder has uncommitted changes or the rebase conflicts, say "
         "so plainly as the first line of your result."
+    )
+
+
+def tip_of(project: str | Path, branch: str) -> str:
+    """The branch's commit in the project's repository, or "" when it can't be read."""
+    out = _git(project, "rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}")
+    return (out or "").strip()
+
+
+def contains(project: str | Path, branch: str, commit: str) -> bool:
+    """Whether the project's local ``branch`` contains ``commit``."""
+    tip = tip_of(project, branch)
+    if not tip or not re.fullmatch(r"[0-9a-f]{7,64}", commit):
+        return False
+    return _git(project, "merge-base", "--is-ancestor", commit, tip) is not None
+
+
+def checked_head_feedback(commit: str, integration: str, tip: str) -> str:
+    """Repair instructions when the landing branch lacks the commit Raticode checked."""
+    at = f" (at {tip[:12]})" if tip else ""
+    return (
+        f"Raticode's project check ran on commit {commit[:12]}, but local {integration}"
+        f"{at} doesn't contain it, so the work that landed isn't the work that was "
+        f"checked. Land the checked commit: rebase the work's branch onto {integration}, "
+        f"rerun the checks, then fast-forward {integration} to that branch. Don't push. "
+        "If it can't land, say so plainly as the first line of your result."
     )

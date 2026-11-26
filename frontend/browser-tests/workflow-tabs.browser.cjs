@@ -339,11 +339,11 @@ async function run() {
     await evaluate(() => document.querySelector('button[aria-label="Close Beacon check"]').click());
     await activateTab('workflow.rattish');
     await evaluate(() => document.querySelector('button[aria-label="Close workflow.rattish"]').click());
-    await waitFor(() => evaluate(() => Boolean(document.querySelector('[role="dialog"]') || window.__lastConfirm)));
+    await waitFor(() => evaluate(() => Boolean(document.querySelector('[role="dialog"]'))));
     assert.equal(requests.some(r => /\/(run|resume|stop)(\/|$)/.test(r.path)), false);
     await screenshot('dirty-close');
     await evaluate(() => {
-      const b = [...document.querySelectorAll('[role="dialog"] button')].find(el => el.textContent.trim() === 'Cancel');
+      const b = [...document.querySelectorAll('[role="dialog"] button')].find(el => ['Cancel', 'Keep as is'].includes(el.textContent.trim()));
       b?.click();
     });
   });
@@ -392,7 +392,6 @@ function routeApi(pathname, response) {
   }
   if (pathname.endsWith("/logs")) return json(response, { runs: [] });
   if (pathname.endsWith("/approvals")) return json(response, { approvals: [] });
-  if (pathname === "/api/workflow-templates") return json(response, { templates: [] });
   if (pathname === "/api/doctor") return json(response, { errors: [], warnings: [] });
   return json(response, {});
 }

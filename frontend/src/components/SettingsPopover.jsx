@@ -44,9 +44,9 @@ import UsageDashboard from "./UsageDashboard.jsx";
 import PairedDevices from "./PairedDevices.jsx";
 import ComputersSettings from "./ComputersSettings.jsx";
 import { FEATURE_PREVIEWS } from "../lib/featurePreview.js";
+import { useRovingChoice } from "../lib/useRovingChoice.js";
 import FirefoxSettings from "./FirefoxSettings.jsx";
-import ChromeSettings from "./ChromeSettings.jsx";
-import EdgeSettings from "./EdgeSettings.jsx";
+import ChromiumBrowserSettings, { CHROMIUM_BROWSERS } from "./ChromiumBrowserSettings.jsx";
 import { WEB_BROWSER_OPTIONS } from "../lib/browserEngines.js";
 import GeckoSettings from "./GeckoSettings.jsx";
 import DefaultBrowserSettings from "./DefaultBrowserSettings.jsx";
@@ -54,6 +54,7 @@ import { EXTERNAL_ENGINE_OPTIONS } from "../lib/externalOpens.js";
 import "./SettingsPopover.css";
 import { PLUGIN_ICONS } from "./pluginIcons.js";
 import { useProviderSettingsCapabilities } from "../lib/useProviderSettingsCapabilities.js";
+import { PROVIDER_PROBLEM_LABELS, providerName, providerProblem, providerUsable } from "../lib/remProviderStatus.js";
 import { ARCHIVE_RETENTION_OPTIONS } from "../lib/threadActivity.js";
 import { audioInputConstraints, createSilenceWatch, listAudioInputDevices, silentInputMessage } from "../lib/audioDevices.js";
 import { DICTATION_MODES } from "../lib/voiceShortcut.js";
@@ -109,6 +110,8 @@ export default function SettingsPopover({
   initialCategory = "general",
   // A browser whose settings to show, when a tab's menu opened Settings.
   initialBrowserSection = "",
+  // Selectors for a setting to scroll to and focus once Settings opens.
+  initialReveal = null,
   dataDir = "",
   onChange,
   onChooseDataDirectory,
@@ -125,7 +128,7 @@ export default function SettingsPopover({
   const providerState = useProviderSettingsCapabilities(open);
   // A setting another category's link asked for, such as a Change link in Settings >
   // Providers: { category, selectors }, tried in order until one is on the page.
-  const [reveal, setReveal] = useState(null);
+  const [reveal, setReveal] = useState(() => (initialReveal?.length ? { selectors: initialReveal } : null));
   const openSetting = useCallback((target) => {
     setQuery("");
     setCategory(target.category);
@@ -331,7 +334,7 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
   }];
   if (category === "usage") return [{ searchText: "Usage tokens allowance limits remaining quotas credits billing spend accounts providers history refresh alerts notifications", element: <UsageDashboard key="usage" /> }];
   if (category === "developer") return [
-    { searchText: "Developer diagnostics application log logs logging errors warnings debug info filter connection app data storage version backend restart tools", element: <DeveloperSettings key="developer" /> },
+    { searchText: "Developer diagnostics application log logs logging errors warnings debug info filter connection data folder app data storage version backend restart tools", element: <DeveloperSettings key="developer" /> },
     {
       searchText: `Feature Preview experimental preview try turn on enable ${FEATURE_PREVIEWS.map((feature) => feature.label).join(" ")}`,
       element: <FeaturePreviewSettings key="feature-preview" settings={settings} onChange={onChange} />,
@@ -339,7 +342,7 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
   ];
   if (category === "memory") return [{ searchText: "Rem memory conversation archive folder purge retention delete permanently Git Second Brain knowledge notes reports HTML Markdown theme gallery generation provider model effort screenshot", element: <RemMemorySettings audioInputDeviceId={settings.devices.audioInputId} key="memory" value={settings.memory} onChange={onChange} providerState={providerState} /> }];
   if (category === "general") return [
-    row("dataDir", "Application data directory", "Stores global Raticode state, run artifacts, and registries.", (
+    row("dataDir", "Data folder", "Stores global Raticode state, run artifacts, and registries.", (
       <PathControl value={appControls.dataDir} onChoose={appControls.onChooseDataDirectory} />
     )),
     row("initialActivity", "Initial sidebar", "Shown on first launch or when the last sidebar cannot be restored.", (
@@ -348,11 +351,11 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
     row("autosave", "Autosave files", "Save file edits after a short delay.", (
       <SwitchControl checked={settings.general.autosave} onChange={(value) => onChange("general.autosave", value)} />
     )),
-    row("executionMode", "Default run target", "Start runs locally or send them to the runner queue.", (
-      <SelectControl value={settings.general.executionMode} onChange={(value) => onChange("general.executionMode", value)} options={[["local", "Local"], ["remote", "Runner queue"]]} />
-    )),
     row("updates", "Check for updates", "Look for a new release on startup and every 10 minutes, and remind you once a day when you aren't on the newest version.", (
       <SwitchControl checked={settings.general.checkForUpdates} onChange={(value) => onChange("general.checkForUpdates", value)} />
+    )),
+    row("backgroundNotices", "Notify me when Raticode is in the background", "Show a desktop notification when a thread's turn ends, Rem replies, Rem waits on your approval in a tab or a Rem task finishes. It names the thread or tab, not what was said; click it to open that place.", (
+      <SwitchControl label="Notify me when Raticode is in the background" checked={settings.general.backgroundNotices} onChange={(value) => onChange("general.backgroundNotices", value)} />
     )),
     row("archivedThreadRetention", "Delete archived threads", "Permanently delete archived Rem threads with no activity for this long. A configured conversation archive keeps a copy.", (
       <SelectControl value={settings.general.archivedThreadRetention} onChange={(value) => onChange("general.archivedThreadRetention", value)} options={ARCHIVE_RETENTION_OPTIONS} />
@@ -477,14 +480,30 @@ function ProviderAccountSelects({ value, onChange }) {
 
 function assistantRows(settings, onChange, row, providerState, appControls) {
   const { capabilities, loading } = providerState;
-  const availableProviders = capabilities.filter((provider) => provider.available && provider.enabled !== false);
-  const provider = availableProviders.find((item) => item.id === settings.assistant.provider)
-    ?? availableProviders[0];
+  const availableProviders = capabilities.filter(providerUsable);
+  const providerOptions = availableProviders.map((item) => [item.id, item.displayName ?? item.id]);
+  // A saved app that can't run here stays chosen, labeled with why, so the select never
+  // shows a different app than the one Rem really uses.
+  const withSaved = (id) => (!id || providerOptions.some(([option]) => option === id) ? providerOptions : [
+    ...providerOptions,
+    [id, savedProviderLabel(capabilities, id)],
+  ]);
+  const savedProvider = settings.assistant.provider;
+  const providerIssue = providerProblem(capabilities, savedProvider);
+  const provider = availableProviders.find((item) => item.id === savedProvider)
+    ?? (savedProvider ? capabilities.find((item) => item.id === savedProvider) : availableProviders[0]);
   const models = provider?.models ?? [];
   const model = models.find((item) => item.id === settings.assistant.model)
     ?? models.find((item) => item.id === provider?.defaultModel)
     ?? models[0];
-  const chatProvider = availableProviders.find((item) => item.id === settings.assistant.chatProvider);
+  const savedChatProvider = settings.assistant.chatProvider;
+  const chatProviderIssue = providerProblem(capabilities, savedChatProvider);
+  const chatProvider = availableProviders.find((item) => item.id === savedChatProvider);
+  // An app that isn't installed is listed under Not installed; a turned-off one has its own row.
+  const openProviders = (id, problem) => appControls.openSetting?.({ category: "providers", selectors: [
+    problem?.kind === "missing" ? '[data-provider-group="missing"] button' : `[data-provider="${id}"] button`,
+    '[data-provider-part="coding-apps"]',
+  ] });
   const chatModels = chatProvider?.models ?? [];
   const chatModel = chatModels.find((item) => item.id === settings.assistant.chatModel)
     ?? chatModels.find((item) => item.id === chatProvider?.defaultModel)
@@ -507,10 +526,13 @@ function assistantRows(settings, onChange, row, providerState, appControls) {
     ] : []),
     row("resources", "Rem resources", "Defaults copied into new threads. Each thread can change its own selection.", <RemResources value={settings.assistant.resources} memory={settings.memory} onChange={(value) => onChange("assistant.resources", value)} />, { stacked: true }),
     row("provider", "Default provider", "Used for new tasks and threads, and for Rem’s chat unless it has its own provider below.", (
-      <SelectControl disabled={loading || !availableProviders.length} value={provider?.id ?? settings.assistant.provider} onChange={(value) => onChange("assistant.provider", value)} options={availableProviders.map((item) => [item.id, item.displayName ?? item.id])} />
+      <div className="space-y-1">
+        <SelectControl label="Default provider" disabled={loading || !availableProviders.length} value={savedProvider || provider?.id || ""} onChange={(value) => onChange("assistant.provider", value)} options={withSaved(savedProvider)} />
+        <ProviderProblemNote problem={providerIssue?.kind === "sign_in" ? null : providerIssue} onOpen={() => openProviders(savedProvider, providerIssue)} />
+      </div>
     )),
-    row("model", "Default model", "Used for new tasks and threads. Existing task and thread selections stay unchanged.", (
-      <SelectControl disabled={!models.length} value={model?.id ?? settings.assistant.model} onChange={(value) => onChange("assistant.model", value)} options={menuModels(provider, settings.assistant.model).map((item) => [item.id, item.displayName ?? item.id])} />
+    row("model", "Default model", "Used for new tasks and threads. Automatic follows the app’s Default model in Settings › Providers. Existing task and thread selections stay unchanged.", (
+      <RemModelSelect provider={provider} value={settings.assistant.model} onChange={(value) => onChange("assistant.model", value)} />
     )),
     row("effort", "Default reasoning effort", "Reasoning level for new tasks and threads.", (
       <SelectControl disabled={!model?.efforts?.length} value={settings.assistant.effort || model?.defaultEffort || ""} onChange={(value) => onChange("assistant.effort", value)} options={(model?.efforts ?? []).map((item) => [item.id, item.displayName ?? item.id])} />
@@ -519,16 +541,20 @@ function assistantRows(settings, onChange, row, providerState, appControls) {
       <ProviderAccountSelects value={settings.assistant.providerAccounts} onChange={(value) => onChange("assistant.providerAccounts", value)} />
     ), { stacked: true }),
     row("chatProvider", "Rem chat provider", "Who writes Rem’s replies in its chat. A faster model or lower effort here makes chat quicker, while tasks and threads keep the defaults above.", (
-      <SelectControl
-        disabled={loading || !availableProviders.length}
-        value={chatProvider?.id ?? ""}
-        onChange={(value) => { onChange("assistant.chatProvider", value); onChange("assistant.chatModel", ""); onChange("assistant.chatEffort", ""); }}
-        options={[["", "Same as tasks and threads"], ...availableProviders.map((item) => [item.id, item.displayName ?? item.id])]}
-      />
+      <div className="space-y-1">
+        <SelectControl
+          label="Rem chat provider"
+          disabled={loading || !availableProviders.length}
+          value={savedChatProvider || ""}
+          onChange={(value) => { onChange("assistant.chatProvider", value); onChange("assistant.chatModel", ""); onChange("assistant.chatEffort", ""); }}
+          options={[["", "Same as tasks and threads"], ...withSaved(savedChatProvider)]}
+        />
+        <ProviderProblemNote problem={chatProviderIssue?.kind === "sign_in" ? null : chatProviderIssue} onOpen={() => openProviders(savedChatProvider, chatProviderIssue)} />
+      </div>
     )),
     ...(chatProvider ? [
       row("chatModel", "Rem chat model", "Model for Rem’s chat replies.", (
-        <SelectControl disabled={!chatModels.length} value={chatModel?.id ?? settings.assistant.chatModel} onChange={(value) => { onChange("assistant.chatModel", value); onChange("assistant.chatEffort", ""); }} options={menuModels(chatProvider, settings.assistant.chatModel).map((item) => [item.id, item.displayName ?? item.id])} />
+        <RemModelSelect provider={chatProvider} value={settings.assistant.chatModel} onChange={(value) => { onChange("assistant.chatModel", value); onChange("assistant.chatEffort", ""); }} />
       )),
       row("chatEffort", "Rem chat reasoning effort", "Low or medium keeps chat replies quick.", (
         <SelectControl disabled={!chatModel?.efforts?.length} value={settings.assistant.chatEffort || chatModel?.defaultEffort || ""} onChange={(value) => onChange("assistant.chatEffort", value)} options={(chatModel?.efforts ?? []).map((item) => [item.id, item.displayName ?? item.id])} />
@@ -588,6 +614,15 @@ function layoutRows(settings, onChange, row) {
 // Thumbnails draw each arrangement with the same rules the workspace uses.
 function LayoutPresetPicker({ layout, onChange }) {
   const selected = activeLayoutPreset(layout);
+  const choose = (preset) => {
+    onChange("layout.projectPaneSide", preset.projectPaneSide);
+    onChange("layout.assistantPaneSide", preset.assistantPaneSide);
+  };
+  const arrangement = useRovingChoice({
+    keys: LAYOUT_PRESETS.map((preset) => preset.id),
+    selected,
+    onSelect: (id) => choose(LAYOUT_PRESETS.find((preset) => preset.id === id)),
+  });
   return (
     <div role="radiogroup" aria-label="Arrangement" className="layout-presets">
       {LAYOUT_PRESETS.map((preset) => {
@@ -599,10 +634,8 @@ function LayoutPresetPicker({ layout, onChange }) {
             className="layout-preset"
             role="radio"
             type="button"
-            onClick={() => {
-              onChange("layout.projectPaneSide", preset.projectPaneSide);
-              onChange("layout.assistantPaneSide", preset.assistantPaneSide);
-            }}
+            onClick={() => choose(preset)}
+            {...arrangement(preset.id)}
           >
             <span aria-hidden="true" className="layout-preset-thumbnail">
               {workspacePaneOrder(preset).map((pane) => (
@@ -659,6 +692,25 @@ function SettingRow({ children, description, label, rowKey, stacked = false }) {
   );
 }
 
+// "Codex (not installed)" for a saved app the provider list can't offer; just the name while
+// capabilities are still loading.
+function savedProviderLabel(capabilities, id) {
+  const problem = providerProblem(capabilities, id);
+  const name = providerName(capabilities, id);
+  return problem ? `${name} (${PROVIDER_PROBLEM_LABELS[problem.kind]})` : name;
+}
+
+// The warning under a Rem provider select when the saved app can't run here.
+function ProviderProblemNote({ problem, onOpen }) {
+  if (!problem) return null;
+  const why = problem.kind === "off" ? "is turned off" : "isn't installed on this computer";
+  return (
+    <p className="text-[10px] leading-4 text-amber-700" data-provider-problem={problem.kind}>
+      {problem.name} {why}, so Rem can’t use it. Choose another app or set it up in <button type="button" className="font-semibold text-brand underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500" onClick={onOpen}>Settings › Providers</button>.
+    </p>
+  );
+}
+
 // The worker limit is per computer, so it lives on this computer's row in Settings > Computers.
 function WorkerLimitPointer({ onOpen }) {
   const open = () => onOpen?.({ category: "computers", selectors: ['[data-setting-row="maxWorkers"] input', '[data-testid="computers-settings"]'] });
@@ -674,7 +726,7 @@ function PathControl({ onChoose, value }) {
     <button
       className="flex h-8 w-full items-center gap-2 rounded-md border border-line bg-white px-2 text-left text-xs text-ink transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
       disabled={!onChoose}
-      title={value || "Application data directory"}
+      title={value || "Data folder"}
       type="button"
       onClick={onChoose}
     >
@@ -703,8 +755,7 @@ function BrowserEngineSections({ defaultEngine, requested = "" }) {
       <SelectControl label="Show settings for" value={section} onChange={setSection} options={[["", "Choose a browser"], ...ENGINE_SECTIONS]} />
       {section === "gecko" ? <GeckoSettings /> : null}
       {section === "firefox" ? <FirefoxSettings /> : null}
-      {section === "chrome" ? <ChromeSettings /> : null}
-      {section === "edge" ? <EdgeSettings /> : null}
+      {Object.hasOwn(CHROMIUM_BROWSERS, section) ? <ChromiumBrowserSettings key={section} browser={CHROMIUM_BROWSERS[section]} /> : null}
     </div>
   );
 }
@@ -756,6 +807,26 @@ function WebBrowserControl({ onChange, value }) {
       {note ? <p role="status" className={`text-[11px] ${missing ? "text-amber-700" : "text-muted"}`}>{note}</p> : null}
     </div>
   );
+}
+
+// Rem's model menus. The empty first choice stores "" and runs the app's own Default
+// model from Settings › Providers, so the menu names what really runs.
+export function RemModelSelect({ label, onChange, provider, value = "" }) {
+  const chosen = value === "cli-default" ? "" : value;
+  const listed = menuModels(provider, chosen);
+  const missing = chosen && !listed.some((item) => item.id === chosen);
+  return <SelectControl
+    disabled={!listed.length}
+    label={label}
+    value={chosen}
+    onChange={onChange}
+    options={[
+      ["", `Automatic${provider?.defaultModel ? ` (${provider.defaultModel})` : ""}`],
+      // Before the app's models load, a saved choice shows as it is.
+      ...(missing ? [[chosen, listed.length ? `${chosen} (unavailable)` : chosen]] : []),
+      ...listed.map((item) => [item.id, item.displayName ?? item.id]),
+    ]}
+  />;
 }
 
 function SelectControl({ disabled = false, label, onChange, options, value }) {
@@ -1272,7 +1343,7 @@ const WORKER_LIMIT_SEARCH = "Worker limit Rem task workers max workers workers a
 
 function categoryKeywords(category) {
   return {
-    general: "startup default workspace run target update queue local data directory storage artifacts autosave files archived threads delete cleanup retention",
+    general: "startup default workspace update data folder data directory storage artifacts autosave files archived threads delete cleanup retention notifications notify background unfocused desktop notice alert",
     devices: "microphone mic audio input device recording transcription dictation speech recognition recognizer offline model macOS Windows Linux test signal level paired devices phone mobile desktop pairing qr trust revoke workflow shortcuts global hotkey run workflow from any app",
     computers: `computers paired desktops ${WORKER_LIMIT_SEARCH} running room load pressure order move up down where work runs placement strategy fill one computer then the next overflow spread evenly balanced only computers i pick manual shared organizations rem`,
     appearance: "theme dark light system motion animation",
@@ -1282,7 +1353,7 @@ function categoryKeywords(category) {
     usage: "usage tokens allowance limits remaining quotas credits billing spend accounts providers history refresh",
     assistant: "self-work self work idle away max threads backlog auto pull research report kanban commit messages auto commit template format default scope current directory global projects rem provider model effort chat faster speed codex claude conversation skills tools mcp servers resources swarm access teams runs",
     memory: "rem memory conversation archive folder purge retention delete permanently git second brain knowledge notes reports html markdown",
-    developer: "developer diagnostics application log logs logging errors warnings debug info filter connection app data storage version backend restart tools feature preview experimental",
+    developer: "developer diagnostics application log logs logging errors warnings debug info filter connection data folder app data storage version backend restart tools feature preview experimental",
     layout: "width pane sidebar panel inspector arrangement preset position side left right swap mirror dock chat rem files explorer project activity bar terminal tab editor startup open hidden compact narrow reset",
     plugins: "plugins sidebar rail activity bar icons order reorder drag lock unlock show hide enable disable",
   }[category] ?? "";

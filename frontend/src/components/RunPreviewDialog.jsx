@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { FileUp, X } from "lucide-react";
 import { Dialog } from "./Dialog.jsx";
-import { initialWorkflowParameters, normalizeWorkflowFilesystemAccess } from "../lib/workflowRunSetup.js";
+import { initialWorkflowParameters } from "../lib/workflowRunSetup.js";
 import { describeFileInput, fileInputOptions, fileInputProblem, fileName } from "../lib/fileInputs.js";
 
 function formatPreviewValue(value) {
@@ -134,7 +134,7 @@ function parseRunParameter(spec, value) {
 export function coerceWorkflowParameters(workflow, values) {
   const errors = {};
   const parameters = { ...values };
-  for (const [name, spec] of Object.entries(workflow.inputs ?? workflow.parameters ?? {})) {
+  for (const [name, spec] of Object.entries(workflow.inputs ?? {})) {
     const value = values[name];
     const empty = value === undefined || value === null || value === "";
     if (spec.required && empty) {
@@ -143,15 +143,7 @@ export function coerceWorkflowParameters(workflow, values) {
     }
     if (empty) {
       // Leave typed inputs unset so the workflow default applies.
-      if (spec.schema && spec.type !== "string" && spec.type !== "enum") delete parameters[name];
-      continue;
-    }
-    if (!spec.schema) {
-      // Legacy workflow parameters are converted by the backend.
-      if (spec.type === "number" && Number.isNaN(Number(value))) errors[name] = "Enter a number";
-      if (spec.type === "enum" && Array.isArray(spec.choices) && !spec.choices.includes(value)) {
-        errors[name] = "Choose a valid option";
-      }
+      if (spec.type !== "string" && spec.type !== "enum") delete parameters[name];
       continue;
     }
     const parsed = parseRunParameter(spec, value);
@@ -176,11 +168,8 @@ export default function RunPreviewDialog({
   onCancel,
   onRun,
   initialParameters = {},
-  executionMode = "local",
-  onExecutionModeChange = () => {},
-  queueState = { runners: [] },
 }) {
-  const parameterSchema = workflow.inputs ?? workflow.parameters ?? {};
+  const parameterSchema = workflow.inputs ?? {};
   const [parameters, setParameters] = useState(() => ({
     ...initialWorkflowParameters(workflow),
     ...initialParameters,
@@ -196,11 +185,10 @@ export default function RunPreviewDialog({
   const bindings = plan?.bindings ?? [];
   const triggerItems = formatTriggerContextItems(plan?.triggerContext);
   const generations = plan?.generations ?? [];
-  const filesystemAccess = workflow.filesystemAccess ?? [];
 
   return (
     <Dialog
-      description={`Review execution details for ${workflow.name}`}
+      description={`Review what a run of ${workflow.name} will do before it starts`}
       onClose={onCancel}
       panelClassName="flex max-h-[86vh] w-full max-w-[760px] flex-col rounded-lg border border-line bg-white shadow-panel"
       title={`Run preview: ${workflow.name}`}
@@ -212,6 +200,7 @@ export default function RunPreviewDialog({
           </div>
           <button
             className="grid h-8 w-8 place-items-center rounded-lg text-muted transition hover:bg-slate-100 hover:text-ink"
+            aria-label="Close run preview"
             title="Close"
             type="button"
             onClick={onCancel}
@@ -235,19 +224,6 @@ export default function RunPreviewDialog({
           ) : null}
           {triggerItems.length > 0 ? (
             <PreviewSection title="Trigger context" items={triggerItems} />
-          ) : null}
-          {filesystemAccess.length > 0 ? (
-            <PreviewSection
-              title="Filesystem access"
-              items={normalizeWorkflowFilesystemAccess(filesystemAccess).map((entry) => {
-                const permissions = [
-                  entry.read ? "read" : null,
-                  entry.write ? "write" : null,
-                  entry.execute ? "execute" : null,
-                ].filter(Boolean);
-                return `${entry.path}: ${permissions.length > 0 ? permissions.join(", ") : "no access"}`;
-              })}
-            />
           ) : null}
           {Object.keys(parameterSchema).length > 0 ? (
             <section>
@@ -307,40 +283,7 @@ export default function RunPreviewDialog({
 
           <section>
             <h3 className="mb-2 text-xs font-semibold uppercase text-muted">
-              Execution target
-            </h3>
-            <div className="inline-flex rounded-lg border border-line bg-slate-50 p-1">
-              <button
-                className={`rounded-md px-3 py-1.5 text-sm ${
-                  executionMode === "local" ? "bg-white font-semibold shadow-sm" : "text-muted"
-                }`}
-                type="button"
-                onClick={() => onExecutionModeChange("local")}
-              >
-                Local
-              </button>
-              <button
-                className={`rounded-md px-3 py-1.5 text-sm ${
-                  executionMode === "remote" ? "bg-white font-semibold shadow-sm" : "text-muted"
-                }`}
-                type="button"
-                onClick={() => onExecutionModeChange("remote")}
-              >
-                Remote
-              </button>
-            </div>
-            {executionMode === "remote" ? (
-              <p className="mt-2 text-xs text-muted">
-                {(queueState.runners ?? []).length
-                  ? `${queueState.runners.length} runner${queueState.runners.length === 1 ? "" : "s"} registered`
-                  : "No runners registered yet"}
-              </p>
-            ) : null}
-          </section>
-
-          <section>
-            <h3 className="mb-2 text-xs font-semibold uppercase text-muted">
-              Execution order
+              Run order
             </h3>
             <div className="space-y-2">
               {generations.map((generation) => (

@@ -17,7 +17,7 @@ import click
 import pytest
 from typer.testing import CliRunner
 
-from gofer.cli.client import AGENT_SESSION_ENVS
+from gofer.cli.client import AGENT_SESSION_ENVS, discover_endpoint
 from gofer.cli.main import app
 from gofer.ui import headless
 from gofer.utils.paths import get_data_dir
@@ -119,35 +119,41 @@ def test_cli_uses_gofer_data_dir_without_data_dir_flag(tmp_path, monkeypatch) ->
     assert [item["id"] for item in json.loads(result.stdout)["workflows"]] == [workflow_id]
 
 
+@pytest.mark.parametrize("by_path", [False, True], ids=["id", "path"])
+def test_a_toml_workflow_is_refused_with_the_convert_command(tmp_path, by_path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    toml = data_dir / "old-flow.toml"
+    source = '[workflow]\nid = "old-flow"\nname = "Old"\n'
+    toml.write_text(source, encoding="utf-8")
+    name = str(toml) if by_path else "old-flow"
+    for command in (["run", name], ["plan", name], ["validate", name], ["logs", "list", name]):
+        result = _invoke("workflow", *command, "--data-dir", str(data_dir))
+        assert result.exit_code == 2, (command, result.output)
+        assert result.stdout == ""
+        assert "is a TOML workflow" in result.stderr
+        assert "Raticode rattish convert" in result.stderr
+    # The TOML file is left as it was.
+    assert toml.read_text(encoding="utf-8") == source
+
+
 @pytest.mark.parametrize(
-    ("command", "hint"),
+    "command",
     [
-        (["show"], "rattish inspect-ir"),
-        (["stop"], "Runs view"),
-        (["secrets"], "rattish preflight"),
-        (["history"], "History in the app"),
-        (["diff", "WORKFLOW", "rev-1"], "History in the app"),
-        (["edit"], "rattish check"),
-        (["trigger"], "triggers add webhook"),
-        (["set-schedule", "--cron", "0 * * * *"], "triggers add cron"),
-        (["set-info", "--name", "Other"], "rattish check"),
-        (["add-node", "--id", "x", "--type", "pass"], "rattish check"),
-        (["add-edge", "--from", "a", "--to", "b"], "rattish check"),
+        ["agent", "list"],
+        ["runner", "list"],
+        ["schedule", "list"],
+        ["watch", "list"],
+        ["workflow", "show", "x"],
+        ["workflow", "add-node", "x"],
+        ["workflow", "history", "x"],
+        ["workflow", "recipe", "--help"],
+        ["schema", "--legacy-toml"],
     ],
 )
-def test_toml_only_commands_point_rattish_workflows_at_rattish(tmp_path, command, hint) -> None:
-    data_dir, workflow_id, source = _workflow(tmp_path)
-    args = [workflow_id if item == "WORKFLOW" else item for item in command]
-    if "WORKFLOW" not in command:
-        args.insert(1, workflow_id)
-    result = _invoke("workflow", *args, "--data-dir", str(data_dir))
+def test_toml_only_commands_are_gone(command) -> None:
+    result = _invoke(*command)
     assert result.exit_code == 2, result.output
-    assert result.stdout == ""
-    assert "is a Rattish workflow" in result.stderr
-    assert f"Raticode workflow {command[0]} only works with legacy TOML" in result.stderr
-    assert hint in result.stderr
-    # The workflow itself is untouched.
-    assert source.read_text(encoding="utf-8") == RUNNABLE
 
 
 def test_workflow_commands_that_handle_rattish(tmp_path) -> None:
@@ -192,7 +198,7 @@ def test_workflow_commands_that_handle_rattish(tmp_path) -> None:
 
 def test_errors_go_to_stderr_and_formats_are_unified(tmp_path) -> None:
     flags = ["--data-dir", str(tmp_path)]
-    missing = _invoke("workflow", "show", "nope", *flags)
+    missing = _invoke("workflow", "run", "nope", *flags)
     assert missing.exit_code == 1
     assert missing.stdout == ""
     assert "not found" in missing.stderr
@@ -208,8 +214,6 @@ def test_errors_go_to_stderr_and_formats_are_unified(tmp_path) -> None:
 
     for command in (
         ["provider", "profile", "list"],
-        ["runner", "list"],
-        ["runner", "status"],
         ["tokens", "list"],
         ["rem", "skill", "list"],
     ):
@@ -232,42 +236,34 @@ def test_schema_and_help_point_at_rattish() -> None:
     payload = json.loads(pointer.stdout)
     assert payload["language"] == "rattish"
     assert Path(payload["grammar"]).name == "grammar.ebnf"
-    assert "--legacy-toml" in payload["legacyToml"]
+    assert "legacyToml" not in payload
 
-    legacy = _invoke("schema", "--legacy-toml")
-    assert legacy.exit_code == 0
-    assert json.loads(legacy.stdout)["legacy"] is True
-    assert "mutation_command" in json.loads(
-        _invoke("schema", "--command", "workflow.add-node").stdout
-    )
-
-    workflow_help = _invoke("workflow", "--help").stdout
-    assert "[Legacy TOML]" in workflow_help
-    for group in ("agent", "schedule", "watch", "runner"):
-        assert "[Legacy TOML]" in _invoke(group, "--help").stdout, group
+    assert "Legacy TOML" not in _invoke("workflow", "--help").stdout
 
 
-def test_legacy_commands_are_all_still_registered() -> None:
+def test_only_rattish_workflow_commands_are_registered() -> None:
     import typer
 
     command: Any = typer.main.get_command(app)
-    workflow_commands = set(command.commands["workflow"].commands)
-    assert {
-        "add-agent",
-        "add-edge",
-        "add-node",
-        "build",
-        "edit",
-        "history",
-        "set-schedule",
-        "set-watch",
-        "show",
-        "stop",
-        "trigger",
-    } <= workflow_commands
-    assert {"agent", "schedule", "watch", "runner", "ui", "serve", "tokens"} <= set(
-        command.commands
-    )
+    assert set(command.commands["workflow"].commands) == {
+        "approvals",
+        "approve",
+        "duplicate",
+        "export",
+        "import",
+        "list",
+        "logs",
+        "plan",
+        "reject",
+        "rename",
+        "resume",
+        "rm",
+        "run",
+        "usage",
+        "validate",
+    }
+    assert not {"agent", "schedule", "watch", "runner"} & set(command.commands)
+    assert {"ui", "serve", "tokens"} <= set(command.commands)
 
 
 # --- headless ---------------------------------------------------------------------------
@@ -341,6 +337,7 @@ def headless_serve(tmp_path, monkeypatch):
     monkeypatch.setattr(ui, "ensure_local_gofer_cli", lambda data_dir: None)
     monkeypatch.setattr(ui, "start_background_refresh", lambda data_dir: lambda: None)
     monkeypatch.setattr(ui, "start_leftover_reclaimer", lambda: lambda: None)
+    monkeypatch.setattr(ui, "start_temp_cleanup", lambda data_dir: lambda: None)
     monkeypatch.setattr(ui, "_install_shutdown_handlers", lambda server: None)
     monkeypatch.setenv("RATICODE_EXPERIMENTAL_ORGANIZATIONS", "1")
     captured = _Captured()
@@ -427,6 +424,11 @@ def test_headless_serve_writes_private_files_and_loads_rem_settings(
     endpoint = json.loads(endpoint_path.read_text(encoding="utf-8"))
     assert endpoint["url"] == f"http://127.0.0.1:{server.server_address[1]}/api"
     assert endpoint["pid"] == os.getpid()
+    # The backend answers the instance proof the CLI checks before sending the token.
+    assert endpoint["proof"] == 1
+    nonce = "5a" * 32
+    status, answer = _request(server, "GET", f"/api/instance/proof?nonce={nonce}", None)
+    assert status == 200 and answer == {"proof": headless.instance_proof(token, nonce)}
     assert token not in endpoint_path.read_text(encoding="utf-8")
     assert server.headless and server.api_token == token
 
@@ -439,9 +441,11 @@ def test_headless_serve_writes_private_files_and_loads_rem_settings(
     assert config["projects"][0]["root"] == str(project.resolve())
 
     assert _request(server, "GET", "/api/rem/conversation", None)[0] == 401
-    assert headless.read_owner_token(data_dir, environ={}) == token
-    with pytest.raises(headless.HeadlessError, match="agent session"):
-        headless.read_owner_token(data_dir, environ={"RATICODE_AGENT_SESSION": "1"})
+    # The user's CLI finds the published owner token; no agent turn does, whichever
+    # marker Raticode set for it.
+    assert discover_endpoint(data_dir=data_dir, env={}).token == token
+    for marker in AGENT_SESSION_ENVS:
+        assert discover_endpoint(data_dir=data_dir, env={marker: "1"}).token == ""
 
     server.shutdown()
     # Shutdown removes the endpoint file, then the token file; wait for both, so a slow
@@ -557,7 +561,7 @@ def test_agent_tokens_are_hashed_and_limited(tmp_path, headless_serve, monkeypat
 
     assert _request(server, "GET", "/api/workflows", agent)[0] == 200
     for method, path, body in (
-        ("GET", "/api/session", None),
+        ("GET", "/api/provider/accounts", None),
         ("POST", "/api/rem/context", {}),
         ("POST", "/api/rem/messages", {"body": "hello"}),
         ("PUT", "/api/rem/kanban/settings", {}),
@@ -673,6 +677,40 @@ def test_agent_tokens_are_hashed_and_limited(tmp_path, headless_serve, monkeypat
     assert not (tmp_path / "other").exists()
 
 
+def test_agent_token_commands_refuse_command_activity_turns(tmp_path, monkeypatch) -> None:
+    # A provider turn can carry any of the CLI's agent-session markers without
+    # RATICODE_AGENT_SESSION; tokens create and revoke refuse each one like other guards.
+    data_dir = tmp_path / "data"
+    assert (
+        _invoke(
+            "tokens",
+            "create",
+            "kept",
+            "-o",
+            str(tmp_path / "kept.token"),
+            "--data-dir",
+            str(data_dir),
+        ).exit_code
+        == 0
+    )
+    monkeypatch.setenv("RATICODE_COMMAND_ACTIVITY", "1")
+    assert "RATICODE_AGENT_SESSION" not in os.environ
+    message = "Agent tokens can't be created or revoked from inside a Raticode agent session."
+
+    token_out = tmp_path / "ci.token"
+    created = _invoke("tokens", "create", "ci", "-o", str(token_out), "--data-dir", str(data_dir))
+    assert created.exit_code == 5, created.output
+    assert message in created.stderr
+    assert not token_out.exists()
+
+    revoked = _invoke("tokens", "revoke", "kept", "--data-dir", str(data_dir))
+    assert revoked.exit_code == 5, revoked.output
+    assert message in revoked.stderr
+    monkeypatch.delenv("RATICODE_COMMAND_ACTIVITY")
+    listed = _invoke("tokens", "list", "--format", "json", "--data-dir", str(data_dir))
+    assert [item["name"] for item in json.loads(listed.stdout)] == ["kept"]
+
+
 def test_child_processes_are_marked_as_agent_sessions() -> None:
     from gofer.utils.process import build_subprocess_env
 
@@ -720,7 +758,7 @@ def test_api_client_discovers_the_headless_backend(tmp_path, headless_serve, mon
     assert with_agent.exit_code == 0, with_agent.output
     # `api` refuses what an agent token can't do before sending it; the backend
     # refuses it too (test_agent_tokens_are_hashed_and_limited).
-    forbidden = _invoke("api", "GET", "/session", "--token-file", str(token_out), *flags)
+    forbidden = _invoke("api", "GET", "/provider/accounts", "--token-file", str(token_out), *flags)
     assert forbidden.exit_code == 5, forbidden.output
     assert json.loads(forbidden.stdout)["error"]["code"] == "user_only"
 
@@ -731,40 +769,26 @@ def test_api_client_discovers_the_headless_backend(tmp_path, headless_serve, mon
     assert json.loads(explicit_owner.stdout)["error"]["code"] == "owner_token_in_agent_session"
 
 
-def test_legacy_workflow_writers_go_through_a_running_backend(
+def test_workflow_writers_go_through_a_running_backend(
     tmp_path, headless_serve, monkeypatch
 ) -> None:
     """workflow rename, duplicate and rm let a published backend make the change, so the
-    backend is the only writer of the workflow files and re-syncs its schedules at once."""
+    backend is the only writer of the workflow files."""
     data_dir, workflow_id, _ = _workflow(tmp_path)
     flags = ["--data-dir", str(data_dir)]
-    from gofer.ui.server import GoferUiRequestHandler
 
     headless_serve(data_dir)
-    # Count the re-syncs the request handler does after a change. The backend's own
-    # monitor also calls server.sync_schedules() every second, so that isn't counted.
-    synced: list[str] = []
-    real_sync = GoferUiRequestHandler._sync_schedules
-
-    def sync(handler: GoferUiRequestHandler) -> None:
-        synced.append("sync")
-        real_sync(handler)
-
-    monkeypatch.setattr(GoferUiRequestHandler, "_sync_schedules", sync)
 
     renamed = _invoke("workflow", "rename", workflow_id, "--name", "Renamed flow", *flags)
     assert renamed.exit_code == 0, renamed.output
     assert "Renamed flow" in renamed.stdout
-    assert len(synced) == 1
 
     copied = _invoke("workflow", "duplicate", workflow_id, "--name", "Copy flow", *flags)
     assert copied.exit_code == 0, copied.output
     copy_id = copied.stdout.rsplit("(", 1)[1].split(")", 1)[0]
-    assert len(synced) == 2
 
     removed = _invoke("workflow", "rm", copy_id, "--yes", *flags)
     assert removed.exit_code == 0, removed.output
-    assert len(synced) == 3
     listed = json.loads(_invoke("workflow", "list", "--json", *flags).stdout)["workflows"]
     assert [item["id"] for item in listed] == [workflow_id]
 
@@ -778,10 +802,9 @@ def test_legacy_workflow_writers_go_through_a_running_backend(
     monkeypatch.setenv("RATICODE_AGENT_SESSION", "1")
     refused = _invoke("workflow", "rm", workflow_id, "--yes", *flags)
     assert refused.exit_code == 5, refused.output
-    assert len(synced) == 3
 
 
-def test_legacy_workflow_writers_work_offline_after_the_backend_stops(tmp_path) -> None:
+def test_workflow_writers_work_offline_after_the_backend_stops(tmp_path) -> None:
     data_dir, workflow_id, _ = _workflow(tmp_path)
     flags = ["--data-dir", str(data_dir)]
     endpoint = data_dir / "headless" / "endpoint.json"

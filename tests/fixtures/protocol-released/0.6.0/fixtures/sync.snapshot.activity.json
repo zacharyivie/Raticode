@@ -1,0 +1,28 @@
+{
+  "version": 2,
+  "id": "00000000-0000-4000-8000-000000000001",
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000003",
+  "sequence": 0,
+  "type": "sync.snapshot",
+  "payload": {
+    "revision": 1,
+    "through_sequence": 0,
+    "threads": [
+      {
+        "thread_id": "00000000-0000-4000-8000-000000000002",
+        "revision": 3,
+        "title": "Review the release notes",
+        "project_id": null,
+        "resource_ids": [],
+        "provider": "codex",
+        "model": "model-a",
+        "group": "active",
+        "running": false,
+        "updated_at": "2026-10-30T16:00:00.000Z",
+        "unread": true,
+        "read_at": "2026-10-30T15:00:00.000Z"
+      }
+    ]
+  }
+}

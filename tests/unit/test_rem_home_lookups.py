@@ -127,7 +127,7 @@ def test_task_lookup_gives_the_full_task_and_recent_runs():
 
 def test_note_lookups_wrap_text_from_conversation_attachments(tmp_path: Path):
     from gofer.ui.brain_library import BrainLibrary
-    from tests.unit.test_brain_library import wait_task
+    from tests.helpers.brain_library import wait_task
 
     root = tmp_path / "brain"
     archive = root / "Rem Conversations"

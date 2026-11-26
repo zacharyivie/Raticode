@@ -1,4 +1,4 @@
-import { apiUrl } from "./api.js";
+import { apiJson } from "./api.js";
 import { selectThreadBrains } from "./remResources.js";
 
 export async function brainRequest(action = "snapshot", params = {}) {
@@ -28,13 +28,12 @@ export async function brainRequest(action = "snapshot", params = {}) {
   const query = action === "snapshot" ? new URLSearchParams([
     ...(params.revision ? [["revision", params.revision]] : []),
     ...(params.recheck ? [["recheck", "1"]] : []),
+    ...(params.passages ? [["passages", "1"]] : []),
   ]).toString() : "";
-  const response = await fetch(apiUrl(query ? `/second-brains?${query}` : "/second-brains"), action === "snapshot" ? {} : {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action, params, workspaceGrants }),
+  const payload = await apiJson(query ? `/second-brains?${query}` : "/second-brains", {
+    ...(action === "snapshot" ? {} : { method: "POST", body: { action, params, workspaceGrants } }),
+    failure: "Could not access the Second Brain library.",
   });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || "Could not access the Second Brain library.");
   if (payload.result === undefined) throw new Error("The Second Brain service returned an invalid response.");
   return payload.result;
 }

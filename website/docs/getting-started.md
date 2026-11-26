@@ -30,6 +30,8 @@ Install one supported coding CLI and sign in with its own instructions. Raticode
 2. If it isn't found, open **Not installed** at the end of the list, choose its executable, and choose **Refresh providers**.
 3. In **Settings > Rem**, pick the **Default provider** for new tasks and threads. You can also set a separate **Rem chat provider** for Rem's own replies.
 
+Settings > Rem always shows the app you saved, even when it can't run here. An app that isn't installed or is turned off stays chosen with a label such as **Codex (not installed)** or **Codex (turned off)**, and a warning under the list links to **Settings > Providers**. Pick another app, or install or turn on that one. Rem's home says the same on its welcome screen: *Rem's app, Codex, isn't installed on this computer. Choose another in Settings › Rem.*, with a button that opens the setting.
+
 Start with the provider you already use. [Provider setup](./setup.md) lists the CLI names and how to check sign-in. You can skip this step while you learn command and file nodes.
 
 ## 3. Open a project

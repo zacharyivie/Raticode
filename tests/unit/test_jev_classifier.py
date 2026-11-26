@@ -30,7 +30,8 @@ from gofer.classifiers.jev import (
     retry_after_seconds,
 )
 from gofer.core.http import HttpRequest, HttpResponse
-from gofer.core.usage_ledger import activity_payload, usage_db
+from gofer.core.usage_history import resolve_range, usage_history
+from gofer.core.usage_ledger import usage_db
 
 FAKE_KEY = "fake-jev-key-for-tests"
 YES_NO = JevQuestion(
@@ -420,7 +421,7 @@ async def test_every_call_writes_one_usage_row_including_failures(tmp_path: Path
         "output_tokens": 0,
         "total_tokens": 120,
     }
-    providers = activity_payload(tmp_path)["activity"]["providers"]
+    providers = usage_history(tmp_path, resolve_range())["activity"]["providers"]
     assert [(p["provider"], p["calls"]) for p in providers] == [("jev", 2)]
     assert FAKE_KEY not in json.dumps(rows)
 

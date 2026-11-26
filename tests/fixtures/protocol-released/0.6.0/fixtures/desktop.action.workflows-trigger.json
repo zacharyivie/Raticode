@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000217",
+  "id": "10000000-0000-4000-8000-000000000217",
+  "sequence": 217,
+  "type": "desktop.action",
+  "payload": {
+    "op": "workflows.trigger",
+    "params": {
+      "workflow_id": "release-check",
+      "trigger_id": "trg_0123456789abcdef",
+      "enabled": true,
+      "confirmed": true
+    }
+  }
+}

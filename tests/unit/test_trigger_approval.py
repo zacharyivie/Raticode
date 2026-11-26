@@ -555,6 +555,81 @@ def test_cli_in_an_agent_turn_cant_take_a_webhook_token_or_loosen_limits(
     assert _cli("pause", "--all", *base).exit_code == 0
 
 
+def test_cli_in_an_agent_turn_can_lower_trigger_limits_but_not_raise_or_remove_them(
+    data_dir: Path, project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = TriggerStore(data_dir)
+    trigger_id = _cron(store, project / "workflow.rattish")
+    limits = {"daily_max_cost_usd": 5, "daily_max_tokens": 50_000, "max_run_seconds": 3600}
+    store.update(trigger_id, **limits, actor="user")
+    monkeypatch.setenv("RATICODE_AGENT_SESSION", "1")
+    base = ("--data-dir", str(data_dir))
+
+    for refused in (
+        ("--daily-max-cost-usd", "0"),
+        ("--daily-max-tokens", "0"),
+        ("--max-run-time", "none"),
+        ("--daily-max-cost-usd", "6"),
+        ("--daily-max-tokens", "60000"),
+        ("--max-run-time", "2h"),
+    ):
+        result = _cli("update", trigger_id, *refused, *base)
+        assert result.exit_code == 5, (refused, result.output)
+        assert "an agent turn can only lower them" in result.output
+    as_json = _cli("update", trigger_id, "--max-run-time", "none", "--format", "json", *base)
+    assert as_json.exit_code == 5
+    assert json.loads(as_json.output)["code"] == "user_only"
+    kept = store.get(trigger_id)
+    assert (kept.daily_max_cost_usd, kept.daily_max_tokens, kept.max_run_seconds) == (
+        5,
+        50_000,
+        3600,
+    )
+
+    lowered = _cli(
+        "update", trigger_id, "--daily-max-cost-usd", "2.5", "--daily-max-tokens", "50000",
+        "--max-run-time", "30m", *base,
+    )  # fmt: skip
+    assert lowered.exit_code == 0, lowered.output
+    saved = store.get(trigger_id)
+    assert (saved.daily_max_cost_usd, saved.daily_max_tokens, saved.max_run_seconds) == (
+        2.5,
+        50_000,
+        1800,
+    )
+
+    # An agent-added trigger keeps the default Time limit or a lower one.
+    workflow = str(project / "workflow.rattish")
+    for refused in (("--max-run-time", "none"), ("--max-run-time", "7h")):
+        result = _cli("add", "cron", workflow, "--cron", "0 9 * * *", *refused, *base)
+        assert result.exit_code == 5, (refused, result.output)
+    assert len(store.list_triggers()) == 1
+    added = _cli("add", "cron", workflow, "--cron", "0 9 * * *", "--max-run-time", "1h", *base)
+    assert added.exit_code == 0, added.output
+    assert sorted(item.max_run_seconds or 0 for item in store.list_triggers()) == [1800, 3600]
+
+    # The user can still raise and remove them.
+    monkeypatch.delenv("RATICODE_AGENT_SESSION")
+    removed = _cli(
+        "update", trigger_id, "--daily-max-cost-usd", "0", "--max-run-time", "none", *base
+    )  # fmt: skip
+    assert removed.exit_code == 0, removed.output
+    assert store.get(trigger_id).daily_max_cost_usd is None
+    assert store.get(trigger_id).max_run_seconds is None
+
+
+def test_store_limits_check_applies_to_every_non_user_actor(data_dir: Path, project: Path) -> None:
+    store = TriggerStore(data_dir)
+    trigger_id = _cron(store, project / "workflow.rattish")
+    for actor in ("rem", "agent", None):
+        with pytest.raises(TriggerError, match="can only lower them"):
+            store.update(trigger_id, max_run_seconds=None, actor=actor)
+    # A trigger with no limit can get one, and other changes leave limits alone.
+    store.update(trigger_id, daily_max_tokens=100, label="renamed", actor="rem")
+    store.update(trigger_id, enabled=False)
+    assert store.get(trigger_id).daily_max_tokens == 100
+
+
 def test_cli_sets_run_edits_without_approval(data_dir: Path, project: Path) -> None:
     base = ("--data-dir", str(data_dir), "--format", "json")
     added = _cli(

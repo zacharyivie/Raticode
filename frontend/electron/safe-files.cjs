@@ -103,7 +103,7 @@ async function writeFile(target, content, { authorize = () => {}, exclusive = fa
       }
       await verify();
       if (process.platform === "linux") authorize(await fsp.realpath(`/proc/self/fd/${handle.fd}`));
-      if (expectedHash && digest(await readBounded(handle, stat, maxBytes)) !== expectedHash) throw new Error("File changed since the search. Refresh the results.");
+      if (expectedHash && digest(await readBounded(handle, stat, maxBytes)) !== expectedHash) throw Object.assign(new Error("File changed since the search. Refresh the results."), { code: "ERR_FILE_CHANGED" });
       const bytes = Buffer.isBuffer(content) ? content : Buffer.from(content, "utf8");
       let offset = 0;
       while (offset < bytes.length) {

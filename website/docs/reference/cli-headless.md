@@ -376,9 +376,9 @@ Each kind of setting has a pair of commands. Write a file with the first, keep i
 
 The backend treats every request that carries your token as you. So inside a Rem or worker turn, the CLI refuses these commands with exit 5 (error code `user_only`) and sends nothing:
 
-- `rattish approve` and `reject`, and the legacy `workflow approve` and `reject`
+- `rattish approve` and `reject`, and `workflow approve` and `reject`
 - `rattish runs land` and `discard`
-- `rattish triggers approve`, `rotate-token`, `webhook-port PORT`, `budget` with a limit, `resume --all`, and `--run-edits-without-approval` on `add` or `update`
+- `rattish triggers approve`, `rotate-token`, `webhook-port PORT`, `budget` with a limit, `resume --all`, `--run-edits-without-approval` on `add` or `update`, and a trigger's daily limits or Time limit raised or removed with `add` or `update` (lowering them still works)
 - `rattish secrets set` and `remove`
 - `org apply`, `org employees release`, Auto mode changes and sending a ticket to another computer
 - `swarm apply` and `delete`
@@ -431,7 +431,7 @@ Some of the app's endpoints have no CLI command on purpose. Each has a reason:
 | `browser` | Raticode's browser tabs, which need a display. |
 | `source-control` | Git. Use git directly. |
 
-Anything else the backend serves that has no command of its own is still reachable with `Raticode api`, such as workflow revision history (`GET /workflows/ID/history`) or log retention (`GET /retention`).
+Anything else the backend serves that has no command of its own is still reachable with `Raticode api`, such as log retention (`GET /retention`).
 
 ## Every backend command
 
@@ -462,7 +462,7 @@ Anything else the backend serves that has no command of its own is still reachab
 | `Raticode rem tasks list`, `Raticode rem tasks show`, `Raticode rem tasks create`, `Raticode rem tasks edit`, `Raticode rem tasks run`, `Raticode rem tasks pause`, `Raticode rem tasks resume`, `Raticode rem tasks delete`, `Raticode rem tasks wait`, `Raticode rem tasks wake`, `Raticode rem tasks make-workflow`, `Raticode rem tasks switch-over` | [Rem from the CLI](./cli-rem.md) |
 | `Raticode rem runs show`, `Raticode rem runs pause`, `Raticode rem runs resume`, `Raticode rem runs cancel`, `Raticode rem runs acknowledge`, `Raticode rem runs acknowledge-all`, `Raticode rem runs retry-review`, `Raticode rem runs wake`, `Raticode rem runs run-there`, `Raticode rem thread show`, `Raticode rem thread send`, `Raticode rem context` | [Rem from the CLI](./cli-rem.md) |
 | `Raticode tickets list`, `Raticode tickets show`, `Raticode tickets create`, `Raticode tickets edit`, `Raticode tickets move`, `Raticode tickets assign`, `Raticode tickets comment`, `Raticode tickets comments`, `Raticode tickets approve`, `Raticode tickets decline`, `Raticode tickets projects` | [Tickets from the CLI](./cli-rem.md#tickets) |
-| `Raticode selfwork status`, `Raticode selfwork report`, `Raticode selfwork on`, `Raticode selfwork off`, `Raticode selfwork window`, `Raticode selfwork stop-when`, `Raticode selfwork objectives`, `Raticode selfwork set`, `Raticode selfwork export`, `Raticode selfwork apply` | [Self-work from the CLI](./cli-rem.md) |
+| `Raticode selfwork status`, `Raticode selfwork report`, `Raticode selfwork start`, `Raticode selfwork on`, `Raticode selfwork off`, `Raticode selfwork window`, `Raticode selfwork stop-when`, `Raticode selfwork objectives`, `Raticode selfwork set`, `Raticode selfwork export`, `Raticode selfwork apply` | [Self-work from the CLI](./cli-rem.md) |
 
 ## Keeping the CLI in step with the app
 

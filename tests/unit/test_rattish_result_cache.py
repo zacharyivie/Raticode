@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -285,6 +286,78 @@ async def test_bound_inputs_are_part_of_the_key(tmp_path: Path) -> None:
         await _run(source, data_dir, provider, workflow_inputs={"topic": topic})
 
     assert len(provider.calls) == 2
+
+
+async def test_a_file_input_counts_by_its_contents_not_its_run_copy(tmp_path: Path) -> None:
+    source = _write(
+        tmp_path,
+        "Rattish: 1\n\nWorkflow:\n  name: Files\n  inputs:\n    doc:\n"
+        '      schema: {"type": "string", "format": "file"}\n      required: true\n\n'
+        "Node summarize:\n  type: common-llm-task\n  provider: claude-code\n  cache: 7d\n"
+        "  with:\n    target: input.doc\n",
+    )
+    data_dir = tmp_path / "data"
+    provider = ScriptedProvider("claude-code")
+    first_file = tmp_path / "a" / "notes.txt"
+    same_bytes = tmp_path / "b" / "notes.txt"
+    for path in (first_file, same_bytes):
+        path.parent.mkdir()
+        path.write_bytes(b"The same notes.\n")
+
+    first = await _run(source, data_dir, provider, workflow_inputs={"doc": str(first_file)})
+    again = await _run(source, data_dir, provider, workflow_inputs={"doc": str(same_bytes)})
+
+    # Each run bound the input to its own copy, so the paths differ but the bytes don't.
+    copies = {run.document["run_id"]: run.path for run in (first, again)}
+    assert len(copies) == 2
+    assert len(provider.calls) == 1
+    assert "cached_at" not in first.document["runs"][0]
+    assert "cached_at" in again.document["runs"][0]
+
+    first_file.write_bytes(b"Different notes.\n")
+    changed = await _run(source, data_dir, provider, workflow_inputs={"doc": str(first_file)})
+
+    assert len(provider.calls) == 2
+    assert "cached_at" not in changed.document["runs"][0]
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True)
+
+
+async def test_a_worktree_run_counts_by_its_project_not_its_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{name}_NAME", "t")
+        monkeypatch.setenv(f"GIT_{name}_EMAIL", "t@x")
+    repo = tmp_path / "project"
+    (repo / "sub").mkdir(parents=True)
+    (repo / "sub" / "keep").write_text("")
+    _write(
+        tmp_path,
+        "Rattish: 1\n\nWorkflow:\n  name: Worktree Cache\n  workspace: worktree\n\n"
+        "Node summarize:\n  type: common-llm-task\n  provider: claude-code\n"
+        "  target: hello world\n  cache: 7d\n"
+        f"\nNode nested:\n  type: common-llm-task\n  provider: claude-code\n"
+        f"  target: the sub folder\n  working-dir: {repo}/sub\n  cache: 7d\n",
+    )
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "commit.gpgsign", "false")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    data_dir = tmp_path / "data"
+    provider = ScriptedProvider("claude-code")
+
+    first = await _run(repo / "workflow.rattish", data_dir, provider)
+    second = await _run(repo / "workflow.rattish", data_dir, provider)
+
+    checkouts = {run.document["worktree"]["checkout"] for run in (first, second)}
+    assert len(checkouts) == 2
+    assert first.status == second.status == "passed"
+    assert len(provider.calls) == 2
+    assert all("cached_at" not in run for run in first.document["runs"])
+    assert all("cached_at" in run for run in second.document["runs"])
 
 
 async def test_an_entry_older_than_the_duration_is_not_used(tmp_path: Path) -> None:

@@ -122,6 +122,101 @@ def create(
         _echo_starter_next_steps(from_starter.to_payload(), workflow.entrypoint)
 
 
+@app.command("convert")
+def convert(
+    toml_file: Path = typer.Argument(
+        ..., help="An old TOML workflow file, such as ~/.local/share/gofer/demo.toml."
+    ),
+    project: Path | None = typer.Option(
+        None, "--project", help="Register the converted workflow in this project folder."
+    ),
+    output: Path | None = typer.Option(
+        None, "--output", help="Write workflow.rattish here instead of registering it."
+    ),
+    name: str | None = typer.Option(
+        None, "--name", help="Workflow name. Defaults to the TOML name."
+    ),
+    allow_partial: bool = typer.Option(
+        False, "--allow-partial", help="Convert even when some parts must be finished by hand."
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format: text or json."),
+    registry_dir: Path | None = typer.Option(
+        None, "--registry-dir", help="Override the app directory used for workflow registration."
+    ),
+) -> None:
+    """Convert an old TOML workflow to Rattish. The TOML file is never changed.
+
+    With --project the result is registered like `rattish create`; with --output it is
+    only written; with neither it is printed. Exits 1 when parts can't be converted,
+    unless --allow-partial.
+    """
+    from gofer.rattish.toml_convert import (
+        TomlConversionError,
+        convert_toml_into_project,
+        convert_toml_workflow,
+    )
+
+    _require_format(output_format)
+    if project is not None and output is not None:
+        typer.echo("Give --project or --output, not both.", err=True)
+        raise typer.Exit(2)
+    payload: dict[str, Any] = {"command": "convert", "toml": str(toml_file.expanduser())}
+    try:
+        if project is not None:
+            workflow, conversion = convert_toml_into_project(
+                toml_file,
+                project,
+                registry_dir=registry_dir,
+                name=name,
+                allow_partial=allow_partial,
+            )
+            payload["workflow"] = workflow.to_payload()
+        else:
+            conversion = convert_toml_workflow(
+                toml_file, source_label=str(output) if output else "workflow.rattish"
+            )
+            if output is not None and (allow_partial or not conversion.unsupported):
+                if output.exists():
+                    raise TomlConversionError(f"{output} already exists. Choose another --output.")
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text(conversion.source, encoding="utf-8")
+                payload["output"] = str(output)
+    except TomlConversionError as exc:
+        payload.update({"ok": False, "error": str(exc), "problems": list(exc.problems)})
+        if output_format == "json":
+            _emit_json(payload)
+        else:
+            typer.echo(str(exc), err=True)
+            for problem in exc.problems:
+                typer.echo(f"  {problem}", err=True)
+        raise typer.Exit(1 if exc.problems else 2)
+    partial = bool(conversion.unsupported) and not allow_partial
+    payload.update(conversion.to_payload())
+    payload["ok"] = not partial
+    if project is None and output is None and not partial:
+        payload["source"] = conversion.source
+    if output_format == "json":
+        _emit_json(payload)
+    else:
+        if "workflow" in payload:
+            typer.echo(f"Converted to {payload['workflow']['sourcePath']}")
+        elif "output" in payload:
+            typer.echo(f"Wrote {output}. Check it with: Raticode rattish check {output}")
+        elif not partial:
+            typer.echo(conversion.source, nl=False)
+        for item in conversion.unsupported:
+            typer.echo(f"Not converted: {item}", err=True)
+        if partial:
+            typer.echo(
+                "Nothing was written. Finish these by hand after converting with --allow-partial.",
+                err=True,
+            )
+        for note in conversion.notes:
+            typer.echo(f"Note: {note}", err=project is None and output is None)
+    if partial:
+        raise typer.Exit(1)
+
+
 @app.command("starters")
 def list_starters_command(
     output_format: str = typer.Option("text", "--format", help="Output format: text or json."),
@@ -249,7 +344,7 @@ def check(
     source: Path = typer.Argument(..., help="Path to a .rattish workflow file."),
     output_format: str = typer.Option("text", "--format", help="Output format: text or json."),
     data_dir: Path | None = typer.Option(
-        None, "--data-dir", help="Override the app data directory used for internal artifacts."
+        None, "--data-dir", help="Override the data folder used for internal artifacts."
     ),
 ) -> None:
     """Compile a Rattish file and report language errors without running it."""
@@ -264,7 +359,7 @@ def compile_source(
     source: Path = typer.Argument(..., help="Path to a .rattish workflow file."),
     output_format: str = typer.Option("text", "--format", help="Output format: text or json."),
     data_dir: Path | None = typer.Option(
-        None, "--data-dir", help="Override the app data directory used for internal artifacts."
+        None, "--data-dir", help="Override the data folder used for internal artifacts."
     ),
 ) -> None:
     """Compile and publish validated IR to Raticode's internal artifact cache."""
@@ -284,7 +379,7 @@ def inspect_ir(
     source: Path = typer.Argument(..., help="Path to a .rattish workflow file."),
     pretty: bool = typer.Option(False, "--pretty", help="Indent the emitted JSON."),
     data_dir: Path | None = typer.Option(
-        None, "--data-dir", help="Override the app data directory used for internal artifacts."
+        None, "--data-dir", help="Override the data folder used for internal artifacts."
     ),
 ) -> None:
     """Print validated internal IR without creating a source-side IR file."""
@@ -341,7 +436,7 @@ def preflight(
     source: Path = typer.Argument(..., help="Path to a .rattish workflow file."),
     output_format: str = typer.Option("text", "--format", help="Output format: text or json."),
     data_dir: Path | None = typer.Option(
-        None, "--data-dir", help="Override the app data directory used for internal artifacts."
+        None, "--data-dir", help="Override the data folder used for internal artifacts."
     ),
 ) -> None:
     """Compile a Rattish file and check whether this environment can run it."""
@@ -372,7 +467,7 @@ def run(
     ),
     output_format: str = typer.Option("text", "--format", help="Output format: text or json."),
     data_dir: Path | None = typer.Option(
-        None, "--data-dir", help="Override the app data directory used for runs and artifacts."
+        None, "--data-dir", help="Override the data folder used for runs and artifacts."
     ),
     from_node: str | None = typer.Option(
         None,
@@ -435,7 +530,7 @@ def prune(
     ),
     output_format: str = typer.Option("text", "--format", help="Output format: text or json."),
     data_dir: Path | None = typer.Option(
-        None, "--data-dir", help="Override the app data directory used for runs and artifacts."
+        None, "--data-dir", help="Override the data folder used for runs and artifacts."
     ),
 ) -> None:
     """Preview or delete old runs of a Rattish workflow.
@@ -557,7 +652,7 @@ def test_workflow(
     ),
     output_format: str = typer.Option("text", "--format", help="Output format: text or json."),
     data_dir: Path | None = typer.Option(
-        None, "--data-dir", help="Override the app data directory used for runs and results."
+        None, "--data-dir", help="Override the data folder used for runs and results."
     ),
 ) -> None:
     """Run a workflow's test set: each case runs the workflow and its checks.

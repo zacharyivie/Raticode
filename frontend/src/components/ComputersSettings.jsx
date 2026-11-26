@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ArrowDown, ArrowUp } from "lucide-react";
-import { apiUrl } from "../lib/api.js";
+import { apiJson } from "../lib/api.js";
 import { NumberControl } from "./SettingControls.jsx";
 import { pollWithoutOverlap } from "../lib/statusPolling.js";
 import {
@@ -27,16 +27,7 @@ const tones = {
 };
 const iconButton = "grid h-7 w-7 place-items-center rounded-md border border-line text-muted transition hover:bg-slate-50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500 disabled:cursor-not-allowed disabled:opacity-40";
 
-async function send(path, body) {
-  const response = await fetch(apiUrl(path), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || "Raticode couldn't save that change.");
-  return payload;
-}
+const send = (path, body) => apiJson(path, { method: "POST", body, failure: "Raticode couldn't save that change." });
 
 function withoutKey(record, key) {
   const next = { ...record };
@@ -66,11 +57,9 @@ export default function ComputersSettings({ maxWorkers = 0, onMaxWorkers } = {})
   const [saving, setSaving] = useState("");
 
   const load = useCallback(async (signal) => {
-    const [listed, placed] = await Promise.all(["/computers", "/computers/placement"].map(async (path) => {
-      const response = await fetch(apiUrl(path), { signal, cache: "no-store" });
-      if (!response.ok) throw new Error("Computers could not be loaded.");
-      return response.json();
-    }));
+    const [listed, placed] = await Promise.all(["/computers", "/computers/placement"].map(
+      (path) => apiJson(path, { signal, cache: "no-store", failure: "Computers could not be loaded." }),
+    ));
     setComputers(listed.computers ?? []);
     setPlacement(placed);
     setLoadError("");

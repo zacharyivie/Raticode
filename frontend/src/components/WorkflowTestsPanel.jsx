@@ -73,6 +73,11 @@ function ChangeBadge({ change }) {
   );
 }
 
+// Whether a loaded tests payload still holds the test set the delete saved.
+function sameTestSet(payload, deleted) {
+  return payload?.revision === deleted.revision && JSON.stringify(payload?.testSet ?? null) === deleted.testSet;
+}
+
 function JsonBlock({ value }) {
   return (
     <pre className="max-h-32 overflow-auto rounded-md bg-slate-50 p-2 font-mono text-[11px] leading-4 text-ink">
@@ -94,6 +99,8 @@ export default function WorkflowTestsPanel({ active = true, workflowId = "", wor
   const [rawDraft, setRawDraft] = useState(null);
   // Try another model: the chosen node, provider and model, and the estimate for both.
   const [trial, setTrial] = useState(null);
+  // The last deleted case and the test set its delete saved, so Undo can put it back.
+  const [deleted, setDeleted] = useState(null);
 
   const load = useCallback(async () => {
     if (!workflowId) return;
@@ -117,7 +124,17 @@ export default function WorkflowTestsPanel({ active = true, workflowId = "", wor
     setEditing(null);
     setRawDraft(null);
     setTrial(null);
+    setDeleted(null);
   }, [workflowId]);
+
+  useEffect(() => {
+    if (!active) setDeleted(null);
+  }, [active]);
+
+  // Another save or a new workflow revision turns Undo off, so it never overwrites newer edits.
+  useEffect(() => {
+    setDeleted((current) => (current && !current.changed && !sameTestSet(data, current) ? { ...current, changed: true } : current));
+  }, [data]);
 
   useEffect(() => {
     if (active) void load();
@@ -156,13 +173,14 @@ export default function WorkflowTestsPanel({ active = true, workflowId = "", wor
   const estimateTotals = skipJudge ? data?.judgeEstimateSkipped : data?.estimate?.totals;
   const staleResult = result && data?.revision && result.revision !== data.revision;
 
-  async function saveCases(nextCases, nextSelected) {
+  async function saveCases(nextCases, nextSelected, { base = data, removed = null } = {}) {
     setBusy(true);
     try {
-      const payload = await workflowTestsApi.save(workflowId, { ...(data?.testSet ?? { testSetVersion: 1 }), testSetVersion: 1, cases: nextCases });
+      const payload = await workflowTestsApi.save(workflowId, { ...(base?.testSet ?? { testSetVersion: 1 }), testSetVersion: 1, cases: nextCases });
       setData(payload);
       setError("");
       setEditing(null);
+      setDeleted(removed ? { ...removed, testSet: JSON.stringify(payload.testSet ?? null), revision: payload.revision, changed: false } : null);
       if (nextSelected !== undefined) setSelectedId(nextSelected);
       return true;
     } catch (saveError) {
@@ -173,9 +191,37 @@ export default function WorkflowTestsPanel({ active = true, workflowId = "", wor
     }
   }
 
+  function deleteCase(testCase) {
+    const index = cases.findIndex((item) => item.id === testCase.id);
+    return saveCases(cases.filter((item) => item.id !== testCase.id), "", { removed: { testCase, index } });
+  }
+
+  // Reads the saved test set first and puts the case back only if nothing changed since the delete.
+  async function undoDelete() {
+    if (!deleted || deleted.changed) return;
+    setBusy(true);
+    let current;
+    try {
+      current = await workflowTestsApi.load(workflowId);
+    } catch (loadError) {
+      setError(loadError.message);
+      setBusy(false);
+      return;
+    }
+    if (!sameTestSet(current, deleted)) {
+      setData(current);
+      setBusy(false);
+      return;
+    }
+    const restored = [...(current.testSet?.cases ?? [])];
+    restored.splice(Math.min(deleted.index, restored.length), 0, deleted.testCase);
+    await saveCases(restored, deleted.testCase.id, { base: current });
+  }
+
   async function run(caseIds, models) {
     setBusy(true);
     setError("");
+    setDeleted(null);
     try {
       const payload = await workflowTestsApi.run(workflowId, {
         caseIds,
@@ -213,7 +259,7 @@ export default function WorkflowTestsPanel({ active = true, workflowId = "", wor
     setBusy(true);
     try {
       const saved = await onUseModel(modelChangeMutations(models));
-      if (saved) void load();
+      if (saved && !saved.error) void load();
     } finally {
       setBusy(false);
     }
@@ -230,6 +276,7 @@ export default function WorkflowTestsPanel({ active = true, workflowId = "", wor
 
   function addCase() {
     const id = nextCaseId(cases);
+    setDeleted(null);
     setEditing({ originalId: null, draft: draftFromCase({ id, inputs: starterInputs(selected), checks: [] }), error: "" });
   }
 
@@ -328,6 +375,16 @@ export default function WorkflowTestsPanel({ active = true, workflowId = "", wor
       ) : null}
       {dirty ? <p className="border-b border-line bg-amber-500/10 px-3 py-1 text-amber-800 dark:text-amber-200">Unsaved workflow changes aren&apos;t tested. Tests run the saved revision.</p> : null}
       {error ? <p className="border-b border-line bg-red-500/10 px-3 py-1 text-red-700 dark:text-red-300" role="alert">{error}</p> : null}
+      {deleted ? (
+        <div className="ui-notice ui-notice--banner flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-1" role="status">
+          <span>Deleted case “{deleted.testCase.name || deleted.testCase.id}”.</span>
+          {deleted.changed ? (
+            <span className="text-muted">The test set changed since, so the delete can&apos;t be undone here.</span>
+          ) : (
+            <button className="ui-button ui-button--sm" disabled={busy} type="button" onClick={undoDelete}>Undo</button>
+          )}
+        </div>
+      ) : null}
       {result ? (
         <div className="border-b border-line px-3 py-1 text-muted">
           <span className={STATUS_TONE[result.status] ?? ""}>
@@ -419,8 +476,11 @@ export default function WorkflowTestsPanel({ active = true, workflowId = "", wor
               change={changes[selected.id]}
               outcome={resultCases[selected.id]}
               testCase={selected}
-              onDelete={() => saveCases(cases.filter((item) => item.id !== selected.id), "")}
-              onEdit={() => setEditing({ originalId: selected.id, draft: draftFromCase(selected), error: "" })}
+              onDelete={() => deleteCase(selected)}
+              onEdit={() => {
+                setDeleted(null);
+                setEditing({ originalId: selected.id, draft: draftFromCase(selected), error: "" });
+              }}
               onRun={() => run([selected.id])}
             />
           ) : (

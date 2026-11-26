@@ -27,7 +27,7 @@ const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { cookieMatchesSite } = require("./browser-policy.cjs");
+const { createBidiSignIns } = require("./bidi-sign-ins.cjs");
 const { createBidiConnection } = require("./firefox-engine.cjs");
 
 const LISTENING = /WebDriver BiDi listening on (ws:\/\/127\.0\.0\.1:\d+)/;
@@ -288,58 +288,17 @@ function createGeckoControl({
   }
 
   // Rem's container starts signed out. Sites the user shares get a copy of
-  // the user's Gecko cookies, as in Firefox and Chrome tabs.
-  async function mirrorSignIns(sites = [], removed = []) {
-    if (!connection || !remUserContext) return;
-    const userPartition = { type: "storageKey", userContext: "default" };
-    const remPartition = { type: "storageKey", userContext: remUserContext };
-    if (sites.length) {
-      const { cookies = [] } = await send("storage.getCookies", { partition: userPartition });
-      for (const cookie of cookies) {
-        if (!sites.some((site) => cookieMatchesSite(cookie.domain, site))) continue;
-        const copy = {
-          name: cookie.name,
-          value: cookie.value,
-          domain: cookie.domain,
-          path: cookie.path,
-          httpOnly: cookie.httpOnly,
-          secure: cookie.secure,
-          sameSite: cookie.sameSite,
-          ...(Number.isFinite(cookie.expiry) ? { expiry: cookie.expiry } : {}),
-        };
-        await send("storage.setCookie", { cookie: copy, partition: remPartition }).catch((error) => {
-          log("warn", `Could not share the sign-in for ${String(cookie.domain).replace(/^\./, "")} with Rem's Gecko tabs: ${error.message}`);
-        });
-      }
-    }
-    if (removed.length) {
-      const { cookies = [] } = await send("storage.getCookies", { partition: remPartition });
-      for (const cookie of cookies) {
-        if (!removed.some((site) => cookieMatchesSite(cookie.domain, site))) continue;
-        if (sites.some((site) => cookieMatchesSite(cookie.domain, site))) continue;
-        await send("storage.deleteCookies", { filter: { name: cookie.name, domain: cookie.domain }, partition: remPartition }).catch(() => {});
-      }
-    }
-  }
-
-  // Only Rem's container. The user's Gecko cookies are cleared in Gecko's own
-  // settings, never by Raticode.
-  async function clearSiteCookies(kind, host_) {
-    if (kind !== "rem" || !connection || !remUserContext) return 0;
-    const partition = { type: "storageKey", userContext: remUserContext };
-    if (!host_) {
-      await send("storage.deleteCookies", { partition });
-      return -1;
-    }
-    const { cookies = [] } = await send("storage.getCookies", { partition });
-    let removed = 0;
-    for (const cookie of cookies) {
-      if (!cookieMatchesSite(cookie.domain, host_)) continue;
-      await send("storage.deleteCookies", { filter: { name: cookie.name, domain: cookie.domain }, partition }).catch(() => {});
-      removed += 1;
-    }
-    return removed;
-  }
+  // the user's Gecko cookies, as in Firefox and Chrome tabs. Only Rem's
+  // container is ever cleared: the user's Gecko cookies are cleared in Gecko's
+  // own settings, never by Raticode.
+  const { clearSiteCookies, mirrorSignIns } = createBidiSignIns({
+    send,
+    log,
+    remUserContext: () => remUserContext,
+    connected: () => Boolean(connection),
+    browserName: "Gecko",
+    userCookies: "never",
+  });
 
   async function setRemDownloads(allowed) {
     remDownloadsAllowed = allowed === true;

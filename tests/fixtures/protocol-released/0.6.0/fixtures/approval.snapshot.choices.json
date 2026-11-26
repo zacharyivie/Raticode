@@ -1,0 +1,28 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000101",
+  "id": "10000000-0000-4000-8000-000000000109",
+  "sequence": 109,
+  "type": "approval.snapshot",
+  "payload": {
+    "remote_allowed": true,
+    "approvals": [
+      {
+        "approval_id": "00000000-0000-4000-8000-000000000009",
+        "action_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "source": "workflow",
+        "title": "Workflow release-review",
+        "summary": "Which release channel should this build go to?",
+        "requested_at": "2026-11-16T12:00:00+00:00",
+        "instruction_required": false,
+        "options": [
+          "Stable",
+          "Beta",
+          "Hold back"
+        ],
+        "reply": "optional"
+      }
+    ]
+  }
+}

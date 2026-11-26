@@ -16,8 +16,8 @@ export const FULL_SCAN_MS = 30_000;
 const latestRunOf = workflow => JSON.stringify(workflow.latestRun ?? null);
 
 // The workflows Studio and run monitoring use from a /workflows payload. When the
-// backend authors Rattish, anything else it lists (old TOML files, or a project file
-// such as pyproject.toml it mistook for one) is not a workflow to show or poll.
+// backend authors Rattish, anything else it lists (an older backend's TOML files, or a
+// project file such as pyproject.toml it mistook for one) is not a workflow to show or poll.
 export function listedRattishWorkflows(payload) {
   const workflows = payload?.workflows ?? [];
   if (payload?.authoringLanguage !== "rattish") return workflows;
@@ -25,14 +25,11 @@ export function listedRattishWorkflows(payload) {
 }
 
 // Which workflows a poll reads: all of them on a full scan; otherwise ones with
-// an active or lost run, ones with a queued run, and ones whose latest run in the
-// workflow list changed since the last poll (including workflows new to it).
-export function workflowsToScan(workflows, { full, records = [], queueRuns = [], latest = new Map(), previousLatest = new Map() }) {
+// an active or lost run, and ones whose latest run in the workflow list changed
+// since the last poll (including workflows new to it).
+export function workflowsToScan(workflows, { full, records = [], latest = new Map(), previousLatest = new Map() }) {
   if (full) return workflows;
-  const watched = new Set([
-    ...records.filter(watchesWorkflowRun).map(record => record.workflowId),
-    ...queueRuns.map(run => run.workflowId),
-  ]);
+  const watched = new Set(records.filter(watchesWorkflowRun).map(record => record.workflowId));
   for (const [id, value] of latest) if (previousLatest.get(id) !== value) watched.add(id);
   return workflows.filter(workflow => watched.has(workflow.id));
 }
@@ -67,7 +64,7 @@ export function useWorkflowRunRegistry(workflows) {
     pendingRef.current = (async () => {
       const failures = [];
       const known = new Map(knownRef.current.filter(workflow => workflow.sourceFormat !== "project").map(workflow => [workflow.id, workflow]));
-      const [discovered, queue] = await Promise.allSettled([read("/workflows"), read("/queue")]);
+      const [discovered] = await Promise.allSettled([read("/workflows")]);
       const discoveredWorkflows = discovered.status === "fulfilled" ? listedRattishWorkflows(discovered.value) : [];
       if (discovered.status === "fulfilled") {
         for (const workflow of discoveredWorkflows) known.set(workflow.id, { ...known.get(workflow.id), ...workflow });
@@ -83,7 +80,6 @@ export function useWorkflowRunRegistry(workflows) {
       const remaining = workflowsToScan([...known.values()], {
         full,
         records: recordsRef.current,
-        queueRuns: queue.status === "fulfilled" ? queue.value.runs || [] : [],
         latest: latest || undefined,
         previousLatest: latestRuns.current,
       });
@@ -113,11 +109,6 @@ export function useWorkflowRunRegistry(workflows) {
         for (const id of failedIds) latest.delete(id);
         latestRuns.current = latest;
       }
-      if (queue.status === "fulfilled") {
-        for (const run of queue.value.runs || []) {
-          updates.push({ workflow: known.get(run.workflowId) || { id: run.workflowId }, runs: [{ ...run, logPath: run.runLogPath, queueRun: true }] });
-        }
-      } else failures.push(queue.reason.message);
       if (!mounted.current) return;
       setRecords(current => {
         const observed = new Set(updates.flatMap(({ workflow, runs }) => runs.map(run => JSON.stringify([workflow.id, run.runId || run.id]))));
@@ -131,7 +122,6 @@ export function useWorkflowRunRegistry(workflows) {
         }
         next = next.map(run => observed.has(JSON.stringify([run.workflowId, run.runId])) ? run : disconnectWorkflowRunRecords([run])[0]);
         for (const id of failedIds) next = disconnectWorkflowRunRecords(next, id);
-        if (queue.status === "rejected") next = next.map(run => run.queueRun ? disconnectWorkflowRunRecords([run])[0] : run);
         for (const { workflow, runs } of updates) next = mergeWorkflowRunRecords(next, runs, workflowRunContext(workflow));
         return next;
       });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { NO_DECISIONS, answerChange, applyDecisionChange, cardLine, cardState, queuedCount, queuedLine, checkLine, closedLabel, countNote, decidedLine, decisionPlace, decisionsCount, editChanges, editState, editTitle, evidenceParts, evidenceText, fallbackDraft, groupDecisions, historyEntries, inProject, isRecord, liveDecision, pathWarnings, recordAddChange, recordDraft, RESTORE_NOTE, recordEditChange, recordFileNote, recordReplaceChange, recordSections, removal, replacesLine, sameDecisions, scanSummary, scopeChips, settleEditLocally, splitList, waitingCount, waitingEdits, SCAN_TOPICS, askAgainTitle, currentAnswer, reopenedLine, looseQueued, looseWaiting, planGroups, planLine, planQueuedLine } from "./remDecisions.js";
+import { NO_DECISIONS, answerChange, applyDecisionChange, cardLine, cardState, queuedCount, queuedLine, checkLine, closedLabel, countNote, decidedLine, decisionPlace, decisionsCount, editChanges, editState, editTitle, evidenceParts, fallbackDraft, groupDecisions, historyEntries, inProject, isRecord, liveDecision, pathWarnings, recordAddChange, recordDraft, RESTORE_NOTE, recordEditChange, recordFileNote, recordReplaceChange, recordSections, removal, replacesLine, sameDecisions, scanSummary, scopeChips, settleEditLocally, splitList, waitingCount, waitingEdits, SCAN_TOPICS, askAgainTitle, currentAnswer, reopenedLine, looseQueued, looseWaiting, planGroups, planLine, planQueuedLine } from "./remDecisions.js";
 import { sampleDecisions } from "./remHomeSample.js";
 
 const APP = "/home/me/Projects/app";
@@ -58,9 +58,11 @@ test("a project shows its own decisions and those about the user; a worktree cou
 });
 
 test("evidence reads as one short line: kind and reference, at most three", () => {
-  assert.equal(evidenceText(evidence), "file package.json · ran npm test · commit abc1234 · +1 more");
-  assert.equal(evidenceText([]), "");
-  assert.equal(evidenceText(undefined), "");
+  const three = evidenceParts(evidence);
+  assert.deepEqual(three.parts.map(part => `${part.label} ${part.ref}`), ["file package.json", "ran npm test", "commit abc1234"]);
+  assert.equal(three.more, 1);
+  assert.deepEqual(evidenceParts([]), { parts: [], more: 0 });
+  assert.deepEqual(evidenceParts(undefined), { parts: [], more: 0 });
   const { parts, more } = evidenceParts(evidence, 2);
   assert.deepEqual(parts.map(part => part.label), ["file", "ran"]);
   assert.equal(parts[1].excerpt, "42 passed");
@@ -75,6 +77,14 @@ test("rows name their place, and an opened one says who decided it and when", ()
   assert.equal(decidedLine(items[1]), "Rem decided (auto mode).");
   assert.equal(decidedLine({ ...items[2], source: { via: "carried over" } }), "Raticode carried it over from what it already did on 2026-11-18.");
   assert.equal(decidedLine(items[0]), "", "a request nobody decided yet says nothing");
+  const read = { ...items[2], decided_at: "2026-03-04T03:06:07+00:00", source: { via: "repository", commit: "1a2b3c4d5e6f", author: "Other Person" }, history: [{ actor: "raticode", action: "read" }] };
+  const line = decidedLine(read);
+  assert.ok(line.startsWith("Read from the repository"), line);
+  assert.doesNotMatch(line, /You decided/);
+  assert.equal(line, "Read from the repository: added in 1a2b3c4d5e6f by Other Person on 2026-03-04.");
+  assert.equal(decidedLine({ ...read, source: { via: "repository" } }), "Read from the repository on 2026-03-04.", "one read before commits were kept");
+  const changed = { ...read, decided_at: "2026-11-20T10:00:00Z", history: [...read.history, { actor: "user", action: "changed" }] };
+  assert.equal(decidedLine(changed), "You decided on 2026-11-20.", "once the user decides on it in Raticode, it says so");
   assert.equal(closedLabel(items[4]), "Replaced by D-1");
   assert.equal(closedLabel(items[5]), "Turned down");
 });

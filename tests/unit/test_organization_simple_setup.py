@@ -19,6 +19,7 @@ from typing import Any
 
 from gofer.ui.organization_store import has_assignment, self_work_assignment
 from gofer.ui.organizations import RESTART_REVIEW_REASON, OrganizationManager
+from tests.helpers.organizations import act, assign_lead
 
 
 def start(tmp_path: Path, stream: Any = None) -> OrganizationManager:
@@ -29,6 +30,7 @@ async def quick(**options: Any) -> Any:
     yield {"type": "final", "message": {"body": "Done."}}
 
 
+# Not the shared company: no project, and it creates as any actor with following on or off.
 def company(
     manager: OrganizationManager,
     root: Path,
@@ -49,18 +51,6 @@ def company(
     if follow:
         params["followProjects"] = True
     return manager.call(str(root), actor, {"action": "create", "params": params})
-
-
-def act(
-    manager: OrganizationManager,
-    org: dict[str, Any],
-    action: str,
-    actor: str = "user",
-    **params: Any,
-) -> Any:
-    return manager.call(
-        org["projectRoot"], actor, {"organizationId": org["id"], "action": action, "params": params}
-    )
 
 
 def state(manager: OrganizationManager, org: dict[str, Any]) -> Any:
@@ -104,18 +94,6 @@ def due_now(manager: OrganizationManager, org: dict[str, Any], eid: str = "lead"
         return {"probe": True}
 
     manager.store.mutate("", org["id"], "test", "probe", change)
-
-
-def assign_lead(manager: OrganizationManager, org: dict[str, Any]) -> None:
-    """The board's way of giving projects, so these tests don't depend on following."""
-    act(
-        manager,
-        org,
-        "self_work_projects",
-        employeeId="lead",
-        projects=[org["projectRoot"]],
-        expectedRevision=0,
-    )
 
 
 def checkins(manager: OrganizationManager, org: dict[str, Any]) -> list[dict[str, Any]]:

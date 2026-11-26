@@ -15,11 +15,13 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -36,25 +38,28 @@ import dev.raticode.mobile.live.LiveClient
 import kotlinx.coroutines.launch
 
 /**
- * The Browser page with Chrome (or another of [BrowserApps]) chosen. Android can't show another app inside Raticode,
- * so this page hands addresses, searches and the computer's tabs to the app itself, and offers what the app really
- * allows another app to do: open it, open its maker's sign-in page in it, its Android app settings and its Google
- * Play page. Chrome has no links to its own settings and no extensions; the page says so rather than pretending.
- * The app keeps its data in its own profile and asks for any password itself; Raticode sees none of it.
- * Test tags start with the app's engine ("chromePage", "chromeAddress", "chromeSignIn", ...).
+ * The Browser page with Firefox, Chrome, Edge or another of [BrowserApps] chosen. Android can't show another app inside
+ * Raticode, so this page hands addresses, searches and the computer's tabs to the app itself, and offers what the app
+ * really allows another app to do: open it (beside Raticode in split screen, for an app with [BrowserApp.beside]), its
+ * sign-in, its Android app settings and its Google Play page. The app's own screens ([BrowserApp.places]) open by deep
+ * link where the app has one (Firefox's settings, add-ons and so on); the others are rows that open the app and say where
+ * to tap, and the page never pretends to link to them. The app keeps its data in its own profile and asks for any
+ * password itself; Raticode sees none of it. Test tags start with the app's engine ("firefoxPage", "chromeAddress",
+ * "edgeBeside", ...). [find] looks for the installed app; tests pass their own.
  */
 @RequiresApi(29)
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-internal fun BrowserAppPage(client: LiveClient, browser: BrowserRuntime, app: BrowserApp, onBack: (() -> Unit)?) {
+internal fun BrowserAppPage(client: LiveClient, browser: BrowserRuntime, app: BrowserApp, onBack: (() -> Unit)?,
+                            find: (Context) -> BrowserApp.Found? = app::find) {
     val context = LocalContext.current
     val focus = LocalFocusManager.current
     val tag = app.engine
-    var found by remember(app) { mutableStateOf(app.find(context)) }
+    var found by remember(app) { mutableStateOf(find(context)) }
     // Installing, turning on or removing the app happens in other apps; look again whenever Raticode comes back.
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle, app) {
-        val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) found = app.find(context) }
+        val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) found = find(context) }
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer) }
     }
@@ -88,7 +93,23 @@ internal fun BrowserAppPage(client: LiveClient, browser: BrowserRuntime, app: Br
         }
         address = ""; focus.clearFocus()
     }
+    // One of the app's own screens by deep link; only hosts the app lists are sent.
+    fun screen(host: String) {
+        val current = found
+        app.problem(current)?.let { return say(it) }
+        if (!app.openPlace(context, current!!, host)) say("${current.edition.name} didn't open that screen.")
+    }
+    fun signIn(signIn: BrowserApp.SignIn) { val host = signIn.host; if (host != null) screen(host) else signIn.url?.let(::openUrl) }
     val name = found?.edition?.name ?: app.name
+    fun launch(beside: Boolean = false) {
+        val current = found
+        app.problem(current)?.let { return say(it) }
+        if (!(if (beside) app.launchBeside(context, current!!) else app.launch(context, current!!))) say("$name didn't open.")
+    }
+    // An app with [BrowserApp.beside] can take the other half of a split screen while Raticode's bar stays on this one:
+    // while Raticode is in split screen, and on Android 12L and later, which starts split screen for it from full screen.
+    val split = remember(LocalConfiguration.current) { (context as? android.app.Activity)?.isInMultiWindowMode == true }
+    val beside = app.beside && (split || android.os.Build.VERSION.SDK_INT >= 32)
 
     Box(Modifier.fillMaxSize().testTag("${tag}Page")) {
         Column(Modifier.fillMaxSize()) {
@@ -138,12 +159,21 @@ internal fun BrowserAppPage(client: LiveClient, browser: BrowserRuntime, app: Br
                         modifier = Modifier.padding(horizontal = 16.dp).fillMaxWidth().testTag("${tag}Address"))
                     Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         // The launcher entry brings back the app's own task, with its tabs, where the user left it.
-                        Button(onClick = { if (!app.launch(context, current)) say("$name didn't open.") }, Modifier.weight(1f).heightIn(min = 48.dp)
-                            .testTag("${tag}Open")) { Text("Open ${app.name}") }
+                        Button(onClick = { launch() }, Modifier.weight(1f).heightIn(min = 48.dp).testTag("${tag}Open")) { Text("Open ${app.name}") }
                         app.signIn?.let { signIn ->
-                            FilledTonalButton(onClick = { openUrl(signIn.url) }, Modifier.weight(1f).heightIn(min = 48.dp).testTag("${tag}SignIn")) { Text("Sign in") }
+                            FilledTonalButton(onClick = { signIn(signIn) }, Modifier.weight(1f).heightIn(min = 48.dp).testTag("${tag}SignIn")) { Text("Sign in") }
+                        }
+                        if (beside) OutlinedButton(onClick = { launch(beside = true) }, Modifier.weight(1f).heightIn(min = 48.dp).testTag("${tag}Beside")) {
+                            Text("${app.name} beside Raticode")
                         }
                     }
+                    if (app.beside) Text(when {
+                            split -> "Raticode and ${app.name} share the screen, so the bar below stays in reach."
+                            beside -> "${app.name} beside Raticode splits the screen between them, so Raticode's bar stays in reach."
+                            else -> "For ${app.name} and Raticode on one screen, open Android's Recents, tap Raticode's icon and choose split screen."
+                        },
+                        Modifier.padding(horizontal = 16.dp).testTag("${tag}SplitHelp"), style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text("Pages open", Modifier.padding(start = 16.dp, top = 4.dp), style = MaterialTheme.typography.labelLarge)
                     SingleChoiceSegmentedButtonRow(Modifier.padding(horizontal = 16.dp).fillMaxWidth()) {
                         listOf(BrowserApps.MODE_APP to "In the ${app.name} app", BrowserApps.MODE_TAB to "Quick look").forEachIndexed { index, (choice, label) ->
@@ -157,7 +187,16 @@ internal fun BrowserAppPage(client: LiveClient, browser: BrowserRuntime, app: Br
                         Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     InsideRaticode(app.name, { browser.setEngine(BrowserRules.ENGINE_GECKO) }) { browser.setEngine(BrowserRules.ENGINE_RATICODE) }
                     BrowserSectionTitle("Your ${app.name}")
-                    app.signIn?.let { signIn -> MenuRow(signIn.label, detail = signIn.detail, icon = ThreadIcons.Lock) { openUrl(signIn.url) } }
+                    app.signIn?.let { signIn -> MenuRow(signIn.label, detail = signIn.detail, icon = ThreadIcons.Lock) { signIn(signIn) } }
+                    if (app.places.any { it.host == null }) Text("${app.name} doesn't let other apps open these screens directly, so each one opens ${app.name}; then follow the steps shown.",
+                        Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    app.places.forEachIndexed { index, place ->
+                        Box(Modifier.testTag("${tag}Place-$index")) {
+                            val host = place.host
+                            if (host != null) MenuRow(place.label, detail = place.detail) { screen(host) }
+                            else MenuRow(place.label, detail = "${place.detail}. ${place.where}") { launch() }
+                        }
+                    }
                     MenuRow("${app.name}'s app settings", detail = "Android's settings for ${current.edition.name}: notifications, permissions, storage and default browser") {
                         if (!app.appSettings(context, current)) say("Android didn't open ${current.edition.name}'s app settings.")
                     }
@@ -184,6 +223,29 @@ internal fun BrowserAppPage(client: LiveClient, browser: BrowserRuntime, app: Br
             }
         }
         SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp))
+    }
+}
+
+/**
+ * The default browser for new tabs, chat links and the Browser page: Raticode (chromium), Raticode (gecko) or one of
+ * [BrowserApps] such as Firefox, Chrome and Edge. The stored values ("raticode", "gecko", "firefox", ...) never change;
+ * only the names shown do.
+ */
+@Composable
+internal fun EngineChoice(browser: BrowserRuntime) {
+    val context = LocalContext.current
+    Text("Default browser", style = MaterialTheme.typography.titleSmall)
+    Text("New tabs and chat links open here. Tabs of ${BrowserTabs.CHROMIUM_NAME} and ${BrowserTabs.GECKO_NAME} share one tab list.",
+        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    (listOf(BrowserRules.ENGINE_RATICODE to BrowserTabs.CHROMIUM_NAME to "Built into this app, on Android's WebView (Chromium)",
+        BrowserRules.ENGINE_GECKO to BrowserTabs.GECKO_NAME to "Built into this app, on Mozilla's Gecko engine, with Firefox extensions") +
+        remember { appEngineChoices(context) }).forEach { (choice, detail) ->
+        val (value, label) = choice
+        Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).combinedClickableRow { browser.setEngine(value) }.testTag("engine-$value"),
+            verticalAlignment = Alignment.CenterVertically) {
+            RadioButton(browser.saved.engine == value, { browser.setEngine(value) })
+            Column { Text(label, fontWeight = FontWeight.Medium); Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        }
     }
 }
 

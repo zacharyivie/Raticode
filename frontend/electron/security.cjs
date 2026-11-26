@@ -285,6 +285,33 @@ function isSafeExternalUrl(value) {
   }
 }
 
+const NETWORK_PATH_ERROR = "Raticode opens only files on this computer, not files on another computer or network share.";
+const TWO_SLASHES = /^[\\/]{2}/;
+// \\?\ and \\.\ (either slash) start Windows device paths.
+const DEVICE_PREFIX = /^[\\/]{2}[?.][\\/]/;
+const DRIVE_ROOT = /^[a-z]:(?:[\\/]|$)/i;
+
+// Whether a path or file: URL names a file on another computer. Windows reads
+// \\host\share and //host/share (either slash), the \\?\UNC\ and \\.\UNC\ long
+// forms, and file://host/ URLs as network shares, and just resolving one
+// contacts that host and offers it the user's sign-in. So every platform
+// refuses them before any path or disk call. Of the device paths only drive
+// ones (\\?\C:\) are local: others such as \\?\GLOBALROOT\ can reach a share too.
+function isNetworkPath(value) {
+  if (value instanceof URL) {
+    if (value.protocol !== "file:") return false;
+    if (value.host !== "" && value.hostname.toLowerCase() !== "localhost") return true;
+    return isNetworkPath(value.pathname);
+  }
+  const text = String(value ?? "").trim();
+  if (/^file:/i.test(text)) {
+    try { return isNetworkPath(new URL(text)); } catch { return true; }
+  }
+  if (!TWO_SLASHES.test(text)) return false;
+  const device = DEVICE_PREFIX.exec(text);
+  return !device || !DRIVE_ROOT.test(text.slice(device[0].length));
+}
+
 function resolveCandidatePath(currentPath, dataDir) {
   if (!currentPath || typeof currentPath !== "string") {
     return path.resolve(dataDir);
@@ -294,6 +321,7 @@ function resolveCandidatePath(currentPath, dataDir) {
   if (!candidate) {
     return path.resolve(dataDir);
   }
+  if (isNetworkPath(candidate)) throw new Error(NETWORK_PATH_ERROR);
 
   return path.isAbsolute(candidate)
     ? path.resolve(candidate)
@@ -355,6 +383,8 @@ function fileUrlForPath(targetPath) {
 module.exports = {
   createIpcSecurity,
   fileUrlForPath,
+  NETWORK_PATH_ERROR,
+  isNetworkPath,
   isSafeExternalUrl,
   isTrustedSenderUrl,
   realpathForContainment,

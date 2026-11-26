@@ -16,6 +16,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { fileURLToPath } = require("node:url");
+const { isNetworkPath } = require("./security.cjs");
 
 const MAX_URL_LENGTH = 8192;
 const MAX_ITEMS = 20;
@@ -47,6 +48,8 @@ function externalOpenFromArg(value, { cwd = process.cwd(), fileSystem = fs } = {
     if (!url.hostname) return null;
     return { kind: "url", url: url.toString() };
   }
+  // A file on another computer is refused before its path is resolved or read.
+  if (isNetworkPath(text)) return null;
   let filePath;
   if (/^file:/i.test(text)) {
     try { filePath = fileURLToPath(new URL(text)); } catch { return null; }
@@ -56,6 +59,7 @@ function externalOpenFromArg(value, { cwd = process.cwd(), fileSystem = fs } = {
   } else {
     filePath = path.resolve(cwd || process.cwd(), text);
   }
+  if (isNetworkPath(filePath)) return null;
   if (!PAGE_EXTENSIONS.has(path.extname(filePath).toLowerCase())) return null;
   try {
     const stat = fileSystem.statSync(filePath);

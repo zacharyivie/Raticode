@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+from collections.abc import AsyncIterator, Awaitable, Callable
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -568,15 +569,33 @@ def test_chat_attachments_use_native_codex_images_and_claude_read_access(tmp_pat
     assert "Read" in claude
 
 
+def _streamed(
+    run: Callable[..., Awaitable[tuple[int, str, str]]],
+) -> Callable[..., AsyncIterator[dict[str, Any]]]:
+    """Turn a fake that returns (returncode, stdout, stderr) into the process stream
+    stream_workflow_chat reads, so one fake serves every chat turn."""
+
+    async def stream(command: list[str], **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        returncode, stdout, stderr = await run(command, **kwargs)
+        for name, text in (("stdout", stdout), ("stderr", stderr)):
+            if text:
+                yield {"type": "chunk", "stream": name, "text": text, "returncode": None}
+        yield {"type": "exit", "stream": None, "text": "", "returncode": returncode}
+
+    return stream
+
+
 @pytest.mark.asyncio
-async def test_run_workflow_chat_adds_trusted_workflow_paths_to_provider_sandbox(
+async def test_run_workflow_chat_ignores_workflow_filesystem_access(
     monkeypatch,
     tmp_path,
 ) -> None:
     captured_command = None
     data_dir = tmp_path / "gofer-data"
-    trusted_dir = tmp_path / "trusted"
-    trusted_dir.mkdir()
+    project = tmp_path / "project"
+    other_folder = tmp_path / "other-folder"
+    project.mkdir()
+    other_folder.mkdir()
     monkeypatch.setattr(chat.shutil, "which", lambda _binary: "/usr/bin/codex")
 
     async def capture_subprocess(command, **_kwargs):
@@ -584,7 +603,7 @@ async def test_run_workflow_chat_adds_trusted_workflow_paths_to_provider_sandbox
         captured_command = command
         return 0, "done", ""
 
-    monkeypatch.setattr(chat, "run_subprocess", capture_subprocess)
+    monkeypatch.setattr(chat, "stream_subprocess", _streamed(capture_subprocess))
 
     await run_workflow_chat(
         provider="codex",
@@ -593,24 +612,19 @@ async def test_run_workflow_chat_adds_trusted_workflow_paths_to_provider_sandbox
         messages=[{"role": "user", "body": "hello"}],
         workflow={
             "id": "trusted",
-            "projectRoot": str(tmp_path),
-            "filesystemAccess": [
-                {"path": str(trusted_dir), "read": True, "write": True},
-                {"path": str(tmp_path / "read-only"), "read": True, "write": False},
-            ],
+            "projectRoot": str(project),
+            # TOML workflows declared this; a chat context carrying it grants nothing.
+            "filesystemAccess": [{"path": str(other_folder), "read": True, "write": True}],
         },
-        working_dir=tmp_path,
+        working_dir=project,
         data_dir=data_dir,
     )
 
     assert captured_command is not None
-    assert option_value(captured_command, "--sandbox") == "danger-full-access"
-    assert str(data_dir.resolve()) in option_values(captured_command, "--add-dir")
-    assert str(trusted_dir.resolve()) in option_values(captured_command, "--add-dir")
-    assert str((tmp_path / "read-only").resolve()) not in option_values(
-        captured_command,
-        "--add-dir",
-    )
+    writable_paths = option_values(captured_command, "--add-dir")
+    assert str(data_dir.resolve()) in writable_paths
+    assert str(other_folder.resolve()) not in writable_paths
+    assert not any(str(other_folder) in str(part) for part in captured_command)
 
 
 @pytest.mark.asyncio
@@ -633,7 +647,7 @@ async def test_run_workflow_chat_uses_only_selected_project_as_scope(
         captured_cwd = kwargs.get("cwd")
         return 0, "done", ""
 
-    monkeypatch.setattr(chat, "run_subprocess", capture_subprocess)
+    monkeypatch.setattr(chat, "stream_subprocess", _streamed(capture_subprocess))
 
     await run_workflow_chat(
         provider="codex",
@@ -650,12 +664,10 @@ async def test_run_workflow_chat_uses_only_selected_project_as_scope(
                     "sourcePath": str(
                         selected_project / ".raticode" / "ai-trending" / "workflow.rattish"
                     ),
-                    "filesystemAccess": [],
                 },
                 {
                     "id": "other",
                     "projectRoot": str(other_project),
-                    "filesystemAccess": [],
                 },
             ],
         },
@@ -686,7 +698,7 @@ async def test_run_workflow_chat_uses_explicit_project_scope_without_workflows(
         captured_cwd = kwargs.get("cwd")
         return 0, "done", ""
 
-    monkeypatch.setattr(chat, "run_subprocess", capture_subprocess)
+    monkeypatch.setattr(chat, "stream_subprocess", _streamed(capture_subprocess))
 
     await run_workflow_chat(
         provider="codex",
@@ -718,7 +730,7 @@ async def test_run_workflow_chat_awaits_selection_validation(
         return 0, "done", ""
 
     monkeypatch.setattr(chat, "validate_provider_selection_async", validate)
-    monkeypatch.setattr(chat, "run_subprocess", fake_run_subprocess)
+    monkeypatch.setattr(chat, "stream_subprocess", _streamed(fake_run_subprocess))
 
     response = await run_workflow_chat(
         provider="codex",
@@ -757,7 +769,7 @@ async def test_workflow_assistant_validation_does_not_nest_event_loop(
     monkeypatch.setattr(provider_capabilities.shutil, "which", lambda _name: "/usr/bin/codex")
     monkeypatch.setattr(provider_capabilities, "provider_capability_service", lambda: service)
     monkeypatch.setattr(service._probes["codex"], "discover", discover)
-    monkeypatch.setattr(chat, "run_subprocess", fake_run_subprocess)
+    monkeypatch.setattr(chat, "stream_subprocess", _streamed(fake_run_subprocess))
 
     response = await run_workflow_chat(
         provider="codex",
@@ -778,7 +790,7 @@ async def test_run_workflow_chat_reports_process_launch_errors(monkeypatch, tmp_
     async def fail_to_spawn(*_args, **_kwargs):
         raise FileNotFoundError("missing codex")
 
-    monkeypatch.setattr(chat, "run_subprocess", fail_to_spawn)
+    monkeypatch.setattr(chat, "stream_subprocess", _streamed(fail_to_spawn))
 
     with pytest.raises(ChatProviderError, match="Could not start 'codex' CLI"):
         await run_workflow_chat(
@@ -805,7 +817,7 @@ async def test_run_workflow_chat_defaults_working_dir_to_data_dir(monkeypatch, t
         captured_cwd = kwargs.get("cwd")
         return 0, "done", ""
 
-    monkeypatch.setattr(chat, "run_subprocess", capture_subprocess)
+    monkeypatch.setattr(chat, "stream_subprocess", _streamed(capture_subprocess))
 
     await run_workflow_chat(
         provider="codex",
@@ -834,7 +846,7 @@ async def test_run_workflow_chat_uses_workflow_resource_limits(
         captured_max_output_bytes = kwargs.get("max_output_bytes")
         return 0, "done", ""
 
-    monkeypatch.setattr(chat, "run_subprocess", capture_subprocess)
+    monkeypatch.setattr(chat, "stream_subprocess", _streamed(capture_subprocess))
 
     await run_workflow_chat(
         provider="codex",
@@ -868,7 +880,7 @@ async def test_run_workflow_chat_has_no_timeout(
         captured_timeout = kwargs.get("timeout")
         return 0, "done", ""
 
-    monkeypatch.setattr(chat, "run_subprocess", capture_subprocess)
+    monkeypatch.setattr(chat, "stream_subprocess", _streamed(capture_subprocess))
 
     await run_workflow_chat(
         provider="codex",
@@ -891,7 +903,7 @@ async def test_run_workflow_chat_leaves_prompt_limits_to_provider(monkeypatch, t
         calls.append(args)
         return 0, "done", ""
 
-    monkeypatch.setattr(chat, "run_subprocess", provider)
+    monkeypatch.setattr(chat, "stream_subprocess", _streamed(provider))
     await run_workflow_chat(
         provider="codex",
         model="cli-default",
@@ -918,7 +930,7 @@ async def test_run_workflow_chat_uses_stdin_for_windows_codex_shim(
         captured_stdin = _kwargs["stdin"]
         return 0, "done", ""
 
-    monkeypatch.setattr(chat, "run_subprocess", capture_subprocess)
+    monkeypatch.setattr(chat, "stream_subprocess", _streamed(capture_subprocess))
 
     await run_workflow_chat(
         provider="codex",
@@ -1853,13 +1865,11 @@ async def test_a_retried_api_call_is_not_a_failed_turn(monkeypatch, tmp_path, re
 async def test_a_retried_api_call_is_not_a_failed_reply(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(chat.shutil, "which", lambda _binary: "/usr/bin/claude")
 
-    async def fake_run_subprocess(_command, **kwargs):
+    async def fake_run_subprocess(_command, **_kwargs):
         result = '{"type":"result","subtype":"success","is_error":false,"result":"Verdict"}\n'
-        stdout = CLAUDE_RETRY + result
-        kwargs["on_stdout"](stdout)
-        return 0, stdout, ""
+        return 0, CLAUDE_RETRY + result, ""
 
-    monkeypatch.setattr(chat, "run_subprocess", fake_run_subprocess)
+    monkeypatch.setattr(chat, "stream_subprocess", _streamed(fake_run_subprocess))
     result = await run_workflow_chat(
         provider="claude_code",
         model="sonnet",
@@ -1908,11 +1918,10 @@ async def test_a_clean_exit_without_an_answer_is_not_a_final_answer(monkeypatch,
 async def test_a_clean_one_shot_exit_without_an_answer_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(chat.shutil, "which", lambda _binary: "/usr/bin/claude")
 
-    async def fake_run_subprocess(_command, **kwargs):
-        kwargs["on_stdout"](CLAUDE_NO_ANSWER)
+    async def fake_run_subprocess(_command, **_kwargs):
         return 0, CLAUDE_NO_ANSWER, ""
 
-    monkeypatch.setattr(chat, "run_subprocess", fake_run_subprocess)
+    monkeypatch.setattr(chat, "stream_subprocess", _streamed(fake_run_subprocess))
     with pytest.raises(chat.ChatProviderError, match="without a final answer"):
         await run_workflow_chat(
             provider="claude_code",

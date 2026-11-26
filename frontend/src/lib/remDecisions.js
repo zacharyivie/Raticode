@@ -106,12 +106,6 @@ export function evidenceParts(evidence = [], max = 3) {
   return { parts, more: Math.max(0, list.length - parts.length) };
 }
 
-// The same as one line of text, e.g. "file package.json · ran npm test · +1 more".
-export function evidenceText(evidence = [], max = 3) {
-  const { parts, more } = evidenceParts(evidence, max);
-  return [...parts.map(part => `${part.label} ${part.ref}`.trim()), more ? `+${more} more` : ""].filter(Boolean).join(" · ");
-}
-
 // The answer to show: the one in force, else Rem's recommendation.
 export const decisionAnswer = item => item?.answer || item?.recommended || "";
 
@@ -121,10 +115,20 @@ export function decisionPlace(item) {
   return item.project_name || trimRoot(item.project).split(/[\\/]/).pop() || item.project;
 }
 
+// A record file Raticode read in rather than wrote, until the user decides on it in Raticode:
+// "Read from the repository: added in 1a2b3c4d5e6f by Sam Lee". rem_decision_records.sync sets the source.
+function readFromRepository(item) {
+  const source = item?.source || {};
+  if (source.via !== "repository" || (item.history || []).some(entry => entry?.actor === "user")) return "";
+  const by = source.author ? ` by ${source.author}` : "";
+  return `Read from the repository${source.commit ? `: added in ${source.commit}${by}` : ""}`;
+}
+
 // Who decided and on what day, e.g. "You decided on 2026-11-18."; "" when nobody has yet.
 export function decidedLine(item) {
   const who = item?.source?.via === "carried over" ? "Raticode carried it over from what it already did"
-    : item?.decided_by === "rem" ? "Rem decided (auto mode)" : item?.decided_by === "user" ? "You decided" : "";
+    : item?.decided_by === "rem" ? "Rem decided (auto mode)"
+      : item?.decided_by === "user" ? readFromRepository(item) || "You decided" : "";
   if (!who) return "";
   return `${who}${item.decided_at ? ` on ${String(item.decided_at).slice(0, 10)}` : ""}.`;
 }

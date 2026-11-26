@@ -11,8 +11,6 @@ import pytest
 
 from gofer.cli import client
 from gofer.cli.commands import workflow as workflow_cmd
-from gofer.core import approvals
-from gofer.ui import api
 from gofer.utils import pids
 
 
@@ -43,7 +41,45 @@ def test_no_pid_check_signals_a_process_on_windows(monkeypatch: pytest.MonkeyPat
 
     assert pids.pid_alive(4321)
     assert client._pid_alive(4322)
-    assert approvals._pid_is_live(4323)
-    assert api._approval_waiter_is_live(request)
     assert workflow_cmd._approval_waiter_is_live(request)
-    assert asked == [4321, 4322, 4323, 4321, 4321]
+    assert asked == [4321, 4322, 4321]
+
+
+def test_mac_start_token_reads_the_start_time_sysctl_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ctypes
+    import struct
+
+    asked: list[list[int]] = []
+    processes = {4321: (1_700_000_000, 123)}
+
+    class FakeLibc:
+        def sysctl(self, mib: Any, count: int, buffer: Any, size: Any, *_rest: Any) -> int:
+            asked.append(list(mib)[:count])
+            start = processes.get(mib[3])
+            if start is None:
+                size._obj.value = 0  # No such process: success, nothing written.
+                return 0
+            # kinfo_proc starts with kp_proc.p_starttime, a timeval.
+            data = struct.pack("=qi", *start) + b"\0" * 636
+            ctypes.memmove(buffer, data, len(data))
+            size._obj.value = len(data)
+            return 0
+
+    monkeypatch.setattr(pids, "_libc", FakeLibc)
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    assert pids.process_start_token(4321) == "mac:1700000000.000123"
+    assert pids.process_start_token(4322) is None
+    assert pids.process_start_token(0) is None
+    assert pids.process_start_token(True) is None
+    # CTL_KERN, KERN_PROC, KERN_PROC_PID, then the PID.
+    assert asked == [[1, 14, 1, 4321], [1, 14, 1, 4322]]
+
+
+def test_start_token_is_none_where_no_start_time_can_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "freebsd14")
+    assert pids.process_start_token(os.getpid()) is None

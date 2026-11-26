@@ -8,6 +8,7 @@ import { ChevronDown, FolderPlus, FolderOpen, Pencil, Plus, Terminal as Terminal
 import { askRemAboutTerminalSelection } from "../lib/askRemAboutFailure.js";
 import { formatKeybinding, settingBinding } from "../lib/settings.js";
 import { useReducedMotion } from "../lib/useReducedMotion.js";
+import { menuTrigger, PopupMenu } from "./PopupMenu.jsx";
 
 const { FitAddon } = fitAddonPackage;
 const { Terminal: XTerm } = xtermPackage;
@@ -22,6 +23,7 @@ export default function TerminalWorkspace({ active, projectRoot, settings, theme
   const layoutElementsRef = useRef(new Map());
   const layoutRectsRef = useRef(new Map());
   const menuRef = useRef(null);
+  const menuTriggerRef = useRef(null);
   const groupRenameCanceledRef = useRef(false);
   const groupRenameInputRef = useRef(null);
   const renameCanceledRef = useRef(false);
@@ -250,6 +252,7 @@ export default function TerminalWorkspace({ active, projectRoot, settings, theme
   function openTabMenu(event, key) {
     event.preventDefault();
     event.stopPropagation();
+    menuTriggerRef.current = menuTrigger(event);
     setActiveKey(key);
     setGroupMenu(null);
     setTabMenu({
@@ -262,6 +265,7 @@ export default function TerminalWorkspace({ active, projectRoot, settings, theme
   function openGroupMenu(event, group) {
     event.preventDefault();
     event.stopPropagation();
+    menuTriggerRef.current = menuTrigger(event);
     setTabMenu(null);
     setGroupMenu({
       id: group.id,
@@ -276,6 +280,7 @@ export default function TerminalWorkspace({ active, projectRoot, settings, theme
   function openTerminalListMenu(event) {
     if (event.target !== event.currentTarget) return;
     event.preventDefault();
+    menuTriggerRef.current = menuTrigger(event);
     setTabMenu(null);
     setGroupMenu({
       id: null,
@@ -284,6 +289,13 @@ export default function TerminalWorkspace({ active, projectRoot, settings, theme
       projectPath: projectRoot,
       top: Math.max(8, Math.min(event.clientY, window.innerHeight - 56)),
     });
+  }
+
+  // Escape in either menu closes it and puts focus back where the menu was opened.
+  function closeMenu(options) {
+    setGroupMenu(null);
+    setTabMenu(null);
+    if (options?.restoreFocus) menuTriggerRef.current?.focus?.();
   }
 
   function beginRename(key) {
@@ -509,12 +521,12 @@ export default function TerminalWorkspace({ active, projectRoot, settings, theme
       </aside>
 
       {groupMenu ? (
-        <div
-          ref={menuRef}
+        <PopupMenu
+          menuRef={menuRef}
           aria-label={`${groupMenu.name} terminal group actions`}
           className="fixed z-[100] w-44 rounded-md border border-line bg-white p-1 text-[11px] text-ink shadow-lg"
-          role="menu"
           style={{ left: groupMenu.left, top: groupMenu.top }}
+          onClose={closeMenu}
         >
           {groupMenu.id ? (
             <>
@@ -564,15 +576,16 @@ export default function TerminalWorkspace({ active, projectRoot, settings, theme
               </p>
             </>
           ) : null}
-        </div>
+        </PopupMenu>
       ) : null}
 
       {tabMenu ? (
-        <div
-          ref={menuRef}
+        <PopupMenu
+          menuRef={menuRef}
+          aria-label={`${tabs.find((tab) => tab.key === tabMenu.key)?.label || "Terminal"} actions`}
           className="fixed z-[100] w-40 rounded-md border border-line bg-white p-1 text-[11px] text-ink shadow-lg"
-          role="menu"
           style={{ left: tabMenu.left, top: tabMenu.top }}
+          onClose={closeMenu}
         >
           <button className="flex h-7 w-full items-center rounded px-2 text-left hover:bg-slate-100" role="menuitem" type="button" onClick={() => beginRename(tabMenu.key)}>
             Rename terminal
@@ -580,7 +593,7 @@ export default function TerminalWorkspace({ active, projectRoot, settings, theme
           <button className="flex h-7 w-full items-center rounded px-2 text-left hover:bg-slate-100" role="menuitem" type="button" onClick={() => closeTab(tabMenu.key)}>
             Close terminal
           </button>
-        </div>
+        </PopupMenu>
       ) : null}
     </div>
   );

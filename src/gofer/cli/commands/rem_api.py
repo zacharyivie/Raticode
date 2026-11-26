@@ -924,15 +924,17 @@ def decisions_show(
             raise CliError(
                 f"No decision {decision_id}.", code="not_found", exit_code=ExitCode.NOT_FOUND
             )
+        from gofer.ui.rem_decisions import decided_line
+
         lines = [_decision_line(item)]
+        if decided_line(item):
+            lines.append(decided_line(item))
         if item.get("why"):
             lines.append(f"Why: {item['why']}")
         for evidence in item.get("evidence") or []:
             lines.append(f"Evidence: {evidence.get('kind')} {evidence.get('ref')}")
         for other in item.get("alternatives") or []:
             lines.append(f"Other option: {other.get('answer')} ({other.get('why_not') or ''})")
-        if (item.get("source") or {}).get("via") == "carried over":
-            lines.append("Carried over: Raticode already did this before it became a decision.")
         record = item.get("record") if item.get("remember_as") == "record" else None
         if record is not None:
             lines.append(f"Record: {item.get('record_path') or 'not in the repository yet'}")

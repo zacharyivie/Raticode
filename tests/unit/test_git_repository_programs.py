@@ -8,6 +8,7 @@ out, diffs or reads status (CWE-78). Scratch repositories only.
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import shlex
@@ -20,7 +21,11 @@ import pytest
 from gofer.rattish import run_worktrees
 from gofer.ui import organization_repository, swarm_workspaces, ticket_patch
 from gofer.ui.rem_home_worktree import ensure_worktree, release_worktree
-from gofer.utils.process import NO_REPOSITORY_PROGRAMS, untrusted_repository_git_env
+from gofer.utils.process import (
+    NO_REPOSITORY_PROGRAMS,
+    run_repository_git,
+    untrusted_repository_git_env,
+)
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
 
@@ -97,6 +102,53 @@ def test_overrides_follow_existing_environment_settings(tmp_path):
     )
     assert env["GIT_CONFIG_KEY_0"] == "url.x.pushInsteadOf"
     assert settings(env)["filter.evil.clean"] == ""
+
+
+def test_a_replace_ref_never_swaps_the_files_of_the_commit_raticode_checks(tmp_path):
+    """Nightly audit, 25 November: a worker that can write the shared ``.git`` ran
+    ``git replace X Y``, so a fresh worktree of its failing commit X held Y's passing
+    files, the project check passed on "X" and X landed."""
+    repo = repository(tmp_path)
+    (repo / "check.sh").write_text("exit 1\n")
+    run(repo, "add", "check.sh")
+    run(repo, "commit", "-qm", "broken work")
+    broken = run(repo, "rev-parse", "HEAD").strip()
+    (repo / "check.sh").write_text("exit 0\n")
+    run(repo, "commit", "-qam", "passing stand-in")
+    stand_in = run(repo, "rev-parse", "HEAD").strip()
+    run(repo, "replace", broken, stand_in)
+    (repo / ".git" / "info").mkdir(exist_ok=True)
+    (repo / ".git" / "info" / "grafts").write_text(f"{broken} {stand_in}\n")
+    # Plain git now shows the stand-in's files for the broken commit.
+    assert run(repo, "show", f"{broken}:check.sh") == "exit 0\n"
+    env = untrusted_repository_git_env(repo, dict(os.environ))
+    fresh = tmp_path / "fresh"
+    subprocess.run(
+        [
+            "git",
+            *NO_REPOSITORY_PROGRAMS,
+            "-C",
+            str(repo),
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            str(fresh),
+            broken,
+        ],
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    assert (fresh / "check.sh").read_text() == "exit 1\n"
+    shown = subprocess.run(
+        ["git", *NO_REPOSITORY_PROGRAMS, "-C", str(repo), "show", f"{broken}:check.sh"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    ).stdout
+    assert shown == "exit 1\n"
 
 
 def test_a_repository_without_commands_adds_no_settings(tmp_path):
@@ -197,6 +249,85 @@ def test_organization_and_swarm_git_run_no_planted_filter(tmp_path):
     swarm_workspaces.git(repo, "diff", "HEAD")
 
     assert not marker.exists(), marker.read_text()
+
+
+# One runner ----------------------------------------------------------------------------
+
+SOURCE = Path(__file__).resolve().parents[2] / "src" / "gofer"
+# run_repository_git itself, and the user's own Commit button, where the repository's
+# hooks and signing run on purpose.
+OWN_GIT_COMMANDS = {"utils/process.py", "ui/commit_message.py", "ui/generation_jobs.py"}
+
+
+def git_command_literals(tree: ast.AST) -> list[int]:
+    """Lines of list or tuple literals whose first item is the string "git"."""
+    allowed: set[int] = set()
+    for node in ast.walk(tree):
+        # A JSON schema's ``"enum": ["git", ...]`` lists choices, not a command.
+        if isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values, strict=True):
+                if isinstance(key, ast.Constant) and key.value == "enum":
+                    allowed.add(id(value))
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.List, ast.Tuple))
+        and id(node) not in allowed
+        and node.elts
+        and isinstance(node.elts[0], ast.Constant)
+        and node.elts[0].value == "git"
+    ]
+
+
+def test_backend_git_commands_all_go_through_the_one_runner():
+    assert all((SOURCE / name).is_file() for name in OWN_GIT_COMMANDS)
+    found = [
+        f"{path.relative_to(SOURCE).as_posix()}:{line}"
+        for path in sorted(SOURCE.rglob("*.py"))
+        if path.relative_to(SOURCE).as_posix() not in OWN_GIT_COMMANDS
+        for line in git_command_literals(ast.parse(path.read_text(encoding="utf-8")))
+    ]
+    assert not found, "Run git with gofer.utils.process.run_repository_git: " + ", ".join(found)
+
+
+def test_the_scan_finds_a_command_but_not_a_schema_choice():
+    code = (
+        'subprocess.run(["git", "status"])\n'
+        'command = ("git", "-C", root)\n'
+        'schema = {"enum": ["git", "digest"]}\n'
+    )
+    assert sorted(git_command_literals(ast.parse(code))) == [1, 2]
+
+
+def test_the_runner_runs_no_planted_program_and_passes_its_options(tmp_path):
+    repo = repository(tmp_path)
+    marker = tmp_path / "marker"
+    plant(repo, marker)
+    (repo / "a.txt").write_text("changed\n")
+
+    status = run_repository_git(repo, "status", "--porcelain", timeout=30)
+    added = run_repository_git(
+        repo, "hash-object", "--stdin", "-w", timeout=30, input=b"piped\n", text=False
+    )
+    named = run_repository_git(
+        repo / ".git", "config", "--get", "x.y", timeout=30, git_dir=True, config=("x.y=z",)
+    )
+    author = {"GIT_AUTHOR_NAME": "Given", "GIT_AUTHOR_EMAIL": "given@example.invalid"}
+    ident = run_repository_git(
+        repo, "var", "GIT_AUTHOR_IDENT", timeout=30, env={"PATH": os.environ["PATH"], **author}
+    )
+
+    assert not marker.exists(), marker.read_text()
+    assert status.returncode == 0 and "a.txt" in status.stdout
+    assert run(repo, "cat-file", "-p", added.stdout.decode().strip()) == "piped\n"
+    assert named.stdout == "z\n"
+    assert ident.stdout.startswith("Given <given@example.invalid>")
+    assert run_repository_git(repo, "no-such-command", timeout=30).returncode != 0
+
+
+def test_the_runner_fails_closed_when_settings_cant_be_read(tmp_path):
+    with pytest.raises(OSError):
+        run_repository_git(tmp_path / "missing", "status", timeout=30)
 
 
 # Hooks named in config ------------------------------------------------------------------

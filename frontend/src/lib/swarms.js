@@ -1,16 +1,12 @@
-import { apiUrl } from "./api.js";
+import { apiJson } from "./api.js";
 
-export async function swarmRequest(projectRoot, path = "", { method = "GET", query = {}, workspacePaths = [], ...body } = {}) {
-  const response = await fetch(apiUrl(`/swarms${path}?${new URLSearchParams({ projectRoot, ...query })}`), {
+export function swarmRequest(projectRoot, path = "", { method = "GET", query = {}, workspacePaths = [], ...body } = {}) {
+  return apiJson(`/swarms${path}?${new URLSearchParams({ projectRoot, ...query })}`, {
     method,
-    ...(method === "GET" ? {} : {
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...body, ...(workspacePaths.length ? { workspaceGrants: Object.fromEntries(workspacePaths.map(path => [path, window.goferDesktop?.workspace?.pathGrantForApi?.(path) || ""])) } : {}), projectRoot, grantId: window.goferDesktop?.workspace?.pathGrantForApi?.(projectRoot) || undefined }),
-    }),
+    body: method === "GET" ? undefined : { ...body, ...(workspacePaths.length ? { workspaceGrants: Object.fromEntries(workspacePaths.map(path => [path, window.goferDesktop?.workspace?.pathGrantForApi?.(path) || ""])) } : {}), projectRoot, grantId: window.goferDesktop?.workspace?.pathGrantForApi?.(projectRoot) || undefined },
+    detailFirst: true,
+    failure: "Could not update swarm. Try again.",
   });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.detail || payload.error || "Could not update swarm. Try again.");
-  return payload;
 }
 
 export function milestoneProgress(objectives = []) {

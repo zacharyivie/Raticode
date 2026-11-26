@@ -11,12 +11,11 @@ from gofer.ui.organization_store import Task
 from gofer.ui.organizations import CHECKIN_OPENING, HEARTBEAT_TITLE, OrganizationManager
 from gofer.ui.rem_home import RemHome
 from gofer.ui.rem_kanban import KanbanRefused
+from tests.helpers.organizations import act, company
 from tests.unit.test_device_application import application as application
 from tests.unit.test_device_desktop_control import phone as phone
 from tests.unit.test_organization_hours_heartbeats import (
-    act,
     checkins,
-    company,
     due_now,
     read,
     settle,
@@ -46,6 +45,7 @@ def participant(home: RemHome, identity: str = "rem") -> Any:
     return next(p for p in home.kanban.board()["participants"] if p["participant_id"] == identity)
 
 
+# Not the organization assign: gives a kanban participant its projects.
 def assign(home: RemHome, *roots: Any, identity: str = "rem") -> None:
     home.kanban.set_participant_projects(
         "user",

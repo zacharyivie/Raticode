@@ -38,9 +38,9 @@ class TicketDetailUiTest {
         "account stays unused until you're back at the desktop."
 
     private fun ticket(id: String, key: String, title: String, status: String, waits: List<TicketWait> = emptyList(), autoApproved: Boolean = false,
-                       reason: String = "", proposed: Boolean = false) =
+                       reason: String = "", proposed: Boolean = false, doneWhen: String = "") =
         KanbanTicket(id, Kanban.SCOPE_REM, "", "", key, title, "Let the phone start a Grok device sign-in.", status, "high", Kanban.REM, "Rem", proposed,
-            reason, "", "Rem", "", "", 3, false, "", kind = "develop", project = "Raticode", autoApproved = autoApproved, waitsFor = waits)
+            reason, "", "Rem", "", "", 3, false, "", kind = "develop", project = "Raticode", autoApproved = autoApproved, waitsFor = waits, doneWhen = doneWhen)
 
     private val grok = ticket("t202", "REM-202", "Sign a Grok account in from the phone", "done",
         waits = listOf(TicketWait("t196", "REM-196", "Sign a Codex account in from the phone", "done")), autoApproved = true, reason = why)
@@ -112,5 +112,20 @@ class TicketDetailUiTest {
         assertEquals("approve", sent.single().optString("action"))
         assertEquals("t300", sent.single().optString("ticket_id"))
         screenshot("ticket-detail-proposal.png")
+    }
+
+    @Test fun aProposalShowsItsDoneWhenOneCheckPerLine() {
+        show(ticket("t301", "REM-301", "Faster board", "backlog", reason = "Short reason.", proposed = true,
+            doneWhen = "The board opens in under 1 s\n\n  npm test passes  "))
+        compose.onNodeWithTag("kanbanDoneWhen").performScrollTo().assertIsDisplayed()
+        compose.onNode(hasText("Done when") and hasAnyAncestor(hasTestTag("kanbanDoneWhen")), useUnmergedTree = true).assertExists()
+        compose.onNode(hasText("The board opens in under 1 s") and hasAnyAncestor(hasTestTag("kanbanDoneWhen")), useUnmergedTree = true).assertExists()
+        compose.onNode(hasText("npm test passes") and hasAnyAncestor(hasTestTag("kanbanDoneWhen")), useUnmergedTree = true).assertExists()
+        screenshot("ticket-detail-done-when.png")
+    }
+
+    @Test fun aTicketWithoutAFinishLineHasNoDoneWhen() {
+        show(later)
+        compose.onAllNodesWithTag("kanbanDoneWhen").assertCountEquals(0)
     }
 }

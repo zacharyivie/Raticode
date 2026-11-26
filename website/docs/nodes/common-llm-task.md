@@ -72,6 +72,8 @@ Node summarize:
 ```
 
 - A run reuses a saved answer while it is younger than the duration and nothing that shapes the answer changed. Each answer keeps the expiry it was saved with, so raising the duration later doesn't extend answers already saved. The saved answer is keyed on the provider, profile, model and effort that would answer, the rendered prompt and bound inputs, the output schema and the node's compiled settings. Change any of them and the step calls the model again. Moving the node in the file, editing other nodes or changing the duration keeps its saved answers.
+- A [file input](../workflows/inputs.md#file-inputs) counts by its contents and file name, not by the path of the run's copy. Choosing a file with the same bytes again reuses the answer; changing its bytes calls the model again.
+- A run [in a worktree](../workflows/rattish.md#run-in-a-worktree) counts by the project the worktree was made from, not by the run's own worktree folder, so the next run's worktree reuses the answer.
 - Each fallback provider has its own saved answers. A step that switches to a fallback looks for that provider's answer before calling it.
 - A cached step shows as **Cached** in the [Run Timeline](../studio/runs.md#cached-steps). It makes no model call, so the run's usage records 0 tokens and $0 for it, and it doesn't count toward `max-tokens` or `max-cost-usd`.
 - Only successful answers are saved. Failures, and steps that read a `secret["NAME"]`, are never saved.

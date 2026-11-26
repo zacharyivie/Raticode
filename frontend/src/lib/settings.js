@@ -105,6 +105,9 @@ export const KEYBINDING_COMMANDS = [
   { id: "graph.addNode", label: "Add node", group: "Graph editor", scope: "graph", defaultBinding: "Tab" },
   { id: "graph.selectAll", label: "Select all nodes", group: "Graph editor", scope: "graph", defaultBinding: "Mod+KeyA" },
   { id: "graph.deleteSelection", label: "Delete selection", group: "Graph editor", scope: "graph", defaultBinding: "Delete" },
+  // Only while the graph has focus; Windows also takes Ctrl+Y for Redo (matchesCommand).
+  { id: "graph.undo", label: "Undo graph edit", group: "Graph editor", scope: "graph", defaultBinding: "Mod+KeyZ" },
+  { id: "graph.redo", label: "Redo graph edit", group: "Graph editor", scope: "graph", defaultBinding: "Mod+Shift+KeyZ" },
   { id: "graph.zoomIn", label: "Zoom in", group: "Graph editor", scope: "graph", defaultBinding: "Equal" },
   { id: "graph.zoomOut", label: "Zoom out", group: "Graph editor", scope: "graph", defaultBinding: "Minus" },
   { id: "graph.fit", label: "Fit workflow", group: "Graph editor", scope: "graph", defaultBinding: "KeyF" },
@@ -120,9 +123,10 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
     autosave: true,
     defaultView: "graph",
     initialActivity: "workflows",
-    executionMode: "local",
     checkForUpdates: true,
     archivedThreadRetention: "never",
+    // Desktop notifications for replies, approvals and Rem tasks while Raticode isn't focused.
+    backgroundNotices: true,
   },
   appearance: {
     theme: "system",
@@ -274,8 +278,8 @@ export function normalizeAppSettings(value = {}) {
   settings.general.initialActivity = enumValue(value?.general?.initialActivity, ["rem", "workflows", "files", "search", "source-control", "kanban", "posts", "organizations", "second-brain"], value?.general?.defaultView === "code" ? "files" : "workflows");
   // Retain the old field for older installations reading these settings.
   settings.general.defaultView = settings.general.initialActivity === "workflows" ? "graph" : "code";
-  settings.general.executionMode = enumValue(settings.general.executionMode, ["local", "remote"], "local");
   settings.general.checkForUpdates = settings.general.checkForUpdates !== false;
+  settings.general.backgroundNotices = settings.general.backgroundNotices !== false;
   settings.general.archivedThreadRetention = enumValue(String(settings.general.archivedThreadRetention), ARCHIVE_RETENTION_OPTIONS.map(([id]) => id), "never");
   settings.appearance.theme = enumValue(settings.appearance.theme, ["system", "light", "dark"], "system");
   settings.appearance.reducedMotion = enumValue(settings.appearance.reducedMotion, ["system", "on", "off"], "system");
@@ -369,14 +373,6 @@ export function updateSetting(settings, path, value) {
   });
 }
 
-export function resetSetting(settings, path) {
-  const normalizedPath = String(path);
-  const separatorIndex = normalizedPath.indexOf(".");
-  const section = separatorIndex < 0 ? "" : normalizedPath.slice(0, separatorIndex);
-  const key = separatorIndex < 0 ? "" : normalizedPath.slice(separatorIndex + 1);
-  return updateSetting(settings, path, DEFAULT_APP_SETTINGS[section]?.[key]);
-}
-
 export function settingBinding(settings, commandId) {
   return settings?.keybindings?.[commandId]
     ?? DEFAULT_APP_SETTINGS.keybindings[commandId]
@@ -420,7 +416,9 @@ export function matchesCommand(event, settings, commandId, platform = globalThis
   const binding = settingBinding(settings, commandId);
   return matchesKeybinding(event, binding, platform)
     || (commandId === "editor.find" && binding === "Mod+KeyF"
-      && /Mac|iPhone|iPad/i.test(platform) && matchesKeybinding(event, "Ctrl+KeyF", platform));
+      && /Mac|iPhone|iPad/i.test(platform) && matchesKeybinding(event, "Ctrl+KeyF", platform))
+    || (commandId === "graph.redo" && binding === "Mod+Shift+KeyZ"
+      && /^Win/i.test(platform) && matchesKeybinding(event, "Ctrl+KeyY", platform));
 }
 
 // Windows reports AltGr as Ctrl+Alt, so on layouts such as Hungarian AltGr+V types "@"

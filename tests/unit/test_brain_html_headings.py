@@ -6,7 +6,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import time
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +21,7 @@ from gofer.ui.brain_documents import (
     validate_portable,
 )
 from gofer.ui.brain_library import BrainLibrary
+from tests.helpers.brain_library import wait_task
 
 REPORT = """<!doctype html><html><head><title>Search report</title>
 <style>h2 { color: red }</style></head><body>
@@ -38,16 +38,6 @@ real search results.</div></div></section>
 <p>ReadableHTML turns headings into paragraph breaks and nothing else.</p></section>
 <h5>Not a section</h5><p>A level-five heading stays body text under the h3.</p>
 <p>Done</p></body></html>"""
-
-
-def wait_task(library: BrainLibrary, task: dict[str, Any]) -> dict[str, Any]:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        receipt = library.task(task["id"])
-        if receipt["state"] != "running":
-            return receipt
-        time.sleep(0.02)
-    pytest.fail("Second Brain task did not finish")
 
 
 @pytest.fixture

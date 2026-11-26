@@ -412,7 +412,7 @@ def test_turns_get_their_providers_folder_and_every_account_folder_is_hidden(
         assert is_managed_data_folder(folder)
     sandbox_rules = claude_sandbox.permission_deny_rules(data_dir)
     assert f"Read(/{data_dir / 'codex-accounts'}/**)" in sandbox_rules
-    assert "claude-accounts" in claude_sandbox.DATA_SECRETS
+    assert "claude-accounts" in claude_sandbox.data_secrets(data_dir)
 
 
 def test_generic_account_actions_name_their_provider(data_dir: Path, stand_in: Path) -> None:

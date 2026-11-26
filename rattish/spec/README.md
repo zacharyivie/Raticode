@@ -74,7 +74,7 @@ for debugging and never creates a source-side IR file.
 the current machine on every invocation. `run` performs both steps and executes the IR.
 Registered workflows store compiled artifacts and versioned run logs in their
 `.raticode/<workflow-id>/` folder. Standalone `.rattish` files without a registered workflow
-folder use the application data directory. None of these commands writes IR beside the
+folder use the data folder. None of these commands writes IR beside the
 source file.
 
 `run --input NAME=JSON` accepts one declared workflow input per option. A file input takes a

@@ -10,21 +10,17 @@
 // and Rem's input are trusted: Chrome treats them like a person using the page.
 //
 // Events for the studio use the stream-* names (stream-frame, stream-cursor
-// and so on), the same messages Firefox tabs send as firefox-*.
+// and so on), the same messages Firefox tabs send as firefox-*. What doesn't
+// depend on DevTools is in stream-tab.cjs.
 const { EventEmitter } = require("node:events");
-const { clampView } = require("./firefox-contents.cjs");
 const pageMenu = require("./stream-page-menu.cjs");
-const { watchSound } = require("./stream-sound.cjs");
+const { FALLBACK_VIEW, STATE_WORLD, StreamTab, clampView } = require("./stream-tab.cjs");
 const { mediaPageHook } = require("./browser-media.cjs");
 
-const FALLBACK_VIEW = { width: 1280, height: 800, scale: 1 };
 const FRAME_QUALITY = 82;
 const ACK_TIMEOUT_MS = 500;
 const POPUP_URL_TIMEOUT_MS = 2000;
 const MAX_TEXT_INPUT = 20000;
-const CURSOR_INTERVAL_MS = 120;
-const STATE_WORLD = "raticode-state";
-const STATE_REFRESH_MS = 1000;
 const DOUBLE_CLICK_MS = 500;
 // Chromium's own pages, under its own schemes and those of browsers built on it.
 const INTERNAL_PAGE = /^\s*(?:about:(?!blank(?:[?#]|$)|srcdoc(?:[?#]|$))|chrome:|chrome-extension:|chrome-untrusted:|chrome-search:|devtools:|view-source:|edge:|extension:)/i;
@@ -116,65 +112,31 @@ function visibleHistory(history) {
   return { entries: visible, index: visible.length ? index : 0 };
 }
 
-class ChromiumContents extends EventEmitter {
-  constructor({ engine, kind = "user", nativeImage = null, clipboard = null, log = () => {}, platform = process.platform }) {
-    super();
+class ChromiumContents extends StreamTab {
+  constructor({ engine, kind, nativeImage, clipboard, log, platform = process.platform }) {
+    super({ kind, nativeImage, clipboard, log, eventPrefix: "stream" });
     this.browser = engine.browser || { id: "chrome", name: "Chrome" };
     this.engine = this.browser.id;
-    this.eventPrefix = "stream";
-    this.kind = kind;
     this.chromium = engine;
-    this.nativeImage = nativeImage;
-    this.clipboard = clipboard;
-    this.log = log;
     this.platform = platform;
     this.targetId = "";
     this.sessionId = "";
     this.mainFrameId = "";
     this.loaderId = "";
     this.frames = new Set();
-    this.destroyed = false;
-    this.dead = false;
-    this.url = "about:blank";
-    this.title = "";
-    this.loading = true;
-    // True from the start of a main-frame navigation until the new document
-    // fires DOMContentLoaded. See isLoadingMainFrame().
-    this.documentLoading = true;
-    this.focused = false;
-    this.muted = false;
-    this.pageZoom = 1;
-    this.view = null;
-    this.visible = false;
     this.history = { entries: [], index: 0 };
     this.worlds = new Map();
-    this.windowOpenHandler = () => ({ action: "deny" });
-    this.waiters = new Set();
-    this.inputQueue = Promise.resolve();
-    this.pendingMove = null;
-    this.pressedKeys = new Set();
     this.buttons = 0;
     this.lastPress = { at: 0, x: 0, y: 0, button: "", count: 0 };
-    this.dialog = null;
     this.popups = new Set();
     this.frame = { seq: 0, ack: "", ackTimer: null, casting: false };
-    this.cursorAt = 0;
     this.stats = { frames: 0, bytes: 0 };
-    this.guardNavigation = false;
-    this.mainFrame = {};
     this.debugger = createDebuggerPassthrough(this);
-    this.nativeInput = {
-      click: (options) => this.nativeClick(options),
-      hover: (options) => this.nativeHover(options),
-      press: (key) => this.nativePress(key),
-    };
-    this.audible = false;
-    this.sound = watchSound(this, { ready: () => Boolean(this.sessionId), evaluate: (expression) => this.evaluateIn(STATE_WORLD, expression) });
-    this.ready = this.start();
-    this.ready.catch((error) => this.fail(error));
+    this.boot();
   }
 
   get name() { return this.browser.name; }
+  isRunning() { return Boolean(this.sessionId); }
 
   async start() {
     const { targetId, sessionId, generation, userAgent } = await this.chromium.createContext(this.kind);
@@ -213,36 +175,9 @@ class ChromiumContents extends EventEmitter {
     this.emit("stream-ready");
   }
 
-  fail(error) {
-    this.loading = false;
-    this.dead = true;
-    this.lastError = error?.message || String(error);
-    this.emit("did-fail-load", {}, -2, this.lastError, this.url, true);
-    this.emit("did-stop-loading");
-  }
-
   // -------------------------------------------------------------------------
   // webContents interface
 
-  isDestroyed() { return this.destroyed; }
-  getURL() { return this.url; }
-  getTitle() { return this.title; }
-  isLoading() { return this.loading; }
-  // As Electron's method of the same name, but true only until the main
-  // document's DOM is ready (Page.domContentEventFired), so a frame or image
-  // that never finishes doesn't keep it true.
-  isLoadingMainFrame() { return this.loading && this.documentLoading; }
-  isFocused() { return this.focused; }
-  getType() { return this.engine; }
-  focus() { this.emit("stream-focus"); }
-  setBackgroundThrottling() {}
-  setBackgroundColor() {}
-  setZoomFactor() {}
-  setWindowOpenHandler(handler) { this.windowOpenHandler = typeof handler === "function" ? handler : this.windowOpenHandler; }
-  isCurrentlyAudible() { return this.audible === true; }
-  isDevToolsOpened() { return false; }
-  closeDevTools() {}
-  openDevTools() { throw new Error(`Developer tools are not available in ${this.name} tabs.`); }
   // One file with the page and its pictures and styles (MHTML), which the
   // browser saves for itself; Raticode's "HTMLComplete" folder isn't offered.
   get savePageFormat() { return "mhtml"; }
@@ -252,8 +187,6 @@ class ChromiumContents extends EventEmitter {
     const { data } = await this.command("Page.captureSnapshot", { format: "mhtml" }, { timeout: 120000 });
     await require("node:fs").promises.writeFile(filePath, String(data || ""), { mode: 0o600 });
   }
-  print() { throw new Error(`Printing is not available in ${this.name} tabs. Save as PDF instead.`); }
-  async getPrintersAsync() { return []; }
 
   async printToPDF(options = {}) {
     await this.alive();
@@ -270,22 +203,12 @@ class ChromiumContents extends EventEmitter {
     // about:settings and similar as chrome:// pages. Only a Chrome window the
     // user opens shows them.
     if (INTERNAL_PAGE.test(target)) throw new Error(`${this.name}'s own pages can't be opened in Raticode tabs. Open them from Settings > Browser > ${this.name}.`);
-    await this.alive();
-    this.lastError = "";
-    const waiter = this.waitForNavigation();
-    // Report loading at once, as Electron does, so callers that wait for the
-    // page to settle do not return before Chrome announces the navigation.
-    this.loading = true;
-    this.documentLoading = true;
+    const waiter = await this.startNavigation();
     let result;
     try {
       result = await this.command("Page.navigate", { url: target });
     } catch (error) {
-      waiter.cancel();
-      this.loading = false;
-      this.emit("did-fail-load", {}, -2, error.message, target, true);
-      this.emit("did-stop-loading");
-      throw new Error(`${this.name} could not open ${target}: ${error.message}`, { cause: error });
+      throw this.navigationRefused(waiter, target, error);
     }
     if (result.isDownload) {
       waiter.cancel();
@@ -316,19 +239,7 @@ class ChromiumContents extends EventEmitter {
     return waiter.promise;
   }
 
-  downloadURL(url) { void this.loadURL(url).catch(() => {}); }
-  reload() { void this.reloadPage(false); }
-  reloadIgnoringCache() { void this.reloadPage(true); }
-
-  async reloadPage(ignoreCache) {
-    if (this.dead) {
-      await this.revive();
-      if (this.url && this.url !== "about:blank") await this.loadURL(this.url).catch(() => {});
-      return;
-    }
-    await this.alive();
-    this.loading = true;
-    this.documentLoading = true;
+  async reloadDocument(ignoreCache) {
     await this.command("Page.reload", { ignoreCache }).catch((error) => this.log("warn", `${this.name} reload failed: ${error.message}`));
   }
 
@@ -366,8 +277,6 @@ class ChromiumContents extends EventEmitter {
     if (history) this.history = visibleHistory(history);
   }
 
-  // Each world is a Chrome isolated world: it shares the page's DOM but none
-  // of its scripts, as in Raticode's own tabs.
   // While Rem drives this tab, Chrome's error and warning pages are off
   // limits: their "Proceed to … (unsafe)" link would let Rem past a
   // certificate error, which Raticode's own tabs never allow. Rem can still
@@ -378,12 +287,7 @@ class ChromiumContents extends EventEmitter {
     }
   }
 
-  async executeJavaScriptInIsolatedWorld(worldId, sources, userGesture = false) {
-    this.refuseRemOnErrorPage();
-    const code = (sources || []).map((item) => item.code).join(";\n");
-    return this.evaluateIn(`raticode-world-${Number(worldId) || 0}`, code, { userGesture: userGesture === true });
-  }
-
+  // Each world is a Chrome isolated world.
   async worldContext(world, fresh = false) {
     const cached = this.worlds.get(world);
     if (!fresh && cached && cached.loaderId === this.loaderId) return cached.contextId;
@@ -416,111 +320,24 @@ class ChromiumContents extends EventEmitter {
     return response.result?.value;
   }
 
-  async capturePage() {
-    await this.alive();
+  async screenshot() {
     const { data } = await this.command("Page.captureScreenshot", { format: "png" });
-    const buffer = Buffer.from(data, "base64");
-    if (!this.nativeImage) return buffer;
-    return this.nativeImage.createFromBuffer(buffer);
-  }
-
-  setAudioMuted(muted) {
-    this.muted = muted === true;
-    void this.applyMute();
-  }
-
-  async applyMute() {
-    if (!this.sessionId || this.dead) return;
-    await this.evaluateIn(STATE_WORLD, `for (const media of document.querySelectorAll("audio,video")) media.muted = ${this.muted}; true`).catch(() => {});
-    await this.sound.check();
-  }
-
-  // window.find selects each match, so the highlight appears in the stream.
-  findInPage(text, { forward = true, findNext = true } = {}) {
-    const requestId = (this.findRequestId = (this.findRequestId || 0) + 1);
-    const query = String(text);
-    const fresh = findNext !== false && this.findQuery !== query;
-    void this.alive().then(async () => {
-      const result = await this.evaluateIn(STATE_WORLD, `(() => {
-        const query = ${JSON.stringify(query)};
-        if (${fresh}) {
-          if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur?.();
-          getSelection()?.removeAllRanges();
-        }
-        const haystack = (document.body?.innerText || "").toLowerCase();
-        const needle = query.toLowerCase();
-        let matches = 0;
-        for (let at = haystack.indexOf(needle); needle && at >= 0; at = haystack.indexOf(needle, at + needle.length)) matches += 1;
-        const found = matches ? window.find(query, false, ${forward === false}, true) : false;
-        return { matches, found };
-      })()`);
-      if (requestId !== this.findRequestId) return;
-      const matches = Number(result?.matches) || 0;
-      if (findNext !== false || this.findQuery !== query) this.findOrdinal = matches ? 1 : 0;
-      else if (matches) this.findOrdinal = ((this.findOrdinal || 0) + (forward === false ? matches - 1 : 1) - 1) % matches + 1;
-      this.findQuery = query;
-      this.emit("found-in-page", {}, { requestId, matches, activeMatchOrdinal: matches ? this.findOrdinal : 0, finalUpdate: true });
-    }).catch(() => {});
-    return requestId;
-  }
-
-  stopFindInPage() {
-    this.findQuery = "";
-    void this.evaluateIn(STATE_WORLD, "getSelection()?.removeAllRanges(); true").catch(() => {});
+    return Buffer.from(data, "base64");
   }
 
   // -------------------------------------------------------------------------
   // Lifecycle
 
-  async alive() {
-    await this.ready;
-    if (this.destroyed) throw new Error(`The ${this.name} tab was closed.`);
-    if (this.dead) throw new Error(this.lastError || `${this.name} stopped. Reload the tab to start it again.`);
-  }
+  stopFrames() { this.stopCast(); }
 
-  async revive() {
-    if (this.destroyed) return;
-    this.dead = false;
-    this.lastError = "";
-    this.loading = true;
-    this.documentLoading = true;
-    this.guardInstalled = false;
-    this.emit("did-start-loading");
-    this.ready = this.start();
-    await this.ready;
-  }
-
-  // Chrome stopped or crashed. The tab stays open and restarts on reload.
-  markDead(reason = `${this.name} stopped`) {
-    if (this.destroyed || this.dead) return;
-    this.dead = true;
-    this.loading = false;
-    this.lastError = `${reason}. Reload the tab to start ${this.name} again.`;
-    this.stopCast();
-    if (this.sessionId) this.chromium.unregister(this.sessionId);
-    this.sessionId = "";
-    this.targetId = "";
-    for (const waiter of this.waiters) waiter.reject(new Error(this.lastError));
-    this.waiters.clear();
-    this.emit("render-process-gone", {}, { reason });
-    this.emit("did-stop-loading");
-  }
-
-  close() {
-    if (this.destroyed) return;
-    this.destroyed = true;
-    this.visible = false;
-    clearTimeout(this.stateTimer);
-    this.stopCast();
-    for (const waiter of this.waiters) waiter.reject(new Error(`The ${this.name} tab was closed.`));
-    this.waiters.clear();
+  // Chrome stopped or crashed, or the tab closed.
+  releasePage(closing) {
     if (this.sessionId) {
       this.chromium.unregister(this.sessionId);
-      const targetId = this.targetId;
-      void this.chromium.send("Target.closeTarget", { targetId }).catch(() => {});
+      if (closing) void this.chromium.send("Target.closeTarget", { targetId: this.targetId }).catch(() => {});
     }
-    this.emit("destroyed");
-    this.removeAllListeners();
+    this.sessionId = "";
+    this.targetId = "";
   }
 
   command(method, params = {}, options = {}) {
@@ -528,32 +345,8 @@ class ChromiumContents extends EventEmitter {
     return this.chromium.send(method, params, { ...options, sessionId: this.sessionId });
   }
 
-  // Input that opens alert() or confirm() keeps DevTools' command waiting
-  // until the dialog is answered. Return as soon as the dialog shows.
-  input(method, params) {
-    const sent = this.command(method, params);
-    sent.catch(() => {});
-    if (this.dialog) return sent;
-    let listener;
-    const opened = new Promise((resolve) => { listener = resolve; this.once("stream-dialog-opened", listener); });
-    return Promise.race([sent, opened]).finally(() => this.off("stream-dialog-opened", listener));
-  }
-
-  waitForNavigation() {
-    let entry;
-    const promise = new Promise((resolve, reject) => { entry = { resolve, reject }; });
-    this.waiters.add(entry);
-    return {
-      promise: promise.finally(() => this.waiters.delete(entry)),
-      cancel: () => { this.waiters.delete(entry); entry.resolve(); },
-    };
-  }
-
-  settleWaiters(error) {
-    for (const waiter of this.waiters) {
-      if (error) waiter.reject(error); else waiter.resolve();
-    }
-    this.waiters.clear();
+  dispatchInput(method, params) {
+    return this.command(method, params);
   }
 
   ownsFrame(frameId) {
@@ -704,25 +497,15 @@ class ChromiumContents extends EventEmitter {
       return;
     }
     if (!Array.isArray(state) || this.destroyed) return;
-    const [title, favicon] = state;
-    if (typeof title === "string" && title !== this.title) {
-      this.title = title;
-      const entry = this.history.entries[this.history.index];
-      if (entry) entry.title = title;
-      this.emit("page-title-updated", {}, title);
-    }
-    let icon = typeof favicon === "string" && /^https?:/i.test(favicon) ? favicon : "";
-    if (!icon && /^https?:/i.test(this.url)) {
-      try { icon = `${new URL(this.url).origin}/favicon.ico`; } catch { icon = ""; }
-    }
-    if (icon !== this.favicon) {
-      this.favicon = icon;
-      this.emit("page-favicon-updated", {}, icon ? [icon] : []);
-    }
+    this.showPageState(state[0], state[1]);
   }
 
-  // Pages open pop-ups as Chrome windows. Raticode asks the same window-open
-  // handler as for its own tabs, then closes the Chrome window.
+  titleChanged(title) {
+    const entry = this.history.entries[this.history.index];
+    if (entry) entry.title = title;
+  }
+
+  // Pages open pop-ups as Chrome windows, which Raticode closes.
   handlePopup(info) {
     const id = info.targetId;
     if (!id || this.popups.has(id)) return;
@@ -746,8 +529,7 @@ class ChromiumContents extends EventEmitter {
     if (this.popupTimers?.has(id)) { clearTimeout(this.popupTimers.get(id)); this.popupTimers.delete(id); }
     if (this.popups.size > 200) this.popups = new Set([...this.popups].slice(-100));
     void this.chromium.send("Target.closeTarget", { targetId: id }).catch(() => {});
-    const decision = this.windowOpenHandler({ url, disposition: "foreground-tab", features: "", postBody: null }) || {};
-    if (decision.action === "allow") this.emit("stream-open-tab", { url });
+    this.offerPopup(url);
   }
 
   // Rem's own tabs check every page navigation against its site rules before
@@ -796,23 +578,10 @@ class ChromiumContents extends EventEmitter {
     }
   }
 
-  setPageZoom(factor) {
-    const zoom = Number(factor);
-    this.pageZoom = Number.isFinite(zoom) && zoom > 0.2 && zoom < 6 ? zoom : 1;
+  zoomChanged() {
     void this.applyViewport().then(() => { if (this.visible) return this.restartCast(); return undefined; });
   }
 
-  viewport() {
-    const view = this.view || FALLBACK_VIEW;
-    return {
-      width: Math.max(100, Math.round(view.width / this.pageZoom)),
-      height: Math.max(100, Math.round(view.height / this.pageZoom)),
-      deviceScaleFactor: Math.min(Math.max(view.scale * this.pageZoom, 0.5), 6),
-    };
-  }
-
-  // Layout happens at the view's CSS size divided by the page zoom; the
-  // device pixel ratio keeps the image sharp on the studio's display.
   async applyViewport() {
     if (!this.sessionId || this.dead) return;
     const { width, height, deviceScaleFactor } = this.viewport();
@@ -889,52 +658,8 @@ class ChromiumContents extends EventEmitter {
     if (Number(seq) === this.frame.seq) this.ackChrome();
   }
 
-  // At most one read per interval, plus one after the last change.
-  scheduleStateRefresh() {
-    if (this.stateTimer) return;
-    const wait = Math.max(0, (this.stateReadAt || 0) + STATE_REFRESH_MS - Date.now());
-    this.stateTimer = setTimeout(() => {
-      this.stateTimer = null;
-      this.stateReadAt = Date.now();
-      void this.refreshState();
-    }, wait);
-    this.stateTimer.unref?.();
-  }
-
   // -------------------------------------------------------------------------
   // The user's input from the studio
-
-  handleInput(events) {
-    for (const item of Array.isArray(events) ? events.slice(0, 200) : []) {
-      if (!item || typeof item !== "object") continue;
-      if (item.t === "move") {
-        const queued = this.pendingMove;
-        this.pendingMove = item;
-        if (queued) continue;
-        this.enqueue(() => {
-          const move = this.pendingMove;
-          this.pendingMove = null;
-          return move ? this.userInput(move) : undefined;
-        });
-        continue;
-      }
-      this.enqueue(() => this.userInput(item));
-    }
-  }
-
-  enqueue(task) {
-    this.inputQueue = this.inputQueue.then(task).catch((error) => {
-      if (!this.destroyed && !this.dead) this.log("debug", `${this.name} input failed: ${error.message}`);
-    });
-  }
-
-  point(item) {
-    const x = Math.round(Number(item.x) / this.pageZoom);
-    const y = Math.round(Number(item.y) / this.pageZoom);
-    const { width, height } = this.viewport();
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-    return { x: Math.min(Math.max(x, 0), width - 1), y: Math.min(Math.max(y, 0), height - 1) };
-  }
 
   modifiers() {
     return modifierBits(this.pressedKeys);
@@ -952,87 +677,41 @@ class ChromiumContents extends EventEmitter {
     return count;
   }
 
-  async userInput(item) {
-    await this.alive();
-    switch (item.t) {
-      case "move": {
-        const at = this.point(item);
-        if (!at) return;
-        await this.mouse("mouseMoved", at);
-        if (Date.now() - this.cursorAt > CURSOR_INTERVAL_MS) {
-          this.cursorAt = Date.now();
-          void this.reportCursor(at);
-        }
-        return;
-      }
-      case "down":
-      case "up": {
-        const at = this.point(item);
-        if (!at) return;
-        const index = [0, 1, 2].includes(item.button) ? item.button : 0;
-        const button = ["left", "middle", "right"][index];
-        const bit = [1, 4, 2][index];
-        this.emit("input-event", {}, { type: item.t === "down" ? "mouseDown" : "mouseUp" });
-        if (item.t === "down") {
-          const clickCount = this.clickCount(at, button);
-          this.buttons |= bit;
-          await this.mouse("mousePressed", at, { button, clickCount });
-        } else {
-          this.buttons &= ~bit;
-          await this.mouse("mouseReleased", at, { button, clickCount: this.lastPress.count || 1 });
-          if (index === 0) void this.reportSelect(at);
-          if (index === 2) void this.reportMenu(at);
-        }
-        return;
-      }
-      case "wheel": {
-        const at = this.point(item);
-        if (!at) return;
-        const deltaX = Math.round(Math.max(-5000, Math.min(5000, Number(item.dx) || 0)) / this.pageZoom);
-        const deltaY = Math.round(Math.max(-5000, Math.min(5000, Number(item.dy) || 0)) / this.pageZoom);
-        if (!deltaX && !deltaY) return;
-        await this.command("Input.dispatchMouseEvent", { type: "mouseWheel", x: at.x, y: at.y, deltaX, deltaY, modifiers: this.modifiers() });
-        return;
-      }
-      case "keydown":
-      case "keyup": {
-        const definition = keyDefinition(item.key);
-        if (!definition) return;
-        if (item.t === "keydown") {
-          this.pressedKeys.add(definition.key);
-          this.emit("input-event", {}, { type: "keyDown" });
-          await this.pressKey(definition, "down");
-        } else {
-          if (!this.pressedKeys.has(definition.key)) return;
-          this.pressedKeys.delete(definition.key);
-          await this.pressKey(definition, "up");
-        }
-        return;
-      }
-      case "text":
-        this.emit("input-event", {}, { type: "char" });
-        await this.typeText(String(item.text ?? ""));
-        return;
-      case "copy":
-      case "cut":
-        await this.copySelection();
-        return;
-      case "focus":
-        this.focused = true;
-        return;
-      case "blur":
-        this.focused = false;
-        for (const key of [...this.pressedKeys]) {
-          const definition = keyDefinition(key);
-          this.pressedKeys.delete(key);
-          if (definition) await this.pressKey(definition, "up").catch(() => {});
-        }
-        return;
-      case "select-option":
-        await this.chooseOption(Number(item.index));
-        return;
-      default:
-        return;
+  moveUserPointer(at) {
+    return this.mouse("mouseMoved", at);
+  }
+
+  async userButton(down, index, at) {
+    const button = ["left", "middle", "right"][index];
+    const bit = [1, 4, 2][index];
+    if (down) {
+      const clickCount = this.clickCount(at, button);
+      this.buttons |= bit;
+      await this.mouse("mousePressed", at, { button, clickCount });
+      return;
+    }
+    this.buttons &= ~bit;
+    await this.mouse("mouseReleased", at, { button, clickCount: this.lastPress.count || 1 });
+    if (index === 2) void this.reportMenu(at);
+  }
+
+  userWheel(at, deltaX, deltaY) {
+    return this.command("Input.dispatchMouseEvent", { type: "mouseWheel", x: at.x, y: at.y, deltaX, deltaY, modifiers: this.modifiers() });
+  }
+
+  userKey(key) {
+    return keyDefinition(key)?.key || "";
+  }
+
+  sendUserKey(key, down) {
+    return this.pressKey(keyDefinition(key), down ? "down" : "up");
+  }
+
+  async releaseUserInput() {
+    for (const key of [...this.pressedKeys]) {
+      const definition = keyDefinition(key);
+      this.pressedKeys.delete(key);
+      if (definition) await this.pressKey(definition, "up").catch(() => {});
     }
   }
 
@@ -1062,19 +741,6 @@ class ChromiumContents extends EventEmitter {
     if (value) await this.input("Input.insertText", { text: value });
   }
 
-  // A windowless Chrome has no use of the system clipboard, so copy and cut
-  // put the page's selection there here.
-  async copySelection() {
-    const text = await this.evaluateIn(STATE_WORLD, `(() => {
-      const active = document.activeElement;
-      if (active && typeof active.selectionStart === "number" && /^(?:input|textarea)$/i.test(active.localName) && active.type !== "password") {
-        return active.value.slice(active.selectionStart, active.selectionEnd);
-      }
-      return String(getSelection() || "");
-    })()`).catch(() => "");
-    if (text && this.clipboard) await Promise.resolve(this.clipboard.writeText(String(text))).catch(() => {});
-  }
-
   // The user's right-click: Raticode's menu, unless the page showed its own.
   async reportMenu(at) {
     const seen = await this.evaluateIn(STATE_WORLD, pageMenu.read(at.x, at.y)).catch(() => null);
@@ -1097,59 +763,9 @@ class ChromiumContents extends EventEmitter {
     return undefined;
   }
 
-  async reportCursor(at) {
-    const cursor = await this.evaluateIn(STATE_WORLD, `(() => {
-      const element = document.elementFromPoint(${at.x}, ${at.y});
-      if (!element) return "default";
-      const style = getComputedStyle(element).cursor;
-      if (style && style !== "auto") return style;
-      if (element.closest("a[href],button,summary,label[for],select,[role=button],[role=link]")) return "pointer";
-      if (element.isContentEditable || /^(?:textarea)$/i.test(element.localName) || element.localName === "input" && !/^(?:button|checkbox|radio|submit|reset|range|color|file|image)$/i.test(element.type)) return "text";
-      return "default";
-    })()`).catch(() => "");
-    if (typeof cursor === "string" && cursor !== this.cursor) {
-      this.cursor = cursor;
-      this.emit("stream-cursor", { cursor: cursor.slice(0, 40) });
-    }
-  }
-
-  // A headless Chrome draws no drop-down for <select> where the stream can
-  // see it, so the studio shows the options itself after a click opens one.
-  async reportSelect(at) {
-    const choice = await this.evaluateIn(STATE_WORLD, `(() => {
-      const element = document.activeElement;
-      if (!element || element.localName !== "select" || element.multiple || element.size > 1 || element.disabled) return null;
-      const rect = element.getBoundingClientRect();
-      if (${at.x} < rect.left || ${at.x} > rect.right || ${at.y} < rect.top || ${at.y} > rect.bottom) return null;
-      return {
-        rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
-        options: [...element.options].slice(0, 500).map((option, index) => ({ index, label: (option.label || option.text || "").slice(0, 200), disabled: option.disabled, selected: option.selected, group: option.parentElement?.localName === "optgroup" ? (option.parentElement.label || "").slice(0, 100) : "" })),
-      };
-    })()`).catch(() => null);
-    if (!choice?.options?.length) return;
-    // Chrome's own (invisible) drop-down would keep the keyboard; close it.
+  async closeNativeSelect() {
     await this.pressKey(keyDefinition("Escape"), "down", 0).catch(() => {});
     await this.pressKey(keyDefinition("Escape"), "up", 0).catch(() => {});
-    const zoom = this.pageZoom;
-    const rect = choice.rect || {};
-    this.emit("stream-select", {
-      rect: { x: rect.x * zoom, y: rect.y * zoom, width: rect.width * zoom, height: rect.height * zoom },
-      options: choice.options,
-    });
-  }
-
-  async chooseOption(index) {
-    if (!Number.isInteger(index) || index < 0) return;
-    await this.evaluateIn(STATE_WORLD, `(() => {
-      const element = document.activeElement;
-      if (!element || element.localName !== "select") return false;
-      const option = element.options[${index}];
-      if (!option || option.disabled) return false;
-      element.selectedIndex = ${index};
-      element.dispatchEvent(new Event("input", { bubbles: true }));
-      element.dispatchEvent(new Event("change", { bubbles: true }));
-      return true;
-    })()`, { userGesture: true });
   }
 
   async setFiles(backendNodeId, files) {

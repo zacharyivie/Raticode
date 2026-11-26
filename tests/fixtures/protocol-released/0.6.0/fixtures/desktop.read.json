@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000141",
+  "id": "10000000-0000-4000-8000-000000000141",
+  "sequence": 141,
+  "type": "desktop.read",
+  "payload": {
+    "op": "organizations.read",
+    "params": {
+      "organization_id": "engineering"
+    }
+  }
+}

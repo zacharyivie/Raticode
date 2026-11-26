@@ -14,7 +14,7 @@ Open Settings from **Help > Settings**, the gear (**Open settings**) in the tool
 
 | Category | What's there |
 | --- | --- |
-| General | Data directory, initial sidebar, file autosave, default run target (local or runner queue), **Check for updates** (on startup and, from 0.5.5, every 10 minutes, with a once-a-day reminder when you're behind), and **Delete archived threads** after 7, 30 or 90 days |
+| General | **Data folder**, initial sidebar, file autosave, **Check for updates** (on startup and, from 0.5.5, every 10 minutes; a newer version shows an **Update** button next to the check button), and **Delete archived threads** after 7, 30 or 90 days |
 | Devices | Microphone and level, **Dictation** (press or hold), **Send after dictation**, **Dictate to Rem from any app** (off by default), **Show Rem your screen** (off by default), **Speech recognition**, **Workflow shortcuts** (run a workflow from any app with a key), and paired phones and computers once pairing is on. See [dictation](../rem/attachments.md#dictate-a-message), [dictating from any app](../rem/attachments.md#dictate-from-any-app), [showing Rem your screen](../rem/attachments.md#show-rem-your-screen) and [pairing](../mobile/pairing.md). |
 | Computers | *New in 0.6.0.* Your computers in order, this computer's **Worker limit** (0 is Auto), and where Rem and each organization run their work. See [Where work runs](../rem/home.md#where-work-runs). |
 | Appearance | **Color theme** and **Reduced motion**. Report styling is under Memory. |

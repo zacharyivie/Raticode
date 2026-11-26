@@ -14,6 +14,10 @@ import pytest
 from gofer.ui import brain_pdf
 from gofer.ui.brain_documents import extract
 from gofer.ui.brain_library import BrainLibrary, disk_fingerprint
+from tests.helpers.brain_library import wait_task
+
+# Reading PDFs in a separate, limited process takes longer than other library tasks.
+PDF_TIMEOUT = 30
 
 POSIX = pytest.mark.skipif(os.name == "nt", reason="checks POSIX process groups and rlimits")
 
@@ -86,16 +90,6 @@ def gone(pid: int) -> bool:
     return False
 
 
-def wait_task(library: BrainLibrary, task: dict[str, Any]) -> dict[str, Any]:
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        receipt = library.task(task["id"])
-        if receipt["state"] != "running":
-            return receipt
-        time.sleep(0.02)
-    pytest.fail("Second Brain task did not finish")
-
-
 @pytest.fixture
 def library(tmp_path: Path):
     service = BrainLibrary(tmp_path / "app", start=False)
@@ -114,7 +108,7 @@ def test_slow_pdf_fails_once_and_the_scan_finishes(library, tmp_path, stub_reade
     began = time.monotonic()
     brain = library.open({"root": str(root)})
     for task in library.snapshot()["tasks"]:
-        assert wait_task(library, task)["state"] == "done"
+        assert wait_task(library, task, timeout=PDF_TIMEOUT)["state"] == "done"
     # The reader sleeps for 300 s; the scan finishes once the 1.5 s limit kills it.
     assert time.monotonic() - began < 20
 
@@ -144,7 +138,7 @@ def test_slow_pdf_fails_once_and_the_scan_finishes(library, tmp_path, stub_reade
     # A second scan doesn't read it again while the file is unchanged.
     readers = len(starts(stub_reader))
     second = library.start_task("index", {"brainId": brain["id"]})
-    assert wait_task(library, second)["state"] == "done"
+    assert wait_task(library, second, timeout=PDF_TIMEOUT)["state"] == "done"
     assert len(starts(stub_reader)) == readers
     again = {doc["path"]: doc for doc in library.entities("documents", brain["id"])}
     assert again["slow.pdf"]["extraction"] == "failed"
@@ -153,7 +147,7 @@ def test_slow_pdf_fails_once_and_the_scan_finishes(library, tmp_path, stub_reade
     # A changed file is read again.
     (root / "slow.pdf").write_bytes(b"%PDF-1.7 fixed now")
     third = library.start_task("index", {"brainId": brain["id"]})
-    assert wait_task(library, third)["state"] == "done"
+    assert wait_task(library, third, timeout=PDF_TIMEOUT)["state"] == "done"
     fixed = {doc["path"]: doc for doc in library.entities("documents", brain["id"])}
     assert fixed["slow.pdf"]["extraction"] == "ready"
     assert len(starts(stub_reader)) == readers + 1
@@ -208,7 +202,7 @@ def brain_with_pdfs(library: BrainLibrary, tmp_path: Path) -> tuple[dict[str, An
     (root / "notes.md").write_text("# Notes\n\nPlain evidence.\n", encoding="utf-8")
     brain = library.open({"root": str(root)})
     for task in library.snapshot()["tasks"]:
-        assert wait_task(library, task)["state"] == "done"
+        assert wait_task(library, task, timeout=PDF_TIMEOUT)["state"] == "done"
     return brain, root
 
 
@@ -248,7 +242,7 @@ def test_reader_that_never_starts_leaves_pdfs_for_the_next_scan(
     # The next scan reads the unchanged files once the reader starts again.
     (tmp_path / "startup").write_text("")
     again = library.start_task("index", {"brainId": brain["id"]})
-    assert wait_task(library, again)["state"] == "done"
+    assert wait_task(library, again, timeout=PDF_TIMEOUT)["state"] == "done"
     docs = {doc["path"]: doc for doc in library.entities("documents", brain["id"])}
     assert docs["a.pdf"]["extraction"] == "ready"
     assert docs["b.pdf"]["extraction"] == "ready"

@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000167",
+  "id": "10000000-0000-4000-8000-000000000167",
+  "sequence": 167,
+  "type": "desktop.read",
+  "payload": {
+    "op": "developer.log",
+    "params": {
+      "after": {
+        "file": "803-1f2e",
+        "offset": 4096
+      },
+      "levels": [
+        "error",
+        "warn",
+        "info"
+      ]
+    }
+  }
+}

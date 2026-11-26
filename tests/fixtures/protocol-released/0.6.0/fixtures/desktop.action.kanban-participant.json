@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000187",
+  "id": "10000000-0000-4000-8000-000000000187",
+  "sequence": 187,
+  "type": "desktop.action",
+  "payload": {
+    "op": "kanban.participant",
+    "params": {
+      "participant_id": "rem",
+      "projects": [
+        "project-1"
+      ],
+      "expected_revision": 3
+    }
+  }
+}

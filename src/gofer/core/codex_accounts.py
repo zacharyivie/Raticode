@@ -21,13 +21,10 @@ Providers page ("What Codex's sandbox can reach").
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
-import queue
-import subprocess
-import threading
-import time
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -56,6 +53,8 @@ DEVICE_SIGN_IN_HELP = (
 )
 # Largest config.toml a new account copies.
 MAX_CONFIG_BYTES = 1024 * 1024
+# Most output the sign-in check reads from ``codex app-server``.
+STATUS_OUTPUT_BYTES = 1024 * 1024
 
 # config.toml settings that pick or hold a sign-in, or send credentials somewhere.
 CONFIG_AUTH_KEYS = frozenset(
@@ -281,92 +280,42 @@ def parse_account(response: Any) -> dict[str, Any]:
     }
 
 
-def _app_server_account(
-    executable: str, env: dict[str, str], folder: Path, *, timeout: float = STATUS_TIMEOUT_SECONDS
-) -> Any:
+async def _app_server_account(
+    executable: str, env: dict[str, str], folder: Path, *, timeout: float
+) -> dict[str, Any] | None:
     """Ask a short-lived ``codex app-server`` for ``account/read``; its result or None."""
-    process = subprocess.Popen(
-        [executable, "app-server"],
-        env=env,
-        cwd=str(folder),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        start_new_session=os.name == "posix",
+    from gofer.core.credential_mask import masked_command
+    from gofer.core.provider_usage import codex_account_read
+    from gofer.subscriptions.acp_transport import AcpTransportError, open_acp_transport
+
+    command = masked_command(
+        [executable, "app-server"], data_dir=folder.parent.parent, keep=[folder]
     )
-    lines: queue.Queue[bytes | None] = queue.Queue()
-
-    def read() -> None:
-        assert process.stdout is not None
-        for line in iter(process.stdout.readline, b""):
-            if len(line) > 1024 * 1024:
-                continue
-            lines.put(line)
-        lines.put(None)
-
-    reader = threading.Thread(target=read, daemon=True)
-    reader.start()
-    deadline = time.monotonic() + timeout
-
-    def send(payload: dict[str, Any]) -> None:
-        assert process.stdin is not None
-        process.stdin.write((json.dumps(payload) + "\n").encode())
-        process.stdin.flush()
-
-    def answer(request_id: int) -> dict[str, Any] | None:
-        while True:
-            left = deadline - time.monotonic()
-            if left <= 0:
-                return None
-            try:
-                line = lines.get(timeout=left)
-            except queue.Empty:
-                return None
-            if line is None:
-                return None
-            try:
-                message = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(message, dict) and message.get("id") == request_id:
-                return message
-
     try:
-        send(
-            {
-                "id": 1,
-                "method": "initialize",
-                "params": {"clientInfo": {"name": "raticode_accounts", "version": "1"}},
-            }
-        )
-        if answer(1) is None:
-            return None
-        send({"method": "initialized", "params": {}})
-        send({"id": 2, "method": "account/read", "params": {"refreshToken": False}})
-        reply = answer(2)
-        return reply.get("result") if reply and "result" in reply else None
-    except (OSError, ValueError):
+        async with open_acp_transport(
+            command,
+            cwd=folder,
+            # The transport starts from Raticode's own environment; naming the other
+            # sign-ins again keeps them out of it.
+            env={**env, **ADAPTER.folder_overrides(folder)},
+            timeout=timeout,
+            max_output_bytes=STATUS_OUTPUT_BYTES,
+            allow_missing_jsonrpc=True,
+        ) as rpc:
+            return await codex_account_read(rpc, client="raticode_accounts", timeout=timeout)
+    except AcpTransportError:
         return None
-    finally:
-        try:
-            if process.stdin is not None:
-                process.stdin.close()
-        except OSError:
-            pass
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-        if process.stdout is not None:
-            process.stdout.close()
 
 
-def read_codex_status(executable: str, env: dict[str, str], folder: Path) -> dict[str, Any]:
-    """The account's sign-in state from Codex's own ``account/read``."""
-    return parse_account(_app_server_account(executable, env, folder))
+def read_codex_status(
+    executable: str, env: dict[str, str], folder: Path, *, timeout: float = STATUS_TIMEOUT_SECONDS
+) -> dict[str, Any]:
+    """The account's sign-in state from Codex's own ``account/read``.
+
+    Every caller is sync code outside an event loop (request threads, the CLI, device
+    threads, quick_status's thread and asyncio.to_thread), so this runs its own loop.
+    """
+    return parse_account(asyncio.run(_app_server_account(executable, env, folder, timeout=timeout)))
 
 
 def _read_status(output: str) -> dict[str, Any]:

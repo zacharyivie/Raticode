@@ -172,7 +172,8 @@ object RemDecisions {
             d.optJSONObject("path_counts")?.takeIf { d.optString("remember_as") == "record" }?.let(::pathCounts),
             d.optBoolean("record_restore") && d.optString("remember_as") == "record",
             d.optBoolean("asked_again"), if (d.optBoolean("asked_again")) d.optString("current_answer").take(ANSWER_MAX) else "",
-            d.optBoolean("fresh"), d.optString("plan").take(16), d.optJSONObject("asked")?.let(::asked))
+            d.optBoolean("fresh"), d.optString("plan").take(16), d.optJSONObject("asked")?.let(::asked),
+            d.optJSONObject("read_from")?.let { RemDecisionReadFrom(it.optString("commit").take(40), it.optString("author").take(100)) })
     }
 
     /** A waiting question's asked block; an older desktop sends none. */
@@ -312,6 +313,10 @@ object RemDecisions {
     fun decidedLine(decision: RemDecision): String {
         val who = when {
             decision.carriedOver -> "Carried over"
+            decision.decidedBy == "user" && decision.readFrom != null -> decision.readFrom.let { read ->
+                "Read from the repository" + if (read.commit.isBlank()) "" else
+                    ": added in ${read.commit}" + if (read.author.isBlank()) "" else " by ${read.author}"
+            }
             decision.decidedBy == "user" -> "You decided"
             decision.decidedBy == "rem" -> "Rem decided (auto mode)"
             else -> ""
@@ -526,7 +531,8 @@ data class RemDecisionStep(val at: String, val actor: String, val action: String
  * ones, with no card yet), provisional (Rem applied its recommendation in
  * self-work's auto mode; in force until the user confirms or changes it), confirmed, superseded or rejected. [project]
  * is a project's name, empty for a decision about the user. [carriedOver] marks one Raticode recorded from what it already
- * did before decisions existed, such as landing on dev. [recordRestore] marks a record whose file a Rem run changed: Raticode
+ * did before decisions existed, such as landing on dev. [readFrom] names the commit that added a record file the desktop
+ * read in from the repository. [recordRestore] marks a record whose file a Rem run changed: Raticode
  * puts the approved text back once the checkout is clean. [askedAgain] marks the question the user's Ask again filed: the
  * decision it supersedes stays in force, with [currentAnswer], until it is answered; [fresh] says a project scan gave its
  * recommendation.
@@ -541,10 +547,16 @@ data class RemDecision(val id: String, val topic: String, val question: String, 
                        val supersedesAll: List<String> = emptyList(), val conflict: String = "",
                        val pathCounts: RemDecisionPathCounts? = null, val recordRestore: Boolean = false,
                        val askedAgain: Boolean = false, val currentAnswer: String = "", val fresh: Boolean = false,
-                       val plan: String = "", val asked: RemDecisionAsked? = null) {
+                       val plan: String = "", val asked: RemDecisionAsked? = null, val readFrom: RemDecisionReadFrom? = null) {
     /** A design decision Raticode writes as a Markdown file in the project's repository ([rememberAs] record). */
     val isRecord: Boolean get() = record != null
 }
+/**
+ * A record file the desktop read in from the repository rather than wrote, until the user decides on it there: the short
+ * hash of the [commit] that added it on the landing branch and that commit's [author] (a name, never an email). Either is
+ * blank for a file read in before the desktop kept them; an older desktop sends none.
+ */
+data class RemDecisionReadFrom(val commit: String, val author: String)
 /**
  * Who asked a waiting question ([label]: a ticket key, a task's title, Self-work, Rem's chat, Project scan, you or Rem), when
  * ([at]), the runs that asked it that wait for it now ([waiting]) or went on without it ([wentOn]), and the task whose sheet the

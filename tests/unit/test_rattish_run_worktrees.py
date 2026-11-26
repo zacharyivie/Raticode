@@ -843,7 +843,7 @@ def test_deleting_a_workflow_removes_its_waiting_worktrees_and_branches(
     assert counted["pending"] == 3
     assert "orphan-run" in counted["runIds"]
 
-    result = delete_workflow_payload(workflow.workflow_id, data_dir, source_format="rattish")
+    result = delete_workflow_payload(workflow.workflow_id, data_dir)
 
     assert result["deleted"] is True
     assert result["runWorktreesRemoved"] == 3
@@ -864,7 +864,7 @@ def test_a_workflow_recreated_with_the_same_name_starts_without_old_worktrees(
     workflow = _registered(repo, data_dir)
     old = _run(workflow.entrypoint, data_dir)
     old_branch = old.document["worktree"]["branch"]
-    delete_workflow_payload(workflow.workflow_id, data_dir, source_format="rattish")
+    delete_workflow_payload(workflow.workflow_id, data_dir)
 
     again = _registered(repo, data_dir)
 
@@ -890,7 +890,7 @@ def test_deleting_is_refused_while_a_worktree_run_is_running(
     monkeypatch.setattr(api, "_rattish_worktree_records", lambda base, workflow_id: [running])
 
     with pytest.raises(api.WorkflowUpdateError, match="busy-run of this workflow is still running"):
-        api.delete_workflow_payload(workflow.workflow_id, data_dir, source_format="rattish")
+        api.delete_workflow_payload(workflow.workflow_id, data_dir)
 
     assert [item.workflow_id for item in list_registered_workflows(registry_dir=data_dir)] == [
         workflow.workflow_id

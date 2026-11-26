@@ -28,7 +28,8 @@ from gofer.ui.organizations import (
     checkin_seconds,
     session_tool,
 )
-from tests.unit.test_organization_hours_heartbeats import act, company, read, settle, start
+from tests.helpers.organizations import act, company
+from tests.unit.test_organization_hours_heartbeats import read, settle, start
 
 NY = "America/New_York"
 
@@ -800,9 +801,7 @@ def test_an_organization_saved_before_hours_and_schedules_still_runs(tmp_path: P
     config.pop("workSchedule")
     config.pop("operatingHours")
     with sqlite3.connect(manager.store.path) as db:
-        db.execute(
-            "UPDATE organizations SET config=? WHERE id=?", (json.dumps(config), made["id"])
-        )
+        db.execute("UPDATE organizations SET config=? WHERE id=?", (json.dumps(config), made["id"]))
     assert read(manager, made)["diagnostics"]["schedule"]["configured"] is False
     act(manager, made, "control", state="running")
     manager.dispatch()

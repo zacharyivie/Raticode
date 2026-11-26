@@ -51,7 +51,7 @@ Each coding app Raticode found gets one row:
 Choose the arrow next to the name, or the name itself, to open the details. They list, in order:
 
 - **Show in model menus**: a checkbox for each model the app reported. See [Hide models from menus](#hide-models-from-menus).
-- **Default model and effort**: what Raticode picks when you choose this app. These appear once the app lists its models.
+- **Default model and effort**: what Raticode picks when you choose this app, in new threads and in Rem's tasks, chat and self-work. These appear once the app lists its models. See [Which default wins](#which-default-wins).
 - The app's accounts, with **Add account**, when the app supports accounts.
 - **Sign-in**: **Sign in again** runs the app's own sign-in once more, for example to switch its default login.
 - **App location**: one closed line saying where the app runs from, such as "Automatic · /usr/bin/claude" or "Override · /opt/claude/bin/claude". Choose it to see the path Raticode found, an **Executable override** field and **Choose executable...**. If you saved an override and the app isn't there, the line ends with "not found" and opens by itself.
@@ -79,6 +79,16 @@ Each provider's details in **Settings > Providers** list the models it reported,
 | **Settings > Rem** | Default provider, model and effort for new tasks and threads. Threads with their own choices keep them. |
 | **Settings > Rem > Accounts** | Which [account](#several-accounts) each provider's work uses, such as your Claude Code, Codex or Grok account |
 | **Settings > Rem > Rem chat provider** | Who writes replies in Rem's home chat. Leave it on **Same as tasks and threads**, or pick a faster model or lower effort so chat answers quickly while tasks keep a stronger model. |
+
+### Which default wins
+
+An app's **Default model** and **Default effort** in **Settings > Providers** apply to Rem's tasks, chat and self-work, and to tasks started from the phone, unless **Settings > Rem** names a model or effort of its own.
+
+- **Settings > Rem > Default model** and **Rem chat model** start on **Automatic (*model*)**, which names the model the app's default picks, such as "Automatic (claude-opus-5-5)". Pick a model there to use it instead; pick **Automatic** again to go back to the app's default.
+- A task that names its own provider, model or effort keeps them. A task on another app than Rem's default provider starts from that app's defaults.
+- A default model you [hide from menus](#hide-models-from-menus) is skipped, and the app picks its own model.
+- A default effort applies only when the model that runs offers it, and only to the app's default model, or to any model when the app has no default model saved.
+- A model given with a `Raticode` CLI `--model` option, or in a workflow [Agent](../nodes/agent.md) node, is used as given.
 
 With Claude Code as the chat provider, Rem's home chat reply appears as it's written. Other providers show what Rem is doing, such as "Reading earlier messages", then the finished reply. Hover a reply (or open its ⋯ menu on the phone) to see which model wrote it and how long it took.
 
@@ -282,7 +292,7 @@ In the turn's own folder, the files that start programs or loosen what Grok asks
 
 How this was checked: Raticode's tests start a stand-in `grok` through the same code path and check the bubblewrap arguments: the `grok-accounts` folder is covered, only the turn's account is bound back, and the files above are read-only. Bubblewrap itself couldn't run where those tests ran, so the mask wasn't exercised against the real `grok` there. Grok 1.0.89 itself was run with an empty `GROK_HOME`: it answered `_x.ai/billing` with error -32000 "Authentication required" and wrote `config.toml` into the folder.
 
-Not built yet: accounts for other providers, an account per organization employee, and starting a Claude Code account's sign-in from the phone.
+Not built yet: accounts for other providers, an account per organization worker, and starting a Claude Code account's sign-in from the phone.
 
 ## Conversation continuity
 

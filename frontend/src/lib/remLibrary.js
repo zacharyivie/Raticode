@@ -1,5 +1,5 @@
 import { useEffect, useSyncExternalStore } from "react";
-import { apiUrl } from "./api.js";
+import { apiJson } from "./api.js";
 
 // Raticode-wide skills and MCP servers. Agents add entries with `Raticode rem`, so
 // every open tools menu refreshes on focus and while it stays open.
@@ -13,13 +13,11 @@ function publish(next) {
   for (const listener of listeners) listener();
 }
 
-async function request(init) {
-  const response = await fetch(apiUrl("/rem-resources"), init);
-  let payload = null;
-  try { payload = await response.json(); } catch { /* handled below */ }
-  if (!response.ok || !payload || !Array.isArray(payload.skills)) {
-    throw new Error(payload?.error || "The Raticode tool library is unavailable.");
-  }
+const UNAVAILABLE = "The Raticode tool library is unavailable.";
+
+async function request(options = {}) {
+  const payload = await apiJson("/rem-resources", { ...options, failure: UNAVAILABLE });
+  if (!Array.isArray(payload.skills)) throw new Error(payload.error || UNAVAILABLE);
   return payload;
 }
 
@@ -32,7 +30,7 @@ export function refreshRemLibrary() {
 }
 
 export async function editRemLibrary(body) {
-  const payload = await request({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const payload = await request({ method: "POST", body });
   publish({ loaded: true, error: "", ...payload });
   return payload;
 }

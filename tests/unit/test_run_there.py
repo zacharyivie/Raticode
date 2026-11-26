@@ -19,16 +19,16 @@ from gofer.ui.rem_home import RemHome
 from gofer.ui.rem_home_models import RemConflict
 from gofer.ui.rem_placement import pinned_computer, run_there_suggestion
 from gofer.ui.rem_self_work import self_started
+from tests.helpers.organizations import act
 from tests.unit.test_organization_placement import (
     DESK,
     PROJECT_THERE,
     Gate,
     Registry,
-    act,
     fleet_target,
     manager_for,
     runtime,
-    wait_idle,
+    wait_workers_stopped,
 )
 from tests.unit.test_organization_placement import Clock as OrgClock
 from tests.unit.test_rem_home import force_run, recipe
@@ -216,7 +216,7 @@ def test_an_organization_pick_only_sets_the_owners_existing_fleet_target(tmp_pat
         assert task["id"] not in (after["runtime"].get("placementSuggestions") or {})
     finally:
         gate.release.set()
-        wait_idle(manager)
+        wait_workers_stopped(manager)
         manager.close()
 
 
@@ -237,5 +237,5 @@ def test_without_an_owner_target_the_ticket_says_what_to_grant_and_offers_no_pic
         assert not ticket.get("execution") and ticket["status"] == "todo"
     finally:
         gate.release.set()
-        wait_idle(manager)
+        wait_workers_stopped(manager)
         manager.close()

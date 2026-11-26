@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000184",
+  "id": "10000000-0000-4000-8000-000000000184",
+  "sequence": 184,
+  "type": "desktop.action",
+  "payload": {
+    "op": "kanban.ticket",
+    "params": {
+      "action": "create",
+      "scope": "organization",
+      "organization_id": "org1",
+      "title": "Fix the export",
+      "description": "CSV export drops the last row.",
+      "priority": "high",
+      "status": "backlog",
+      "assignee_id": "lead"
+    }
+  }
+}

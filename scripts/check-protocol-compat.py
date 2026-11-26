@@ -3,12 +3,19 @@
 
 A phone or desktop that hasn't updated keeps sending what its release's fixtures show.
 Reads the fixtures from the newest v* tag with git and needs no network.
+
+Without a v* tag it fails, because CI fetches the tags and a missing tag there is a
+setup error. ``--skip-without-tags`` prints that it skipped and why instead: a local
+clone may have no tags, and scripts/check-dev.py runs this on every landing.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
+import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 from jsonschema import Draft202012Validator
@@ -24,21 +31,35 @@ def git(*args: str) -> str:
     ).stdout
 
 
-def last_release_tag() -> str:
+NO_TAGS = "No v* tags found, so there is no last release to compare with."
+
+
+def last_release_tag() -> str | None:
     tags = git("tag", "--list", "v[0-9]*", "--sort=-v:refname").split()
-    if not tags:
-        raise SystemExit("No v* tags found. Fetch the repository's tags first.")
-    return tags[0]
+    return tags[0] if tags else None
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument(
+        "--skip-without-tags",
+        action="store_true",
+        help="pass with a note instead of failing when the clone has no v* tag",
+    )
+    args = parser.parse_args(argv)
+    tag = last_release_tag()
+    if tag is None:
+        if args.skip_without_tags:
+            print(f"Skipped: {NO_TAGS} Fetch the tags with git fetch --tags to run it.")
+            return 0
+        print(f"{NO_TAGS} Fetch the repository's tags first.", file=sys.stderr)
+        return 1
     validators = {
         name: Draft202012Validator(
             json.loads((ROOT / PROTOCOL / f"{name}.schema.json").read_text())
         )
         for name in (*NAMED_SCHEMAS, "event")
     }
-    tag = last_release_tag()
     names = git("ls-tree", "-r", "--name-only", tag, f"{PROTOCOL}/fixtures").split()
     failures = []
     for name in names:
@@ -49,9 +70,11 @@ def main() -> None:
         if error is not None:
             failures.append(f"{stem}: {error.message}")
     if failures:
-        raise SystemExit(f"{tag} messages the protocol now rejects:\n" + "\n".join(failures))
+        print(f"{tag} messages the protocol now rejects:", *failures, sep="\n", file=sys.stderr)
+        return 1
     print(f"{len(names)} fixtures from {tag} still fit the current protocol.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

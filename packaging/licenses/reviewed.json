@@ -786,10 +786,6 @@
       "license": "MIT",
       "version": "1.6.0"
     },
-    "prompt-toolkit": {
-      "license": "License :: OSI Approved :: BSD License",
-      "version": "3.0.52"
-    },
     "protobuf": {
       "license": "3-Clause BSD License",
       "version": "7.36.2"
@@ -813,10 +809,6 @@
     "pydantic-core": {
       "license": "MIT",
       "version": "2.50.4"
-    },
-    "pydantic-settings": {
-      "license": "MIT",
-      "version": "2.16.2"
     },
     "pygments": {
       "license": "BSD-2-Clause",
@@ -866,10 +858,6 @@
       "license": "MIT",
       "version": "0.9.1"
     },
-    "python-dotenv": {
-      "license": "BSD-3-Clause",
-      "version": "1.2.4"
-    },
     "pywin32-ctypes": {
       "license": "BSD-3-Clause",
       "version": "0.2.3"
@@ -877,10 +865,6 @@
     "pyyaml": {
       "license": "MIT",
       "version": "6.0.3"
-    },
-    "questionary": {
-      "license": "MIT",
-      "version": "2.1.1"
     },
     "referencing": {
       "license": "MIT",
@@ -921,10 +905,6 @@
     "sortedcontainers": {
       "license": "Apache 2.0",
       "version": "2.4.0"
-    },
-    "sqlalchemy": {
-      "license": "MIT",
-      "version": "2.1.8"
     },
     "tokenizers": {
       "license": "License :: OSI Approved :: Apache Software License",
@@ -969,10 +949,6 @@
     "watchdog": {
       "license": "Apache-2.0",
       "version": "7.1.0"
-    },
-    "wcwidth": {
-      "license": "MIT",
-      "version": "0.8.1"
     },
     "win32-setctime": {
       "license": "MIT license",

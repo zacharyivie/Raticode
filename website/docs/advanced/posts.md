@@ -200,7 +200,7 @@ Under the accounts, **Publishing rules** apply to every post and save as you cha
 
 - **Save as template**: keeps the title and each platform's text and link, with any `{blanks}` you wrote, as a template. It doesn't save or change the post.
 
-**Note to yourself** (optional) is shown on the card as the reason for the post. **Save for review** saves the post into **Needs review**. `Ctrl+Enter` (`Cmd+Enter` on a Mac) saves; `Escape` closes without saving.
+**Note to yourself** (optional) is shown on the card as the reason for the post. **Save for review** saves the post into **Needs review**. `Ctrl+Enter` (`Cmd+Enter` on a Mac) saves; `Escape` closes without saving. Once you've changed anything, `Escape` asks first (**Keep editing** goes back to the draft as it was) and a click outside the editor leaves it open. New in 0.6.1.
 
 ## Review and approve
 

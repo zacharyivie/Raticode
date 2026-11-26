@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "id": "10000000-0000-4000-8000-000000000011",
+  "thread_id": "00000000-0000-4000-8000-000000000002",
+  "request_id": "00000000-0000-4000-8000-000000000001",
+  "sequence": 11,
+  "type": "error",
+  "payload": {
+    "code": "unauthorized",
+    "retryable": false,
+    "detail": "Desktop approval required"
+  }
+}

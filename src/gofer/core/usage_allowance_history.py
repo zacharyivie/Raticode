@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from gofer.core.usage_ledger import usage_db
+from gofer.utils.instants import stored_instant
 
 # Providers can report the same reset a few seconds apart; a shift this small is the
 # same window, not a new reading.
@@ -34,18 +35,8 @@ PACE_TEXT = {
 }
 
 
-def _parse(value: Any) -> datetime | None:
-    if not value:
-        return None
-    try:
-        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
-
-
 def _same_reset(left: Any, right: Any) -> bool:
-    first, second = _parse(left), _parse(right)
+    first, second = stored_instant(left), stored_instant(right)
     if first is None or second is None:
         return first is None and second is None
     return abs((first - second).total_seconds()) <= RESET_TOLERANCE_SECONDS
@@ -76,7 +67,7 @@ def record_allowance_readings(
     """
     from gofer.core.usage_service import window_used_percent
 
-    observed = _parse(observed_at)
+    observed = stored_instant(observed_at)
     if observed is None:
         return 0
     written = 0
@@ -91,7 +82,7 @@ def record_allowance_readings(
         if percent is None:
             continue
         resets_at = window.get("resets_at") if isinstance(window.get("resets_at"), str) else ""
-        reset = _parse(resets_at)
+        reset = stored_instant(resets_at)
         if reset is not None and reset <= observed:
             continue
         seen.add(window_id)
@@ -102,7 +93,7 @@ def record_allowance_readings(
             (provider, profile, window_id),
         ).fetchone()
         if last is not None:
-            previous = _parse(last["observed_at"])
+            previous = stored_instant(last["observed_at"])
             if previous is not None and observed <= previous:
                 continue
         if not _changed(last, percent, resets_at or ""):
@@ -158,7 +149,7 @@ def split_windows(readings: Sequence[Mapping[str, Any]]) -> list[list[Mapping[st
     for reading in readings:
         if windows:
             last = windows[-1][-1]
-            if _parse(last.get("resets_at")) and _parse(reading.get("resets_at")):
+            if stored_instant(last.get("resets_at")) and stored_instant(reading.get("resets_at")):
                 same = _same_reset(last.get("resets_at"), reading.get("resets_at"))
             else:
                 same = float(reading["used_percent"]) >= float(last["used_percent"])
@@ -188,18 +179,18 @@ def pace(
     change, so the rate runs from the first reading to that check. Fewer than two
     readings is ``not_enough``.
     """
-    reset = _parse(resets_at)
+    reset = stored_instant(resets_at)
     points = [
         (stamp, float(r["used_percent"]))
         for r in readings
-        if (stamp := _parse(r.get("observed_at"))) is not None
+        if (stamp := stored_instant(r.get("observed_at"))) is not None
     ]
     if len(points) < 2 or reset is None:
         return {"state": "not_enough", "runs_out_at": None, "text": PACE_TEXT["not_enough"]}
     (first_at, first), (last_at, last) = points[0], points[-1]
     if last >= 100:
         return {"state": "used_up", "runs_out_at": None, "text": PACE_TEXT["used_up"]}
-    checked = _parse(checked_at)
+    checked = stored_instant(checked_at)
     end_at = max(last_at, checked) if checked is not None and checked < reset else last_at
     seconds = (end_at - first_at).total_seconds()
     rate = (last - first) / seconds if seconds > 0 else 0.0
@@ -251,7 +242,7 @@ def weekly_burndown(
     window = weekly_window(account)
     if window is None:
         return None
-    reset = _parse(window.get("resets_at"))
+    reset = stored_instant(window.get("resets_at"))
     now = now or datetime.now(UTC)
     if reset is None or reset <= now:
         return None
@@ -259,7 +250,7 @@ def weekly_burndown(
     current: list[Mapping[str, Any]] = []
     for part in split_windows(list(readings)):
         if _same_reset(part[-1].get("resets_at"), window.get("resets_at")):
-            current = [r for r in part if (_parse(r.get("observed_at")) or reset) >= start]
+            current = [r for r in part if (stored_instant(r.get("observed_at")) or reset) >= start]
     points = [
         {"observed_at": str(r["observed_at"]), "used_percent": float(r["used_percent"])}
         for r in current

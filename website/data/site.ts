@@ -14,6 +14,11 @@ export const defaultSiteUrl = 'https://raticode.dev/'
 export const supportEmail = 'support@raticode.dev'
 export const supportMailto = `mailto:${supportEmail}`
 
+// The one place to chip in for Raticode's development. The support banner (home page and
+// the foot of every docs page), the top nav and the footer link here, and
+// `npm run check:links` fails if the banner is missing or a page links another donation page.
+export const supportProjectUrl = 'https://buymeacoffee.com/Raticode'
+
 // /.well-known/security.txt (RFC 9116) tells security researchers how to report a problem.
 // Expires should be less than a year ahead, so every build sets it 360 days out; the site
 // is rebuilt with each release, which keeps it current. Policy points at the support

@@ -36,15 +36,6 @@ def test_no_placeholders(tmp_path: Path) -> None:
     assert mgr.load(p, {}) == "Plain text."
 
 
-def test_list_prompts(tmp_path: Path) -> None:
-    (tmp_path / "a.md").write_text("a")
-    (tmp_path / "b.md").write_text("b")
-    mgr = PromptManager(search_dirs=[tmp_path])
-    paths = mgr.list_prompts()
-    names = {p.name for p in paths}
-    assert {"a.md", "b.md"} <= names
-
-
 def test_search_dir_resolution(tmp_path: Path) -> None:
     (tmp_path / "greet.md").write_text("Hi {{user}}!")
     mgr = PromptManager(search_dirs=[tmp_path])

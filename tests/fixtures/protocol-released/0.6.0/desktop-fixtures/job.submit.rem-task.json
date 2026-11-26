@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "id": "00000000-0000-4000-8000-000000000001",
+  "thread_id": "00000000-0000-4000-8000-000000000002",
+  "request_id": "00000000-0000-4000-8000-000000000003",
+  "sequence": 0,
+  "type": "job.submit",
+  "payload": {
+    "job_id": "00000000-0000-4000-8000-000000000003",
+    "target_device_id": "00000000-0000-4000-8000-000000000004",
+    "project_id": "00000000-0000-4000-8000-000000000005",
+    "resource_ids": [],
+    "intent": "Find the slowdown",
+    "expected_policy_revision": 1,
+    "rem_task": {
+      "run_id": "00000000-0000-4000-8000-000000000006",
+      "type": "research",
+      "execution_mode": "work",
+      "title": "Find the slowdown",
+      "prompt": "Why did startup slow down? Compare the logs from last week with today's.",
+      "checks": [
+        {"id": "answer", "description": "Name the causes with sources"}
+      ],
+      "provider": "codex"
+    }
+  }
+}

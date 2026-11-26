@@ -32,15 +32,39 @@
 .rem-side-dismiss-all:disabled { opacity: .6; cursor: progress; }
 .rem-side-dismiss-all small { font-size: 10px; font-variant-numeric: tabular-nums; }
 
+/* Start/Stop self-work under Rem's name: tinted with the brand while off, quiet while on. */
+.rem-self-work { display: grid; gap: 3px; margin: -2px 14px 8px; }
+.rem-self-work-toggle { display: flex; align-items: center; gap: 7px; width: 100%; height: 30px; padding: 0 10px; border: 1px solid rgb(var(--color-brand) / .35); border-radius: 8px; background: rgb(var(--color-brand) / .1); color: rgb(var(--color-brand)); font-size: 12px; font-weight: 600; text-align: left; }
+.rem-self-work-toggle:hover:not(:disabled) { background: rgb(var(--color-brand) / .18); }
+.rem-self-work-toggle:disabled { opacity: .6; cursor: progress; }
+.rem-self-work[data-on] .rem-self-work-toggle { border-color: rgb(var(--color-line)); background: transparent; color: rgb(var(--color-ink)); }
+.rem-self-work[data-on] .rem-self-work-toggle:hover:not(:disabled) { background: rgb(var(--color-ink) / .07); }
+.rem-self-work-mode { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; font-size: 11px; font-weight: 500; color: rgb(var(--color-muted)); }
+.rem-self-work-mode::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.rem-self-work[data-mode=working] .rem-self-work-mode { color: rgb(var(--color-brand)); }
+.rem-self-work[data-mode=working] .rem-self-work-mode::before { animation: rem-self-work-pulse 1.8s ease-in-out infinite; }
+.rem-self-work[data-mode=paused] .rem-self-work-mode { color: var(--rem-attention); }
+.rem-self-work-line { display: -webkit-box; margin: 0; padding: 0 2px; overflow: hidden; font-size: 11px; line-height: 1.4; color: rgb(var(--color-muted)); -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.rem-self-work-now { padding: 0; border: 0; background: none; color: rgb(var(--color-brand)); font: inherit; font-weight: 600; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.rem-self-work-now:disabled { opacity: .6; cursor: progress; }
+.rem-self-work-error { margin: 0; padding: 0 2px; font-size: 11px; color: var(--rem-danger); }
+@keyframes rem-self-work-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .rem-self-work[data-mode=working] .rem-self-work-mode::before { animation: none; } }
+
 /* Self-work objectives: a compact checklist above the task groups. */
 .rem-side-objectives { margin: 2px 0 4px; padding-bottom: 4px; border-bottom: 1px solid rgb(var(--color-line) / .7); }
 .rem-objectives-add { width: 22px; height: 22px; flex: none; }
 .rem-objectives { margin: 0; padding: 0; list-style: none; }
-.rem-objective { position: relative; display: flex; align-items: flex-start; gap: 7px; padding: 4px 4px 4px 9px; border-radius: 6px; font-size: 12px; line-height: 17px; }
+.rem-objective { position: relative; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 7px; padding: 4px 4px 4px 9px; border-radius: 6px; font-size: 12px; line-height: 17px; }
 .rem-objective:hover, .rem-objective:focus-within { background: rgb(var(--color-ink) / .06); }
 .rem-objective input[type=checkbox] { flex: none; width: 13px; height: 13px; margin: 2px 0 0; accent-color: rgb(var(--color-brand)); cursor: pointer; }
-.rem-objective-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.rem-objective-text { flex: 1; min-width: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
 .rem-objective-text > span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.rem-objective[data-expanded] .rem-objective-text > span { display: block; overflow: visible; }
+.rem-objective[data-expanded] { background: rgb(var(--color-ink) / .06); }
+.rem-objective-details { flex: 0 0 100%; padding: 0 4px 2px 20px; font-size: 11px; line-height: 15px; color: rgb(var(--color-muted)); overflow-wrap: anywhere; }
+.rem-objective-details p { margin: 0; }
+.rem-objective-details p + p { margin-top: 3px; }
 .rem-objective-text small { display: block; font-size: 10.5px; line-height: 14px; color: rgb(var(--color-brand)); }
 .rem-objective[data-done] .rem-objective-text > span { color: rgb(var(--color-muted)); text-decoration: line-through; text-decoration-color: rgb(var(--color-muted) / .6); }
 .rem-objective-menu { opacity: 0; }
@@ -49,6 +73,16 @@
 .rem-objective[data-confirming], .rem-objective[data-editing] { display: block; padding: 7px 8px; background: rgb(var(--color-ink) / .06); }
 .rem-objective[data-confirming] p { margin: 0 0 7px; overflow-wrap: anywhere; }
 .rem-objectives-empty { margin: 0; padding: 2px 10px 6px 27px; font-size: 11.5px; line-height: 1.45; color: rgb(var(--color-muted)); }
+/* Stale objectives: done in earlier self-work sessions, folded below the current ones. */
+.rem-objectives-stale { margin: 4px 2px 0; padding-top: 3px; border-top: 1px dashed rgb(var(--color-line)); }
+.rem-objectives-stale-heading { display: flex; align-items: center; gap: 5px; width: 100%; height: 22px; padding: 0 6px 0 7px; border-radius: 6px; color: rgb(var(--color-muted)); font-size: 11px; font-weight: 500; }
+.rem-objectives-stale-heading:hover { color: rgb(var(--color-ink)); background: rgb(var(--color-ink) / .06); }
+.rem-objectives-stale-heading small { margin-left: auto; font-size: 10px; font-variant-numeric: tabular-nums; }
+.rem-objective[data-stale] { opacity: .62; }
+.rem-objective[data-stale]:hover, .rem-objective[data-stale]:focus-within { opacity: 1; }
+.rem-objective[data-stale] .rem-objective-text > span { text-decoration: none; }
+.rem-objectives-more { display: block; width: calc(100% - 18px); height: 22px; margin: 2px 9px 0; border-radius: 6px; color: rgb(var(--color-muted)); font-size: 11px; text-align: left; padding: 0 7px; }
+.rem-objectives-more:hover { color: rgb(var(--color-ink)); background: rgb(var(--color-ink) / .06); }
 .rem-objective-form { display: grid; gap: 5px; padding: 4px 4px 6px 9px; }
 .rem-objective[data-editing] .rem-objective-form { padding: 0; }
 .rem-objective-form input { width: 100%; min-width: 0; height: 26px; padding: 0 7px; border: 1px solid rgb(var(--color-line)); border-radius: 6px; background: transparent; color: rgb(var(--color-ink)); font-size: 12px; }
@@ -328,6 +362,8 @@
 .rem-suggestions button, .rem-quiet-button { display: inline-flex; align-items: center; gap: 6px; padding: 7px 13px; border: 1px solid var(--rem-line); border-radius: 999px; background: var(--rem-raised); color: var(--rem-ink); font-size: 12.5px; }
 .rem-suggestions button:hover, .rem-quiet-button:hover { border-color: var(--rem-accent); color: var(--rem-accent); }
 .rem-quiet-button { margin-top: 10px; }
+.rem-provider-problem { display: flex; flex-direction: column; align-items: center; gap: 2px; max-width: 440px; margin-top: 14px; padding: 12px 16px; border: 1px solid var(--rem-line); border-radius: 12px; background: var(--rem-raised); }
+.rem-welcome .rem-provider-problem p { color: var(--rem-ink); }
 
 .rem-composer { flex-shrink: 0; width: min(680px, 100%); margin: 0 auto; padding: 4px 20px 18px; }
 

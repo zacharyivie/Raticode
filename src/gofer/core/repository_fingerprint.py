@@ -23,7 +23,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from gofer.utils.process import NO_REPOSITORY_PROGRAMS, build_subprocess_env
+from gofer.utils.process import build_subprocess_env, run_repository_git
 
 KEEP_SECONDS = 300.0
 TIMEOUT_SECONDS = 10.0
@@ -44,16 +44,13 @@ def from_root_commits(commits: list[str]) -> str | None:
 
 def _read(root: str) -> str | None:
     try:
-        done = subprocess.run(
-            # rev-list reads commits only: no filters, hooks or index, so the repository's
-            # own config names nothing it runs. The flags still turn off fsmonitor and hooks.
-            ["git", *NO_REPOSITORY_PROGRAMS, "-C", root, "rev-list", "--max-parents=0", "HEAD"],
-            capture_output=True,
-            text=True,
+        done = run_repository_git(
+            root,
+            "rev-list",
+            "--max-parents=0",
+            "HEAD",
             timeout=TIMEOUT_SECONDS,
-            stdin=subprocess.DEVNULL,
-            check=False,
-            env={**build_subprocess_env(), "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"},
+            env={**build_subprocess_env(), "LC_ALL": "C"},
         )
     except (OSError, subprocess.SubprocessError, ValueError):
         return None

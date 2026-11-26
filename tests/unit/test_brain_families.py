@@ -18,6 +18,7 @@ from gofer.ui.brain_families import (
     report_families,
 )
 from gofer.ui.brain_library import BrainLibrary
+from tests.helpers.brain_library import wait_idle
 
 
 def paragraph(topic: str, index: int) -> str:
@@ -44,15 +45,6 @@ def doc(
         "blocks": [{"id": f"{doc_id}-{n}", "text": text} for n, text in enumerate(texts)],
         **extra,
     }
-
-
-def wait_idle(library: BrainLibrary) -> None:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if all(task["state"] != "running" for task in library.snapshot()["tasks"]):
-            return
-        time.sleep(0.02)
-    pytest.fail("Second Brain tasks did not finish")
 
 
 @pytest.fixture

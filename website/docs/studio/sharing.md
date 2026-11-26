@@ -30,6 +30,8 @@ Before running it, open the source and graph and read:
 
 Importing a workflow isn't permission to run it.
 
+From 0.6.1, **Import** takes only `.raticode` bundles. A `.toml` workflow or a `.gof.zip` bundle from an older version can't be imported. Convert a `.toml` workflow with `Raticode rattish convert` instead; see [Convert a TOML workflow](../workflows/rattish.md#convert-a-toml-workflow).
+
 ## Check the receiving computer
 
 Compile and run preflight on the destination. It still needs its own interpreters, provider CLIs, API profiles and credentials.

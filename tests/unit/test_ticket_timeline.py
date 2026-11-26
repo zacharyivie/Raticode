@@ -442,6 +442,7 @@ def org_task(**fields: Any) -> dict[str, Any]:
     }
 
 
+# Not the organization company: a bare stored state for timeline reads.
 def company(*tasks: dict[str, Any]) -> dict[str, Any]:
     return {
         "config": {"employees": [{"id": "mira", "name": "Mira"}]},

@@ -19,6 +19,7 @@ const {
   normalizeBrowserUrl,
 } = require("./browser-utils.cjs");
 const policyRules = require("./browser-policy.cjs");
+const { NETWORK_PATH_ERROR, isNetworkPath } = require("./security.cjs");
 const { FirefoxContents } = require("./firefox-contents.cjs");
 const { PAGE_AGENT } = require("./agent-browser.cjs");
 const { ChromiumContents, isInternalPage: isChromiumInternalPage } = require("./chromium-contents.cjs");
@@ -77,18 +78,16 @@ const LINK_CLICK_MS = 3000;
 const OFFLINE_PROXY = Object.freeze({ mode: "fixed_servers", proxyRules: "http://127.0.0.1:9", proxyBypassRules: "<-loopback>" });
 const OFFLINE_WEBRTC_POLICY = "disable_non_proxied_udp";
 
-const NETWORK_FILE_ERROR = "Raticode opens only files on this computer, not file:// addresses on another computer or network share.";
-
-// The path a file: URL names on this computer, or "" for anything else. A file:
-// URL with a host (file://server/share/page.html) names a network share, and on
-// Windows just resolving its path contacts that server and offers it the user's
-// sign-in, so such URLs are refused before any path or disk call.
+// The path a file: URL names on this computer, or "" for anything else. A
+// network share (file://server/share/page.html) is refused before any path or
+// disk call: see isNetworkPath.
 function localFilePath(value) {
   let url;
   try { url = value instanceof URL ? value : new URL(String(value ?? "")); } catch { return ""; }
-  if (url.protocol !== "file:") return "";
-  if (url.host !== "" && url.hostname.toLowerCase() !== "localhost") return "";
-  try { return fileURLToPath(url); } catch { return ""; }
+  if (url.protocol !== "file:" || isNetworkPath(url)) return "";
+  let file;
+  try { file = fileURLToPath(url); } catch { return ""; }
+  return isNetworkPath(file) ? "" : file;
 }
 const LINK_CLICK_RECORDER = `(() => {
   if (window.__raticodeLinkClick) return true;
@@ -663,7 +662,7 @@ function createBrowserSessions({
       // Local files always render in the in-memory preview profile.
       if (url.startsWith("file:")) {
         const file = localFilePath(url);
-        if (!file) throw new Error(NETWORK_FILE_ERROR);
+        if (!file) throw new Error(NETWORK_PATH_ERROR);
         previewFolder = path.dirname(fs.realpathSync(resolvePath(file, { mustExist: true })));
         kind = "preview";
       }
@@ -1635,8 +1634,8 @@ function createBrowserSessions({
       const timer = setTimeout(() => settlePrompt(requestId, null), PROMPT_TIMEOUT_MS);
       timer.unref?.();
       prompts.set(requestId, { session, kind, payload, resolve, timer, createdAt: Date.now() });
+      // The page reads the prompt from the tab state (promptsFor).
       emitState(session);
-      session.owner.send("gofer:browser-prompt", { id: session.id, clientId: session.clientId, requestId, kind, ...payload });
     });
   }
 
@@ -2734,7 +2733,7 @@ function createBrowserSessions({
     // Typed local paths open as previews in their own profile.
     if (normalizedUrl.startsWith("file:") && session.kind !== "preview") {
       const file = localFilePath(normalizedUrl);
-      if (!file) throw new Error(NETWORK_FILE_ERROR);
+      if (!file) throw new Error(NETWORK_PATH_ERROR);
       resolvePath(file, { mustExist: true });
       session.owner.send("gofer:browser-open-file", { href: normalizedUrl });
       return Promise.resolve();

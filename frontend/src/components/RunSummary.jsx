@@ -2,13 +2,13 @@ import { useState } from "react";
 import { AlertCircle, CheckCircle2, Circle, CircleSlash, Loader2, Square, Unplug, X } from "lucide-react";
 import AskRemButton from "./AskRemButton.jsx";
 import { runCanAskRem } from "../lib/askRemAboutFailure.js";
-import { distinctWorkflowRunRecords, exactWorkflowRunStopPath, formatRunAge, sortWorkflowRunsNewestFirst, workflowRunSummary } from "../lib/workflowRuns";
+import { exactWorkflowRunStopPath, formatRunAge, sortWorkflowRunsNewestFirst, workflowRunSummary } from "../lib/workflowRuns";
 
 const LABELS = { running: "Running", queued: "Queued", submitting: "Submitting", stopping: "Stop requested", success: "Succeeded", error: "Failed", stopped: "Stopped", cancelled: "Cancelled", disconnected: "Disconnected", unknown: "Unknown" };
 
 const ACTIVE_STATUSES = new Set(["running", "queued", "submitting", "stopping"]);
 
-export function RunStatus({ status }) {
+export function RunStatus({ status, className = "" }) {
   const active = ACTIVE_STATUSES.has(status);
   const Icon = status === "error" ? AlertCircle : status === "success" ? CheckCircle2 : status === "disconnected" ? Unplug : ["stopped", "cancelled"].includes(status) ? CircleSlash : active ? Loader2 : Circle;
   const tone = status === "error" ? "text-red-700 dark:text-red-300"
@@ -16,7 +16,29 @@ export function RunStatus({ status }) {
       : ["stopped", "cancelled"].includes(status) ? "text-amber-700 dark:text-amber-300"
         : active ? "text-blue-700 dark:text-sky-300"
           : "text-zinc-600 dark:text-zinc-300";
-  return <span className={`inline-flex items-center gap-1.5 ${tone}`}><Icon size={13} aria-hidden="true" className={active ? "animate-spin motion-reduce:animate-none" : undefined} />{LABELS[status] ?? status}</span>;
+  return <span className={`inline-flex items-center gap-1.5 ${tone} ${className}`}><Icon size={13} aria-hidden="true" className={active ? "animate-spin motion-reduce:animate-none" : undefined} />{LABELS[status] ?? status}</span>;
+}
+
+// Statuses whose error says why the run ended early.
+const REASON_STATUSES = new Set(["error", "disconnected"]);
+
+function errorFirstLine(text) {
+  return text.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
+}
+
+// Why a failed or interrupted run ended: the first line of its error, at most two
+// lines tall. `expandable` adds Show more for the whole message; leave it off inside
+// another button, such as a row in a run menu.
+export function RunErrorReason({ status, error, expandable = false, className = "" }) {
+  const [expanded, setExpanded] = useState(false);
+  const text = String(error ?? "").trim();
+  const first = errorFirstLine(text);
+  if (!REASON_STATUSES.has(status) || !first) return null;
+  const more = expandable && (text !== first || first.length > 100);
+  return <div className={`min-w-0 text-[11px] leading-4 text-muted ${className}`} data-testid="run-error-reason">
+    <p className={expanded ? "whitespace-pre-wrap break-words" : "line-clamp-2 break-words"} title={expandable ? undefined : text}>{expanded ? text : first}</p>
+    {more ? <button type="button" aria-expanded={expanded} className="font-medium text-brand hover:underline focus-visible:outline" onClick={(event) => { event.stopPropagation(); setExpanded((current) => !current); }}>{expanded ? "Show less" : "Show full error"}</button> : null}
+  </div>;
 }
 
 function runTiming(record, now = Date.now()) {
@@ -33,8 +55,7 @@ export default function RunSummary({ embedded = false, records = [], projectPath
   const [pending, setPending] = useState(new Set());
   const [error, setError] = useState("");
   const summary = workflowRunSummary(records);
-  const distinct = distinctWorkflowRunRecords(records);
-  const visible = sortWorkflowRunsNewestFirst(scope === "project" ? distinct.filter((record) => record.projectPath === projectPath) : distinct);
+  const visible = sortWorkflowRunsNewestFirst(scope === "project" ? records.filter((record) => record.projectPath === projectPath) : records);
 
   async function stop(record) {
     if (pending.has(record.key) || !exactWorkflowRunStopPath(record)) return;

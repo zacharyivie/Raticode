@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -587,14 +588,25 @@ def test_tabular_loop_stops_parsing_at_item_limit(tmp_path, monkeypatch, suffix)
     context = runtime.RuntimeContext(tmp_path, "test", "test", {}, (), {})
     seen = []
     if suffix == ".csv":
-        original_reader = runtime.csv.DictReader
+        original_reader = runtime.csv.reader
 
-        def observed_reader(*args, **kwargs):
-            for row in original_reader(*args, **kwargs):
+        class ObservedReader:
+            def __init__(self, *args, **kwargs):
+                self._reader = original_reader(*args, **kwargs)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                row = next(self._reader)
                 seen.append(row)
-                yield row
+                return row
 
-        monkeypatch.setattr(runtime.csv, "DictReader", observed_reader)
+            @property
+            def line_num(self):
+                return self._reader.line_num
+
+        monkeypatch.setattr(runtime.csv, "reader", ObservedReader)
     else:
         original_loads = runtime.json.loads
 
@@ -605,7 +617,8 @@ def test_tabular_loop_stops_parsing_at_item_limit(tmp_path, monkeypatch, suffix)
         monkeypatch.setattr(runtime.json, "loads", observed_loads)
     with pytest.raises(ValueError, match="fan-out"):
         runtime._tabular_loop_items(path, context)
-    assert len(seen) <= 3 if suffix == ".csv" else len(seen) <= 2
+    # The CSV reader also returns the header row.
+    assert len(seen) <= 4 if suffix == ".csv" else len(seen) <= 2
 
 
 @pytest.mark.anyio
@@ -655,6 +668,113 @@ def test_tabular_loop_accepts_exact_item_limit_and_preserves_newlines(
     assert items == (
         [{"name": "first\r\nline"}, {"name": "second"}] if suffix == ".csv" else [{}, {}]
     )
+
+
+def _tabular_items(tmp_path: Path, name: str, content: str | bytes) -> list[dict[str, Any]]:
+    path = tmp_path / name
+    if isinstance(content, str):
+        content = content.encode("utf-8")
+    path.write_bytes(content)
+    context = runtime.RuntimeContext(tmp_path, "test", "test", {}, (), {})
+    return runtime._tabular_loop_items(path, context)
+
+
+def test_tabular_loop_drops_excel_byte_order_mark(tmp_path):
+    assert _tabular_items(tmp_path, "rows.csv", "\ufeffname,email\nBo,bo@example.com\n") == [
+        {"name": "Bo", "email": "bo@example.com"}
+    ]
+    assert _tabular_items(tmp_path, "rows.jsonl", '\ufeff{"name": "Bo"}\n') == [{"name": "Bo"}]
+
+
+@pytest.mark.parametrize(
+    ("name", "content"),
+    [
+        ("rows.csv", "name;email\nBo;bo@example.com\n"),
+        ("rows.csv", "name\temail\nBo\tbo@example.com\n"),
+        ("rows.tsv", "name\temail\nBo\tbo@example.com\n"),
+        ("rows.csv", "name,email\nBo,bo@example.com\n"),
+    ],
+)
+def test_tabular_loop_picks_delimiter_from_header(tmp_path, name, content):
+    assert _tabular_items(tmp_path, name, content) == [{"name": "Bo", "email": "bo@example.com"}]
+
+
+def test_tabular_loop_comma_header_keeps_semicolons_in_values(tmp_path):
+    assert _tabular_items(tmp_path, "rows.csv", "name,note\nBo,a;b\n") == [
+        {"name": "Bo", "note": "a;b"}
+    ]
+
+
+def test_tabular_loop_short_rows_get_null_and_trailing_empty_columns_are_ignored(tmp_path):
+    assert _tabular_items(tmp_path, "rows.csv", "name,email,\nBo\nAl,al@example.com,\n") == [
+        {"name": "Bo", "email": None},
+        {"name": "Al", "email": "al@example.com"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("name", "content", "message"),
+    [
+        ("rows.csv", "name,email\nBo,bo@example.com,extra\n", "rows.csv line 2 has 3 values"),
+        ("rows.csv", "name,name\nBo,Al\n", "rows.csv line 1: the header 'name' names columns"),
+        ("rows.csv", "name,,email\nBo,x,y\n", "rows.csv line 1: column 2 has no header"),
+        ("rows.csv", ",\nBo\n", "rows.csv line 1 is an empty header row"),
+        ("rows.csv", 'name\n"Bo\nsmith",extra\n', "rows.csv line 2 has 2 values"),
+        ("rows.csv", "name\nB\xe9\n".encode("latin-1"), "rows.csv line 2 is not UTF-8"),
+        ("rows.jsonl", '{"name": "Bo"}\n[["name", "Al"]]\n', "rows.jsonl line 2 is an array"),
+        ("rows.jsonl", '{"name": "Bo"}\n\n"Al"\n', "rows.jsonl line 3 is a string"),
+        ("rows.jsonl", '{"name": "Bo"}\n\n{"name": }\n', r"rows.jsonl line 3 is not valid JSON"),
+    ],
+)
+def test_tabular_loop_errors_name_the_file_and_line(tmp_path, name, content, message):
+    with pytest.raises(ValueError, match=re.escape(message)):
+        _tabular_items(tmp_path, name, content)
+
+
+@pytest.mark.anyio
+async def test_tabular_loop_extra_value_is_a_configuration_error(tmp_path: Path) -> None:
+    (tmp_path / "rows.csv").write_text("name,email\nBo,bo@example.com,extra\n")
+    ir = compile_source(
+        "Rattish: 1\nWorkflow:\n  name: Rows\nNode repeat:\n  type: loop\n"
+        '  source: {"type": "tabular", "path": "rows.csv"}\n',
+        tmp_path,
+    )
+    result = await execute_node(ir, "repeat")
+    assert result.outcome == "failure"
+    assert result.error is not None
+    assert result.error.code == "RATTISH_RUNTIME_CONFIGURATION_ERROR"
+    assert "rows.csv line 2" in result.error.message
+
+
+def test_xlsx_loop_rejects_blank_and_repeated_headers(tmp_path):
+    from tests.helpers.xlsx_files import write_xlsx
+
+    pytest.importorskip("python_calamine")
+    context = runtime.RuntimeContext(tmp_path, "test", "test", {}, (), {})
+    blank = write_xlsx(tmp_path / "blank.xlsx", [[["name", None, "email"], ["Bo", "x", "y"]]])
+    with pytest.raises(ValueError, match="blank.xlsx row 1: column 2 has no header"):
+        runtime._tabular_loop_items(blank, context)
+    repeated = write_xlsx(tmp_path / "repeated.xlsx", [[["name", "name"], ["Bo", "Al"]]])
+    with pytest.raises(ValueError, match="repeated.xlsx row 1: the header 'name'"):
+        runtime._tabular_loop_items(repeated, context)
+
+
+@pytest.mark.anyio
+async def test_directory_loop_names_a_file_that_is_not_utf8(tmp_path: Path) -> None:
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "notes.md").write_text("hello")
+    (tmp_path / "docs" / "logo.png").write_bytes(b"\x89PNG\xff\xfe")
+    ir = compile_source(
+        "Rattish: 1\nWorkflow:\n  name: Files\nNode repeat:\n  type: loop\n"
+        '  source: {"type": "directory", "path": "docs", "glob": "*", "include-content": true}\n',
+        tmp_path,
+    )
+    result = await execute_node(ir, "repeat")
+    assert result.outcome == "failure"
+    assert result.error is not None
+    assert result.error.code == "RATTISH_RUNTIME_CONFIGURATION_ERROR"
+    assert "logo.png is not UTF-8 text" in result.error.message
+    assert "Narrow glob" in result.error.message
 
 
 @pytest.mark.parametrize("row_count", [0, 2, 3])

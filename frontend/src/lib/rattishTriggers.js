@@ -1,4 +1,4 @@
-import { apiUrl } from "./api.js";
+import { apiJson } from "./api.js";
 
 export const RUNS_ONLY_WHILE_RUNNING =
   "Triggers run only while Raticode or its background scheduler is running.";
@@ -365,44 +365,28 @@ export function webhookCurl(url, token) {
   return `curl -X POST -H 'Authorization: Bearer ${token}' -H 'Content-Type: application/json' -d '{}' ${url}`;
 }
 
-async function send(path, options) {
-  const response = await fetch(apiUrl(`/rattish/triggers${path}`), options);
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(payload.error || `Request failed (${response.status}).`);
-    // Approve this version names the files it couldn't show when it refuses.
-    if (Array.isArray(payload.unseen)) error.unseen = payload.unseen;
-    throw error;
-  }
-  return payload;
-}
-
-function post(path, body) {
-  return send(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body ?? {}),
-  });
-}
+// Approve this version names the files it couldn't show when it refuses (error.unseen).
+const send = (path, options = {}) =>
+  apiJson(`/rattish/triggers${path}`, { ...options, failure: status => `Request failed (${status}).` });
 
 export const triggersApi = {
   load: (workflowId) => send(`?workflowId=${encodeURIComponent(workflowId)}`),
-  create: (workflowId, kind, body) => post("", { ...body, workflowId, kind }),
-  update: (triggerId, body) => post(`/${encodeURIComponent(triggerId)}`, body),
+  create: (workflowId, kind, body) => send("", { method: "POST", body: { ...body, workflowId, kind } }),
+  update: (triggerId, body) => send(`/${encodeURIComponent(triggerId)}`, { method: "POST", body: body ?? {} }),
   remove: (triggerId) => send(`/${encodeURIComponent(triggerId)}`, { method: "DELETE" }),
-  rotateToken: (triggerId) => post(`/${encodeURIComponent(triggerId)}/rotate-token`),
+  rotateToken: (triggerId) => send(`/${encodeURIComponent(triggerId)}/rotate-token`, { method: "POST", body: {} }),
   // What changed since the approved version, and approving the exact version reviewed.
   changes: (triggerId) => send(`/${encodeURIComponent(triggerId)}/changes`),
   // acceptUnseen is the second confirmation for changes that weren't shown in full.
   approve: (triggerId, fingerprint, { acceptUnseen = false } = {}) =>
-    post(`/${encodeURIComponent(triggerId)}/approve`, acceptUnseen ? { fingerprint, acceptUnseen: true } : { fingerprint }),
-  setStartAtLogin: (enabled) => post("/login", { enabled }),
-  previewCron: (expression, timezone) => post("/preview", { expression, timezone }),
+    send(`/${encodeURIComponent(triggerId)}/approve`, { method: "POST", body: acceptUnseen ? { fingerprint, acceptUnseen: true } : { fingerprint } }),
+  setStartAtLogin: (enabled) => send("/login", { method: "POST", body: { enabled } }),
+  previewCron: (expression, timezone) => send("/preview", { method: "POST", body: { expression, timezone } }),
   // Every trigger on this computer at once. Each keeps its own on/off setting.
   pauseState: () => send("/pause"),
-  setPaused: (paused) => post("/pause", { paused }),
+  setPaused: (paused) => send("/pause", { method: "POST", body: { paused } }),
   // The computer-wide daily limit over every triggered run. null removes a part.
-  setBudget: (budget) => post("/budget", budget),
+  setBudget: (budget) => send("/budget", { method: "POST", body: budget ?? {} }),
 };
 
 // A trigger's or the computer's daily limit, as its card or the runs view shows it.

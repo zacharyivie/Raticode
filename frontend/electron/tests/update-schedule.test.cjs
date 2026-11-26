@@ -1,18 +1,11 @@
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const os = require("node:os");
-const path = require("node:path");
 const test = require("node:test");
 
 const {
   CHECK_INTERVAL_MS,
   MAX_BACKOFF_MS,
   createUpdateScheduler,
-  localDay,
   nextCheckDelay,
-  readReminderRecord,
-  reminderDecision,
-  writeReminderRecord,
 } = require("../update-schedule.cjs");
 
 // A clock and timer list the test moves by hand.
@@ -182,62 +175,4 @@ test("a download or a waiting restart skips the scheduled check", async () => {
   await clock.advance(CHECK_INTERVAL_MS);
   assert.equal(checks, 2);
   scheduler.stop();
-});
-
-test("the settled hook runs after every check, even one that fails", async () => {
-  const clock = fakeClock();
-  let settled = 0;
-  const scheduler = createUpdateScheduler({
-    ...clock,
-    runCheck: async () => { throw new Error("offline"); },
-    onSettled: () => { settled += 1; throw new Error("a broken hook doesn't stop the schedule"); },
-  });
-  scheduler.start();
-  await settle();
-  assert.equal(settled, 1);
-  assert.equal(clock.timers.length, 1);
-  scheduler.stop();
-});
-
-test("the reminder shows once a day, only while the user is at Raticode", () => {
-  const base = { available: true, latestVersion: "0.5.6", today: "2026-11-13" };
-  assert.equal(reminderDecision({ ...base, record: {}, userActive: false }).show, false);
-  const first = reminderDecision({ ...base, record: {}, userActive: true });
-  assert.deepEqual(first, { show: true, record: { day: "2026-11-13", version: "0.5.6" } });
-  // Same day: nothing, even after a restart or a newer release.
-  assert.equal(reminderDecision({ ...base, record: first.record, userActive: true }).show, false);
-  assert.equal(reminderDecision({ ...base, latestVersion: "0.5.7", record: first.record, userActive: true }).show, false);
-  // Up to date: nothing.
-  assert.equal(reminderDecision({ ...base, available: false, record: {}, userActive: true }).show, false);
-});
-
-test("a week away shows one reminder for the newest version, not one per day or release", () => {
-  const record = { day: "2026-11-06", version: "0.5.4" };
-  const back = reminderDecision({ available: true, latestVersion: "0.5.9", today: "2026-11-13", record, userActive: true });
-  assert.deepEqual(back, { show: true, record: { day: "2026-11-13", version: "0.5.9" } });
-  assert.equal(reminderDecision({ available: true, latestVersion: "0.5.9", today: "2026-11-13", record: back.record, userActive: true }).show, false);
-  assert.equal(reminderDecision({ available: true, latestVersion: "0.5.9", today: "2026-11-14", record: back.record, userActive: true }).show, true);
-});
-
-test("the local day follows the computer's calendar", () => {
-  assert.equal(localDay(new Date(2026, 0, 5, 23, 59)), "2026-01-05");
-  assert.equal(localDay(new Date(2026, 0, 6, 0, 1)), "2026-01-06");
-});
-
-test("the reminder record survives a restart and ignores a damaged file", () => {
-  const folder = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-update-reminder-"));
-  try {
-    const file = path.join(folder, "update-reminder.json");
-    assert.deepEqual(readReminderRecord(fs, file), {});
-    writeReminderRecord(fs, file, { day: "2026-11-13", version: "0.5.6", extra: "dropped" });
-    assert.deepEqual(readReminderRecord(fs, file), { day: "2026-11-13", version: "0.5.6" });
-    assert.deepEqual(fs.readdirSync(folder), ["update-reminder.json"]);
-    if (process.platform !== "win32") assert.equal(fs.statSync(file).mode & 0o777, 0o600);
-    fs.writeFileSync(file, "{not json");
-    assert.deepEqual(readReminderRecord(fs, file), {});
-    fs.writeFileSync(file, JSON.stringify({ day: "yesterday", version: 5 }));
-    assert.deepEqual(readReminderRecord(fs, file), { day: "", version: "" });
-  } finally {
-    fs.rmSync(folder, { recursive: true, force: true });
-  }
 });

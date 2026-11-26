@@ -21,10 +21,12 @@ import AwayReport from "./RemAwayReport.jsx";
 import { followsAfterScroll, gapToEnd, readingPlace, restoreReadingPlace, wheelLeavesEnd } from "../lib/remScroll.js";
 import { searchWords } from "../lib/remSearch.js";
 import { clearRemHistory, connectRemHome, dismissNotice, editRemMessage, loadEarlierRemMessages, loadRemHomeFixture, openRemThread, openTaskSheet, resetRemHomeStore, retryRemMessage, sendRemMessage, suggestMessage, useRemHome } from "../lib/remHomeStore.js";
-import { applyRemComposerRequest, attachToRemComposer, updateRemComposer, useRemComposerState } from "../lib/remComposer.js";
+import { applyRemComposerRequest, attachToRemComposer, restoreRemComposerDraft, updateRemComposer, useRemComposerState } from "../lib/remComposer.js";
 import { clipboardAttachmentFiles, largePasteFile, transferContainsFiles } from "../lib/chatAttachments.js";
 import { copiedFilePaths, readFileAttachments } from "../lib/fileAttachments.js";
 import { ScreenButton, ScreenSentChip, ScreenTile, screenNote } from "./ScreenContext.jsx";
+import { providerProblem, remChatProviderId, remProviderProblemText } from "../lib/remProviderStatus.js";
+import { apiUrl } from "../lib/api";
 import "./RemHome.css";
 
 const SUGGESTIONS = [
@@ -57,7 +59,7 @@ function useTaskLists(tasks) {
   }, [tasks]);
 }
 
-export default function RemHomeWorkspace({ avatar = {}, onOpenLink, onOpenSettings }) {
+export default function RemHomeWorkspace({ avatar = {}, onOpenLink, onOpenSettings, remProvider = null }) {
   const store = useRemHome();
   // The app passes a new function on every render; a stable one keeps message rows cached.
   const openLinkRef = useRef(onOpenLink);
@@ -113,7 +115,7 @@ export default function RemHomeWorkspace({ avatar = {}, onOpenLink, onOpenSettin
     {/* An opened task shows in the Rem sidebar, so the conversation keeps its width. */}
     <div className="rem-home-main">
       {searching ? <RemChatSearch now={now} onJump={jumpToResult} onClose={closeSearch} /> : null}
-      <Conversation key={store.conversation?.id || "loading"} store={store} now={now} replying={replying} avatar={avatar} onOpenLink={openLink} messageFocus={messageFocus} onShowMessage={showMessage} />
+      <Conversation key={store.conversation?.id || "loading"} store={store} now={now} replying={replying} avatar={avatar} onOpenLink={openLink} messageFocus={messageFocus} onShowMessage={showMessage} remProvider={remProvider} onOpenSettings={onOpenSettings} />
     </div>
   </section>;
 }
@@ -124,7 +126,7 @@ function useNow() {
   return now;
 }
 
-function Conversation({ store, now, replying, avatar, onOpenLink, messageFocus, onShowMessage }) {
+function Conversation({ store, now, replying, avatar, onOpenLink, messageFocus, onShowMessage, remProvider, onOpenSettings }) {
   const scrollRef = useRef(null);
   const pinnedRef = useRef(true);
   // Where the last scroll left the chat, so a move up is told apart from a resize.
@@ -261,7 +263,7 @@ function Conversation({ store, now, replying, avatar, onOpenLink, messageFocus, 
               const message = row.message;
               return <Message key={message.id} message={message} first={first} now={now} tasks={message.work ? taskLists.get(message.work.task_id) || NO_TASKS : message.kind === "self_work_report" ? store.tasks : NO_TASKS} tickets={tickets} onOpenLink={onOpenLink} live={liveWork.has(message.id)} followUps={message.id === followUpsFor} newest={message.id === newestRem} onShowMessage={message.refers_to && shown.has(message.refers_to) ? onShowMessage : null} />;
             })}
-          </div>) : <Welcome offline={offline} loading={store.status === "loading"} avatar={avatar} />}
+          </div>) : <Welcome offline={offline} loading={store.status === "loading"} avatar={avatar} remProvider={remProvider} onOpenSettings={onOpenSettings} />}
         </FoldPinContext.Provider>
         {replying ? <div className="rem-msg" data-role="rem"><span className="rem-face"><RatFaceIcon size={18} /></span><div className="rem-msg-body">
           {/* The reply as it is written. Screen readers hear the finished message instead. */}
@@ -303,8 +305,31 @@ function showMatch(stream, message, words = []) {
 }
 function clearMatch() { globalThis.CSS?.highlights?.delete("rem-found"); }
 
+// Why the app writing Rem's chat replies can't run here, read from the providers' saved
+// state without launching any of them, or null. Checked again when providers change.
+function useRemProviderProblem(remProvider, active) {
+  const id = remChatProviderId(remProvider);
+  const [capabilities, setCapabilities] = useState(null);
+  useEffect(() => {
+    if (!active || !id) return undefined;
+    let live = true;
+    const load = () => fetch(apiUrl("/provider/capabilities?snapshot=1"))
+      .then(response => (response.ok ? response.json() : null))
+      .then(payload => { if (live && Array.isArray(payload?.providers)) setCapabilities(payload.providers); })
+      .catch(() => {});
+    void load();
+    window.addEventListener("raticode:providers-changed", load);
+    return () => { live = false; window.removeEventListener("raticode:providers-changed", load); };
+  }, [active, id]);
+  return active && id ? providerProblem(capabilities, id) : null;
+}
+
 // Rem's animated sprite greets you here; the rat face stands in when the sprite is turned off.
-function Welcome({ offline, loading, avatar }) {
+// When Rem's app can't run here, the welcome says so in place of the ideas.
+function Welcome({ offline, loading, avatar, remProvider = null, onOpenSettings }) {
+  const problem = useRemProviderProblem(remProvider, !offline && !loading);
+  // Rem's chat has its own provider setting when one is chosen; otherwise the default one.
+  const field = remProvider?.chatProvider ? "chatProvider" : "provider";
   return <div className="rem-welcome">
     {avatar.enabled !== false
       ? <RemAvatar visible animated={avatar.animated !== false} reducedMotion={avatar.reducedMotion} />
@@ -315,7 +340,12 @@ function Welcome({ offline, loading, avatar }) {
       {devPreview ? <button type="button" className="rem-quiet-button" onClick={() => void loadRemHomeFixture()}><Sparkles size={14} aria-hidden="true" />Preview with sample data</button> : null}
     </> : <>
       <p>Tell me what you need. I’ll start the work, check it, and let you know when it’s done.</p>
-      {!loading ? <div className="rem-suggestions" aria-label="Ideas">
+      {problem ? <div className="rem-provider-problem" role="status" data-provider-problem={problem.kind}>
+        <p>{remProviderProblemText(problem)}</p>
+        <button type="button" className="rem-quiet-button" onClick={() => onOpenSettings?.({ selectors: [`[data-setting-row="${field}"] select`] })}>
+          <Settings size={14} aria-hidden="true" />Open Settings › Rem
+        </button>
+      </div> : !loading ? <div className="rem-suggestions" aria-label="Ideas">
         {SUGGESTIONS.map(text => <button key={text} type="button" onClick={() => suggestMessage(text)}>{text}</button>)}
       </div> : null}
     </>}
@@ -502,6 +532,7 @@ function useRemDropZone() {
 function Composer({ disabled, replying, request, offline, onShowMessage, shown }) {
   const { draft, attachments, error: attachmentError, replyTo, screen } = useRemComposerState();
   const [focusRequest, setFocusRequest] = useState(0);
+  useEffect(() => { restoreRemComposerDraft(); }, []);
   const send = async () => {
     const text = draft.trim();
     if ((!text && !attachments.length && !screen) || disabled) return;

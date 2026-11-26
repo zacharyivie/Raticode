@@ -31,6 +31,7 @@ from gofer.core.usage_ledger import (
     summarize_calls,
     usage_db,
 )
+from gofer.utils.instants import stored_instant
 from gofer.utils.paths import get_data_dir
 
 # Preset periods and their length in days; "all" reads from the first recorded call.
@@ -69,7 +70,6 @@ LEGACY_DAYS = {
 RANGE_ALIASES = {"1d": "24h", "90d": "3mo", "180d": "6mo", "365d": "1y", "12mo": "1y"}
 DEFAULT_RANGE = "30d"
 EARLIEST_DATE = date(2000, 1, 1)
-BUCKETS = ("hour", "day", "week", "month", "year")
 
 
 class UsageRangeError(ValueError):
@@ -257,14 +257,6 @@ def _stamp(local_naive: datetime, zone: tzinfo, bucket: str) -> str:
     return local_naive.replace(tzinfo=zone).isoformat()
 
 
-def _parse(value: Any) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(str(value))
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-
-
 # Calls are written with now_iso(): UTC ISO text with or without microseconds. Rows in
 # any other form are read one by one, as before.
 _UTC_TEXT = (
@@ -417,7 +409,7 @@ def _read_history(
     """The period's first call and its activity and series, from grouped rows when exact."""
     where, arguments = _range_filter(period)
     oldest = db.execute(f"SELECT MIN(observed_at) FROM usage_invocations{where}", arguments)
-    first = _parse(oldest.fetchone()[0])
+    first = stored_instant(oldest.fetchone()[0])
     split = _split_hours(period, period.start or first)
     grouped = _grouped_history(db, period, split) if split is not None else None
     return grouped if grouped is not None else _per_row_history(db, period)
@@ -453,7 +445,7 @@ def _per_row_history(
         f"usage_invocations{where} ORDER BY observed_at",
         arguments,
     ).fetchall()
-    first = _parse(rows[0]["observed_at"]) if rows else None
+    first = stored_instant(rows[0]["observed_at"]) if rows else None
     return first, {
         "activity": summarize_calls(rows),
         "series": _series(rows, period, period.start or first),
@@ -471,7 +463,7 @@ def _grouped_history(
     rows = _grouped_rows(db, period, split)
     ties = _Ties(db)
     first_at = min((row[_FIRST_AT] for row in rows), default=None)
-    first = _parse(first_at) if first_at is not None else None
+    first = stored_instant(first_at)
     series = _grouped_series(rows, period, period.start or first, split, ties)
     if series is None:
         return None
@@ -727,7 +719,7 @@ def _grouped_series(
     for row in rows:
         hour = row[_HOUR]
         if hour is None:
-            observed = _parse(row[_STAMP])
+            observed = stored_instant(row[_STAMP])
             if observed is None:
                 continue
             key = _row_key(observed, bucket, zone)
@@ -955,7 +947,7 @@ def _series(rows: list[Any], period: UsageRange, start: datetime | None) -> dict
     account_totals: dict[tuple[str, str], int] = {}
     account_seen: dict[tuple[str, str], int] = {}
     for row in rows:
-        observed = _parse(row["observed_at"])
+        observed = stored_instant(row["observed_at"])
         if observed is None:
             continue
         found = index.get(_row_key(observed, bucket, period.zone))

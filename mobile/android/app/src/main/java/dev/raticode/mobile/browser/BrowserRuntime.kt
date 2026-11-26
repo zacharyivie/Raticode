@@ -461,8 +461,6 @@ internal class BrowserRuntime private constructor(private val app: Application) 
      * as when the user picks one of its tabs. The other browser's tabs stay open, and anything they play goes on.
      */
     fun show(engine: String) = update(BrowserRules.showing(saved, engine))
-    fun setFirefoxMode(mode: String) = update(saved.copy(firefoxMode = if (mode == FirefoxApps.MODE_TAB) mode else FirefoxApps.MODE_APP))
-    fun setEdgeMode(mode: String) = update(saved.copy(edgeMode = if (mode == EdgeApps.MODE_TAB) mode else EdgeApps.MODE_APP))
     fun computerSearch(template: String) { if (template != saved.computerSearch && template.isNotBlank()) update(saved.copy(computerSearch = template)) }
     fun setAppMode(engine: String, mode: String) {
         if (BrowserApps.byEngine(engine) != null) update(saved.copy(appModes = saved.appModes + (engine to BrowserApps.mode(mode))))

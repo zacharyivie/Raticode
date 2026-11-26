@@ -23,6 +23,7 @@ from gofer.ui.worktree_setup import (
     parse_config,
     prepare,
 )
+from tests.helpers.organizations import act
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -380,22 +381,15 @@ def test_organization_worker_runs_in_a_set_up_worktree(tmp_path: Path) -> None:
                 },
             )
 
-            def act(action: str, **params: Any) -> Any:
-                return manager.call(
-                    org["projectRoot"],
-                    "user",
-                    {"organizationId": org["id"], "action": action, "params": params},
-                )
-
-            act("task_create", title=f"Work {data}", assignee="lead")
-            act("control", state="running")
+            act(manager, org, "task_create", title=f"Work {data}", assignee="lead")
+            act(manager, org, "control", state="running")
             manager.dispatch()
             until = time.monotonic() + 15
             while manager._active and time.monotonic() < until:
                 time.sleep(0.02)
             state = manager.store.get("", org["id"])
             events = manager.store.events("", org["id"])
-            act("control", state="paused")
+            act(manager, org, "control", state="paused")
             return {"state": state, "events": events}
         finally:
             manager.close()

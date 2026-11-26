@@ -122,22 +122,12 @@ def _closure(start: Iterable[str], edges: Mapping[str, set[str]]) -> set[str]:
     return seen
 
 
-def upstream_nodes(ir: Mapping[str, Any], node_id: str) -> set[str]:
-    """Every node ``node_id`` depends on, directly or through others."""
-    return _closure([node_id], node_dependencies(ir))
-
-
 def _dependents(dependencies: Mapping[str, set[str]]) -> dict[str, set[str]]:
     dependents: dict[str, set[str]] = {}
     for target, sources in dependencies.items():
         for source in sources:
             dependents.setdefault(source, set()).add(target)
     return dependents
-
-
-def downstream_nodes(ir: Mapping[str, Any], node_id: str) -> set[str]:
-    """Every node that depends on ``node_id``, directly or through others."""
-    return _closure([node_id], _dependents(node_dependencies(ir)))
 
 
 def approval_gates(ir: Mapping[str, Any]) -> set[str]:

@@ -9,6 +9,7 @@ discovery, sign-in status and usage refresh are replaced with fakes.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 import urllib.error
@@ -20,7 +21,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from gofer.cli.commands import _backend
+from gofer.cli.client import AGENT_SESSION_ENVS
 from gofer.cli.main import app
 from gofer.rattish.workspaces import create_registered_workflow
 
@@ -34,7 +35,7 @@ CLEARED_ENV = (
     "RATICODE_DATA_DIR",
     "GOFER_DATA_DIR",
     "RATICODE_NON_INTERACTIVE",
-    *_backend.AGENT_ENV,
+    *AGENT_SESSION_ENVS,
 )
 
 
@@ -142,7 +143,7 @@ def test_backend_found_through_the_headless_files(backend, monkeypatch) -> None:
 
     monkeypatch.delenv("RATICODE_URL")
     monkeypatch.delenv("RATICODE_TOKEN_FILE")
-    write_api_files(backend.data, url=backend.url, token=TOKEN)
+    write_api_files(backend.data, url=backend.url, token=TOKEN, proof=True)
     assert ok("projects", "list", "--data-dir", str(backend.data)) == []
 
 
@@ -672,6 +673,10 @@ def test_org_tickets_projects_knowledge_and_packages(backend) -> None:
 
     package = backend.tmp / "org.zip"
     assert ok("org", "export", org_id, "-f", str(package))["files"]
+    # The package names the organization's projects and instructions: owner-only, like
+    # the other exports (nightly audit, 24 November: it was written at the umask's 0644).
+    if sys.platform != "win32":
+        assert package.stat().st_mode & 0o777 == 0o600
     assert ok("org", "import", str(package), "--preview")
     imported = ok("org", "import", str(package))
     assert imported["id"] != org_id

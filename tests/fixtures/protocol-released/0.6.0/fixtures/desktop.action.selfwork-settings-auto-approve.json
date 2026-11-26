@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000215",
+  "id": "10000000-0000-4000-8000-000000000215",
+  "sequence": 215,
+  "type": "desktop.action",
+  "payload": {
+    "op": "selfwork.settings",
+    "params": {
+      "auto_approve_proposals": true,
+      "confirm_auto_approve": true,
+      "expected_revision": 5
+    }
+  }
+}

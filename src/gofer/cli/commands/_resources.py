@@ -149,12 +149,17 @@ def write_private_text(path: Path, text: str) -> None:
     Exports of settings and organizations can name MCP servers, folders and accounts,
     and a home folder other accounts can list is common.
     """
+    write_private_bytes(path, text.encode("utf-8"))
+
+
+def write_private_bytes(path: Path, data: bytes) -> None:
+    """``write_private_text`` for bytes, such as an organization's package ZIP."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+    with os.fdopen(descriptor, "wb") as handle:
         if sys.platform != "win32":
             os.fchmod(handle.fileno(), 0o600)
-        handle.write(text)
+        handle.write(data)
 
 
 def write_json_file(path: Path, document: Any) -> None:

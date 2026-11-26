@@ -9,7 +9,7 @@ from gofer.rattish.workspaces import (
     DEFAULT_RATICODE_IGNORE,
     RattishWorkspaceError,
     create_registered_workflow,
-    discover_registered_workflows,
+    discover_project_workflows,
     find_registered_workflow,
     list_registered_workflows,
 )
@@ -110,8 +110,8 @@ def test_discover_registered_workflows_only_in_managed_workspaces(
     (ignored_workflow / "ignored.rattish").write_text(source, encoding="utf-8")
     registry = tmp_path / "app-data"
 
-    first = discover_registered_workflows(project, registry_dir=registry)
-    second = discover_registered_workflows(project, registry_dir=registry)
+    first = discover_project_workflows(project, registry_dir=registry).workflows
+    second = discover_project_workflows(project, registry_dir=registry).workflows
 
     assert [(workflow.workflow_id, workflow.entrypoint) for workflow in first] == [
         ("review", raticode_workflow / "workflow.rattish"),
@@ -167,7 +167,7 @@ def test_discovery_keeps_previous_project_file_registrations(
         encoding="utf-8",
     )
 
-    discovered = discover_registered_workflows(project, registry_dir=registry)
+    discovered = discover_project_workflows(project, registry_dir=registry).workflows
 
     # A workflow.rattish outside .raticode is a project workflow now, and an earlier
     # registration of it keeps its ID.
@@ -204,7 +204,7 @@ def test_workspace_operations_reject_linked_workspace_roots(tmp_path: Path, acti
                 project, stage, "test", "test", registry_dir=tmp_path / "data"
             )
         else:
-            discover_registered_workflows(project, registry_dir=tmp_path / "data")
+            discover_project_workflows(project, registry_dir=tmp_path / "data").workflows
     assert list(outside.iterdir()) == []
 
 
@@ -259,7 +259,7 @@ def test_discovery_does_not_follow_project_directory_or_file_links(tmp_path: Pat
     source.write_text("Rattish: 1\nWorkflow:\n  name: Outside\n")
     (project / "linked").symlink_to(outside, target_is_directory=True)
     (project / "linked.rattish").symlink_to(source)
-    assert discover_registered_workflows(project, registry_dir=tmp_path / "data") == ()
+    assert discover_project_workflows(project, registry_dir=tmp_path / "data").workflows == ()
 
 
 def test_registry_reads_reuse_one_parse_until_the_file_changes(

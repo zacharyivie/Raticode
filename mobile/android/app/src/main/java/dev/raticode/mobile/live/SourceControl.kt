@@ -181,16 +181,6 @@ object SourceControl {
         else -> "Status unavailable"
     }
 
-    /** Where the branch stands against its upstream, in words. */
-    fun syncText(p: SourceProject): String = when {
-        p.state != "ok" -> ""
-        p.upstream.isBlank() -> if (p.detached) "Detached HEAD" else "No upstream branch"
-        p.ahead == null || p.behind == null -> "Tracking ${p.upstream}"
-        p.ahead == 0 && p.behind == 0 -> "Up to date with ${p.upstream}"
-        else -> listOfNotNull(p.ahead.takeIf { it > 0 }?.let { "$it to push" }, p.behind.takeIf { it > 0 }?.let { "$it to pull" })
-            .joinToString(", ")
-    }
-
     fun branchText(p: SourceProject) = when {
         p.state != "ok" -> ""
         p.branch.isNotBlank() -> p.branch

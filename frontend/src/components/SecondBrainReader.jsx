@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { BookOpen, ChevronDown, ChevronUp, Copy, ExternalLink, Eye, EyeOff, FileClock, Highlighter, Library, ListTree, MessageSquareQuote, MoreHorizontal, PanelLeft, Plus, Quote, Search, Sparkles, Star, Trash2, X, ZoomIn, ZoomOut, Link2, CircleCheck } from "lucide-react";
 import { checkByDue, extractionLabel, formatCitation, formatDay, formatTime, formatBytes, isHeadingPassage, newerReports, originLabel, parseQuery, sectionName, sectionStarts, typeLabel, webSourceUrl } from "../lib/secondBrain.js";
-import { activateTab, closeTab, pinTab, openDocument, toggleReading, saveCitation, removeCitation, addToCollection, evidenceItem, openDialog, notify, libraryFor, documentById, navigate, confirmReplacement } from "../lib/secondBrainStore.js";
+import { activateTab, closeTab, pinTab, openDocument, toggleReading, saveCitation, removeCitation, addToCollection, evidenceItem, openDialog, notify, libraryFor, documentById, navigate, confirmReplacement, useDocumentHistory } from "../lib/secondBrainStore.js";
 import { Empty, Menu, Pill, Segmented, TypeIcon, askRem } from "./SecondBrainParts.jsx";
 import Connections from "./SecondBrainConnections.jsx";
+import { useRovingChoice } from "../lib/useRovingChoice.js";
 
 function ranges(text, needle, kind) {
   const out = [];
@@ -73,7 +74,8 @@ function DocumentDetails({ doc, store }) {
   const library = libraryFor(store, doc.brainId);
   const citations = library.citationsByDoc[doc.id] || [];
   const reportsUsing = store.reports.filter(report => report.sourceVersions.some(source => source.docId === doc.id));
-  const versions = [{ hash: doc.version, at: doc.dates.modified, note: "Current source" }, ...doc.versions.filter(version => version.hash !== doc.version)];
+  const history = useDocumentHistory(doc);
+  const versions = [{ hash: doc.version, at: doc.dates.modified, note: "Current source" }, ...history.versions.filter(version => version.hash !== doc.version)];
   const facts = [["Path", <code className="sb-mono" key="p">{doc.path}</code>], ["Type", typeLabel(doc.type)], ["Author", doc.author || "Unknown"], ["Project in file or set by you", doc.project || "None"], ["Tags", doc.tags.length ? doc.tags.join(", ") : "None"],
     ["Source", webSourceUrl(doc.source?.url) ? <a key="s" href={webSourceUrl(doc.source.url)} rel="noreferrer" onClick={event => { event.preventDefault(); window.open(webSourceUrl(doc.source.url), "_blank", "noopener,noreferrer"); }}>{doc.source.domain}</a> : "None"], ["DOI", doc.source?.doi || "None"],
     ["Added", formatDay(doc.dates.added)], ["Modified", formatDay(doc.dates.modified)], ["Published", doc.dates.published ? formatDay(doc.dates.published) : "Unknown"], ...(doc.dates.captured ? [["Captured", formatTime(doc.dates.captured)]] : []),
@@ -87,7 +89,7 @@ function DocumentDetails({ doc, store }) {
       <code className="sb-mono">{version.hash}</code><span>{version.note}<small>{formatTime(version.at)}</small></span>
       {index === 0 ? <Pill tone="success">Current</Pill> : <button type="button" className="sb-mini-button" onClick={() => openDialog("version-diff", { docId: doc.id, from: version.hash })}>Compare with current</button>}
       {used.length ? <small className="sb-version-use">Used by {used.map(report => report.title).join(", ")}</small> : null}
-    </li>; })}</ol></section>
+    </li>; })}</ol>{history.loading ? <p role="status" className="sb-hint">Loading older versions…</p> : history.error ? <p role="alert" className="sb-hint">Could not load older versions: {history.error}</p> : null}</section>
     <section><h4>Saved citations <small>{citations.length}</small></h4>{citations.length ? <ul className="sb-saved-citations">{citations.map(citation => <li key={citation.id}>
       <button type="button" className="sb-quote" onClick={() => openDocument(doc.id, { blockId: citation.blockId, quote: citation.quote })}>“{citation.quote}”</button>
       <small>{doc.blocks.find(block => block.id === citation.blockId)?.heading} · version {citation.version}{citation.version !== doc.version ? " · source changed since saved" : ""}</small>
@@ -110,6 +112,7 @@ export default function SecondBrainReader({ brain, view, store, search, collecti
   const articleRef = useRef(null);
   const bodyRef = useRef(null);
   const findRef = useRef(null);
+  const documentTab = useRovingChoice({ keys: view.tabs.filter(tab => documentById(store, tab.docId)).map(tab => tab.docId), selected: view.activeDocId, onSelect: activateTab, orientation: "horizontal" });
   const parsed = useMemo(() => parseQuery(search.text), [search.text]);
   const terms = [...parsed.terms, ...parsed.phrases].filter(term => term.length > 1);
   const library = useMemo(() => libraryFor(store, doc?.brainId || brain.id), [store, doc?.brainId, brain.id]);
@@ -167,7 +170,7 @@ export default function SecondBrainReader({ brain, view, store, search, collecti
     <div className="sb-reader-tabs" role="tablist" aria-label="Open documents">
       {resultsHidden ? <button type="button" className="sb-icon-button" aria-label="Show results" title="Show results" onClick={onShowResults}><PanelLeft size={15} /></button> : null}
       {view.tabs.map(tab => { const item = documentById(store, tab.docId); if (!item) return null; return <div key={tab.docId} className="sb-reader-tab" data-active={tab.docId === view.activeDocId || undefined} data-preview={tab.preview || undefined}>
-        <button type="button" role="tab" aria-selected={tab.docId === view.activeDocId} title={`${item.path}${tab.preview ? " · Preview (double-click to keep open)" : ""}`} onClick={() => activateTab(tab.docId)} onDoubleClick={() => pinTab(tab.docId)}><TypeIcon type={item.type} size={13} /><span>{item.title}</span></button>
+        <button type="button" role="tab" aria-selected={tab.docId === view.activeDocId} title={`${item.path}${tab.preview ? " · Preview (double-click to keep open)" : ""}`} onClick={() => activateTab(tab.docId)} onDoubleClick={() => pinTab(tab.docId)} {...documentTab(tab.docId)}><TypeIcon type={item.type} size={13} /><span>{item.title}</span></button>
         <button type="button" className="sb-tab-close" aria-label={`Close ${item.title}`} title="Close" onClick={() => closeTab(tab.docId)}><X size={12} /></button>
       </div>; })}
     </div>
@@ -225,6 +228,7 @@ export default function SecondBrainReader({ brain, view, store, search, collecti
             {doc.extraction === "ocr" ? <div className="sb-doc-warning" role="note"><strong>No searchable text yet.</strong> This PDF contains page images. Run OCR from Library health to extract text; OCR text is labeled and kept separate from the original page.<button type="button" className="sb-mini-button" onClick={() => navigate("health")}>Open Library health</button></div> : null}
             {doc.extraction === "failed" ? <div className="sb-doc-warning" data-tone="danger" role="note"><strong>Extraction failed.</strong> {doc.blocks[0]?.text} The original file is unchanged.<button type="button" className="sb-mini-button" onClick={() => navigate("health")}>Fix in Library health</button></div> : null}
             {doc.extraction !== "failed" ? <h1>{doc.title}</h1> : null}
+            {doc.passagesLoading && !doc.blocks.length ? <p role="status" className="sb-hint">Loading passages…</p> : null}
             {doc.extraction === "ready" || doc.extraction === "pending" || doc.missing ? doc.blocks.map(block => <section key={block.id} data-block={block.id} data-flash={flash === block.id || undefined}>
               {starts.has(block.id) && !isHeadingPassage(block) && (sectionName(block) || block.page) ? <h2>{block.heading}{block.page ? <small> · page {block.page}</small> : null}</h2> : null}
               <p {...(isHeadingPassage(block) ? { className: "sb-doc-heading", role: "heading", "aria-level": 2 } : {})}>{decorate(block.text, marks).map((part, index) => {

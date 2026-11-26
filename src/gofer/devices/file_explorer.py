@@ -48,12 +48,10 @@ SNIFF = 8000
 NOT_OPEN = "This project is no longer open on your computer."
 MISSING = "This folder is no longer on your computer."
 NO_FILE = "This file is no longer on your computer."
-NOT_FOLDER = "This is not a folder."
 NOT_FILE = "This is not a regular file, so it can't be opened from the phone."
 LINKED = "This is a link to somewhere else, so the phone doesn't follow it."
 SENSITIVE = "This file may hold passwords, keys or sign-ins, so it stays on your computer."
 TOO_LARGE = "This file is larger than the 10 MB a phone can download. Open it on your computer."
-BINARY = "This file isn't text."
 UNREADABLE = "Your computer couldn't read this."
 UNSUPPORTED = "Browsing files from the phone isn't supported on this computer's system."
 

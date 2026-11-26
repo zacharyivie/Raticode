@@ -22,45 +22,14 @@ import {
   X,
 } from "lucide-react";
 import { downloadStatus, formatZoom, hostLabel, relativeTime } from "../lib/browserUi.js";
+import { usePopupMenu } from "./PopupMenu.jsx";
+import { useRovingChoice } from "../lib/useRovingChoice.js";
 
 const BUTTON = "rounded-md border border-line bg-white px-2.5 py-1 text-xs font-medium text-ink hover:bg-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-brand disabled:opacity-40";
 const PRIMARY = "rounded-md bg-brand px-2.5 py-1 text-xs font-semibold text-white hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-brand";
 
 // ---------------------------------------------------------------------------
 // Menus
-
-export function usePopupMenu(menuRef, onClose, { includeParent = false } = {}) {
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  useEffect(() => {
-    menuRef.current?.querySelector("[role=menuitem]:not([disabled])")?.focus();
-    const close = (event) => {
-      const inside = includeParent ? menuRef.current?.parentElement : menuRef.current;
-      if (!inside?.contains(event.target)) onCloseRef.current();
-    };
-    // The window the menu is in: Raticode's, or the Browser's own window.
-    const view = menuRef.current?.ownerDocument?.defaultView || window;
-    view.addEventListener("pointerdown", close, true);
-    return () => view.removeEventListener("pointerdown", close, true);
-  }, [menuRef, includeParent]);
-  return (event) => {
-    const enabled = [...(menuRef.current?.querySelectorAll("[role=menuitem]:not([disabled])") || [])];
-    if (!enabled.length) return;
-    const index = enabled.indexOf((menuRef.current?.ownerDocument || document).activeElement);
-    const next = {
-      ArrowDown: (index + 1) % enabled.length,
-      ArrowUp: index <= 0 ? enabled.length - 1 : index - 1,
-      Home: 0,
-      End: enabled.length - 1,
-    }[event.key];
-    if (next !== undefined) { event.preventDefault(); enabled[next].focus(); return; }
-    if (event.key === "Escape") {
-      event.preventDefault();
-      event.stopPropagation();
-      onCloseRef.current({ restoreFocus: true });
-    }
-  };
-}
 
 export const MENU_ITEM_CLASS = "browser-menu-item flex w-full items-center gap-2 px-3 py-1.5 text-left text-ink disabled:opacity-40";
 
@@ -409,9 +378,12 @@ export function SiteInfoPopover({ info, onClose, onPermission, onClearData, onRe
 // ---------------------------------------------------------------------------
 // History, bookmarks, downloads and site data
 
+const LIBRARY_VIEWS = [["history", "History", History], ["bookmarks", "Bookmarks", Bookmark], ["downloads", "Downloads", Download], ["data", "Site data", Cookie]];
+const LIBRARY_VIEW_KEYS = LIBRARY_VIEWS.map(([id]) => id);
+
 export function LibraryPanel({ view, onViewChange, onClose, onOpenUrl, onOpenFile, bridge }) {
-  const views = [["history", "History", History], ["bookmarks", "Bookmarks", Bookmark], ["downloads", "Downloads", Download], ["data", "Site data", Cookie]];
   const panelRef = useRef(null);
+  const section = useRovingChoice({ keys: LIBRARY_VIEW_KEYS, selected: view, onSelect: onViewChange, orientation: "horizontal" });
   useEffect(() => { panelRef.current?.focus(); }, []);
   return (
     <div
@@ -423,8 +395,8 @@ export function LibraryPanel({ view, onViewChange, onClose, onOpenUrl, onOpenFil
       onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); onClose(); } }}
     >
       <div className="flex items-center gap-1 border-b border-line p-1.5" role="tablist" aria-label="Library sections">
-        {views.map(([id, label, Icon]) => (
-          <button key={id} aria-selected={view === id} role="tab" className={`flex items-center gap-1 rounded px-2 py-1 ${view === id ? "bg-slate-100 font-semibold" : "text-muted hover:text-ink"}`} type="button" onClick={() => onViewChange(id)}>
+        {LIBRARY_VIEWS.map(([id, label, Icon]) => (
+          <button key={id} aria-selected={view === id} role="tab" className={`flex items-center gap-1 rounded px-2 py-1 ${view === id ? "bg-slate-100 font-semibold" : "text-muted hover:text-ink"}`} type="button" onClick={() => onViewChange(id)} {...section(id)}>
             <Icon aria-hidden="true" size={12} />{label}
           </button>
         ))}

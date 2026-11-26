@@ -97,9 +97,11 @@ def _act(
 
 def _line(ticket: dict[str, Any]) -> str:
     where = ticket.get("organization_name") or "Rem"
-    flags = (
-        " (proposal)" if ticket.get("proposed") else " (running)" if ticket.get("running") else ""
-    )
+    if ticket.get("proposed"):
+        on = ticket.get("proposed_on")
+        flags = f" (proposal from {on})" if on else " (proposal)"
+    else:
+        flags = " (running)" if ticket.get("running") else ""
     waits = [w for w in ticket.get("waits_for") or [] if w.get("status") != "done"]
     if waits:
         flags += " (waits for " + ", ".join(w.get("key") or w["title"] for w in waits) + ")"
@@ -776,6 +778,27 @@ def _switch(enabled: bool, connection: tuple[Any, Any, Any], output: opts.Output
     backend.run(f"selfwork {'on' if enabled else 'off'}", output, connection, body)
 
 
+@selfwork_app.command("start")
+def selfwork_start(
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Start self-work now, without waiting for 15 quiet minutes; turns it on if it is off.
+
+    Self-work keeps starting work until it is turned off, within its thread limit, objectives,
+    allowance, projects and stop condition. Telling Rem "start self-work now" does the same.
+    """
+
+    def body(client: ApiClient, out: Output) -> CommandResult:
+        backend.require_user("start Rem's self-work")
+        revision = int(_self_work(client)["settings"]["revision"])
+        return _put_settings(client, {"start_now": True}, revision)
+
+    backend.run("selfwork start", output, (endpoint, token_file, data_dir), body)
+
+
 @selfwork_app.command("on")
 def selfwork_on(
     output: opts.Output = opts.OutputFormat.json,
@@ -783,7 +806,10 @@ def selfwork_on(
     token_file: opts.TokenFile = None,
     data_dir: opts.DataDir = None,
 ) -> None:
-    """Turn self-work on, as telling Rem "turn on self-work" does. Other settings stay."""
+    """Turn self-work on, as telling Rem "turn on self-work" does. Other settings stay.
+
+    It starts after 15 minutes without a prompt; `selfwork start` starts it now.
+    """
     _switch(True, (endpoint, token_file, data_dir), output)
 
 
@@ -927,35 +953,52 @@ def selfwork_stop_when(
     backend.run("selfwork stop-when", output, (endpoint, token_file, data_dir), body)
 
 
-OBJECTIVE_ACTIONS = ("list", "add", "edit", "remove", "move", "check", "uncheck")
+OBJECTIVE_ACTIONS = ("list", "add", "edit", "remove", "check", "uncheck")
+
+
+def _objective_line(item: dict[str, Any]) -> str:
+    mark = "x" if item.get("done") else " "
+    line = f"[{mark}] {item['text']}  ({item['id']})"
+    if item.get("done_when"):
+        line += f"\n      done when: {item['done_when']}"
+    if item.get("done") and item.get("done_evidence"):
+        line += f"\n      met: {item['done_evidence']}"
+    return line
 
 
 def _objectives_text(view: dict[str, Any]) -> str:
+    """Current objectives (open above done, newest first), then the stale ones."""
     items = view.get("items") or []
-    if not items:
+    if not view.get("total") and not items:
         return "No self-work objectives. Rem writes its own when self-work starts with none."
-    lines = [f"Objectives (revision {view.get('revision', 0)}):"]
-    for item in items:
-        mark = "x" if item.get("done") else " "
-        line = f"[{mark}] {item['text']}  ({item['id']})"
-        if item.get("done_when"):
-            line += f"\n      done when: {item['done_when']}"
-        if item.get("done") and item.get("done_evidence"):
-            line += f"\n      met: {item['done_evidence']}"
-        lines.append(line)
+    done, total = (
+        int(view.get("done") or 0),
+        int(view.get("open") or 0) + int(view.get("done") or 0),
+    )
+    lines = [f"Objectives (revision {view.get('revision', 0)}), {done}/{total} done:"]
+    current = [i for i in items if not (i.get("done") and i.get("stale"))]
+    stale = [i for i in items if i.get("done") and i.get("stale")]
+    lines += [_objective_line(i) for i in current]
+    if stale:
+        lines.append("Stale (done in earlier self-work sessions):")
+        lines += [_objective_line(i) for i in stale]
+    shown_to = int(view.get("offset") or 0) + len(items)
+    if shown_to < int(view.get("total") or 0):
+        lines.append(f"{int(view['total']) - shown_to} more; list again with --offset {shown_to}.")
     return "\n".join(lines)
 
 
 @selfwork_app.command("objectives")
 def selfwork_objectives(
-    action: str = typer.Argument("list", help="list, add, edit, remove, move, check or uncheck"),
+    action: str = typer.Argument("list", help="list, add, edit, remove, check or uncheck"),
     text: str | None = typer.Option(None, "--text", help="The objective, for add or edit"),
     done_when: str | None = typer.Option(
         None, "--done-when", help="Its doneness criteria; leave out for an open-ended one"
     ),
     identity: str | None = typer.Option(None, "--id", help="The objective's ID from `list`"),
-    index: int | None = typer.Option(None, "--index", help="New position for move, from 0"),
     evidence: str | None = typer.Option(None, "--evidence", help="How it was met, for check"),
+    limit: int = typer.Option(30, "--limit", min=1, max=500, help="How many to list"),
+    offset: int = typer.Option(0, "--offset", min=0, help="How many to skip, for list"),
     revision: int | None = typer.Option(
         None, "--expected-revision", help="The list's revision from `list`"
     ),
@@ -964,27 +1007,27 @@ def selfwork_objectives(
     token_file: opts.TokenFile = None,
     data_dir: opts.DataDir = None,
 ) -> None:
-    """Show or change the self-work objectives: the goals that guide a whole session."""
+    """Show or change the self-work objectives: the goals that guide a whole session.
+
+    They list newest first, open above done; ones done in an earlier session are stale.
+    """
 
     def body(client: ApiClient, out: Output) -> CommandResult:
         if action not in OBJECTIVE_ACTIONS:
             raise backend.invalid(f"Choose one of: {', '.join(OBJECTIVE_ACTIONS)}.")
         if action == "list":
-            view = client.get("/rem/objectives")
+            view = client.get("/rem/objectives", query={"limit": limit, "offset": offset})
             return CommandResult(data=view, text=_objectives_text(view))
         backend.require_user("change Rem's self-work objectives")
         if action == "add" and not text:
             raise backend.invalid("add needs --text.")
         if action != "add" and not identity:
             raise backend.invalid(f"{action} needs --id.")
-        if action == "move" and index is None:
-            raise backend.invalid("move needs --index.")
-        payload: dict[str, Any] = {"action": action}
+        payload: dict[str, Any] = {"action": action, "limit": limit}
         for key, value in (
             ("text", text),
             ("done_when", done_when),
             ("id", identity),
-            ("index", index),
             ("evidence", evidence),
             ("expected_revision", revision),
         ):

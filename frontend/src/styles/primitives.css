@@ -2,14 +2,14 @@
 Shared UI primitives. Every rule reads the semantic tokens defined in index.css,
 so one class works in light mode, dark mode, and the tinted sidebar and chat regions.
 
-  Buttons   .ui-button [--primary | --ghost | --danger | --danger-ghost] [--sm | --lg]
+  Buttons   .ui-button [--primary | --danger] [--sm]
             .ui-icon-button [--sm]
-  Fields    .ui-input (input, textarea), .ui-select, .ui-label, .ui-hint, .ui-field-error
+  Fields    .ui-input (input, textarea, select)
   Status    .ui-badge[data-tone], .ui-notice[data-tone]
             tones: neutral, brand, success, warning, danger, info
   Surfaces  .ui-popover, .ui-menu-item, .ui-dialog, .ui-scrim
   Layout    .ui-panel-header (sidebar panel title row)
-  Text      .ui-section-title, .ui-kbd
+  Text      .ui-section-title
 
 These rules sit in the components layer, so Tailwind utilities on the same element
 (width, margin, a custom height) still win.
@@ -61,7 +61,6 @@ These rules sit in the components layer, so Tailwind utilities on the same eleme
     background: rgb(var(--color-brand-hover));
   }
 
-  .ui-button--ghost,
   .btn-ghost {
     border-color: transparent;
     background: transparent;
@@ -74,15 +73,7 @@ These rules sit in the components layer, so Tailwind utilities on the same eleme
   }
   .ui-button--danger:hover:not(:disabled) { background: rgb(var(--color-danger-solid) / .88); }
 
-  .ui-button--danger-ghost {
-    border-color: transparent;
-    background: transparent;
-    color: rgb(var(--color-danger));
-  }
-  .ui-button--danger-ghost:hover:not(:disabled) { background: rgb(var(--color-danger-soft)); }
-
   .ui-button--sm { min-height: 28px; padding: 0 8px; font-size: 12px; }
-  .ui-button--lg { min-height: 36px; padding: 0 14px; }
 
   .ui-icon-button {
     display: inline-grid;
@@ -103,8 +94,7 @@ These rules sit in the components layer, so Tailwind utilities on the same eleme
   }
   .ui-icon-button--sm { width: 28px; height: 28px; }
 
-  .ui-input,
-  .ui-select {
+  .ui-input {
     width: 100%;
     min-width: 0;
     min-height: 32px;
@@ -119,23 +109,17 @@ These rules sit in the components layer, so Tailwind utilities on the same eleme
     transition: border-color 120ms, box-shadow 120ms;
   }
   .ui-input::placeholder { color: rgb(var(--color-muted)); opacity: .8; }
-  .ui-input:hover:not(:disabled, :focus),
-  .ui-select:hover:not(:disabled, :focus) { border-color: rgb(var(--color-muted) / .6); }
-  .ui-input:focus,
-  .ui-select:focus {
+  .ui-input:hover:not(:disabled, :focus) { border-color: rgb(var(--color-muted) / .6); }
+  .ui-input:focus {
     border-color: rgb(var(--color-brand));
     box-shadow: 0 0 0 2px rgb(var(--color-brand) / .15);
   }
-  .ui-input:focus-visible,
-  .ui-select:focus-visible { outline: none !important; }
-  .ui-input[aria-invalid="true"],
-  .ui-select[aria-invalid="true"] { border-color: rgb(var(--color-danger)); }
-  .ui-input:disabled,
-  .ui-select:disabled { cursor: not-allowed; opacity: .6; }
+  .ui-input:focus-visible { outline: none !important; }
+  .ui-input[aria-invalid="true"] { border-color: rgb(var(--color-danger)); }
+  .ui-input:disabled { cursor: not-allowed; opacity: .6; }
   .ui-input:read-only:not(select) { background-color: rgb(var(--color-ink) / .03); }
 
-  select.ui-input,
-  .ui-select {
+  select.ui-input {
     appearance: none;
     padding-right: 30px;
     background-image: var(--ui-select-arrow);
@@ -143,10 +127,6 @@ These rules sit in the components layer, so Tailwind utilities on the same eleme
     background-repeat: no-repeat;
     background-size: 16px;
   }
-
-  .ui-label { display: block; color: rgb(var(--color-ink)); font-size: 12px; font-weight: 500; }
-  .ui-hint { color: rgb(var(--color-muted)); font-size: 11px; line-height: 1.45; }
-  .ui-field-error { color: rgb(var(--color-danger)); font-size: 11px; line-height: 1.45; }
 
   .ui-badge {
     --ui-tone: var(--color-muted);
@@ -235,16 +215,4 @@ These rules sit in the components layer, so Tailwind utilities on the same eleme
   }
   .ui-section-title:has(.ui-badge) { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
   .ui-section-title .ui-badge { padding: 0 5px; font-size: 9px; letter-spacing: .04em; line-height: 14px; }
-  .ui-kbd {
-    display: inline-block;
-    min-width: 18px;
-    padding: 0 4px;
-    border: 1px solid rgb(var(--color-line));
-    border-bottom-width: 2px;
-    border-radius: 4px;
-    background: rgb(var(--color-field));
-    color: rgb(var(--color-muted));
-    font: 10px/16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    text-align: center;
-  }
 }

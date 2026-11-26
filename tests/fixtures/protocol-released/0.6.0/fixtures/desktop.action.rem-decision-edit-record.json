@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000282",
+  "id": "10000000-0000-4000-8000-000000000282",
+  "sequence": 282,
+  "type": "desktop.action",
+  "payload": {
+    "op": "rem.decision.change",
+    "params": {
+      "action": "edit",
+      "id": "D-4",
+      "expected_revision": 10,
+      "consequences": "Session reads go through the app's own database, and backups cover them.",
+      "applies_to": ["src/sessions/**", "migrations/**"]
+    }
+  }
+}

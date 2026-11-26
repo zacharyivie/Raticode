@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000152",
+  "id": "10000000-0000-4000-8000-000000000152",
+  "sequence": 152,
+  "type": "desktop.action",
+  "payload": {
+    "op": "workflows.run",
+    "params": {
+      "workflow_id": "release-check",
+      "expected_revision": "sha256:e7fdf232489bcdcd91a9cc1d9c8023c0541334ddac1c1c2e890b91e9c46279a3"
+    }
+  }
+}

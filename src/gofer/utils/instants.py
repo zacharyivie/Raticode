@@ -22,3 +22,24 @@ def aware_instant(value: Any, label: str, *, future: bool = False) -> datetime:
     if future and parsed <= datetime.now(UTC):
         raise ValueError(f"Choose a {label.lower()} in the future")
     return parsed
+
+
+def stored_instant(value: Any, *, naive_as_utc: bool = True) -> datetime | None:
+    """A time Raticode saved earlier, read back; None when it is empty or can't be read.
+
+    [value] is a datetime or an ISO 8601 string, with a Z suffix or an offset. A time that
+    names its zone keeps that offset. One with no zone is taken as UTC, or gives None when
+    [naive_as_utc] is off.
+    """
+    if isinstance(value, datetime):
+        parsed = value
+    elif not value:
+        return None
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is not None:
+        return parsed
+    return parsed.replace(tzinfo=UTC) if naive_as_utc else None

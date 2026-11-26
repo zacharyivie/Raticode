@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { allowanceMode, allowancePaceLine, autoApproveHint, autoApproveWarning, hasAllowanceModes, hasAutoApprove, paceRateWarning, selfWorkAccountChange, selfWorkAccountRows } from "./remKanban.js";
-import { activityLine, assignmentLine, formatTokens, selfWorkLimitsLine, dailyAllowanceLine, usageSentence, usageShort, autoPullHint, avatarColor, boardOn, cappedThreads, canDropOn, checksLine, columnTickets, entryHeadline, entryTone, filterTickets, initials, modeLabel, ownerFilters, participantOf, remProjectChoices, savedSwitchNote, scopeNote, selfWorkLine, selfWorkWindows, selfWorkStop, stopJudgmentLine, lastStopLine, stopPayload, visibleEntries, windowDetail, withProject } from "./remKanban.js";
+import { allowanceMode, allowancePaceLine, autoApproveHint, autoApproveWarning, hasAllowanceModes, hasAutoApprove, paceRateWarning, selfWorkAccountChange, selfWorkAccountRows, selfWorkToggle } from "./remKanban.js";
+import { activityLine, assignmentLine, formatTokens, selfWorkLimitsLine, dailyAllowanceLine, usageSentence, usageShort, autoPullHint, avatarColor, boardOn, cappedThreads, canDropOn, canUndoMove, moveNotice, checksLine, columnTickets, entryHeadline, entryTone, filterTickets, initials, modeLabel, ownerFilters, participantOf, remProjectChoices, savedSwitchNote, scopeNote, selfWorkLine, selfWorkWindows, selfWorkStop, stopJudgmentLine, lastStopLine, stopPayload, visibleEntries, windowDetail, withProject } from "./remKanban.js";
 
 const ticket = (fields = {}) => ({ ticket_id: "t", key: "REM-1", title: "Export", scope: "rem", organization_id: "", status: "todo", priority: "medium", proposed: false, running: false, created_at: "2026-11-01", ...fields });
 
@@ -361,4 +361,55 @@ test("when self-work stops: the condition, the last check and what Save sends", 
   // An empty time keeps the latest time when one is set, and clears it otherwise.
   assert.deepEqual(stopPayload(stop, { condition: "x", time: "", day: "", keepTime: true }), { condition: "x", expected_revision: 4 });
   assert.deepEqual(stopPayload({ revision: 0 }, { condition: "x", time: "", day: "", keepTime: false }), { condition: "x", no_later_than: null });
+});
+
+test("the side pane's self-work button starts self-work now and stops it, and offers Start now while it waits", () => {
+  assert.equal(selfWorkToggle(null), null);
+  assert.equal(selfWorkToggle({ settings: {} }), null, "an older desktop without the switch shows no button");
+  const off = { settings: { enabled: false, saved_enabled: false, idle_minutes: 15, revision: 7 }, state: { mode: "off", detail: "Self-work is off." } };
+  assert.deepEqual(selfWorkToggle(off), {
+    on: false, mode: "off", label: "Start self-work",
+    detail: "Rem starts on its objectives now and keeps going until you stop it.",
+    change: { start_now: true, expected_revision: 7 },
+    startNow: null,
+  });
+  // Start starts now, as "start self-work now" in chat does, not the switch that waits for
+  // quiet minutes; it sends no window, no stop condition and no objectives.
+  assert.deepEqual(Object.keys(selfWorkToggle(off).change), ["start_now", "expected_revision"]);
+  const next = { ...off, schedule: { active: null, upcoming: [{ id: "w2", label: "11:00 PM today to 7:00 AM Fri" }] } };
+  assert.match(selfWorkToggle(next).detail, /Next window: 11:00 PM today to 7:00 AM Fri\.$/);
+
+  const working = { settings: { enabled: true, saved_enabled: true, idle_minutes: 15, revision: 8 }, state: { mode: "working", detail: "Working on 2 tasks." } };
+  assert.deepEqual(selfWorkToggle(working), { on: true, mode: "working", label: "Stop self-work", detail: "Working on 2 tasks.", change: { enabled: false, expected_revision: 8 }, startNow: null });
+  // A stop condition shows under the button; Stop still sends only the switch.
+  const stopping = { ...working, stop: { active: true, label: "Stops when “REM-12 is done”", revision: 2 } };
+  assert.equal(selfWorkToggle(stopping).detail, "Working on 2 tasks. Stops when “REM-12 is done”.");
+  assert.deepEqual(selfWorkToggle(stopping).change, { enabled: false, expected_revision: 8 });
+  // A window turns self-work on while the saved switch is off: the button shows it on.
+  const windowed = { settings: { enabled: true, saved_enabled: false, idle_minutes: 15, revision: 9 }, state: { mode: "waiting", starts_at: "x", detail: "" },
+    schedule: { active: { id: "w1", label: "Until 7:00 PM today", end_label: "7:00 PM today" }, upcoming: [] } };
+  assert.equal(selfWorkToggle(windowed).label, "Stop self-work");
+  assert.equal(selfWorkToggle(windowed).detail, "Starts after 15 quiet minutes · ends 7:00 PM today");
+  // On but waiting for quiet minutes: Start now skips the wait; once asked, it's gone.
+  assert.deepEqual(selfWorkToggle(windowed).startNow, { start_now: true, expected_revision: 9 });
+  const asked = { ...windowed, state: { mode: "waiting", starts_at: "", started_now_at: "2026-11-24T18:00:00Z", detail: "Starts work on its next check." } };
+  assert.equal(selfWorkToggle(asked).startNow, null);
+  assert.equal(selfWorkToggle(asked).detail, "Starts work on its next check.");
+  assert.equal(selfWorkToggle({ ...windowed, state: { mode: "paused", detail: "Waiting for Raticode to connect." } }).mode, "paused");
+});
+
+test("a move's notice names the ticket and its column, and Undo is offered only where a move can go back", () => {
+  const rem = { key: "REM-12", scope: "rem", status: "todo", paused: "" };
+  assert.equal(moveNotice(rem, "cancelled"), "REM-12 cancelled.");
+  assert.equal(moveNotice(rem, "backlog"), "REM-12 moved to Backlog.");
+  assert.equal(moveNotice(rem, "in_progress"), "REM-12 started.");
+  assert.equal(moveNotice({ ...rem, paused: "paused" }, "in_progress"), "REM-12 resumed.");
+  assert.equal(moveNotice({ ...rem, key: "STU-5", scope: "organization" }, "in_progress"), "STU-5 moved to In progress.");
+  assert.ok(canUndoMove(rem, "cancelled"));
+  assert.ok(canUndoMove({ ...rem, status: "done" }, "backlog"), "Rem's done tickets can be marked done again");
+  assert.ok(!canUndoMove(rem, "in_progress"), "starting work has no Undo");
+  assert.ok(!canUndoMove({ ...rem, status: "blocked" }, "cancelled"), "nothing moves a ticket back into Blocked");
+  assert.ok(!canUndoMove({ ...rem, status: "in_review" }, "backlog"), "nor into In review");
+  assert.ok(canUndoMove({ ...rem, scope: "organization" }, "backlog"));
+  assert.ok(!canUndoMove({ ...rem, scope: "organization", status: "blocked" }, "todo"), "an organization ticket reopens instead");
 });

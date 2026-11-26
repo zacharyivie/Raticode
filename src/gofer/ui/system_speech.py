@@ -672,6 +672,8 @@ def _no_window() -> dict[str, Any]:
 
 
 def _windows_powershell(environ: Mapping[str, str]) -> str:
+    # Not approvals._windows_powershell_path: that one falls back to pwsh (PowerShell 7),
+    # which runs on .NET Core and has no System.Speech, so only Windows PowerShell works.
     root = environ.get("SystemRoot") or environ.get("SYSTEMROOT") or r"C:\Windows"
     candidate = Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
     if candidate.is_file():

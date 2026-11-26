@@ -98,7 +98,7 @@ for (const [name, spec] of Object.entries(ENGINES)) {
     const engine = spec.engine(dataDir);
     const contents = spec.contents(engine);
     const watcher = watchMedia(contents, { audible: () => contents.isCurrentlyAudible(), muted: () => false });
-    const start = () => contents.evaluateIn("test", "document.querySelector('audio').play().then(() => true)", { userGesture: true, userActivation: true });
+    const start = () => contents.evaluateIn("test", "document.querySelector('audio').play().then(() => true)", { userGesture: true });
     const pollSnapshot = (check, message) => waitFor(() => { contents.emit("media-started-playing"); const media = watcher.snapshot(); return check(media) && (media || true); }, message);
     try {
       await contents.ready;

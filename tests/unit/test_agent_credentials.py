@@ -227,9 +227,6 @@ async def test_unwatched_codex_turns_write_the_data_folder_only_where_sandboxed_
     # A Rem task with no project works in its own folder inside the data folder.
     work = data_dir / "rem-work" / "task" if projectless else tmp_path / "project"
     work.mkdir(parents=True, exist_ok=True)
-    # A folder the task's tools granted inside the data folder stays read-only too.
-    granted = data_dir / "library" / "notes"
-    granted.mkdir(parents=True)
     command = await codex_chat_command(
         monkeypatch,
         tmp_path,
@@ -240,7 +237,6 @@ async def test_unwatched_codex_turns_write_the_data_folder_only_where_sandboxed_
         workflow={
             "projectRoot": str(work),
             "remManagedTask": {"unattended": True, "limitDataFolder": True, "runId": "run"},
-            "filesystemAccess": [{"path": str(granted)}],
         },
     )
     assert_codex_hides(command, expected_folders(data_dir, secrets_dir))
@@ -253,7 +249,6 @@ async def test_unwatched_codex_turns_write_the_data_folder_only_where_sandboxed_
         data_dir / "command-slots" / "slots",
         data_dir / "command-slots" / "bin" / "pytest",
         data_dir / "rem-work" / "turn-scratch" / "another-run",
-        granted,
     ):
         assert codex_access(cwd, rules, path) == "read", f"{path} is writable: {rules}"
     for path in (scratch / "tmp" / "x", activity / "digest", queue / "test" / "ticket", work / "f"):
@@ -283,6 +278,58 @@ async def test_codex_reviews_write_only_their_scratch_folder_in_the_data_folder(
     assert codex_access(cwd, rules, tmp_path / "project" / "f") == "read"
     for path in (scratch / "x", activity / "digest", queue / "test" / "ticket"):
         assert codex_access(cwd, rules, path) == "write"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("paired", [False, True], ids=["desktop-worker", "paired-desktop-job"])
+async def test_codex_organization_workers_write_the_data_folder_only_where_their_run_needs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    data_dir: Path,
+    secrets_dir: Path,
+    paired: bool,
+) -> None:
+    # organizations.py runs a worker with its own runtime folder as the turn's data
+    # folder; a job from a paired desktop runs with Raticode's data folder itself.
+    runtime = data_dir if paired else tmp_path / ".raticode-employee-runtime" / "org" / "worker"
+    runtime.mkdir(parents=True, exist_ok=True)
+    work = data_dir / "organization-worktrees" / "org" / "task"
+    shared = data_dir / "organization-shared-worktrees" / "org" / "task"
+    project = tmp_path / "project"
+    for folder in (work, shared, project):
+        folder.mkdir(parents=True, exist_ok=True)
+    command = await codex_chat_command(
+        monkeypatch,
+        tmp_path,
+        runtime,
+        permission_mode="workspace-write",
+        working_dir=work,
+        **({} if paired else {"library_data_dir": data_dir}),
+        workflow={
+            "projectRoot": str(work),
+            "organizationRun": {"organizationId": "org", "taskId": "task", "parentRunId": "r"},
+            # A workspace that is the data folder opens none of it.
+            "organizationWorkspacePaths": [str(project), str(shared), str(work), str(data_dir)],
+        },
+    )
+    assert_codex_hides(command, expected_folders(data_dir, secrets_dir))
+    cwd, rules, _network = codex_profile(command)
+    for path in (
+        data_dir / "organizations.sqlite3",
+        data_dir / "usage.sqlite3",
+        data_dir / "report-themes" / "theme.css",
+        data_dir / "organization-runs" / "org" / "turn.json.gz",
+        data_dir / "organization-skills" / "org" / "1" / "skills" / "s" / "SKILL.md",
+        runtime / "usage.sqlite3",
+        runtime / "report-themes" / "theme.css",
+        # Workspaces outside the data folder keep the access they had.
+        project / "f",
+    ):
+        assert codex_access(cwd, rules, path) == "read", f"{path} is writable: {rules}"
+    for path in (work / "f", shared / "f"):
+        assert codex_access(cwd, rules, path) == "write", f"{path} isn't writable: {rules}"
+    for folder in expected_folders(data_dir, secrets_dir):
+        assert codex_access(cwd, rules, folder / "x") == "deny"
 
 
 def test_codex_keeps_the_data_folder_writable_where_its_profile_cant_apply(

@@ -21,10 +21,7 @@ from gofer.utils.data_folders import (
 SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src" / "gofer"
 
 # Data-folder entries that are not Raticode's own managed folders. Keep this short.
-NOT_MANAGED = {
-    # Prompt files users and imported bundles keep beside their legacy workflows.
-    "prompts",
-}
+NOT_MANAGED: set[str] = set()
 
 # data_dir / "x", self._data_dir / "x", get_data_dir() / "x", _data_dir(base) / "x",
 # (data_dir or get_data_dir()) / "x", data_dir.resolve() / "x" and data_root / "x".
@@ -79,10 +76,11 @@ def test_folders_named_through_constants_are_managed() -> None:
     import inspect
 
     from gofer.cli.client import API_DIR_NAME
+    from gofer.core.agent_credentials import DATA_CREDENTIAL_FOLDERS
+    from gofer.core.provider_accounts import account_folder_names
     from gofer.core.rem_library import SKILLS_FOLDER
     from gofer.ui import organization_repository
     from gofer.ui.browser_tools import GRANTS_DIR
-    from gofer.ui.claude_sandbox import DATA_SECRETS
     from gofer.ui.headless import HEADLESS_DIRNAME
     from gofer.ui.rem_home_worktree import plan_worktree
 
@@ -93,7 +91,8 @@ def test_folders_named_through_constants_are_managed() -> None:
         organization_repository.WORKTREES,
         GRANTS_DIR,
         HEADLESS_DIRNAME,
-        *DATA_SECRETS,
+        *DATA_CREDENTIAL_FOLDERS,
+        *account_folder_names(),
         inspect.signature(plan_worktree).parameters["folder"].default,
     }
     worktree_folders = set(

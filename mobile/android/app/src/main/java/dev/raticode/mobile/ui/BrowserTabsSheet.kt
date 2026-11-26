@@ -27,8 +27,6 @@ import dev.raticode.mobile.browser.BrowserApps
 import dev.raticode.mobile.browser.BrowserRules
 import dev.raticode.mobile.browser.BrowserRuntime
 import dev.raticode.mobile.browser.BrowserTabs
-import dev.raticode.mobile.browser.EdgeApps
-import dev.raticode.mobile.browser.FirefoxApps
 import dev.raticode.mobile.browser.GeckoBrowser
 import dev.raticode.mobile.live.BrowserAddress
 import dev.raticode.mobile.live.DesktopBrowser
@@ -63,16 +61,10 @@ private class OtherBrowser(val engine: String, val name: String, val open: (Cont
 
 /** Firefox, Chrome and Edge as installed, signed by their makers and turned on, each opening pages the way the user chose for it. */
 private fun otherBrowsers(context: Context, saved: BrowserRules.Saved): List<OtherBrowser> = buildList {
-    FirefoxApps.find(context)?.takeIf { it.usable }?.let { found ->
-        add(OtherBrowser(BrowserRules.ENGINE_FIREFOX, found.build.name) { c, url -> FirefoxApps.open(c, found, url, saved.firefoxMode) })
-    }
     BrowserApps.ALL.forEach { app ->
         app.find(context)?.takeIf { it.usable }?.let { found ->
             add(OtherBrowser(app.engine, app.name) { c, url -> app.open(c, found, url, BrowserRules.appMode(saved, app.engine)) })
         }
-    }
-    EdgeApps.find(context)?.takeIf { it.usable }?.let { found ->
-        add(OtherBrowser(BrowserRules.ENGINE_EDGE, "Edge") { c, url -> EdgeApps.open(c, found, url, saved.edgeMode) })
     }
 }
 

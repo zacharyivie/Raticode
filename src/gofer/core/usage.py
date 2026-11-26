@@ -64,81 +64,6 @@ def estimate_tokens(text: str | None, pricing: LlmPricing | None = None) -> int:
     return max(1, math.ceil(len(text) / chars_per_token))
 
 
-def usage_from_metadata(
-    *,
-    provider: str,
-    profile: str | None,
-    model: str | None,
-    prompt: str | None,
-    output: str | None,
-    duration_seconds: float,
-    pricing: LlmPricing | None = None,
-    metadata: dict[str, Any] | None = None,
-) -> LlmUsageEstimate:
-    metadata = metadata or {}
-    source = str(metadata.get("source") or "fallback_chars_per_token")
-    exact_input = _int_metadata(
-        metadata,
-        "input_tokens",
-        "inputTokens",
-        "prompt_tokens",
-        "promptTokens",
-        "total_input_tokens",
-        "totalInputTokens",
-    )
-    exact_output = _int_metadata(
-        metadata,
-        "output_tokens",
-        "outputTokens",
-        "completion_tokens",
-        "completionTokens",
-        "total_output_tokens",
-        "totalOutputTokens",
-    )
-    exact_total = _int_metadata(metadata, "total_tokens", "totalTokens")
-    input_tokens = exact_input if exact_input is not None else estimate_tokens(prompt, pricing)
-    output_tokens = exact_output if exact_output is not None else estimate_tokens(output, pricing)
-    total_tokens = exact_total if exact_total is not None else input_tokens + output_tokens
-    token_counts_estimated = not (exact_input is not None and exact_output is not None)
-    cost = _float_metadata(
-        metadata,
-        "cost",
-        "cost_usd",
-        "estimated_cost",
-        "estimatedCost",
-        "total_cost_usd",
-        "totalCostUsd",
-        "total_cost",
-        "totalCost",
-    )
-    cost_estimated = cost is None
-    if cost is None:
-        effective_pricing = pricing or LlmPricing()
-        cost = (
-            input_tokens * effective_pricing.input_cost_per_1k_tokens
-            + output_tokens * effective_pricing.output_cost_per_1k_tokens
-        ) / 1000
-    estimated = bool(metadata.get("estimated", False)) or token_counts_estimated or cost_estimated
-    if estimated and source == "provider_metadata":
-        source = "provider_metadata_with_estimates"
-    elif estimated:
-        source = "fallback_chars_per_token"
-    return LlmUsageEstimate(
-        provider=str(metadata.get("provider") or provider),
-        profile=_str_metadata(metadata, "profile") or profile,
-        model=_str_metadata(metadata, "model") or model,
-        prompt_length=len(prompt or ""),
-        output_length=len(output or ""),
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        total_tokens=total_tokens,
-        estimated_cost=cost,
-        duration_seconds=duration_seconds,
-        estimated=estimated,
-        source=source,
-    )
-
-
 def summarize_node_outputs(
     node_outputs: dict[str, Any],
     node_runs: dict[str, list[Any]] | None = None,
@@ -201,14 +126,6 @@ def summarize_node_outputs(
     }
 
 
-def _int_metadata(metadata: dict[str, Any], *keys: str) -> int | None:
-    for key in keys:
-        value = metadata.get(key)
-        if value is not None:
-            return int(value)
-    return None
-
-
 def _node_cost(node: dict[str, object]) -> float:
     value = node.get("estimated_cost")
     return float(value) if isinstance(value, int | float | str) else 0.0
@@ -217,19 +134,3 @@ def _node_cost(node: dict[str, object]) -> float:
 def _node_duration(node: dict[str, object]) -> float:
     value = node.get("duration_seconds")
     return float(value) if isinstance(value, int | float | str) else 0.0
-
-
-def _float_metadata(metadata: dict[str, Any], *keys: str) -> float | None:
-    for key in keys:
-        value = metadata.get(key)
-        if value is not None:
-            return float(value)
-    return None
-
-
-def _str_metadata(metadata: dict[str, Any], *keys: str) -> str | None:
-    for key in keys:
-        value = metadata.get(key)
-        if value is not None:
-            return str(value)
-    return None

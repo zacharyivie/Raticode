@@ -44,7 +44,6 @@ ENABLED = True
 PROFILE = "raticode"
 PROFILE_SELECTOR = f'default_permissions="{PROFILE}"'
 NETWORK_ON = "sandbox_workspace_write.network_access=true"
-FULL_ACCESS = "danger-full-access"
 BYPASS_FLAGS = frozenset({"--dangerously-bypass-approvals-and-sandbox", "--yolo"})
 _SANDBOX_FLAGS = ("--sandbox", "-s")
 _VALUE_FLAGS = frozenset(

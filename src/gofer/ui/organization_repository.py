@@ -19,10 +19,9 @@ from typing import Any
 
 from gofer.core.commit_attribution import clean_commit_message
 from gofer.utils.process import (
-    NO_REPOSITORY_PROGRAMS,
     build_subprocess_env,
     git_push_blocked_environment,
-    untrusted_repository_git_env,
+    run_repository_git,
 )
 
 FOLDER = "organization-repositories"
@@ -79,21 +78,8 @@ def _env() -> dict[str, str]:
 def git(cwd: Path | str, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     """Run git with no hooks, no repository-named programs, no signing and push blocked."""
     try:
-        result = subprocess.run(
-            [
-                "git",
-                *NO_REPOSITORY_PROGRAMS,
-                "-c",
-                "commit.gpgsign=false",
-                "-C",
-                str(cwd),
-                *args,
-            ],
-            env=untrusted_repository_git_env(cwd, _env()),
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
+        result = run_repository_git(
+            cwd, *args, timeout=60, env=_env(), config=("commit.gpgsign=false",)
         )
     except subprocess.TimeoutExpired as exc:
         # Callers handle RepositoryError; a hung git must not escape as another error.

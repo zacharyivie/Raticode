@@ -117,11 +117,11 @@ class ComputersTest {
         val (rem, acme, beta) = view.consumers
         assertTrue(rem.isRem)
         assertEquals("balanced", rem.strategy)
-        assertEquals("Spread evenly", Computers.strategyText(rem.strategy))
+        assertEquals("Spread evenly", Computers.STRATEGIES.toMap().getValue(rem.strategy))
         assertEquals("Any of your computers", Computers.assignedText(rem, view))
         assertFalse(acme.isRem)
         assertEquals("manual", acme.strategy)
-        assertEquals("Only computers I pick", Computers.strategyText(acme.strategy))
+        assertEquals("Only computers I pick", Computers.STRATEGIES.toMap().getValue(acme.strategy))
         assertEquals(listOf("00000000-0000-4000-8000-000000000005"), acme.shared)
         assertEquals(listOf("00000000-0000-4000-8000-000000000006"), acme.missing)
         assertEquals("Laptop (shared), Unpaired computer 00000000 (missing)", Computers.assignedText(acme, view))
@@ -130,7 +130,7 @@ class ComputersTest {
             "its tickets wait unless they run through a fleet execution target there.", acme.notice)
         assertEquals("", rem.notice)
         assertFalse(beta.saved)
-        assertEquals("Fill one computer, then the next", Computers.strategyText(beta.strategy))
+        assertEquals("Fill one computer, then the next", Computers.STRATEGIES.toMap().getValue(beta.strategy))
         assertEquals("Any of your computers (default)", Computers.assignedText(beta, view))
         assertEquals("", beta.notice)
         // Computers come in the user's order, which overflow fills in turn.

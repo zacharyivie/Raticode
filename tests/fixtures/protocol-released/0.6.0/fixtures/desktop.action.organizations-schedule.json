@@ -1,0 +1,63 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000202",
+  "id": "10000000-0000-4000-8000-000000000202",
+  "sequence": 202,
+  "type": "desktop.action",
+  "payload": {
+    "op": "organizations.schedule",
+    "params": {
+      "organization_id": "org1",
+      "expected_revision": 4,
+      "timezone": "America/New_York",
+      "blocks": [
+        {
+          "block_id": "features",
+          "label": "New feature work",
+          "focus": "Build planned features.",
+          "cadence": "daily",
+          "start": "08:00",
+          "end": "17:00",
+          "keywords": [
+            "feature"
+          ]
+        },
+        {
+          "block_id": "weekly-release",
+          "label": "Weekly release",
+          "focus": "",
+          "cadence": "weekly",
+          "days": [
+            4
+          ],
+          "start": "13:00",
+          "end": "17:00",
+          "keywords": []
+        },
+        {
+          "block_id": "audit",
+          "label": "Dependency audit",
+          "focus": "",
+          "cadence": "monthly",
+          "nth_week": 1,
+          "weekday": 0,
+          "start": "09:00",
+          "end": "12:00",
+          "keywords": []
+        },
+        {
+          "block_id": "review",
+          "label": "Quarterly review",
+          "focus": "",
+          "cadence": "quarterly",
+          "quarter_month": 1,
+          "month_day": 1,
+          "start": "09:00",
+          "end": "17:00",
+          "keywords": []
+        }
+      ]
+    }
+  }
+}

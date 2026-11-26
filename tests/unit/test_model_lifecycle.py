@@ -342,13 +342,13 @@ def test_preflight_skips_the_list_offline_and_with_a_proxy_profile(
 def test_the_triggers_section_and_cli_show_a_retiring_model(
     tmp_path: Path, fixed_today: date
 ) -> None:
-    from gofer.rattish.workspaces import discover_registered_workflows
+    from gofer.rattish.workspaces import discover_project_workflows
     from gofer.ui.rattish_triggers import triggers_payload
 
     data = tmp_path / "data"
     data.mkdir()
     source = _workflow(tmp_path, "claude-sonnet-4-5-20250929")
-    (registered,) = discover_registered_workflows(source.parent, registry_dir=data)
+    (registered,) = discover_project_workflows(source.parent, registry_dir=data).workflows
     (notice,) = triggers_payload(data, registered.workflow_id)["models"]["notices"]
     assert notice["node"] == "summarize"
     assert notice["provider"] == "anthropic-api"

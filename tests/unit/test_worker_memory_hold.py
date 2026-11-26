@@ -19,18 +19,18 @@ from gofer.core import command_slots, computers
 from gofer.core.command_slots import SlotSettings, slots_root, write_settings
 from gofer.core.worker_claims import ORGANIZATIONS, PHONE, REM, SWARMS, WorkerClaims
 from gofer.ui.swarms import SwarmManager
+from tests.helpers.organizations import act
 from tests.unit.test_device_chat import full_desktop as full_desktop
 from tests.unit.test_device_chat import paired, submit, until, work_state
 from tests.unit.test_organization_placement import (
     Clock,
     Gate,
     Registry,
-    act,
     company,
     manager_for,
     running,
     runtime,
-    wait_idle,
+    wait_workers_stopped,
 )
 
 # Read when pytest collects this file, before the suite's fixture pins the hold off.
@@ -102,7 +102,7 @@ def test_an_organization_worker_waits_for_free_memory(tmp_path: Path, low_memory
         assert "placementWait" not in runtime(manager, org)
     finally:
         gate.release.set()
-        wait_idle(manager)
+        wait_workers_stopped(manager)
         manager.close()
 
 

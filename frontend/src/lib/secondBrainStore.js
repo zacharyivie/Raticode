@@ -13,7 +13,7 @@ let sequence = 0;
 export const uid = prefix => `${prefix}-${Date.now().toString(36)}-${(++sequence).toString(36)}`;
 
 function initialState() {
-  return { loaded: false, brains: [], activeBrainId: "", documents: [], collections: [], savedSearches: [], reports: [], health: [], families: [], series: [], jobs: [], citations: [], projects: [], topics: [], views: {}, tasks: [], dialog: null, toast: null };
+  return { loaded: false, passagesLoading: false, brains: [], activeBrainId: "", documents: [], collections: [], savedSearches: [], reports: [], health: [], families: [], series: [], jobs: [], citations: [], projects: [], topics: [], views: {}, tasks: [], dialog: null, toast: null };
 }
 function seededState(sample) {
   return {
@@ -47,6 +47,14 @@ let revision = "";
 let recheckNext = false;
 let preferencesTimer;
 let researchProvider = { id: "codex", model: "cli-default" };
+// The snapshot sends each document's version and passage count, not its passages. They
+// live here by document ID with the version they belong to; a refresh fetches only the
+// documents whose version this lacks ("passages"), and drops documents that are gone.
+const passageCache = new Map();
+// Each requested ID mapped to the version it was asked for, so two refreshes don't fetch the same passages.
+const passagesAsked = new Map();
+// Stored older versions, fetched when a version list or a version dialog opens.
+const historyCache = new Map();
 const listeners = new Set();
 function emit() { for (const listener of listeners) listener(); }
 function set(next) {
@@ -89,27 +97,76 @@ function enqueue(action, params) {
 export function flushLibraryWrites() { return queue; }
 export function setResearchProvider(provider) { researchProvider = provider; }
 export function isSampleLibrary() { return fixture; }
-export function researchProviderSettings() { return researchProvider; }
-export function libraryRevision() { return revision; }
+// Puts the cached passages on each document. A document whose version the cache lacks keeps
+// the passages it had (none on the first load) until its own arrive, marked passagesLoading.
+function withPassages(documents) {
+  let passagesLoading = false;
+  const next = documents.map(doc => {
+    const cached = passageCache.get(doc.id);
+    if (cached?.version === doc.version) {
+      if (doc.blocks === cached.blocks && !doc.passagesLoading) return doc;
+      const filled = { ...doc, blocks: cached.blocks };
+      delete filled.passagesLoading;
+      return filled;
+    }
+    passagesLoading = true;
+    return doc.passagesLoading ? doc : { ...doc, blocks: doc.blocks || cached?.blocks || [], passagesLoading: true };
+  });
+  return { documents: next, passagesLoading };
+}
+// A full refresh carries every document's passages and stored versions.
+function keepPassages(documents) {
+  for (const doc of documents) {
+    if (Array.isArray(doc.blocks)) passageCache.set(doc.id, { version: doc.version, blocks: doc.blocks });
+    if (Array.isArray(doc.versions)) historyCache.set(doc.id, { version: doc.version, versions: doc.versions });
+  }
+}
+function dropRemoved(documents) {
+  const ids = new Set(documents.map(doc => doc.id));
+  for (const cache of [passageCache, passagesAsked, historyCache]) for (const id of cache.keys()) if (!ids.has(id)) cache.delete(id);
+}
+// Fetches, in one request, the passages of every document whose version the cache lacks.
+async function fetchPassages() {
+  const wanted = state.documents.filter(doc => passageCache.get(doc.id)?.version !== doc.version && passagesAsked.get(doc.id) !== doc.version);
+  if (fixture || !wanted.length) return;
+  for (const doc of wanted) passagesAsked.set(doc.id, doc.version);
+  try {
+    const answer = await brainRequest("passages", { ids: wanted.map(doc => doc.id) });
+    for (const doc of answer.documents) passageCache.set(doc.id, { version: doc.version, blocks: doc.blocks });
+    for (const id of answer.missing) passageCache.delete(id);
+  } catch {
+    // The view can't search or read without passages: fall back to a full refresh that carries them.
+    for (const doc of wanted) if (passagesAsked.get(doc.id) === doc.version) passagesAsked.delete(doc.id);
+    await refreshLibrary({ full: true });
+    return;
+  }
+  for (const doc of wanted) if (passagesAsked.get(doc.id) === doc.version) passagesAsked.delete(doc.id);
+  state = { ...state, ...withPassages(state.documents) }; emit();
+}
 // recheck asks the library to run Library health's file checks now instead of within the minute.
-export async function refreshLibrary({ initial = false, recheck = false } = {}) {
+// full asks for every document's passages and stored versions in the snapshot itself.
+export async function refreshLibrary({ initial = false, recheck = false, full = false } = {}) {
   recheckNext ||= recheck;
   if (fixture || (pending && !initial)) return;
   const asked = recheckNext;
   recheckNext = false;
   try {
-    const snapshot = await brainRequest("snapshot", { revision: initial ? "" : revision, recheck: asked });
+    const snapshot = await brainRequest("snapshot", { revision: initial || full ? "" : revision, recheck: asked, passages: full });
     if (pending) return;
     if (snapshot.unchanged) {
       // Nothing changed since the snapshot this window has: keep its state and skip a render.
       revision = snapshot.revision;
       if (state.error) { state = { ...state, error: null }; emit(); }
+      await fetchPassages();
       return;
     }
     revision = snapshot.revision || "";
+    const documents = snapshot.documents || [];
+    if (full) keepPassages(documents);
+    dropRemoved(documents);
     const priorTasks = new Map(state.tasks.map(item => [item.id, item.state]));
     const activeBrainId = (initial ? snapshot.activeBrainId : state.activeBrainId) || snapshot.brains[0]?.id || "";
-    state = { ...state, ...snapshot, activeBrainId: snapshot.brains.some(item => item.id === activeBrainId) ? activeBrainId : snapshot.brains[0]?.id || "", views: initial ? snapshot.views || {} : state.views, loaded: true, error: null };
+    state = { ...state, ...snapshot, ...withPassages(documents), activeBrainId: snapshot.brains.some(item => item.id === activeBrainId) ? activeBrainId : snapshot.brains[0]?.id || "", views: initial ? snapshot.views || {} : state.views, loaded: true, error: null };
     for (const task of state.tasks) if (task.state === "done" && priorTasks.get(task.id) === "running") {
       if (task.result?.reportId) state = { ...state, views: { ...state.views, [task.brainId]: { ...viewFor(state, task.brainId), section: "reports", reportId: task.result.reportId } } };
       if (task.result?.brainId) state = { ...state, activeBrainId: task.result.brainId };
@@ -120,12 +177,14 @@ export async function refreshLibrary({ initial = false, recheck = false } = {}) 
     revision = "";
     recheckNext ||= asked;
     state = { ...state, loaded: true, error: error.message }; emit();
+    return;
   }
+  await fetchPassages();
 }
 export function subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); }
 export const getState = () => state;
 export function useSecondBrain() { return useSyncExternalStore(subscribe, getState, getState); }
-export function resetSecondBrainStore() { clearInterval(poll); clearTimeout(preferencesTimer); poll = null; state = initialState(); loading = null; fixture = false; revision = ""; recheckNext = false; emit(); }
+export function resetSecondBrainStore() { clearInterval(poll); clearTimeout(preferencesTimer); poll = null; state = initialState(); loading = null; fixture = false; revision = ""; recheckNext = false; passageCache.clear(); passagesAsked.clear(); historyCache.clear(); emit(); }
 // Explicit fixtures for tests and the visual harness. Production never seeds a sample library.
 export async function loadSampleLibrary() {
   fixture = true;
@@ -171,9 +230,60 @@ export function libraryFor(current, brainId = current.activeBrainId) {
 }
 export const documentById = (current, id) => current.documents.find(doc => doc.id === id);
 export const blockById = (doc, blockId) => doc?.blocks?.find(block => block.id === blockId);
+// The sample library keeps passages and versions on each document; the library sends counts.
+export const passageCount = doc => doc.passageCount ?? doc.blocks?.length ?? 0;
+export const historySize = doc => doc.historySize ?? (doc.versions?.length ? new TextEncoder().encode(JSON.stringify(doc.versions)).length : 0);
 
-export function notify(message, tone = "success") { set({ toast: { id: uid("toast"), message, tone } }); }
+function cachedHistory(doc) {
+  if (fixture) return doc.versions || [];
+  const cached = historyCache.get(doc.id);
+  if (cached?.version === doc.version) return cached.versions;
+  return doc.versionCount === 0 ? [] : null;
+}
+// A document's stored older versions ({ hash, at, note, blocks }), fetched once per document version.
+export async function loadHistory(doc) {
+  const cached = cachedHistory(doc);
+  if (cached) return cached;
+  const answer = await brainRequest("passages", { ids: [doc.id], history: true });
+  const item = answer.documents[0];
+  if (!item) throw new Error("This document is no longer in the library.");
+  historyCache.set(item.id, { version: item.version, versions: item.versions });
+  return item.versions;
+}
+// For the reader's version list and the version dialogs: { versions, loading, error }.
+export function useDocumentHistory(doc) {
+  const key = doc ? `${doc.id}\u0001${doc.version}` : "";
+  const [loaded, setLoaded] = useState({ key: "", versions: [], error: "" });
+  const known = doc ? cachedHistory(doc) : [];
+  useEffect(() => {
+    if (!doc || cachedHistory(doc)) return undefined;
+    let active = true;
+    loadHistory(doc).then(versions => { if (active) setLoaded({ key, versions, error: "" }); }, error => { if (active) setLoaded({ key, versions: [], error: error.message }); });
+    return () => { active = false; };
+    // The key holds the document's ID and version, the only inputs that change the result.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  if (known) return { versions: known, loading: false, error: "" };
+  if (loaded.key === key) return { versions: loaded.versions, loading: false, error: loaded.error };
+  return { versions: [], loading: true, error: "" };
+}
+
+// action is an optional { label, run } shown as a button on the notice.
+export function notify(message, tone = "success", action = null) { set({ toast: { id: uid("toast"), message, tone, ...(action ? { action } : {}) } }); }
 export function dismissToast() { set({ toast: null }); }
+
+// Removes a collection, saved search or research job and offers Undo, which puts the same
+// object back at its old place. The usual write path then stores it again under its ID.
+function removeWithUndo(kind, id, noun) {
+  const index = state[kind].findIndex(item => item.id === id);
+  if (index < 0) return;
+  const removed = state[kind][index];
+  set(current => ({ ...current, [kind]: current[kind].filter(item => item.id !== id) }));
+  notify(`Deleted ${noun} “${removed.name}”.`, "success", { label: "Undo", run: () => {
+    set(current => current[kind].some(item => item.id === id) ? current : { ...current, [kind]: current[kind].toSpliced(Math.min(index, current[kind].length), 0, removed) });
+    dismissToast();
+  } });
+}
 export function dismissError() { set({ error: null }); }
 
 export function setActiveBrain(brainId) {
@@ -195,7 +305,7 @@ export function saveSearch(name) {
   updateView(current => ({ search: { ...current.search, savedId: saved.id } }));
   notify(`Saved search “${name}”.`);
 }
-export function deleteSavedSearch(id) { set(current => ({ ...current, savedSearches: current.savedSearches.filter(item => item.id !== id) })); }
+export function deleteSavedSearch(id) { removeWithUndo("savedSearches", id, "saved search"); }
 
 export function openDocument(docId, { blockId = "", quote = "", preview = true, brainId } = {}) {
   const doc = documentById(state, docId);
@@ -244,7 +354,7 @@ export function createCollection(name, items = []) {
 export function updateCollection(id, patch) {
   set(current => ({ ...current, collections: current.collections.map(item => item.id === id ? { ...item, ...(typeof patch === "function" ? patch(item) : patch), updated: new Date().toISOString() } : item) }));
 }
-export function deleteCollection(id) { set(current => ({ ...current, collections: current.collections.filter(item => item.id !== id) })); }
+export function deleteCollection(id) { removeWithUndo("collections", id, "collection"); }
 export function evidenceItem(docId, blockId = "", note = "") {
   const doc = documentById(state, docId);
   return { id: uid("it"), kind: blockId ? "passage" : "document", docId, blockId, version: doc?.version || "", note };
@@ -312,7 +422,6 @@ export async function startTask({ kind, label, brainId = state.activeBrainId, ..
 export function cancelTask(id) { if (!fixture) enqueue("cancel", { id }); }
 export function dismissTask(id) { if (!fixture) enqueue("dismiss", { id }); set(current => ({ ...current, tasks: current.tasks.filter(task => task.id !== id) })); }
 
-export function addReport(report) { set(current => ({ ...current, reports: [report, ...current.reports] })); }
 export function updateReport(id, patch) { set(current => ({ ...current, reports: current.reports.map(report => report.id === id ? { ...report, ...(typeof patch === "function" ? patch(report) : patch) } : report) })); }
 export function updateClaim(reportId, claimId, patch) { updateReport(reportId, report => ({ claims: report.claims.map(claim => claim.id === claimId ? { ...claim, ...patch } : claim) })); }
 export function updateReportCitation(reportId, citationId, patch) { updateReport(reportId, report => ({ citations: report.citations.map(citation => citation.id === citationId ? { ...citation, ...patch } : citation) })); }
@@ -334,14 +443,13 @@ export function markSeries(seriesId, notSeries = true) {
   set(current => ({ ...current, series: (current.series || []).map(item => item.id === seriesId ? { ...item, notSeries } : item) }));
 }
 export function saveJob(job) { job = { ...job, provider: job.provider || researchProvider }; set(current => ({ ...current, jobs: current.jobs.some(item => item.id === job.id) ? current.jobs.map(item => item.id === job.id ? job : item) : [...current.jobs, job] })); }
-export function removeJob(id) { set(current => ({ ...current, jobs: current.jobs.filter(job => job.id !== id) })); }
+export function removeJob(id) { removeWithUndo("jobs", id, "research job"); }
 export function captureSource({ title, url, excerpt }) {
   return startTask({ kind: "capture", label: "Capturing source", title, url, excerpt });
 }
 
 // Projects and topic names. Merging keeps the absorbed project's name as an alias.
 export function saveProject(project) { set(current => ({ ...current, projects: current.projects.some(item => item.id === project.id) ? current.projects.map(item => item.id === project.id ? project : item) : [...current.projects, project] })); }
-export function deleteProject(id) { set(current => ({ ...current, projects: current.projects.filter(item => item.id !== id) })); }
 export function mergeProjects(from, into) {
   const merged = mergedProject(into, from, state.activeBrainId, uid);
   set(current => ({ ...current, projects: [...current.projects.filter(item => item.id !== merged.id && item.id !== from.id), merged] }));

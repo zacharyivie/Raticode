@@ -167,16 +167,6 @@ def allowlist_match(host: str, address: str | None, allowlist: Iterable[str]) ->
     return matched
 
 
-def network_policy_warnings(url: str, allowlist: Iterable[str] = ()) -> list[str]:
-    if "{{" in url and "}}" in url:
-        return []
-    try:
-        validate_http_request_url(url, allowlist=allowlist, resolver=lambda _host, _port: ())
-    except NetworkPolicyViolation as exc:
-        return [str(exc)]
-    return []
-
-
 def _validate_address(
     url: str,
     safe_url: str,

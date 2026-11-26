@@ -80,10 +80,6 @@ export function organizeThreads(entries, { running = new Set(), unread = new Set
   return groups;
 }
 
-export function threadIsArchived(thread, missingRoots, branches) {
-  return Boolean(thread.archived) || threadIsUnreachable(thread, missingRoots, branches);
-}
-
 export function archiveRetentionDays(value) {
   const days = Number(value);
   return Number.isFinite(days) && days > 0 ? days : 0;

@@ -39,6 +39,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from gofer.ui import rem_self_work_windows as windows
 from gofer.ui.rem_home_models import ACTIVE, ClockTime
 from gofer.ui.rem_objectives import SETTING as OBJECTIVES_SETTING
+from gofer.utils.instants import stored_instant
 
 SETTING = "self_work_stop"
 MAX_CONDITION = 500
@@ -122,7 +123,7 @@ def active(record: dict[str, Any]) -> bool:
 
 
 def fallback(record: dict[str, Any]) -> datetime | None:
-    return windows.instant(record.get("no_later_than"))
+    return stored_instant(record.get("no_later_than"))
 
 
 def fallback_due(record: dict[str, Any], clock: datetime) -> bool:
@@ -334,7 +335,7 @@ def _judgment_view(
 ) -> dict[str, Any] | None:
     if not judgment:
         return None
-    at = windows.instant(judgment.get("at"))
+    at = stored_instant(judgment.get("at"))
     return {
         "met": bool(judgment.get("met")),
         "evidence": str(judgment.get("evidence") or ""),
@@ -354,7 +355,7 @@ def view(record: dict[str, Any], clock: datetime, *, judging: bool = False) -> d
     last = record.get("last") or None
     shown_last = None
     if last:
-        last_end = windows.instant(last.get("no_later_than"))
+        last_end = stored_instant(last.get("no_later_than"))
         last_zone = str(last.get("timezone") or zone_name)
         shown_last = {
             "condition": last.get("condition") or "",
@@ -441,7 +442,7 @@ def report_line(stop: dict[str, Any] | None, clock: datetime) -> str:
     """The line a self-work report adds about its stop condition."""
     if not stop or not stop.get("condition"):
         if stop and stop.get("no_later_than"):
-            end = windows.instant(stop["no_later_than"])
+            end = stored_instant(stop["no_later_than"])
             if end:
                 return (
                     "Its latest stop time was "
@@ -489,7 +490,7 @@ def finished_since(db: sqlite3.Connection, since: datetime) -> list[dict[str, An
         (since.isoformat()[:19],),
     ):
         run = json.loads(body)
-        finished = windows.instant(run.get("finished_at"))
+        finished = stored_instant(run.get("finished_at"))
         if (
             _self_started(run)
             and run["state"] not in ACTIVE
@@ -508,7 +509,7 @@ def records(db: sqlite3.Connection, record: dict[str, Any], clock: datetime) -> 
     changed since the condition was set and the board's counts; self-work's runs since then;
     the user's own tasks that ran since then; and the objectives.
     """
-    since = windows.instant(record.get("condition_set_at") or record.get("set_at")) or clock
+    since = stored_instant(record.get("condition_set_at") or record.get("set_at")) or clock
     condition = str(record.get("condition") or "")
     numbers = ticket_numbers(condition)
     tickets = [json.loads(row[0]) for row in db.execute("SELECT body FROM kanban_tickets")]
@@ -531,7 +532,7 @@ def records(db: sqlite3.Connection, record: dict[str, Any], clock: datetime) -> 
         ]
     else:
         changed = sorted(
-            (t for t in tickets if (windows.instant(t.get("updated_at")) or since) > since),
+            (t for t in tickets if (stored_instant(t.get("updated_at")) or since) > since),
             key=lambda t: str(t.get("updated_at")),
             reverse=True,
         )
@@ -549,8 +550,8 @@ def records(db: sqlite3.Connection, record: dict[str, Any], clock: datetime) -> 
         (since.isoformat()[:19], since.isoformat()[:19], *states),
     ):
         run = json.loads(body)
-        created = windows.instant(run.get("created_at")) or since
-        finished = windows.instant(run.get("finished_at"))
+        created = stored_instant(run.get("created_at")) or since
+        finished = stored_instant(run.get("finished_at"))
         if created >= since or (finished and finished >= since) or run["state"] in ACTIVE:
             runs.append(run)
     runs.sort(key=lambda r: str(r.get("finished_at") or r.get("created_at") or ""))
@@ -619,17 +620,17 @@ def due(
     if not active(record) or not record.get("condition"):
         return None
     attempt = record.get("attempt") or {}
-    tried = windows.instant(attempt.get("at"))
+    tried = stored_instant(attempt.get("at"))
     if attempt.get("state") == "failed" and tried and clock - tried < RETRY_AFTER:
         return None
-    since = windows.instant(record.get("condition_set_at") or record.get("set_at")) or clock
+    since = stored_instant(record.get("condition_set_at") or record.get("set_at")) or clock
     judged = set(record.get("judged_runs") or [])
     ended = [r for r in finished_since(db, since) if r["id"] not in judged]
     settling = [
         r
         for r in ended
         if r["id"] in unsettled
-        and clock - (windows.instant(r.get("finished_at")) or clock) < SETTLE_WAIT
+        and clock - (stored_instant(r.get("finished_at")) or clock) < SETTLE_WAIT
     ]
     if settling:
         return "pending", []
@@ -638,7 +639,7 @@ def due(
     judgment = record.get("judgment")
     if not judgment:
         return "new", []
-    last = windows.instant(judgment.get("at"))
+    last = stored_instant(judgment.get("at"))
     if not idle or (last and clock - last < IDLE_EVERY):
         return None
     if judgment.get("fingerprint") != fingerprint(records(db, record, clock)):

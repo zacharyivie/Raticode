@@ -18,7 +18,7 @@ from typing import Literal, Protocol
 import anyio
 
 from gofer.core.http import HttpClient, HttpRequest, UrllibHttpClient
-from gofer.core.operations import HttpRetryPolicy
+from gofer.core.http_retry import HttpRetryPolicy
 from gofer.utils.atomic_output import atomic_binary_output
 from gofer.utils.paths import get_data_dir
 from gofer.utils.process import run_subprocess
@@ -369,33 +369,6 @@ class ApprovalStore:
             request.waiter_pid = os.getpid()
             self.create_or_update(request)
 
-    def claim_resume(self, workflow_id: str, run_id: str, node_id: str) -> ApprovalRequest | None:
-        path = self.request_path(workflow_id, run_id, node_id)
-        if not path.exists():
-            return None
-        with _request_lock(path):
-            request = self.get(workflow_id, run_id, node_id)
-            if request is None or request.decision is None:
-                return None
-            if request.resume_claimed_at and _pid_is_live(request.resume_claimed_by_pid):
-                return None
-            request.resume_claimed_at = _now()
-            request.resume_claimed_by_pid = os.getpid()
-            self.create_or_update(request)
-        return request
-
-    def release_resume(self, workflow_id: str, run_id: str, node_id: str) -> None:
-        path = self.request_path(workflow_id, run_id, node_id)
-        if not path.exists():
-            return
-        with _request_lock(path):
-            request = self.get(workflow_id, run_id, node_id)
-            if request is None:
-                return
-            request.resume_claimed_at = None
-            request.resume_claimed_by_pid = None
-            self.create_or_update(request)
-
     def list_pending(self, workflow_id: str | None = None) -> list[ApprovalRequest]:
         return [
             request for request in self.list_requests(workflow_id) if request.status == "pending"
@@ -542,13 +515,6 @@ def _request_lock(path: Path) -> Iterator[None]:
                 msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
     finally:
         os.close(descriptor)
-
-
-def _pid_is_live(pid: int | None) -> bool:
-    from gofer.utils.pids import pid_alive
-
-    # Never os.kill(pid, 0): on Windows that ends the process it asks about.
-    return pid_alive(pid)
 
 
 @dataclass
@@ -794,6 +760,7 @@ try {
 
 
 def _windows_powershell_path() -> str | None:
+    """Windows PowerShell, or PowerShell 7 when it's missing. Health checks use this too."""
     return (
         shutil.which("powershell.exe")
         or shutil.which("powershell")

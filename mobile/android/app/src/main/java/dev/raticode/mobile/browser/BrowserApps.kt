@@ -10,13 +10,13 @@ import androidx.core.net.toUri
 import dev.raticode.mobile.live.BrowserAddress
 
 /**
- * Browser apps other than Firefox that the phone's Browser page can hand pages to instead of Raticode's own browser:
- * Google Chrome ([ChromeApps]) and siblings described the same way. Each app's file defines one [BrowserApp] and adds
- * it to [ALL]; saving the choice, the Browser page, Browser settings and chat links all go through this list, so a new
- * app needs no other change to those files. Firefox keeps its own [FirefoxApps], since it also opens Firefox's screens.
+ * Browser apps that the phone's Browser page can hand pages to instead of Raticode's own browser: Firefox ([Firefox]),
+ * Google Chrome ([ChromeApps]), Microsoft Edge ([MicrosoftEdge]) and siblings described the same way. Each app's file
+ * defines one [BrowserApp] and adds it to [ALL]; saving the choice, the Browser page, Browser settings, the tab list and
+ * chat links all go through this list, so a new app needs no other change to those files.
  */
 object BrowserApps {
-    val ALL: List<BrowserApp> = listOf(ChromeApps.APP)
+    val ALL: List<BrowserApp> = listOf(Firefox.APP, ChromeApps.APP, MicrosoftEdge.APP)
 
     fun byEngine(engine: String): BrowserApp? = ALL.firstOrNull { it.engine == engine }
 
@@ -35,8 +35,12 @@ object BrowserApps {
  * One browser app for Android. [engine] is the saved choice ("chrome"). [editions] are its packages in order of
  * preference, each with the SHA-256 digests of the certificates its maker signs that package with; Raticode sends pages
  * only to an installed edition Android confirms is signed with one of them. [store] is the package Google Play lists.
- * [signIn] is a web page that starts the app's own account sign-in, opened in the app like any other page. [limits]
- * says, in the page's words, what the app doesn't let Raticode do.
+ * [signIn] starts the app's own account sign-in: a web page opened in the app like any other page, or one of the app's
+ * screens. [places] are the app's own screens, each shown as a row. A place with a deep-link host opens that screen
+ * ([openPlace]); a place without one opens the app and says where to tap. [linkHosts] is the fixed list of hosts the app
+ * may be sent, each as `scheme://host` with its edition's [Edition.scheme]; any other host is never sent ([deepLink]).
+ * [beside] offers the app in the other half of a split screen ([launchBeside]). [limits] says, in the page's words, what
+ * the app doesn't let Raticode do.
  */
 class BrowserApp(
     val engine: String,
@@ -46,11 +50,26 @@ class BrowserApp(
     val store: String,
     val signIn: SignIn?,
     val limits: String,
+    val places: List<Place> = emptyList(),
+    val beside: Boolean = false,
+    val linkHosts: Set<String> = emptySet(),
 ) {
-    data class Edition(val pkg: String, val name: String, val certs: List<String>)
+    /** One package of the app. [scheme] is the deep-link scheme that package registers, for an app with [linkHosts]. */
+    data class Edition(val pkg: String, val name: String, val certs: List<String>, val scheme: String? = null)
 
-    /** A page the app opens for its own account sign-in; Raticode only opens the address and never sees the password. */
-    data class SignIn(val url: String, val label: String, val detail: String)
+    /**
+     * The app's own account sign-in: a web page ([url]) or one of its screens by deep-link host ([host]). Raticode only
+     * opens the address or screen and never sees the password.
+     */
+    data class SignIn(val label: String, val detail: String, val url: String? = null, val host: String? = null) {
+        init { require((url == null) != (host == null)) { "A sign-in is a web page or a screen" } }
+    }
+
+    /**
+     * One of the app's own screens, as [label] and what it is ([detail]). [host] opens it by deep link; without one,
+     * [where] says where it is in the app's menu.
+     */
+    data class Place(val label: String, val detail: String, val where: String = "", val host: String? = null)
 
     /** An installed edition. [genuine] means its maker signed it; nothing is sent to one that isn't. */
     data class Found(val app: BrowserApp, val edition: Edition, val version: String, val enabled: Boolean, val genuine: Boolean) {
@@ -64,6 +83,10 @@ class BrowserApp(
 
     /** The preferred installed edition: the first of [editions] that is installed. */
     fun preferred(installed: Collection<String>): Edition? = editions.firstOrNull { it.pkg in installed }
+
+    /** The deep link for [host] in [edition], or null for a host outside [linkHosts] or an edition with no scheme. */
+    fun deepLink(edition: Edition, host: String): String? =
+        if (host in linkHosts && edition.scheme != null) "${edition.scheme}://$host" else null
 
     /** Pages the app opens for Raticode: web addresses only. The app applies its own rules to each one. */
     fun openable(url: String): Boolean = BrowserAddress.isWeb(url)
@@ -114,11 +137,32 @@ class BrowserApp(
         return start(context, intent)
     }
 
+    /**
+     * Opens one of the app's own screens by its deep-link [host]. An older version without that screen opens where the
+     * user left it instead, as [launch] does. A host outside [linkHosts] opens nothing.
+     */
+    fun openPlace(context: Context, found: Found, host: String): Boolean {
+        if (!found.usable) return false
+        val link = deepLink(found.edition, host) ?: return false
+        if (start(context, Intent(Intent.ACTION_VIEW, link.toUri()).setPackage(found.edition.pkg))) return true
+        return launch(context, found)
+    }
+
     /** Opens the app through its launcher entry, which brings back its existing task where the user left it. */
     fun launch(context: Context, found: Found): Boolean {
         if (!found.usable) return false
         val intent = context.packageManager.getLaunchIntentForPackage(found.edition.pkg) ?: return false
         return start(context, intent)
+    }
+
+    /**
+     * The app in the other half of a split screen, beside Raticode and its bottom bar. Android places it there only while
+     * Raticode is itself in split screen; otherwise the app opens full screen, as [launch] does.
+     */
+    fun launchBeside(context: Context, found: Found): Boolean {
+        if (!found.usable) return false
+        val intent = context.packageManager.getLaunchIntentForPackage(found.edition.pkg) ?: return false
+        return start(context, intent.addFlags(Intent.FLAG_ACTIVITY_LAUNCH_ADJACENT or Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
     /** Opens the app's page in Google Play, or on the web when the phone has no store. */

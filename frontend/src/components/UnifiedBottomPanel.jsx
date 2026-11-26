@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Activity, AlertCircle, AlertTriangle, ChevronDown, FlaskConical, GitBranch, History, Info, Terminal as TerminalIcon } from "lucide-react";
 
-const RunTimelinePanel = lazy(() => import("./DagCanvas.jsx").then(module => ({ default: module.RunTimelinePanel })));
+const RunTimelinePanel = lazy(() => import("./RunTimelinePanel.jsx").then(module => ({ default: module.RunTimelinePanel })));
 import { DEFAULT_APP_SETTINGS, formatKeybinding, matchesCommand, settingBinding } from "../lib/settings.js";
 
 import RunSummary from "./RunSummary.jsx";
@@ -13,6 +13,7 @@ const WorkflowTestsPanel = lazy(() => import("./WorkflowTestsPanel.jsx"));
 const RunChangesPanel = lazy(() => import("./RunChangesPanel.jsx"));
 import { bottomPanelTabForShortcut, clamp } from "../lib/terminalWorkspace.js";
 import { trackPointerDrag } from "../lib/paneResize.js";
+import { useRovingChoice } from "../lib/useRovingChoice.js";
 import { bottomPanelStartState, openTerminalTab, terminalInEditor } from "../lib/workspaceLayout.js";
 export * from "../lib/terminalWorkspace.js";
 
@@ -69,6 +70,14 @@ export default function UnifiedBottomPanel({
     if (tab === "tests") setTestsMounted(true);
     if (tab === "terminal") setTerminalMounted(true);
   }, [editorTerminal]);
+
+  // Arrow keys pick the next view without the click's collapse-when-open toggle.
+  const panelTab = useRovingChoice({
+    keys: ["problems", "timeline", "runs", ...(hasChanges ? ["changes"] : []), "tests", ...(editorTerminal ? [] : ["terminal"])],
+    selected: activeTab,
+    onSelect: selectTab,
+    orientation: "horizontal",
+  });
 
   const handleTabClick = useCallback((tab) => {
     if (tab === activeTab && !collapsed) {
@@ -234,6 +243,7 @@ export default function UnifiedBottomPanel({
           icon={AlertTriangle}
           label="Problems"
           onClick={() => handleTabClick("problems")}
+          roving={panelTab("problems")}
         >
           {diagnostics.length ? (
             <span className={errorCount ? "text-red-700" : "text-amber-700"}>
@@ -246,12 +256,14 @@ export default function UnifiedBottomPanel({
           icon={History}
           label="Run Timeline"
           onClick={() => handleTabClick("timeline")}
+          roving={panelTab("timeline")}
         />
         <PanelTab
           active={activeTab === "runs"}
           icon={Activity}
           label="Runs"
           onClick={() => handleTabClick("runs")}
+          roving={panelTab("runs")}
         >
           {runSummary.active.length ? <span>{runSummary.active.length} active</span> : null}
           {runSummary.unread.length ? <span className="text-brand">· {runSummary.unread.length} unread</span> : null}
@@ -262,6 +274,7 @@ export default function UnifiedBottomPanel({
           icon={GitBranch}
           label="Changes"
           onClick={() => handleTabClick("changes")}
+          roving={panelTab("changes")}
         >
           {changesProps.worktree.state === "pending" ? <span className="text-brand" title="Changes waiting to be landed or discarded">· to review</span> : null}
         </PanelTab> : null}
@@ -270,12 +283,14 @@ export default function UnifiedBottomPanel({
           icon={FlaskConical}
           label="Tests"
           onClick={() => handleTabClick("tests")}
+          roving={panelTab("tests")}
         />
         {editorTerminal ? null : <PanelTab
           active={activeTab === "terminal"}
           icon={TerminalIcon}
           label="Terminal"
           onClick={() => handleTabClick("terminal")}
+          roving={panelTab("terminal")}
         />}
         <div className="flex-1" />
         <button
@@ -329,7 +344,7 @@ export default function UnifiedBottomPanel({
   );
 }
 
-function PanelTab({ active, children, icon: Icon, label, onClick }) {
+function PanelTab({ active, children, icon: Icon, label, onClick, roving }) {
   return (
     <button
       aria-selected={active}
@@ -337,6 +352,7 @@ function PanelTab({ active, children, icon: Icon, label, onClick }) {
       role="tab"
       type="button"
       onClick={onClick}
+      {...roving}
     >
       <Icon aria-hidden="true" size={13} />
       {label}

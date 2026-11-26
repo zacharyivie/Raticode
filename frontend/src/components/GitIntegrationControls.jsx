@@ -3,6 +3,7 @@ import { integrationOperations } from "./WorktreeContextMenu.jsx";
 import { hasUnsavedCodeChanges } from "../lib/codeEditorSessions.js";
 import RemActionIcon from "./RemActionIcon.jsx";
 import BranchTargetPicker from "./BranchTargetPicker.jsx";
+import { useConfirm } from "./ConfirmDialog.jsx";
 
 const emptyList = [];
 const byName = (a, b) => a.localeCompare(b, "en", { numeric: true, sensitivity: "base" }) || (a < b ? -1 : a > b ? 1 : 0);
@@ -11,6 +12,7 @@ const button = "rounded border border-line px-2 py-1.5 text-xs hover:bg-slate-50
 
 export default function GitIntegrationControls({ rootPath, sourceControl, worktrees, source, request, onSourceChange, onChanged, onSelectProject, onBusy, disabled }) {
   const [stashes, setStashes] = useState([]);
+  const [confirm, confirmDialog] = useConfirm();
   const defaultTarget = () => (sourceControl.branch !== source ? sourceControl.branch : sourceControl.branches?.find(branch => branch !== source)) || "";
   const [target, setTarget] = useState(request?.target || defaultTarget());
   const [targetType, setTargetType] = useState(request?.target && request?.targetType === "remote" ? "remote" : "local");
@@ -133,8 +135,8 @@ export default function GitIntegrationControls({ rootPath, sourceControl, worktr
       </div>
     </section> : null}
     {stashes.length ? <section aria-label="Stashes" className="mt-4 border-t border-line pt-3">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2"><strong>Stashes · {stashes.length}</strong><button type="button" className={button} disabled={unavailable} onClick={() => { if (window.confirm(`Permanently discard all ${stashes.length} stashes? This cannot be undone in Raticode.`)) void run("stash-clear", { hashes: stashes.map(s => s.hash) }); }}>Discard stashes</button></div>
-      {stashes.map(stash => <div key={stash.hash} className="border-b border-line py-3"><p className="break-words">{stash.ref} · {stash.subject}</p><div className="mt-2 flex gap-2"><button type="button" className={button} disabled={unavailable} onClick={() => { setPreview(null); void run("stash-preview", { hash: stash.hash }, true); }}>Preview stash</button><button type="button" className={button} disabled={unavailable} onClick={() => { if (window.confirm(`Permanently discard ${stash.ref}: ${stash.subject}?`)) void run("stash-drop", { hash: stash.hash }); }}>Discard</button></div></div>)}
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2"><strong>Stashes · {stashes.length}</strong><button type="button" className={button} disabled={unavailable} onClick={async () => { const hashes = stashes.map(s => s.hash); if (await confirm({ confirmLabel: "Discard stashes", danger: true, message: `Permanently discard all ${hashes.length} stashes? This cannot be undone in Raticode.` })) void run("stash-clear", { hashes }); }}>Discard stashes</button></div>
+      {stashes.map(stash => <div key={stash.hash} className="border-b border-line py-3"><p className="break-words">{stash.ref} · {stash.subject}</p><div className="mt-2 flex gap-2"><button type="button" className={button} disabled={unavailable} onClick={() => { setPreview(null); void run("stash-preview", { hash: stash.hash }, true); }}>Preview stash</button><button type="button" className={button} disabled={unavailable} onClick={async () => { if (await confirm({ confirmLabel: "Discard stash", danger: true, message: `Permanently discard ${stash.ref}: ${stash.subject}?` })) void run("stash-drop", { hash: stash.hash }); }}>Discard</button></div></div>)}
     </section> : null}
     {busy ? <p role="status">Checking Git…</p> : null}
     {error ? <p role="alert" className="whitespace-pre-wrap break-words text-red-700 dark:text-red-300">{error}</p> : null}
@@ -143,8 +145,9 @@ export default function GitIntegrationControls({ rootPath, sourceControl, worktr
       <p role="status" className={preview.conflicts?.length || preview.blocked ? "text-red-700 dark:text-red-300" : "text-muted"}>{preview.notice}</p>
       {preview.conflicts?.length ? <ul className="space-y-1">{preview.conflicts.map(file => <li key={file} className="break-all">! {file}</li>)}</ul> : null}
       <div tabIndex={0} aria-label="Preview diff" className="max-h-80 overflow-auto rounded border border-line p-2 font-mono text-[11px]">{(preview.diff || "No content changes.").split("\n").map((line, i) => <div key={i} className={`whitespace-pre ${line.startsWith("+") ? "text-green-800 dark:text-green-300" : line.startsWith("-") ? "text-red-700 dark:text-red-300" : "text-muted"}`}>{line || " "}</div>)}</div>
-      <div className="flex flex-wrap gap-2"><button type="button" className={button} disabled={unavailable || preview.blocked} onClick={() => { if (window.confirm("Apply this stash? The saved stash will be kept. Conflicts will pause for resolution.")) void run("stash-apply-selected", preview.value); }}>Apply stash</button><button type="button" className={button} disabled={unavailable} onClick={() => setPreview(null)}>Close preview</button></div>
+      <div className="flex flex-wrap gap-2"><button type="button" className={button} disabled={unavailable || preview.blocked} onClick={async () => { const value = preview.value; if (await confirm({ confirmLabel: "Apply stash", message: "Apply this stash? The saved stash will be kept. Conflicts will pause for resolution." })) void run("stash-apply-selected", value); }}>Apply stash</button><button type="button" className={button} disabled={unavailable} onClick={() => setPreview(null)}>Close preview</button></div>
       <p className="text-muted">Applying keeps the stash as a backup.</p>
     </section> : null}
+    {confirmDialog}
   </div>;
 }

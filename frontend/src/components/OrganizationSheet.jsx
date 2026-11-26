@@ -14,6 +14,7 @@ import { ProviderModelEffortFields, useProviderCapabilities } from "./ProviderMo
 import WorkerAccountField from "./WorkerAccountField.jsx";
 import { accountAfterProviderChange } from "../lib/workerAccounts.js";
 import { useProviderAccountList } from "../lib/useProviderAccountList.js";
+import MarkdownContent from "./MarkdownContent.jsx";
 import TicketPatchReview from "./TicketPatchReview.jsx";
 import { Avatar, Bar, Chip, Pill } from "./OrganizationViews.jsx";
 import { WorktreeSetupNotice } from "./WorktreeSetup.jsx";
@@ -147,7 +148,7 @@ function TicketSheet({ model, ticket, ctx }) {
       ? <><span>{offer.computer_name} has room:</span> <button className="oh-link" type="button" disabled={ctx.busy} onClick={() => ctx.onAct("run_there", { taskId: ticket.id, computerId: offer.computer_id }, `${ticket.key} runs on ${offer.computer_name}`)}>Run there</button></>
       : <span>{offer.text}</span>}</p></Rec>)(ticket.status === "todo" && !ticket.claim ? model.runtime?.placementSuggestions?.[ticket.id] : null)}
     <Rec label="Why">{ticket.doneWhen ? <><p>{ticket.doneWhen}</p><small className="oh-faint">Done when, in your words</small></> : <Muted>No done-when yet. <button className="oh-link" type="button" onClick={startEdit}>Add one</button></Muted>}
-      {ticket.description && <details className="oh-fold"><summary>Details</summary><p className="oh-prose">{ticket.description}</p></details>}</Rec>
+      {ticket.description && <details className="oh-fold"><summary>Details</summary><MarkdownContent compact images={false} className="oh-md" value={ticket.description} /></details>}</Rec>
     <Rec label="Part of"><div className="oh-chips">{ticket.project && <Chip model={model} refId={`project:${ticket.project}`} onOpen={ctx.onOpen} />}{milestone && <Chip model={model} refId={`ms:${milestone.id}`} onOpen={ctx.onOpen} />}{epic ? <Chip model={model} refId={`epic:${epic.id}`} onOpen={ctx.onOpen} /> : <Muted>No epic</Muted>}</div></Rec>
     <Rec label="Used">{ticket.used.length ? <div className="oh-link-list">{ticket.used.map(id => <div className="oh-link-row" key={id}><span className="oh-link-kind">{ticket.observed.has(id) ? "Read in a run" : "Linked"}</span><Chip model={model} refId={`kb:${id}`} onOpen={ctx.onOpen} />
       {!ticket.observed.has(id) && ticket.column !== "running" && <button className="oh-icon-btn" type="button" aria-label="Unlink note" title="Unlink note" onClick={() => update({ knowledge: (ticket.knowledge || []).filter(k => k !== id) }, "Note unlinked")}><X size={12} /></button>}</div>)}</div> : <Muted>No notes linked.</Muted>}
@@ -301,7 +302,7 @@ function EpicSheet({ model, epic, ctx }) {
   if (editing) return <PlanForm kind="epic" model={model} item={epic} ctx={ctx} onDone={() => setEditing(false)} />;
   return <>
     <Rec label="Part of"><div className="oh-chips"><Chip model={model} refId={`project:${epic.projectId}`} onOpen={ctx.onOpen} />{epic.milestoneId && <Chip model={model} refId={`ms:${epic.milestoneId}`} onOpen={ctx.onOpen} />}</div></Rec>
-    {epic.description && <Rec label="About"><p className="oh-prose">{epic.description}</p></Rec>}
+    {epic.description && <Rec label="About"><MarkdownContent compact images={false} className="oh-md" value={epic.description} /></Rec>}
     <Rec label="Progress"><Bar value={progress} /><small className="oh-faint">{pct(progress)}% of tickets accepted</small></Rec>
     <Rec label="Tickets">{tickets.length ? <div className="oh-stack">{tickets.map(t => <div className="oh-link-row" key={t.id}><Pill state={t.column} /><Chip model={model} refId={`ticket:${t.id}`} onOpen={ctx.onOpen} /></div>)}</div> : <Muted>No tickets yet.</Muted>}</Rec>
     <Rec label="Knowledge"><div className="oh-chips">{[...new Set(tickets.flatMap(t => t.used))].map(id => <Chip key={id} model={model} refId={`kb:${id}`} onOpen={ctx.onOpen} />)}{!tickets.some(t => t.used.length) && <Muted>None yet</Muted>}</div></Rec>

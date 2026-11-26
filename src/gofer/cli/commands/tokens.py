@@ -23,7 +23,7 @@ app = typer.Typer(
 _DATA_DIR = typer.Option(
     None,
     "--data-dir",
-    help="Raticode data directory. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the "
+    help="Raticode data folder. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the "
     "standard folder.",
 )
 
@@ -37,7 +37,7 @@ def _store(data_dir: Path | None) -> AgentTokenStore:
 
 
 def _refuse_agent_session() -> None:
-    from gofer.ui.headless import in_agent_session
+    from gofer.cli.client import in_agent_session
 
     if in_agent_session():
         typer.echo(

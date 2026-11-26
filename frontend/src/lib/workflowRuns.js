@@ -45,7 +45,6 @@ export function mergeWorkflowRunRecords(records, runs, context = {}) {
       worktreePath: identity.worktreePath ?? previous?.worktreePath ?? "",
       status: previous?.status === "stopping" && ACTIVE.has(status) ? "stopping" : status,
       awaitingApproval: ACTIVE.has(status) && (run.awaitingApproval ?? previous?.awaitingApproval ?? false),
-      queueRun: run.queueRun ?? previous?.queueRun ?? false,
       sourcePath: identity.sourcePath ?? previous?.sourcePath ?? "",
       triggerType: run.triggerType ?? run.trigger ?? previous?.triggerType ?? "",
       message: run.message ?? previous?.message ?? "",
@@ -80,8 +79,7 @@ export function disconnectWorkflowRunRecords(records, workflowId = null) {
 }
 
 export function workflowRunSummary(records, workflowId = null) {
-  const distinct = distinctWorkflowRunRecords(records);
-  const matching = workflowId ? distinct.filter((record) => record.workflowId === workflowId) : distinct;
+  const matching = workflowId ? records.filter((record) => record.workflowId === workflowId) : records;
   const active = matching.filter((record) => ACTIVE.has(record.status));
   const unread = matching.filter((record) => record.unread);
   return {
@@ -118,7 +116,7 @@ export function pruneUnlistedWorkflowRuns(records, workflowId, runs = [], { comp
   const listedTimes = runs.map(runStartedAt).filter((time) => time !== null);
   const oldestListed = listedTimes.length ? Math.min(...listedTimes) : null;
   return records.filter((record) => {
-    if (record.workflowId !== workflowId || record.queueRun || ACTIVE.has(record.status) || listed.has(record.runId)) return true;
+    if (record.workflowId !== workflowId || ACTIVE.has(record.status) || listed.has(record.runId)) return true;
     if (complete) return false;
     const started = runStartedAt(record);
     return oldestListed === null || started === null || started < oldestListed;
@@ -139,8 +137,6 @@ const LIST_STATUS = {
 
 // What the workflow list shows for one workflow: compile state first, then
 // active runs, then the newest finished run.
-const LEGACY_WORKFLOW_STATUS = { Success: "success", Error: "error", Stopped: "stopped", Running: "running" };
-
 export function workflowListStatus(workflow, records = [], { submitting = false } = {}) {
   if (workflow?.invalid) {
     return { key: "invalid", label: "Invalid", tone: "error", detail: workflow?.validationError || "This workflow has errors. Open it to see them.", unread: false };
@@ -161,11 +157,7 @@ export function workflowListStatus(workflow, records = [], { submitting = false 
   }
   const latest = summary.latest;
   if (!latest) {
-    // Legacy workflows report their newest run in the workflow payload before
-    // the run registry has scanned their logs.
-    const legacyStatus = LEGACY_WORKFLOW_STATUS[workflow?.status];
-    if (legacyStatus) return { key: legacyStatus, ...LIST_STATUS[legacyStatus], detail: "", unread };
-    return { key: "ready", label: "Ready", tone: "muted", detail: workflow?.status === "Scheduled" ? "Scheduled" : "Not run yet", unread };
+    return { key: "ready", label: "Ready", tone: "muted", detail: "Not run yet", unread };
   }
   const status = LIST_STATUS[latest.status] ?? { label: "Unknown", tone: "muted" };
   return {
@@ -189,14 +181,8 @@ export function formatRunAge(value, now = Date.now()) {
   return new Date(time).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-export function distinctWorkflowRunRecords(records) {
-  const logs = new Set(records.filter(record => !record.queueRun && record.logPath).map(record => JSON.stringify([record.workflowId, record.logPath])));
-  return records.filter(record => !record.queueRun || !record.logPath || !logs.has(JSON.stringify([record.workflowId, record.logPath])));
-}
-
 export function exactWorkflowRunStopPath(record) {
   if (!record?.workflowId || !record?.runId || !["running", "queued"].includes(record.status) || record.stale) return null;
-  if (record.queueRun) return `/queue/${encodeURIComponent(record.runId)}/cancel`;
   return `/workflows/${encodeURIComponent(record.workflowId)}/runs/${encodeURIComponent(record.runId)}/stop`;
 }
 

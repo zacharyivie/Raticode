@@ -5,6 +5,8 @@ import {
   templateBody, templateDraft, timeTargets, timeZoneChoices, zonedInput, zonedToIso,
 } from "../lib/socialApi.js";
 import { PlatformIcon } from "./SocialPostsParts.jsx";
+import { useDiscardGuard } from "./ConfirmDialog.jsx";
+import { useRovingChoice } from "../lib/useRovingChoice.js";
 
 // New, edit and duplicate share this dialog. Times are typed into a draft as the clock reads in
 // the chosen time zone and only turned into UTC on save, so clearing or retyping never snaps back.
@@ -12,7 +14,7 @@ export default function SocialPostEditor({ title, post, draft, template: startTe
   const start = post || draft || null;
   const platforms = useMemo(() => data.platforms || [], [data.platforms]);
   const zone = start?.timezone || localTimeZone();
-  const [form, setForm] = useState(() => ({
+  const [initial] = useState(() => ({
     title: start?.title || "",
     timing: start?.scheduled_at ? "later" : "now",
     when: zonedInput(start?.scheduled_at, zone),
@@ -24,6 +26,7 @@ export default function SocialPostEditor({ title, post, draft, template: startTe
       options: { ...(item.options || {}) }, media: (item.media || []).map(media => ({ sha256: media.sha256, name: media.name, path: media.path })),
     })),
   }));
+  const [form, setForm] = useState(initial);
   const [active, setActive] = useState(0);
   const [mediaPath, setMediaPath] = useState("");
   const [tried, setTried] = useState(false);
@@ -63,6 +66,7 @@ export default function SocialPostEditor({ title, post, draft, template: startTe
   };
 
   const current = form.variants[active] || null;
+  const platformTab = useRovingChoice({ keys: form.variants.map((_, index) => index), selected: active, onSelect: setActive, orientation: "horizontal" });
   const currentPlatform = platforms.find(item => item.id === current?.platform);
   const currentTarget = current ? targets.find(item => item.key === keyOf(current)) : null;
   const counters = form.variants.map(item => charCounter(item, platforms.find(entry => entry.id === item.platform)));
@@ -130,10 +134,15 @@ export default function SocialPostEditor({ title, post, draft, template: startTe
     setMediaPath("");
   };
 
-  return <div className="sp-overlay" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onCancel(); }}>
+  // A press outside never throws away a changed draft, and Escape asks first.
+  const changed = () => JSON.stringify(form) !== JSON.stringify(initial) || Boolean(mediaPath.trim() || templateName?.trim() || Object.values(blanks).some(value => value.trim()));
+  const guard = useDiscardGuard({ changed, onClose: onCancel, message: post ? "Discard your changes to this post?" : "Discard this post?" });
+
+  return <>
+  <div className="sp-overlay" role="presentation" {...guard.outsidePress}>
     <form className="sp-editor" role="dialog" aria-modal="true" aria-labelledby="sp-editor-h" onSubmit={save} noValidate
       onKeyDown={event => {
-        if (event.key === "Escape") { event.stopPropagation(); onCancel(); }
+        if (event.key === "Escape") { event.stopPropagation(); guard.requestClose(); }
         if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) save(event);
       }}>
       <header className="sp-editor-head">
@@ -185,11 +194,7 @@ export default function SocialPostEditor({ title, post, draft, template: startTe
                 const target = targets.find(entry => entry.key === keyOf(item));
                 const counter = counters[index];
                 return <button key={keyOf(item)} type="button" role="tab" aria-selected={index === active} id={`sp-tab-${index}`} aria-controls="sp-compose-panel"
-                  className={counter.over ? "over" : ""} onClick={() => setActive(index)}
-                  onKeyDown={event => {
-                    if (event.key === "ArrowRight") { event.preventDefault(); setActive((index + 1) % form.variants.length); }
-                    if (event.key === "ArrowLeft") { event.preventDefault(); setActive((index - 1 + form.variants.length) % form.variants.length); }
-                  }}>
+                  className={counter.over ? "over" : ""} onClick={() => setActive(index)} {...platformTab(index)}>
                   <PlatformIcon platform={item.platform} size={16} />{target?.name || item.platform}
                   {counter.over ? <span className="sp-over-tag">too long</span> : null}
                 </button>;
@@ -294,7 +299,9 @@ export default function SocialPostEditor({ title, post, draft, template: startTe
         <button type="submit" className="oh-btn primary" disabled={busy}><Send size={13} aria-hidden="true" />Save for review</button>
       </footer>
     </form>
-  </div>;
+  </div>
+  {guard.confirmDialog}
+  </>;
 }
 
 export function CharMeter({ counter, platform }) {

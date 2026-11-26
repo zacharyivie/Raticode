@@ -163,6 +163,46 @@ object Kanban {
         }
     }
 
+    /** A column or status in the board's words: "running" and "in_progress" are both In progress. */
+    private fun label(column: String) = COLUMN_LABELS[column] ?: STATUS_LABELS[column] ?: column
+
+    /** What a move did, in the desktop's words: "REM-12 cancelled.", "REM-12 started." or "REM-12 moved to Backlog." */
+    fun moveNotice(ticket: KanbanTicket, column: String): String {
+        val key = ticket.key.ifBlank { "The ticket" }
+        val starting = column == "running" || column == "in_progress"
+        return when {
+            column == "cancelled" -> "$key cancelled."
+            starting && ticket.isRem -> "$key ${if (ticket.paused.isNotBlank()) "resumed" else "started"}."
+            else -> "$key moved to ${label(column)}."
+        }
+    }
+
+    /**
+     * Undo sends a ticket back with another move, so it's offered only where that move exists, as the desktop's
+     * canUndoMove does: never after starting work, never for a paused ticket, and not back into In review or Blocked,
+     * which goes through a review. [ticket] is the ticket as it was before the move.
+     */
+    fun canUndoMove(ticket: KanbanTicket, column: String): Boolean {
+        val back = if (ticket.isRem) setOf("backlog", "todo", "done", "cancelled") else setOf("backlog", "todo")
+        return column != "running" && column != "in_progress" && ticket.paused.isBlank() && ticket.status in back
+    }
+
+    /** Rem's ticket can be cancelled from its page while it isn't proposed, running, paused, done or cancelled already. */
+    fun canCancel(ticket: KanbanTicket) = ticket.isRem && !ticket.proposed && !ticket.running && ticket.paused.isBlank() &&
+        ticket.status !in setOf("done", "cancelled")
+
+    /** The move sent back to where [move] began, for Undo, at the revision the board showed after it. */
+    fun undo(move: KanbanMove, moved: KanbanTicket): KanbanMove? =
+        if (move.back || !canUndoMove(move.before, move.column)) null else KanbanMove(moved, move.before.status, back = true)
+
+    /** The ticket as the board shows it once [move] went through: the same ticket at a newer revision. */
+    fun landed(move: KanbanMove, tickets: List<KanbanTicket>): KanbanTicket? =
+        tickets.firstOrNull { it.uid == move.before.uid && it.revision > move.before.revision }
+
+    /** The notice once [move] went through. */
+    fun notice(move: KanbanMove) =
+        if (move.back) "${move.before.key.ifBlank { "The ticket" }} moved back to ${label(move.column)}." else moveNotice(move.before, move.column)
+
     // Waiting for other tickets ---------------------------------------------------------------------------------------
 
     /** The card's line: what the ticket still waits for, or empty once every one of them is Done. */
@@ -205,6 +245,10 @@ object Kanban {
     fun violatesLine(ticket: KanbanTicket) =
         if (ticket.violatesDecisions.isEmpty()) "" else "Violates ${ticket.violatesDecisions.take(3).joinToString(", ")}" +
             (if (ticket.violatesDecisions.size > 3) " +${ticket.violatesDecisions.size - 3}" else "")
+
+    /** Why a ticket names the paired desktop whose self-work pass proposed it. */
+    fun proposedOnNote(ticket: KanbanTicket) = "Proposed by a self-work pass that ran on ${ticket.proposedOn}." +
+        (if (ticket.proposed) " What another computer proposes always waits for your approval, even with auto-approval on." else "")
 
     fun blockText(ticket: KanbanTicket) = when {
         ticket.status != "blocked" -> ""
@@ -500,7 +544,14 @@ object Kanban {
         // An older desktop sends neither; the ticket then breaks no decision as far as the phone knows.
         t.strings("violates_decisions").take(MAX_WAITS), t.optString("violation_reason").take(1200),
         // An older desktop sends no tags.
-        t.strings("tags").take(5).map { it.take(40) })
+        t.strings("tags").take(5).map { it.take(40) },
+        // An older desktop never names one: its proposals all came from itself.
+        proposedOn = t.optString("proposed_on").take(100),
+        // An older desktop doesn't send it, and the ticket shows no finish line.
+        doneWhen = t.optString("done_when").take(1000),
+        // An older desktop sends neither, and the ticket says nothing about objectives.
+        objective = t.optJSONObject("objective")?.optString("text").orEmpty().take(OBJECTIVE_TEXT_MAX),
+        objectiveLeft = t.optString("objective_left").take(500))
 
     fun parseSelfWork(json: JSONObject): SelfWorkView {
         val s = json.optJSONObject("settings"); val l = json.optJSONObject("limits"); val st = json.optJSONObject("state"); val r = json.optJSONObject("report")
@@ -535,7 +586,8 @@ object Kanban {
                 st?.optJSONObject("allowance_pace")?.let { it.optString("mode") == "pace" && !it.isNull("starts") && it.optInt("starts", 1) == 0 } ?: false),
             r?.let { report -> SelfWorkReport(report.optString("since"), report.optString("updated_at"), report.optBoolean("unseen"), report.optString("summary"),
                 report.objects("tickets_added").map { ReportTicket(it.optString("ticket_id"), it.optString("title"), it.optString("scope"),
-                    it.optString("organization_id"), it.optString("organization_name"), it.optBoolean("proposed"), it.optString("at"), it.optBoolean("auto_approved")) },
+                    it.optString("organization_id"), it.optString("organization_name"), it.optBoolean("proposed"), it.optString("at"), it.optBoolean("auto_approved"),
+                    it.optString("computer_name").take(100)) },
                 report.objects("work_done").map { ReportWork(it.optString("ticket_id"), it.optString("title"), it.optString("state"), it.optString("summary"),
                     it.optString("thread_id"), it.optString("at")) },
                 report.objects("duplicates_merged").map { ReportMerged(it.optString("ticket_id"), it.optString("title"), it.optString("kept_title"), it.optString("reason"), it.optString("at")) },
@@ -544,8 +596,65 @@ object Kanban {
             json.objects("accounts").take(40).map { a -> SelfWorkAccount(a.optString("provider").take(40), a.optString("label").take(80).ifBlank { a.optString("provider").take(40) },
                 a.optString("choice").take(128), a.optString("rem_setting_label").take(140).ifBlank { "Default sign-in" }, a.strings("accounts").take(100).map { it.take(128) }) }
                 .filter { it.provider.isNotBlank() },
-            json.optJSONObject("stop")?.let(::stop))
+            json.optJSONObject("stop")?.let(::stop),
+            json.optJSONObject("objectives")?.let(::objectives))
     }
+
+    /** The self-work objectives the desktop lists, open ones first and newest first. An older desktop sends none, and the page shows no card. */
+    private fun objectives(o: JSONObject): SelfWorkObjectives {
+        val items = o.objects("items").take(OBJECTIVES_MAX).map { i ->
+            SelfWorkObjective(i.optString("id").take(64), i.optString("text").take(OBJECTIVE_TEXT_MAX), i.optString("done_when").take(500),
+                i.optBoolean("done"), i.optString("done_by").take(20), i.optString("done_evidence").take(700), i.optString("created_by").take(20),
+                i.optBoolean("done") && i.optBoolean("stale"))
+        }.filter { it.id.isNotBlank() && it.text.isNotBlank() }
+        // The desktop sends them in this order; the stable sort only keeps a group from mixing into another.
+        val ordered = items.sortedBy { if (it.stale) 2 else if (it.done) 1 else 0 }
+        val stale = items.count { it.stale }
+        val done = items.count { it.done } - stale
+        // The counts cover the whole list, beyond what one answer holds; worked out from the items when missing.
+        return SelfWorkObjectives(ordered, o.optInt("open", items.size - done - stale).coerceAtLeast(0), o.optInt("done", done).coerceAtLeast(0),
+            o.optInt("stale", stale).coerceAtLeast(0), o.optInt("total", items.size).coerceAtLeast(items.size))
+    }
+
+    // Self-work objectives ------------------------------------------------------------------------------------------------
+
+    const val OBJECTIVE_TEXT_MAX = 200
+    private const val OBJECTIVES_MAX = 500
+
+    /** The card's count for this session, as the desktop shows it: "5", "2/5" once some are done, or "" when none is current. */
+    fun objectivesCount(objectives: SelfWorkObjectives): String {
+        val total = objectives.open + objectives.done
+        return if (total == 0) "" else if (objectives.done > 0) "${objectives.done}/$total" else "$total"
+    }
+
+    /** What the card says with no current objective, as the desktop words it. */
+    fun objectivesEmpty(objectives: SelfWorkObjectives) =
+        if (objectives.stale > 0) "None for this session yet." else "None yet. When self-work starts with none, Rem writes its own, each with a finish line."
+
+    /** An objective's details, one per line, as the desktop shows them: its finish line, who checked it off and why, and who wrote it. */
+    fun objectiveDetails(item: SelfWorkObjective): String = buildList {
+        add(if (item.doneWhen.isNotBlank()) "Done when: ${item.doneWhen}" else "Open-ended: no finish line, so Rem never checks it off.")
+        if (item.done) {
+            val who = if (item.doneBy == "rem") "Rem" else "You"
+            add("$who checked it off${item.doneEvidence.takeIf { it.isNotBlank() }?.let { ": $it" } ?: "."}")
+            if (item.stale) add("Stale: done in an earlier self-work session, so it doesn't count toward this one.")
+        }
+        if (item.createdBy == "rem") add("Written by Rem.")
+    }.joinToString("\n")
+
+    /**
+     * A Rem ticket's line about the self-work objectives, as the desktop's objectiveLine: the one it advances, or, while
+     * objectives are open, that self-work leaves it. Null when there is nothing to say, such as on a done ticket.
+     */
+    fun objectiveLine(ticket: KanbanTicket): TicketObjective? {
+        if (!ticket.isRem || ticket.status in setOf("done", "cancelled")) return null
+        if (ticket.objective.isNotBlank()) return TicketObjective(false, ticket.objective, "Advances the self-work objective “${ticket.objective}”.")
+        if (ticket.objectiveLeft.isNotBlank()) return TicketObjective(true, "Not on an objective: self-work leaves it", ticket.objectiveLeft)
+        return null
+    }
+
+    /** The ticket page's Objective text: the detail, and for a ticket self-work leaves, how to start it anyway. */
+    fun objectivePageText(line: TicketObjective) = if (line.off) "${line.detail} Move it to In progress to start it anyway." else line.detail
 
     /** When self-work stops. An older desktop sends none, and the page offers no stop condition. */
     private fun stop(s: JSONObject) = SelfWorkStop(s.optBoolean("active"), s.optLong("revision"), s.optString("condition").take(MAX_STOP_CONDITION),
@@ -678,12 +787,26 @@ data class KanbanTicket(val id: String, val scope: String, val organizationId: S
                         /** Why it contradicts them, as the desktop recorded it. */
                         val violationReason: String = "",
                         /** Labels such as `Guardrail`, for a ticket a guardrail retro proposed. */
-                        val tags: List<String> = emptyList()) {
+                        val tags: List<String> = emptyList(),
+                        /** The paired desktop a self-work pass ran on (Run there) when it proposed this; such a proposal always waits for the user. */
+                        val proposedOn: String = "",
+                        /** Its finish line as stored: each non-empty line is one check its review makes. */
+                        val doneWhen: String = "",
+                        /** The text of the open self-work objective it advances, or empty. */
+                        val objective: String = "",
+                        /** Why self-work leaves it while objectives are open, or empty. */
+                        val objectiveLeft: String = "") {
     val guardrail get() = Kanban.GUARDRAIL in tags
+    /** [doneWhen]'s checks, one per non-empty line. */
+    val doneWhenLines get() = doneWhen.lines().map { it.trim() }.filter { it.isNotEmpty() }
     val isRem get() = scope == Kanban.SCOPE_REM
     /** Ticket IDs are unique only within their organization; this one is unique on the board. */
     val uid get() = "$organizationId/$id"
     val owner get() = if (isRem) "Rem" else organizationName.ifBlank { "Organization" }
+}
+/** A move sent from this phone: [before] is the ticket as it was, [column] where it went. [back] marks an Undo. */
+data class KanbanMove(val before: KanbanTicket, val column: String, val back: Boolean = false) {
+    fun params() = Kanban.moveParams(before, column)
 }
 /** [earlier] counts tickets the desktop left out to keep the answer small. */
 data class KanbanBoard(val tickets: List<KanbanTicket>, val organizations: List<KanbanOrganization>, val earlier: Int,
@@ -756,7 +879,9 @@ data class SelfWorkState(val mode: String, val activeThreads: Int, val todoRemai
                          /** Pace to reset is holding new starts now. */
                          val paceHolding: Boolean = false)
 data class ReportTicket(val id: String, val title: String, val scope: String, val organizationId: String, val organizationName: String, val proposed: Boolean, val at: String,
-                        val autoApproved: Boolean = false)
+                        val autoApproved: Boolean = false,
+                        /** The paired desktop whose self-work pass proposed it, or empty. */
+                        val computerName: String = "")
 data class ReportWork(val ticketId: String, val title: String, val state: String, val summary: String, val threadId: String, val at: String)
 data class ReportMerged(val ticketId: String, val title: String, val keptTitle: String, val reason: String, val at: String)
 data class ReportNote(val text: String, val at: String)
@@ -771,7 +896,22 @@ data class SelfWorkView(val settings: SelfWorkSettings, val limits: SelfWorkLimi
                         /** One row per provider with accounts; empty from a desktop without self-work accounts. */
                         val accounts: List<SelfWorkAccount> = emptyList(),
                         /** When self-work stops; null from a desktop without stop conditions. */
-                        val stop: SelfWorkStop? = null)
+                        val stop: SelfWorkStop? = null,
+                        /** Self-work's objectives; null from a desktop that doesn't send them. Read-only here: Rem's chat changes them. */
+                        val objectives: SelfWorkObjectives? = null)
+/**
+ * One self-work objective. [doneWhen] is its finish line, empty for an open-ended one; [doneBy] is `rem` or `user`;
+ * [stale] marks one done in a self-work session that has ended.
+ */
+data class SelfWorkObjective(val id: String, val text: String, val doneWhen: String, val done: Boolean, val doneBy: String, val doneEvidence: String,
+                             val createdBy: String, val stale: Boolean)
+/** [items] are open first, then done, then stale, newest first in each; [open] and [done] count this session's, [stale] earlier ones, [total] all. */
+data class SelfWorkObjectives(val items: List<SelfWorkObjective>, val open: Int, val done: Int, val stale: Int, val total: Int) {
+    val current get() = items.filterNot { it.stale }
+    val staleItems get() = items.filter { it.stale }
+}
+/** A ticket's objective line: [short] for its card, [detail] for its page; [off] when self-work leaves it. */
+data class TicketObjective(val off: Boolean, val short: String, val detail: String)
 /**
  * When the self-work running now stops: at [condition] (the user's words, judged by Rem on the desktop) or [noLaterThan]
  * at the latest, whichever comes first. [active] is false when neither is set; [last] is the stop of the last session.

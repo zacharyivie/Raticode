@@ -1,6 +1,6 @@
 ---
 name: raticode-workflow-builder
-description: Create, edit, validate, and preflight Raticode workflows written in the Rattish language. Use for workflow authoring, graph changes, node configuration, routes, inputs, or execution readiness. Do not use the legacy TOML authoring commands for these tasks.
+description: Create, edit, validate, and preflight Raticode workflows written in the Rattish language. Use for workflow authoring, graph changes, node configuration, routes, inputs, or execution readiness.
 ---
 
 # Raticode workflow builder
@@ -66,6 +66,9 @@ Node review:
 ```
 
 Use kebab-case node IDs and field names. `needs` declares readiness. `to` declares routes.
+Unquoted block-map keys are lower-cased, so quote names whose case matters, such as `env`
+variables and `http-request` `params` (`"DEBUG": "1"`, not `DEBUG: "1"`), or write the map as
+a JSON object. Two keys in one map that match once lower-cased (`Path` and `path`) are an error.
 Use `with` for typed input bindings, such as `report: node.collect.output.stdout`. Workflow
 inputs use `input.<name>`. Paths in Rattish are project-relative and cannot escape the
 project root.
@@ -145,8 +148,8 @@ workflow also has a trigger. Test runs with `--input 'doc="PATH"'`.
 - Preserve the user's project and requested trigger behavior.
 - Reuse project scripts and prompts when suitable.
 - Do not edit compiled JSON IR. The compiler owns IR and stores it internally.
-- Do not use `Raticode workflow create`, `Raticode workflow add-node`, or other legacy TOML mutation
-  commands for Rattish workflows.
+- An old TOML workflow can't be run or edited any more. Convert it with
+  `Raticode rattish convert FILE.toml --project PATH`, then work on the Rattish file.
 - Schedules, file watches and local webhooks are not Rattish syntax. Set them with
   `Raticode rattish triggers add cron|file|webhook` after the workflow validates, and tell the
   user they fire only while Raticode or its background scheduler is running.
@@ -156,6 +159,6 @@ workflow also has a trigger. Test runs with `--input 'doc="PATH"'`.
   running anything. Running the tests executes the workflow once per case, so it needs the
   same authorization as a real run.
 - If the user requests a trigger or feature that Rattish 1 does not support, report that
-  limitation. Do not create a legacy TOML workflow as a workaround unless the user asks.
+  limitation.
 - If the CLI or filesystem is unavailable, provide a Rattish patch and say which validation
   commands could not run.

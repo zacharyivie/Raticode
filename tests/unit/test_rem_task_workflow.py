@@ -13,10 +13,16 @@ import pytest
 from gofer.core.usage_ledger import record_invocation
 from gofer.rattish.artifacts import compile_rattish_file
 from gofer.rattish.test_sets import TEST_RESULT_VERSION, results_directory
-from gofer.rattish.triggers import ApprovalConflict, TriggerStore, approval_status
+from gofer.rattish.triggers import (
+    ApprovalConflict,
+    TriggerStore,
+    approval_status,
+    next_occurrence,
+    parse_cron,
+)
 from gofer.ui import rem_task_workflow as flow
 from gofer.ui.rem_home import RemHome
-from gofer.ui.rem_home_models import RemConflict
+from gofer.ui.rem_home_models import RemConflict, Schedule
 from tests.unit.test_rem_home import home as home
 from tests.unit.test_rem_home import recipe
 
@@ -118,6 +124,25 @@ def drafted(home: RemHome, project: Path) -> tuple[dict[str, Any], dict[str, Any
 # --------------------------------------------------------------------------- schedule
 
 
+def _schedule_matches(schedule: dict[str, Any], count: int = 12) -> bool:
+    """Whether the trigger's next ``count`` times are the task's, from now."""
+    expression, timezone = flow.trigger_schedule(schedule)
+    trigger = parse_cron(expression, timezone)
+    rem = Schedule.model_validate(schedule)
+    clock = datetime.now(UTC)
+    rem_clock = clock
+    for _ in range(count):
+        mine = next_occurrence(trigger, clock)
+        theirs = rem.next(rem_clock)
+        if mine is None or theirs is None:
+            return mine is None and theirs is None
+        if mine.astimezone(UTC).isoformat() != theirs:
+            return False
+        clock = mine
+        rem_clock = datetime.fromisoformat(theirs)
+    return True
+
+
 def test_trigger_schedule_copies_daily_weekly_and_cron_times() -> None:
     assert flow.trigger_schedule(DAILY) == ("30 7 * * *", "Europe/Berlin")
     weekly = {
@@ -127,17 +152,19 @@ def test_trigger_schedule_copies_daily_weekly_and_cron_times() -> None:
         "timezone": "UTC",
     }
     assert flow.trigger_schedule(weekly) == ("5 18 * * mon,fri", "UTC")
-    # Rem hands cron text to APScheduler, where 0 is Monday; the trigger gets day names
-    # so it fires on the same days the task did.
-    cron = {"kind": "cron", "cron": "0 9 * * 1-5", "timezone": "America/New_York"}
-    assert flow.trigger_schedule(cron) == ("0 9 * * tue,wed,thu,fri,sat", "America/New_York")
+    # Rem reads cron weekdays the crontab way and stores them as day names, which the
+    # trigger reads the same way, so it fires on the same days the task did.
+    cron = Schedule.model_validate(
+        {"kind": "cron", "cron": "0 9 * * 1-5", "timezone": "America/New_York"}
+    ).model_dump()
+    assert flow.trigger_schedule(cron) == ("0 9 * * mon-fri", "America/New_York")
     for schedule in (
         DAILY,
         weekly,
         cron,
         {"kind": "cron", "cron": "*/20 6-8 * * *", "timezone": "Asia/Tokyo"},
     ):
-        assert flow.schedule_matches(schedule)
+        assert _schedule_matches(schedule)
     with pytest.raises(flow.WorkflowSwitchError):
         flow.trigger_schedule({"kind": "interval", "every_minutes": 30})
 

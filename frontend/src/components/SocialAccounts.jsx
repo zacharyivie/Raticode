@@ -5,10 +5,11 @@ import {
   reopenSignIn, saveSocialSettings, setPaused, signInStatus, startSignIn, updateAccount,
 } from "../lib/socialApi.js";
 import {
-  CONNECT_ORDER, NO_SIGN_IN_NOTE, PLATFORM_GUIDES, SIGN_IN_GUIDES, connectBody, connectChoices, defaultChoice, guideDocs, guideFields, guideMethods, guideSteps, methodLabel,
+  CONNECT_ORDER, NO_SIGN_IN_NOTE, PLATFORM_GUIDES, SIGN_IN_GUIDES, connectBody, connectChoices, defaultChoice, defaultMethod, guideDocs, guideFields, guideMethods, guideSteps, methodLabel,
   signInBody, signInFields, signInMessage, signInRedirect, signInSteps, validateConnect, validateSignIn,
 } from "../lib/socialPlatforms.js";
 import { AccountStatus, DomainInput, LoginField, PlatformIcon, Stepper, Switch } from "./SocialPostsParts.jsx";
+import { useRovingChoice } from "../lib/useRovingChoice.js";
 
 // Posts > Accounts: connected accounts as cards, a guided Connect panel beside them, and the
 // publishing rules underneath. `attempt` runs one backend call and returns { ok, value, error }
@@ -158,7 +159,7 @@ function ConnectPanel({ platform, account, label, info, attempt, busy, openLink,
     if (!account) return defaultChoice(platform);
     if (account.signed_in && SIGN_IN_GUIDES[platform]) return "signin";
     if (account.auth && methods.some(item => item.id === account.auth)) return account.auth;
-    return platform === "x" ? "oauth2" : methods[0]?.id;
+    return platform === "x" ? "oauth2" : defaultMethod(platform);
   });
   const signingIn = method === "signin" && Boolean(SIGN_IN_GUIDES[platform]) && info?.available !== false;
   const chosen = methods.find(item => item.id === method) || methods[0];
@@ -451,6 +452,9 @@ function PublishingRules({ data, attempt, busy }) {
     const outcome = await attempt(() => saveSocialSettings(body));
     if (outcome.ok) setSaved(what); else setProblem(outcome.error);
   };
+  const pickLate = minutes => save({ late_window_minutes: minutes }, "Late limit");
+  // Not disabled while a save runs: that would drop keyboard focus out of the group.
+  const lateChoice = useRovingChoice({ keys: LATE_WINDOW_CHOICES, selected: late, onSelect: pickLate, busy });
   return <section className="sp-rules" aria-labelledby="sp-rules-h">
     <header className="sp-section-head">
       <div>
@@ -469,8 +473,8 @@ function PublishingRules({ data, attempt, busy }) {
         <h3><Timer size={14} aria-hidden="true" />If a post runs late</h3>
         <p>If your computer was asleep or Raticode was closed at post time, still send it if it's no more than this late. After that it waits in Problems as Missed, so nothing goes out hours late by surprise.</p>
         <div className="sp-chips" role="radiogroup" aria-label="Still post when late by up to">
-          {LATE_WINDOW_CHOICES.map(minutes => <button key={minutes} type="button" role="radio" aria-checked={late === minutes} className="sp-chip-btn" disabled={busy}
-            onClick={() => late !== minutes && save({ late_window_minutes: minutes }, "Late limit")}>{durationLabel(minutes)}</button>)}
+          {LATE_WINDOW_CHOICES.map(minutes => <button key={minutes} type="button" role="radio" aria-checked={late === minutes} className="sp-chip-btn" aria-disabled={busy || undefined}
+            onClick={() => !busy && late !== minutes && pickLate(minutes)} {...lateChoice(minutes)}>{durationLabel(minutes)}</button>)}
         </div>
         <Stepper label={custom ? "Custom, in minutes" : "Or exactly, in minutes"} value={late} min={1} max={MAX_LATE_WINDOW} step={15} disabled={busy}
           onCommit={minutes => save({ late_window_minutes: minutes }, "Late limit")} />

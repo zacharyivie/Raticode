@@ -314,6 +314,8 @@ test("archive leaves a corrupt completed journal record untouched", (t) => {
   assert.deepEqual(fs.readFileSync(journalPath), before);
 });
 
+const readTerms = (root, id) => fs.readFileSync(path.join(root, "threads", `${id}.terms`), "utf8").split("\n").filter(Boolean);
+
 for (const restart of [false, true]) {
   test(`same-millisecond same-count body edits recover a failed index write${restart ? " after worker restart" : " on retry"}`, (t) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-index-clock-"));
@@ -338,11 +340,15 @@ for (const restart of [false, true]) {
       const committedSnapshot = JSON.parse(fs.readFileSync(snapshotPath));
       assert.equal(failedIndex.threads[result.id].archivedAt, committedSnapshot.updatedAt);
       assert.equal(failedIndex.threads[result.id].messageCount, committedSnapshot.messages.length);
-      assert.equal(failedIndex.threads[result.id].terms.includes(term), false);
+      // Words are written before the index, so a failed index write never hides them from a search.
+      assert.equal("terms" in failedIndex.threads[result.id], false);
+      assert.equal(readTerms(root, result.id).includes(term), true);
       const durableJournal = fs.readFileSync(journalPath, "utf8");
       if (restart) archive = archiveWithFixedClock();
       archive(root, thread, messages);
-      assert.equal(JSON.parse(fs.readFileSync(indexPath)).threads[result.id].terms.includes(term), true);
+      assert.equal("terms" in JSON.parse(fs.readFileSync(indexPath)).threads[result.id], false);
+      assert.equal(readTerms(root, result.id).includes(term), true);
+      assert.equal(readTerms(root, result.id).includes("originalterm"), true, "earlier revisions' words stay");
       assert.equal(fs.readFileSync(journalPath, "utf8"), durableJournal);
       const indexIdentity = fs.statSync(indexPath).ino;
       archive(root, thread, messages);
@@ -359,6 +365,7 @@ test("forgetting Rem threads erases their archived copies and keeps other thread
     assert.deepEqual(forgetConversations(archive, ["rem-worker", "never-archived"]), { forgotten: 2 });
     const files = fs.readdirSync(path.join(archive, "threads"));
     assert.equal(files.filter(file => file.endsWith(".json")).length, 1);
+    assert.deepEqual(files.filter(file => file.endsWith(".terms")), [`${crypto.createHash("sha256").update("mine").digest("hex")}.terms`]);
     const content = fs.readdirSync(archive, { recursive: true }).filter(file => fs.statSync(path.join(archive, file)).isFile())
       .map(file => fs.readFileSync(path.join(archive, file), "utf8")).join("\n");
     assert.doesNotMatch(content, /old corrupted request|"Worker"/);
@@ -421,9 +428,11 @@ test("Delete permanently removes the thread's files and only the attachments no 
     const index = JSON.parse(fs.readFileSync(path.join(root, "index.json")));
     assert.deepEqual(Object.values(index.threads).map(entry => entry.threadId), ["kept"]);
     const remaining = fs.readdirSync(path.join(root, "threads"));
-    assert.equal(remaining.length, 2);
+    const gone = crypto.createHash("sha256").update("gone").digest("hex");
+    assert.equal(fs.existsSync(path.join(root, "threads", `${gone}.terms`)), false, "the purge removes the thread's word list");
+    assert.equal(remaining.length, 3);
     const everything = remaining.map(name => fs.readFileSync(path.join(root, "threads", name), "utf8")).join("\n") + JSON.stringify(index);
-    assert.doesNotMatch(everything, /secret plan|"Gone"/);
+    assert.doesNotMatch(everything, /secret|"Gone"/);
     assert.match(everything, /keep me/);
 
     // Repeating the purge, or purging a thread that was never archived, changes nothing.
@@ -582,4 +591,67 @@ test("the retention queue job carries its age", async () => {
   worker.complete({ purged: 0 });
   await run;
   await queue.close();
+});
+
+test("each thread's words go to threads/<key>.terms and index.json leaves them out", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rem-terms-"));
+  try {
+    const { id } = archiveConversation(root, { id: "t", title: "Gamma plan" }, [{ id: "m", role: "user", body: "Use SQLite" }]);
+    archiveConversation(root, { id: "t", title: "Gamma plan" }, [{ id: "m", role: "user", body: "Use Postgres" }]);
+    assert.deepEqual(readTerms(root, id), ["gamma", "plan", "postgres", "sqlite", "use"], "earlier revisions' words stay");
+    const entry = JSON.parse(fs.readFileSync(path.join(root, "index.json"))).threads[id];
+    assert.equal("terms" in entry, false);
+    assert.equal(entry.title, "Gamma plan");
+    assert.equal(fs.readFileSync(path.join(root, "threads", `${id}.terms`), "utf8"), "gamma\nplan\npostgres\nsqlite\nuse\n");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("the first save after the upgrade moves every index entry's words to .terms files once", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rem-terms-migrate-"));
+  try {
+    const ids = ["one", "two", "three"].map((threadId, n) => archiveConversation(root, { id: threadId, title: `Thread ${threadId}` }, [{ id: "m", role: "user", body: `word${n} shared ünïcode` }]).id);
+    const expected = Object.fromEntries(ids.map((id) => [id, readTerms(root, id)]));
+    // Rebuild the index older versions wrote: words in each entry, no .terms files.
+    const indexPath = path.join(root, "index.json");
+    const index = JSON.parse(fs.readFileSync(indexPath));
+    for (const id of ids) { index.threads[id].terms = expected[id]; fs.rmSync(path.join(root, "threads", `${id}.terms`)); }
+    index.threads["../escape"] = { threadId: "bad", terms: ["outside"] };
+    fs.writeFileSync(indexPath, JSON.stringify(index));
+
+    const saved = archiveConversation(root, { id: "one", title: "Thread one" }, [{ id: "m", role: "user", body: "word0 shared ünïcode later" }]);
+    const migrated = JSON.parse(fs.readFileSync(indexPath));
+    assert.deepEqual(Object.values(migrated.threads).filter((entry) => "terms" in entry), [], "no words are left in the index");
+    assert.equal(saved.id, ids[0]);
+    assert.deepEqual(readTerms(root, ids[0]), [...expected[ids[0]], "later"].sort());
+    for (const id of ids.slice(1)) assert.deepEqual(readTerms(root, id), expected[id], "the same words are on disk");
+    assert.equal(fs.existsSync(path.join(root, "escape.terms")), false);
+    assert.equal(fs.existsSync(path.join(root, "threads", "..", "escape.terms")), false);
+
+    // Once moved, later saves leave the other threads' files alone.
+    const before = fs.statSync(path.join(root, "threads", `${ids[1]}.terms`)).ino;
+    archiveConversation(root, { id: "three", title: "Thread three" }, [{ id: "m", role: "user", body: "word2 again" }]);
+    assert.equal(fs.statSync(path.join(root, "threads", `${ids[1]}.terms`)).ino, before);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a 700-thread archive index stays under 1 MB once words move out", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rem-terms-size-"));
+  try {
+    fs.mkdirSync(path.join(root, "threads"));
+    const threads = {};
+    for (let n = 0; n < 700; n++) {
+      const id = crypto.createHash("sha256").update(`thread-${n}`).digest("hex");
+      const words = Array.from({ length: 600 }, (_, w) => `word${n}x${w}`).sort();
+      const attachments = Array.from({ length: 2 }, (_, a) => `attachments/${crypto.createHash("sha256").update(`${n}:${a}`).digest("hex")}.png`);
+      threads[id] = { threadId: `thread-${n}`, title: `Planning thread number ${n} about the release`, projectRoot: "/home/user/Projects/Example", updatedAt: "2026-11-01T00:00:00.000Z", archivedAt: "2026-11-01T00:00:00.000Z", deleted: n % 10 === 0, ...(n % 10 === 0 ? { deletedAt: "2026-11-02T00:00:00.000Z" } : {}), messageCount: 40, snapshot: `threads/${id}.json`, journal: `threads/${id}.jsonl`, terms: words, attachments };
+    }
+    const indexPath = path.join(root, "index.json");
+    fs.writeFileSync(indexPath, JSON.stringify({ version: 1, threads }, null, 2) + "\n");
+    assert.ok(fs.statSync(indexPath).size > 1024 * 1024, "the fixture starts above 1 MB");
+    archiveConversation(root, { id: "thread-0", title: "Planning thread number 0 about the release" }, [{ id: "m", role: "user", body: "one more" }]);
+    const size = fs.statSync(indexPath).size;
+    assert.ok(size < 1024 * 1024, `index.json is ${size} bytes`);
+    assert.equal(Object.keys(JSON.parse(fs.readFileSync(indexPath)).threads).length, 700);
+    assert.equal(fs.readdirSync(path.join(root, "threads")).filter((name) => name.endsWith(".terms")).length, 700);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

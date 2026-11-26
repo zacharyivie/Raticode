@@ -18,6 +18,7 @@ from gofer.ui.organization_auto import needs_review, review_pass
 from gofer.ui.organization_recovery import MAX_REM_REOPENS, RETRY_SECONDS, rem_may_reopen
 from gofer.ui.organizations import OrganizationManager
 from gofer.ui.rem_ticket_activity import RETRY_REASON
+from tests.helpers.organizations import act, assign
 
 FAILED = "The last run failed; see the conversation"
 
@@ -60,6 +61,7 @@ def start(tmp_path: Path, stream: Any = quick, reviewer: Any = None) -> Organiza
     return manager
 
 
+# Not the shared company: Mira outside the lead's reports, and auto=True turns on Auto mode.
 def company(manager: OrganizationManager, root: Path, *, auto: bool = False, **config: Any) -> Any:
     employees = config.pop(
         "employees",
@@ -84,14 +86,6 @@ def company(manager: OrganizationManager, root: Path, *, auto: bool = False, **c
     if auto:
         org = act(manager, org, "auto_mode", enabled=True, confirm=True)
     return org
-
-
-def act(manager: OrganizationManager, org: dict[str, Any], action: str, **params: Any) -> Any:
-    return manager.call(
-        org["projectRoot"],
-        "user",
-        {"organizationId": org["id"], "action": action, "params": params},
-    )
 
 
 def read(manager: OrganizationManager, org: dict[str, Any]) -> Any:
@@ -394,17 +388,6 @@ def test_auto_mode_keeps_going_through_a_short_outage_of_rems_model(tmp_path: Pa
 
 
 # ---------------------------------------------------------------- worker reviewers
-
-
-def assign(manager: OrganizationManager, org: dict[str, Any], eid: str) -> None:
-    act(
-        manager,
-        org,
-        "self_work_projects",
-        employeeId=eid,
-        projects=[org["projectRoot"]],
-        expectedRevision=0,
-    )
 
 
 def hand_in(manager: OrganizationManager, org: dict[str, Any], tid: str) -> None:

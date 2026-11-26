@@ -2496,7 +2496,10 @@ class SwarmManager:
                 ):
                     raise SwarmError("Git operations require your active assignment")
                 result = swarm_git.execute(
-                    attempt["workspace"], run["configuration"].get("gitPermissions"), payload
+                    attempt["workspace"],
+                    run["configuration"].get("gitPermissions"),
+                    payload,
+                    push_blocked_by_organization=swarm_git.organization_blocks_push(run),
                 )
                 self._event(
                     run,
@@ -2685,6 +2688,9 @@ class SwarmManager:
 
     def _instructions(self, swarm: dict[str, Any], agent: dict[str, Any], token: str) -> str:
         git_permissions = swarm_git.permissions(swarm["run"]["configuration"].get("gitPermissions"))
+        if swarm_git.organization_blocks_push(swarm["run"]):
+            # Tell agents what the git tool will actually allow.
+            git_permissions["remote"] = False
         configured = swarm["run"]["configuration"]
         run_limits = {
             key: default if configured.get(key) is None else configured[key]
@@ -3584,9 +3590,11 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                     "remResources": resources,
                     # Without remote permission, shell `git push` fails too, not just
                     # the managed tool. The chat runner applies this to the process.
-                    "remBlockGitPush": not swarm_git.permissions(
-                        run["configuration"].get("gitPermissions")
-                    )["remote"],
+                    # An organization's Block git push setting wins over the swarm's own.
+                    "remBlockGitPush": swarm_git.organization_blocks_push(run)
+                    or not swarm_git.permissions(run["configuration"].get("gitPermissions"))[
+                        "remote"
+                    ],
                     **({"organizationRun": run["organization"]} if run.get("organization") else {}),
                 },
                 working_dir=working_dir,

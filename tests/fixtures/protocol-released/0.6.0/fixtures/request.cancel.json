@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "id": "10000000-0000-4000-8000-000000000003",
+  "thread_id": "00000000-0000-4000-8000-000000000002",
+  "request_id": "00000000-0000-4000-8000-000000000001",
+  "sequence": 3,
+  "type": "request.cancel",
+  "payload": {
+    "reason": "Stop this request"
+  }
+}

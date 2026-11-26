@@ -113,6 +113,10 @@ def apply_rule(doc: dict[str, Any], rules: Mapping[str, str] | None) -> bool:
     return before != (bool(doc.get("excluded")), doc.get("excludedBy"))
 
 
+# What a Rem read, an agent token's read or a citation of a left-out document gets back.
+LEFT_OUT_REFUSAL = "This document is left out of search in this brain, so it can't be read"
+
+
 def is_left_out(doc: Mapping[str, Any]) -> bool:
     """Left out of search (by a folder rule or in Edit metadata), not just missing."""
     return bool(doc.get("excluded")) and not doc.get("missing")

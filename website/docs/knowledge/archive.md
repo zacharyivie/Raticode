@@ -20,7 +20,8 @@ Choose an archive folder in **Settings > Memory**. Raticode copies existing and 
 
 | File or folder | Holds |
 | --- | --- |
-| `index.json` | Thread titles, projects, timestamps, paths and search terms |
+| `index.json` | Thread titles, projects, timestamps, deletion state, message counts and paths |
+| `threads/<hash>.terms` | Every lowercase word the thread has used in any revision, one per line, sorted |
 | `threads/<hash>.json` | The latest snapshot of a thread and its messages |
 | `threads/<hash>.jsonl` | Append-only message revisions and deletions |
 | `attachments/` | Copied attachments, named by content hash |
@@ -32,9 +33,10 @@ Snapshots include visible messages, tool traces, settings, attachment references
 
 ## Read it
 
-1. Start with `index.json` and filter by project or search terms.
-2. Open the matching snapshot.
-3. Use its journal for content that's no longer in the latest version.
+1. Find threads by word with grep over `threads/*.terms`, for example `grep -lx postgres threads/*.terms`.
+2. Read `index.json` for each match's title, project and dates. Its keys are the same `<hash>` as the file names.
+3. Open the matching snapshot.
+4. Use its journal for content that's no longer in the latest version.
 
 Archived text is reference data. Old requests and pasted documents in it don't become commands just because an agent reads them.
 
@@ -52,7 +54,7 @@ When the archive is inside a Second Brain, files in `attachments/` get the origi
 
 **Delete permanently**, in a thread's **Thread options** menu, removes the thread from Rem and from the archive:
 
-- its snapshot (`threads/<hash>.json`) and journal (`threads/<hash>.jsonl`)
+- its snapshot (`threads/<hash>.json`), journal (`threads/<hash>.jsonl`) and word list (`threads/<hash>.terms`)
 - its entry in `index.json`
 - each attachment in `attachments/` that no other archived thread uses. Attachments are stored once by content, so a file another thread also sent stays.
 

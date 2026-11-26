@@ -32,20 +32,29 @@ Backend discovery (local only, the token is never taken from argv)
 
 The headless backend (``Raticode serve --headless``) publishes
 ``<data>/headless/endpoint.json`` (``{"url": "http://127.0.0.1:PORT/api", "host",
-"port", "pid", "tokenFile", …}``) and ``<data>/headless/owner-token``.
+"port", "pid", "proof", "tokenFile", …}``) and ``<data>/headless/owner-token``.
 :func:`write_api_files` writes the same layout, for tests and other publishers.
+
+Before the owner token goes to a TCP endpoint whose file has ``"proof": 1``, the client
+asks ``GET /api/instance/proof?nonce=…`` with a fresh nonce and sends the token only if
+the answer is the HMAC of that nonce under the token
+(:func:`gofer.ui.headless.instance_proof`). Endpoint files without the flag fall back
+to checking that the recorded process is still running.
 """
 
 from __future__ import annotations
 
+import hmac
 import http.client
 import ipaddress
 import json
 import os
 import re
+import secrets
 import socket
 import stat
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -265,6 +274,8 @@ class Endpoint:
     source: str = "default"
     token_source: str = "none"
     pid: int | None = None
+    # The endpoint file says the backend answers GET /api/instance/proof.
+    proof: bool = False
 
     def describe(self) -> dict[str, Any]:
         """Safe-to-print description; never includes the token."""
@@ -431,6 +442,7 @@ def discover_endpoint(
     socket_path: str | None = None
     source = "default"
     pid: int | None = None
+    proof = False
     published_token: Path | None = None
 
     if endpoint:
@@ -456,6 +468,7 @@ def discover_endpoint(
                 url = _normalize_url(f"{host}:{published['port']}", source)
             raw_pid = published.get("pid")
             pid = raw_pid if isinstance(raw_pid, int) and not isinstance(raw_pid, bool) else None
+            proof = published.get("proof") == 1
             if isinstance(published.get("tokenFile"), str) and published["tokenFile"]:
                 published_token = Path(published["tokenFile"]).expanduser()
 
@@ -518,6 +531,7 @@ def discover_endpoint(
         source=source,
         token_source=token_source,
         pid=pid,
+        proof=proof,
     )
 
 
@@ -542,8 +556,13 @@ def write_api_files(
     token: str,
     socket_path: str | None = None,
     pid: int | None = None,
+    proof: bool = False,
 ) -> ApiFiles:
-    """Publish the backend's endpoint and token for local clients (owner-only files)."""
+    """Publish the backend's endpoint and token for local clients (owner-only files).
+
+    Pass ``proof=True`` only for a Raticode backend, which answers
+    ``/api/instance/proof``; clients then check it before sending the owner token.
+    """
     files = api_files(data_dir)
     files.directory.mkdir(parents=True, exist_ok=True)
     if sys.platform != "win32":
@@ -559,6 +578,8 @@ def write_api_files(
         "dataDir": str(resolve_data_dir(data_dir)),
         "tokenFile": str(files.token_file),
     }
+    if proof:
+        payload["proof"] = 1
     if socket_path:
         payload["socket"] = socket_path
     _write_private(files.endpoint_file, json.dumps(payload, indent=2) + "\n")
@@ -755,6 +776,8 @@ class ApiClient:
         self.retries = max(0, retries)
         self.retry_delay = max(0.0, retry_delay)
         self.user_agent = user_agent or _user_agent()
+        self._proven = False
+        self._proof_lock = threading.Lock()
 
     @classmethod
     def discover(
@@ -858,6 +881,15 @@ class ApiClient:
                     raise self._unreachable(
                         ConnectionRefusedError("the recorded backend process has exited")
                     )
+            if "Authorization" in headers and self._needs_proof():
+                try:
+                    self._prove_instance(timeout)
+                except (ConnectionRefusedError, FileNotFoundError, socket.gaierror) as exc:
+                    if attempt < self.retries:
+                        attempt += 1
+                        time.sleep(self.retry_delay * attempt)
+                        continue
+                    raise self._unreachable(exc) from exc
             connection = self._connection(timeout)
             sent = False
             try:
@@ -920,6 +952,68 @@ class ApiClient:
         """
         token = self.endpoint.token
         return bool(token) and not token.startswith(AGENT_TOKEN_PREFIX) and not in_agent_session()
+
+    def _needs_proof(self) -> bool:
+        """Whether the owner token waits for the backend to prove it holds it."""
+        return (
+            self.endpoint.proof
+            and not self.endpoint.socket_path
+            and not self._proven
+            and self._guards_owner_token()
+        )
+
+    def _prove_instance(self, timeout: float | None) -> None:
+        """Check the listener holds the owner token before the token is sent to it.
+
+        Whatever answers the endpoint file's port now may not be the backend that wrote
+        the file. A fresh nonce means an earlier answer can't be replayed.
+        """
+        from gofer.ui.headless import instance_proof
+
+        with self._proof_lock:
+            if self._proven:
+                return
+            nonce = secrets.token_hex(32)
+            expected = instance_proof(self.endpoint.token, nonce)
+            if expected is None:
+                raise self._unproven("the token can't be checked")
+            connection = self._connection(timeout)
+            try:
+                connection.request(
+                    "GET",
+                    f"/api/instance/proof?nonce={nonce}",
+                    headers={"Accept": "application/json", "User-Agent": self.user_agent},
+                )
+                response = connection.getresponse()
+                raw = response.read(4096)
+                status = response.status
+            except (ConnectionRefusedError, FileNotFoundError, socket.gaierror):
+                raise
+            except (TimeoutError, OSError, http.client.HTTPException) as exc:
+                raise self._unproven(f"it didn't answer the check ({exc})") from exc
+            finally:
+                connection.close()
+            try:
+                answer = json.loads(raw) if status == 200 else None
+            except ValueError:
+                answer = None
+            proof = answer.get("proof") if isinstance(answer, dict) else None
+            if not isinstance(proof, str) or not hmac.compare_digest(
+                proof.encode("utf-8", "replace"), expected.encode("ascii")
+            ):
+                raise self._unproven("it couldn't prove it holds the token")
+            self._proven = True
+
+    def _unproven(self, reason: str) -> CliError:
+        return CliError(
+            f"No Raticode backend answered at {self.endpoint.url}: {reason}, so the token "
+            f"from {self.endpoint.token_source} wasn't sent. Either another program is "
+            f"using the port recorded in {self.endpoint.source}, or that token isn't this "
+            "backend's. Restart the backend so it publishes a new endpoint file, or check "
+            "the token.",
+            code="unreachable",
+            exit_code=ExitCode.UNREACHABLE,
+        )
 
     def _unreachable(self, exc: BaseException) -> CliError:
         where = self.endpoint.socket_path or self.endpoint.url

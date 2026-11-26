@@ -95,6 +95,7 @@ Open the workflow and choose **Tests** in the bottom panel.
 - The case list marks each case **Passed**, **Failed** or **Could not run**. Select a case to see each check and why it failed.
 - **Add case** and **Edit** open a form: name, inputs as a JSON object, what the run should do, and the checks. JSON values stay as you typed them until you save.
 - **Run case** runs only the selected case. **Stop** stops a run between cases and cancels the case in progress.
+- The trash button deletes the selected case and saves the test set. **Undo** in the line that follows puts the case back in its old place until your next change: a save, an edit, a run or closing the panel. If the test set file changed in the meantime, Undo turns off so it never overwrites the newer version.
 
 Tests always run the saved workflow. If the editor has unsaved changes, the panel says so.
 

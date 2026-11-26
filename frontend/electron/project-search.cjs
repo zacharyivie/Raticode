@@ -35,6 +35,17 @@ async function scanProject(root, options = {}) {
     : compileGlobs(exclusion);
   const includes = compileGlobs(String(options.include || ""));
   const result = { files: [], count: 0, truncated: false, skipped: 0 };
+  const replacing = typeof options.replacement === "string";
+  // The text one match becomes, worked out by the same native replace that
+  // writes the file: a sticky copy of the pattern replaces only the match at
+  // its index, so $1, $& and lookarounds see the whole line.
+  const single = new RegExp(pattern.source, `${pattern.flags.replace("g", "")}y`);
+  function replacementFor(line, match) {
+    if (!options.regex) return options.replacement;
+    single.lastIndex = match.index;
+    const replaced = line.replace(single, options.replacement);
+    return replaced.slice(match.index, replaced.length - (line.length - match.index - match[0].length));
+  }
   const deadline = Date.now() + 10000;
   let candidates;
   try {
@@ -96,14 +107,17 @@ async function scanProject(root, options = {}) {
         for (const match of lines[index].matchAll(pattern)) {
           if (result.count >= 1000) { result.truncated = true; break; }
           const start = Math.max(0, match.index - 12);
-          matches.push({ lineNumber: index + 1, column: match.index + 1, text: lines[index].slice(start, match.index + match[0].length + 120), offset: match.index - start, length: match[0].length });
+          const entry = { lineNumber: index + 1, column: match.index + 1, text: lines[index].slice(start, match.index + match[0].length + 120), offset: match.index - start, length: match[0].length };
+          if (replacing) entry.replacement = replacementFor(lines[index], match);
+          matches.push(entry);
           result.count++;
         }
         if (result.count >= 1000) { result.truncated = true; break; }
       }
       if (matches.length) {
         const file = { path: target, relativePath, matches, hash: digest(buffer) };
-        if (typeof options.replacement === "string") {
+        if (replacing && options.includeContent) {
+          file.previous = buffer.toString("utf8");
           file.content = buffer.toString("utf8").split(/(\r?\n)/).map((line, index) => index % 2 ? line : line.replace(pattern, options.regex ? options.replacement : () => options.replacement)).join("");
         }
         result.files.push(file);
@@ -149,7 +163,7 @@ async function listProjectFiles(root) {
   };
 }
 // Regex runs off the Electron main thread so pathological expressions can be stopped.
-function searchProject(root, options = {}) {
+function runSearchWorker(root, options) {
   return new Promise((resolve, reject) => {
     const worker = new Worker(__filename, { workerData: { root, options } });
     const timer = setTimeout(() => { void worker.terminate(); reject(new Error("Search timed out. Simplify the expression or exclude more files.")); }, 12000);
@@ -158,9 +172,27 @@ function searchProject(root, options = {}) {
     worker.once("exit", (code) => { clearTimeout(timer); if (code) reject(new Error("Search worker stopped.")); });
   });
 }
+// Results carry each match's replacement text, never whole files.
+function searchProject(root, options = {}) {
+  return runSearchWorker(root, { ...options, includeContent: false });
+}
+
+const FILE_LIMIT = 2 * 1024 * 1024;
+const UNDO_LIMIT = 20 * 1024 * 1024;
+// The latest replace only, in memory: each changed file's earlier text and the
+// hash of what the replace wrote. The next replace or a restart drops it.
+let lastReplace = null;
+function insideRoot(root) {
+  return (target) => {
+    const relative = path.relative(root, target);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("File is outside the project.");
+  };
+}
+
 async function replaceProject(root, options = {}) {
   if (typeof options.replacement !== "string" || !Array.isArray(options.files) || !options.files.length) throw new Error("Search again before replacing.");
-  const result = await searchProject(root, options);
+  lastReplace = null;
+  const result = await runSearchWorker(root, { ...options, includeContent: true });
   if (result.truncated) throw new Error("Narrow your search before replacing. Results are incomplete.");
   const files = options.files.map((expected) => {
     const file = result.files.find((entry) => entry.path === expected.path);
@@ -169,23 +201,47 @@ async function replaceProject(root, options = {}) {
   });
   let count = 0;
   const changed = [];
+  const undo = { root, files: [], bytes: 0 };
+  const finish = (extra = {}) => {
+    const undoable = undo.files.length > 0 && undo.bytes <= UNDO_LIMIT;
+    if (undoable) lastReplace = undo;
+    return { count, changed, undoable, ...extra };
+  };
   for (const file of files) {
     try {
       if (await fs.realpath(file.path) !== file.path) throw new Error("File path changed.");
-      await require("./safe-files.cjs").writeFile(file.path, file.content, {
-        expectedHash: file.hash,
-        digest,
-        maxBytes: 2 * 1024 * 1024,
-        authorize: (target) => {
-          const relative = path.relative(root, target);
-          if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("File is outside the project.");
-        },
-      });
+      // The search read only valid UTF-8, so this is byte for byte what the hash covers.
+      const previous = Buffer.from(file.previous, "utf8");
+      const written = Buffer.from(file.content, "utf8");
+      await safeFiles.writeFile(file.path, written, { expectedHash: file.hash, digest, maxBytes: FILE_LIMIT, authorize: insideRoot(root) });
       count += file.matches.length;
       changed.push(file.path);
-    } catch (error) { return { count, changed, error: `${file.relativePath}: ${error.message}` }; }
+      undo.bytes += previous.length + written.length;
+      if (undo.bytes <= UNDO_LIMIT) undo.files.push({ path: file.path, relativePath: file.relativePath, previous, hash: digest(written), size: written.length });
+    } catch (error) { return finish({ error: `${file.relativePath}: ${error.message}` }); }
   }
-  return { count, changed };
+  return finish();
+}
+
+// Puts back the files the latest replace changed. A file whose text changed
+// after the replace is left alone and named.
+async function undoReplace(root) {
+  const record = lastReplace;
+  if (!record || record.root !== root) throw new Error("There is no replace to undo.");
+  lastReplace = null;
+  const restored = [];
+  const skipped = [];
+  for (const file of record.files) {
+    try {
+      if (await fs.realpath(file.path) !== file.path) throw new Error("File path changed.");
+      await safeFiles.writeFile(file.path, file.previous, { expectedHash: file.hash, digest, maxBytes: file.size, authorize: insideRoot(root) });
+      restored.push(file.path);
+    } catch (error) {
+      const changed = error.code === "ERR_FILE_CHANGED" || error.code === "ERR_FILE_TOO_LARGE" || error.code === "ENOENT";
+      skipped.push({ path: file.path, relativePath: file.relativePath, changed, ...(changed ? {} : { error: error.message }) });
+    }
+  }
+  return { restored, skipped };
 }
 if (!isMainThread) scanProject(workerData.root, workerData.options).then((result) => parentPort.postMessage({ result }), (error) => parentPort.postMessage({ error: error.message }));
-module.exports = { listProjectFiles, searchProject, replaceProject, scanProject };
+module.exports = { listProjectFiles, searchProject, replaceProject, scanProject, undoReplace };

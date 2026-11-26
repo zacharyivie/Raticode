@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { coverCutouts, deviceBounds, sameBounds } from "../lib/geckoView.js";
 import { useBrowserHost } from "../lib/browserHost.js";
 import { PromptBar, RemChip } from "./BrowserPanels.jsx";
+import { ipcErrorMessage } from "../lib/ipcError.js";
 
 const POSITION_CHECK_MS = 200;
+const START_FAILED = "Raticode (gecko) could not start.";
 const BUTTON = "h-8 rounded-md border border-line bg-white px-3 text-xs font-semibold text-ink transition hover:bg-slate-50";
 
 // Menus and dialogs that are open and overlap the slot. They may be small
@@ -19,10 +21,6 @@ function openOverlays(rect, doc = document, view = window) {
 
 function hostOf(url) {
   try { return new URL(url).host; } catch { return ""; }
-}
-
-function cleanError(cause) {
-  return String(cause?.message || cause || "Raticode (gecko) could not start.").replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
 }
 
 // Addresses already given to Firefox, which reopens them itself after a restart.
@@ -83,7 +81,7 @@ export default function GeckoBrowser({ active, tabId = "", initialUrl = "", pend
       // address, for switching back to another browser.
       if (url) rememberHandedOver(tabId, url);
     } catch (cause) {
-      setError(cleanError(cause));
+      setError(ipcErrorMessage(cause, START_FAILED));
     } finally {
       setStarting(false);
     }
@@ -94,7 +92,7 @@ export default function GeckoBrowser({ active, tabId = "", initialUrl = "", pend
     let cancelled = false;
     const unsubscribe = bridge.onGecko?.((next) => { if (!cancelled) setStatus(next); });
     void bridge.gecko("status").then((next) => { if (!cancelled) setStatus(next); })
-      .catch((cause) => { if (!cancelled) setError(cleanError(cause)); });
+      .catch((cause) => { if (!cancelled) setError(ipcErrorMessage(cause, START_FAILED)); });
     return () => { cancelled = true; unsubscribe?.(); };
   }, [bridge]);
 
@@ -110,7 +108,7 @@ export default function GeckoBrowser({ active, tabId = "", initialUrl = "", pend
   function sharedAction(id, command, options = {}) {
     void bridge.gecko("shared-action", { ...options, id, command })
       .then((tabs) => { if (Array.isArray(tabs)) setSharedTabs(tabs); })
-      .catch((cause) => setError(cleanError(cause)));
+      .catch((cause) => setError(ipcErrorMessage(cause, START_FAILED)));
   }
 
   // Firefox starts when the Gecko tab is first looked at, not when Raticode restores it.
@@ -154,7 +152,7 @@ export default function GeckoBrowser({ active, tabId = "", initialUrl = "", pend
     if (!opened) return;
     setError("");
     void bridge.gecko("new-tab").then((next) => { if (next) setStatus(next); })
-      .catch((cause) => setError(cleanError(cause)));
+      .catch((cause) => setError(ipcErrorMessage(cause, START_FAILED)));
     // bridge is fixed for the window's life.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, ready, opened, newTabRequests]);
@@ -230,7 +228,7 @@ export default function GeckoBrowser({ active, tabId = "", initialUrl = "", pend
       const result = await bridge.gecko("restart-app");
       if (result?.manual) setRestartNote("Close Raticode and start it again to finish.");
     } catch (cause) {
-      setError(cleanError(cause));
+      setError(ipcErrorMessage(cause, START_FAILED));
     }
   }
 

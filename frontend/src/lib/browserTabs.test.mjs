@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { browserFamilyChoices, browserGroupHasNewTab, browserTabEngine, browserTabGroupKey, groupBrowserTabPaths, groupedBrowserPaths, browserTabOpening, geckoTabPath, isGeckoWindowTab, viewedBrowserMedia, withBrowserTabEngines } from "./browserTabs.js";
-import { WEB_BROWSER_OPTIONS, controlledEngine, engineBadge, engineLabel, isStreamedEngine, newTabEngine, streamsIntoView, webBrowserEngine } from "./browserEngines.js";
+import { WEB_BROWSER_OPTIONS, controlledEngine, engineBadge, engineLabel, newTabEngine, streamsIntoView, webBrowserEngine } from "./browserEngines.js";
 import { mediaForBar } from "./browserMedia.js";
 
 test("the integrated browsers are Raticode (chromium) and Raticode (gecko), and stored values don't change", () => {
@@ -135,5 +135,4 @@ test("Rem's Raticode (gecko) tabs sit beside the Gecko window tab instead of fol
   assert.equal(browserTabEngine(tabs.remOne), "gecko");
   assert.equal(streamsIntoView("gecko"), true);
   assert.equal(streamsIntoView("raticode"), false);
-  assert.equal(isStreamedEngine("gecko"), false);
 });

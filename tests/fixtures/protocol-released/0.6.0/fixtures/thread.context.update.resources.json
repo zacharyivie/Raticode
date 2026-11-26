@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "id": "10000000-0000-4000-8000-000000000109",
+  "thread_id": "00000000-0000-4000-8000-000000000002",
+  "request_id": "00000000-0000-4000-8000-000000000003",
+  "sequence": 0,
+  "type": "thread.context.update",
+  "payload": {
+    "expected_revision": 1,
+    "project_id": null,
+    "resource_ids": [
+      "00000000-0000-4000-8000-000000000201"
+    ],
+    "provider": "local-test",
+    "model": "fake",
+    "set_resources": true
+  }
+}

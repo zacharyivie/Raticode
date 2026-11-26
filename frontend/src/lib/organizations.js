@@ -1,5 +1,5 @@
 import { providerPermissionDefault } from "./providerPermissions.js";
-import { apiUrl } from "./api.js";
+import { apiJson } from "./api.js";
 
 const READS = new Set(["availability", "list", "read", "history", "events", "export", "help", "tasks", "attempts", "routines", "outcomes", "rehearse", "diagnostics", "workflow_preview", "run_events", "audit_verify", "run_input", "knowledge_search", "knowledge_read", "ticket_changes", "repository"]);
 export async function organizationRequest(projectRoot = "", action = "list", organizationId, params = {}) {
@@ -20,13 +20,11 @@ export async function organizationRequest(projectRoot = "", action = "list", org
     }
   }
   const query = new URLSearchParams({ projectRoot, action, ...(organizationId ? { organizationId } : {}), ...(read ? Object.fromEntries(Object.entries(params).filter(([, value]) => value != null && value !== "")) : {}) });
-  const response = await fetch(apiUrl(`/organizations?${query}`), read ? {} : {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ projectRoot, action, organizationId, params, workspaceGrants,
-      grantId: window.goferDesktop?.workspace?.pathGrantForApi?.(projectRoot) || undefined }),
+  const payload = await apiJson(`/organizations?${query}`, {
+    ...(read ? {} : { method: "POST", body: { projectRoot, action, organizationId, params, workspaceGrants,
+      grantId: window.goferDesktop?.workspace?.pathGrantForApi?.(projectRoot) || undefined } }),
+    failure: "Could not update the organization. Retry after refreshing.",
   });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || "Could not update the organization. Retry after refreshing.");
   return payload.result;
 }
 
@@ -124,8 +122,10 @@ export function configurationChanges(before, after, path = "") {
   return [{ path: path || "/", before, after }];
 }
 
+// The organization page's tabs, in order. Organization members are "workers" in anything
+// users read; "employees" stays the config and API name.
+export const ORGANIZATION_SECTIONS = [["people", "Workers"], ["chart", "Org chart"], ["owned-projects", "Project folders"], ["work", "Work"], ["operations", "Operations"], ["history", "Configuration history"], ["activity", "Activity"]];
 export const TASK_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
-export const TASK_PRIORITIES = ["critical", "high", "medium", "low"];
 export const STATUS_LABELS = { backlog: "Backlog", todo: "To do", in_progress: "In progress", in_review: "In review",
   blocked: "Blocked", done: "Done", cancelled: "Cancelled", approval: "Needs approval", attention: "Needs you" };
 const GROUP_ORDER = ["approval", "in_progress", "in_review", "todo", "blocked", "backlog", "done", "cancelled"];
@@ -248,6 +248,11 @@ export function attentionSummary(tasks = [], runtime = {}) {
   };
 }
 
+// The backend's waiting reasons keep their saved wording ("Assign an employee"), which scripts
+// and the phone match on; people read the glossary's word for organization members.
+const WAITING_REASON_WORDS = { "Assign an employee": "Assign a worker", "Employee is held": "Worker is held" };
+export const waitingReasonText = reason => WAITING_REASON_WORDS[reason] || reason;
+
 // Why Start would leave work waiting: setup gaps first, then the reasons the rehearsal gives
 // for open tickets that can't start, most common first.
 export function startBlockers(organization, preview) {
@@ -295,7 +300,7 @@ export function taskGroups(tasks) {
 
 const FIELD_LABELS = {
   name: "Name", slug: "Package slug", description: "Purpose", instructions: "Instructions", goals: "Goals",
-  employees: "Employees", projects: "Initiatives", projectRoots: "Project folders", teams: "Teams", title: "Title", role: "Role", reportsTo: "Reports to",
+  employees: "Workers", projects: "Initiatives", projectRoots: "Project folders", teams: "Teams", title: "Title", role: "Role", reportsTo: "Reports to",
   provider: "Provider", model: "Model", effort: "Effort", permissionMode: "Permission mode", resources: "Tools",
   skills: "Skills", paused: "Paused", heartbeatSeconds: "Heartbeat", memory: "Persistent memory",
   monthlyBudgetUsd: "Monthly budget", monthlyTurnLimit: "Monthly run limit", maxConcurrency: "Workers at once",
@@ -306,7 +311,7 @@ const FIELD_LABELS = {
 };
 const humanize = key => FIELD_LABELS[key] || key.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ").replace(/^./, c => c.toUpperCase());
 
-// Turns "/employees/mira/heartbeatSeconds" into "Employees › Mira Santos › Heartbeat".
+// Turns "/employees/mira/heartbeatSeconds" into "Workers › Mira Santos › Heartbeat".
 export function changeLabel(path, ...configs) {
   const segments = path.split("/").filter(Boolean);
   if (!segments.length) return "Whole configuration";

@@ -77,6 +77,39 @@ test("a development launch skips Electron's app folder, and a launch with nothin
   assert.equal(externalOpenFromArg("-psn_0_12345", { fileSystem }), null);
 });
 
+test("on Windows, a web page on a network share is refused before Raticode looks for the file", (t) => {
+  // Node reads file://host/share as \\host\share only on Windows, so load the
+  // module with Windows file URL rules.
+  const url = require("node:url");
+  const toPath = url.fileURLToPath;
+  t.mock.method(url, "fileURLToPath", (value, options) => toPath(value, { ...options, windows: true }));
+  const modulePath = require.resolve("../default-browser.cjs");
+  delete require.cache[modulePath];
+  let windowsOpenFromArg;
+  try {
+    ({ externalOpenFromArg: windowsOpenFromArg } = require("../default-browser.cjs"));
+  } finally {
+    delete require.cache[modulePath];
+  }
+  const stats = [];
+  const local = fakeFileSystem({ "C:\\pages\\page.html": "<p>" });
+  const fileSystem = { statSync: (file) => { stats.push(file); return local.statSync(file); } };
+  for (const arg of [
+    "\\\\host\\share\\x.html",
+    "//host/share/x.html",
+    "file://host/share/x.html",
+    "file:////host/share/x.html",
+    "\\\\?\\UNC\\host\\share\\x.html",
+    "//./unc/host/share/x.html",
+  ]) {
+    assert.equal(windowsOpenFromArg(arg, { cwd: "C:\\pages", fileSystem }), null, arg);
+  }
+  assert.deepEqual(stats, []);
+  // A file on this computer still opens.
+  assert.deepEqual(windowsOpenFromArg("file:///C:/pages/page.html", { fileSystem }), { kind: "file", path: "C:\\pages\\page.html" });
+  assert.deepEqual(stats, ["C:\\pages\\page.html"]);
+});
+
 test("a command line opens at most 20 items", () => {
   const argv = ["exe", ...Array.from({ length: 30 }, (_, index) => `https://example.com/${index}`)];
   assert.equal(externalOpensFromArgv(argv, { defaultApp: false }).length, 20);

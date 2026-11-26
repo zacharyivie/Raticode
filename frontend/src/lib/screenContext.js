@@ -5,7 +5,6 @@ import { useSyncExternalStore } from "react";
 // reply and keeps only its name (see rem_screen.py). Turned on in Settings > Devices.
 
 export const SCREEN_COMMAND_ID = "voice.askAboutScreen";
-export const DEFAULT_SCREEN_BINDING = "Ctrl+Alt+Shift+Space";
 // Rem's chat takes one picture of up to 5 MB; the desktop app keeps under it.
 export const SCREEN_MAX_BYTES = 5 * 1024 * 1024;
 

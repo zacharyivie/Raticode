@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { normalizeAppSettings, DEFAULT_APP_SETTINGS } from "./settings.js";
-import { ARCHIVE_GIT_LIMIT, ARCHIVE_PURGE_OPTIONS, expiredArchivedThreads, inspectThreadScopes, mergeTaskThreadMetadata, organizeThreads, threadIndexEntry, threadIsArchived, threadScopeBadge, threadScopeKey } from "./threadActivity.js";
+import { ARCHIVE_GIT_LIMIT, ARCHIVE_PURGE_OPTIONS, expiredArchivedThreads, inspectThreadScopes, mergeTaskThreadMetadata, organizeThreads, threadIndexEntry, threadIsUnreachable, threadScopeBadge, threadScopeKey } from "./threadActivity.js";
 
 const now = Date.parse("2026-09-15T12:00:00Z");
 const at = minutes => new Date(now - minutes * 60000).toISOString();
@@ -44,8 +44,8 @@ test("unreachable folders and deleted branches archive threads, including pinned
   assert.equal(group(thread, { branches: new Map([["/repo", ["main", "feature"]]]) }), "read");
   // A running turn keeps its thread visible until it finishes.
   assert.equal(group(thread, { running: new Set(["t"]), missingRoots: new Set(["/repo"]) }), "running");
-  assert.equal(threadIsArchived(thread, new Set(["/repo"])), true);
-  assert.equal(threadIsArchived({ id: "global", updatedAt: at(0) }, new Set([""])), false);
+  assert.equal(threadIsUnreachable(thread, new Set(["/repo"])), true);
+  assert.equal(threadIsUnreachable({ id: "global", updatedAt: at(0) }, new Set([""])), false);
 });
 
 test("archived threads expire after the configured time without activity", () => {
@@ -88,7 +88,7 @@ test("unborn current branches and failed branch listings are not treated as dele
   const entries = [{ projectRoot: "/repo", projectBranch: "main", updatedAt: new Date(now).toISOString() }];
   for (const status of [{ active: true, branch: "main", branches: [] }, { active: true, branch: "other", branches: [], branchesUnavailable: true }]) {
     const result = await inspectThreadScopes(entries, { gitBranches: async () => status });
-    assert.equal(threadIsArchived(entries[0], result.missingRoots, result.branches), false);
+    assert.equal(threadIsUnreachable(entries[0], result.missingRoots, result.branches), false);
   }
 });
 
@@ -100,8 +100,8 @@ test("equivalent Windows scopes share inspection and match canonical missing roo
     gitBranches: async () => { throw new Error("Missing root should not be inspected"); },
   });
   assert.deepEqual(checked, ["C:\\Repo"]);
-  assert.equal(threadIsArchived(entries[0], scopes.missingRoots, scopes.branches), true);
-  assert.equal(threadIsArchived(entries[0], new Set(), new Map([["c:/repo", ["main"]]])), true);
+  assert.equal(threadIsUnreachable(entries[0], scopes.missingRoots, scopes.branches), true);
+  assert.equal(threadIsUnreachable(entries[0], new Set(), new Map([["c:/repo", ["main"]]])), true);
 });
 
 test("scope keys check pinned, unread and recent read roots but skip archived ones", () => {

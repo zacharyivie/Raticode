@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { FileKey, KeyRound, Plus, Trash2 } from "lucide-react";
-import { apiUrl } from "../lib/api";
+import { apiJson } from "../lib/api";
 
 // Values go to the backend once and live in the system keychain. No response returns
 // one, so the value field always starts empty and is cleared after saving.
@@ -15,20 +15,15 @@ const STATUS = {
   missing: ["Missing", "border-amber-500/60 bg-amber-500/10 text-amber-700 dark:text-amber-300"],
 };
 
-async function request(path, options) {
-  const response = await fetch(apiUrl(`/rattish/secrets${path}`), options);
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `Request failed (${response.status}).`);
-  return payload;
-}
+const request = (path, options) =>
+  apiJson(`/rattish/secrets${path}`, { ...options, failure: status => `Request failed (${status}).` });
 
 export const secretsApi = {
   load: (workflowId) => request(workflowId ? `?workflowId=${encodeURIComponent(workflowId)}` : ""),
   save: (workflowId, name, value) =>
     request(workflowId ? `?workflowId=${encodeURIComponent(workflowId)}` : "", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, value }),
+      body: { name, value },
     }),
   remove: (workflowId, name) =>
     request(

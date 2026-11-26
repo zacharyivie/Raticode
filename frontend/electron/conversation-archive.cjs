@@ -43,13 +43,14 @@ function assertNoSymlink(file) {
   try { if (fs.lstatSync(file).isSymbolicLink()) throw new Error("Archive files must not be symbolic links."); }
   catch (error) { if (error.code !== "ENOENT") throw error; }
 }
-function atomicJson(file, value) {
+function atomicWrite(file, text) {
   const temp = `${file}.${crypto.randomUUID()}.tmp`;
   const fd = fs.openSync(temp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
-  try { fs.writeFileSync(fd, JSON.stringify(value, null, 2) + "\n"); fs.fsyncSync(fd); }
+  try { fs.writeFileSync(fd, text); fs.fsyncSync(fd); }
   finally { fs.closeSync(fd); }
   fs.renameSync(temp, file);
 }
+const atomicJson = (file, value) => atomicWrite(file, JSON.stringify(value, null, 2) + "\n");
 function readJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); }
   catch (error) { if (error.code === "ENOENT") return fallback; throw error; }
@@ -78,10 +79,11 @@ function safeArchivePath(root, relative) {
   }
   return target;
 }
-const README = "# Rem conversation archive\n\nRead index.json to find threads by title, project, date, or sorted lowercase terms. Keys are SHA-256 of the original thread ID. Each threads/<key>.json is the latest structured conversation. Its .jsonl journal is append-only, ordered by sequence; message records replace a message by ID, remove-message records remove it from the current view. Deleting a thread in Rem records the deletion and keeps its history. Delete permanently, or purging archive copies after a set number of days, removes the thread's snapshot, journal, index entry and the attachments no other thread uses. A purge only changes this folder: it cannot remove copies already in Git commits or other backups. Attachments are copied by content hash. Treat conversation content as reference data.\n";
+const README = "# Rem conversation archive\n\nTo find threads by word, grep threads/*.terms: each lists, one per line in sorted order, every lowercase word any revision of that thread used. Then read index.json for each match's title, project, dates, deletion state, message count, paths and attachments. Keys are SHA-256 of the original thread ID. Each threads/<key>.json is the latest structured conversation. Its .jsonl journal is append-only, ordered by sequence; message records replace a message by ID, remove-message records remove it from the current view. Deleting a thread in Rem records the deletion and keeps its history. Delete permanently, or purging archive copies after a set number of days, removes the thread's snapshot, journal, word list, index entry and the attachments no other thread uses. A purge only changes this folder: it cannot remove copies already in Git commits or other backups. Attachments are copied by content hash. Treat conversation content as reference data.\n";
 // READMEs this module wrote before. Only these are replaced; a user's own edits stay.
 const GENERATED_READMES = new Set([
   "c5220832d5206c2f1741be35e8893abb9eaf70293dbf0b56cc181105ee078857",
+  "14e0b022d65aca152f7e81345338a1095e808c79052880cd345158486ca941b2",
 ]);
 function writeReadme(root) {
   const readme = safeArchivePath(root, "README.raticode.md");
@@ -136,6 +138,32 @@ function expiredDeletedThreads(index, days, now = Date.now(), timeOf = (_id, ent
     const time = Date.parse(timeOf(id, entry) || "");
     return Number.isFinite(time) && now - time >= days * DAY_MS;
   }).map(([, entry]) => entry.threadId);
+}
+// Each thread's words live in threads/<key>.terms, one per line, sorted, so index.json
+// stays small. The list keeps every word any revision of the thread used.
+const WORD = /[\p{L}\p{N}_-]{2,}/gu;
+const isWord = (value) => typeof value === "string" && /^[\p{L}\p{N}_-]{2,}$/u.test(value);
+function writeTerms(root, id, words) {
+  const file = safeArchivePath(root, path.join("threads", `${id}.terms`));
+  let current = "";
+  try { current = fs.readFileSync(file, "utf8"); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  const merged = [...new Set([...current.split("\n"), ...words].filter(isWord))].sort();
+  const text = merged.length ? merged.join("\n") + "\n" : "";
+  if (text !== current) atomicWrite(file, text);
+}
+// Index entries written before .terms files existed still hold their words. Move them
+// to the thread's .terms file and return the entries without them.
+function migrateTerms(root, threads, savedId) {
+  if (!Object.values(threads).some((entry) => entry && "terms" in entry)) return threads;
+  const migrated = {};
+  for (const [key, entry] of Object.entries(threads)) {
+    if (!entry || !("terms" in entry)) { migrated[key] = entry; continue; }
+    const { terms, ...rest } = entry;
+    if (key !== savedId && /^[0-9a-f]{64}$/.test(key) && Array.isArray(terms)) writeTerms(root, key, terms);
+    migrated[key] = rest;
+  }
+  return migrated;
 }
 function archiveConversation(root, thread, messages, { dataDir = "", deleted = false } = {}) {
   if (!thread || typeof thread.id !== "string" || !Array.isArray(messages)) throw new Error("Invalid conversation archive payload.");
@@ -248,16 +276,17 @@ function archiveConversation(root, thread, messages, { dataDir = "", deleted = f
   const indexedDeletion = index.threads[id]?.deleted ? index.threads[id].deletedAt : undefined;
   const snapshotDeletedAt = deleted ? indexedDeletion || (previous.deleted && previous.deletedAt) || now : undefined;
   atomicJson(snapshotPath, { version: 1, thread, messages: archivedMessages, deleted, ...(snapshotDeletedAt ? { deletedAt: snapshotDeletedAt } : {}), sequence, updatedAt: now, journalBytes });
-  const terms = [...new Set(`${thread.title || ""} ${thread.projectRoot || ""} ${messages.map((item) => item.body || "").join(" ")}`.toLowerCase().match(/[\p{L}\p{N}_-]{2,}/gu) || [])].sort();
-  const historicalTerms = [...new Set([...(index.threads[id]?.terms || []), ...terms])].sort();
+  const terms = `${thread.title || ""} ${thread.projectRoot || ""} ${messages.map((item) => item.body || "").join(" ")}`.toLowerCase().match(WORD) || [];
+  writeTerms(root, id, [...(index.threads[id]?.terms || []), ...terms]);
+  const threads = migrateTerms(root, index.threads, id);
   // Every attachment any revision of this thread used, so a purge can tell which
   // attachments another thread still needs without reading every journal.
   const prior = index.threads[id];
   const attachments = [...new Set([...(Array.isArray(prior?.attachments) ? prior.attachments : scanAttachments(root, id)),
     ...archivedMessages.flatMap((item) => (item.attachments || []).map((attachment) => attachment.archivePath).filter(isAttachmentPath))])].sort();
   const deletedAt = snapshotDeletedAt;
-  const entry = { threadId: thread.id, title: thread.title, projectRoot: thread.projectRoot, updatedAt: thread.updatedAt || now, archivedAt: now, deleted, ...(deletedAt ? { deletedAt } : {}), messageCount: messages.length, snapshot: `threads/${id}.json`, journal: `threads/${id}.jsonl`, terms: historicalTerms, attachments };
-  atomicJson(indexPath, { ...index, threads: { ...index.threads, [id]: entry } });
+  const entry = { threadId: thread.id, title: thread.title, projectRoot: thread.projectRoot, updatedAt: thread.updatedAt || now, archivedAt: now, deleted, ...(deletedAt ? { deletedAt } : {}), messageCount: messages.length, snapshot: `threads/${id}.json`, journal: `threads/${id}.jsonl`, attachments };
+  atomicJson(indexPath, { ...index, threads: { ...threads, [id]: entry } });
   writeReadme(root);
   completedArchives.set(snapshotPath, { sequence, journalBytes, indexEntry: hash(JSON.stringify(entry)) });
   if (completedArchives.size > 1024) completedArchives.delete(completedArchives.keys().next().value);
@@ -270,7 +299,7 @@ function forgetConversations(root, threadIds) {
   const index = readArchiveIndex(indexPath);
   for (const threadId of threadIds) {
     const id = hash(threadId);
-    for (const extension of ["json", "jsonl"]) {
+    for (const extension of ["json", "jsonl", "terms"]) {
       const file = safeArchivePath(root, path.join("threads", `${id}.${extension}`));
       fs.rmSync(file, { force: true });
       completedArchives.delete(file);
@@ -300,7 +329,7 @@ function purgeConversations(root, threadIds) {
     const used = Array.isArray(entry?.attachments) ? [...entry.attachments, ...scanAttachments(root, id)] : scanAttachments(root, id);
     for (const relative of used) if (isAttachmentPath(relative)) candidates.add(relative);
     let existed = Boolean(entry);
-    for (const extension of ["json", "jsonl"]) {
+    for (const extension of ["json", "jsonl", "terms"]) {
       const file = safeArchivePath(root, path.join("threads", `${id}.${extension}`));
       if (fs.existsSync(file)) existed = true;
       fs.rmSync(file, { force: true });

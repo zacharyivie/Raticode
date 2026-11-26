@@ -1,13 +1,14 @@
 import { useSyncExternalStore } from "react";
-import { apiUrl } from "./api.js";
+import { apiJson } from "./api.js";
 import { uploadChatAttachments } from "./chatAttachments.js";
 import { encodeScreen } from "./screenContext.js";
 import { startPolling } from "./refresh.js";
 import { conversationRepository } from "./conversationRepository.js";
 import { mergeInServerOrder } from "./conversationCache.js";
 import { mergeTaskThreadMetadata, threadIndexEntry } from "./threadActivity.js";
-import { NO_OBJECTIVES, applyObjectiveChange, sameObjectives } from "./remObjectives.js";
+import { NO_OBJECTIVES, OBJECTIVES_PAGE, applyObjectiveChange, sameObjectives } from "./remObjectives.js";
 import { CONFLICT_MESSAGE, GONE_MESSAGE, NO_DECISIONS, applyDecisionChange, sameDecisions, scanSummary, settleEditLocally } from "./remDecisions.js";
+import { backgroundNoticesAllowed, newRemReplies, showBackgroundNotice } from "./backgroundNotices.js";
 
 // Shared state for the Rem sidebar and conversation. The backend control service
 // (GET/POST /api/rem/...) is authoritative: the renderer submits commands and
@@ -80,27 +81,21 @@ class RemServiceError extends Error {
 // URL, so a poll's address never changes and the browser can reuse its
 // cross-origin permission check instead of asking the backend again each time.
 export async function request(path, { method = "GET", body, known = "" } = {}) {
-  let response;
-  const headers = { ...(known ? { "X-Gofer-Known": known } : {}), ...(body === undefined ? {} : { "Content-Type": "application/json" }) };
   try {
-    response = await fetch(apiUrl(`/rem${path}`), {
-      method,
-      ...(Object.keys(headers).length ? { headers } : {}),
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    return await apiJson(`/rem${path}`, {
+      method, body, headers: known ? { "X-Gofer-Known": known } : undefined,
+      detailFirst: true, failure: status => `Rem request failed (${status}).`,
     });
-  } catch {
-    throw new RemServiceError("Raticode's backend isn't reachable.", 0);
-  }
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new RemServiceError(payload.detail || payload.error || `Rem request failed (${response.status}).`, response.status);
+  } catch (failure) {
+    // No status means nothing answered.
+    if (typeof failure?.status !== "number") throw new RemServiceError("Raticode's backend isn't reachable.", 0);
+    const error = new RemServiceError(failure.message, failure.status);
     // Switch over names the files it couldn't show in full when it refuses, as triggers do.
-    if (Array.isArray(payload.unseen)) error.unseen = payload.unseen;
+    if (failure.unseen) error.unseen = failure.unseen;
     // Decisions name why they refused (conflict, not_found, invalid), apart from a missing route.
-    if (typeof payload.code === "string") error.code = payload.code;
+    if (failure.code) error.code = failure.code;
     throw error;
   }
-  return payload;
 }
 // The service is absent (older backend) or unreachable; nothing can run.
 const unavailable = error => error?.status === 0 || error?.status === 404 || error?.status === 501;
@@ -246,6 +241,7 @@ export async function refreshRemHome() {
     if (conversation.context_ready === false && configuredContext) { configuredContext = ""; void syncContext(); }
     if (conversation.opened_projects?.length) openedProjectsListener?.(conversation.opened_projects);
     const previousTasks = state.status === "ready" ? state.tasks : null;
+    const previousMessages = state.status === "ready" ? state.messages : null;
     // Once read, the list stays loaded through a failed poll, so chat cards don't flicker.
     const decisionsLoaded = state.decisionsLoaded || Boolean(decisions && (decisions.unchanged || Array.isArray(decisions.items)));
     const nextDecisions = decisions && !decisions.unchanged ? sameDecisions(decisions, state.decisions) : state.decisions;
@@ -265,7 +261,10 @@ export async function refreshRemHome() {
         }),
         ...(tasks.unchanged ? {} : { tasks: mergeTasks(tasks.tasks ?? [], current.tasks), taskTickets: sameTickets(tasks.tickets, current.taskTickets), objectives: sameObjectives(tasks.objectives, current.objectives) }),
       }));
+      // The poll sends the first page; a changed list reloads as many as the user had loaded.
+      if (!tasks.unchanged && loadedObjectives > OBJECTIVES_PAGE && state.objectives.items.length < Math.min(loadedObjectives, state.objectives.total ?? Infinity)) void loadRemObjectives(loadedObjectives);
       if (!tasks.unchanged) notifyFinishedRuns(previousTasks, tasks.tasks ?? []);
+      if (!conversation.unchanged) notifyRemReply(previousMessages, conversation.messages ?? []);
     }
     // Include finished runs so the final reply and unread state reach the
     // thread list even when a run completes between polls. Runs come newest
@@ -301,26 +300,24 @@ export async function refreshRemHome() {
     set(unavailable(error) ? { status: "offline", error: "" } : { status: state.status === "loading" ? "error" : state.status, error: error.message });
   }
 }
-// Finished work reaches the user even while Raticode is in the background.
-// Electron grants web notifications; a browser only shows them once allowed.
-// The presentation helpers load on demand so they stay out of the app's first chunk.
+// Finished work reaches the user even while Raticode is in the background
+// (backgroundNotices.js). The presentation helpers load on demand so they stay
+// out of the app's first chunk.
 function notifyFinishedRuns(previous, tasks) {
-  const Notice = globalThis.Notification;
-  if (!previous || !Notice || Notice.permission !== "granted" || globalThis.document?.hasFocus?.() !== false) return;
+  if (!previous || !backgroundNoticesAllowed()) return;
   void import("./remHome.js").then(({ finishedRunNotifications }) => {
     for (const notice of finishedRunNotifications(previous, tasks)) {
-      try {
-        const shown = new Notice(notice.title, { body: notice.body, tag: notice.tag });
-        shown.onclick = () => {
-          globalThis.focus?.();
-          window.dispatchEvent(new CustomEvent("gofer:rem-show-task", { detail: { taskId: notice.taskId } }));
-          openTaskSheet(notice.taskId);
-        };
-      } catch {
-        // Notifications are a convenience; the result is already in Rem's chat.
-      }
+      showBackgroundNotice({ ...notice, open: () => {
+        window.dispatchEvent(new CustomEvent("gofer:rem-show-task", { detail: { taskId: notice.taskId } }));
+        openTaskSheet(notice.taskId);
+      } });
     }
   }, () => {});
+}
+// Rem's reply in its own chat: one notice for the newest, which opens Rem's chat there.
+function notifyRemReply(previous, messages) {
+  const reply = newRemReplies(previous, messages).at(-1);
+  if (reply) showBackgroundNotice({ title: "Rem replied", tag: `rem-reply-${reply.id}`, open: () => showRemMessage(reply.id) });
 }
 // Tasks the server didn't change keep their objects, so only the chat rows
 // showing a changed task re-render while Rem works.
@@ -572,12 +569,40 @@ export function updateRemTask(task, patch, { applyTo = "current_and_future" } = 
   return command(() => request(`/tasks/${encodeURIComponent(task.id)}`, { method: "PATCH", body: { request_id: requestId("task-edit"), expected_revision: task.revision, apply_to: applyTo, ...patch } }), "Couldn't save your changes.", "Someone changed this first. Your edits are still here.");
 }
 
-// The user's change to the self-work objectives: add, edit, remove, move, check, uncheck.
+// How many objectives the side pane has asked for: the first page, plus one more page each
+// time the user scrolls to the bottom. Polls and changes then load as many again.
+let loadedObjectives = OBJECTIVES_PAGE;
+let loadingObjectives = null;
+
+async function loadRemObjectives(limit) {
+  if (loadingObjectives) return loadingObjectives;
+  loadingObjectives = (async () => {
+    try {
+      const view = await request(`/objectives?limit=${limit}`);
+      if (Array.isArray(view?.items) && view.revision >= state.objectives.revision) set({ objectives: sameObjectives(view, state.objectives) });
+    } catch {
+      // The next scroll or poll tries again.
+    } finally {
+      loadingObjectives = null;
+    }
+  })();
+  return loadingObjectives;
+}
+
+// The user scrolled to the bottom of the objectives: load the next page.
+export function loadMoreRemObjectives() {
+  if (state.fixture || state.status !== "ready") return Promise.resolve();
+  loadedObjectives = Math.max(loadedObjectives, state.objectives.items.length) + OBJECTIVES_PAGE;
+  return loadRemObjectives(loadedObjectives);
+}
+
+// The user's change to the self-work objectives: add, edit, remove, check, uncheck.
 // It carries the revision this window shows, so it never overwrites a change made meanwhile.
 export function changeRemObjectives(change) {
   if (state.fixture) { set(current => ({ ...current, objectives: applyObjectiveChange(current.objectives, change) })); return Promise.resolve(true); }
   return command(async () => {
-    const view = await request("/objectives", { method: "POST", body: { ...change, expected_revision: state.objectives.revision } });
+    const limit = loadedObjectives > OBJECTIVES_PAGE ? { limit: loadedObjectives } : {};
+    const view = await request("/objectives", { method: "POST", body: { ...change, ...limit, expected_revision: state.objectives.revision } });
     set({ objectives: sameObjectives(view, state.objectives) });
     return view;
   }, "Couldn't change the objectives.", "The objectives changed meanwhile, so nothing was saved. Check them and try again.");
@@ -845,7 +870,7 @@ export async function openRemThread(threadId) {
   window.dispatchEvent(new CustomEvent("gofer:rem-open-thread", { detail: { threadId } }));
 }
 
-export function resetRemHomeStore() { ++historyGeneration; stopPolling?.(); stopPolling = null; state = initialState(); configuredContext = ""; versions = { conversation: "", tasks: "", decisions: "" }; serverWindow = []; threadVersions.clear(); mirroredThreads.clear(); finishedThreadVersions.clear(); runningThreads.clear(); clearedThreads.clear(); pendingClear = null; emit(); }
+export function resetRemHomeStore() { ++historyGeneration; stopPolling?.(); stopPolling = null; state = initialState(); configuredContext = ""; versions = { conversation: "", tasks: "", decisions: "" }; serverWindow = []; threadVersions.clear(); mirroredThreads.clear(); finishedThreadVersions.clear(); runningThreads.clear(); clearedThreads.clear(); pendingClear = null; loadedObjectives = OBJECTIVES_PAGE; loadingObjectives = null; emit(); }
 // Explicit fixtures for tests, the visual harness and development previews.
 // Production never seeds sample tasks or messages.
 export async function loadRemHomeFixture(scene = "busy") {

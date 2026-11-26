@@ -61,11 +61,14 @@ async function main() {
   assert.equal(await evaluate("[...document.querySelectorAll('label')].find(l=>l.textContent.startsWith('Maximum runs')).querySelector('input').value"), "");
   await field("Maximum runs per task", "25"); await evaluate("document.activeElement.blur()");
   await click("Create organization"); await wait("document.querySelector('.org-toolbar h2')?.textContent === 'Launch studio'");
-  await click("Employee"); await field("Employee name", "Mira"); await field("Title", "Release engineer"); await field("Employee instructions", "Implement assigned releases and attach test evidence.");
+  // Organization members are workers in anything users read (GLOSSARY.md), never employees.
+  assert.equal(await evaluate("document.querySelector('.org-tabs button')?.textContent"), "Workers");
+  assert.deepEqual(await evaluate("[...document.querySelectorAll('.org-tabs button, h1, h2, h3, h4, [aria-label]')].map(e => `${e.textContent} ${e.getAttribute('aria-label') || ''}`).filter(text => /\\bemployees?\\b/i.test(text))"), []);
+  await click("Worker"); await field("Worker name", "Mira"); await field("Title", "Release engineer"); await field("Worker instructions", "Implement assigned releases and attach test evidence.");
   await field("Check-in interval in seconds, 0 is automatic", "");
   assert.equal(await evaluate("[...document.querySelectorAll('label')].find(l=>l.textContent.startsWith('Check-in interval')).querySelector('input').value"), "");
   await field("Check-in interval in seconds, 0 is automatic", "0"); await evaluate("document.activeElement.blur()");
-  await click("Save employee"); await wait("document.querySelector('.org-person strong')?.textContent === 'Mira'");
+  await click("Save worker"); await wait("document.querySelector('.org-person strong')?.textContent === 'Mira'");
   await field("Assignment for Mira", "Verify the release checks"); await click("Assign work");
   // Start asks for confirmation and summarizes what will run.
   await click("Start work"); await wait("document.querySelector('.org-start')?.textContent.includes('can start now')");
@@ -86,9 +89,9 @@ async function main() {
   await field("Comment", "Release evidence reviewed");
   await click("Save comment");
   await wait("document.querySelector('.org-conversation')?.textContent.includes('Release evidence reviewed')");
-  await click("Employees");
-  await click("Employee"); await field("Employee name", "Theo"); await field("Title", "Quality engineer");
-  await click("Save employee");
+  await click("Workers");
+  await click("Worker"); await field("Worker name", "Theo"); await field("Title", "Quality engineer");
+  await click("Save worker");
   await wait("document.querySelectorAll('.org-person').length === 2");
   await wait("document.querySelector('.org-profile h3')?.textContent === 'Theo'");
   await field("Assignment for Theo", "This draft belongs to Theo");
@@ -96,7 +99,7 @@ async function main() {
   await wait("document.querySelector('.org-profile h3')?.textContent === 'Mira'");
   assert.equal(await evaluate("document.querySelector('.org-assignment textarea').value"), "");
   // Editing uses the full available panel, including while Rem occupies the rest of a desktop window.
-  await click("Edit employee");
+  await click("Edit worker");
   assert.equal(await evaluate("document.querySelector('.org-inspector .org-form')"), null);
   await evaluate("document.querySelector('main').style.width = '420px'");
   await wait("getComputedStyle(document.querySelector('.org-form-grid')).gridTemplateColumns.split(' ').length === 1");
@@ -126,8 +129,8 @@ async function main() {
   assert.equal(await evaluate("document.activeElement.classList.contains('org-restore')"), true);
   await evaluate("document.querySelector('.org-restore .org-changes details').open = true");
   assert.ok(await evaluate("document.querySelector('.org-restore').innerText.includes('Previous value') && document.querySelector('.org-restore').innerText.includes('New value')"));
-  await click("Restore and pause employees"); await wait("document.querySelector('.org-heading small')?.textContent.includes('Revision 4')");
-  await click("Employees"); await wait("document.querySelectorAll('.org-person').length === 0");
+  await click("Restore and pause workers"); await wait("document.querySelector('.org-heading small')?.textContent.includes('Revision 4')");
+  await click("Workers"); await wait("document.querySelectorAll('.org-person').length === 0");
   await click("Configuration history"); await wait("document.querySelectorAll('.org-revision').length === 4");
   assert.equal(await evaluate("document.querySelector('.org-toolbar .org-status').textContent"), "Paused");
   assert.equal(await evaluate("document.documentElement.scrollWidth > innerWidth"), false);
@@ -141,19 +144,19 @@ async function main() {
   assert.equal(await evaluate("document.querySelector('.org-scroll').scrollWidth > document.querySelector('.org-scroll').clientWidth + 1"), false);
   fs.writeFileSync(path.join(artifacts, "history-mobile-dark.png"), (await win.webContents.capturePage()).toPNG());
   // Reporting lines persist and drive the chart. Descendants cannot become managers.
-  await click("Employees");
+  await click("Workers");
   async function select(label, name) {
     await evaluate(`(() => { const el = [...document.querySelectorAll('label')].find(l => l.querySelector('span')?.textContent === ${JSON.stringify(label)}).querySelector('select'); el.value = [...el.options].find(o => o.textContent === ${JSON.stringify(name)}).value; el.dispatchEvent(new Event('change', {bubbles:true})); })()`);
   }
   for (const [name, manager] of [["Ada", "Organization owner"], ["Kai", "Ada"], ["Mira", "Kai"]]) {
-    await click("Employee"); await field("Employee name", name); await select("Reports to", manager);
-    await click("Save employee"); await wait(`document.querySelector('.org-profile h3')?.textContent === ${JSON.stringify(name)}`);
+    await click("Worker"); await field("Worker name", name); await select("Reports to", manager);
+    await click("Save worker"); await wait(`document.querySelector('.org-profile h3')?.textContent === ${JSON.stringify(name)}`);
   }
   await click("Org chart");
   await wait("document.querySelector('[aria-label=\"Reports to Ada\"] [aria-label=\"Reports to Kai\"] strong')?.textContent === 'Mira'");
   await evaluate("[...document.querySelectorAll('.org-chart-person')].find(b=>b.querySelector('strong')?.textContent==='Ada').click()");
   await wait("document.querySelector('.org-profile h3')?.textContent === 'Ada'");
-  await click("Edit employee");
+  await click("Edit worker");
   assert.deepEqual(await evaluate("[...document.querySelectorAll('label')].find(l=>l.querySelector('span')?.textContent==='Reports to').querySelector('select').textContent"), "Organization owner");
   await click("Cancel");
   // Counts open name-only directories. Each editor saves just one collection entry.
@@ -164,8 +167,8 @@ async function main() {
   assert.equal(await evaluate("document.querySelectorAll('.org-form').length"), 0);
   await click("Engineering");
   await wait("document.querySelector('.org-form h3')?.textContent === 'Engineering'");
-  assert.deepEqual(await evaluate("[...document.querySelectorAll('.org-collection-people button')].map(b=>b.getAttribute('aria-label'))"), ["Edit employee: Kai", "Edit employee: Mira"]);
-  await click("Edit employee: Mira"); await wait("document.querySelector('.org-form h3')?.textContent === 'Edit Mira'");
+  assert.deepEqual(await evaluate("[...document.querySelectorAll('.org-collection-people button')].map(b=>b.getAttribute('aria-label'))"), ["Edit worker: Kai", "Edit worker: Mira"]);
+  await click("Edit worker: Mira"); await wait("document.querySelector('.org-form h3')?.textContent === 'Edit Mira'");
   await click("Cancel"); await click("1 team"); await click("Engineering");
   await field("Team name", "Unsaved name"); await click("Cancel"); await click("Engineering");
   assert.equal(await evaluate("[...document.querySelectorAll('label')].find(l=>l.querySelector('span')?.textContent==='Team name').querySelector('input').value"), "Engineering");
@@ -177,7 +180,7 @@ async function main() {
   assert.equal(await evaluate("document.querySelectorAll('.org-directory li').length"), 1);
   await field("Find teams", "");
   assert.equal(await evaluate("document.querySelectorAll('.org-directory li').length"), 2);
-  await click("Employees"); await click("0 initiatives"); await click("Add initiative");
+  await click("Workers"); await click("0 initiatives"); await click("Add initiative");
   await field("Initiative name", "Desktop release"); await select("Initiative owner", "Mira");
   await field("Initiative description", "Signed installers"); await click("Save initiative");
   await wait("document.querySelector('.org-directory')?.textContent.includes('Desktop release')");
@@ -196,7 +199,7 @@ async function main() {
   await wait("document.querySelector('.org-form h3')?.textContent === 'Desktop release'");
   assert.equal(await evaluate("document.querySelector('.org-form textarea').value"), "Signed installers");
   assert.equal(await evaluate("document.querySelector('.org-collection-people small').textContent"), "Initiative owner");
-  await click("Edit employee: Mira"); await wait("document.querySelector('.org-form h3')?.textContent === 'Edit Mira'");
+  await click("Edit worker: Mira"); await wait("document.querySelector('.org-form h3')?.textContent === 'Edit Mira'");
   await click("Cancel");
   await click("Organization settings");
   assert.equal(await evaluate("[...document.querySelectorAll('summary')].some(el=>el.textContent==='Projects and teams')"), false);
@@ -314,6 +317,6 @@ async function main() {
   await field("Review reason", "Checked the result independently"); await click("Accept result");
   await wait("document.querySelector('.org-conversation .org-status')?.textContent === 'Done'");
   assert.deepEqual(errors, []);
-  console.log("Organizations browser: real backend create, employee, draft inputs, task execution, conversation, history, restore, org chart, initiatives, global organizations and project ownership passed.");
+  console.log("Organizations browser: real backend create, worker, draft inputs, task run, conversation, history, restore, org chart, initiatives, global organizations and project ownership passed.");
 }
 main().then(async () => { clearTimeout(timeout); backend?.kill(); await vite?.close(); win?.destroy(); app.exit(0); }).catch(async error => { console.error(error); clearTimeout(timeout); backend?.kill(); await vite?.close(); app.exit(1); });

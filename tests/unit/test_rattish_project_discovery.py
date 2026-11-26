@@ -15,7 +15,6 @@ from gofer.rattish.workspaces import (
     RattishWorkspaceError,
     delete_registered_workflow,
     discover_project_workflows,
-    discover_registered_workflows,
     find_registered_workflow,
     list_registered_workflows,
 )
@@ -47,7 +46,7 @@ def test_nested_starters_and_managed_workflows_are_discovered(tmp_path: Path) ->
     top = _workflow(project, "Top level")
     registry = tmp_path / "data"
 
-    discovered = discover_registered_workflows(project, registry_dir=registry)
+    discovered = discover_project_workflows(project, registry_dir=registry).workflows
 
     assert _ids(discovered) == {
         ".raticode/review": "review",
@@ -70,7 +69,7 @@ def test_nested_starters_and_managed_workflows_are_discovered(tmp_path: Path) ->
         project / "rattish" / "starters" / "jev-demo" / "workflow.rattish"
     )
     # Discovering again changes nothing.
-    assert discover_registered_workflows(project, registry_dir=registry) == discovered
+    assert discover_project_workflows(project, registry_dir=registry).workflows == discovered
 
 
 @pytest.mark.parametrize(
@@ -100,7 +99,7 @@ def test_skipped_folders_are_not_searched(tmp_path: Path, folder: str) -> None:
     _workflow(project / folder)
     _workflow(project / "flows" / "kept")
 
-    discovered = discover_registered_workflows(project, registry_dir=tmp_path / "data")
+    discovered = discover_project_workflows(project, registry_dir=tmp_path / "data").workflows
 
     assert _ids(discovered) == {"flows/kept": "kept"}
 
@@ -132,7 +131,7 @@ def test_marked_folders_and_nested_worktrees_are_skipped(tmp_path: Path) -> None
     _workflow(data_folder / "rem-work" / "task")
     _workflow(project / "flows" / "kept")
 
-    discovered = discover_registered_workflows(project, registry_dir=tmp_path / "data")
+    discovered = discover_project_workflows(project, registry_dir=tmp_path / "data").workflows
 
     assert sorted(_ids(discovered)) == ["flows/kept", "vendor/lib/flows/sub"]
 
@@ -143,7 +142,7 @@ def test_the_app_data_folder_inside_a_project_is_skipped(tmp_path: Path) -> None
     _workflow(data_dir / "anything")
     _workflow(project / "flows" / "kept")
 
-    discovered = discover_registered_workflows(project, registry_dir=data_dir)
+    discovered = discover_project_workflows(project, registry_dir=data_dir).workflows
 
     assert _ids(discovered) == {"flows/kept": "kept"}
 
@@ -158,7 +157,7 @@ def test_worktree_copies_of_starters_are_not_listed_twice(tmp_path: Path) -> Non
     )
     registry = tmp_path / "data"
 
-    discovered = discover_registered_workflows(project, registry_dir=registry)
+    discovered = discover_project_workflows(project, registry_dir=registry).workflows
 
     assert [(w.workflow_id, w.relative_folder) for w in discovered] == [
         ("jev-demo", "rattish/starters/jev-demo")
@@ -174,7 +173,7 @@ def test_same_folder_names_get_unique_stable_ids_from_their_path(tmp_path: Path)
     _workflow(project / "deep" / "team-a" / "daily")
     registry = tmp_path / "data"
 
-    first = _ids(discover_registered_workflows(project, registry_dir=registry))
+    first = _ids(discover_project_workflows(project, registry_dir=registry).workflows)
 
     # The managed workflow keeps the plain name; the others use their folder path.
     assert first == {
@@ -186,11 +185,11 @@ def test_same_folder_names_get_unique_stable_ids_from_their_path(tmp_path: Path)
     assert len(set(first.values())) == len(first)
     # A new workflow with a clashing path slug never takes an existing ID.
     _workflow(project / "team" / "a-daily")
-    second = _ids(discover_registered_workflows(project, registry_dir=registry))
+    second = _ids(discover_project_workflows(project, registry_dir=registry).workflows)
     assert {key: second[key] for key in first} == first
     assert second["team/a-daily"] == "a-daily"
     _workflow(project / "x" / "team-a-daily")
-    third = _ids(discover_registered_workflows(project, registry_dir=registry))
+    third = _ids(discover_project_workflows(project, registry_dir=registry).workflows)
     assert third["x/team-a-daily"] == "x-team-a-daily"
 
 
@@ -201,8 +200,8 @@ def test_ids_stay_unique_across_projects(tmp_path: Path) -> None:
     _workflow(first_project / "flows" / "report")
     _workflow(second_project / "flows" / "report")
 
-    first = discover_registered_workflows(first_project, registry_dir=registry)
-    second = discover_registered_workflows(second_project, registry_dir=registry)
+    first = discover_project_workflows(first_project, registry_dir=registry).workflows
+    second = discover_project_workflows(second_project, registry_dir=registry).workflows
 
     assert [w.workflow_id for w in first] == ["report"]
     assert [w.workflow_id for w in second] == ["flows-report"]
@@ -219,7 +218,7 @@ def test_symlinks_out_of_the_project_are_refused(tmp_path: Path) -> None:
     (project / "file-link" / "workflow.rattish").symlink_to(outside_source)
     registry = tmp_path / "data"
 
-    assert discover_registered_workflows(project, registry_dir=registry) == ()
+    assert discover_project_workflows(project, registry_dir=registry).workflows == ()
 
     # A registration that reaches the file through a link is not listed or found.
     registry_path = registry / "radish" / "workspace-registry.json"
@@ -285,14 +284,14 @@ def test_deleted_or_moved_project_workflows_are_forgotten(tmp_path: Path) -> Non
     entrypoint = _workflow(project / "flows" / "report")
     managed = _workflow(project / ".raticode" / "kept")
     registry = tmp_path / "data"
-    assert _ids(discover_registered_workflows(project, registry_dir=registry)) == {
+    assert _ids(discover_project_workflows(project, registry_dir=registry).workflows) == {
         ".raticode/kept": "kept",
         "flows/report": "report",
     }
 
     entrypoint.unlink()
     managed.unlink()
-    discovered = discover_registered_workflows(project, registry_dir=registry)
+    discovered = discover_project_workflows(project, registry_dir=registry).workflows
 
     assert discovered == ()
     persisted = json.loads((registry / "radish" / "workspace-registry.json").read_text())
@@ -300,7 +299,7 @@ def test_deleted_or_moved_project_workflows_are_forgotten(tmp_path: Path) -> Non
     assert [item["id"] for item in persisted["workflows"]] == ["kept"]
     # Putting it back gives it the same ID.
     _workflow(project / "flows" / "report")
-    assert _ids(discover_registered_workflows(project, registry_dir=registry)) == {
+    assert _ids(discover_project_workflows(project, registry_dir=registry).workflows) == {
         "flows/report": "report"
     }
 
@@ -353,7 +352,7 @@ def test_discovery_stays_fast_on_a_large_project(tmp_path: Path) -> None:
     started = time.perf_counter()
     scan = project_scan.scan_project_workflows(project.resolve(), data_dir=registry)
     elapsed = time.perf_counter() - started
-    discovered = discover_registered_workflows(project, registry_dir=registry)
+    discovered = discover_project_workflows(project, registry_dir=registry).workflows
 
     assert len(scan.entrypoints) == 20
     assert len(discovered) == 20
@@ -416,7 +415,7 @@ def test_workflow_at_the_project_top_is_not_bundled_with_the_project(tmp_path: P
     (nested.parent / "helper.sh").write_text("echo hi\n")
     (nested.parent / ".env").write_text("TOKEN=secret\n")
     registry = tmp_path / "data"
-    ids = _ids(discover_registered_workflows(project, registry_dir=registry))
+    ids = _ids(discover_project_workflows(project, registry_dir=registry).workflows)
 
     with pytest.raises(RattishBundleError, match="own folder"):
         export_rattish_bundle(ids["."], tmp_path / "top.raticode", registry_dir=registry)
@@ -481,7 +480,7 @@ def test_project_root_given_through_a_link_is_resolved(tmp_path: Path) -> None:
     alias.symlink_to(project, target_is_directory=True)
     registry = tmp_path / "data"
 
-    [workflow] = discover_registered_workflows(alias, registry_dir=registry)
+    [workflow] = discover_project_workflows(alias, registry_dir=registry).workflows
 
     assert workflow.project_root == project.resolve()
     assert list_registered_workflows(registry_dir=registry) == (workflow,)

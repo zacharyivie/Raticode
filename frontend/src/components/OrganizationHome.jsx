@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowLeft, Building2, Clock, Folder, Network, Pause, Play, RefreshCw, Search, Settings, SquareKanban, Users, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Building2, Clock, Folder, Network, Pause, Play, RefreshCw, Search, Settings, SquareKanban, Users } from "lucide-react";
 import { KINDS, buildModel, hoursStatus, initialsOf, moveRule, needsYou, reviewCaution, searchEntities } from "../lib/organizationModel.js";
 import { organizationRequest } from "../lib/organizations.js";
 import { ORGANIZATION_BOARD_FILTERS, liveOrganizationFilters, organizationBoard, useBoardFilters } from "../lib/boardFilters.js";
@@ -10,6 +10,7 @@ import { KnowledgeView } from "./OrganizationKnowledge.jsx";
 import { IssuesView, OverviewView, ProjectsView, WorkersView } from "./OrganizationViews.jsx";
 import "./OrganizationHome.css";
 import { AutoBadge } from "./OrganizationAutoMode.jsx";
+import { NoticeStack, useNotices } from "./Notice.jsx";
 
 const TABS = [["org", "Organization", Building2], ["projects", "Projects", Folder], ["issues", "Issues", SquareKanban], ["workers", "Workers", Users], ["knowledge", "Knowledge", Network]];
 const clock = at => new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
@@ -74,7 +75,6 @@ export default function OrganizationHome(props) {
 function Home({ organizationId, onClose, openSettings, defaults = {} }) {
   const [organization, setOrganization] = useState(null);
   const [events, setEvents] = useState([]);
-  const [error, setError] = useState("");
   // A failed background read. The page keeps what it last loaded and says how old it is.
   const [stale, setStale] = useState(null);
   const [loadedAt, setLoadedAt] = useState(0);
@@ -83,7 +83,7 @@ function Home({ organizationId, onClose, openSettings, defaults = {} }) {
   const [projectId, setProjectId] = useState(null);
   const [trail, setTrail] = useState([]);
   const [palette, setPalette] = useState(false);
-  const [toasts, setToasts] = useState([]);
+  const { notices, notify: toast, dismiss } = useNotices();
   const [starting, setStarting] = useState(false);
   const [kb, setKb] = useState(KNOWLEDGE);
   const [kbFocus, setKbFocus] = useState(null);
@@ -93,12 +93,6 @@ function Home({ organizationId, onClose, openSettings, defaults = {} }) {
   // This organization's board filters, kept on this computer across visits and restarts.
   const liveFilters = useCallback(value => organization ? liveOrganizationFilters(value, model) : value, [organization, model]);
   const [filters, setFilters] = useBoardFilters(organizationBoard(organizationId), BOARD, liveFilters);
-
-  const toast = useCallback((text, action) => {
-    const id = Math.random().toString(36).slice(2);
-    setToasts(current => [...current.slice(-1), { id, text, action }]);
-    setTimeout(() => setToasts(current => current.filter(item => item.id !== id)), action ? 6000 : 3500);
-  }, []);
 
   const refresh = useCallback(async (force = false) => {
     const data = await organizationRequest("", "read", organizationId, force ? {} : { sinceVersion: version.current });
@@ -120,7 +114,7 @@ function Home({ organizationId, onClose, openSettings, defaults = {} }) {
   }, [refresh]);
 
   const act = useCallback(async (action, params = {}, message) => {
-    setBusy(true); setError("");
+    setBusy(true);
     try {
       const data = await organizationRequest("", action, organizationId, params);
       if (data?.needsUserConsent) toast("Waiting for approval. Nothing changed yet.");
@@ -129,7 +123,8 @@ function Home({ organizationId, onClose, openSettings, defaults = {} }) {
       window.dispatchEvent(new CustomEvent("gofer:organizations-changed"));
       return data || true;
     } catch (failure) {
-      setError(failure.message); toast(failure.message);
+      // An error stays until it is dismissed.
+      toast(failure.message, null, "danger");
       return null;
     } finally { setBusy(false); }
   }, [organizationId, refresh, toast]);
@@ -255,7 +250,6 @@ function Home({ organizationId, onClose, openSettings, defaults = {} }) {
       <nav className="oh-tabs" role="tablist" aria-label="Organization sections" onKeyDown={onTabKey}>{TABS.map(([id, label, Icon]) => <button key={id} id={`oh-tab-${id}`} role="tab" type="button" aria-selected={tab === id} aria-controls="oh-panel" tabIndex={tab === id ? 0 : -1} title={label} onClick={() => go(id)}><Icon size={15} aria-hidden="true" /><span className="lbl">{label}</span>{counts[id] ? <span className="oh-count" title={`${counts[id]} need you`}>{counts[id]}<span className="oh-sr"> need you</span></span> : null}</button>)}</nav>
       <section id="oh-panel" role="tabpanel" aria-labelledby={`oh-tab-${tab}`} className={`oh-view ${!detail && ["issues", "workers"].includes(tab) ? "fill" : ""}`} ref={view} tabIndex={-1}>
         {stale && <div className="oh-banner stale" role="status"><AlertTriangle size={14} aria-hidden="true" /><span><b>Couldn&apos;t refresh.</b> {loadedAt ? `This is how things looked at ${clock(loadedAt)}. ` : ""}Raticode keeps trying. <small>{stale}</small></span><button className="oh-btn small" type="button" onClick={retry}><RefreshCw size={13} />Try again</button></div>}
-        {error && <div className="oh-banner bad" role="alert"><AlertTriangle size={14} aria-hidden="true" /><span>{error}</span><button className="oh-icon-btn" type="button" aria-label="Dismiss error" onClick={() => setError("")}><X size={13} /></button></div>}
         {!running && runtime.pauseReason && !archived && runtime.pauseReason !== "Paused by you" && <div className="oh-banner" role="status"><Pause size={14} /><span>{runtime.pauseReason}</span></div>}
         {running && !archived && runtime.placementWait && <div className="oh-banner" role="status" data-testid="org-placement-wait"><Clock size={14} aria-hidden="true" /><span>{runtime.placementWait}</span></div>}
         {starting && <div className="oh-start"><StartSheet organization={organization} busy={busy} onCancel={() => setStarting(false)} onStart={async () => { if (await act("control", { state: "running" }, "Started. Workers pick up To do tickets.")) setStarting(false); }} /></div>}
@@ -269,6 +263,6 @@ function Home({ organizationId, onClose, openSettings, defaults = {} }) {
       </section>
     </div>
     {palette && <Palette model={model} onClose={() => setPalette(false)} onPick={ref => { setPalette(false); open(ref, true); }} />}
-    <div className="oh-toasts" aria-live="polite">{toasts.map(item => <div className="oh-toast" key={item.id}><span>{item.text}</span>{item.action && <button type="button" onClick={() => { item.action.run(); setToasts(current => current.filter(t => t.id !== item.id)); }}>{item.action.label}</button>}</div>)}</div>
+    <NoticeStack notices={notices} onDismiss={dismiss} />
   </section>;
 }

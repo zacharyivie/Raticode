@@ -234,6 +234,59 @@ test("a frame's requests reach its tab, and a held request nobody owns goes on",
   }
 });
 
+test("Firefox copies only a shared site's sign-ins to Rem, and Settings can clear the user's cookies", async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "firefox-sign-ins-"));
+  const sent = [];
+  const userCookies = [
+    { name: "session", value: "a", domain: ".music.example", path: "/", httpOnly: true, secure: true, sameSite: "lax", expiry: 2000000000 },
+    { name: "id", value: "b", domain: "accounts.music.example", path: "/", httpOnly: false, secure: true, sameSite: "none" },
+    { name: "session", value: "c", domain: ".bank.example", path: "/", httpOnly: true, secure: true, sameSite: "strict" },
+    { name: "track", value: "d", domain: "music.example.evil", path: "/", httpOnly: false, secure: false, sameSite: "none" },
+  ];
+  const spawnFake = () => {
+    const child = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => true;
+    setImmediate(() => child.stderr.emit("data", "WebDriver BiDi listening on ws://127.0.0.1:45680\n"));
+    return child;
+  };
+  class FakeSocket {
+    constructor() { setImmediate(() => this.onopen?.()); }
+    send(text) {
+      const { id, method, params } = JSON.parse(text);
+      sent.push([method, params]);
+      let result = {};
+      if (method === "browser.createUserContext") result = { userContext: "rem" };
+      if (method === "storage.getCookies") result = { cookies: params.partition.userContext === "default" ? userCookies : [] };
+      setImmediate(() => this.onmessage?.({ data: JSON.stringify({ type: "success", id, result }) }));
+    }
+    close() {}
+  }
+  try {
+    const engine = createFirefoxEngine({ dataDir, find: () => "/usr/bin/firefox-fake", spawn: spawnFake, WebSocketImpl: FakeSocket, watchdog: false });
+    await engine.ensure();
+    await engine.mirrorSignIns(["music.example"]);
+    const copies = sent.filter(([method]) => method === "storage.setCookie").map(([, params]) => params);
+    assert.deepEqual(copies.map((params) => [params.cookie.domain, params.cookie.name, params.partition.userContext]), [
+      [".music.example", "session", "rem"],
+      ["accounts.music.example", "id", "rem"],
+    ]);
+    assert.equal(copies[0].cookie.expiry, 2000000000);
+    assert.equal("expiry" in copies[1].cookie, false, "a session cookie stays a session cookie");
+
+    // Firefox's profile is Raticode's, so Settings may clear the user's cookies.
+    sent.length = 0;
+    assert.equal(await engine.clearSiteCookies("user", "bank.example"), 1);
+    assert.deepEqual(sent.at(-1), ["storage.deleteCookies", { filter: { name: "session", domain: ".bank.example" }, partition: { type: "storageKey", userContext: "default" } }]);
+    assert.equal(await engine.clearSiteCookies("user", ""), -1);
+    assert.deepEqual(sent.at(-1), ["storage.deleteCookies", { partition: { type: "storageKey", userContext: "default" } }]);
+    engine.stop();
+    assert.equal(await engine.clearSiteCookies("user", ""), 0, "nothing to clear once Firefox stopped");
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("Rem's DevTools commands map to WebDriver BiDi", async () => {
   const calls = [];
   const contents = Object.assign(new EventEmitter(), {
@@ -585,7 +638,7 @@ test("a real Firefox reports files a page builds (blob: and data: links) with ma
     for (const [name, filename] of [["fileSaver", "file-saver.html"], ["revokeNow", "revoke-now.html"], ["dataUrl", "data-url.html"], ["server", "server.html"]]) {
       const began = new Promise((resolve) => contents.once("firefox-download-begin", resolve));
       const ended = new Promise((resolve) => contents.once("firefox-download-end", resolve));
-      await contents.evaluateIn(null, `cases.${name}(${JSON.stringify(filename)}); true`, { userActivation: true });
+      await contents.evaluateIn(null, `cases.${name}(${JSON.stringify(filename)}); true`, { userGesture: true });
       const [start, end] = await Promise.all([began, ended]);
       assert.equal(start.filename, filename);
       assert.ok(start.navigation, `${filename} has no key`);

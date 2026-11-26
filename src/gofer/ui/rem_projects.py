@@ -17,6 +17,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from gofer.utils.process import run_repository_git
+
 # Opened projects waiting for the desktop window to list them as its own.
 MAX_PENDING = 20
 # Places no agent workspace may start in or contain, beyond the home credential
@@ -119,20 +121,15 @@ def _empty(path: Path) -> bool:
 
 def _git_init(path: Path) -> None:
     try:
-        result = subprocess.run(
-            ["git", "init", "--quiet", str(path)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-            stdin=subprocess.DEVNULL,
-        )
+        result = run_repository_git(path, "init", "--quiet", timeout=30)
     except FileNotFoundError as exc:
         raise ProjectOpenError(
             f"Created {path}, but git isn't installed, so it has no repository yet."
         ) from exc
     except subprocess.TimeoutExpired as exc:
         raise ProjectOpenError(f"Created {path}, but git init didn't finish in time.") from exc
+    except OSError as exc:
+        raise ProjectOpenError(f"Created {path}, but couldn't run git init: {exc}") from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip().splitlines()[-1:] or ["no output"]
         raise ProjectOpenError(f"Created {path}, but git init failed: {detail[0][:300]}")

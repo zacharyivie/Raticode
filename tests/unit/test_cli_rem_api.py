@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +20,7 @@ import pytest
 from typer.testing import CliRunner
 
 from gofer.cli import client as client_module
-from gofer.cli.client import write_api_files
-from gofer.cli.commands import _backend
+from gofer.cli.client import AGENT_SESSION_ENVS, write_api_files
 from gofer.cli.main import app
 from gofer.ui.rem_home import RemHome
 from gofer.ui.rem_kanban import new_ticket, put_ticket
@@ -36,7 +36,7 @@ CLIENT_ENV = (
     "GOFER_DATA_DIR",
     "GOFER_UI_API_TOKEN",
     "RATICODE_NON_INTERACTIVE",
-    *_backend.AGENT_ENV,
+    *AGENT_SESSION_ENVS,
 )
 
 
@@ -100,7 +100,7 @@ def backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     replier = threading.Thread(target=answer, daemon=True)
     replier.start()
     port = int(server.server_address[1])
-    write_api_files(data_dir, url=f"http://127.0.0.1:{port}", token="cli-token")
+    write_api_files(data_dir, url=f"http://127.0.0.1:{port}", token="cli-token", proof=True)
     monkeypatch.setenv("RATICODE_DATA_DIR", str(data_dir))
     sent: list[tuple[str, str]] = []
     original = client_module.ApiClient.request
@@ -736,6 +736,41 @@ def test_organization_ticket_needs_organizations(backend):
     assert refused["error"]["code"] == "unavailable"
 
 
+def test_selfwork_objectives_list_newest_first_with_stale_ones_apart(backend):
+    service, _, _ = backend
+    for text in ("Older goal for the list", "Newer goal for the list"):
+        cli("selfwork", "objectives", "add", "--text", text)
+    older = next(
+        i
+        for i in cli("selfwork", "objectives")["data"]["items"]
+        if i["text"] == "Older goal for the list"
+    )
+    cli("selfwork", "objectives", "check", "--id", older["id"])
+    # A self-work session ends: what it finished goes stale.
+    from gofer.ui import rem_objectives
+
+    with service.store.connect() as db:
+        rem_objectives.mark_stale(db, service.store, datetime.now(UTC))
+    cli("selfwork", "objectives", "add", "--text", "Newest goal for the list")
+    listed = cli("selfwork", "objectives")["data"]
+    assert [i["text"] for i in listed["items"]] == [
+        "Newest goal for the list",
+        "Newer goal for the list",
+        "Older goal for the list",
+    ]
+    assert (listed["open"], listed["done"], listed["stale"]) == (2, 0, 1)
+    text = runner.invoke(app, ["selfwork", "objectives", "--output", "text"]).stdout
+    assert "0/2 done" in text
+    assert text.index("Newer goal") < text.index("Stale (done in earlier self-work sessions)")
+    assert text.index("Stale (") < text.index("Older goal")
+    page = runner.invoke(app, ["selfwork", "objectives", "--limit", "1", "--output", "text"])
+    assert "2 more; list again with --offset 1." in page.stdout
+    second = cli("selfwork", "objectives", "--limit", "1", "--offset", "1")["data"]
+    assert [i["text"] for i in second["items"]] == ["Newer goal for the list"]
+    # The order is fixed, so there is no move any more.
+    assert cli("selfwork", "objectives", "move", "--id", older["id"], code=2)
+
+
 def test_selfwork_status_set_export_apply_and_report(backend, tmp_path):
     status = cli("selfwork", "status")["data"]
     revision = status["settings"]["revision"]
@@ -885,7 +920,11 @@ def test_selfwork_auto_approval_needs_the_users_confirmation(backend, tmp_path, 
     assert applied["data"]["settings"]["auto_approve_proposals"] is True
 
 
-def test_errors_go_to_stderr_with_an_envelope_and_exit_code(backend, monkeypatch):
+def test_errors_go_to_stderr_with_an_envelope_and_exit_code(backend, monkeypatch, tmp_path):
+    # Given the address directly, the backend gets the wrong token and rejects it
+    # (through endpoint.json the CLI wouldn't send a token the backend can't prove).
+    published = json.loads((tmp_path / "data" / "headless" / "endpoint.json").read_text())
+    monkeypatch.setenv("RATICODE_URL", published["url"])
     monkeypatch.setenv("RATICODE_TOKEN", "wrong")
     result = runner.invoke(app, ["rem", "tasks", "list"])
     assert result.exit_code == 5
@@ -999,6 +1038,37 @@ def test_decisions_show_and_paths_print_each_record_paths_file_count(backend):
     assert "Give --project or --id." in str(refused.exception)
 
 
+def test_decisions_show_names_the_commit_that_added_a_record_read_from_the_repository(backend):
+    import subprocess as sp
+
+    service, project, _ = backend
+    env = {
+        "GIT_AUTHOR_NAME": "Other Person",
+        "GIT_AUTHOR_EMAIL": "other@example.invalid",
+        "GIT_AUTHOR_DATE": "2026-03-04T05:06:07+00:00",
+        "GIT_COMMITTER_NAME": "T",
+        "GIT_COMMITTER_EMAIL": "t@example.invalid",
+        "PATH": __import__("os").environ["PATH"],
+    }
+    folder = project / ".raticode" / "decisions"
+    folder.mkdir(parents=True)
+    (folder / "0001-tabs.md").write_text("---\nstatus: accepted\ntitle: Indentation\n---\nTabs.\n")
+    for args in (["init", "-q", "-b", "dev"], ["add", "-A"], ["commit", "-q", "-m", "start"]):
+        sp.run(["git", "-C", str(project), *args], check=True, capture_output=True, env=env)
+    added = sp.run(
+        ["git", "-C", str(project), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    cli("rem", "decisions", "add", "branch.integration", "dev", "--project", str(project))
+    listed = cli("rem", "decisions", "list", "--project", str(project))["data"]["items"]
+    record_id = next(i["id"] for i in listed if i.get("record_path", "").endswith("0001-tabs.md"))
+    shown = cli("rem", "decisions", "show", record_id, "--output", "text").stdout
+    expected = f"Read from the repository: added in {added[:12]} by Other Person on 2026-03-04."
+    assert expected in shown
+    assert "You decided" not in shown and "other@example.invalid" not in shown
+    branch = next(i["id"] for i in listed if i.get("topic") == "branch.integration")
+    assert "You decided on " in cli("rem", "decisions", "show", branch, "--output", "text").stdout
+
+
 def test_decisions_retire_keeps_a_written_record_and_says_what_happened_to_its_file(backend):
     import subprocess as sp
 
@@ -1065,3 +1135,15 @@ def test_a_decision_notice_line_names_the_question_its_id_project_and_recommenda
     )
     bare = {**notice, "project_name": "", "decision": {"id": "D-3", "recommended": ""}}
     assert _notice_line(bare) == "needs_you: Rem has a question: Which branch? (D-3)"
+
+
+def test_ticket_line_names_the_desktop_a_proposal_came_from():
+    from gofer.cli.commands.tickets import _line
+
+    base = {"key": "REM-4", "status": "backlog", "revision": 1, "title": "Cache the index"}
+    assert _line({**base, "proposed": True, "proposed_on": "Desk B"}).endswith(
+        "Rem: Cache the index (proposal from Desk B)"
+    )
+    assert _line({**base, "proposed": True, "proposed_on": ""}).endswith("(proposal)")
+    # Once approved it is an ordinary ticket again.
+    assert _line({**base, "proposed": False, "proposed_on": "Desk B"}).endswith("Cache the index")

@@ -69,7 +69,7 @@ Approvals are kept in Raticode's data folder on this computer, readable only by 
 | Created by | Which worktrees | Where the result shows |
 | --- | --- | --- |
 | [Rem](../rem/home.md) | A task's temporary worktree, when another task is already changing the project | The task's status in its sheet |
-| [Raticode's project check](../rem/home.md#raticode-runs-the-project-s-check-itself) | The fresh worktree each run of the project's decided check and proving test gets (not in a released version yet). Only links and copies: the setup's commands would run files the worker committed outside the sandbox. When setup fails, isn't approved or has commands, the check runs in the task's folder instead and the proving test isn't run | The check's receipt in the review, with the reason |
+| [Raticode's project check](../rem/home.md#raticode-runs-the-project-s-check-itself) | The fresh worktree each run of the project's decided check and proving test gets (not in a released version yet). Only links and copies: the setup's commands would run files the worker committed outside the sandbox. When setup fails or isn't approved, the check fails without running; when it has commands, the check runs in the task's folder instead. In both cases the proving test isn't run | The check's receipt in the review, with the reason |
 | [Organizations](../advanced/organizations.md) | Each ticket's worktree | The ticket's **Did** section and the organization's activity |
 | [Swarms](../advanced/swarms.md) | Each agent's assignment worktree, the worktree integration checks run in, and the review worktree before the first checks run in it | The attempt under **Assignment attempts and checks**, or **Results and branches** |
 

@@ -80,11 +80,17 @@ object OpenTypes {
     fun readableScheme(scheme: String?) = scheme.equals("content", ignoreCase = true)
 
     /** A file another app shares: content only, and never one of Raticode's own providers, whose
-     *  cache (opened files, camera shots, Developer log hand-offs) this lock-exempt screen must not show. */
-    fun readableFrom(scheme: String?, authority: String?, ownPackage: String) =
+     *  cache (opened files, camera shots, Developer log hand-offs) this screen must not show.
+     *  The one exception is [handedOut]: a copy Raticode itself just gave the phone's default viewer
+     *  (OpenedFiles.view, such as Open on a file Rem sent), when Raticode is that viewer. That copy is
+     *  Raticode's own data, so it is refused while the app lock or child lock is on ([locked]). */
+    fun readableFrom(scheme: String?, authority: String?, ownPackage: String, handedOut: Boolean = false, locked: Boolean = false): Boolean {
+        if (!readableScheme(scheme)) return false
         // Android opens `content://0@x/...` from provider x: it drops everything up to the last '@'
         // (ContentProvider.getAuthorityWithoutUserId), so the check must compare what Android will open.
-        readableScheme(scheme) && authority?.substringAfterLast('@')?.startsWith(ownPackage) != true
+        val ours = authority?.substringAfterLast('@')?.startsWith(ownPackage) == true
+        return !ours || (handedOut && !locked)
+    }
 
     /** Which of Raticode's own browsers takes links from other apps. Raticode (chromium) unless the user picked Raticode (gecko). */
     fun linkEngine(value: String?): String =

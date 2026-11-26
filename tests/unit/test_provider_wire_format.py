@@ -197,7 +197,7 @@ def test_a_lookup_round_adds_blocks_after_the_first_rounds(wire: Path, tmp_path:
 def test_workflow_agent_steps_reach_each_provider(
     wire: Path, tmp_path: Path, provider: str
 ) -> None:
-    from gofer.core.runner import _SUBSCRIPTIONS
+    from gofer.subscriptions.registry import shared_subscriptions
 
     work = tmp_path / "work"
     work.mkdir()
@@ -219,7 +219,7 @@ def test_workflow_agent_steps_reach_each_provider(
         mcp_servers=["docs"] if provider == "claude_code" else [],
     )
     result = asyncio.run(
-        Agent(config, _SUBSCRIPTIONS[provider]).run(
+        Agent(config, shared_subscriptions()[provider]).run(
             prompt_override="Do the step: WIRE-MARKER",
             provider_settings=settings,
             timeout=60,

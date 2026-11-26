@@ -248,6 +248,50 @@ def test_the_worker_index_always_keeps_the_projects_facts(book, project: Path):
     assert ".raticode/decisions" in last["note"]
 
 
+def test_a_plans_answers_reach_only_the_work_that_cites_them(book, project: Path):
+    db, store = book
+    key = str(project)
+    for topic, answer in {
+        "checks.fast": "python3 scripts/check-dev.py",
+        "branch.integration": "dev",
+        "decisions.folder": ".raticode/decisions",
+        "storage.engine": "SQLite",
+    }.items():
+        add = {"action": "add", "project": key, "topic": topic, "answer": answer}
+        decisions.change(db, store, add, actor="user")
+    for topic in ("plan:store", "plan:auth", "plan:sync"):
+        _, item = decisions.file_request(
+            db,
+            store,
+            request(topic=topic, answer=f"Answer for {topic}"),
+            project=key,
+            decides_alone=False,
+            plan="P-1",
+        )
+        decisions.change(db, store, {"action": "use", "id": item["id"]}, actor="user")
+    read = decisions.read(db, store)
+    planned = [i["id"] for i in read["items"] if i.get("plan") == "P-1"]
+    assert planned == ["D-5", "D-6", "D-7"]
+    assert all(i["status"] == "confirmed" for i in read["items"])
+
+    def ids(text: str = "", **kw: Any) -> list[str]:
+        return [e["id"] for e in decisions.for_prompt(read, [key], text, **kw)]
+
+    # A task that cites neither the plan nor its answers gets none of them, and still
+    # gets the check command, the landing branch, the folder and untagged facts.
+    assert ids("Fix the login form on P-10 and D-70") == ["D-2", "D-1", "D-3", "D-4"]
+    # A slice ticket's "Rests on ... (plan P-1)" gets every answer of its plan.
+    slice_ids = ids("Rests on D-7 (plan P-1).\n\nSave notes offline")
+    assert sorted(slice_ids) == ["D-1", "D-2", "D-3", "D-4", "D-5", "D-6", "D-7"]
+    # Citing one answer alone lists that one.
+    assert "D-7" in ids("Rests on D-7.") and not {"D-5", "D-6"} & set(ids("Rests on D-7."))
+    # Rem's chat lists them while the plan is asking or ready, not once it was handed back.
+    for status, listed in (("asking", True), ("ready", True), ("handed_back", False)):
+        read["plans"] = [{"id": "P-1", "status": status}]
+        assert ("D-7" in ids(chat=True)) is listed, status
+        assert {"D-1", "D-2", "D-3", "D-4"} <= set(ids(chat=True))
+
+
 def test_a_chat_answer_needs_the_users_words_and_a_waiting_request(book, project: Path):
     db, store = book
     _, item = decisions.file_request(

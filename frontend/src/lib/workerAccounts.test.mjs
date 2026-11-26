@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { accountAfterProviderChange, providerAccounts, showsAccountChoice, workerAccountLabel, workerAccountOptions } from "./workerAccounts.js";
+import { accountAfterProviderChange, providerAccounts, showsAccountChoice, workerAccountOptions } from "./workerAccounts.js";
 
 const accounts = [
   { provider: "codex", name: "work", account_id: "aaaaaaaaaaaaaaaa", state: "signed_in" },
@@ -19,9 +19,6 @@ test("a worker's Account choice lists only its provider's accounts after the def
 test("a saved account that was removed stays listed and says what its turns do", () => {
   const options = workerAccountOptions(accounts, "codex", "dddddddddddddddd");
   assert.deepEqual(options.at(-1), { id: "dddddddddddddddd", label: "Removed account", meta: "Runs on the default sign-in" });
-  assert.equal(workerAccountLabel(accounts, { provider: "codex", account: "dddddddddddddddd" }), "Removed account (runs on the default sign-in)");
-  assert.equal(workerAccountLabel(accounts, { provider: "codex", account: "aaaaaaaaaaaaaaaa" }), "work");
-  assert.equal(workerAccountLabel(accounts, { provider: "codex" }), "Default sign-in");
 });
 
 test("switching provider clears an account that belongs to the old one", () => {

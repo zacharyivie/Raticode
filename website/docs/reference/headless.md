@@ -111,7 +111,7 @@ Raticode api POST /organizations -f action=secret_reference -f organizationId=OR
   -f params.id=github -f params.account=github-token
 ```
 
-The backend then reads `org-secret-github-token` wherever an employee's grant uses `secret://github`, or a webhook uses the `github` reference.
+The backend then reads `org-secret-github-token` wherever a worker's grant uses `secret://github`, or a webhook uses the `github` reference.
 
 A workflow secret needs no setup beyond the file. `secret["SERVICE_TOKEN"]` checks a value saved in the keychain first, then `workflow-secret-SERVICE_TOKEN` in the folder, then the `SERVICE_TOKEN` environment variable. **Workflow settings > Secrets** marks a name the folder provides as **Secrets folder** and lists the folder's workflow secrets, read-only. A file that breaks the rules above stops the run at preflight with a message naming the file; the environment variable isn't used in its place. See [Secrets](../workflows/inputs.md#secrets).
 
@@ -254,6 +254,8 @@ An agent token acts with Rem's authority, not yours:
 - It can't create, edit, run, queue, resume, stop or delete workflows, change their triggers, approve a changed workflow version for a trigger, or create, start or control swarms. Editing a workflow and then running it would let it run any command it wrote, with your account.
 - It can't change Second Brain libraries.
 - It can't read a Second Brain with **Allow cloud processing** off. Searching one, or listing its projects, topics or report and job sources, gets HTTP 403 with the code `brain_private`, and so does opening, relating or connecting a document stored in one. In `Raticode brain list` such a brain shows its name and the state `private`, with no folder, documents, reports or tasks.
+- It can't open, relate or connect a document [left out of search](../knowledge/second-brain.md#folder-rules), even with `--private-brains`. It gets HTTP 403 with the code `document_left_out`, and left-out documents don't appear in another document's related files or connections.
+- Asking for documents' passages (the `passages` action) lists one stored in a private brain or left out of search under `missing`, without its text.
 
 A local script that reads your private brains and keeps what it reads on this computer can get a token that reads them:
 

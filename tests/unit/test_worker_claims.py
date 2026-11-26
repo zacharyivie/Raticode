@@ -20,8 +20,9 @@ from gofer.ui.chat_steering import ChatSteering
 from gofer.ui.device_chat import DeviceChatBridge
 from gofer.ui.organizations import OrganizationManager
 from gofer.ui.rem_home import RemHome
+from tests.helpers.organizations import act
 from tests.unit.test_device_chat import Work, request
-from tests.unit.test_organization_placement import act, company
+from tests.unit.test_organization_placement import company
 from tests.unit.test_rem_home import home as home
 from tests.unit.test_rem_home import recipe, wait_run
 

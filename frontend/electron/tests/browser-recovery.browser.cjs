@@ -11,7 +11,6 @@ const fs = require("node:fs");
 const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
-const { pathToFileURL } = require("node:url");
 const { BrowserWindow, Menu, WebContentsView, app, clipboard, dialog, ipcMain, nativeImage, session, shell, webContents } = require("electron");
 const { createBrowserSessions } = require("../browser-sessions.cjs");
 const { createBrowserStore } = require("../browser-store.cjs");
@@ -113,7 +112,6 @@ async function run() {
   dialog.showMessageBoxSync = (...args) => { dialogs.push(args); return 0; };
   dialog.showErrorBox = (...args) => { dialogs.push(args); };
 
-  const preload = path.join(__dirname, "..", "browser-preload.cjs");
   window = new BrowserWindow({
     width: 900,
     height: 600,
@@ -122,7 +120,6 @@ async function run() {
       contextIsolation: true,
       preload: path.join(__dirname, "..", "preload.cjs"),
       sandbox: true,
-      additionalArguments: [`--gofer-browser-preload=${pathToFileURL(preload)}`],
     },
   });
   const page = (code) => window.webContents.executeJavaScript(code);

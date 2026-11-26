@@ -285,6 +285,50 @@ def test_status_is_whether_billing_answers_and_sign_in_runs_grok_login_in_the_fo
     assert accounts.choose_account(data_dir, provider="grok") is None
 
 
+def test_groks_authentication_required_error_over_the_shared_transport_reads_not_signed_in_yet(
+    data_dir: Path, grok: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gofer.core import provider_usage
+
+    opened: list[tuple[list[str], dict[str, Any]]] = []
+    real = provider_usage.open_acp_transport
+
+    def spy(command: list[str], **options: Any) -> Any:
+        opened.append((command, options))
+        return real(command, **options)
+
+    monkeypatch.setattr(provider_usage, "open_acp_transport", spy)
+    work = accounts.create_account("work", provider="grok", data_dir=data_dir)
+    folder = accounts.account_config_dir(work, data_dir)
+
+    # The stand-in answers -32000 "Authentication required", as Grok 1.0.89 does.
+    status = accounts.account_status(work, data_dir=data_dir, refresh=True)
+    assert status == {
+        "state": "needs_sign_in",
+        "plan": None,
+        "email": None,
+        "identity": None,
+        "reason": "Not signed in yet.",
+        "checked_at": status["checked_at"],
+    }
+    command, options = opened[-1]
+    assert command[-4:] == [str(grok), *grok_accounts.ACP_ARGS]
+    assert options["cwd"] == folder
+    assert options["timeout"] == accounts.STATUS_TIMEOUT_SECONDS
+    assert options["max_output_bytes"] == 4 * 1024 * 1024
+    assert options["env"]["GROK_HOME"] == str(folder)
+
+    # Another refusal shows Grok's own words, without the transport's prefix.
+    (folder / "broken").write_text("")
+    broken = accounts.account_status(work, data_dir=data_dir, refresh=True)
+    assert broken["state"] == "unknown"
+    assert broken["reason"] == "Grok couldn't report this account: upstream unavailable."
+    # The transport starts from Raticode's own environment; the parent's keys stay out.
+    checks = [c for c in _calls(tmp_path) if c["args"] == list(grok_accounts.ACP_ARGS)]
+    assert len(checks) == 2 and all(c["home"] == str(folder) for c in checks)
+    assert all(_no_other_sign_in(c) for c in checks)
+
+
 def test_remove_signs_out_with_grok_logout_first_then_deletes_the_folder(
     data_dir: Path, grok: Path, tmp_path: Path
 ) -> None:

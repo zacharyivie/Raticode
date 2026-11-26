@@ -1,19 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DatabaseZap } from "lucide-react";
-import { apiUrl } from "../lib/api";
+import { apiJson } from "../lib/api";
 
 const SMALL_BUTTON_CLASS =
   "inline-flex h-7 items-center gap-1 rounded-md border border-line bg-white px-2 text-[11px] font-medium text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50";
 
-async function request(workflowId, options) {
-  const response = await fetch(
-    apiUrl(`/rattish/cache?workflowId=${encodeURIComponent(workflowId)}`),
-    options,
-  );
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `Request failed (${response.status}).`);
-  return payload;
-}
+const request = (workflowId, options) =>
+  apiJson(`/rattish/cache?workflowId=${encodeURIComponent(workflowId)}`, { ...options, failure: status => `Request failed (${status}).` });
 
 export const resultCacheApi = {
   load: (workflowId) => request(workflowId),

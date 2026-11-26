@@ -86,7 +86,7 @@ A task that [waits for other tasks](../rem/home.md#start-a-task-after-another) s
 ### Work threads and self-work
 
 - A task's work thread shows each instruction from Rem or you as a labeled card, the worker's steps under **Show thoughts**, and each reply in its own card with **Copy Markdown**. Long items fold to **Show more**; the newest reply starts open.
-- Tell Rem "turn on self-work", "stop self-work" or "is self-work on?", typed or by voice, and the reply says what it is now. See [Turn it on or off from the chat](../rem/board.md#turn-it-on-or-off-from-the-chat).
+- Tell Rem "turn on self-work", "stop self-work" or "is self-work on?", typed or by voice, and the reply says what it is now. See [Turn it on or off from the chat](../rem/board.md#turn-it-on-or-off-from-the-chat). "Start self-work now" starts it without waiting for quiet minutes; see [Start self-work now](../rem/board.md#start-self-work-now) (needs a desktop newer than the current release).
 - Tell Rem "self-work until 7 PM" or "self-work from 11 PM to 7 AM" to set a [timed window](../rem/board.md#timed-self-work). **Desktop settings › Rem self-work** shows the running window, planned ones and the last period; the switch ends a running window. Set or cancel windows in the chat or on the computer.
 - **When to stop**, on the same page, shows the [stop condition and latest time](../rem/board.md#stop-condition-and-latest-time) of the self-work running now and Rem's last check. **Edit** sets the condition in your words and a latest time (24-hour, with Next, Today or Tomorrow), and **Clear** removes both. Telling Rem "stop when REM-12 is done, but no later than midnight" works too. A desktop without this shows nothing. *Not in a released version yet.*
 - When self-work stops, Rem's [report](../rem/board.md#the-report-when-self-work-stops) shows in the chat with each task and how it went. Tap one to open it.
@@ -112,7 +112,7 @@ The paperclip offers:
 - **Camera**: the photo goes into the message and isn't saved to your gallery
 - Android's file browser at **Recent files**, **Downloads** or **All files**
 
-Attach up to eight files, 10 MB each. Tap a thumbnail to preview it. Files Rem sends appear under its reply with **Download**, **Save** and **Open**. Rem sees photos as it does on the desktop; see [Images in Rem's chat](../rem/attachments.md#images-in-rem-s-chat).
+Attach up to eight files, 10 MB each. Tap a thumbnail to preview it. Files Rem sends appear under its reply with **Download**, **Save** and **Open**. **Open** hands the file to the phone's default app for its type, such as a PDF reader for a PDF report. If you made Raticode the default for that type in [Open with Raticode](./workspace.md#open-files-from-other-apps), the report opens in Raticode's own viewer. When no app on the phone opens the type, Raticode shows the file itself if it can, and otherwise says so and offers **Save instead**. Rem sees photos as it does on the desktop; see [Images in Rem's chat](../rem/attachments.md#images-in-rem-s-chat).
 
 ## Long text
 

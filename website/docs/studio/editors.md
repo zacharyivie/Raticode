@@ -13,6 +13,7 @@ Write exact behavior in code. Use the graph to see how the steps connect.
 Open **File explorer** in the project sidebar and select a file.
 
 - The code workspace has tabs, find in the current file, split editing, and project-wide search and replace (the **Search** plugin).
+- With **Replace** open and text in **Replace with**, each result shows the matched text struck through next to what replaces it, with `$1` and `$&` filled in for a regular expression. After **Replace all**, select **Undo** next to the "Replaced" message to put the files back. Undo skips and names any file that changed after the replace. It covers only the latest replace, is lost when Raticode restarts, and isn't offered for a replace larger than about 20 MB.
 - Save with your platform's usual Save shortcut. Until you save, other tools see the version on disk, not your edits.
 - Markdown files open in Preview or Edit mode, and HTML files in Browse or Edit mode. Switch to source to change the document.
 
@@ -29,6 +30,10 @@ Open a workflow. The source and the graph are two views of the same Rattish docu
 - Edit `workflow.rattish` directly for exact fields and routes.
 
 <AppScreenshot name="graph-inspector" caption="Select a node to edit it in the Node inspector. Its tabs are General, Action, Inputs, Run and Routes." />
+
+A text field in the inspector saves when you leave it. If Raticode can't save the value, for example because the workflow would stop compiling, the field keeps what you typed and says why under it. Fix the text and leave the field to try again, or press Escape or **Use saved value** to put the saved value back. New in 0.6.1.
+
+List fields, such as an approval gate's approvers or a script's args, show one row per item, with buttons to add, remove and move rows. Name and value fields, such as an HTTP request's headers or a script's `env`, show a Name column and a Value column. A name that is empty or used twice is marked on its row, and the field doesn't save until you fix it. The rows save when you leave the field or press Enter; removing or moving a row saves at once. A value can be a <span v-pre>`{{...}}`</span> placeholder, typed as text. Turn on **Edit as JSON** to edit the whole field as JSON instead. A value the rows can't show, such as a nested object written in code, always opens as JSON. Fields with their own nested settings, such as `retry` or `output-schema`, stay JSON. New in 0.6.1.
 
 The graph is drawn from the source; it isn't a second definition that runs. Node positions and display settings live in `workflow.metadata.json`, so moving a node never changes a command or route.
 
@@ -56,6 +61,22 @@ Every choice is an edit to `workflow.rattish` that Raticode checks before saving
 The inspector's **Type** field opens the same picker, with the node's current type marked. Choosing a different type keeps the node's ID, routes and shared settings such as `needs` and `timeout`, drops the old type's own fields and fills in starting fields for the new type.
 
 The list, groups and descriptions come from the installed Rattish node contracts, so a node type that Raticode adds appears in the picker without anything else changing.
+
+### Undo and Redo graph edits
+
+*New in Raticode 0.6.1.*
+
+Each workflow you have open keeps its own list of graph edits: adding, deleting, duplicating and renaming nodes, changing a node's type, and changing its needs, routes and fields. To step back or forward through them:
+
+- Press **Mod+Z** to undo and **Mod+Shift+Z** to redo while the graph has focus. On Windows, **Ctrl+Y** also redoes.
+- Use the **Undo** and **Redo** buttons beside **Delete selected node** in the graph toolbar. Hover one to see which edit it acts on, for example **Undo delete node fetch**. A button is dimmed when there's nothing to undo or redo.
+- Choose **Edit > Undo** or **Edit > Redo** while the graph is in front, or **Undo graph edit** and **Redo graph edit** in the command palette.
+
+Undo saves `workflow.rattish` as it was before the edit. In a text field, Rem's message box or the code editor, Mod+Z undoes typing there instead, and so does **Edit > Undo** when one of them had focus before you opened the menu.
+
+- Undo and Redo work only while `workflow.rattish` is still the version that edit saved. If you changed it in the code editor, or Rem or another program changed it, the toolbar says **workflow.rattish changed since that edit, so it can't be undone here** and both lists are cleared.
+- Moving a node isn't an edit to `workflow.rattish`, so it isn't undone.
+- Each list keeps the last 50 edits. It's cleared when you close the workflow or quit Raticode.
 
 ## Understand diagnostics
 

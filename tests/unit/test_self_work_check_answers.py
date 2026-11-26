@@ -72,11 +72,15 @@ def test_bad_entries_are_dropped_long_prose_is_cut_and_long_lists_keep_their_fir
         }
     )
     assert len(plan.objectives) == objectives.MAX_OPEN_BY_REM
-    # A finish line that can't be used leaves the goal open-ended rather than losing it.
+    # A finish line that can't be used is read as missing rather than losing the goal, and
+    # the planner is then asked once for the finish lines Rem's own objectives need.
     assert (plan.objectives[0].text, plan.objectives[0].done_when) == (
         "Raise UX quality of the studio",
         "",
     )
+    assert [p["loc"] for p in answers.plan_problems(plan)] == [
+        ["objectives", n, "done_when"] for n in range(objectives.MAX_OPEN_BY_REM)
+    ]
     assert all(len(o.text) <= objectives.TEXT_MAX for o in plan.objectives)
     [check] = plan.done
     assert check.id == "o1" and len(check.evidence) <= objectives.EVIDENCE_MAX
@@ -207,7 +211,10 @@ def test_an_unusable_plan_is_repaired_once_then_marked_failed(board):
 
 def test_a_repaired_plan_is_used(board):
     home, _, _ = board
-    goal = {"text": "Raise UX quality of the workflow studio"}
+    goal = {
+        "text": "Raise UX quality of the workflow studio",
+        "done_when": "Every studio usability ticket in Backlog is done or cancelled",
+    }
     prompts = planner_answers(home, "Here are my objectives", {"objectives": [goal]})
     at(home, 15)
     tick(home)

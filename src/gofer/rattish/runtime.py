@@ -17,7 +17,7 @@ import sys
 import threading
 import uuid
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -42,9 +42,9 @@ from gofer.core.approvals import (
     wait_for_decision,
 )
 from gofer.core.http import HttpClient, HttpRequest, UrllibHttpClient, append_query_params
+from gofer.core.http_retry import HttpRetryPolicy
 from gofer.core.llm_prompts import common_llm_task_prompt
 from gofer.core.network_policy import NetworkPolicyViolation, validate_http_request_url
-from gofer.core.operations import HttpRetryPolicy
 from gofer.core.provider_profiles import (
     ResolvedProviderSettings,
     resolve_provider_settings,
@@ -58,6 +58,7 @@ from gofer.core.structured_output import (
 )
 from gofer.core.usage_context import active_usage_observer
 from gofer.rattish import agent_sandbox, approved_files, shells
+from gofer.rattish.binding_misses import BindingSourceMissingError, describe_miss
 from gofer.rattish.contracts import canonical_json_bytes, contract_fingerprint, json_fingerprint
 from gofer.rattish.ir_validation import (
     InvalidRattishIrError as InvalidRattishIrError,
@@ -81,6 +82,7 @@ from gofer.rattish.result_cache import (
     ResultCache,
     cache_duration_seconds,
     cache_key,
+    current_run_paths,
     is_cacheable_workflow_id,
 )
 from gofer.rattish.storage import migrate_legacy_directory, workflow_owned_directory
@@ -476,6 +478,17 @@ async def execute_node(
                 {"exception": type(exc).__name__},
             ),
         )
+    except BindingSourceMissingError as exc:
+        handled = HandlerResult(
+            False,
+            {},
+            RuntimeErrorInfo(
+                "configuration",
+                "RATTISH_RUNTIME_CONFIGURATION_ERROR",
+                str(exc),
+                {"exception": "ValueError", **exc.details},
+            ),
+        )
     except (LookupError, ValueError) as exc:
         handled = HandlerResult(
             False,
@@ -591,6 +604,7 @@ def _result_cache_entry(
         project_root=str(context.project_root),
         prompt=prompt,
         inputs=bindings.local,
+        paths=current_run_paths(),
     )
     return key, duration
 
@@ -618,27 +632,6 @@ def _with_provider_choice(node: Mapping[str, Any], choice: Mapping[str, Any]) ->
         "configuration": configuration,
         "resolutions": {**node["resolutions"], "provider": selected},
     }
-
-
-async def execute_bash_node(
-    ir: Mapping[str, Any],
-    node_id: str,
-    *,
-    workflow_inputs: Mapping[str, Any] | None = None,
-    node_outputs: Mapping[str, Any] | None = None,
-) -> NodeExecutionResult:
-    """Compatibility wrapper for the original Bash-only vertical slice API."""
-    node = _find_node(ir, node_id)
-    if node["runtime_handler"] != "raticode.bash_command":
-        raise UnsupportedRattishRuntimeError(
-            f"Node {node_id!r} does not use the Bash runtime handler."
-        )
-    return await execute_node(
-        ir,
-        node_id,
-        workflow_inputs=workflow_inputs,
-        node_outputs=node_outputs,
-    )
 
 
 async def _agent_handler(
@@ -2112,6 +2105,99 @@ def _search_result_metadata(metadata: Any) -> dict[str, Any]:
     return result
 
 
+_JSON_KINDS = {list: "an array", str: "a string", bool: "true or false", int: "a number"}
+
+
+def _tabular_text(path: Path, context: RuntimeContext) -> str:
+    """Decode a CSV or JSONL source, dropping the byte-order mark Excel writes."""
+    data = read_bytes_limited(path, max_bytes=context.max_file_read_bytes)
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        line = data[: exc.start].count(b"\n") + 1
+        raise ValueError(
+            f"{path.name} line {line} is not UTF-8 text. Save the file as UTF-8, "
+            'such as Excel\'s "CSV UTF-8" format.'
+        ) from None
+
+
+def _csv_delimiter(path: Path, text: str) -> str:
+    """Tab for .tsv; otherwise the one delimiter the header line uses, or a comma."""
+    if path.suffix.lower() == ".tsv":
+        return "\t"
+    header = text.split("\n", 1)[0]
+    found = [mark for mark in (",", ";", "\t") if mark in header]
+    return found[0] if len(found) == 1 else ","
+
+
+def _blank_cell(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _table_headers(name: str, where: str, values: Sequence[Any]) -> list[str]:
+    headers = ["" if value is None else str(value) for value in values]
+    # Spreadsheets often carry empty columns past the last header; ignore them.
+    while headers and not headers[-1].strip():
+        headers.pop()
+    if not headers:
+        raise ValueError(f"{name} {where} is an empty header row; it must name each column.")
+    columns: dict[str, int] = {}
+    for column, header in enumerate(headers, 1):
+        if not header.strip():
+            raise ValueError(
+                f"{name} {where}: column {column} has no header. Name it or delete the column."
+            )
+        if header in columns:
+            raise ValueError(
+                f"{name} {where}: the header {header!r} names columns {columns[header]} and "
+                f"{column}. Give each column its own name."
+            )
+        columns[header] = column
+    return headers
+
+
+def _table_items(
+    name: str,
+    rows: Iterable[tuple[str, Sequence[Any]]],
+    append_item: Callable[[dict[str, Any]], None],
+) -> None:
+    """Turn rows after the header into items; short rows get null for missing cells."""
+    headers: list[str] | None = None
+    for where, values in rows:
+        if headers is None:
+            headers = _table_headers(name, where, values)
+            continue
+        if any(not _blank_cell(value) for value in values[len(headers) :]):
+            used = max(index for index, value in enumerate(values, 1) if not _blank_cell(value))
+            raise ValueError(
+                f"{name} {where} has {used} values but the header row names {len(headers)} "
+                "columns. Quote values that contain the delimiter, or add a header for the "
+                "extra column."
+            )
+        append_item(
+            {
+                header: values[index] if index < len(values) else None
+                for index, header in enumerate(headers)
+            }
+        )
+
+
+def _csv_rows(name: str, text: str, delimiter: str) -> Iterator[tuple[str, list[str]]]:
+    with io.StringIO(text, newline="") as stream:
+        reader = csv.reader(stream, delimiter=delimiter)
+        previous_line = 0
+        while True:
+            try:
+                values = next(reader)
+            except StopIteration:
+                return
+            except csv.Error as exc:
+                raise ValueError(f"{name} line {reader.line_num}: {exc}.") from None
+            first_line, previous_line = previous_line + 1, reader.line_num
+            if values:
+                yield f"line {first_line}", values
+
+
 def _tabular_loop_items(path: Path, context: RuntimeContext) -> list[dict[str, Any]]:
     if path.stat().st_size > context.max_file_read_bytes:
         raise ValueError("Loop tabular source exceeds the per-file read limit.")
@@ -2130,30 +2216,43 @@ def _tabular_loop_items(path: Path, context: RuntimeContext) -> list[dict[str, A
             raise ValueError("Loop tabular content exceeds the aggregate read limit.")
         items.append(item)
 
-    if path.suffix.lower() == ".jsonl":
-        for line in read_text_limited(path, max_bytes=context.max_file_read_bytes).splitlines():
+    suffix = path.suffix.lower()
+    if suffix == ".jsonl":
+        text = _tabular_text(path, context).replace("\r\n", "\n").replace("\r", "\n")
+        for number, line in enumerate(text.split("\n"), 1):
             if line.strip():
                 if len(items) >= DEFAULT_RESOURCE_LIMITS.max_fanout_items:
                     raise ValueError("Loop tabular source exceeds the fan-out item limit.")
-                append_item(dict(json.loads(line)))
-    elif path.suffix.lower() == ".csv":
-        text = read_bytes_limited(path, max_bytes=context.max_file_read_bytes).decode("utf-8")
-        with io.StringIO(text, newline="") as stream:
-            for row in csv.DictReader(stream):
-                append_item(dict(row))
-    elif path.suffix.lower() == ".xlsx":
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"{path.name} line {number} is not valid JSON: {exc.msg} "
+                        f"(column {exc.colno})."
+                    ) from None
+                if not isinstance(value, dict):
+                    kind = "null" if value is None else _JSON_KINDS.get(type(value), "a number")
+                    raise ValueError(
+                        f"{path.name} line {number} is {kind}; each line must be a JSON "
+                        'object such as {"name": "Bo"}.'
+                    )
+                append_item(value)
+    elif suffix in {".csv", ".tsv"}:
+        text = _tabular_text(path, context)
+        rows = _csv_rows(path.name, text, _csv_delimiter(path, text))
+        _table_items(path.name, rows, append_item)
+    elif suffix == ".xlsx":
         from gofer.utils.xlsx import open_xlsx_rows
 
         try:
-            rows = open_xlsx_rows(path, max_file_bytes=context.max_file_read_bytes)
+            xlsx_rows = open_xlsx_rows(path, max_file_bytes=context.max_file_read_bytes)
         except ImportError as exc:
             raise ValueError("Loop .xlsx sources require the xlsx optional dependency.") from exc
-        with rows:
-            headers = [str(value) for value in next(rows, ())]
-            for values in rows:
-                append_item(dict(zip(headers, values, strict=False)))
+        with xlsx_rows:
+            numbered = ((f"row {number}", values) for number, values in enumerate(xlsx_rows, 1))
+            _table_items(path.name, numbered, append_item)
     else:
-        raise ValueError("Loop tabular sources support .jsonl, .csv, and .xlsx files.")
+        raise ValueError("Loop tabular sources support .jsonl, .csv, .tsv, and .xlsx files.")
     return items
 
 
@@ -2166,7 +2265,7 @@ async def _loop_handler(
     items: list[dict[str, Any]]
     aggregate_bytes = 0
 
-    def read_content(path: Path) -> str:
+    def read_content(path: Path, label: str, hint: str) -> str:
         nonlocal aggregate_bytes
         if aggregate_bytes + path.stat().st_size > DEFAULT_RESOURCE_LIMITS.max_aggregate_read_bytes:
             raise ValueError("Loop content exceeds the aggregate read limit.")
@@ -2178,7 +2277,13 @@ async def _loop_handler(
             ),
         )
         aggregate_bytes += len(data)
-        return data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError(
+                f"{label} is not UTF-8 text, so include-content can't read it. {hint}"
+            ) from None
+        return text.replace("\r\n", "\n").replace("\r", "\n")
 
     if source_type == "count":
         if source["count"] > DEFAULT_RESOURCE_LIMITS.max_fanout_items:
@@ -2208,7 +2313,12 @@ async def _loop_handler(
                 "directory": str(path.parent),
             }
             if source["include_content"]:
-                item["file_content"] = read_content(path)
+                item["file_content"] = read_content(
+                    path,
+                    path.relative_to(root).as_posix(),
+                    f"Narrow glob (now {source['glob']!r}) to match only text files, "
+                    "such as '*.md'.",
+                )
             items.append(item)
     elif source_type == "trigger-events":
         if len(context.trigger_events) > DEFAULT_RESOURCE_LIMITS.max_fanout_items:
@@ -2222,7 +2332,9 @@ async def _loop_handler(
             if source["include_content"] and isinstance(event_path, str):
                 path = project_path(context.project_root, event_path)
                 if path.is_file():
-                    item["file_content"] = read_content(path)
+                    item["file_content"] = read_content(
+                        path, event_path, "Turn off include-content or send only text files."
+                    )
             items.append(item)
     elif source_type == "infinite":
         items = []
@@ -2765,10 +2877,23 @@ def _resolve_bindings_in(node: Mapping[str, Any], context: RuntimeContext) -> Re
                 raise ValueError(
                     f"Binding {binding['name']!r} can't start. {not_found_message(missing)}"
                 ) from exc
-            raise ValueError(
-                f"Binding {binding['name']!r} could not resolve its source from the "
-                "available runtime data."
-            ) from exc
+            miss = (
+                describe_miss(
+                    binding["source"]["reference"],
+                    workflow_inputs=context.workflow_inputs,
+                    trigger_events=context.trigger_events,
+                    node_outputs=context.node_outputs,
+                    node_statuses=context.node_statuses,
+                    node_errors=context.node_errors,
+                )
+                if binding["source"]["kind"] == "reference"
+                else None
+            )
+            if miss is None:
+                raise ValueError(
+                    f"Binding {binding['name']!r} could not resolve its source."
+                ) from exc
+            raise BindingSourceMissingError(miss.message(binding["name"]), miss.details()) from exc
         delivery = binding["delivery"]
         source = binding["source"]
         local[binding["name"]] = value
@@ -3187,11 +3312,6 @@ def _environment_value(value: Any) -> str:
     if isinstance(value, str):
         return value
     return canonical_json_bytes(value).decode("utf-8")
-
-
-def _shell_command_args(command: str) -> list[str]:
-    """``shell: auto``: PowerShell on Windows, bash elsewhere."""
-    return shells.command_args("auto", command)
 
 
 def _open_resource_command(target: str, resource_type: str, args: list[str]) -> list[str]:

@@ -28,11 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from gofer.ui.rem_decisions import Alternative, DecisionRequest, Evidence, Recommendation
-from gofer.utils.process import (
-    NO_REPOSITORY_PROGRAMS,
-    build_subprocess_env,
-    untrusted_repository_git_env,
-)
+from gofer.utils.process import run_repository_git
 
 CHECK_TOPIC = "checks.fast"
 BRANCH_TOPIC = "branch.integration"
@@ -237,14 +233,7 @@ def _read(root: Path, relative: str) -> str | None:
 
 def _git(root: Path, *args: str) -> str | None:
     try:
-        result = subprocess.run(
-            ["git", *NO_REPOSITORY_PROGRAMS, "-C", str(root), *args],
-            capture_output=True,
-            text=True,
-            timeout=GIT_TIMEOUT_SECONDS,
-            check=False,
-            env=untrusted_repository_git_env(root, build_subprocess_env()),
-        )
+        result = run_repository_git(root, *args, timeout=GIT_TIMEOUT_SECONDS)
     except (OSError, subprocess.SubprocessError):
         return None
     return result.stdout if result.returncode == 0 else None

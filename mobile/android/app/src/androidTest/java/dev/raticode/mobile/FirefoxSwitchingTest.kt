@@ -9,7 +9,8 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.platform.app.InstrumentationRegistry
 import dev.raticode.mobile.browser.BrowserRules
 import dev.raticode.mobile.browser.BrowserRuntime
-import dev.raticode.mobile.browser.FirefoxApps
+import dev.raticode.mobile.browser.BrowserApps
+import dev.raticode.mobile.browser.Firefox
 import dev.raticode.mobile.live.LiveClient
 import dev.raticode.mobile.ui.BrowserPage
 import dev.raticode.mobile.ui.RaticodeTheme
@@ -25,8 +26,8 @@ import org.junit.Test
  * emulator. Pass `musicPage`: a page with a "Play music" button that loops a tone (the host serves it, for example
  * `http://10.0.2.2:8771/index.html`). Checks, with Android's own media sessions as the record of what is playing:
  * - Over Raticode (a Custom Tab): Back, like its ✕, closes the page and its sound stops. This was the user's problem.
- * - In the Firefox app (now the default): Raticode coming back in front leaves Firefox playing, and Return to
- *   Firefox brings back the same page, still playing.
+ * - In the Firefox app (now the default): Raticode coming back in front leaves Firefox playing, and Open Firefox
+ *   brings back the same page, still playing.
  * Screenshots go to `/data/local/tmp/raticode-switch-*.png`.
  *
  * Not yet reliable: an earlier version of this test passed once (November 7, 2026, 21 s). Later runs stalled at the
@@ -135,34 +136,35 @@ class FirefoxSwitchingTest {
     @Test fun switchingKeepsFirefoxAndItsMusic() {
         val page = InstrumentationRegistry.getArguments().getString("musicPage")
         assumeTrue("Pass musicPage, a page with a Play music button", page != null)
-        assumeTrue("Requires Mozilla's Firefox for Android on the emulator", FirefoxApps.find(app)?.usable == true)
+        assumeTrue("Requires Mozilla's Firefox for Android on the emulator", Firefox.APP.find(app)?.usable == true)
         lateinit var browser: BrowserRuntime
         compose.runOnUiThread {
             browser = BrowserRuntime.get(app)
-            browser.setEngine(BrowserRules.ENGINE_FIREFOX)
-            browser.setFirefoxMode(FirefoxApps.MODE_APP)
+            browser.setEngine(Firefox.ENGINE)
+            browser.setAppMode(Firefox.ENGINE, BrowserApps.MODE_APP)
             val client = LiveClient(app)
             compose.activity.setContent { RaticodeTheme { BrowserPage(client, null) {} } }
         }
         try {
             compose.waitUntil(8000) { compose.onAllNodesWithTag("firefoxPage").fetchSemanticsNodes().isNotEmpty() }
             // The Firefox app is the default, offered first, and the page says how to switch.
-            compose.onNodeWithTag("firefoxSwitchHelp").assertExists()
+            compose.onNodeWithTag("firefoxSplitHelp").assertExists()
             compose.onNodeWithTag("firefoxOpens-app").assertIsSelected()
-            // Not in split screen, so there is no button that would only open Firefox full screen.
-            assertTrue(compose.onAllNodesWithTag("firefoxBeside").fetchSemanticsNodes().isEmpty())
+            // Not in split screen: Android 12L and later start one for the beside button; before that there is no button
+            // that would only open Firefox full screen.
+            assertEquals(android.os.Build.VERSION.SDK_INT >= 32, compose.onAllNodesWithTag("firefoxBeside").fetchSemanticsNodes().isNotEmpty())
             pause(800)
             screenshot("page")
 
             // A fresh Firefox's welcome, once, as a user's own Firefox has long finished.
-            compose.onNodeWithTag("firefoxReturn").performScrollTo().performClick()
+            compose.onNodeWithTag("firefoxOpen").performScrollTo().performClick()
             waitFor("Firefox in front") { front() == firefox }
             pause(1500); finishFirefoxWelcome()
             raticodeBack()
 
             // Over Raticode (the old default): closing the Custom Tab with Back, as with its ✕, stops the music.
             compose.onNodeWithTag("firefoxOpens-tab").performScrollTo().performClick()
-            assertEquals(FirefoxApps.MODE_TAB, browser.saved.firefoxMode)
+            assertEquals(BrowserApps.MODE_TAB, BrowserRules.appMode(browser.saved, Firefox.ENGINE))
             playInFirefox(page!!)
             screenshot("custom-tab-playing")
             instrumentation.uiAutomation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
@@ -178,8 +180,8 @@ class FirefoxSwitchingTest {
             assertEquals("Firefox kept playing while Raticode was in front", "playing", firefoxMedia())
             screenshot("raticode-while-playing")
 
-            // Return to Firefox brings back the same page, still playing, without opening another.
-            compose.onNodeWithTag("firefoxReturn").performScrollTo().performClick()
+            // Open Firefox brings back the same page, still playing, without opening another.
+            compose.onNodeWithTag("firefoxOpen").performScrollTo().performClick()
             waitFor("Firefox in front") { front() == firefox }
             waitFor("the same page") { findText("Play music") != null }
             assertEquals("playing", firefoxMedia())

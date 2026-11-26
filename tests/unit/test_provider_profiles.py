@@ -6,11 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from gofer.core.agent import AgentConfig
-from gofer.core.graph import GraphNode
 from gofer.core.http import HttpRequest, HttpResponse
-from gofer.core.operations import AgentOperation, OperationType
-from gofer.core.planner import build_execution_plan
 from gofer.core.provider_profiles import (
     MASKED_SECRET_VALUE,
     ProviderProfile,
@@ -22,7 +18,6 @@ from gofer.core.provider_profiles import (
     save_provider_profiles,
     validate_provider_settings,
 )
-from gofer.core.workflow import AgenticWorkflow, WorkflowConfig
 from gofer.subscriptions.claude_code import ClaudeCodeSubscription
 from gofer.subscriptions.codex import CodexSubscription
 from gofer.subscriptions.direct_api import AnthropicApiSubscription, OpenAiApiSubscription
@@ -305,80 +300,6 @@ def test_direct_provider_api_key_secret_resolves_to_runtime_env(
     assert resolved_provider_env(settings)["GOFER_DIRECT_API_KEY"] == "api-key"
 
 
-def test_provider_profile_missing_secret_is_reported_in_plan_and_validation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("GOFER_SECRET_CODEX_TOKEN", raising=False)
-    monkeypatch.delenv("CODEX_TOKEN", raising=False)
-    save_provider_profiles(
-        {
-            "secure": ProviderProfile(
-                name="secure",
-                subscription="codex",
-                secret_refs={"CODEX_API_KEY": "CODEX_TOKEN"},
-            )
-        },
-        tmp_path,
-    )
-    workflow = AgenticWorkflow(WorkflowConfig(id="profiles", name="Profiles"))
-    workflow.register_agent(
-        AgentConfig(
-            agent_id="reviewer",
-            subscription="codex",
-            working_dir=tmp_path,
-            profile="secure",
-        )
-    )
-    workflow.add_operation(
-        GraphNode(
-            node_id="review",
-            operation=AgentOperation(
-                type=OperationType.AGENT,
-                agent_id="reviewer",
-                working_dir=tmp_path,
-            ),
-        )
-    )
-
-    plan = build_execution_plan(workflow, workflow_path=tmp_path / "workflow.toml")
-
-    assert plan["requiredSecrets"] == ["CODEX_TOKEN"]
-    with pytest.raises(ValueError, match="missing secret reference"):
-        workflow.validate(tmp_path / "workflow.toml")
-
-
-def test_direct_provider_missing_api_secret_is_reported_in_plan(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    workflow = AgenticWorkflow(WorkflowConfig(id="direct", name="Direct"))
-    workflow.register_agent(
-        AgentConfig(
-            agent_id="writer",
-            subscription="openai_api",
-            working_dir=tmp_path,
-            model="gpt-5-mini",
-        )
-    )
-    workflow.add_operation(
-        GraphNode(
-            node_id="write",
-            operation=AgentOperation(
-                type=OperationType.AGENT,
-                agent_id="writer",
-                working_dir=tmp_path,
-            ),
-        )
-    )
-
-    plan = build_execution_plan(workflow, workflow_path=tmp_path / "workflow.toml")
-
-    assert plan["requiredSecrets"] == ["OPENAI_API_KEY"]
-    assert plan["providerRequirements"][0]["directApi"] is True
-
-
 def test_codex_profile_command_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = ResolvedProviderSettings(
         profile_name="quality",
@@ -463,71 +384,6 @@ def test_claude_profile_command_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     # The profile's MCP server is allowed by name; Claude Code has no --mcp-server.
     assert cmd.count("--allowedTools") == 3
     assert "mcp__docs" in cmd and "--mcp-server" not in cmd
-
-
-def test_workflow_validation_rejects_missing_profile(tmp_path: Path) -> None:
-    workflow = AgenticWorkflow(WorkflowConfig(id="profiles", name="Profiles"))
-    workflow.register_agent(
-        AgentConfig(
-            agent_id="reviewer",
-            subscription="codex",
-            working_dir=tmp_path,
-            profile="missing",
-        )
-    )
-    workflow.add_operation(
-        GraphNode(
-            node_id="review",
-            operation=AgentOperation(
-                type=OperationType.AGENT,
-                agent_id="reviewer",
-                working_dir=tmp_path,
-            ),
-        )
-    )
-
-    with pytest.raises(ValueError, match="Provider profile 'missing' was not found"):
-        workflow.validate(tmp_path / "workflow.toml")
-
-
-def test_workflow_validation_rejects_unsupported_profile_settings(
-    tmp_path: Path,
-) -> None:
-    save_provider_profiles(
-        {
-            "unsupported": ProviderProfile(
-                name="unsupported",
-                subscription="codex",
-                tools=["Read"],
-            )
-        },
-        tmp_path,
-    )
-    workflow = AgenticWorkflow(WorkflowConfig(id="profiles", name="Profiles"))
-    workflow.register_agent(
-        AgentConfig(
-            agent_id="reviewer",
-            subscription="codex",
-            working_dir=tmp_path,
-            profile="unsupported",
-        )
-    )
-    workflow.add_operation(
-        GraphNode(
-            node_id="review",
-            operation=AgentOperation(
-                type=OperationType.AGENT,
-                agent_id="reviewer",
-                working_dir=tmp_path,
-            ),
-        )
-    )
-
-    plan = build_execution_plan(workflow, workflow_path=tmp_path / "workflow.toml")
-
-    assert any("do not support default tools" in warning for warning in plan["warnings"])
-    with pytest.raises(ValueError, match="do not support default tools"):
-        workflow.validate(tmp_path / "workflow.toml")
 
 
 def test_ui_provider_profile_api_round_trip(tmp_path: Path) -> None:
@@ -732,9 +588,7 @@ def test_acp_provider_profile_round_trip_preserves_custom_model(provider, tmp_pa
     ],
 )
 def test_acp_profiles_reject_unsupported_options(provider, field, value):
-    settings = ResolvedProviderSettings.model_validate(
-        {"subscription": provider, field: value}
-    )
+    settings = ResolvedProviderSettings.model_validate({"subscription": provider, field: value})
     if provider == "grok" and field == "effort":
         validate_provider_settings(settings)
     else:

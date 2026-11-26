@@ -46,4 +46,46 @@ class OpenedFilesTest {
         OpenedFiles.cleanup(cache, keepMillis = 0)
         assertEquals(0, OpenedFiles.directory(cache).listFiles()!!.size)
     }
+
+    @Test fun openHandsTheCopyToTheDefaultAppAndRaticodesOwnViewerAcceptsIt() {
+        val given = OpenedFiles.HandedOut { 0L }
+        val uri = "content://dev.raticode.mobile.opened/opened/3f1c/report.html"
+        val tried = mutableListOf<String>()
+        assertTrue(OpenedFiles.offer(uri, listOf("text/html"), given) { type -> tried += type; true })
+        assertEquals(listOf("text/html"), tried)
+        // Raticode is the default app for HTML, so OpenFileActivity gets this address and must show it.
+        assertTrue(given.contains(uri))
+        assertTrue(dev.raticode.mobile.open.OpenTypes.readableFrom("content", "dev.raticode.mobile.opened", "dev.raticode.mobile",
+            handedOut = given.contains(uri)))
+        // Any other address of Raticode's own stays refused.
+        val other = "content://dev.raticode.mobile.opened/handoff/log.txt"
+        assertFalse(dev.raticode.mobile.open.OpenTypes.readableFrom("content", "dev.raticode.mobile.opened", "dev.raticode.mobile",
+            handedOut = given.contains(other)))
+        assertFalse(given.contains(null))
+    }
+
+    @Test fun openTriesEachTypeAndReportsFalseWhenNoAppTakesTheFile() {
+        val given = OpenedFiles.HandedOut { 0L }
+        val uri = "content://dev.raticode.mobile.opened/opened/9a2b/notes.md"
+        val tried = mutableListOf<String>()
+        assertFalse(OpenedFiles.offer(uri, listOf("text/markdown", "text/plain"), given) { type -> tried += type; false })
+        assertEquals(listOf("text/markdown", "text/plain"), tried)
+        assertFalse(given.contains(uri))
+        // The plain-text fallback is used when only it has an app.
+        assertTrue(OpenedFiles.offer(uri, listOf("text/markdown", "text/plain"), given) { it == "text/plain" })
+        assertTrue(given.contains(uri))
+    }
+
+    @Test fun handedOutCopiesExpireWithTheCopyAndClearOnReset() {
+        var now = 1_000L
+        val given = OpenedFiles.HandedOut { now }
+        given.add("content://x.opened/opened/a/r.pdf")
+        now += OpenedFiles.KEEP_MILLIS - 1
+        assertTrue(given.contains("content://x.opened/opened/a/r.pdf"))
+        now += 1
+        assertFalse(given.contains("content://x.opened/opened/a/r.pdf"))
+        given.add("content://x.opened/opened/b/r.pdf")
+        given.clear()
+        assertFalse(given.contains("content://x.opened/opened/b/r.pdf"))
+    }
 }
