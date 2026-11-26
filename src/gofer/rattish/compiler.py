@@ -25,6 +25,7 @@ from gofer.rattish.contracts import (
 from gofer.rattish.diagnostics import (
     RattishCompileError,
     RattishDiagnostic,
+    RelatedDiagnostic,
     SourcePosition,
     SourceSpan,
     did_you_mean,
@@ -83,6 +84,36 @@ _DURATION_MULTIPLIERS = {
     "m": 60_000,
     "h": 3_600_000,
     "d": 86_400_000,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _CaseSensitiveMapField:
+    code: str
+    label: str
+    reader: str
+
+
+_ENV_KEYS = _CaseSensitiveMapField(
+    "RATTISH_MAP_KEY_CHANGED", "Environment variable", "the program it runs"
+)
+# Map fields whose keys another program matches exactly, by node type. Rattish lowercases
+# unquoted map keys, so env DEBUG: "1" would set debug. HTTP header names are left out
+# because servers compare them case-insensitively. Prompt-file variables and Jev options
+# are left out because Raticode matches those keys itself.
+_CASE_SENSITIVE_MAP_FIELDS: dict[str, dict[str, _CaseSensitiveMapField]] = {
+    "agent": {"env": _ENV_KEYS},
+    "bash-command": {"env": _ENV_KEYS},
+    "shell-script": {"env": _ENV_KEYS},
+    "python-script": {"env": _ENV_KEYS},
+    "http-request": {
+        "params": _CaseSensitiveMapField("RATTISH_MAP_KEY_CHANGED", "URL parameter", "the server")
+    },
+    "mcp-tool": {
+        "arguments": _CaseSensitiveMapField(
+            "RATTISH_MCP_ARGUMENT_KEY_CHANGED", "Argument", "the tool"
+        )
+    },
 }
 
 
@@ -187,6 +218,12 @@ class RattishCompiler:
                 )
             )
 
+        self._duplicate_map_key_errors(
+            ast,
+            context,
+            diagnostics,
+            skip=self._maps_with_own_duplicate_check(ast["workflow"]),
+        )
         workflow = self._analyze_workflow(ast["workflow"], context, diagnostics)
         workflow_inputs = workflow.pop("_input_schemas")
         workflow_outputs_field = workflow.pop("_outputs_field")
@@ -3685,47 +3722,141 @@ class RattishCompiler:
             )
         return None if unresolved else resolved
 
-    def _mcp_argument_key_warnings(
+    def _map_key_changed_warnings(
         self,
         value: Mapping[str, Any],
         node_id: str,
+        field_name: str,
+        rule: _CaseSensitiveMapField,
         context: CompileContext,
         diagnostics: list[RattishDiagnostic],
     ) -> None:
-        """Warn when an unquoted argument key changes spelling, such as maxResults.
+        """Warn when an unquoted key in a case-sensitive map changes spelling.
 
-        Rattish map keys compare case-insensitively, but MCP tools match argument names
-        exactly. A JSON object or a quoted key keeps the spelling.
+        Rattish lowercases unquoted map keys, but environment variables, URL parameters
+        and MCP tool arguments are matched exactly by the program that reads them. A
+        quoted key or a JSON object keeps the spelling.
         """
         if value.get("kind") == "list":
             for item in value.get("items") or []:
-                self._mcp_argument_key_warnings(item, node_id, context, diagnostics)
+                self._map_key_changed_warnings(
+                    item, node_id, field_name, rule, context, diagnostics
+                )
             return
         if value.get("kind") != "map":
             return
         for entry in value.get("entries") or []:
             key = entry["key"]
             if key.get("kind") == "identifier" and key["source"] != key["canonical"]:
+                example = entry["value"].get("source") or "..."
                 diagnostics.append(
                     RattishDiagnostic(
-                        code="RATTISH_MCP_ARGUMENT_KEY_CHANGED",
+                        code=rule.code,
                         severity="warning",
                         phase="semantic",
                         message=(
-                            f"Argument {key['source']!r} of node {node_id!r} is read as "
-                            f"{key['canonical']!r}: unquoted keys ignore case, and the tool "
-                            "matches names exactly."
+                            f"{rule.label} {key['source']!r} of node {node_id!r} is read as "
+                            f"{key['canonical']!r}: unquoted keys ignore case, and "
+                            f"{rule.reader} matches names exactly."
                         ),
                         file=context.entrypoint,
                         span=self._span(key["span"]),
-                        details={"node": node_id, "key": key["source"]},
+                        details={
+                            "node": node_id,
+                            "field": field_name,
+                            "key": key["source"],
+                            "read_as": key["canonical"],
+                        },
                         suggestions=(
-                            f'Quote the key ("{key["source"]}": ...) or write arguments as a '
-                            "JSON object.",
+                            f'Quote the key ("{key["source"]}": {example}) or write '
+                            f"{field_name} as a JSON object.",
                         ),
                     )
                 )
-            self._mcp_argument_key_warnings(entry["value"], node_id, context, diagnostics)
+            self._map_key_changed_warnings(
+                entry["value"], node_id, field_name, rule, context, diagnostics
+            )
+
+    def _duplicate_map_key_errors(
+        self,
+        node: Any,
+        context: CompileContext,
+        diagnostics: list[RattishDiagnostic],
+        *,
+        skip: frozenset[int] = frozenset(),
+    ) -> None:
+        """Report two entries of one block map whose keys are equal once read.
+
+        Unquoted keys compare lowercased and quoted keys compare exactly, the same keys
+        the configuration uses, so the later entry would silently replace the earlier
+        one. Maps in ``skip`` already report their own duplicates.
+        """
+        if isinstance(node, list):
+            for item in node:
+                self._duplicate_map_key_errors(item, context, diagnostics, skip=skip)
+            return
+        if not isinstance(node, Mapping):
+            return
+        if node.get("kind") == "map" and id(node) not in skip:
+            first_keys: dict[str, Mapping[str, Any]] = {}
+            for entry in node.get("entries") or []:
+                key = entry["key"]
+                name = self._map_key(key)
+                first = first_keys.setdefault(name, key)
+                if first is key:
+                    continue
+                first_line = int(first["span"]["start"]["line"])
+                diagnostics.append(
+                    RattishDiagnostic(
+                        code="RATTISH_DUPLICATE_MAP_KEY",
+                        severity="error",
+                        phase="semantic",
+                        message=(
+                            f"Map key {key['source']} repeats {first['source']} on line "
+                            f"{first_line}: both are read as {name!r}, so only the last "
+                            "value would be kept."
+                        ),
+                        file=context.entrypoint,
+                        span=self._span(key["span"]),
+                        related=(
+                            RelatedDiagnostic(
+                                file=context.entrypoint,
+                                span=self._span(first["span"]),
+                                message=f"First entry for {name!r}.",
+                            ),
+                        ),
+                        details={"key": name, "first_line": first_line},
+                        suggestions=(
+                            "Remove one of the entries, or quote both keys when their "
+                            "case is meant to differ.",
+                        ),
+                    )
+                )
+        for child in node.values():
+            if isinstance(child, (Mapping, list)):
+                self._duplicate_map_key_errors(child, context, diagnostics, skip=skip)
+
+    @staticmethod
+    def _maps_with_own_duplicate_check(workflow: Mapping[str, Any]) -> frozenset[int]:
+        """Workflow inputs and outputs maps report repeats as duplicate names already."""
+        skipped: set[int] = set()
+        for entry in workflow.get("entries") or []:
+            if entry.get("kind") != "field":
+                continue
+            value = entry.get("value") or {}
+            if value.get("kind") != "map":
+                continue
+            name = entry["name"]["canonical"]
+            if name == "inputs":
+                skipped.add(id(value))
+            elif name == "outputs":
+                skipped.add(id(value))
+                skipped.update(
+                    id(item["value"])
+                    for item in value.get("entries") or []
+                    if item["value"].get("kind") == "map"
+                )
+        return frozenset(skipped)
 
     def _run_static_diagnostics(
         self,
@@ -3771,10 +3902,18 @@ class RattishCompiler:
             self._plaintext_secret_warnings(
                 declaration, node_id, secret_fields, context, diagnostics
             )
-        if contract.document["node_type"] == "mcp-tool" and "arguments" in declared_fields:
-            self._mcp_argument_key_warnings(
-                declared_fields["arguments"]["value"], node_id, context, diagnostics
-            )
+        for field_name, rule in _CASE_SENSITIVE_MAP_FIELDS.get(
+            contract.document["node_type"], {}
+        ).items():
+            if field_name in declared_fields:
+                self._map_key_changed_warnings(
+                    declared_fields[field_name]["value"],
+                    node_id,
+                    field_name,
+                    rule,
+                    context,
+                    diagnostics,
+                )
         if (
             "sandbox_off" in rules
             and configuration.get("sandbox") == "off"

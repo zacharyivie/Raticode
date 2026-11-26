@@ -8,49 +8,31 @@ from typing import Literal
 # A post's own states while it is reviewed. After approval a post's state comes from its
 # variants (``derive_post_state``).
 REVIEW_STATES = frozenset({"draft", "proposed", "changes_requested", "declined", "expired"})
-POST_STATES = REVIEW_STATES | frozenset(
-    {
-        "approved",
-        "scheduled",
-        "due",
-        "publishing",
-        "published",
-        "partly_published",
-        "failed",
-        "missed",
-        "cancelled",
-        "needs_attention",
-    }
-)
 
 # A variant is one post on one account.
-VARIANT_STATES = frozenset(
-    {
-        "pending",  # not approved yet
-        "approved",  # approved for now; the publisher sends it on its next pass
-        "scheduled",  # approved for later
-        "held_by_platform",  # handed to the platform's own scheduler
-        "due",  # tap to publish: waiting for the user's Publish tap
-        "publishing",
-        "published",
-        "failed",
-        "missed",
-        "needs_reconnect",
-        "outcome_unknown",
-        "held",  # a cap was reached; waits for the user
-        "ready_to_post",  # manual platforms: copy, paste, then mark posted
-        "posted_by_you",
-        "cancelled",
-    }
-)
+VariantState = Literal[
+    "pending",  # not approved yet
+    "approved",  # approved for now; the publisher sends it on its next pass
+    "scheduled",  # approved for later
+    "held_by_platform",  # handed to the platform's own scheduler
+    "due",  # tap to publish: waiting for the user's Publish tap
+    "publishing",
+    "published",
+    "failed",
+    "missed",
+    "needs_reconnect",
+    "outcome_unknown",
+    "held",  # a cap was reached; waits for the user
+    "ready_to_post",  # manual platforms: copy, paste, then mark posted
+    "posted_by_you",
+    "cancelled",
+]
 DONE_VARIANT_STATES = frozenset({"published", "posted_by_you", "cancelled"})
 PROBLEM_VARIANT_STATES = frozenset(
     {"failed", "missed", "needs_reconnect", "outcome_unknown", "held"}
 )
-WAITING_VARIANT_STATES = frozenset({"approved", "scheduled", "held_by_platform"})
 
 DeliveryMode = Literal["api", "platform_held", "tap_to_publish", "manual"]
-DELIVERY_MODES: frozenset[str] = frozenset({"api", "platform_held", "tap_to_publish", "manual"})
 
 DEFAULT_LATE_WINDOW_MINUTES = 120
 MAX_LATE_WINDOW_MINUTES = 7 * 24 * 60
@@ -168,11 +150,9 @@ PLATFORMS: dict[str, Platform] = {
         ),
     )
 }
-API_PLATFORMS = frozenset(key for key, value in PLATFORMS.items() if value.api)
-MANUAL_PLATFORMS = frozenset(key for key, value in PLATFORMS.items() if not value.api)
 
 
-def derive_post_state(review_state: str, variant_states: list[str]) -> str:
+def derive_post_state(review_state: str, variant_states: list[VariantState]) -> str:
     """A post's state from its variants once approved; its review state before that."""
     if review_state in REVIEW_STATES or not variant_states:
         return review_state

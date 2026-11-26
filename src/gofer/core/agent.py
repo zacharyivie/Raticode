@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import inspect
 import json
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
@@ -92,21 +91,6 @@ class Agent:
         if memory:
             prompt_text = format_agent_memory(memory, current_prompt)
         extra_paths = configured_extra_paths(self._config)
-        execute_kwargs: dict[str, Any] = {}
-        if max_output_bytes is not None and _accepts_execute_kwarg(
-            self._subscription,
-            "max_output_bytes",
-        ):
-            execute_kwargs["max_output_bytes"] = max_output_bytes
-        if timeout is not None and _accepts_execute_kwarg(self._subscription, "timeout"):
-            execute_kwargs["timeout"] = timeout
-        if on_thought is not None and _accepts_execute_kwarg(self._subscription, "on_thought"):
-            execute_kwargs["on_thought"] = on_thought
-        if provider_settings is not None and _accepts_execute_kwarg(
-            self._subscription,
-            "provider_settings",
-        ):
-            execute_kwargs["provider_settings"] = provider_settings
         effective_env = {
             **(resolved_provider_env(provider_settings) if provider_settings else {}),
             **self._config.env,
@@ -136,7 +120,10 @@ class Agent:
             env=effective_env,
             cancel_event=cancel_event,
             extra_paths=extra_paths,
-            **execute_kwargs,
+            max_output_bytes=max_output_bytes,
+            timeout=timeout,
+            on_thought=on_thought,
+            provider_settings=provider_settings,
         )
         return AgentResult(
             agent_id=self._config.agent_id,
@@ -156,30 +143,6 @@ class Agent:
             or (provider_settings.model if provider_settings else self._config.model),
             usage_metadata=result.usage_metadata,
         )
-
-
-def agent_external_access_warnings(
-    config: AgentConfig,
-    path_base: Path | None = None,
-) -> list[str]:
-    warnings_: list[str] = []
-    try:
-        working_dir = _resolve_config_path(config.working_dir, path_base).resolve()
-    except OSError:
-        working_dir = _resolve_config_path(config.working_dir, path_base)
-    for extra_path in config.extra_paths:
-        try:
-            resolved_extra = _resolve_config_path(extra_path, path_base).resolve()
-        except OSError:
-            resolved_extra = _resolve_config_path(extra_path, path_base)
-        if resolved_extra == working_dir or working_dir in resolved_extra.parents:
-            continue
-        warnings_.append(
-            f"Agent '{config.agent_id}' grants provider filesystem access outside "
-            f"working_dir: extra_paths entry '{resolved_extra}' is outside "
-            f"'{working_dir}'"
-        )
-    return warnings_
 
 
 def format_agent_memory(memory: list[dict[str, str]], current_prompt: str) -> str:
@@ -230,10 +193,3 @@ def _resolve_config_path(path: Path, path_base: Path | None) -> Path:
     if expanded.is_absolute() or path_base is None:
         return expanded
     return path_base / expanded
-
-
-def _accepts_execute_kwarg(subscription: Subscription, name: str) -> bool:
-    parameters = inspect.signature(subscription.execute).parameters
-    return name in parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    )

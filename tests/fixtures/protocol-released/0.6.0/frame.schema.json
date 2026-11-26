@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 2
+    },
+    "session_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "mode": {
+      "enum": [
+        "pair",
+        "resume"
+      ]
+    },
+    "direction": {
+      "enum": [
+        "initiator_to_responder",
+        "responder_to_initiator"
+      ]
+    },
+    "index": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "body": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 2731,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    }
+  },
+  "required": [
+    "version",
+    "session_id",
+    "mode",
+    "direction",
+    "index",
+    "body"
+  ],
+  "additionalProperties": false
+}

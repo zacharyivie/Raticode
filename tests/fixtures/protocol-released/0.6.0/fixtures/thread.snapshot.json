@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "id": "10000000-0000-4000-8000-000000000005",
+  "thread_id": "00000000-0000-4000-8000-000000000002",
+  "request_id": "00000000-0000-4000-8000-000000000001",
+  "sequence": 5,
+  "type": "thread.snapshot",
+  "payload": {
+    "title": "Attachment previews",
+    "project_id": "00000000-0000-4000-8000-000000000004",
+    "resource_ids": [
+      "00000000-0000-4000-8000-000000000005"
+    ],
+    "provider": "codex",
+    "model": "desktop-selected",
+    "revision": 1
+  }
+}

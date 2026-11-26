@@ -456,6 +456,22 @@ show its reason under Settings > Devices.
    the complete asset inventory and every remote SHA-256. It changes the existing
    draft's candidate name to the version tag and publishes it. It verifies the
    public asset bytes afterward. It never replaces release assets.
+7. Once a new phone app version is public, refresh the frozen protocol copy that the
+   desktop is tested against: `tests/fixtures/protocol-released/` holds one folder,
+   named for the release it came from (`0.6.0` came from `v0.6.0`, the same commit as
+   `mobile-v0.36.0`; name a phone-only release like `mobile-0.37.0`). From a worktree
+   off `dev`, replacing the placeholders:
+
+   ```bash
+   git rm -rq tests/fixtures/protocol-released
+   mkdir -p tests/fixtures/protocol-released/A.B.C
+   git archive mobile-vA.B.C src/gofer/devices/protocol/v2 \
+     | tar -x --strip-components=5 -C tests/fixtures/protocol-released/A.B.C
+   python -m pytest tests/unit/test_protocol_released_compat.py
+   ```
+
+   Commit the folder and land it on `dev` once the test passes. Keep the `GATED` entries
+   even when the new copy knows their fields: phones older than it still rely on the gate.
 
 A draft is created with a `candidate-<SHA>-<RUN>-<ATTEMPT>` identifier;
 it does not push a `v*` tag. Publication discovers ready drafts through their

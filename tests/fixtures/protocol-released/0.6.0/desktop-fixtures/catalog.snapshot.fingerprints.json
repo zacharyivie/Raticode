@@ -1,0 +1,36 @@
+{
+  "version": 2,
+  "id": "00000000-0000-4000-8000-000000000002",
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000003",
+  "sequence": 1,
+  "type": "catalog.snapshot",
+  "payload": {
+    "revision": 1,
+    "projects": [
+      {
+        "id": "00000000-0000-4000-8000-000000000010",
+        "name": "Raticode",
+        "fingerprint": "deb87fabd17715bb31ad4cf4ffb9494eeb15f8d33d85b031a301c64ab3417eaa"
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000011",
+        "name": "Notes",
+        "fingerprint": null
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000012",
+        "name": "Scratch"
+      }
+    ],
+    "resources": [],
+    "providers": [
+      {
+        "id": "codex",
+        "models": [
+          "cli-default"
+        ]
+      }
+    ]
+  }
+}

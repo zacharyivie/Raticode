@@ -66,7 +66,7 @@ object DesktopViews {
         // Each thread's menu has its own choices; a new thread's has none.
         ThreadAccounts.OP -> ThreadAccounts.key(params.optString("thread_id"))
         // A sign-in answers with that account's state; provider.accounts carries its code after that.
-        ThreadAccounts.SIGN_IN -> ThreadAccounts.SIGN_IN_KEY + params.optString("name")
+        ThreadAccounts.SIGN_IN -> ThreadAccounts.signInKey(params)
         else -> if (op.startsWith("rem.")) "rem.home" else op
     }
 

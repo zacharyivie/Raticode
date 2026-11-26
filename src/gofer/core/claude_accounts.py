@@ -219,11 +219,6 @@ def get_account(name: str, data_dir: Path | None = None) -> ProviderProfile:
     return _accounts.get_account(name, data_dir, PROVIDER)
 
 
-def account_environment(base: dict[str, str] | None = None, *, config_dir: Path) -> dict[str, str]:
-    """A full child environment that uses only this folder's sign-in."""
-    return ADAPTER.environment(config_dir, base)
-
-
 def copy_setup(source: Path, target: Path) -> list[str]:
     """Copy the allowlisted setup items; symlinks are skipped, nothing else is read."""
     return _accounts.copy_setup(source, target, SETUP_ALLOWLIST)

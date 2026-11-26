@@ -1,23 +1,15 @@
-import { apiUrl } from "./api.js";
+import { apiJson } from "./api.js";
 
 // Project setup for new worktrees (backend: gofer/ui/worktree_setup.py).
 
-async function send(path, options) {
-  const response = await fetch(apiUrl(`/worktree-setup${path}`), options);
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `Request failed (${response.status}).`);
-  return payload;
-}
-
-function post(path, body) {
-  return send(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-}
+const send = (path, options = {}) =>
+  apiJson(`/worktree-setup${path}`, { ...options, failure: status => `Request failed (${status}).` });
 
 export const worktreeSetupApi = {
   load: project => send(`?project=${encodeURIComponent(project)}`),
   pending: () => send("/pending"),
-  approve: (project, sha256) => post("/approve", { project, sha256 }),
-  revoke: project => post("/revoke", { project }),
+  approve: (project, sha256) => send("/approve", { method: "POST", body: { project, sha256 } }),
+  revoke: project => send("/revoke", { method: "POST", body: { project } }),
 };
 
 // The setup version waiting for the user's decision, or null when nothing is waiting.

@@ -38,7 +38,8 @@ change them through it.
   them, its questions are filed here as ordinary requests tagged with the plan's ID
   (``item["plan"]``, ``P-n``) and the plan itself is kept in ``book["plans"]``. Plan
   questions always wait for the user. When the last one is settled the plan becomes
-  ``ready`` (``_settle_plans``), and Rem's home hands it back to Rem once.
+  ``ready`` (``_settle_plans``), and Rem's home hands it back to Rem once. Its answers
+  reach only the prompts of work that cites the plan or the decision (``for_prompt``).
 """
 
 from __future__ import annotations
@@ -66,7 +67,6 @@ EDITS_KEPT = 50
 # The words Rem quotes from the user's message must be at least this long once normalized,
 # so a stray "yes" or "ok" can't stand for a request to change a decision.
 SAID_MIN = 10
-EDIT_STATUSES = ("waiting", "applied", "cancelled", "replaced")
 # A change's parts, in the order a card shows them, with the label it shows.
 EDIT_FIELDS = (
     ("question", "Question"),
@@ -515,24 +515,17 @@ def _inside(project: Path, ref: str) -> Path | None:
 
 
 def _commit_exists(project: Path, ref: str) -> bool:
-    from gofer.utils.process import NO_REPOSITORY_PROGRAMS, untrusted_repository_git_env
+    from gofer.utils.process import run_repository_git
 
     try:
-        env = untrusted_repository_git_env(project, {"PATH": "/usr/bin:/bin"})
-        result = subprocess.run(
-            [
-                "git",
-                *NO_REPOSITORY_PROGRAMS,
-                "-C",
-                str(project),
-                "cat-file",
-                "-e",
-                ref + "^{commit}",
-            ],
-            capture_output=True,
+        result = run_repository_git(
+            project,
+            "cat-file",
+            "-e",
+            ref + "^{commit}",
             timeout=15,
-            check=False,
-            env=env,
+            env={"PATH": "/usr/bin:/bin"},
+            text=False,
         )
     except (OSError, subprocess.SubprocessError):
         return False
@@ -1754,6 +1747,40 @@ def asked_line(block: dict[str, Any] | None) -> str:
     return " · ".join(parts)
 
 
+def read_from(item: dict[str, Any]) -> dict[str, str] | None:
+    """The commit that added a record file Raticode read in, until the user decides on it.
+
+    ``{"commit", "author"}`` (either may be empty for a file read before commits were
+    kept), or None for a decision that didn't come from the repository or that the user
+    has since confirmed or changed in Raticode.
+    """
+    source = item.get("source") or {}
+    if source.get("via") != "repository":
+        return None
+    if any(isinstance(e, dict) and e.get("actor") == "user" for e in item.get("history") or []):
+        return None
+    return {"commit": str(source.get("commit") or ""), "author": str(source.get("author") or "")}
+
+
+def decided_line(item: dict[str, Any]) -> str:
+    """``You decided on 2026-11-18.`` and the other ways, as every client says it."""
+    read = read_from(item) if item.get("decided_by") == "user" else None
+    if (item.get("source") or {}).get("via") == "carried over":
+        who = "Raticode carried it over from what it already did"
+    elif item.get("decided_by") == "rem":
+        who = "Rem decided (auto mode)"
+    elif read is not None:
+        by = f" by {read['author']}" if read["author"] else ""
+        added = f": added in {read['commit']}{by}" if read["commit"] else ""
+        who = f"Read from the repository{added}"
+    elif item.get("decided_by") == "user":
+        who = "You decided"
+    else:
+        return ""
+    day = str(item.get("decided_at") or "")[:10]
+    return f"{who} on {day}." if day else f"{who}."
+
+
 def view(
     book: dict[str, Any],
     project: str | None = None,
@@ -1844,14 +1871,49 @@ def _left_out(count: int, folders: list[str]) -> dict[str, Any]:
     }
 
 
-def for_prompt(book: dict[str, Any], projects: list[str], text: str = "") -> list[dict[str, Any]]:
+# Plans whose answers Rem's chat still lists: asking, or settled and not yet handed back.
+# The hand-back turn carries every answer itself (rem_plans.for_prompt).
+PLANS_IN_CHAT = frozenset({"asking", "ready"})
+
+
+def _cites(text: str, identity: str) -> bool:
+    return bool(re.search(rf"(?<![\w-]){re.escape(identity)}(?![\w-])", text))
+
+
+def _for_plan_work(item: dict[str, Any], text: str, open_plans: frozenset[str]) -> bool:
+    """Whether a plan's answer belongs in this prompt.
+
+    A plan's facts matter only to the work that rests on them: a task citing the plan
+    (``P-n``, as each slice ticket's "Rests on D-x (plan P-n)" does) or the decision
+    itself, and Rem's chat while the plan in ``open_plans`` is still asking or ready.
+    Facts without a plan tag, the facts only a scan sets and decision records always count.
+    """
+    plan = item.get("plan")
+    if not plan or item.get("remember_as") == "record" or item["topic"] in SCAN_ONLY_TOPICS:
+        return True
+    return plan in open_plans or _cites(text, str(plan)) or _cites(text, str(item["id"]))
+
+
+def for_prompt(
+    book: dict[str, Any],
+    projects: list[str],
+    text: str = "",
+    *,
+    chat: bool = False,
+    every_plan: bool = False,
+) -> list[dict[str, Any]]:
     """Decisions in force for these projects (and those about the user), within a budget.
 
     A worker or Rem's model reads this short index so it uses recorded answers instead of
     asking, and keeps to the project's decision records. Plain facts (``branch.integration``,
     ``checks.fast``, ``decisions.folder`` and every other answer that isn't a record) come
-    first and are never left out. Each record is one short entry: its ID, topic, the first
-    sentence of its decision and its file, where the paths and full text are one read away.
+    first and are never left out, except a plan's answers (``_for_plan_work``): those go
+    only to a ``text`` that cites the plan or the decision, and with ``chat`` (Rem's chat)
+    while the plan is asking or ready. ``every_plan`` keeps them all: self-work research
+    lists them so a proposal can name a plan answer it contradicts (``conflicts_with``),
+    the only way the decision guard catches a contradicted fact. Each record is one short
+    entry: its ID, topic, the first sentence of its decision and its file, where the paths
+    and full text are one read away.
     With more records than fit, those whose words or paths appear in ``text`` (the task)
     come first, then the newest, and a last entry says how many were left out and where
     they are. Reviewers get the full text of the records a change touches separately
@@ -1860,7 +1922,18 @@ def for_prompt(book: dict[str, Any], projects: list[str], text: str = "") -> lis
     from gofer.ui import rem_decision_records as decision_records
 
     keys = {project_key(p) for p in projects if p} | {None}
-    found = [i for i in book["items"] if i["status"] in IN_FORCE and i.get("project") in keys]
+    open_plans = frozenset(
+        str(plan.get("id"))
+        for plan in book.get("plans") or []
+        if chat and plan.get("status", "asking") in PLANS_IN_CHAT
+    )
+    found = [
+        i
+        for i in book["items"]
+        if i["status"] in IN_FORCE
+        and i.get("project") in keys
+        and (every_plan or _for_plan_work(i, text, open_plans))
+    ]
     words = set(re.findall(r"[a-z0-9]{4,}", text.casefold()))
 
     def relevant(item: dict[str, Any]) -> int:

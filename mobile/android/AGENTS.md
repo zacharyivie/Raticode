@@ -18,7 +18,6 @@ This Android Kotlin/Jetpack Compose app opens into live pairing and authorized d
 - `app/src/main/java/dev/raticode/mobile/data`: bounded document import and file metadata helpers.
 - `app/src/test`: local behavior tests.
 - `app/src/androidTest`: emulator interaction tests.
-- `protocol/v1`: application schemas and public test fixtures.
 - `../../src/gofer/devices/protocol/v2`: the one copy of the v2 schemas and fixtures, shared with the desktop. Change it and the app together in one commit.
 - `.venv-contract/bin/python scripts/check-contract.py`: schema checks after installing protocol/requirements.txt.
 - `gradle/libs.versions.toml`: pinned dependency versions.

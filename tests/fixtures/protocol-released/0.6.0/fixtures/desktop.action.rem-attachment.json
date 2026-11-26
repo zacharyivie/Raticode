@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000166",
+  "id": "10000000-0000-4000-8000-000000000166",
+  "sequence": 166,
+  "type": "desktop.action",
+  "payload": {
+    "op": "rem.attachment",
+    "params": {
+      "message_id": "rem-msg-mw2e26q8-3",
+      "file_id": "771f264b82eb4bd9a48b0319e78e071c"
+    }
+  }
+}

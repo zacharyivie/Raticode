@@ -201,7 +201,7 @@ internal fun WorkflowsPage(client: LiveClient, onBack: (() -> Unit)?, openRun: P
     val params = when {
         inTests && estimating != null -> Workflows.estimateParams(open.orEmpty(), estimating!!.second, estimating!!.first)
         inTests -> Workflows.testsParams(open.orEmpty())
-        open != null && reviewing != null -> JSONObject().put("workflow_id", open).put("trigger_id", reviewing)
+        open != null && reviewing != null -> Workflows.changesParams(open.orEmpty(), reviewing.orEmpty())
         open != null -> JSONObject().put("workflow_id", open).put("input_form", true).apply { runId?.let { put("run_id", it) } }
         showRuns -> Workflows.runsParams(since, status, only)
         else -> JSONObject()

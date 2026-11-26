@@ -71,3 +71,13 @@
 /* Let long headings wrap in the "On this page" outline instead of ending in "…". The padding keeps
    the first line where VitePress's active-heading marker expects a 32px row. */
 .docs-layout .VPDocAsideOutline .outline-link { white-space: normal; line-height: 18px; padding: 7px 0; }
+
+/* The support banner shows once per docs page: under "On this page" while that column is
+   on screen (1280px and wider, see VPDoc), otherwise at the end of the page. */
+.support-banner-end { margin-top: 32px; }
+@media (min-width: 1280px) {
+  .VPDoc.has-aside .support-banner-end { display: none; }
+}
+@media print {
+  .support-banner-end { display: none; }
+}

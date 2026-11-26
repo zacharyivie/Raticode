@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +15,7 @@ from gofer.ui.brain_library import BrainLibrary
 from gofer.ui.case_twins import CaseTwinError, case_twins, existing_twin
 from gofer.ui.report_outputs import ReportTools
 from gofer.ui.second_brain import SecondBrain
+from tests.helpers.brain_library import wait_task
 
 TWIN_ERROR = r"a/Note\.md and a/note\.md differ only by letter case"
 
@@ -34,16 +34,6 @@ def library(tmp_path: Path):
     service = BrainLibrary(tmp_path / "app", start=False)
     yield service
     service.close()
-
-
-def wait_task(library: BrainLibrary, task: dict[str, Any]) -> dict[str, Any]:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        receipt = library.task(task["id"])
-        if receipt["state"] != "running":
-            return receipt
-        time.sleep(0.02)
-    pytest.fail("Second Brain task did not finish")
 
 
 @pytest.fixture

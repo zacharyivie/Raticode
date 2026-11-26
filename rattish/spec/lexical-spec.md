@@ -76,6 +76,17 @@ literal blocks, JSON object member names, JSON string values, and structured-out
 selectors. It never lowercases the source buffer. The concrete tree retains original token
 spelling and the semantic AST stores a separate canonical value for normalized identifiers.
 
+A block-map key is an identifier or a double-quoted string. The compiler lowercases an
+unquoted key, the same as a field name, and keeps a quoted key exactly as written. So
+`DEBUG: "1"` under `env` sets `debug`, while `"DEBUG": "1"` sets `DEBUG`. Where another
+program matches the names exactly (`env` on `agent`, `bash-command`, `shell-script` and
+`python-script`, `params` on `http-request`, and `arguments` on `mcp-tool`), the compiler
+warns when an unquoted key changes spelling.
+
+Block-map keys follow the JSON duplicate rule: two entries in one block map whose keys
+are equal after this step, such as `Path` and `path`, or a key written twice, are a
+semantic error (`RATTISH_DUPLICATE_MAP_KEY`). `"Path"` and `path` are different keys.
+
 ## Identifiers
 
 An `IDENTIFIER` has this regular form:

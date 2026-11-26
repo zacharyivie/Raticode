@@ -34,6 +34,7 @@ from gofer.core.provider_profiles import (
 from gofer.core.usage_credentials import UsageCredentialError, resolve_usage_credentials
 from gofer.subscriptions.acp_transport import (
     AcpRpcError,
+    AcpTransport,
     AcpTransportError,
     open_acp_transport,
 )
@@ -845,6 +846,20 @@ def _codex_account_args(settings: ResolvedProviderSettings) -> list[str] | None:
     return result
 
 
+async def codex_account_read(
+    rpc: AcpTransport,
+    *,
+    client: str = "raticode_usage",
+    timeout: float = REFRESH_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Open a ``codex app-server`` connection and return its ``account/read`` result."""
+    await rpc.request(
+        "initialize", {"clientInfo": {"name": client, "version": "1"}}, timeout=timeout
+    )
+    await rpc.notify("initialized", {})
+    return await rpc.request("account/read", {"refreshToken": False}, timeout=timeout)
+
+
 async def _rpc_allowance(
     provider: str, executable: str, settings: ResolvedProviderSettings, env: dict[str, str]
 ) -> tuple[str, str | None, str, list[dict[str, Any]]]:
@@ -888,17 +903,7 @@ async def _rpc_allowance(
             allow_missing_jsonrpc=provider == "codex",
         ) as rpc:
             if provider == "codex":
-                await rpc.request(
-                    "initialize",
-                    {"clientInfo": {"name": "raticode_usage", "version": "1"}},
-                    timeout=REFRESH_TIMEOUT_SECONDS,
-                )
-                await rpc.notify("initialized", {})
-                account = (
-                    await rpc.request(
-                        "account/read", {"refreshToken": False}, timeout=REFRESH_TIMEOUT_SECONDS
-                    )
-                ).get("account")
+                account = (await codex_account_read(rpc)).get("account")
                 if not isinstance(account, dict):
                     return (
                         "auth_required",
@@ -954,17 +959,7 @@ async def codex_account_allowance(
                 max_output_bytes=MAX_OUTPUT_BYTES,
                 allow_missing_jsonrpc=True,
             ) as rpc:
-                await rpc.request(
-                    "initialize",
-                    {"clientInfo": {"name": "raticode_usage", "version": "1"}},
-                    timeout=REFRESH_TIMEOUT_SECONDS,
-                )
-                await rpc.notify("initialized", {})
-                account = (
-                    await rpc.request(
-                        "account/read", {"refreshToken": False}, timeout=REFRESH_TIMEOUT_SECONDS
-                    )
-                ).get("account")
+                account = (await codex_account_read(rpc)).get("account")
                 if not isinstance(account, dict):
                     return None
                 if account.get("type") != "chatgpt":
@@ -993,7 +988,7 @@ async def grok_account_allowance(
     """
     try:
         with tempfile.TemporaryDirectory(prefix="raticode-usage-") as directory:
-            payload = await _grok_billing(executable, env, Path(directory))
+            payload = await grok_billing(_grok_command(executable), env, Path(directory))
     except (OSError, RuntimeError, TimeoutError, ValueError, AcpTransportError):
         return None
     if not isinstance(payload, dict):
@@ -1001,20 +996,28 @@ async def grok_account_allowance(
     return normalize_grok_billing(payload)
 
 
-async def _grok_billing(executable: str, env: dict[str, str], cwd: Path) -> Any:
+def _grok_command(executable: str) -> list[str]:
+    from gofer.core.grok_accounts import ACP_ARGS
+
+    return [executable, *ACP_ARGS]
+
+
+async def grok_billing(
+    command: list[str],
+    env: dict[str, str],
+    cwd: Path,
+    *,
+    timeout: float = REFRESH_TIMEOUT_SECONDS,
+    max_output_bytes: int = MAX_OUTPUT_BYTES,
+) -> dict[str, Any]:
+    """Grok's ``_x.ai/billing`` result; AcpRpcError keeps the code when Grok refuses."""
     async with open_acp_transport(
-        [executable, "agent", "--no-leader", "stdio"],
-        cwd=cwd,
-        env=env,
-        timeout=REFRESH_TIMEOUT_SECONDS,
-        max_output_bytes=MAX_OUTPUT_BYTES,
+        command, cwd=cwd, env=env, timeout=timeout, max_output_bytes=max_output_bytes
     ) as rpc:
         await rpc.request(
-            "initialize",
-            {"protocolVersion": 1, "clientCapabilities": {}},
-            timeout=REFRESH_TIMEOUT_SECONDS,
+            "initialize", {"protocolVersion": 1, "clientCapabilities": {}}, timeout=timeout
         )
-        return await rpc.request("_x.ai/billing", {}, timeout=REFRESH_TIMEOUT_SECONDS)
+        return await rpc.request("_x.ai/billing", {}, timeout=timeout)
 
 
 async def _grok_allowance(
@@ -1022,7 +1025,7 @@ async def _grok_allowance(
 ) -> tuple[str, str | None, list[dict[str, Any]]]:
     """Grok's ACP billing extension reads the signed-in account without a session."""
     with tempfile.TemporaryDirectory(prefix="raticode-usage-") as directory:
-        payload = await _grok_billing(executable, env, Path(directory))
+        payload = await grok_billing(_grok_command(executable), env, Path(directory))
     windows = normalize_grok_billing(payload)
     if windows:
         return "available", None, windows

@@ -107,8 +107,9 @@ object Workflows {
     fun triggerAction(workflow: Workflow, trigger: WorkflowTrigger, enabled: Boolean): JSONObject = JSONObject()
         .put("workflow_id", workflow.id).put("trigger_id", trigger.id).put("enabled", enabled).apply { if (enabled) put("confirmed", true) }
 
-    fun changesParams(workflow: Workflow, trigger: WorkflowTrigger): JSONObject =
-        JSONObject().put("workflow_id", workflow.id).put("trigger_id", trigger.id)
+    /** Asks for what changed in a trigger's workflow since it was approved. */
+    fun changesParams(workflowId: String, triggerId: String): JSONObject =
+        JSONObject().put("workflow_id", workflowId).put("trigger_id", triggerId)
 
     /**
      * Approves the version [changes] showed; a workflow that changed again since is refused by the desktop.

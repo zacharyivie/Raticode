@@ -138,7 +138,6 @@
 .org-first-worker { border: 1px solid rgb(var(--color-line)); border-radius: 6px; padding: 10px 14px 12px; margin: 0; display: grid; gap: 8px; }
 .org-first-worker legend { padding: 0 6px; font-weight: 600; }
 .org-first-worker legend small { font-weight: 400; color: rgb(var(--color-muted)); margin-left: 4px; }
-.org-collection-entry { border-left: 2px solid rgb(var(--color-line)); padding: 0 16px 16px; margin: 16px 0; }
 .org-banner { display: flex; align-items: center; gap: 10px; padding: 10px 24px; border-bottom: 1px solid rgb(var(--color-line)); font-size: 12px; }
 .org-banner > span { flex: 1; }
 .org-banner .org-button { border: 0; background: transparent; color: inherit; min-height: 28px; height: 28px; }

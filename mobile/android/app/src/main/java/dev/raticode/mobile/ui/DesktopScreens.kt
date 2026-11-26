@@ -87,9 +87,6 @@ internal fun whenText(value: String, past: Boolean = false): String {
     }
 }
 
-/** A run state in the desktop's words ("Working", "Didn't finish", "Stopped"). */
-internal fun runLabel(state: String) = RemTaskStatus.run(state).label
-
 /** Matches the desktop's task status line. */
 internal fun remActivity(task: RemTask): String = RemTaskStatus.activity(task).label
 
@@ -668,7 +665,7 @@ internal fun ColumnScope.LegacyOrganizationView(client: LiveClient, id: String) 
                         }
                     }
                     if (org.employees.isNotEmpty()) item {
-                        SettingsGroup("Employees") {
+                        SettingsGroup("Workers") {
                             org.employees.forEach { e ->
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Column(Modifier.weight(1f)) {

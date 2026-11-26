@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -20,6 +19,7 @@ from gofer.ui.brain_queries import (
     saved_matches,
     semantic_text,
 )
+from tests.helpers.brain_library import wait_idle
 
 TABLE = json.loads(
     (Path(__file__).parents[1] / "fixtures/brain-query-syntax.json").read_text(encoding="utf-8")
@@ -63,15 +63,6 @@ NOTES = {
         "2026-11-13",
     ),
 }
-
-
-def wait_idle(library: BrainLibrary) -> None:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if all(task["state"] != "running" for task in library.snapshot()["tasks"]):
-            return
-        time.sleep(0.02)
-    pytest.fail("Second Brain tasks did not finish")
 
 
 @pytest.fixture

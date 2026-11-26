@@ -9,7 +9,8 @@ import androidx.lifecycle.ViewModelStore
 import androidx.test.platform.app.InstrumentationRegistry
 import dev.raticode.mobile.browser.BrowserRules
 import dev.raticode.mobile.browser.BrowserRuntime
-import dev.raticode.mobile.browser.FirefoxApps
+import dev.raticode.mobile.browser.BrowserApps
+import dev.raticode.mobile.browser.Firefox
 import dev.raticode.mobile.live.*
 import dev.raticode.mobile.ui.LiveScreen
 import dev.raticode.mobile.ui.RaticodeTheme
@@ -104,11 +105,11 @@ class LiveFirefoxBrowserTest {
     @Test fun firefoxAsThePhonesBrowser() {
         val path = InstrumentationRegistry.getArguments().getString("firefoxInvitationFile")
         assumeTrue("Requires disposable fixture with --workspace --remote --desktop --browser", path != null)
-        assumeTrue("Requires Firefox for Android on the emulator", FirefoxApps.find(app)?.usable == true)
+        assumeTrue("Requires Firefox for Android on the emulator", Firefox.APP.find(app)?.usable == true)
         compose.runOnUiThread { compose.activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
         DeviceStore(app).reset()
         lateinit var browser: BrowserRuntime
-        compose.runOnUiThread { browser = BrowserRuntime.get(app); browser.setEngine(BrowserRules.ENGINE_RATICODE); browser.setFirefoxMode(FirefoxApps.MODE_TAB); browser.notice = null }
+        compose.runOnUiThread { browser = BrowserRuntime.get(app); browser.setEngine(BrowserRules.ENGINE_RATICODE); browser.setAppMode(Firefox.ENGINE, BrowserApps.MODE_TAB); browser.notice = null }
         val owners = ViewModelStore()
         lateinit var client: LiveClient
         compose.runOnUiThread {
@@ -128,13 +129,13 @@ class LiveFirefoxBrowserTest {
             compose.onNodeWithTag("engine-firefox").performScrollTo().performClick()
             instrumentation.uiAutomation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
             compose.waitUntil(8000) { compose.onAllNodesWithTag("firefoxPage").fetchSemanticsNodes().isNotEmpty() }
-            assertEquals(BrowserRules.ENGINE_FIREFOX, browser.saved.engine)
+            assertEquals(Firefox.ENGINE, browser.saved.engine)
             compose.onNodeWithText("Version", substring = true).assertIsDisplayed()
             waitFor("computer tabs", client) { has("Fixture docs") }
             screenshot("page.png")
 
             // Open Firefox once and finish its first-run screens, as a user's own Firefox already has.
-            compose.onNodeWithTag("firefoxReturn").performScrollTo().performClick()
+            compose.onNodeWithTag("firefoxOpen").performScrollTo().performClick()
             inFirefoxThenBack(client, "welcome.png", welcome = true)
             // An address opens in Firefox, over Raticode.
             compose.onNodeWithTag("firefoxAddress").performTextReplacement("example.com")
@@ -153,7 +154,7 @@ class LiveFirefoxBrowserTest {
                 shell("am start -a android.settings.SETTINGS")
                 pause(2000)
                 instrumentation.uiAutomation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-                waitFor("turned off", client) { has(FirefoxApps.TURNED_OFF) }
+                waitFor("turned off", client) { has(Firefox.APP.turnedOff) }
                 assertTrue(has("Open Firefox's app settings"))
                 screenshot("turned-off.png")
             } finally { shell("pm enable --user 0 org.mozilla.firefox") }

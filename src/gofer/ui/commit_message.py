@@ -620,6 +620,9 @@ def _validated_message(
 
 
 async def _read_staged_diff(project_root: Path) -> str:
+    # Not run_repository_git: this file serves the user's own Commit button, where the
+    # repository's hooks and signing run on purpose. That is the exception
+    # tests/unit/test_git_repository_programs.py allows for this file's git commands.
     code, diff, stderr = await run_subprocess(
         [
             "git",

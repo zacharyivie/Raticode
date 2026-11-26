@@ -45,6 +45,7 @@ from typing import Any
 
 from gofer.ui import rem_self_work_windows as windows
 from gofer.ui.rem_home_models import ACTIVE, now
+from gofer.utils.instants import stored_instant
 
 MAX_AFTER = 10
 # How deep a chain of waiting tasks is followed to explain a hold.
@@ -89,14 +90,6 @@ PREREQUISITE_GUIDANCE = (
     "results are the starting point: read their reports and build on what they found "
     "instead of repeating that work.\nPrerequisite results:\n"
 )
-
-
-def _instant(value: Any) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 # How many running runs one task can wait for; more than Rem ever runs at once.
@@ -223,8 +216,8 @@ def _newest_since(db: sqlite3.Connection, task_id: str, since: str) -> dict[str,
     if not runs:
         return None
     # Runs are newest first, so only the newest can qualify.
-    floor = _instant(since) if since else None
-    started = _instant(runs[0].get("created_at"))
+    floor = stored_instant(since)
+    started = stored_instant(runs[0].get("created_at"))
     if floor is None or (started is not None and started >= floor):
         return runs[0]
     return None
@@ -350,7 +343,7 @@ def _condition_items(
                 }
             )
     schedule = task.get("schedule") or {}
-    at = _instant(schedule.get("at")) if schedule.get("at") else None
+    at = stored_instant(schedule.get("at"))
     if at is not None:
         label = windows.when_label(at, str(schedule.get("timezone") or "UTC"), clock)
         items.append(
@@ -516,7 +509,7 @@ def queued_text(task: dict[str, Any]) -> str:
     if waits.get("self_work_window"):
         parts.append("after the self-work window ends")
     schedule = task.get("schedule") or {}
-    at = _instant(schedule.get("at")) if schedule.get("at") else None
+    at = stored_instant(schedule.get("at"))
     if at is not None:
         label = windows.when_label(at, str(schedule.get("timezone") or "UTC"), datetime.now(UTC))
         parts.append(f"not before {label}")

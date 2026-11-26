@@ -47,9 +47,6 @@ OWNER_TOKEN_FILENAME = "owner-token"
 ENDPOINT_FILENAME = "endpoint.json"
 AGENT_TOKENS_FILENAME = "agent-tokens.json"
 REM_SETTINGS_FILENAME = "rem-settings.json"
-# Set in the environment of everything the backend starts (providers, Rem workers,
-# workflow commands). The client helpers refuse the owner token when it is present.
-AGENT_SESSION_ENV = "RATICODE_AGENT_SESSION"
 AGENT_TOKEN_PREFIX = "rtk_agent_"
 MAX_REM_SETTINGS_BYTES = 256 * 1024
 _TOKEN_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
@@ -231,10 +228,6 @@ def new_owner_token() -> str:
     return secrets.token_urlsafe(32)
 
 
-def in_agent_session(environ: dict[str, str] | None = None) -> bool:
-    return bool((os.environ if environ is None else environ).get(AGENT_SESSION_ENV))
-
-
 def read_endpoint(data_dir: Path) -> dict[str, Any]:
     """The running headless backend's endpoint record, for clients on this computer."""
     path = endpoint_path(data_dir)
@@ -245,14 +238,22 @@ def read_endpoint(data_dir: Path) -> dict[str, Any]:
     return payload
 
 
-def read_owner_token(data_dir: Path, environ: dict[str, str] | None = None) -> str:
-    """The owner token for a client the user runs; refused inside Rem worker sessions."""
-    if in_agent_session(environ):
-        raise HeadlessError(
-            "This command is running inside a Raticode agent session, which can't use the "
-            "owner token. Use an agent token file instead."
-        )
-    return read_token_file(owner_token_path(data_dir))
+INSTANCE_PROOF_LABEL = b"raticode-instance-proof:"
+_INSTANCE_NONCE = re.compile(r"[0-9a-f]{64}")
+
+
+def instance_proof(token: str, nonce: str) -> str | None:
+    """HMAC-SHA256 of a client's nonce under the owner token, or None for a bad nonce.
+
+    A client checks this before sending the owner token, so a program squatting on a
+    stale endpoint's port can't get it: forging the answer takes the token, and each
+    request carries a fresh nonce (32 random bytes as lowercase hex), so an earlier
+    answer can't be replayed.
+    """
+    if not token or not _INSTANCE_NONCE.fullmatch(nonce):
+        return None
+    message = INSTANCE_PROOF_LABEL + nonce.encode("ascii")
+    return hmac.new(token.encode("utf-8"), message, hashlib.sha256).hexdigest()
 
 
 def publish_endpoint(
@@ -269,6 +270,8 @@ def publish_endpoint(
         "host": host,
         "port": port,
         "pid": os.getpid(),
+        # Answers GET /api/instance/proof; clients check it before sending the token.
+        "proof": 1,
         "dataDir": str(data_dir),
         "tokenFile": str(token_file) if token_file else None,
         # Only the folder's path, so `Raticode doctor` can check the same files.
@@ -524,6 +527,7 @@ AGENT_SECOND_BRAIN_ACTIONS = frozenset(
     {
         "snapshot",
         "search",
+        "passages",
         "original",
         "related",
         "projects",

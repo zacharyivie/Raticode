@@ -13,6 +13,8 @@ node benchmarks/git_performance.cjs
 
 The scheduler probe waits for a nominal 1.2 seconds with 0, 20, and 100 inactive teams. Each synthetic archive contains 512 KiB of padding. CPU is Python process CPU, not whole-desktop utilization. The writes probe measures ten state updates, cumulative SQLite WAL growth with automatic checkpointing disabled, and peak allocations traced during the updates. It excludes migration and fixture creation.
 
+`benchmarks/brain_passages.py COPY_OF_A_BRAIN` indexes a copy of a folder of notes in a throwaway data folder and times what the Second Brain view downloads: the library snapshot after a change, and the `passages` it fetches for every document on the first load and for one changed document. Point it at a copy, because opening a brain writes into its folder and the probe edits files to give documents stored versions. `results/brain-passages-2026-11-24.json` has the samples from an 814-document brain, before and after the snapshot stopped carrying passages: a poll after one change went from 20.1 MB (about 136 ms to build, 73 ms to encode, 38 ms to parse) to 3.1 MB plus 13 KB of passages (about 139 ms, 13 ms and 5 ms). The first load now fetches the passages separately, 16.8 MB in about 130 ms plus 64 ms to encode and 31 ms to parse, after the document list is already on screen.
+
 The Git probe uses a temporary real repository and the production Git runner, with ten unchanged 7 kB files. It records five warm concurrent refreshes and counts subprocesses. It does not invoke any user's Git repository.
 
 For Chromium measurements, select the repository's Node version before npm:

@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000101",
+  "id": "10000000-0000-4000-8000-000000000110",
+  "sequence": 110,
+  "type": "approval.resolve",
+  "payload": {
+    "approval_id": "00000000-0000-4000-8000-000000000009",
+    "action_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "decision": "approve",
+    "choice": "Beta",
+    "instruction": "Only the internal testers."
+  }
+}

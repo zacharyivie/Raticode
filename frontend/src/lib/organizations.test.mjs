@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { test } from "node:test";
 import { historyByDate, teamMembers, teamGroups, projectPeople, employeeTree, reportingHierarchy, eligibleManagers, configurationChanges, newEmployee, taskGroups, changeLabel, activityEntries, actorLabel, formatUsd, usageCost, plural, initials, relativeDay, employeeStatus, attentionSummary, monthUsage, transcriptEntries, reportsCost, dangerousPermission, pendingRequests, runProvenance } from "./organizations.js";
 
@@ -31,10 +32,32 @@ test("task groups lead with plans awaiting approval and skip empty lifecycle sta
   ]);
   assert.deepEqual(groups.map(group => [group.id, group.tasks.map(task => task.id)]), [["approval", ["b"]], ["in_progress", ["d"]], ["todo", ["a"]], ["done", ["c"]]]);
 });
-test("change labels name employees and fields instead of raw identifiers", () => {
+test("organization tabs say Workers, the glossary word, and no tab says Employees", async () => {
+  const { ORGANIZATION_SECTIONS } = await import("./organizations.js");
+  const labels = (ORGANIZATION_SECTIONS || []).map(([, label]) => label);
+  assert.equal(labels[0], "Workers");
+  assert.deepEqual(labels.filter(label => /\bemployees?\b/i.test(label)), []);
+});
+test("Organization screens never call a worker an employee in text people read", () => {
+  // Code keeps `employee` names and the "employee:" actor prefix; prose and labels say worker.
+  const components = new URL("../components/", import.meta.url);
+  const prose = [/\b(?:the|a|an|each|every|this|that|your|all|paused|assigned|rem|new|edit|remove|save|choose|add|resume) employees?\b/gi, /["'>`]\s*Employees?\b/g];
+  const found = fs.readdirSync(components).filter(name => /^Organization.*\.jsx$/.test(name)).flatMap(name => {
+    const source = fs.readFileSync(new URL(name, components), "utf8");
+    return prose.flatMap(pattern => source.match(pattern) || []).map(text => `${name}: ${text}`);
+  });
+  assert.deepEqual(found, []);
+});
+test("waiting reasons read worker while the backend keeps its employee reason codes", async () => {
+  const { waitingReasonText } = await import("./organizations.js");
+  assert.equal(waitingReasonText("Assign an employee"), "Assign a worker");
+  assert.equal(waitingReasonText("Employee is held"), "Worker is held");
+  assert.equal(waitingReasonText("Scheduled for 2026-12-01"), "Scheduled for 2026-12-01");
+});
+test("change labels name workers and fields instead of raw identifiers", () => {
   const config = { employees: [{ id: "mira", name: "Mira Santos" }] };
-  assert.equal(changeLabel("/employees/mira/heartbeatSeconds", config), "Employees › Mira Santos › Heartbeat");
-  assert.equal(changeLabel("/employees/gone/name", config, { employees: [{ id: "gone", name: "Former" }] }), "Employees › Former › Name");
+  assert.equal(changeLabel("/employees/mira/heartbeatSeconds", config), "Workers › Mira Santos › Heartbeat");
+  assert.equal(changeLabel("/employees/gone/name", config, { employees: [{ id: "gone", name: "Former" }] }), "Workers › Former › Name");
   assert.equal(changeLabel("/packageFiles/skills/review/SKILL.md"), "Package files › skills/review/SKILL.md");
   assert.equal(changeLabel("/"), "Whole configuration");
 });

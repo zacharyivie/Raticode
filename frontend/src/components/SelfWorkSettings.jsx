@@ -4,6 +4,7 @@ import { openRemThread } from "../lib/remHomeStore.js";
 import { ALLOWANCE_MODES, activityLine, allowanceMode, allowancePaceLine, autoApproveHint, dailyAllowanceLine, hasAllowanceModes, paceRateWarning, autoApproveWarning, autoPullHint, boardOn, cancelSelfWorkWindow, cappedThreads, hasAutoApprove, modeLabel, remProjectChoices, saveParticipant, saveSelfWork, savedSwitchNote, saveSelfWorkStop, selfWorkAccountChange, selfWorkAccountRows, selfWorkLimitsLine, selfWorkLine, selfWorkStop, selfWorkWindows, lastStopLine, stopJudgmentLine, stopPayload, useKanban, windowDetail, withProject } from "../lib/remKanban.js";
 import { NumberControl, SwitchControl } from "./SettingControls.jsx";
 import SelfWorkReport from "./SelfWorkReport.jsx";
+import { useRovingChoice } from "../lib/useRovingChoice.js";
 import "./Kanban.css";
 
 // Settings > Rem: self-work's switch, thread limit, backlog pulling and Rem's projects. They
@@ -233,10 +234,13 @@ function SelfWorkLimits({ settings, limits, reason, today, paced, save }) {
   </fieldset>;
 }
 
+const ALLOWANCE_MODE_KEYS = ALLOWANCE_MODES.map(([value]) => value);
+
 // Allowance use: Off, Daily cap or Pace to reset. One choice, because a daily cap under a pace
 // line would hold self-work below the line every day.
 function AllowanceUse({ settings, limits, today, paced, row, save }) {
   const mode = allowanceMode(settings);
+  const allowanceUse = useRovingChoice({ keys: ALLOWANCE_MODE_KEYS, selected: mode, onSelect: value => save({ allowance_mode: value }) });
   const status = mode === "pace" ? allowancePaceLine(paced) : dailyAllowanceLine(today);
   const holding = mode === "pace" ? Boolean(paced?.starts === 0) : Boolean(today?.cap_percent && !today?.available);
   const warning = paceRateWarning(settings);
@@ -252,7 +256,7 @@ function AllowanceUse({ settings, limits, today, paced, row, save }) {
       <div role="radiogroup" aria-label="Allowance use" className="inline-flex shrink-0 overflow-hidden rounded-md border border-line">
         {ALLOWANCE_MODES.map(([value, label]) => <button key={value} type="button" role="radio" aria-checked={mode === value} data-mode={value}
           className={`h-7 px-2 text-[11px] font-medium outline-none transition focus-visible:ring-2 focus-visible:ring-brand/40 ${mode === value ? "bg-brand text-white" : "bg-white text-muted hover:text-ink"}`}
-          onClick={() => { if (value !== mode) save({ allowance_mode: value }); }}>{label}</button>)}
+          onClick={() => { if (value !== mode) save({ allowance_mode: value }); }} {...allowanceUse(value)}>{label}</button>)}
       </div>
     </div>
     {mode === "daily" ? row("daily_allowance_percent", "Weekly allowance per day", "How much of a weekly allowance self-work may use each day, from midnight, counted for each account it runs on.", limits.daily_allowance_percent_max || 100, "%", 1) : null}

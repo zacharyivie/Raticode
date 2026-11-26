@@ -31,6 +31,48 @@ def provider_preference(provider: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def app_default_selection(
+    provider: str, model: str | None, effort: str | None
+) -> tuple[str | None, str | None]:
+    """The model and effort a call runs with when its own choice leaves them to the app.
+
+    An empty or ``cli-default`` model takes Settings > Providers > <app> > Default model,
+    and an empty effort its Default effort, under the rules that screen shows them with
+    (ProviderCapability.to_ui_payload): a blocked model, or one the app's catalog doesn't
+    list, is skipped, and the saved effort is kept only when the model that runs offers it
+    and the saved model is empty or is that model. Never runs the app's CLI: without a
+    catalog the saved model still applies and the saved effort doesn't. A None part stays
+    with the app's own default.
+    """
+    from gofer.core.provider_capabilities import (
+        CLI_PROVIDERS,
+        model_block_applies,
+        provider_capability_service,
+    )
+
+    chosen = "" if (model or "").strip() == "cli-default" else (model or "").strip()
+    wanted = "" if (effort or "").strip() == "cli-default" else (effort or "").strip()
+    preference = provider_preference(provider)
+    saved_model = str(preference.get("defaultModel") or "").strip()
+    saved_effort = str(preference.get("defaultEffort") or "").strip()
+    if (chosen and wanted) or provider not in CLI_PROVIDERS or not (saved_model or saved_effort):
+        return chosen or None, wanted or None
+    capability = provider_capability_service().cached(provider)
+    catalog = capability.models if capability and capability.discovery_status == "ready" else None
+    if not chosen and saved_model:
+        denied = list(preference.get("deniedModels", []))
+        aliases = capability.alias_targets() if capability else {}
+        listed = catalog is None or any(item.id == saved_model for item in catalog)
+        if listed and not model_block_applies(provider, saved_model, denied, aliases):
+            chosen = saved_model
+    runs = chosen or (capability.default_model if capability else None)
+    if not wanted and saved_effort and (not saved_model or saved_model == runs):
+        offered = next((item for item in catalog or [] if item.id == runs), None)
+        if offered and any(item.id == saved_effort for item in offered.efforts):
+            wanted = saved_effort
+    return chosen or None, wanted or None
+
+
 def save_provider_preference(provider: str, changes: dict[str, Any]) -> None:
     from gofer.core.provider_capabilities import PROVIDER_BINARIES
 

@@ -20,6 +20,9 @@ function MarkdownContent({
   className = "",
   compact = false,
   fileMentions = null,
+  // Off where the text is shown as a record, such as a ticket sheet: an image shows as its
+  // alt text and nothing loads.
+  images = true,
   inverse = false,
   // Web images load by themselves only where the text can't use them to send data
   // out: a turn that already used web tools, or a file the user opened. Elsewhere a
@@ -134,6 +137,7 @@ function MarkdownContent({
       return <hr className={inverse ? "border-white/25" : "border-line"} />;
     },
     img({ alt = "", src = "" }) {
+      if (!images) return alt || null;
       // Web images load through the desktop backend, so the site never sees this
       // window's request. They open full size in a browser tab.
       if (isExternalUrl(src)) return <Suspense fallback={imagePlaceholder}><WebImage alt={alt} autoLoad={loadWebImages} src={websiteLinkHref(src)} /></Suspense>;
@@ -187,7 +191,7 @@ function MarkdownContent({
     ul({ children, className: listClassName = "" }) {
       return <ul className={`${listClassName} ml-6 list-disc space-y-1`}>{children}</ul>;
     },
-  }), [handleLinkClick, inverse, loadWebImages, sourcePath, ticketIndex]);
+  }), [handleLinkClick, images, inverse, loadWebImages, sourcePath, ticketIndex]);
 
   return (
     <div

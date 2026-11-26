@@ -993,8 +993,8 @@ cd frontend && npm test && npm run check:build
 ```
 
 Before a branch lands on `dev`, `python3 scripts/check-dev.py` runs ruff, mypy, the
-repository-wide tests and the website docs check, and prints one PASS or FAIL line
-for each.
+repository-wide tests, the website docs check and the dead-code check, and prints
+one PASS or FAIL line for each.
 
 Frontend checks are split by runtime:
 

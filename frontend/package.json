@@ -1,6 +1,6 @@
 {
   "name": "gofer-flow-ui",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Local workflow automation studio for Raticode.",
   "author": {
     "name": "Raticode",
@@ -265,7 +265,6 @@
     "@eslint/js": "^10.0.1",
     "@tailwindcss/postcss": "^4.3.5",
     "@vitejs/plugin-react": "^6.1.2",
-    "autoprefixer": "^10.6.2",
     "concurrently": "^10.0.7",
     "electron": "^45.4.1",
     "electron-builder": "^26.18.0",

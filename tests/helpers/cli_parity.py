@@ -1,9 +1,11 @@
 """Read the app's surfaces that the CLI must keep up with, and the CLI's own commands.
 
-* Backend HTTP routes. The backend is a hand-written ``BaseHTTPRequestHandler`` with
-  no route table, so this reads the dispatch code itself. Each ``if`` that tests the
-  request path, the Rem path parts, a swarm's ID and action, or a trigger action
-  becomes one route key such as ``GET /api/workflows/*/logs``. A path check nested in
+* Backend HTTP routes. Routes declared in the backend's route table
+  (``gofer.ui.server.ROUTES``) are read as data. The rest are still if-chains in a
+  hand-written ``BaseHTTPRequestHandler``, so this reads that dispatch code itself:
+  each ``if`` that tests the request path, the Rem path parts, or a swarm's ID and
+  action becomes one route key such as ``GET /api/workflows/*/logs``. A key found in
+  both the table and an if-chain raises ``UnreadableRoute``. A path check nested in
   another route's body narrows that route and becomes its own key. Action APIs, where
   a field of the request body picks what happens (Organizations, Second Brain, the
   skill library, devices, ticket changes, swarm control), get one key per action:
@@ -28,6 +30,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from gofer.ui.routes import RouteTable
+
 ROOT = Path(__file__).resolve().parents[2]
 SERVER = ROOT / "src/gofer/ui/server.py"
 BRAIN_LIBRARY = ROOT / "src/gofer/ui/brain_library.py"
@@ -47,10 +51,6 @@ DELEGATED = {
     "_dispatch_rem_home_request",
     "_dispatch_organization_request",
     "_dispatch_swarm_request",
-    "_dispatch_rattish_triggers",
-    "_dispatch_rattish_secrets",
-    "_dispatch_worktree_setup",
-    "_dispatch_workflow_shortcuts",
 }
 
 
@@ -359,36 +359,6 @@ def _swarm_routes(tree: ast.Module) -> set[str]:
     return routes
 
 
-def _trigger_routes(
-    tree: ast.Module,
-    name: str = "_dispatch_rattish_triggers",
-    prefix: str = "/api/rattish/triggers",
-) -> set[str]:
-    """Routes of a sub-dispatcher that compares ``action``, the path after ``prefix``."""
-    routes = set()
-    function = _function(tree, name, "GoferUiRequestHandler")
-    for node in _ifs(function):
-        if not _mentions(node.test, {"action"}):
-            continue
-        method, route = "*", prefix
-        for term in _conjuncts(node.test):
-            text = _src(term)
-            if text.startswith("method == "):
-                method = _constants(term.comparators[0])[0]  # type: ignore[attr-defined]
-            elif text in {"not action", "action"}:
-                pass
-            elif text.startswith("action == "):
-                route += "/" + _constants(term.comparators[0])[0]  # type: ignore[attr-defined]
-            elif text.startswith("action.endswith("):
-                route += "/*" + _constants(term.args[0])[0]  # type: ignore[attr-defined]
-            elif text == "'/' not in action":
-                route += "/*"
-            else:
-                raise UnreadableRoute(f"Unknown trigger route condition: {text}")
-        routes.add(f"{method} {route}")
-    return routes
-
-
 ACTION_NAMES = {"action", "body.get('action')", "payload.get('action')"}
 
 
@@ -468,19 +438,29 @@ def _expand_body_actions(routes: set[str]) -> set[str]:
     return expanded
 
 
-def backend_routes(server_source: str | None = None) -> set[str]:
-    """Every route key; ``server_source`` replaces server.py for tests of this reader."""
+def table_routes(table: RouteTable | None = None) -> set[str]:
+    """Route keys declared in the backend's route table, read as data."""
+    if table is None:
+        from gofer.ui.server import ROUTES  # importing server.py registers its routes
+
+        table = ROUTES
+    return {route.key for route in table.routes}
+
+
+def backend_routes(server_source: str | None = None, table: RouteTable | None = None) -> set[str]:
+    """Every route key: the route table's, then the if-chains'.
+
+    ``server_source`` replaces server.py and ``table`` the backend's route table, for
+    tests of this reader.
+    """
     tree = ast.parse(server_source if server_source is not None else SERVER.read_text())
-    routes = (
-        _top_level_routes(tree)
-        | _rem_routes(tree)
-        | _swarm_routes(tree)
-        | _trigger_routes(tree)
-        | _trigger_routes(tree, "_dispatch_worktree_setup", "/api/worktree-setup")
-        | _trigger_routes(tree, "_dispatch_rattish_secrets", "/api/rattish/secrets")
-        | _trigger_routes(tree, "_dispatch_workflow_shortcuts", "/api/workflow-shortcuts")
-        | _action_routes(tree)
+    legacy = (
+        _top_level_routes(tree) | _rem_routes(tree) | _swarm_routes(tree) | _action_routes(tree)
     )
+    declared = table_routes(table)
+    if both := sorted(declared & legacy):
+        raise UnreadableRoute(f"Routes both in the route table and an if-chain: {both}")
+    routes = declared | legacy
     return routes if server_source is not None else _expand_body_actions(routes)
 
 
@@ -497,14 +477,12 @@ def _payload_properties(schema: dict[str, Any], message_type: str) -> dict[str, 
 
 
 def phone_operations(schema: dict[str, Any] | None = None) -> set[str]:
-    """Desktop operations a phone can ask for, from the desktop's tables and the protocol."""
-    from gofer.devices.desktop_control import ACTION_OPS, READ_OPS
-
+    """Desktop operations a phone can ask for: the ``op`` enums of the protocol's messages."""
     protocol = _protocol(schema)
     declared = set()
     for message_type in ("desktop.read", "desktop.action"):
         declared |= set(_payload_properties(protocol, message_type).get("op", {}).get("enum", []))
-    return set(READ_OPS) | set(ACTION_OPS) | declared
+    return declared
 
 
 # Message types whose payload's ``op`` is listed one by one in phone_operations().

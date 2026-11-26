@@ -3,6 +3,7 @@ import { AppWindow, BookOpen, Eraser, FolderOpen, Globe, Network, Pencil, Plug, 
 import { DEFAULT_REM_RESOURCES, remResourceError } from "../lib/remResources.js";
 import { editRemLibrary, skillKey, useRemLibrary } from "../lib/remLibrary.js";
 import { IconAction, ToolRow, ToolSection } from "./RemToolRows.jsx";
+import { useRovingChoice } from "../lib/useRovingChoice.js";
 const SecondBrainResources = lazy(() => import("./SecondBrainResources.jsx"));
 
 export { DEFAULT_REM_RESOURCES, remResourceError, remToolSummary } from "../lib/remResources.js";
@@ -230,6 +231,9 @@ export function envNames(text = "") {
   return [...new Set(String(text).split(/[\s,]+/).filter(Boolean))];
 }
 
+const CONNECTIONS = [["http", "HTTP endpoint"], ["stdio", "Local program"]];
+const CONNECTION_KEYS = CONNECTIONS.map(([type]) => type);
+
 function ServerForm({ initial, error, onCancel, onSubmit }) {
   const id = useId();
   const [draft, setDraft] = useState(() => ({
@@ -238,6 +242,7 @@ function ServerForm({ initial, error, onCancel, onSubmit }) {
   }));
   const [busy, setBusy] = useState(false);
   const set = (patch) => setDraft((current) => ({ ...current, ...patch }));
+  const connection = useRovingChoice({ keys: CONNECTION_KEYS, selected: draft.type, onSelect: (type) => set({ type }) });
   const submit = async (event) => {
     event.preventDefault();
     setBusy(true);
@@ -250,7 +255,7 @@ function ServerForm({ initial, error, onCancel, onSubmit }) {
     <label className="rem-tools__field" htmlFor={`${id}-name`}>Name</label>
     <input id={`${id}-name`} aria-label="Server name" autoFocus value={draft.name} placeholder="docs" onChange={(event) => set({ name: event.target.value })} />
     <div className="rem-tools__segmented" role="radiogroup" aria-label="Connection">
-      {[["http", "HTTP endpoint"], ["stdio", "Local program"]].map(([type, label]) => <button key={type} type="button" role="radio" aria-checked={draft.type === type} className={draft.type === type ? "is-active" : ""} onClick={() => set({ type })}>{label}</button>)}
+      {CONNECTIONS.map(([type, label]) => <button key={type} type="button" role="radio" aria-checked={draft.type === type} className={draft.type === type ? "is-active" : ""} onClick={() => set({ type })} {...connection(type)}>{label}</button>)}
     </div>
     {draft.type === "stdio" ? <>
       <label className="rem-tools__field" htmlFor={`${id}-command`}>Program</label>

@@ -6,7 +6,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const { unixTerminalShell } = require("./terminal-shell.cjs");
@@ -31,7 +31,6 @@ const {
   session,
   protocol,
   systemPreferences,
-  powerMonitor,
   webContents,
 } = require("electron");
 protocol.registerSchemesAsPrivileged([{ scheme: "raticode-media", privileges: { standard: true, secure: true, stream: true } }]);
@@ -77,7 +76,7 @@ const { createBrowserSessions } = require("./browser-sessions.cjs");
 const { createBrowserStore } = require("./browser-store.cjs");
 const { createOpenWith } = require("./open-with.cjs");
 const { PARTITIONS: BROWSER_PARTITIONS } = require("./browser-policy.cjs");
-const { listProjectFiles, searchProject, replaceProject } = require("./project-search.cjs");
+const { listProjectFiles, searchProject, replaceProject, undoReplace } = require("./project-search.cjs");
 const { createAppLog, redactLog } = require("./app-log.cjs");
 const { createBackendOutput } = require("./backend-log.cjs");
 const { createMainErrorHandler, createTerminalOutput, describeError, rejectionLevel } = require("./main-errors.cjs");
@@ -182,8 +181,6 @@ let installUpdateAfterDownload = false;
 // Automatic update checks: on startup and every 10 minutes while the Check for updates setting is on.
 let updateScheduler = null;
 let automaticUpdateChecks = false;
-let updateReminderClock = null;
-let updateReminderDay = "";
 
 // Set as soon as a quit starts, before unsaved files are checked. Ctrl+C in the
 // terminal starts one: Electron turns SIGINT, SIGTERM and SIGHUP into app.quit()
@@ -315,7 +312,6 @@ function createWindow(apiBaseUrl, { show = true } = {}) {
       backgroundThrottling: false,
       additionalArguments: [
         `--gofer-api-base-url=${apiBaseUrl}`,
-        `--gofer-browser-preload=${pathToFileURL(browserPreloadPath)}`,
         ...(legacyProjectMigrationToken ? [`--gofer-legacy-project-migration=${legacyProjectMigrationToken}`] : []),
       ],
     },
@@ -1395,11 +1391,10 @@ function setupIpcHandlers() {
     listProjectFiles: (_event, options = {}) => listProjectFiles(resolveExactPath(options.projectRoot, { grantId: options.grantId, mustExist: true })),
     searchProject: (_event, options = {}) => searchProject(resolveExactPath(options.projectRoot, { grantId: options.grantId, mustExist: true }), options),
     replaceProject: (_event, options = {}) => replaceProject(resolveExactPath(options.projectRoot, { grantId: options.grantId, mustExist: true }), options),
+    undoReplace: (_event, options = {}) => undoReplace(resolveExactPath(options.projectRoot, { grantId: options.grantId, mustExist: true })),
     openLogsFolder,
     openPath,
-    openUpdateRelease,
     setAutomaticUpdateChecks,
-    dismissUpdateReminder,
     pathInfo,
     missingRecentFiles: (_event, options = {}) => missingRecentFiles(options.paths),
     missingThreadRoots: (_event, options = {}) => missingThreadRoots(options.paths),
@@ -2046,10 +2041,6 @@ function setupAutoUpdater() {
   autoUpdater.allowDowngrade = false;
   autoUpdater.allowPrerelease = false;
 
-  // Coming back to the window is the usual "first use today".
-  app.on("browser-window-focus", (_event, window) => {
-    if (window === mainWindow) maybeShowUpdateReminder();
-  });
   autoUpdater.on("checking-for-update", () => {
     setUpdateState({ checking: true, error: "" });
   });
@@ -2067,7 +2058,6 @@ function setupAutoUpdater() {
   });
   autoUpdater.on("update-not-available", (info) => {
     setUpdateState({
-      reminder: null,
       available: false,
       checking: false,
       downloaded: false,
@@ -2156,7 +2146,7 @@ async function runUpdateCheck() {
       // electron-updater answers null when it isn't set up; that is not "up to date".
       throw Object.assign(new Error("This copy of Raticode has no update settings, so it can't check for updates. Download the newest version from the release page."), { userFacing: true });
     }
-    setUpdateState({ checking: false, checkedAt: Date.now(), ...(updateState.available ? {} : { reminder: null }) });
+    setUpdateState({ checking: false, checkedAt: Date.now() });
   } catch (error) {
     if (isNoPublishedVersionsError(error)) {
       setNoReleasesUpdateState();
@@ -2268,7 +2258,6 @@ function ensureUpdateScheduler() {
     updateScheduler = updateSchedule.createUpdateScheduler({
       runCheck: () => runUpdateCheck(),
       isBusy: updaterBusy,
-      onSettled: () => maybeShowUpdateReminder(),
     });
   }
   return updateScheduler;
@@ -2278,65 +2267,8 @@ function ensureUpdateScheduler() {
 function setAutomaticUpdateChecks(_event, enabled) {
   automaticUpdateChecks = enabled === true && !isSmokeTest;
   const scheduler = ensureUpdateScheduler();
-  if (automaticUpdateChecks) {
-    scheduler.start();
-    if (!updateReminderClock) {
-      // Only looks at the last answer; it never contacts GitHub.
-      updateReminderClock = setInterval(() => maybeShowUpdateReminder(), 60 * 1000);
-      updateReminderClock.unref?.();
-    }
-  } else {
-    scheduler.stop();
-    if (updateReminderClock) clearInterval(updateReminderClock);
-    updateReminderClock = null;
-    if (updateState.reminder) setUpdateState({ reminder: null });
-  }
-  return getUpdateState();
-}
-
-function updateReminderFile() {
-  return path.join(app.getPath("userData"), "update-reminder.json");
-}
-
-// The window is in front and someone used the keyboard or mouse in the last five minutes.
-function userIsUsingRaticode() {
-  if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || mainWindow.isMinimized() || !mainWindow.isFocused()) return false;
-  try {
-    return powerMonitor.getSystemIdleTime() < updateSchedule.ACTIVE_IDLE_SECONDS;
-  } catch {
-    return true;
-  }
-}
-
-// One reminder a day, the first time the user is at Raticode that day, in a single banner that
-// replaces itself. Days away don't add reminders: only the day of the last one is kept.
-function maybeShowUpdateReminder() {
-  if (!automaticUpdateChecks || updateState.reminder) return;
-  const today = updateSchedule.localDay();
-  if (updateReminderDay === today) return;
-  const file = updateReminderFile();
-  const decision = updateSchedule.reminderDecision({
-    available: Boolean(updateState.available),
-    latestVersion: updateState.info?.version,
-    record: updateSchedule.readReminderRecord(fs, file),
-    today,
-    userActive: userIsUsingRaticode(),
-  });
-  if (!decision.show) {
-    if (decision.record.day === today) updateReminderDay = today;
-    return;
-  }
-  updateReminderDay = today;
-  try {
-    updateSchedule.writeReminderRecord(fs, file, decision.record);
-  } catch (error) {
-    applicationLog?.write("warn", "updater", `Couldn't save when the update reminder was shown: ${error?.message || error}`);
-  }
-  setUpdateState({ reminder: { version: decision.record.version, day: today } });
-}
-
-function dismissUpdateReminder() {
-  setUpdateState({ reminder: null });
+  if (automaticUpdateChecks) scheduler.start();
+  else scheduler.stop();
   return getUpdateState();
 }
 

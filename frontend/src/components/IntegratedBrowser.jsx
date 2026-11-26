@@ -45,8 +45,8 @@ import {
   MENU_ITEM_CLASS,
   SecurityChip,
   SiteInfoPopover,
-  usePopupMenu,
 } from "./BrowserPanels.jsx";
+import { usePopupMenu } from "./PopupMenu.jsx";
 import { askRemPageText } from "../lib/browserAskRem.js";
 import { createTabRecovery, hangAction, HANG_GRACE_MS } from "../lib/browserRecovery.js";
 import { browserChromeShortcutAction } from "../lib/browserShortcuts.js";
@@ -60,6 +60,7 @@ import {
   suggestionRows,
   trimHistoryForSession,
 } from "../lib/browserUi.js";
+import { ipcErrorMessage } from "../lib/ipcError.js";
 
 const HISTORY_SAVE_DELAY_MS = 800;
 
@@ -969,7 +970,7 @@ export function FirefoxSignInBar({ onSignIn, name = "Firefox" }) {
       await onSignIn();
       setStatus(`Sign in in the ${name} window, then close it. Your ${name} tabs here come back signed in.`);
     } catch (error) {
-      setStatus(String(error?.message || error).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ""));
+      setStatus(ipcErrorMessage(error));
     }
   }
   return (
@@ -990,7 +991,7 @@ function FirefoxAddonBar({ bridge, slug }) {
       const result = await bridge.library("firefox-addon-install", { key: slug });
       setStatus(result?.cancelled ? "" : `Added ${result?.installed?.name || "the extension"} to Raticode's Firefox.`);
     } catch (error) {
-      setStatus(String(error?.message || error).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ""));
+      setStatus(ipcErrorMessage(error));
     }
   }
   return (
@@ -1121,17 +1122,6 @@ function browserInputLooksLikeUrl(input) {
 
 export function browserSessionEventMatches(sessionId, event) {
   return Boolean(sessionId && event?.id === sessionId);
-}
-
-export function browserFaviconUrl(favicons) {
-  if (!Array.isArray(favicons)) return "";
-  return favicons.find((value) => /^(?:https?:|file:|data:image\/)/i.test(String(value ?? ""))) || "";
-}
-
-export function isIntegratedBrowserShortcut(event) {
-  if (event.repeat || !event.altKey || event.shiftKey) return false;
-  if (!event.ctrlKey && !event.metaKey) return false;
-  return event.code === "Slash" || event.key === "/";
 }
 
 // Whether Raticode's window is showing. A minimized or hidden window counts as

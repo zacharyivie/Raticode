@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 import typer
 
 from gofer.cli.client import ExitCode, in_agent_session
+from gofer.cli.output import confirm_unseen
 from gofer.rattish.trigger_defaults import (
     DEFAULT_DEBOUNCE_SECONDS,
     DEFAULT_MAX_RUN_SECONDS,
@@ -44,7 +45,7 @@ app = typer.Typer(
 add_app = typer.Typer(help="Add a trigger to a workflow.", no_args_is_help=True)
 app.add_typer(add_app, name="add")
 
-_DATA_DIR_OPTION = typer.Option(None, "--data-dir", help="Override the app data directory.")
+_DATA_DIR_OPTION = typer.Option(None, "--data-dir", help="Override the data folder.")
 _FORMAT_OPTION = typer.Option("text", "--format", help="Output format: text or json.")
 _OVERLAP_OPTION = typer.Option(
     DEFAULT_OVERLAP,
@@ -110,10 +111,10 @@ def _require_format(output_format: str) -> None:
 
 
 def _fail(error: Exception, output_format: str) -> typer.Exit:
-    from gofer.rattish.triggers import USER_ONLY
+    from gofer.rattish.triggers import UserOnlyError
 
     # A decision only the user may make exits 5, like every other user-only refusal.
-    user_only = str(error) == USER_ONLY
+    user_only = isinstance(error, UserOnlyError)
     if output_format == "json":
         payload = {"ok": False, "error": str(error)}
         if user_only:
@@ -662,7 +663,7 @@ def _offer_approval(
         return {"approved": True}
     if not yes and not typer.confirm("Approve this version for the trigger?", default=False):
         return {"approved": False, "error": "Not approved."}
-    accept_unseen = _confirm_unseen(shown.get("unseen") or [], yes=yes, unseen=unseen, fmt=fmt)
+    accept_unseen = confirm_unseen(shown.get("unseen") or [], yes=yes, unseen=unseen, fmt=fmt)
     try:
         approve_trigger(
             store,
@@ -689,35 +690,10 @@ def _offer_approval(
     return {"approved": True}
 
 
-def _unseen_lines(unseen: list[dict[str, Any]]) -> list[str]:
-    from gofer.rattish.trigger_approval import unseen_lines
-
-    return unseen_lines(unseen)
-
-
 def _unseen_refusal(unseen: list[dict[str, Any]]) -> str:
     from gofer.rattish.trigger_approval import unseen_refusal
 
     return unseen_refusal(unseen)
-
-
-def _confirm_unseen(files: list[dict[str, Any]], *, yes: bool, unseen: bool, fmt: str) -> bool:
-    """Whether you approve files whose change wasn't shown: --unseen, or a second yes.
-
-    With --yes and no --unseen nothing asks, so the approval is refused and names them.
-    """
-    if not files or unseen:
-        return unseen
-    if yes or fmt != "text":
-        return False
-    from gofer.rattish.trigger_approval import unseen_heading
-
-    heading, advice = unseen_heading(files)
-    typer.echo(heading)
-    for line in _unseen_lines(files):
-        typer.echo(line)
-    typer.echo(advice)
-    return typer.confirm("Approve them without seeing all of their changes?", default=False)
 
 
 def _set_enabled(
@@ -1079,7 +1055,7 @@ def approve(
         if not typer.confirm("Approve this version for the trigger?", default=False):
             typer.echo("Not approved. The trigger keeps skipping its starts until you approve.")
             raise typer.Exit(1)
-    accept_unseen = _confirm_unseen(
+    accept_unseen = confirm_unseen(
         shown.get("unseen") or [], yes=yes, unseen=unseen, fmt=output_format
     )
     try:

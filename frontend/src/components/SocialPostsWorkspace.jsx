@@ -11,6 +11,7 @@ import {
 import SocialAccounts from "./SocialAccounts.jsx";
 import SocialPostEditor, { CharMeter } from "./SocialPostEditor.jsx";
 import { PlatformIcon } from "./SocialPostsParts.jsx";
+import { useRovingChoice } from "../lib/useRovingChoice.js";
 import "./OrganizationHome.css";
 import "./SocialPostsWorkspace.css";
 
@@ -281,6 +282,7 @@ function PostCard({ post, data, run, busy, onEdit, onDuplicate, selected, toggle
   const [noteFor, setNoteFor] = useState("");
   const [note, setNote] = useState("");
   const variant = post.variants?.find(item => item.id === tab) || post.variants?.[0] || null;
+  const platformTab = useRovingChoice({ keys: (post.variants || []).map(item => item.id), selected: variant?.id, onSelect: setTab, orientation: "horizontal" });
   const platform = data.platforms.find(item => item.id === variant?.platform);
   const reviewing = ["proposed", "changes_requested", "draft"].includes(post.state);
   const live = ["approved", "scheduled", "due", "publishing", "needs_attention", "missed", "failed", "partly_published"].includes(post.state);
@@ -308,7 +310,7 @@ function PostCard({ post, data, run, busy, onEdit, onDuplicate, selected, toggle
     </ul> : null}
     {post.variants?.length > 1 ? <div className="sp-tabs" role="tablist" aria-label="Platforms">
       {post.variants.map(item => <button key={item.id} type="button" role="tab" aria-selected={item.id === variant?.id} className={`st-${item.state}`}
-        onClick={() => setTab(item.id)}><PlatformIcon platform={item.platform} size={14} />{item.account_name || item.platform_label || item.platform}</button>)}
+        onClick={() => setTab(item.id)} {...platformTab(item.id)}><PlatformIcon platform={item.platform} size={14} />{item.account_name || item.platform_label || item.platform}</button>)}
     </div> : null}
     {variant ? <VariantPreview post={post} variant={variant} platform={platform} previous={previous} run={run} busy={busy} /> : null}
     {post.rationale ? <p className="sp-rationale"><strong>Why: </strong>{post.rationale}</p> : null}

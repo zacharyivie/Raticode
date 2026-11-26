@@ -4,7 +4,7 @@ import pytest
 
 from gofer.rattish.artifacts import compile_rattish_file
 from gofer.rattish.migration import migrate_source
-from gofer.rattish.workspaces import discover_registered_workflows, list_registered_workflows
+from gofer.rattish.workspaces import discover_project_workflows, list_registered_workflows
 
 LEGACY_SOURCE = (
     "Radish: 1\n\nWorkflow:\n  name: Legacy\n\n"
@@ -18,14 +18,14 @@ def test_explicit_migration_allows_discovery_and_preserves_identity(tmp_path: Pa
     source = folder / "workflow.rad"
     source.write_text(LEGACY_SOURCE)
     data = tmp_path / "data"
-    assert discover_registered_workflows(tmp_path / "project", registry_dir=data) == ()
+    assert discover_project_workflows(tmp_path / "project", registry_dir=data).workflows == ()
     migrate_source(source)
-    first = discover_registered_workflows(tmp_path / "project", registry_dir=data)[0]
+    first = discover_project_workflows(tmp_path / "project", registry_dir=data).workflows[0]
     assert first.entrypoint == source.with_suffix(".rattish")
     assert first.entrypoint.read_text() == LEGACY_SOURCE
     assert not source.exists()
     assert list_registered_workflows(registry_dir=data) == (first,)
-    assert discover_registered_workflows(tmp_path / "project", registry_dir=data) == (first,)
+    assert discover_project_workflows(tmp_path / "project", registry_dir=data).workflows == (first,)
     compiled = compile_rattish_file(source, data_dir=data)
     assert compiled.source_path == first.entrypoint
     assert len(compiled.ir["nodes"]) == 1

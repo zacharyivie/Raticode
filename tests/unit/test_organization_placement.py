@@ -15,6 +15,7 @@ from gofer.core.placement_reader import PlacementReader
 from gofer.core.worker_claims import Claim, WorkerClaims
 from gofer.ui.organizations import OrganizationManager
 from gofer.ui.rem_placement import RemPlacement
+from tests.helpers.organizations import act
 
 
 class Clock:
@@ -119,6 +120,7 @@ def manager_for(
     return manager
 
 
+# Not the shared company: a named organization with any number of workers, for placement.
 def company(manager: OrganizationManager, root: Path, name: str, workers: int = 1, **config: Any):
     root.mkdir(parents=True, exist_ok=True)
     return manager.call(
@@ -138,14 +140,6 @@ def company(manager: OrganizationManager, root: Path, name: str, workers: int = 
     )
 
 
-def act(manager: OrganizationManager, org: dict[str, Any], action: str, **params: Any) -> Any:
-    return manager.call(
-        org["projectRoot"],
-        "user",
-        {"organizationId": org["id"], "action": action, "params": params},
-    )
-
-
 def runtime(manager: OrganizationManager, org: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = manager.store.get("", org["id"])["runtime"]
     return result
@@ -157,7 +151,8 @@ def running(manager: OrganizationManager, org: dict[str, Any]) -> int:
     )
 
 
-def wait_idle(manager: OrganizationManager) -> None:
+# Waits until the computer's worker count is back to 0, which these placement tests check.
+def wait_workers_stopped(manager: OrganizationManager) -> None:
     until = time.monotonic() + 10
     while manager.running_workers() and time.monotonic() < until:
         time.sleep(0.02)
@@ -203,7 +198,7 @@ def test_dispatch_starts_no_organization_run_while_rem_fills_the_worker_limit(
         assert attempt["placement"]["reason"] == "Workstation is the first computer with room"
     finally:
         gate.release.set()
-        wait_idle(manager)
+        wait_workers_stopped(manager)
         manager.close()
 
 
@@ -245,7 +240,7 @@ def test_manual_placement_on_a_computer_it_cant_use_starts_nothing(tmp_path: Pat
         assert "placementWait" not in runtime(manager, org)
     finally:
         gate.release.set()
-        wait_idle(manager)
+        wait_workers_stopped(manager)
         manager.close()
 
 
@@ -298,7 +293,7 @@ def test_rem_and_two_organizations_share_one_computer(tmp_path: Path) -> None:
         assert not any(runtime(manager, org).get("placementWait") for org in (first, second))
     finally:
         gate.release.set()
-        wait_idle(manager)
+        wait_workers_stopped(manager)
         manager.close()
 
 
@@ -429,7 +424,7 @@ def test_an_organization_ticket_needs_the_owners_target_for_its_worker_on_the_de
         assert runtime(manager, org)["tasks"][0]["status"] == "todo"
     finally:
         gate.release.set()
-        wait_idle(manager)
+        wait_workers_stopped(manager)
         manager.close()
 
 

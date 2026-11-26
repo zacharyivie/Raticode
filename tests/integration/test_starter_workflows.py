@@ -22,6 +22,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import click
 import pytest
 from typer.testing import CliRunner
 
@@ -419,3 +420,35 @@ def test_studio_api_lists_starters_and_creates_from_one(tmp_path: Path) -> None:
     assert (
         Path(created["sourcePath"]) == project / ".raticode" / "daily-report" / "workflow.rattish"
     )
+
+
+def test_workflow_list_shows_node_and_route_counts(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    data_dir = tmp_path / "data"
+    created = create_workflow_from_starter(project, "daily-report", registry_dir=data_dir)
+    result = CliRunner().invoke(
+        app,
+        ["workflow", "list", "--data-dir", str(data_dir)],
+        terminal_width=200,
+        env={"COLUMNS": "200", "NO_COLOR": "1"},
+    )
+    assert result.exit_code == 0, result.output
+    # FORCE_COLOR in the environment makes Rich style the cells even here.
+    lines = click.unstyle(result.output).splitlines()
+    header = next(line for line in lines if "Name" in line)
+    assert [cell.strip() for cell in header.strip("┃│ ").split("┃")] == [
+        "ID",
+        "Name",
+        "Nodes",
+        "Routes",
+        "Status",
+    ]
+    row = next(line for line in lines if created.workflow_id in line)
+    assert [cell.strip() for cell in row.strip("│ ").split("│")] == [
+        created.workflow_id,
+        "Daily report",
+        "3",
+        "2",
+        "Ready",
+    ]

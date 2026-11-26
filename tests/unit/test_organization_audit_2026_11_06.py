@@ -12,10 +12,8 @@ import pytest
 
 from gofer.ui import organization_repository as repository
 from gofer.ui.organizations import OrganizationManager
+from tests.helpers.organizations import act, as_worker, company
 from tests.unit.test_organization_hours_heartbeats import (
-    act,
-    as_worker,
-    company,
     read,
     settle,
     start,

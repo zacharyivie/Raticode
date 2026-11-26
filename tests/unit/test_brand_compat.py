@@ -18,7 +18,7 @@ from gofer.rattish.workspaces import (
     WORKSPACE_DIRECTORY,
     create_registered_workflow,
     delete_registered_workflow,
-    discover_registered_workflows,
+    discover_project_workflows,
     find_registered_workflow,
     list_registered_workflows,
 )
@@ -43,12 +43,12 @@ def test_previous_workspace_requires_rename_and_exports_with_current_names(
     (root / workflow_ignore).write_text(".env\n")
     (root / ".env").write_text("PRIVATE_FIXTURE=excluded\n")
     registry = tmp_path / "registry"
-    assert discover_registered_workflows(project, registry_dir=registry) == ()
+    assert discover_project_workflows(project, registry_dir=registry).workflows == ()
     current_root = project / WORKSPACE_DIRECTORY / "review"
     current_root.parent.mkdir()
     root.rename(current_root)
     root = current_root
-    (workflow,) = discover_registered_workflows(project, registry_dir=registry)
+    (workflow,) = discover_project_workflows(project, registry_dir=registry).workflows
     assert list_registered_workflows(registry_dir=registry) == (workflow,)
     bundle = tmp_path / "review.raticode"
     export_rattish_bundle(workflow.workflow_id, bundle, registry_dir=registry)
@@ -76,7 +76,7 @@ def test_renamed_workspace_keeps_registered_id_and_creation_time(
         entry[key] = entry[key].replace(WORKSPACE_DIRECTORY, workspace_directory)
     registry_file.write_text(json.dumps(data))
     assert find_registered_workflow(workflow.workflow_id, registry_dir=registry) == workflow
-    assert discover_registered_workflows(project, registry_dir=registry) == (workflow,)
+    assert discover_project_workflows(project, registry_dir=registry).workflows == (workflow,)
 
 
 @pytest.mark.parametrize(
@@ -120,4 +120,4 @@ def test_previous_workspace_symlink_is_ignored(tmp_path: Path, workspace_directo
     project = tmp_path / "project"
     project.mkdir()
     (project / workspace_directory).symlink_to(outside, target_is_directory=True)
-    assert discover_registered_workflows(project, registry_dir=tmp_path / "registry") == ()
+    assert discover_project_workflows(project, registry_dir=tmp_path / "registry").workflows == ()

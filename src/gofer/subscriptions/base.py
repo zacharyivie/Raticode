@@ -297,10 +297,6 @@ def _json_payloads(text: str) -> list[dict[str, Any]]:
     return payloads
 
 
-def _non_json_thoughts(chunks: list[str]) -> list[str]:
-    return [chunk for chunk in chunks if not _json_payloads(chunk)]
-
-
 def _live_thoughts_from_payloads(payloads: list[dict[str, Any]]) -> list[str]:
     thoughts: list[str] = []
     for payload in payloads:

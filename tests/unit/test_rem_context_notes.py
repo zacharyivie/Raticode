@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -22,6 +21,7 @@ from gofer.ui.second_brain import (
     add_context_note,
 )
 from gofer.ui.server import GoferUiServer
+from tests.helpers.brain_library import wait_idle
 
 THEMED_REPORT = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Orbit review</title>
@@ -59,15 +59,6 @@ MARKDOWN_NOTE = (
     "## Notes\n\n" + ("Long paragraph about compost and mulch. " * 60).strip() + "\n\n"
     "## Later\n\n" + "\n\n".join(f"Week {n} chores are weeding." for n in range(200)) + "\n"
 )
-
-
-def wait_idle(library: BrainLibrary) -> None:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if all(task["state"] != "running" for task in library.snapshot()["tasks"]):
-            return
-        time.sleep(0.02)
-    pytest.fail("Second Brain tasks did not finish")
 
 
 @pytest.fixture

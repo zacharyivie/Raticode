@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000143",
+  "id": "10000000-0000-4000-8000-000000000143",
+  "sequence": 143,
+  "type": "desktop.action",
+  "payload": {
+    "op": "files.link",
+    "params": {
+      "source": "rem",
+      "message_id": "finished-00000000-0000-4000-8000-000000000301-0",
+      "href": "/home/me/Projects/second-brain/reports/plan.html"
+    }
+  }
+}

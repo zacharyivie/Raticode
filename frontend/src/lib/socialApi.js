@@ -1,43 +1,36 @@
-import { apiUrl } from "./api.js";
+import { apiJson } from "./api.js";
 
 // The Posts plugin's backend calls and the pure helpers its dashboard uses. Approving
 // and publishing always send the content hash of the version on screen, so the backend
 // refuses if the post changed after the user read it.
 
-async function request(path, options = {}) {
-  const response = await fetch(apiUrl(path), options);
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `Posts request failed (${response.status}).`);
-  return payload;
-}
-
-const json = (method, body) => ({ method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body ?? {}) });
+const request = (path, options = {}) => apiJson(path, { ...options, failure: status => `Posts request failed (${status}).` });
 const postPath = id => `/social/posts/${encodeURIComponent(id)}`;
 const variantPath = (id, variantId) => `${postPath(id)}/variants/${encodeURIComponent(variantId)}`;
 
 export const loadSocial = () => request("/social");
-export const createPost = body => request("/social/posts", json("POST", body));
-export const editPost = (id, body) => request(`${postPath(id)}/edit`, json("POST", body));
-export const approvePost = (post, { publishNow = false } = {}) => request(`${postPath(post.id)}/approve`, json("POST", { content_hash: post.content_hash, publish_now: publishNow }));
-export const declinePost = (id, note = "") => request(`${postPath(id)}/decline`, json("POST", { note }));
-export const requestChanges = (id, note = "") => request(`${postPath(id)}/request-changes`, json("POST", { note }));
-export const cancelPost = id => request(`${postPath(id)}/cancel`, json("POST", {}));
-export const publishVariant = (post, variantId) => request(`${variantPath(post.id, variantId)}/publish`, json("POST", { content_hash: post.content_hash }));
-export const markPosted = (post, variantId, url) => request(`${variantPath(post.id, variantId)}/mark-posted`, json("POST", { url }));
-export const setPaused = paused => request("/social/pause", json("POST", { paused }));
-export const saveSocialSettings = body => request("/social/settings", json("PUT", body));
-export const connectAccount = body => request("/social/accounts", json("POST", body));
-export const updateAccount = (id, body) => request(`/social/accounts/${encodeURIComponent(id)}`, json("PATCH", body));
+export const createPost = body => request("/social/posts", { method: "POST", body: body ?? {} });
+export const editPost = (id, body) => request(`${postPath(id)}/edit`, { method: "POST", body: body ?? {} });
+export const approvePost = (post, { publishNow = false } = {}) => request(`${postPath(post.id)}/approve`, { method: "POST", body: { content_hash: post.content_hash, publish_now: publishNow } });
+export const declinePost = (id, note = "") => request(`${postPath(id)}/decline`, { method: "POST", body: { note } });
+export const requestChanges = (id, note = "") => request(`${postPath(id)}/request-changes`, { method: "POST", body: { note } });
+export const cancelPost = id => request(`${postPath(id)}/cancel`, { method: "POST", body: {} });
+export const publishVariant = (post, variantId) => request(`${variantPath(post.id, variantId)}/publish`, { method: "POST", body: { content_hash: post.content_hash } });
+export const markPosted = (post, variantId, url) => request(`${variantPath(post.id, variantId)}/mark-posted`, { method: "POST", body: { url } });
+export const setPaused = paused => request("/social/pause", { method: "POST", body: { paused } });
+export const saveSocialSettings = body => request("/social/settings", { method: "PUT", body: body ?? {} });
+export const connectAccount = body => request("/social/accounts", { method: "POST", body: body ?? {} });
+export const updateAccount = (id, body) => request(`/social/accounts/${encodeURIComponent(id)}`, { method: "PATCH", body: body ?? {} });
 export const disconnectAccount = id => request(`/social/accounts/${encodeURIComponent(id)}`, { method: "DELETE" });
 // Browser sign-in through a loopback listener on this computer (gofer.social.signin).
 const signInPath = id => `/social/accounts/sign-in/${encodeURIComponent(id)}`;
-export const startSignIn = body => request("/social/accounts/sign-in", json("POST", body));
+export const startSignIn = body => request("/social/accounts/sign-in", { method: "POST", body: body ?? {} });
 export const signInStatus = id => request(signInPath(id));
-export const reopenSignIn = id => request(`${signInPath(id)}/open`, json("POST", {}));
-export const chooseSignInPage = (id, pageId) => request(`${signInPath(id)}/page`, json("POST", { page_id: pageId }));
+export const reopenSignIn = id => request(`${signInPath(id)}/open`, { method: "POST", body: {} });
+export const chooseSignInPage = (id, pageId) => request(`${signInPath(id)}/page`, { method: "POST", body: { page_id: pageId } });
 export const cancelSignIn = id => request(signInPath(id), { method: "DELETE" });
-export const checkAccount = id => request(`/social/accounts/${encodeURIComponent(id)}/check`, json("POST", {}));
-export const saveTemplate = (body, id) => request(id ? `/social/templates/${encodeURIComponent(id)}` : "/social/templates", json(id ? "PUT" : "POST", body));
+export const checkAccount = id => request(`/social/accounts/${encodeURIComponent(id)}/check`, { method: "POST", body: {} });
+export const saveTemplate = (body, id) => request(id ? `/social/templates/${encodeURIComponent(id)}` : "/social/templates", { method: id ? "PUT" : "POST", body: body ?? {} });
 export const deleteTemplate = id => request(`/social/templates/${encodeURIComponent(id)}`, { method: "DELETE" });
 // The backend's next good times for these accounts or manual platforms, in a time zone. It
 // skips times close to other planned posts on the same accounts (gofer.social.timing).
@@ -202,17 +195,6 @@ export function accountNotice(account) {
   }
   return "";
 }
-
-// The login fields the Connect form asks for. They are sent once and never shown again.
-export const SECRET_FIELDS = Object.freeze({
-  discord: [["webhook_url", "Webhook URL"]],
-  x: [["access_token", "Access token"], ["refresh_token", "Refresh token (optional)"], ["client_id", "Client ID (optional)"], ["client_secret", "Client secret (optional)"]],
-  linkedin: [["access_token", "Access token"]],
-  facebook: [["page_access_token", "Page access token"]],
-  youtube: [["refresh_token", "Refresh token"], ["client_id", "Client ID"], ["client_secret", "Client secret"], ["access_token", "Access token (optional)"]],
-});
-
-export const CONNECTABLE = Object.freeze(["discord", "x", "linkedin", "facebook", "youtube"]);
 
 // Which actions the dashboard offers for one variant in its current state.
 export function variantActions(variant) {

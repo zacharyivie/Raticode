@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowRight, GitBranch, Network } from "lucide-react";
 
+// A Rattish route's label, with its predicate exactly as written.
+export function edgeLabel({ mode, predicateSource } = {}) {
+  if (mode === "otherwise") return "otherwise";
+  if (mode === "when") return predicateSource ? `when ${predicateSource}` : "when";
+  return "always";
+}
+
 function relationshipSummary(nodeId, nodesById, edges) {
   const incoming = edges.filter((edge) => edge.to === nodeId);
   const outgoing = edges.filter((edge) => edge.from === nodeId);
@@ -205,7 +212,7 @@ export default function GraphOutline({
                   <button
                     ref={(element) => element ? itemRefs.current.set(itemKey, element) : itemRefs.current.delete(itemKey)}
                     aria-current={selected ? "true" : undefined}
-                    aria-label={`${from} to ${to}, condition ${edge.label ?? edge.condition ?? "always"}, ${validation}`}
+                    aria-label={`${from} to ${to}, condition ${edgeLabel(edge)}, ${validation}`}
                     className={`w-full rounded-md px-2.5 py-2 text-left transition ${
                       selected ? "bg-indigo-50 text-indigo-700" : "text-slate-700 hover:bg-slate-50 hover:text-ink"
                     }`}
@@ -229,7 +236,7 @@ export default function GraphOutline({
                       <span className="truncate">{to}</span>
                     </span>
                     <span className="mt-0.5 flex items-center gap-1 text-[10px] text-muted">
-                      <GitBranch aria-hidden="true" size={10} /> {edge.label ?? edge.condition ?? "always"} · {validation}
+                      <GitBranch aria-hidden="true" size={10} /> {edgeLabel(edge)} · {validation}
                     </span>
                   </button>
                 </li>

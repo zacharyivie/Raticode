@@ -28,7 +28,6 @@ MANIFEST = ROOT / "docs/cli-parity.json"
 KIND_LABELS = {
     "backend": "Backend: needs a running Raticode backend",
     "offline": "Offline: works without a backend",
-    "legacy": "Legacy: older TOML workflows",
 }
 
 _DESCRIPTION = (
@@ -57,8 +56,6 @@ HEADER = "\n".join(
         "[Headless CLI](./cli-headless.md), [Rem and tickets from the CLI](./cli-rem.md) and "
         "[talking to a running backend](./cli.md#talk-to-a-running-backend).",
         "- **Offline** commands work on files and local stores without a backend.",
-        "- **Legacy** commands work only with older TOML workflows. For Rattish workflows use "
-        "`Raticode rattish`.",
         "",
         "The [CLI reference](./cli.md) explains how the commands fit together.",
         "",

@@ -15,6 +15,7 @@ import pytest
 from gofer.ui.organization_knowledge import run_check
 from gofer.ui.organization_store import OrganizationConflict
 from gofer.ui.organizations import OrganizationManager
+from tests.helpers.organizations import act
 
 
 async def final(**options: Any) -> Any:
@@ -25,6 +26,7 @@ def start(tmp_path: Path, stream: Any = final) -> OrganizationManager:
     return OrganizationManager(tmp_path / "data", stream=stream, start_runtime=False)
 
 
+# Not the shared company: Raticode Studio with a builder and no project.
 def company(manager: OrganizationManager, root: Path, **config: Any) -> Any:
     employees = config.pop(
         "employees",
@@ -47,18 +49,6 @@ def company(manager: OrganizationManager, root: Path, **config: Any) -> Any:
                 }
             },
         },
-    )
-
-
-def act(
-    manager: OrganizationManager,
-    org: dict[str, Any],
-    action: str,
-    actor: str = "user",
-    **params: Any,
-) -> Any:
-    return manager.call(
-        org["projectRoot"], actor, {"organizationId": org["id"], "action": action, "params": params}
     )
 
 

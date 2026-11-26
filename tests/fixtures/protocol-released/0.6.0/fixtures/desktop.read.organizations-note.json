@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000168",
+  "id": "10000000-0000-4000-8000-000000000168",
+  "sequence": 168,
+  "type": "desktop.read",
+  "payload": {
+    "op": "organizations.note",
+    "params": {
+      "organization_id": "org1",
+      "note_id": "k1"
+    }
+  }
+}

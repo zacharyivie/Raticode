@@ -29,6 +29,7 @@ from gofer.ui.organization_recovery import (
     worker_reviews,
 )
 from gofer.ui.organizations import OrganizationManager
+from tests.helpers.organizations import act, as_worker, assign
 
 
 async def quick(**options: Any) -> Any:
@@ -53,6 +54,7 @@ def start(tmp_path: Path, stream: Any = quick, reviewer: Any = None) -> Organiza
     return manager
 
 
+# Not the shared company: Mira outside the lead's reports, and auto=True turns on Auto mode.
 def company(manager: OrganizationManager, root: Path, *, auto: bool = False) -> Any:
     org = manager.call(
         str(root),
@@ -77,45 +79,12 @@ def company(manager: OrganizationManager, root: Path, *, auto: bool = False) -> 
     return org
 
 
-def act(manager: OrganizationManager, org: dict[str, Any], action: str, **params: Any) -> Any:
-    return manager.call(
-        org["projectRoot"],
-        "user",
-        {"organizationId": org["id"], "action": action, "params": params},
-    )
-
-
-def as_worker(
-    manager: OrganizationManager, org: dict[str, Any], eid: str, action: str, **params: Any
-) -> Any:
-    state = manager.store.get("", org["id"])
-    return manager.call(
-        org["projectRoot"],
-        f"employee:{eid}",
-        {"organizationId": org["id"], "action": action, "params": params},
-        employee_id=eid,
-        bound_org=org["id"],
-        generation=state["runtime"]["generation"],
-    )
-
-
 def state(manager: OrganizationManager, org: dict[str, Any]) -> Any:
     return manager.store.get("", org["id"])
 
 
 def ticket(manager: OrganizationManager, org: dict[str, Any], tid: str) -> Any:
     return next(t for t in state(manager, org)["runtime"]["tasks"] if t["id"] == tid)
-
-
-def assign(manager: OrganizationManager, org: dict[str, Any], eid: str) -> None:
-    act(
-        manager,
-        org,
-        "self_work_projects",
-        employeeId=eid,
-        projects=[org["projectRoot"]],
-        expectedRevision=0,
-    )
 
 
 def settle(manager: OrganizationManager, seconds: float = 10) -> None:
@@ -173,8 +142,8 @@ def test_a_worker_reviewer_cannot_send_one_result_back_forever(tmp_path: Path) -
         as_worker(
             manager,
             org,
-            "lead",
             "review",
+            worker="lead",
             taskId=task["id"],
             expectedRevision=task["revision"],
             decision="revise",
@@ -194,8 +163,8 @@ def test_a_worker_reviewer_cannot_send_one_result_back_forever(tmp_path: Path) -
         as_worker(
             manager,
             org,
-            "lead",
             "review",
+            worker="lead",
             taskId=task["id"],
             expectedRevision=task["revision"],
             decision="revise",
@@ -239,8 +208,8 @@ def test_a_worker_reviewer_may_still_accept_after_the_limit(tmp_path: Path) -> N
     as_worker(
         manager,
         org,
-        "lead",
         "review",
+        worker="lead",
         taskId=task["id"],
         expectedRevision=task["revision"],
         decision="accept",

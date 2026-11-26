@@ -16,6 +16,7 @@ import pytest
 from gofer.ui import organization_repository as repository
 from gofer.ui.organization_knowledge import run_context
 from gofer.ui.organizations import OrganizationManager
+from tests.helpers.organizations import act, as_worker
 
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "t",
@@ -47,6 +48,7 @@ def repo(path: Path) -> Path:
     return path
 
 
+# Not the shared company: two projects and per-project ticket access, which these tests check.
 def company(manager: OrganizationManager, root: Path, name: str = "Studio", **config: Any) -> Any:
     employees = config.pop(
         "employees",
@@ -87,32 +89,6 @@ def company(manager: OrganizationManager, root: Path, name: str = "Studio", **co
     )
 
 
-def act(
-    manager: OrganizationManager,
-    org: dict[str, Any],
-    action: str,
-    actor: str = "user",
-    **params: Any,
-) -> Any:
-    return manager.call(
-        org["projectRoot"], actor, {"organizationId": org["id"], "action": action, "params": params}
-    )
-
-
-def as_worker(
-    manager: OrganizationManager, org: dict[str, Any], worker: str, action: str, **params: Any
-) -> Any:
-    state = manager.store.get("", org["id"])
-    return manager.call(
-        org["projectRoot"],
-        f"employee:{worker}",
-        {"organizationId": org["id"], "action": action, "params": params},
-        employee_id=worker,
-        bound_org=org["id"],
-        generation=state["runtime"]["generation"],
-    )
-
-
 def read(manager: OrganizationManager, org: dict[str, Any]) -> Any:
     return act(manager, org, "read")
 
@@ -137,20 +113,22 @@ def test_ticket_permissions_are_enforced_per_project_and_action(tmp_path: Path) 
     # Running lets workers act, but nothing is dispatched in this test.
     act(manager, org, "control", state="running")
 
-    made = as_worker(manager, org, "builder", "task_create", title="Board", project="desktop")
+    made = as_worker(
+        manager, org, "task_create", worker="builder", title="Board", project="desktop"
+    )
     assert made["project"] == "desktop"
     with pytest.raises(ValueError, match="Mira Santos can't create tickets in Docs"):
-        as_worker(manager, org, "builder", "task_create", title="Guide", project="docs")
+        as_worker(manager, org, "task_create", worker="builder", title="Guide", project="docs")
     with pytest.raises(ValueError, match="can't create tickets outside a project"):
-        as_worker(manager, org, "builder", "task_create", title="Loose")
+        as_worker(manager, org, "task_create", worker="builder", title="Loose")
 
     mine = act(manager, org, "task_create", title="Drag", project="desktop", assignee="builder")
     with pytest.raises(ValueError, match="can't change the status of tickets in Desktop"):
         as_worker(
             manager,
             org,
-            "builder",
             "task_update",
+            worker="builder",
             taskId=mine["id"],
             expectedRevision=mine["revision"],
             changes={"status": "backlog"},
@@ -159,8 +137,8 @@ def test_ticket_permissions_are_enforced_per_project_and_action(tmp_path: Path) 
         as_worker(
             manager,
             org,
-            "builder",
             "task_update",
+            worker="builder",
             taskId=mine["id"],
             expectedRevision=mine["revision"],
             changes={"title": "Renamed"},
@@ -169,8 +147,8 @@ def test_ticket_permissions_are_enforced_per_project_and_action(tmp_path: Path) 
     noted = as_worker(
         manager,
         org,
-        "builder",
         "task_update",
+        worker="builder",
         taskId=mine["id"],
         expectedRevision=mine["revision"],
         changes={"evidence": "Tests pass"},
@@ -178,8 +156,8 @@ def test_ticket_permissions_are_enforced_per_project_and_action(tmp_path: Path) 
     cancelled = as_worker(
         manager,
         org,
-        "builder",
         "task_update",
+        worker="builder",
         taskId=noted["id"],
         expectedRevision=noted["revision"],
         changes={"status": "cancelled"},
@@ -188,13 +166,19 @@ def test_ticket_permissions_are_enforced_per_project_and_action(tmp_path: Path) 
 
     # Noor may create and move tickets in Docs, and nothing in Desktop.
     guide = as_worker(
-        manager, org, "writer", "task_create", title="Guide", project="docs", assignee="writer"
+        manager,
+        org,
+        "task_create",
+        worker="writer",
+        title="Guide",
+        project="docs",
+        assignee="writer",
     )
     moved = as_worker(
         manager,
         org,
-        "writer",
         "task_update",
+        worker="writer",
         taskId=guide["id"],
         expectedRevision=guide["revision"],
         changes={"status": "backlog"},
@@ -204,17 +188,17 @@ def test_ticket_permissions_are_enforced_per_project_and_action(tmp_path: Path) 
         as_worker(
             manager,
             org,
-            "writer",
             "task_update",
+            worker="writer",
             taskId=guide["id"],
             expectedRevision=moved["revision"],
             changes={"status": "cancelled"},
         )
     with pytest.raises(ValueError, match="Noor Haddad can't create tickets in Desktop"):
-        as_worker(manager, org, "writer", "task_create", title="Board", project="desktop")
+        as_worker(manager, org, "task_create", worker="writer", title="Board", project="desktop")
 
     # Workers saved before permissions existed keep the organization-wide rules.
-    legacy = as_worker(manager, org, "lead", "task_create", title="Anything", project="docs")
+    legacy = as_worker(manager, org, "task_create", worker="lead", title="Anything", project="docs")
     assert legacy["project"] == "docs"
     # Refused actions changed nothing.
     titles = [t["title"] for t in read(manager, org)["runtime"]["tasks"]]
@@ -243,8 +227,8 @@ def test_moving_a_ticket_between_projects_needs_permission_in_both(tmp_path: Pat
         as_worker(
             manager,
             org,
-            "builder",
             "task_update",
+            worker="builder",
             taskId=made["id"],
             expectedRevision=made["revision"],
             changes={"project": "docs"},

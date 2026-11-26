@@ -86,13 +86,10 @@ internal fun BrowserPage(client: LiveClient, onBack: (() -> Unit)?, revealContro
     val browser = remember { BrowserRuntime.get(context) }
     // The default browser, unless the user picked a tab of the other built-in browser in the shared tab list.
     val engine = BrowserRules.pageEngine(browser.saved)
-    // With Firefox chosen, the page hands pages and Firefox's own screens to Firefox for Android.
+    // With Firefox, Chrome, Edge or another of BrowserApps chosen, the page hands pages (and the app's own screens, where
+    // it has links to them) to that app.
     val app = BrowserApps.byEngine(engine)
     if (engine == BrowserRules.ENGINE_GECKO) GeckoPage(client, browser, onBack, revealControls, onAskRem)
-    else if (engine == BrowserRules.ENGINE_FIREFOX) FirefoxPage(client, browser, onBack)
-    // With Edge chosen, Microsoft Edge for Android takes pages the same way.
-    else if (engine == BrowserRules.ENGINE_EDGE) EdgePage(client, browser, onBack)
-    // With Chrome (one of BrowserApps) chosen, Chrome for Android takes pages the same way.
     else if (app != null) BrowserAppPage(client, browser, app, onBack)
     else RaticodeBrowser(client, browser, onBack, revealControls, onAskRem)
 }
@@ -563,7 +560,6 @@ private fun BrowserSettingsSheet(browser: BrowserRuntime, client: LiveClient, on
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Browser settings and privacy", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
             EngineChoice(browser)
-            EdgeEngineChoice(browser)
             Text("Search with", style = MaterialTheme.typography.titleSmall)
             val choices = listOf("computer" to (if (saved.computerSearch.isNotBlank()) "Same as Raticode on your computer" else "Same as your computer (Google until it's known)")) +
                 BrowserRules.SEARCH_ENGINES.map { (label, template) -> template to label }

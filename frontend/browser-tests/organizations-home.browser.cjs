@@ -1,6 +1,6 @@
 /* global __dirname, console, setTimeout, clearTimeout, process, fetch */
 // Drives the Organizations experience against a real, isolated backend whose sample
-// organization ran one ticket with a test employee. Nothing touches the user's data.
+// organization ran one ticket with a test worker. Nothing touches the user's data.
 require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
 const { testViteCacheDir } = require("../electron/tests/test-vite-cache.cjs");
 const assert = require("node:assert/strict");

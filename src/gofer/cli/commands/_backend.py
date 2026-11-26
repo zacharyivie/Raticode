@@ -16,7 +16,6 @@ from urllib.parse import quote
 
 from gofer.cli import client_options as opts
 from gofer.cli.client import (
-    AGENT_SESSION_ENVS,
     ApiClient,
     CliError,
     CommandResult,
@@ -25,10 +24,6 @@ from gofer.cli.client import (
     in_agent_session,
     new_request_id,
 )
-
-# The client core's agent-session markers: what Raticode sets for every provider turn it
-# starts (``gofer.utils.process`` and ``gofer.core.command_slots``).
-AGENT_ENV = AGENT_SESSION_ENVS
 
 Body = Callable[[ApiClient, Output], CommandResult | None]
 

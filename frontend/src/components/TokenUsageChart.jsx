@@ -1,15 +1,19 @@
 import { useId, useMemo, useState } from "react";
 import { formatUsageNumber } from "../lib/usage.js";
+import { useRovingChoice } from "../lib/useRovingChoice.js";
 import { bucketLabel, compactTokens, loadUsageSplit, saveUsageSplit, seriesStyleVars, sharePercent, tokenChartModel, USAGE_SPLITS } from "../lib/usageHistory.js";
 
 const BUCKET_WORDS = { hour: "hour", day: "day", week: "week", month: "month", year: "year" };
+const NOTHING_POINTED = { bar: null, segment: null };
 
 /** Reported tokens per time bucket, one stacked segment per provider or per account. */
 export default function TokenUsageChart({ series }) {
   const [split, setSplit] = useState(() => loadUsageSplit());
   const model = useMemo(() => tokenChartModel(series, split), [series, split]);
-  const [active, setActive] = useState(null);
-  const [hovered, setHovered] = useState(null);
+  // The bar being read and the piece under the pointer change together, so the
+  // tooltip never names a bar without its hovered row or keeps another bar's row.
+  const [pointed, setPointed] = useState(NOTHING_POINTED);
+  const { bar: active, segment: hovered } = pointed;
   const id = useId();
   const styles = Object.fromEntries(model.legend.map(entry => [entry.key, entry.style]));
   if (!model.bars.length) return null;
@@ -18,18 +22,18 @@ export default function TokenUsageChart({ series }) {
   const bar = active === null ? null : model.bars[active];
   function choose(next) {
     setSplit(saveUsageSplit(next));
-    setHovered(null);
+    setPointed(current => ({ ...current, segment: null }));
   }
   function move(event) {
     const last = model.bars.length - 1;
     const current = active ?? -1;
     const next = { ArrowRight: current + 1, ArrowLeft: current - 1, Home: 0, End: last }[event.key];
     if (next === undefined) {
-      if (event.key === "Escape") setActive(null);
+      if (event.key === "Escape") setPointed(NOTHING_POINTED);
       return;
     }
     event.preventDefault();
-    setActive(Math.max(0, Math.min(last, next < 0 ? last : next)));
+    setPointed({ bar: Math.max(0, Math.min(last, next < 0 ? last : next)), segment: null });
   }
   const align = active === null ? "center" : active < model.bars.length / 4 ? "start" : active > (3 * model.bars.length) / 4 ? "end" : "center";
   return <figure className="usage-chart" aria-labelledby={`${id}-title`}>
@@ -45,19 +49,20 @@ export default function TokenUsageChart({ series }) {
           className="usage-chart-bars" role="group" tabIndex={0}
           aria-label={`Tokens per ${word} by ${who}, ${model.bars.length} bars. Use the left and right arrow keys to read each ${word}.`}
           aria-describedby={`${id}-detail`}
-          onKeyDown={move} onFocus={() => setActive(current => current ?? model.bars.length - 1)} onBlur={() => { setActive(null); setHovered(null); }}
-          onMouseLeave={() => { setActive(null); setHovered(null); }}
+          onKeyDown={move} onFocus={() => setPointed(current => current.bar === null ? { bar: model.bars.length - 1, segment: null } : current)}
+          onBlur={() => setPointed(NOTHING_POINTED)} onMouseLeave={() => setPointed(NOTHING_POINTED)}
         >
           {model.bars.map((item, index) => <div
             key={item.key} className="usage-chart-column" data-active={active === index || undefined}
-            onMouseEnter={() => setActive(index)}
+            onMouseEnter={() => setPointed({ bar: index, segment: null })}
           >
             <div className="usage-chart-stack" style={{ height: `${model.max ? 100 * item.total / model.max : 0}%` }}>
               {item.segments.map(segment => <span
                 key={segment.key} className="usage-chart-segment" data-pattern={styles[segment.key]?.pattern}
                 data-hovered={(active === index && hovered === segment.key) || undefined}
                 style={{ flexGrow: segment.share, ...seriesStyleVars(styles[segment.key]) }}
-                onMouseEnter={() => setHovered(segment.key)}
+                onMouseEnter={() => setPointed({ bar: index, segment: segment.key })}
+                onMouseLeave={() => setPointed(current => current.bar === index && current.segment === segment.key ? { bar: index, segment: null } : current)}
               />)}
             </div>
           </div>)}
@@ -93,20 +98,15 @@ export default function TokenUsageChart({ series }) {
   </figure>;
 }
 
+const SPLIT_KEYS = USAGE_SPLITS.map(option => option.key);
+
 /** By provider / By account: a two-option radio group, arrow keys move between them. */
 function SplitSwitch({ split, onChange }) {
+  const choice = useRovingChoice({ keys: SPLIT_KEYS, selected: split, onSelect: onChange });
   return <div className="usage-range-options usage-chart-split" role="radiogroup" aria-label="Split the chart">
-    {USAGE_SPLITS.map((option, index) => <button
+    {USAGE_SPLITS.map(option => <button
       key={option.key} type="button" role="radio" aria-checked={split === option.key}
-      tabIndex={split === option.key ? 0 : -1} onClick={() => onChange(option.key)}
-      onKeyDown={event => {
-        const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
-        if (!step) return;
-        event.preventDefault();
-        const next = USAGE_SPLITS[(index + step + USAGE_SPLITS.length) % USAGE_SPLITS.length];
-        onChange(next.key);
-        event.currentTarget.parentElement.querySelectorAll("[role=radio]")[USAGE_SPLITS.indexOf(next)]?.focus();
-      }}
+      onClick={() => onChange(option.key)} {...choice(option.key)}
     >{option.label}</button>)}
   </div>;
 }

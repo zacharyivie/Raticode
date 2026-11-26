@@ -5,7 +5,7 @@
 
 import { useSyncExternalStore } from "react";
 
-import { apiUrl } from "./api.js";
+import { apiJson } from "./api.js";
 import { formatKeybinding, normalizedBinding, settingBinding } from "./settings.js";
 
 export const WORKFLOW_SHORTCUTS_CHANGED = "gofer:workflow-shortcuts-changed";
@@ -24,20 +24,8 @@ function bridge() {
   return typeof window === "undefined" ? null : window.goferDesktop?.workflowShortcuts ?? null;
 }
 
-async function request(path, init = {}) {
-  const response = await fetch(apiUrl(path), {
-    ...init,
-    headers: init.body ? { "Content-Type": "application/json" } : undefined,
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(payload.error || `Workflow shortcuts returned ${response.status}`);
-    // Approve this version names the files it couldn't show when it refuses.
-    if (Array.isArray(payload.unseen)) error.unseen = payload.unseen;
-    throw error;
-  }
-  return payload;
-}
+// Approve this version names the files it couldn't show when it refuses (error.unseen).
+const request = (path, options = {}) => apiJson(path, { ...options, failure: status => `Workflow shortcuts returned ${status}` });
 
 /** Why a recorded binding can't be a shortcut in every app, or "". Same rules as the app's. */
 export function bindingProblem(binding) {
@@ -94,7 +82,7 @@ function changed() {
 export async function saveWorkflowShortcut({ workflowId, binding, input = null }) {
   const payload = await request("/workflow-shortcuts", {
     method: "POST",
-    body: JSON.stringify({ workflowId, binding, ...(input ? { input } : {}) }),
+    body: { workflowId, binding, ...(input ? { input } : {}) },
   });
   await changed();
   return payload.shortcut;
@@ -136,7 +124,7 @@ export function shortcutReviewSource(id) {
     approve: async (fingerprint, { acceptUnseen = false } = {}) => {
       const payload = await request(`${path}/approve`, {
         method: "POST",
-        body: JSON.stringify(acceptUnseen ? { fingerprint, acceptUnseen: true } : { fingerprint }),
+        body: acceptUnseen ? { fingerprint, acceptUnseen: true } : { fingerprint },
       });
       await changed();
       return payload.shortcut;

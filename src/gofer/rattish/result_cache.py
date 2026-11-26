@@ -9,6 +9,14 @@ rendered prompt and bound inputs, the output schema and the node's compiled form
 this one keeps its entries). Changing the duration doesn't change the key: a
 lookup checks an entry's age against the node's current duration.
 
+Two kinds of path are new on every run but stand for the same thing, so the key
+leaves them out (``RunPaths``). A file input's copy in ``<run_id>.files/`` counts by its
+contents: each mention of its path becomes ``file:<input>/<name>#sha256:<digest>``. A
+``workspace: worktree`` run counts by the project its worktree was made from: the key
+holds that project's folder, an absolute ``working_dir`` is written relative to the
+worktree's project folder, and any other mention of the worktree becomes the matching
+path in the project's repository.
+
 Each workflow keeps its entries in its own folder under the data folder,
 ``rattish-cache/<workflow-id>/``. Folders are owner-only (0700) and entries are
 owner-only files (0600). A folder holds at most ``MAX_WORKFLOW_BYTES``; writing
@@ -25,13 +33,16 @@ import json
 import os
 import re
 import stat
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from gofer.rattish.contracts import canonical_json_bytes, json_fingerprint
+from gofer.rattish.workflow_id import WORKFLOW_ID_PATTERN, validate_workflow_id
 from gofer.utils.atomic_output import atomic_binary_output, mkdir_without_links
 
 CACHE_FOLDER = "rattish-cache"
@@ -41,13 +52,11 @@ MAX_WORKFLOW_BYTES = 32 * 1024 * 1024
 # A larger answer is used for its run but not saved.
 MAX_ENTRY_BYTES = 2 * 1024 * 1024
 MAX_CACHE_DURATION_SECONDS = 365 * 24 * 3600
-KEY_VERSION = 1
+KEY_VERSION = 2
 ENTRY_VERSION = 1
 DURATION_PATTERN = re.compile(r"([1-9][0-9]*)(s|m|h|d|w)")
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 _KEY_PATTERN = re.compile(r"[0-9a-f]{64}")
-# The same rule as gofer.core.workflow.validate_workflow_id, without its heavy imports.
-_WORKFLOW_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,127}")
 # Parts of a compiled node that don't change its answer.
 _NODE_FIELDS_OUTSIDE_KEY = frozenset({"source_span", "routes", "readiness"})
 
@@ -63,13 +72,7 @@ def cache_duration_seconds(value: Any) -> int | None:
 
 
 def is_cacheable_workflow_id(workflow_id: str) -> bool:
-    return _WORKFLOW_ID_PATTERN.fullmatch(workflow_id) is not None
-
-
-def validate_workflow_id(workflow_id: str) -> str:
-    if not is_cacheable_workflow_id(workflow_id):
-        raise ValueError("Workflow id must match [a-z0-9][a-z0-9-]{0,127}")
-    return workflow_id
+    return WORKFLOW_ID_PATTERN.fullmatch(workflow_id) is not None
 
 
 def cache_root(data_dir: Path) -> Path:
@@ -80,17 +83,100 @@ def workflow_cache_dir(data_dir: Path, workflow_id: str) -> Path:
     return cache_root(data_dir) / validate_workflow_id(workflow_id)
 
 
+@dataclass(frozen=True, slots=True)
+class RunPaths:
+    """The paths of one run that the key replaces with what they stand for."""
+
+    # Each file input copy's path, mapped to its ``file:<input>/<name>#sha256:...`` token.
+    file_contents: Mapping[str, str] = field(default_factory=dict)
+    # A worktree run's worktree folder and the project's repository folder.
+    checkout: str | None = None
+    repository: str | None = None
+    # The project folder inside the worktree, and the project folder it was made from.
+    worktree_root: str | None = None
+    project_root: str | None = None
+
+    @classmethod
+    def for_run(
+        cls, file_contents: Mapping[str, str], worktree: Mapping[str, Any] | None
+    ) -> RunPaths:
+        """From the staged file inputs and the run's worktree record, if it has one."""
+        if worktree is None:
+            return cls(dict(file_contents))
+        return cls(
+            dict(file_contents),
+            checkout=str(worktree["checkout"]),
+            repository=str(worktree["repository"]),
+            worktree_root=str(worktree["root"]),
+            project_root=str(worktree["project_root"]),
+        )
+
+    def stable(self, material: dict[str, Any]) -> dict[str, Any]:
+        """Key material with this run's paths replaced."""
+        if self.worktree_root is not None and self.checkout is not None:
+            material["project_root"] = self.project_root
+            configuration = material["node"]["configuration"]
+            working_dir = configuration.get("working_dir")
+            if isinstance(working_dir, str) and Path(working_dir).is_absolute():
+                path = Path(working_dir)
+                if path.is_relative_to(self.checkout):
+                    configuration["working_dir"] = Path(
+                        os.path.relpath(path, self.worktree_root)
+                    ).as_posix()
+        # Longest first, so a path is never replaced by the token of a shorter one.
+        replacements = sorted(self.file_contents.items(), key=lambda item: -len(item[0]))
+        if self.checkout is not None and self.repository is not None:
+            replacements.append((self.checkout, self.repository))
+        if not replacements:
+            return material
+        replaced = _replace_paths(material, replacements)
+        assert isinstance(replaced, dict)
+        return replaced
+
+
+def _replace_paths(value: Any, replacements: list[tuple[str, str]]) -> Any:
+    if isinstance(value, str):
+        for old, new in replacements:
+            if old in value:
+                value = value.replace(old, new)
+        return value
+    if isinstance(value, dict):
+        return {name: _replace_paths(item, replacements) for name, item in value.items()}
+    if isinstance(value, list):
+        return [_replace_paths(item, replacements) for item in value]
+    return value
+
+
+# The executing run's paths. Set by the run service around the workflow it runs.
+_RUN_PATHS: ContextVar[RunPaths | None] = ContextVar("rattish_cache_run_paths", default=None)
+
+
+@contextmanager
+def stable_run_paths(paths: RunPaths) -> Iterator[None]:
+    token = _RUN_PATHS.set(paths)
+    try:
+        yield
+    finally:
+        _RUN_PATHS.reset(token)
+
+
+def current_run_paths() -> RunPaths | None:
+    return _RUN_PATHS.get()
+
+
 def cache_key(
     node: Mapping[str, Any],
     *,
     project_root: str,
     prompt: Any,
     inputs: Mapping[str, Any],
+    paths: RunPaths | None = None,
 ) -> str:
     """The cache key of one node activation, as 64 hex digits.
 
     ``node`` is the compiled node with the provider that would answer already applied,
-    so each fallback provider has its own entries.
+    so each fallback provider has its own entries. ``paths`` are the run's file input
+    copies and worktree, which the key replaces with what they stand for.
     """
     configuration = dict(node["configuration"])
     configuration.pop("cache", None)
@@ -113,7 +199,10 @@ def cache_key(
         "node": compiled,
         "project_root": project_root,
     }
-    return json_fingerprint(json.loads(json.dumps(material, default=str))).removeprefix("sha256:")
+    material = json.loads(json.dumps(material, default=str))
+    if paths is not None:
+        material = paths.stable(material)
+    return json_fingerprint(material).removeprefix("sha256:")
 
 
 @dataclass(frozen=True, slots=True)

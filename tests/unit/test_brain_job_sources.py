@@ -10,7 +10,8 @@ import pytest
 
 from gofer.ui.brain_job_sources import matches_source_rules, source_rules
 from gofer.ui.brain_library import BrainLibrary
-from tests.unit.test_brain_library import cited_output, opened, wait_task
+from tests.helpers.brain_library import wait_task
+from tests.unit.test_brain_library import cited_output, opened
 
 
 @pytest.fixture

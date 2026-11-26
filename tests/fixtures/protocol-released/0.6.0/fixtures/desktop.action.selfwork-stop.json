@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000284",
+  "id": "10000000-0000-4000-8000-000000000284",
+  "sequence": 284,
+  "type": "desktop.action",
+  "payload": {
+    "op": "selfwork.stop",
+    "params": {
+      "condition": "REM-205 to REM-212 are done",
+      "no_later_than": {
+        "time": "00:00"
+      },
+      "expected_revision": 3
+    }
+  }
+}

@@ -84,21 +84,6 @@ export async function uploadChatAttachments(attachments, threadId, fetchImpl = f
   return attachments.map(attachment => attachment.file ? uploaded[index++] : attachment).filter(Boolean);
 }
 
-export async function transcribeAudioBlob(blob, fetchImpl = fetch) {
-  const response = await fetchImpl(apiUrl("/chat/transcribe"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      data: arrayBufferToBase64(await blob.arrayBuffer()),
-      name: "recording.wav",
-      type: "audio/wav",
-    }),
-  });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || `Transcription returned ${response.status}`);
-  return String(payload.text || "").trim();
-}
-
 // Resolves to { sessionId, engine, engineName, notice }. engine is "macos", "windows" or
 // "offline"; notice says why the OS recognizer wasn't used, when it wasn't.
 export async function startStreamingTranscription(fetchImpl = fetch) {

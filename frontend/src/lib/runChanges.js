@@ -1,19 +1,14 @@
-import { apiUrl } from "./api.js";
+import { apiJson } from "./api.js";
 
 // A workspace: worktree run's changes (backend: gofer/rattish/run_worktrees.py).
 
-async function send(runId, action, { method = "GET", workflowId = "", body } = {}) {
+function send(runId, action, { method = "GET", workflowId = "", body } = {}) {
   const query = method === "GET" && workflowId ? `?workflowId=${encodeURIComponent(workflowId)}` : "";
-  const response = await fetch(apiUrl(`/rattish/runs/${encodeURIComponent(runId)}/${action}${query}`), {
+  return apiJson(`/rattish/runs/${encodeURIComponent(runId)}/${action}${query}`, {
     method,
-    ...(method === "GET" ? {} : {
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...(workflowId ? { workflowId } : {}), ...(body || {}) }),
-    }),
+    body: method === "GET" ? undefined : { ...(workflowId ? { workflowId } : {}), ...(body || {}) },
+    failure: status => `Request failed (${status}).`,
   });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `Request failed (${response.status}).`);
-  return payload;
 }
 
 export const runChangesApi = {

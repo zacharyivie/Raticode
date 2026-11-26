@@ -20,6 +20,8 @@ Choose **New thread**, check the project scope and composer settings, then send.
 | Shift+Enter | New line |
 | Ctrl+Enter | Start the thread in the background |
 
+Unsent text in a thread's composer, or in a new thread's, is kept on this computer until you send or clear it, so it's still there after a restart, an update or a reload. Attachments aren't kept. Deleting a thread removes its unsent text.
+
 <AppScreenshot name="rem-thread" caption="A thread in the Rem pane, scoped to its project. Show thoughts expands the steps the agent took; the composer below picks the provider, model and effort." />
 
 ## Organize threads
@@ -80,6 +82,27 @@ While Rem works, type a new instruction and choose **Steer**, or press Enter.
 - Steering can restart the provider process with the same settings.
 
 **Stop** asks the provider to cancel. It doesn't undo finished edits or outside effects, so check what was done before continuing. If a provider error offers **Resume task**, that continues the task on purpose.
+
+## Notifications while Raticode is in the background
+
+When the Raticode window isn't focused, the desktop shows a notification for:
+
+| When | Notification |
+| --- | --- |
+| A thread's turn finishes | **Reply in** *thread name* |
+| A thread's turn fails | **Turn failed in** *thread name* |
+| Rem replies in its own chat | **Rem replied** |
+| Rem waits on your approval in a browser tab | *Rem* **needs your approval in** *tab name* |
+| A Rem task finishes | The result and the task's name |
+
+- Notifications name the thread or tab, never what Rem or the agent wrote, like the phone's default.
+- Each turn and each approval request notifies once.
+- Clicking one brings Raticode forward and opens that thread, Rem's chat, the tab or the task.
+- Turns in Rem's worker threads aren't announced on their own; the task's notification covers them.
+- Nothing shows while the window has focus.
+- **Settings > General > Notify me when Raticode is in the background** turns all of them off. It's on by default.
+
+Workflow [notification](../nodes/notification.md) nodes and workflow shortcuts send their own notifications, which this switch doesn't change. For alerts on your phone, see [Alerts and notifications](../mobile/rem.md#alerts-and-notifications).
 
 ## Edit, resend or fork
 

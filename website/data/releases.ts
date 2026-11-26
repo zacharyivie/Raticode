@@ -29,9 +29,9 @@ export interface CliBinary {
 const repo = 'https://github.com/zacharyivie/Raticode'
 
 export const desktopRelease = {
-  version: '0.6.0',
-  tag: 'v0.6.0',
-  publishedAt: '2026-11-24',
+  version: '0.6.1',
+  tag: 'v0.6.1',
+  publishedAt: '2026-11-26',
   // Mac builds are Developer ID signed and notarized from 0.5.3 on.
   macNotarized: true,
 }
@@ -46,7 +46,7 @@ const v = desktopRelease.version
 // `npm run check:downloads` exits 3 and the deploy waits, so the live site never links a
 // file that doesn't exist. `npm run set-release` keeps it in step with version.properties.
 // Kept on one line so set-release can rewrite it.
-export const mobileRelease = { version: '0.36.0', tag: 'mobile-v0.36.0' }
+export const mobileRelease = { version: '0.37.0', tag: 'mobile-v0.37.0' }
 
 // SHA-256 fingerprint of the certificate Raticode Mobile releases are signed with. It is
 // public, the same value as the ANDROID_SIGNING_CERT_SHA256 repository variable the publish

@@ -73,15 +73,6 @@ export function viewedBrowserMedia(viewedPaths = [], tabs = {}) {
   return viewed.some((path) => isGeckoWindowTab(tabs[path])) ? [...viewed, GECKO_VIEWED] : viewed;
 }
 
-// Paths are kept apart: web tabs in the Browser plugin, everything else in the
-// File explorer's editor. Returns the two lists for a mixed list.
-export function splitBrowserPaths(paths = [], tabs = {}) {
-  const browser = [];
-  const files = [];
-  for (const path of paths) (tabs[path] ? browser : files).push(path);
-  return { browser, files };
-}
-
 // The tab bar keeps each browser's tabs together. Private tabs form their own
 // group, since a new tab beside them is private too. Groups appear in the order
 // their first tab was opened; tabs keep their order inside a group.

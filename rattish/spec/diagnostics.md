@@ -35,6 +35,9 @@ and never blocks publication or a run.
 | `RATTISH_MISSING_WORKFLOW_NAME` | error | Workflow `name` is absent or empty. |
 | `RATTISH_DUPLICATE_IDENTIFIER` | error | Two declarations canonicalize to the same identifier. |
 | `RATTISH_DUPLICATE_FIELD` | error | A block repeats a field after case normalization. |
+| `RATTISH_DUPLICATE_MAP_KEY` | error | Two entries in one block map have the same key once read: unquoted keys compare lowercased and quoted keys compare exactly. The span is the second entry's key; `related` and `details.first_line` point at the first. |
+| `RATTISH_MAP_KEY_CHANGED` | warning | An unquoted key in `env` (`agent`, `bash-command`, `shell-script`, `python-script`) or `params` (`http-request`) is read lowercased, but the program or server matches names exactly. Quote the key or write the map as a JSON object. |
+| `RATTISH_MCP_ARGUMENT_KEY_CHANGED` | warning | The same as `RATTISH_MAP_KEY_CHANGED` for `mcp-tool` `arguments`, at any depth. |
 | `RATTISH_UNKNOWN_FIELD` | error | The language or selected node contract does not declare a field. |
 | `RATTISH_MISSING_FIELD` | error | A required field is absent. |
 | `RATTISH_INVALID_FIELD_VALUE` | error | A field value violates its declared type or constraint. |

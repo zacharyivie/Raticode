@@ -120,8 +120,6 @@ class DeviceStore(context: Context) {
         cipher.updateAAD(("device-file-v2:" + name).toByteArray())
         return cipher.doFinal(bytes, 13, bytes.size - 13)
     }
-    fun removeTransfer(id: String, chunksOnly: Boolean = false) =
-        cleanupTransfers(if (chunksOnly) emptySet() else setOf(id), if (chunksOnly) setOf(id) else emptySet())
     fun cleanupTransfers(removed: Set<String>, completed: Set<String>) = synchronized(lock) {
         checkOwner()
         (removed + completed).forEach { require(java.util.UUID.fromString(it).toString() == it) }
@@ -135,7 +133,6 @@ class DeviceStore(context: Context) {
             }
         }
     }
-    fun removeBlob(name: String) = synchronized(lock) { checkOwner(); blob(name).delete() }
     fun reset() = synchronized(lock) { checkOwner(); file.delete(); blobs.listFiles().orEmpty().forEach { it.delete() }; store().apply { deleteEntry(DATA); deleteEntry(IDENTITY) } }
     companion object { private val lock = Any(); private val generations = java.util.concurrent.atomic.AtomicLong(); private const val DATA = "raticode.device.data.v2"; private const val IDENTITY = "raticode.device.identity.v2" }
 }

@@ -48,7 +48,7 @@ Each new trigger has a [Time limit](#time-limit) of 6 hours. Add `--max-run-time
 
 A repeating Rem task can become a workflow with **Make it a workflow** in its menu (see [Make it a workflow](../rem/home.md#make-it-a-workflow)). Its finished card's **Switch over…** adds a cron trigger for you:
 
-- The schedule and time zone are the task's own. **Daily** and **Weekly** become a cron expression such as `30 7 * * *` or `0 9 * * mon,fri`. A **Custom** cron schedule keeps its fields, with numbered weekdays written as day names, because Rem's own schedules count weekdays from Monday = 0 and triggers follow crontab, where 0 is Sunday. The trigger fires on the days the task did.
+- The schedule and time zone are the task's own. **Daily** and **Weekly** become a cron expression such as `30 7 * * *` or `0 9 * * mon,fri`. A **Custom** cron schedule keeps its fields as they are. Rem tasks and triggers both read cron the crontab way and Rem stores weekdays as day names, so the trigger fires on the days the task did.
 - It is labelled "Switched over from Rem task “…”" and uses the default overlap and missed-run settings.
 - It runs only the version you reviewed in **Switch over…**, the same as approving it in [Approved versions](#approved-versions). If the workflow changed since you opened it, nothing is added.
 - The task's schedule is paused at the same time. **Resume schedule** on the task turns this trigger off, and switching over again turns the same trigger back on.
@@ -179,6 +179,7 @@ Approving takes the same user-only path as accepting a ticket's work, so an agen
 - Rem, its workers and organization workers can still add or change triggers through `Raticode rattish triggers`, but from inside an agent turn that approves nothing. A trigger an agent adds waits with **Waiting for you to approve this workflow version.**, and its first review shows every file as new.
 - `Raticode rattish triggers approve` refuses to run inside an agent turn (exit code 5), and limited agent tokens can't reach the approve route.
 - Inside an agent turn, `rotate-token`, `webhook-port PORT`, setting a `budget` and `resume --all` are refused too (exit code 5), so an agent can't take a webhook's token, move the webhook listener, loosen the daily limit or turn every trigger back on. Reading the port and the budget, and `pause --all`, still work.
+- Inside an agent turn, `add` and `update` can lower a trigger's own daily cost limit, daily token limit and Time limit, or set one where there was none, but can't raise or remove them (exit code 5). `--daily-max-cost-usd 0`, `--daily-max-tokens 0` and `--max-run-time none` are refused, and a trigger an agent adds keeps the default Time limit or a shorter one.
 - The paired phone approves as you do. Its **Approve this version** passes the phone's [suspicious-request check](../mobile/pairing.md#suspicious-requests-lock-the-phone) first, so a locked phone can't approve.
 
 Turning a trigger off approves nothing.
@@ -237,6 +238,7 @@ A triggered run that hangs, such as a step waiting on a server that never answer
   Lengths take `s`, `m`, `h` and `d`, such as `90s`, `30m` or `1h30m`, up to 30 days.
 - The run is stopped the same way as **Stop**, so it ends as **Stopped** under Runs. The trigger's history entry shows it as **Failed**: **Stopped after 6 h, this trigger's time limit. Raise the limit or set a timeout in the workflow.**
 - The workflow's own [`timeout`](./rattish.md#workflow-limits) still applies. Whichever is shorter ends the run: at the workflow's `timeout`, the run fails with its timeout error as before.
+- Inside an agent turn, `--max-run-time` can only shorten it. A longer limit or `none` is refused with exit code 5, as described in [Only you can approve](#only-you-can-approve).
 - Only triggered runs have it. Runs you start yourself in the app or a terminal, from the phone, or by Rem don't.
 - `Raticode rattish triggers list` shows it as `time-limit=6h`, and `list --format json` includes it as `maxRunSeconds` (seconds, or `null` for none). `triggers export` and `apply` carry it as `maxRunSeconds`; a file without it gets 6 hours.
 - The phone shows each trigger's Time limit on the workflow's **Triggers** tab. It is set on the computer.
@@ -254,6 +256,7 @@ When a triggered run fails because one of its agent steps hit the provider's usa
 - A run waits at most **6 times**, the same as Rem's tasks. After the sixth wait the entry ends **Failed** with the last error, such as **Still at Claude Code's usage limit after 6 waits for it to reset.**
 - Only a provider's usage limit counts. A credit balance that is too low, an organization's spend cap (`enforced_spend_limit_reached`) and the workflow's own [`max-cost-usd` or `max-tokens`](./rattish.md#workflow-limits) end the run failed at once, because waiting doesn't fix them.
 - The resume is a triggered start like any other: it needs the [approved version](#approved-versions), it is skipped while [all triggers are paused](#pause-all-triggers) or the trigger is off, and it counts toward the [daily limit](#daily-limit). It waits for any other run of the workflow to finish first.
+- A run whose saved record or saved input values were edited, removed or replaced while it waited isn't resumed: the entry ends **Failed** with **The run's saved record changed while it waited, so Raticode didn't resume it. Start it again.** Resume from the **Runs** list still works, because you start that yourself.
 - A waiting run counts as running for the [overlap policy](#if-the-workflow-is-already-running): a `skip` start says **Skipped because run … is waiting for Claude Code's usage limit to reset.**, and a `queue` start waits for the resumed run to finish.
 - Waits are saved with the triggers on this computer, so a run still resumes after Raticode or its scheduler restarts. Nothing resumes while no scheduler is running; the next one resumes any run whose reset has passed.
 - **Workflow runs**, a workflow's **Runs** list and the phone show the failed run as **Waiting for usage limit**, with the time it resumes, until the scheduler resumes it.
@@ -383,4 +386,4 @@ Options and limits:
 - Debounce must be between 0.1 and 3,600 seconds.
 - `history --limit N` shows up to 1,000 events. Raticode keeps the latest 200 per trigger.
 
-See also: [Rattish language](./rattish.md), [Validation and preflight](./validation.md), [Schedules](./schedules.md) and [File watchers](./watchers.md) for the older services, [Import and export](../studio/sharing.md) for what an exported workflow leaves behind, and the [CLI command index](../reference/cli-commands.md).
+See also: [Rattish language](./rattish.md), [Validation and preflight](./validation.md), [Schedules](./schedules.md) and [File watchers](./watchers.md) for running a workflow from an outside scheduler or watcher, [Import and export](../studio/sharing.md) for what an exported workflow leaves behind, and the [CLI command index](../reference/cli-commands.md).

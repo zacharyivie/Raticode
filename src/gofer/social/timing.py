@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from gofer.utils.instants import stored_instant
+
 WEEKDAYS = (0, 1, 2, 3, 4)
 MIDWEEK = (1, 2, 3)
 # Two posts to one account closer than this compete with each other.
@@ -134,7 +136,7 @@ def timing_hints(
     post: Mapping[str, Any], others: Iterable[Mapping[str, Any]]
 ) -> list[dict[str, str]]:
     """Plain notes about a post's time: posts close together on one account, and quiet hours."""
-    when = _parse(post.get("scheduled_at"))
+    when = stored_instant(post.get("scheduled_at"), naive_as_utc=False)
     if when is None:
         return []
     hints: list[dict[str, str]] = []
@@ -156,7 +158,7 @@ def timing_hints(
     for other in others:
         if other.get("id") == post.get("id"):
             continue
-        other_when = _parse(other.get("scheduled_at"))
+        other_when = stored_instant(other.get("scheduled_at"), naive_as_utc=False)
         if other_when is None or abs(other_when - when) >= SPACING:
             continue
         shared = sorted(
@@ -181,13 +183,3 @@ def timing_hints(
             }
         )
     return hints[:5]
-
-
-def _parse(value: Any) -> datetime | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else None

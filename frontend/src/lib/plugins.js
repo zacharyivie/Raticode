@@ -15,7 +15,7 @@ export const SIDEBAR_PLUGINS = Object.freeze([
   // `badge` marks a plugin as experimental wherever it is shown, not only in Feature Preview.
   { id: "posts", label: "Posts", description: "Review, approve and schedule social posts that Rem, tasks and workflows propose. Untested, and it may change.", experimental: true, pane: false, badge: "Experimental" },
   { id: "swarms", label: "Swarms", description: "Agent teams working in the current project.", experimental: true },
-  { id: "organizations", label: "Organizations", description: "Rem employees, teams, and their work queues.", experimental: true },
+  { id: "organizations", label: "Organizations", description: "Rem workers, teams, and their work queues.", experimental: true },
   { id: "second-brain", label: "Second Brain", description: "Notes, reports, and knowledge collections.", experimental: true },
 ].map(Object.freeze));
 

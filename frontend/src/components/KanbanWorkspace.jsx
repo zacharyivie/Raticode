@@ -1,11 +1,15 @@
-import { useCallback, useEffect, useState } from "react";
-import { Building2, Check, ExternalLink, FolderX, Gauge, Hourglass, PauseCircle, Play, Plus, Search, ShieldAlert, ShieldCheck, Sparkles, Target, TriangleAlert, X } from "lucide-react";
-import { COLUMNS, PRIORITIES, STATUS_LABELS, canDropOn, canEditWaits, columnTickets, filterTickets, findRequestedTicket, guardrailTag, modeLabel, objectiveLine, onKanbanTicket, ownerFilters, participantOf, pausedLabel, saveParticipant, scopeNote, selfWorkLine, sendTicket, takeKanbanTicket, usageSentence, usageShort, useKanban, violatesLine, waitChoices, waitsChange, waitsLine } from "../lib/remKanban.js";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { Building2, Check, ChevronDown, ChevronUp, ExternalLink, FolderX, Gauge, Hourglass, Monitor, PauseCircle, Play, Plus, Search, ShieldAlert, ShieldCheck, Sparkles, Target, TriangleAlert, X } from "lucide-react";
+import { COLUMNS, PRIORITIES, STATUS_LABELS, canDropOn, canEditWaits, canUndoMove, columnTickets, filterTickets, findRequestedTicket, guardrailTag, modeLabel, moveNotice, objectiveLine, onKanbanTicket, ownerFilters, participantOf, pausedLabel, saveParticipant, scopeNote, selfWorkLine, sendTicket, takeKanbanTicket, usageSentence, usageShort, useKanban, violatesLine, waitChoices, waitsChange, waitsLine } from "../lib/remKanban.js";
 import { openRemThread } from "../lib/remHomeStore.js";
 import { GLOBAL_BOARD, GLOBAL_BOARD_FILTERS, GLOBAL_FILTER_KEYS, activeFilterCount, liveGlobalFilters, resetFilters, useBoardFilters } from "../lib/boardFilters.js";
 import KanbanPeople, { PersonAvatar } from "./KanbanPeople.jsx";
+import MarkdownContent from "./MarkdownContent.jsx";
 import TicketTimeline from "./TicketTimeline.jsx";
 import TicketPatchReview from "./TicketPatchReview.jsx";
+import { Dialog } from "./Dialog.jsx";
+import { useDiscardGuard } from "./ConfirmDialog.jsx";
+import { NoticeStack, useNotices } from "./Notice.jsx";
 import "./OrganizationHome.css";
 import "./Kanban.css";
 
@@ -41,12 +45,67 @@ export default function KanbanWorkspace() {
   const grouped = columnTickets(tickets);
   const current = board?.tickets.find(ticket => ticket.ticket_id === selected) || null;
   const act = change => run(() => sendTicket(change));
+  // Closing a sheet gives keyboard focus back to the card that opened it, or to the board's
+  // first card when that ticket has left the board.
+  const cards = useRef(new Map());
+  const returnTo = useRef("");
+  const returned = useRef(null);
+  const firstCard = () => COLUMNS.map(([column]) => grouped[column][0]).find(Boolean);
+  const closeSheet = useCallback(() => {
+    setSelected(current => {
+      returnTo.current = current;
+      return "";
+    });
+  }, []);
+  useEffect(() => {
+    if (selected) {
+      returned.current = null;
+      return;
+    }
+    const first = firstCard();
+    const pending = returnTo.current;
+    if (pending) {
+      returnTo.current = "";
+      const card = cards.current.get(pending) || (first && cards.current.get(first.ticket_id));
+      card?.focus();
+      returned.current = card ? { id: pending, card } : null;
+      return;
+    }
+    // A sheet action that closed it (Cancel ticket, Hand over) can take the card off the
+    // board afterwards: focus moves on to the first card instead of being lost.
+    const back = returned.current;
+    if (!back || cards.current.get(back.id) === back.card) return;
+    returned.current = null;
+    const active = document.activeElement;
+    if (active && active !== back.card && active !== document.body) return;
+    if (first) cards.current.get(first.ticket_id)?.focus();
+  });
+  const { notices, notify, dismiss } = useNotices();
+  // Sends one change and returns the ticket as the new board has it, or null when it failed.
+  const change = async (ticket, values) => {
+    let response = null;
+    const done = await run(async () => (response = await sendTicket({ ticket_id: ticket.ticket_id, scope: ticket.scope, organization_id: ticket.organization_id || undefined, expected_revision: ticket.revision, ...values })));
+    return done ? response?.board?.tickets.find(item => item.ticket_id === ticket.ticket_id) || null : null;
+  };
+  // A move says what it did. Undo moves the ticket back with its new revision; a move that
+  // starts work has none.
+  const move = async (ticket, column) => {
+    const moved = await change(ticket, { action: "move", column });
+    if (!moved) return;
+    const from = STATUS_LABELS[ticket.status];
+    notify(moveNotice(ticket, column), canUndoMove(ticket, column) ? { label: "Undo", run: async () => {
+      if (await change(moved, { action: "move", column: ticket.status })) notify(`${ticket.key} moved back to ${from}.`);
+    } } : null);
+  };
+  const decline = async (ticket, reason) => {
+    if (await change(ticket, { action: "decline", reason })) notify(`${ticket.key} declined.`);
+  };
   const drop = column => event => {
     event.preventDefault();
     setOver("");
     const ticket = board?.tickets.find(item => item.ticket_id === event.dataTransfer.getData("text/plain"));
     if (!canDropOn(ticket, column)) return;
-    act({ action: "move", ticket_id: ticket.ticket_id, scope: ticket.scope, organization_id: ticket.organization_id || undefined, expected_revision: ticket.revision, column });
+    void move(ticket, column);
   };
   return <div className="oh kb" data-testid="kanban-board">
     <div className="oh-main">
@@ -83,43 +142,55 @@ export default function KanbanWorkspace() {
             <div className={`col-body ${over === column ? "over" : ""}`} data-col={column}
               onDragOver={event => { event.preventDefault(); setOver(column); }}
               onDragLeave={() => setOver("")} onDrop={drop(column)}>
-              {grouped[column].map(ticket => <Card key={ticket.ticket_id} ticket={ticket} person={participantOf(ticket, participants)} onOpen={() => setSelected(ticket.ticket_id)} />)}
+              {grouped[column].map(ticket => <Card key={ticket.ticket_id} ticket={ticket} person={participantOf(ticket, participants)} open={ticket.ticket_id === selected} cardRef={card => { if (card) cards.current.set(ticket.ticket_id, card); else cards.current.delete(ticket.ticket_id); }} onOpen={() => setSelected(ticket.ticket_id)} />)}
             </div>
           </section>)}
         </div></div>
       </div>}
     </div>
-    {current ? <TicketSheet key={current.ticket_id} ticket={current} board={board} act={act} apply={response => run(async () => response)} onClose={() => setSelected("")} /> : null}
+    {current ? <TicketSheet key={current.ticket_id} ticket={current} board={board} act={act} onMove={column => move(current, column)} onDecline={reason => decline(current, reason)} apply={response => run(async () => response)} onClose={closeSheet} /> : null}
     {creating && board ? <NewTicket board={board} act={act} onClose={() => setCreating(false)} /> : null}
+    <NoticeStack notices={notices} onDismiss={dismiss} />
   </div>;
 }
 
-function Card({ ticket, person, onOpen }) {
+function Card({ ticket, person, open, cardRef, onOpen }) {
   const note = scopeNote(ticket);
   const waits = waitsLine(ticket);
   const objective = objectiveLine(ticket);
-  return <article className={`oh-card ${ticket.running ? "is-running" : ""} ${ticket.status === "blocked" && !ticket.paused ? "flagged" : ""} ${ticket.paused ? "is-paused" : ""}`} draggable={!ticket.running && !ticket.proposed}
+  const violates = violatesLine(ticket);
+  const guardrail = guardrailTag(ticket);
+  // The card's name is its key and title; its status lines are read out as its description,
+  // so a screen reader hears what the card shows.
+  const id = useId();
+  const lines = { flag: ticket.status === "blocked" && ticket.block_reason, scope: note, waits: ticket.wait_notice || waits, skip: ticket.skip_reason, objective,
+    proposed: ticket.proposed, auto: ticket.auto_approved, from: ticket.proposed_on, violates, guardrail, paused: ticket.paused };
+  const line = name => `${id}-${name}`;
+  const describedBy = Object.keys(lines).filter(name => lines[name]).map(line).join(" ");
+  return <article ref={cardRef} className={`oh-card ${ticket.running ? "is-running" : ""} ${ticket.status === "blocked" && !ticket.paused ? "flagged" : ""} ${ticket.paused ? "is-paused" : ""}`} draggable={!ticket.running && !ticket.proposed}
     onDragStart={event => { event.dataTransfer.setData("text/plain", ticket.ticket_id); event.dataTransfer.effectAllowed = "move"; }}
-    onClick={onOpen} onKeyDown={event => { if (event.key === "Enter") onOpen(); }} tabIndex={0} role="button" aria-label={`${ticket.key} ${ticket.title}`}>
+    onClick={onOpen} onKeyDown={event => { if (event.key !== "Enter" && event.key !== " ") return; event.preventDefault(); onOpen(); }}
+    tabIndex={0} role="button" aria-label={`${ticket.key} ${ticket.title}`} aria-describedby={describedBy || undefined} aria-current={open ? "true" : undefined}>
     <div className="row1"><span className="oh-key">{ticket.key}</span><span>{ticket.project || (ticket.priority === "critical" || ticket.priority === "high" ? ticket.priority : "")}</span></div>
     <div className="title">{ticket.title}</div>
-    {ticket.status === "blocked" && ticket.block_reason ? <div className="flag"><span>{ticket.block_reason}</span></div> : null}
-    {note ? <div className="kb-scope" title={note}><FolderX size={12} aria-hidden="true" /><span>{note}</span></div> : null}
-    {ticket.wait_notice ? <div className="kb-wait-notice" title={ticket.wait_notice} data-testid="ticket-wait-notice"><TriangleAlert size={12} aria-hidden="true" /><span>{ticket.wait_notice}</span></div>
-      : waits ? <div className="kb-waits" title={ticket.waits_for.filter(item => item.status !== "done").map(item => `${item.key} ${item.title}`).join("\n")} data-testid="ticket-waits"><Hourglass size={12} aria-hidden="true" /><span>{waits}</span></div> : null}
-    {ticket.skip_reason ? <div className="kb-scope" title={ticket.skip_reason}><FolderX size={12} aria-hidden="true" /><span>Rem left this out: {ticket.skip_reason}</span></div> : null}
-    {objective ? <div className={`kb-objective ${objective.off ? "is-off" : ""}`} title={objective.detail} data-testid="ticket-objective"><Target size={11} aria-hidden="true" /><span>{objective.short}</span></div> : null}
+    {lines.flag ? <div className="flag" id={line("flag")}><span>{ticket.block_reason}</span></div> : null}
+    {note ? <div className="kb-scope" title={note} id={line("scope")}><FolderX size={12} aria-hidden="true" /><span>{note}</span></div> : null}
+    {ticket.wait_notice ? <div className="kb-wait-notice" title={ticket.wait_notice} id={line("waits")} data-testid="ticket-wait-notice"><TriangleAlert size={12} aria-hidden="true" /><span>{ticket.wait_notice}</span></div>
+      : waits ? <div className="kb-waits" title={ticket.waits_for.filter(item => item.status !== "done").map(item => `${item.key} ${item.title}`).join("\n")} id={line("waits")} data-testid="ticket-waits"><Hourglass size={12} aria-hidden="true" /><span>{waits}</span></div> : null}
+    {ticket.skip_reason ? <div className="kb-scope" title={ticket.skip_reason} id={line("skip")}><FolderX size={12} aria-hidden="true" /><span>Rem left this out: {ticket.skip_reason}</span></div> : null}
+    {objective ? <div className={`kb-objective ${objective.off ? "is-off" : ""}`} title={objective.detail} id={line("objective")} data-testid="ticket-objective"><Target size={11} aria-hidden="true" /><span>{objective.short}</span></div> : null}
     {ticket.running ? <div className="livebar" aria-hidden="true"><i /></div> : null}
     <div className="row3">
       {person ? <PersonAvatar person={person} small /> : <span className="oh-av" style={{ background: "var(--faint)" }} title="Unassigned">?</span>}
       {ticket.scope === "rem" ? <span>Rem</span> : <span><Building2 size={12} />{ticket.assignee || ticket.organization_name}</span>}
       <span className="grow" />
       {usageShort(ticket.usage) ? <span className="kb-usage" title={usageSentence(ticket.usage)} data-testid="ticket-usage"><Gauge size={11} aria-hidden="true" />{usageShort(ticket.usage)}</span> : null}
-      {ticket.proposed ? <span className="kb-proposed"><Sparkles size={11} />Your approval</span> : null}
-      {ticket.auto_approved ? <span className="kb-auto" title="Self-work approved this on its own; you haven't reviewed it"><Sparkles size={11} aria-hidden="true" />Auto-approved</span> : null}
-      {violatesLine(ticket) ? <span className="kb-violates" title={ticket.violation_reason || "It contradicts a decision in force, so self-work won't start it."} data-testid="ticket-violates"><ShieldAlert size={11} aria-hidden="true" />{violatesLine(ticket)}</span> : null}
-      {guardrailTag(ticket) ? <span className="kb-guardrail" title="A guardrail retro proposed this to stop a failure that came back in two or more runs" data-testid="ticket-guardrail"><ShieldCheck size={11} aria-hidden="true" />{guardrailTag(ticket)}</span> : null}
-      {ticket.paused ? <span className="kb-paused"><PauseCircle size={11} aria-hidden="true" />{pausedLabel(ticket.paused)}</span> : null}
+      {ticket.proposed ? <span className="kb-proposed" id={line("proposed")}><Sparkles size={11} aria-hidden="true" />Your approval</span> : null}
+      {ticket.auto_approved ? <span className="kb-auto" id={line("auto")} title="Self-work approved this on its own; you haven't reviewed it"><Sparkles size={11} aria-hidden="true" />Auto-approved</span> : null}
+      {ticket.proposed_on ? <span className="kb-auto" id={line("from")} title={`A self-work pass that ran on ${ticket.proposed_on} proposed this`} data-testid="ticket-proposed-on"><Monitor size={11} aria-hidden="true" />From {ticket.proposed_on}</span> : null}
+      {violates ? <span className="kb-violates" id={line("violates")} title={ticket.violation_reason || "It contradicts a decision in force, so self-work won't start it."} data-testid="ticket-violates"><ShieldAlert size={11} aria-hidden="true" />{violates}</span> : null}
+      {guardrail ? <span className="kb-guardrail" id={line("guardrail")} title="A guardrail retro proposed this to stop a failure that came back in two or more runs" data-testid="ticket-guardrail"><ShieldCheck size={11} aria-hidden="true" />{guardrail}</span> : null}
+      {ticket.paused ? <span className="kb-paused" id={line("paused")}><PauseCircle size={11} aria-hidden="true" />{pausedLabel(ticket.paused)}</span> : null}
     </div>
   </article>;
 }
@@ -131,7 +202,7 @@ const hasPatch = ticket => !ticket.running && !ticket.proposed && ticket.status 
 // Accept and change requests: Rem's finished or blocked tickets, an organization's in review or done.
 const canDecide = ticket => (ticket.scope === "organization" ? ["in_review", "done"] : ["done", "blocked"]).includes(ticket.status) && !ticket.paused;
 
-function TicketSheet({ ticket, board, act, apply, onClose }) {
+function TicketSheet({ ticket, board, act, onMove, onDecline, apply, onClose }) {
   const [reviewing, setReviewing] = useState(false);
   const projects = board.participants.find(item => item.kind === "rem")?.assignable || [];
   const note = scopeNote(ticket);
@@ -141,14 +212,20 @@ function TicketSheet({ ticket, board, act, apply, onClose }) {
   const [worker, setWorker] = useState("");
   const organization = board.organizations.find(org => org.organization_id === (destination || ticket.organization_id));
   const base = { ticket_id: ticket.ticket_id, scope: ticket.scope, organization_id: ticket.organization_id || undefined, expected_revision: ticket.revision };
+  // Escape closes the sheet, but not while a Decline reason is typed in it.
+  const reasonRef = useRef(reason);
+  reasonRef.current = reason;
+  // Opening a ticket moves keyboard focus into its sheet, at its title.
+  const heading = useRef(null);
+  useEffect(() => { heading.current?.focus(); }, []);
   useEffect(() => {
-    const close = event => { if (event.key === "Escape") onClose(); };
+    const close = event => { if (event.key === "Escape" && !reasonRef.current.trim()) onClose(); };
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
   }, [onClose]);
   return <aside className={`kb-sheet ${reviewing ? "is-reviewing" : ""}`} aria-label={`Ticket ${ticket.key}`}>
     <header className="kb-sheet-head"><span className="oh-key">{ticket.key}</span><span className="grow" /><button className="oh-btn icon ghost" type="button" aria-label="Close" onClick={onClose}><X size={15} /></button></header>
-    <h2>{ticket.title}</h2>
+    <h2 ref={heading} tabIndex={-1}>{ticket.title}</h2>
     <p className="oh-sheet-sub"><span className={`oh-pill st-${ticket.status === "in_progress" ? "running" : ticket.status}`}>{COLUMNS.find(([key]) => key === ticket.status)?.[1] || ticket.status}</span><span>{ticket.scope === "rem" ? "Rem" : ticket.organization_name}</span>{ticket.assignee && ticket.scope !== "rem" ? <span>{ticket.assignee}</span> : null}{ticket.project ? <span>{ticket.project}</span> : null}</p>
     {note ? <p className="kb-scope" role="status"><FolderX size={13} aria-hidden="true" /><span>{note}</span></p> : null}
     {ticket.scope === "rem" && !ticket.running && !ticket.paused && ["backlog", "todo", "blocked"].includes(ticket.status) ? <label className="kb-field"><span>Project</span>
@@ -156,13 +233,15 @@ function TicketSheet({ ticket, board, act, apply, onClose }) {
         <option value="">No project</option>
         {[...new Set([...projects, ...(ticket.project_dir ? [ticket.project_dir] : [])])].map(root => <option key={root} value={root}>{projectLabel(board, root)}</option>)}
       </select></label> : null}
-    {ticket.description ? <p className="kb-description">{ticket.description}</p> : null}
+    {ticket.description ? <TicketDescription text={ticket.description} /> : null}
+    <DoneWhen ticket={ticket} />
     <WaitsFor ticket={ticket} board={board} act={act} />
     {ticket.auto_approved ? <p className="kb-auto-note" role="note" data-testid="ticket-auto-approved"><Sparkles size={13} aria-hidden="true" /><span>Approved by self-work, not by you, because auto-approval is on in Settings &gt; Rem. Edit, move or cancel it like any ticket.</span></p> : null}
-    {ticket.proposal_reason ? <div className="kb-section"><h3>Why Rem suggests this</h3><p>{ticket.proposal_reason}</p></div> : null}
+    {ticket.proposed_on ? <p className="kb-auto-note" role="note" data-testid="ticket-proposed-on-note"><Monitor size={13} aria-hidden="true" /><span>Proposed by a self-work pass that ran on {ticket.proposed_on}.{ticket.proposed ? " What another computer proposes always waits for your approval, even with auto-approval on." : ""}</span></p> : null}
+    {ticket.proposal_reason ? <div className="kb-section"><h3>Why Rem suggests this</h3><TicketMarkdown value={ticket.proposal_reason} /></div> : null}
     {ticket.skip_reason ? <div className="kb-section"><h3>Why Rem left this out</h3><p>{ticket.skip_reason}</p></div> : null}
     {objective ? <div className="kb-section" data-testid="ticket-objective-detail"><h3>Objective</h3><p>{objective.detail}{objective.off ? " Move it to In progress to start it anyway." : ""}</p></div> : null}
-    {ticket.summary ? <div className="kb-section"><h3>Result</h3><p>{ticket.summary}</p></div> : null}
+    {ticket.summary ? <div className="kb-section"><h3>Result</h3><TicketMarkdown value={ticket.summary} /></div> : null}
     {violatesLine(ticket) ? <div className="kb-section kb-violates-note" role="note" data-testid="ticket-violates-detail"><h3><ShieldAlert size={13} aria-hidden="true" />Violates decisions</h3><p>{ticket.violation_reason || `It contradicts ${ticket.violates_decisions.join(", ")}.`}</p><p className="kb-hint">Self-work won't start it, and Rem can't make an exception for itself. Edit the ticket, or change the decision in Rem's Decisions list, and Rem checks it again.</p></div>
       : ticket.block_reason ? <div className="kb-section"><h3>{ticket.paused ? pausedLabel(ticket.paused) : "Blocked"}</h3><p>{ticket.block_reason}</p></div> : null}
     {ticket.usage ? <div className="kb-section" data-testid="ticket-usage-detail"><h3>Usage</h3><p>{usageSentence(ticket.usage)}</p></div> : null}
@@ -175,7 +254,7 @@ function TicketSheet({ ticket, board, act, apply, onClose }) {
       <button className="oh-btn primary" type="button" onClick={() => act({ ...base, action: "approve" })}><Check size={14} />Approve for To do</button>
       <label className="oh-sr" htmlFor="kb-decline">Reason (optional)</label>
       <input id="kb-decline" className="kb-input" placeholder="Reason (optional)" value={reason} onChange={event => setReason(event.target.value)} />
-      <button className="oh-btn danger" type="button" onClick={() => { act({ ...base, action: "decline", reason: reason.trim() || undefined }); onClose(); }}>Decline</button>
+      <button className="oh-btn danger" type="button" onClick={() => { onDecline(reason.trim() || undefined); onClose(); }}>Decline</button>
     </div> : null}
     {ticket.scope === "rem" && !ticket.proposed && !ticket.running && !ticket.paused && ["backlog", "todo", "blocked"].includes(ticket.status) && board.organizations.length ? <div className="kb-section">
       <h3>Hand to an organization</h3>
@@ -187,19 +266,59 @@ function TicketSheet({ ticket, board, act, apply, onClose }) {
       </div>
     </div> : null}
     {ticket.paused ? <div className="kb-section kb-move"><h3>Paused task</h3><div className="kb-actions">
-      <button className="oh-btn primary" type="button" onClick={() => act({ ...base, action: "move", column: "in_progress" })}><Play size={14} />Resume</button>
+      <button className="oh-btn primary" type="button" onClick={() => onMove("in_progress")}><Play size={14} />Resume</button>
     </div><p className="kb-hint">Resumes the same task in its thread. To end it instead, stop it from its task in Rem.</p></div> : null}
     {!ticket.proposed && !ticket.running && !ticket.paused ? <div className="kb-section kb-move"><h3>Move</h3><div className="kb-actions">
-      {ticket.status === "cancelled" ? <button className="oh-btn" type="button" onClick={() => act({ ...base, action: "move", column: "backlog" })}>Restore to Backlog</button> : <>
-        {canDropOn(ticket, "todo") ? <button className="oh-btn" type="button" onClick={() => act({ ...base, action: "move", column: "todo" })}>To do</button> : null}
-        {canDropOn(ticket, "in_progress") ? <button className="oh-btn" type="button" onClick={() => act({ ...base, action: "move", column: "in_progress" })}>Start now</button> : null}
-        {canDropOn(ticket, "backlog") ? <button className="oh-btn" type="button" onClick={() => act({ ...base, action: "move", column: "backlog" })}>Backlog</button> : null}
-        {ticket.scope === "rem" && canDropOn(ticket, "done") ? <button className="oh-btn" type="button" onClick={() => act({ ...base, action: "move", column: "done" })}>Mark done</button> : null}
-        {ticket.scope === "rem" && ticket.status !== "done" ? <button className="oh-btn ghost" type="button" onClick={() => { act({ ...base, action: "move", column: "cancelled" }); onClose(); }}>Cancel ticket</button> : null}
+      {ticket.status === "cancelled" ? <button className="oh-btn" type="button" onClick={() => onMove("backlog")}>Restore to Backlog</button> : <>
+        {canDropOn(ticket, "todo") ? <button className="oh-btn" type="button" onClick={() => onMove("todo")}>To do</button> : null}
+        {canDropOn(ticket, "in_progress") ? <button className="oh-btn" type="button" onClick={() => onMove("in_progress")}>Start now</button> : null}
+        {canDropOn(ticket, "backlog") ? <button className="oh-btn" type="button" onClick={() => onMove("backlog")}>Backlog</button> : null}
+        {ticket.scope === "rem" && canDropOn(ticket, "done") ? <button className="oh-btn" type="button" onClick={() => onMove("done")}>Mark done</button> : null}
+        {ticket.scope === "rem" && ticket.status !== "done" ? <button className="oh-btn ghost" type="button" onClick={() => { onMove("cancelled"); onClose(); }}>Cancel ticket</button> : null}
       </>}
     </div></div> : null}
     <TicketTimeline ticket={ticket} />
   </aside>;
+}
+
+// Rem writes ticket text in Markdown. The sheet shows it formatted, with no images.
+const TicketMarkdown = ({ value }) => <MarkdownContent compact images={false} className="oh-md" value={value} />;
+
+// A description longer than about 12 lines starts folded to its first few, so Done when,
+// Waits for and Move stay close. The phone folds it the same way. Lines are counted from the
+// text, about 60 characters to a line at the sheet's width.
+const FOLD_LINES = 12;
+const LINE_CHARS = 60;
+const foldsDescription = text => String(text).split("\n")
+  .reduce((lines, line) => lines + Math.max(1, Math.ceil(line.length / LINE_CHARS)), 0) > FOLD_LINES;
+
+function TicketDescription({ text }) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  const long = foldsDescription(text);
+  const folded = long && !open;
+  // The whole text stays in the page; tabbing to a link in the hidden part opens it.
+  const reveal = event => {
+    if (!folded || event.target === event.currentTarget) return;
+    const bottom = event.currentTarget.getBoundingClientRect?.().bottom;
+    if (bottom === undefined || event.target.getBoundingClientRect?.().bottom > bottom) setOpen(true);
+  };
+  return <div className="kb-description">
+    <div id={id} className="kb-fold" data-folded={folded || undefined} onFocus={reveal}><TicketMarkdown value={text} /></div>
+    {long ? <button type="button" className="kb-fold-toggle" aria-expanded={open} aria-controls={id} onClick={() => setOpen(value => !value)}>
+      {open ? <ChevronUp size={13} aria-hidden="true" /> : <ChevronDown size={13} aria-hidden="true" />}{open ? "Show less" : "Show all"}
+    </button> : null}
+  </div>;
+}
+
+// The ticket's finish line: each line is one check its review makes.
+function DoneWhen({ ticket }) {
+  const lines = (ticket.done_when || "").split("\n").map(line => line.trim()).filter(Boolean);
+  if (!lines.length) return null;
+  return <div className="kb-section" data-testid="ticket-done-when">
+    <h3>Done when</h3>
+    <ul className="kb-done-list">{lines.map((line, index) => <li key={index}><Check size={13} aria-hidden="true" /><span>{line}</span></li>)}</ul>
+  </div>;
 }
 
 // What a ticket waits for, with its notice, and the controls to change the list.
@@ -235,7 +354,8 @@ function NewTicket({ board, act, onClose }) {
   const rem = board.participants.find(item => item.kind === "rem");
   const openProjects = rem?.assignable || [];
   // Starts on one of Rem's assigned projects, so a new ticket can be picked up on its own.
-  const [form, setForm] = useState({ title: "", description: "", priority: "medium", status: "todo", owner: "rem", worker: "", project: rem?.projects.find(root => openProjects.includes(root)) || "" });
+  const [start] = useState(() => ({ title: "", description: "", priority: "medium", status: "todo", owner: "rem", worker: "", project: rem?.projects.find(root => openProjects.includes(root)) || "" }));
+  const [form, setForm] = useState(start);
   const [busy, setBusy] = useState(false);
   const change = values => setForm(current => ({ ...current, ...values }));
   const organization = form.owner === "rem" ? null : board.organizations.find(org => org.organization_id === form.owner);
@@ -250,9 +370,13 @@ function NewTicket({ board, act, onClose }) {
     setBusy(false);
     if (saved) onClose();
   };
-  return <div className="kb-overlay" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
-    <form className="kb-dialog oh-form" onSubmit={submit} role="dialog" aria-modal="true" aria-label="New ticket">
-      <h2>New ticket</h2>
+  // What was typed or chosen stays until Cancel, Add ticket or a confirmed Escape.
+  const changed = Object.keys(start).some(key => form[key] !== start[key]);
+  const guard = useDiscardGuard({ changed, onClose, message: "Discard this ticket? What you entered isn't saved." });
+  return <>
+    <Dialog title="New ticket" onClose={guard.requestClose} overlayClassName="kb-overlay" overlayProps={guard.outsidePress} panelClassName="kb-dialog">
+    <form className="oh-form" onSubmit={submit}>
+      <h2 aria-hidden="true">New ticket</h2>
       <label>Title<input autoFocus maxLength={500} value={form.title} onChange={event => change({ title: event.target.value })} /></label>
       <label>Description<textarea value={form.description} onChange={event => change({ description: event.target.value })} /></label>
       <label>For
@@ -267,5 +391,7 @@ function NewTicket({ board, act, onClose }) {
       <label>Column<select value={form.status} onChange={event => change({ status: event.target.value })}><option value="todo">To do</option><option value="backlog">Backlog</option></select></label>
       <div className="kb-actions"><button className="oh-btn primary" type="submit" disabled={busy || !form.title.trim()}>Add ticket</button><button className="oh-btn ghost" type="button" onClick={onClose}>Cancel</button></div>
     </form>
-  </div>;
+    </Dialog>
+    {guard.confirmDialog}
+  </>;
 }

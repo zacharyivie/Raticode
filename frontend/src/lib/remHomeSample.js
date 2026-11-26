@@ -209,14 +209,16 @@ function decisionCard(item) {
   return { id, topic, question, recommended, why, evidence, alternatives, status, tried };
 }
 
-// Self-work objectives for the busy scene: two open goals, one open-ended, one done.
+// Self-work objectives for the busy scene: two open goals, one open-ended, one done, and
+// one stale from an earlier session. Ordered as the backend sends them.
 export function sampleObjectives() {
   const items = [
     { id: "obj-ux", text: "Raise UX quality of the workflow studio", done_when: "", done: false, created_by: "user", created_at: ago(300) },
     { id: "obj-sb", text: "Improve reliability of the Second Brain tools", done_when: "No open reliability tickets for Second Brain and the nightly suite passes 3 nights running", done: false, created_by: "rem", created_at: ago(240) },
     { id: "obj-perf", text: "Optimize performance of file handling", done_when: "Opening a 10,000-file project takes under 2 s", done: true, done_by: "rem", done_evidence: "Measured 1.4 s on the benchmark project after the index change.", created_by: "rem", created_at: ago(600), done_at: ago(30) },
+    { id: "obj-cli", text: "Harden the CLI for unattended runs", done_when: "Every CLI command has a JSON error code", done: true, stale: true, done_by: "user", created_by: "user", created_at: ago(4000), done_at: ago(3000) },
   ];
-  return { revision: 4, items, open: 2, done: 1 };
+  return { revision: 4, items, offset: 0, total: items.length, open: 2, done: 1, stale: 1 };
 }
 
 // The first running task serves the first objective, as a self-work run records it.

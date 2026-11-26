@@ -5,13 +5,13 @@ from __future__ import annotations
 import http.client
 import json
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from gofer.ui.server import GoferUiServer
+from tests.helpers.brain_library import wait_idle
 
 OWNER = "brain-agent-owner-token"
 NOTE = "# Harbor survey\n\nThe harbor survey found two risks near the pier.\n"
@@ -46,21 +46,12 @@ def call(
     return response.status, value
 
 
-def wait_idle(server: GoferUiServer) -> None:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if all(task["state"] != "running" for task in server.second_brains.snapshot()["tasks"]):
-            return
-        time.sleep(0.02)
-    pytest.fail("Second Brain tasks did not finish")
-
-
 def make_brain(server: GoferUiServer, root: Path, name: str, *, cloud: bool) -> dict[str, Any]:
     root.mkdir(parents=True)
     (root / "harbor.md").write_text(NOTE, encoding="utf-8")
     library = server.second_brains
     brain = library.open({"root": str(root)})
-    wait_idle(server)
+    wait_idle(server.second_brains)
     library.update_brain(
         {"id": brain["id"], "patch": {"name": name, "settings": {"allowCloud": cloud}}}
     )
@@ -182,3 +173,18 @@ def test_report_sources_from_a_collection_leave_out_private_documents(api, brain
     jobs = {"sources": [{"id": doc["id"], "title": "t", "path": "p"} for doc in docs.values()]}
     kept = agent_brain_result(api.second_brains, "job_sources", jobs)
     assert [item["id"] for item in kept["sources"]] == [docs[shared["id"]]["id"]]
+
+
+def test_agent_passages_answer_private_documents_as_missing(api, brains):
+    shared, private, docs = brains
+    shared_id, private_id = docs[shared["id"]]["id"], docs[private["id"]]["id"]
+    agent = api.agent_tokens.create("reader")
+    status, value = call(api, agent, "passages", {"ids": [shared_id, private_id]})
+    assert status == 200, value
+    result = value["result"]
+    assert [doc["id"] for doc in result["documents"]] == [shared_id]
+    assert result["missing"] == [private_id]
+    assert "harbor survey" in json.dumps(result["documents"])
+    # The owner reads both.
+    owner = call(api, OWNER, "passages", {"ids": [shared_id, private_id]})[1]["result"]
+    assert [doc["id"] for doc in owner["documents"]] == [shared_id, private_id]

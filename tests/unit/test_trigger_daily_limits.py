@@ -115,7 +115,7 @@ def test_limits_are_checked_and_zero_or_null_removes_them(data_dir: Path, source
 
     # Leaving them out keeps them; 0 or None removes one.
     assert store.update(trigger_id, label="Nightly").daily_max_cost_usd == 2.5
-    cleared = store.update(trigger_id, daily_max_cost_usd=0, daily_max_tokens=None)
+    cleared = store.update(trigger_id, daily_max_cost_usd=0, daily_max_tokens=None, actor="user")
     assert (cleared.daily_max_cost_usd, cleared.daily_max_tokens) == (None, None)
 
     for bad, match in (
@@ -377,7 +377,7 @@ def test_a_real_triggered_run_records_its_daily_cap(data_dir: Path, source: Path
 def test_api_saves_limits_and_warns_about_providers_without_cost(
     data_dir: Path, tmp_path: Path
 ) -> None:
-    from gofer.rattish.workspaces import discover_registered_workflows
+    from gofer.rattish.workspaces import discover_project_workflows
     from gofer.ui.rattish_triggers import (
         create_trigger_payload,
         daily_budget_payload,
@@ -388,7 +388,7 @@ def test_api_saves_limits_and_warns_about_providers_without_cost(
     )
 
     source = _workflow(tmp_path, AGENT_WORKFLOW, name="agent")
-    (registered,) = discover_registered_workflows(source.parent, registry_dir=data_dir)
+    (registered,) = discover_project_workflows(source.parent, registry_dir=data_dir).workflows
     workflow_id = registered.workflow_id
     created = create_trigger_payload(
         data_dir,

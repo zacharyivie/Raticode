@@ -106,7 +106,34 @@ def plan(raw: Any) -> objectives_store.PlannedObjectives:
             required=("id", "evidence"),
             prose=("evidence",),
         ),
+        finish_lines=entries(
+            objectives_store.FinishLine,
+            answer,
+            "finish_lines",
+            objectives_store.MAX_OPEN_BY_REM,
+            required=("id", "done_when"),
+        ),
     )
+
+
+def plan_problems(plan: objectives_store.PlannedObjectives) -> list[dict[str, Any]]:
+    """Objectives in a usable plan that lack a checkable finish line, for one repair request.
+
+    The planner writes objectives on Rem's own initiative, so each needs done_when
+    (FINISH_LINE_RULE). Those still without one after the repair are refused when saved.
+    """
+    problems: list[dict[str, Any]] = []
+    for number, entry in enumerate(plan.objectives):
+        problem = objectives_store.finish_line_problem(" ".join(entry.done_when.split()))
+        if problem:
+            problems.append(
+                {
+                    "loc": ["objectives", number, "done_when"],
+                    "msg": f"“{entry.text.strip()[:80]}”: {problem}",
+                    "type": "finish_line",
+                }
+            )
+    return problems
 
 
 def fit(raw: Any) -> objective_fit.FitResult:

@@ -13,7 +13,7 @@ const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { cookieMatchesSite } = require("./browser-policy.cjs");
+const { createBidiSignIns } = require("./bidi-sign-ins.cjs");
 const { prefLine, removeAutomationContainers } = require("./firefox-profile.cjs");
 
 const LAUNCH_TIMEOUT_MS = 45000;
@@ -620,57 +620,15 @@ function createFirefoxEngine({
 
   // Rem's container starts signed out. Sites the user shares get a copy of
   // the user's Firefox cookies when a Rem tab opens or the list changes.
-  async function mirrorSignIns(sites = [], removed = []) {
-    if (!connection || !remUserContext) return;
-    const userPartition = { type: "storageKey", userContext: "default" };
-    const remPartition = { type: "storageKey", userContext: remUserContext };
-    if (sites.length) {
-      const { cookies = [] } = await send("storage.getCookies", { partition: userPartition });
-      for (const cookie of cookies) {
-        if (!sites.some((site) => cookieMatchesSite(cookie.domain, site))) continue;
-        const copy = {
-          name: cookie.name,
-          value: cookie.value,
-          domain: cookie.domain,
-          path: cookie.path,
-          httpOnly: cookie.httpOnly,
-          secure: cookie.secure,
-          sameSite: cookie.sameSite,
-          ...(Number.isFinite(cookie.expiry) ? { expiry: cookie.expiry } : {}),
-        };
-        await send("storage.setCookie", { cookie: copy, partition: remPartition }).catch((error) => {
-          log("warn", `Could not share the sign-in for ${String(cookie.domain).replace(/^\./, "")} with Rem's Firefox tabs: ${error.message}`);
-        });
-      }
-    }
-    if (removed.length) {
-      const { cookies = [] } = await send("storage.getCookies", { partition: remPartition });
-      for (const cookie of cookies) {
-        if (!removed.some((site) => cookieMatchesSite(cookie.domain, site))) continue;
-        if (sites.some((site) => cookieMatchesSite(cookie.domain, site))) continue;
-        await send("storage.deleteCookies", { filter: { name: cookie.name, domain: cookie.domain }, partition: remPartition }).catch(() => {});
-      }
-    }
-  }
-
-  // Clears the cookies of one site, or of every site when host is empty.
-  async function clearSiteCookies(kind, host) {
-    if (!connection) return 0;
-    const partition = { type: "storageKey", userContext: kind === "rem" ? remUserContext : "default" };
-    if (kind === "rem" && !remUserContext) return 0;
-    if (!host) {
-      await send("storage.deleteCookies", { partition });
-      return -1;
-    }
-    const { cookies = [] } = await send("storage.getCookies", { partition });
-    let removed = 0;
-    for (const cookie of cookies) {
-      if (!cookieMatchesSite(cookie.domain, host)) continue;
-      await send("storage.deleteCookies", { filter: { name: cookie.name, domain: cookie.domain }, partition }).catch(() => {});
-      removed += 1;
-    }
-    return removed;
-  }
+  // Settings can clear the user's Firefox cookies too: this profile is Raticode's.
+  const { clearSiteCookies, mirrorSignIns } = createBidiSignIns({
+    send,
+    log,
+    remUserContext: () => remUserContext,
+    connected: () => Boolean(connection),
+    browserName: "Firefox",
+    userCookies: "clearable",
+  });
 
   async function setRemDownloads(allowed) {
     remDownloadsAllowed = allowed === true;

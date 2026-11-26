@@ -10,7 +10,7 @@ import stat
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import closing
 from itertools import chain
 from pathlib import Path
@@ -153,6 +153,30 @@ class NoteIndex:
         self.scanning = False
         self.seen: set[str] = set()
         self.deferred: set[str] = set()
+        # Folders of private brains inside the root, relative to it; see leave_out.
+        self.private: frozenset[Path] = frozenset()
+
+    def leave_out(self, folders: Iterable[Path]) -> None:
+        """Keep these folders (private brains inside the root) out of the index.
+
+        The walk skips them and their change events are ignored. A changed list starts
+        a full scan, which deletes rows stored under them before the next search.
+        """
+        private = frozenset(
+            folder.relative_to(self.root)
+            for folder in folders
+            if folder != self.root and folder.is_relative_to(self.root)
+        )
+        with self.events_lock:
+            if private != self.private:
+                self.private = private
+                self.full_scan = True
+        self.wake.set()
+
+    def _kept(self, relative: Path) -> bool:
+        return _included(relative) and not any(
+            relative.is_relative_to(folder) for folder in self.private
+        )
 
     def close(self) -> None:
         with self.condition:
@@ -175,7 +199,7 @@ class NoteIndex:
             relative = path.relative_to(self.root)
         except ValueError:
             return
-        if not _included(relative):
+        if not self._kept(relative):
             return
         with self.events_lock:
             if directory or len(self.pending) >= MAX_NOTES:
@@ -277,7 +301,7 @@ class NoteIndex:
                         entries += 1
                         relative = (directory / entry.name).relative_to(self.root)
                         path = None
-                        if _included(relative):
+                        if self._kept(relative):
                             if entry.is_dir(follow_symlinks=False):
                                 directories.append(directory / entry.name)
                             elif (
@@ -433,7 +457,8 @@ class NoteIndex:
                             "Second Brain has more than 10,000 notes. Choose a smaller root."
                         )
                 relative = Path(path)
-                info = _note_stat(self.root, relative)
+                # A path that is no longer kept counts as gone, so its row is deleted.
+                info = _note_stat(self.root, relative) if self._kept(relative) else None
                 previous = old.get(path)
                 if (
                     info is not None

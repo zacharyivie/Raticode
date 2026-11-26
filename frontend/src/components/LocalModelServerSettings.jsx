@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { apiUrl } from "../lib/api";
+import { apiJson } from "../lib/api";
 
 export const DEFAULT_LOCAL_SERVER_URL = "http://127.0.0.1:11434/v1";
 
@@ -33,12 +33,7 @@ export default function LocalModelServerSettings({ labelledBy = "", onProfilesCh
   const [error, setError] = useState("");
   const [checks, setChecks] = useState({});
 
-  async function request(path, options = {}) {
-    const response = await fetch(apiUrl(path), options);
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || "Local model server settings couldn't be saved.");
-    return payload;
-  }
+  const request = (path, options = {}) => apiJson(path, { ...options, failure: "Local model server settings couldn't be saved." });
   async function load() {
     const payload = await request("/provider/profiles", {});
     const all = Array.isArray(payload.profiles) ? payload.profiles : [];
@@ -51,11 +46,10 @@ export default function LocalModelServerSettings({ labelledBy = "", onProfilesCh
     load().catch(failure => { setProfiles([]); setError(failure.message || "Local model server profiles couldn't be loaded."); });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps -- load once when the card opens
 
-  const post = body => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   async function check(profileName) {
     setBusy(`check:${profileName}`);
     try {
-      const payload = await request(`/provider/profiles/${encodeURIComponent(profileName)}/check`, post({}));
+      const payload = await request(`/provider/profiles/${encodeURIComponent(profileName)}/check`, { method: "POST", body: {} });
       setChecks(current => ({ ...current, [profileName]: payload.check }));
     } catch (failure) {
       setChecks(current => ({ ...current, [profileName]: { reachable: false, error: failure.message } }));
@@ -73,10 +67,10 @@ export default function LocalModelServerSettings({ labelledBy = "", onProfilesCh
       const profile = { name: profileName, subscription: "openai_api", local: true, api_base_url: address.trim() };
       if (remote) {
         profile.api_key_secret = keySecretName(profileName);
-        await request("/rattish/secrets", post({ name: profile.api_key_secret, value: key }));
+        await request("/rattish/secrets", { method: "POST", body: { name: profile.api_key_secret, value: key } });
         setKey("");
       }
-      await request("/provider/profiles", post(profile));
+      await request("/provider/profiles", { method: "POST", body: profile });
       await load();
       setBusy("");
       await check(profileName);

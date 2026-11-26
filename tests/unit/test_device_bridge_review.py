@@ -49,6 +49,9 @@ class CancelledWork:
     def claim(self, **_kinds: bool) -> dict[str, Any] | None:
         return None
 
+    def incoming_waiting(self) -> bool:
+        return False
+
     def authorized(self, peer: str, thread: str) -> bool:
         return True  # Replacement grant still exists for the same thread.
 

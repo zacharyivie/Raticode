@@ -15,9 +15,10 @@ source "$HOME/.nvm/nvm.sh"
 nvm use
 cd website
 npm ci
-npm run dev        # local dev server
+npm run dev -- --host 127.0.0.1 --port 5190 --strictPort  # local dev server at http://127.0.0.1:5190/, reloads as you edit
 npm run typecheck  # vue-tsc
-npm run check      # versions match the release sources, typecheck, build, then check links, #anchors, sitemap and robots.txt
+npm test           # unit tests for the check scripts (scripts/*.test.mjs)
+npm run check      # versions match the release sources, tests, typecheck, build, then check links, #anchors, sitemap and robots.txt
 npm run check:downloads  # every desktop download and the signed phone APK exist on their published releases (network; exit 3 = not published yet)
 npm run set-release -- X.Y.Z  # move the site to a new desktop release, and the phone APK to mobile/android/version.properties
 npm run set-release -- --mobile  # move only the phone APK to mobile/android/version.properties
@@ -25,11 +26,36 @@ npm run build      # static output in .vitepress/dist
 npm run preview    # serve the build
 ```
 
+Plain `npm run dev` uses port 5173, which the desktop app's own dev server also uses; on
+`localhost` both can end up listening and the browser may reach the wrong one. The flags above
+pin an address, and `--strictPort` stops with an error instead of sharing a port in use (pick
+another number then). From the fish shell, run the block inside `bash -c '...'`, because
+`nvm.sh` is a bash script.
+
 The site lives at `https://raticode.dev/`, and the build targets that address by default.
 For another address set `WEBSITE_URL` (for another domain, `WEBSITE_URL=https://<domain>/`),
 and optionally `WEBSITE_BASE` for the path; `data/site.ts` reads both, and `check:links` must
 see the same values as the build. The sitemap, `robots.txt`, canonical links and the social
 preview image are generated from that address.
+
+## Support banner
+
+Every page shows the Buy Me a Coffee banner (`theme/components/SupportBanner.vue`) once,
+linking only to `supportProjectUrl` in `data/site.ts`:
+
+- the home page: the full banner at the bottom, after the Download section and before the
+  closing call to action;
+- docs pages: a narrow one in the right-hand column, directly under **On this page**
+  (`aside-outline-after` in `theme/index.ts`), never inside the article. Below 1280px wide
+  VitePress hides that column, so each docs page also ends with a compact banner in
+  `.support-banner-end` (`doc-after`), which `theme/styles/docs.css` hides whenever the
+  column shows. Don't put the banner in a page by hand;
+- the 404 page: the compact banner after its list of links.
+
+`npm run check:links` fails when a page has no banner, a docs page has one inside the article,
+none or two under the outline, or no hidden end-of-page one, the home page has it anywhere but
+the bottom, or a banner links anywhere else (`scripts/support-banner.mjs`). The top menu, the
+home page footer and the Support guide link the same page.
 
 ## Search engines
 

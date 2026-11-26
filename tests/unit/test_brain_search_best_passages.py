@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from gofer.ui.brain_library import BrainLibrary
+from tests.helpers.brain_library import wait_idle
 
 
 @pytest.fixture
@@ -17,14 +17,6 @@ def library(tmp_path: Path):
     service = BrainLibrary(tmp_path / "app", start=False)
     yield service
     service.close()
-
-
-def wait_tasks(library: BrainLibrary) -> None:
-    deadline = time.monotonic() + 15
-    while any(task["state"] == "running" for task in library.snapshot()["tasks"]):
-        if time.monotonic() > deadline:
-            pytest.fail("Second Brain tasks did not finish")
-        time.sleep(0.02)
 
 
 def build(library: BrainLibrary, tmp_path: Path) -> dict[str, Any]:
@@ -51,7 +43,7 @@ def build(library: BrainLibrary, tmp_path: Path) -> dict[str, Any]:
         encoding="utf-8",
     )
     brain = library.open({"root": str(root)})
-    wait_tasks(library)
+    wait_idle(library)
     return brain
 
 
@@ -87,7 +79,7 @@ def test_identical_documents_keep_their_passages_together(library, tmp_path):
         "---\ntitle: Bike\n---\n## Chain\n\nOiled it.\n", encoding="utf-8"
     )
     brain = library.open({"root": str(root)})
-    wait_tasks(library)
+    wait_idle(library)
     names = titles(library)
     hits = library.search({"brainId": brain["id"], "query": "compost"})["hits"]
     docs = [names[hit["docId"]] for hit in hits]

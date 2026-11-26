@@ -19,7 +19,7 @@ Each layer is separate. Turning one off doesn't turn off the others.
 | Provider permissions | The provider's own approval mode and execution policy |
 | Workflow preflight | Whether declared executables, paths, credentials and contracts are ready |
 | Agent step sandbox | Where a workflow agent step's shell can write, what it can read and which hosts it can reach (from 0.6.0) |
-| Organization or device grants | What one organization employee or one paired device may do |
+| Organization or device grants | What one organization worker or one paired device may do |
 
 - Turning off Rem's shell doesn't limit an MCP server you added separately. Provider-native tools can have their own policy.
 - Choosing a project isn't an operating-system sandbox. Rem's unattended work and workflow agent steps add one; see below.
@@ -34,7 +34,7 @@ Raticode keeps credentials in a few folders of its own: each Claude Code, Codex 
 
 | Run | How |
 | --- | --- |
-| Codex: threads, Rem tasks, self-work, reviews, organization workers, swarms, workflow steps, commit messages | Raticode runs Codex with a permission profile that gives it the same reach as before (read the disk, write the project, temp and the folders it adds) and denies each folder for reading and writing, even inside Raticode's data folder, which threads may otherwise write. Self-work and reviews write the data folder only where Claude Code's sandbox lets them; see [What Codex self-work and reviews can write](#what-codex-self-work-and-reviews-can-write). The steerable app-server turns get the same profile. |
+| Codex: threads, Rem tasks, self-work, reviews, organization workers, swarms, workflow steps, commit messages | Raticode runs Codex with a permission profile that gives it the same reach as before (read the disk, write the project, temp and the folders it adds) and denies each folder for reading and writing, even inside Raticode's data folder, which threads may otherwise write. Self-work, reviews and organization workers write the data folder only where their run needs to; see [What Codex self-work, reviews and organization workers can write](#what-codex-self-work-reviews-and-organization-workers-can-write). The steerable app-server turns get the same profile. |
 | Claude Code, any turn | Read, Edit and Write tool deny rules for each folder. Unattended turns and workflow steps also hide them, and the rest of the data folder, from the shell through Claude Code's sandbox. Turns you watch, which have no Claude Code sandbox, and steps with `sandbox: off` start inside bubblewrap like the providers below, so their shell can't reach the folders either. |
 | Cursor, GitHub Copilot, OpenCode, Antigravity, Grok, and Codex with full access or its older settings | On Linux, Raticode starts the CLI with bubblewrap, where each folder is empty and read-only and `/proc` shows only the CLI's own processes. The CLI's own sign-in, the project and the network are unchanged. |
 | Workflow agent steps, any provider | An `extra-paths` entry that is, holds or sits in one of these folders, or in a home credential folder such as `~/.ssh`, `~/.aws` or `~` itself, stops the run at preflight (`RATTISH_PREFLIGHT_CREDENTIAL_PATH`) and again when the step starts. |
@@ -50,7 +50,7 @@ Limits:
 - Codex skills kept in a Codex account's own `skills` folder can't run their scripts from a Codex shell command under Raticode's profile, because the account's folder is denied. Skills in `~/.codex` are unaffected.
 - Workflow `bash` and `python` steps run your own commands and aren't covered.
 
-### What Codex self-work and reviews can write
+### What Codex self-work, reviews and organization workers can write
 
 *New in Raticode 0.6.0.*
 
@@ -62,7 +62,9 @@ Self-work and [reviews](../rem/home.md#how-work-is-checked) run with nobody watc
 
 The rest of the data folder is read-only to them: databases such as the usage ledger (`<data>/usage.sqlite3`), settings, the command-slot programs, other turns' scratch folders and any folder a task's tools add inside it. The credential folders above stay denied. Unlike Claude Code's sandbox, which hides the data folder, Codex's commands can still read it. The project, temp and folders outside the data folder keep their usual access.
 
-Codex threads you watch and the worker of a task you ask Rem for can still write the whole data folder apart from the credential folders, as Claude Code turns you watch can. So can Codex on native Windows, with its older settings (a `sandbox_mode` in a loaded config) or with full access, where Raticode's permission profile doesn't apply.
+From 0.6.1, [organization](organizations.md) workers on Codex are limited the same way, both the workers this desktop starts and the organization work it runs for a paired desktop. Inside the data folder their commands can write the command-slot folders, their working folder (such as their ticket's worktree under `<data>/organization-worktrees`) and each of their workspaces inside the data folder, such as their ticket's checkout of the organization's shared repository under `<data>/organization-shared-worktrees`. The rest is read-only to them, including the organization database (`<data>/organizations.sqlite3`), the usage ledger, report themes, saved run inputs (`<data>/organization-runs`), copied skills (`<data>/organization-skills`) and a desktop worker's own runtime folder. Organization workers on Claude Code are unchanged.
+
+Unlike self-work, reviews and organization workers, Codex threads you watch and the worker of a task you ask Rem for can still write the whole data folder apart from the credential folders, as Claude Code turns you watch can. So can Codex on native Windows, with its older settings (a `sandbox_mode` in a loaded config) or with full access, where Raticode's permission profile doesn't apply.
 
 ## Sandbox for workflow agent steps
 

@@ -5,7 +5,6 @@ import base64
 import copy
 import hashlib
 import hmac
-import html
 import json
 import logging
 import math
@@ -32,7 +31,7 @@ from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import ParseResult, parse_qs, unquote, urlparse
 
 from gofer.core.command_slots import start_leftover_reclaimer
 from gofer.core.provider_auth import ProviderAuthSessions
@@ -51,17 +50,13 @@ from gofer.core.provider_preferences import (
     voice_tidy_preference,
 )
 from gofer.core.resources import ResourceLimits, bundle_resource_limits_from_env
-from gofer.core.scheduler import WorkflowScheduler
 from gofer.core.secrets_folder import CREDENTIALS_DIRECTORY_ENV
-from gofer.core.usage import summarize_node_outputs
 from gofer.core.usage_credentials import (
     UsageCredentialError,
     save_usage_credentials,
     usage_credentials_payload,
 )
 from gofer.core.usage_service import refresh_usage, start_background_refresh, usage_overview
-from gofer.core.watcher import WorkflowWatcher
-from gofer.core.workflow import AgenticWorkflow
 from gofer.rattish.editor import RattishEditorError, RattishRevisionConflict
 from gofer.rattish.test_sets import WorkflowTestError
 from gofer.rattish.trigger_login import LoginEntryError
@@ -72,7 +67,15 @@ from gofer.rattish.triggers import (
     TriggerNotFound,
     UnseenChanges,
 )
-from gofer.rattish.workspaces import list_registered_workflows
+from gofer.rattish.workflow_secrets import WorkflowSecretError
+from gofer.rattish.workflow_shortcuts import ApprovalConflict as ShortcutApprovalConflict
+from gofer.rattish.workflow_shortcuts import (
+    ShortcutChanged,
+    ShortcutConflict,
+    ShortcutError,
+    ShortcutNotFound,
+)
+from gofer.rattish.workflow_shortcuts import UnseenChanges as ShortcutUnseenChanges
 from gofer.ui import headless as headless_support
 from gofer.ui import (
     rattish_cache,
@@ -86,79 +89,61 @@ from gofer.ui import (
 from gofer.ui.api import (
     DiscoveryCancelled,
     ProviderProfileError,
-    RunnerQueueError,
     WorkflowAlreadyExistsError,
     WorkflowApprovalError,
     WorkflowBundleError,
     WorkflowCreateError,
-    WorkflowHistoryError,
     WorkflowLogError,
     WorkflowPlanError,
     WorkflowRunError,
-    WorkflowTriggerError,
     WorkflowUpdateError,
     analyze_rattish_document_payload,
-    apply_workflow_validation_fix_payload,
-    cancel_queued_run_payload,
     check_provider_profile_payload,
+    convert_toml_workflow_payload,
     create_registered_workflow_payload,
     create_workflow_from_starter_payload,
-    create_workflow_payload,
     decide_workflow_approval_payload,
     delete_provider_profile_payload,
     delete_workflow_chat_payload,
     delete_workflow_payload,
     duplicate_workflow_payload,
     export_rattish_bundle_payload,
-    export_workflow_bundle_payload,
     health_payload,
     import_rattish_bundle_payload,
-    import_workflow_bundle_payload,
-    import_workflow_payload,
     latest_workflow_log_payload,
     list_workflow_approvals_payload,
-    list_workflow_history_payload,
     list_workflow_payloads,
     list_workflow_run_logs_payload,
-    list_workflow_templates_payload,
     mutate_rattish_document_payload,
     open_project_payload,
     open_rattish_document_payload,
     preview_rattish_bundle_payload,
-    preview_workflow_bundle_payload,
     provider_profiles_payload,
     prune_workflow_run_logs_payload,
-    queue_workflow_run_payload,
     rename_workflow_payload,
-    replay_workflow_trigger_payload,
-    restore_workflow_revision_payload,
     resume_workflow_payload,
     retention_settings_payload,
     run_triggered_rattish,
     run_workflow_payload,
-    runner_queue_payload,
     save_rattish_document_payload,
     save_rattish_metadata_payload,
     starter_workflows_payload,
     stop_rattish_runs_for_shutdown,
     stop_workflow_run_payload,
-    trigger_workflow_payload,
     update_retention_settings_payload,
-    update_workflow_payload,
     upsert_provider_profile_payload,
-    validate_workflow_draft_payload,
-    validate_workflow_payload,
     workflow_plan_payload,
-    workflow_revision_diff_payload,
     workflow_run_events_payload,
     workflow_run_log_payload,
     workflow_run_worktrees_payload,
-    workflow_template_payload,
 )
 from gofer.ui.brain_privacy import (
     AGENT_BRAIN_PRIVATE,
+    AGENT_DOCUMENT_LEFT_OUT,
     agent_brain_refusal,
     agent_brain_result,
+    agent_left_out_refusal,
+    agent_left_out_result,
     agent_snapshot,
 )
 from gofer.ui.chat import (
@@ -209,8 +194,9 @@ from gofer.ui.rem_home import RemHome
 from gofer.ui.rem_home_models import RemConflict
 from gofer.ui.rem_kanban import KanbanRefused, message_ticket_keys, task_ticket_keys
 from gofer.ui.rem_thread_listing import desktop_listing
-from gofer.ui.scratch_cleanup import start_scratch_cleanup
+from gofer.ui.routes import Mount, RouteRequest, RouteTable
 from gofer.ui.swarms import SwarmManager
+from gofer.ui.temp_cleanup import start_temp_cleanup
 from gofer.ui.workflow_tests import (
     estimate_workflow_tests_payload,
     save_workflow_tests_payload,
@@ -225,7 +211,6 @@ from gofer.utils.paths import get_data_dir, restrict_to_owner
 from gofer.utils.process import seal_credential_env
 
 log = get_logger(__name__)
-CONTINUOUS_RUN_POLL_SECONDS = 1.0
 PATH_GRANT_TTL_SECONDS = 15 * 60
 UI_MAX_HANDLERS = 32
 UI_MAX_EXPENSIVE_REQUESTS = 8
@@ -402,73 +387,6 @@ def rem_poll_result(
     if known == version:
         return {"unchanged": True, "version": version} | {k: result[k] for k in keep if k in result}
     return {**result, "version": version}
-
-
-_unreadable_workflows: set[tuple[str, int]] = set()
-_continuous_failures: dict[str, str] = {}
-
-
-def _load_workflow_file(path: Path) -> AgenticWorkflow | None:
-    """Read a saved workflow, saying once per version of the file why it was skipped.
-
-    These files are re-read on every poll; an unreadable one silently lost its
-    schedule, watch or continuous run.
-    """
-    try:
-        return AgenticWorkflow.from_file(path)
-    except Exception as exc:  # noqa: BLE001
-        try:
-            key = (str(path), path.stat().st_mtime_ns)
-        except OSError:
-            key = (str(path), 0)
-        if key not in _unreadable_workflows:
-            _unreadable_workflows.add(key)
-            log.warning("Workflow file %s can't be read, so it won't run (%s)", path, exc)
-        return None
-
-
-def sync_workflow_schedules(data_dir: Path, scheduler: WorkflowScheduler) -> None:
-    data_dir.mkdir(parents=True, exist_ok=True)
-    active_schedule_ids: set[str] = set()
-
-    for path in sorted(data_dir.glob("*.toml")):
-        workflow = _load_workflow_file(path)
-        if workflow is None:
-            continue
-        if workflow.config.run_continuously or workflow.config.schedule is None:
-            continue
-        try:
-            scheduler.add_workflow(workflow, path)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Skipping invalid schedule in %s: %s", path, exc)
-            continue
-        active_schedule_ids.add(workflow.config.id)
-
-    for job in scheduler.list_workflows():
-        if job["id"] not in active_schedule_ids:
-            scheduler.remove_workflow(job["id"])
-
-
-def sync_workflow_watchers(data_dir: Path, watcher: WorkflowWatcher) -> None:
-    data_dir.mkdir(parents=True, exist_ok=True)
-    active_watch_ids: set[str] = set()
-
-    for path in sorted(data_dir.glob("*.toml")):
-        workflow = _load_workflow_file(path)
-        if workflow is None:
-            continue
-        if workflow.config.run_continuously or workflow.config.watch is None:
-            continue
-        try:
-            watcher.add_workflow(workflow, path)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Skipping invalid watcher in %s: %s", path, exc)
-            continue
-        active_watch_ids.add(workflow.config.id)
-
-    for watched in watcher.list_workflows():
-        if watched["id"] not in active_watch_ids:
-            watcher.remove_workflow(watched["id"])
 
 
 @dataclass(frozen=True)
@@ -697,27 +615,9 @@ class GoferUiServer(ThreadingHTTPServer):
         self.request_job_timeout = max(
             1.0, float(os.environ.get("GOFER_UI_JOB_TIMEOUT_SECONDS", UI_JOB_DEADLINE_SECONDS))
         )
-        self._schedule_lock = threading.Lock()
-        self._schedule_signature: tuple[tuple[str, int, int], ...] | None = None
         self.path_grant_secret = os.environ.get("GOFER_DESKTOP_GRANT_SECRET", "")
         self.path_grants = DesktopPathGrantStore()
-        # Snapshot startup trust. Re-reading a renderer-writable registry during
-        # grant renewal would let a renderer launder an arbitrary new root.
-        self.trusted_project_roots = tuple(
-            sorted(
-                {
-                    str(workflow.project_root.resolve())
-                    for workflow in list_registered_workflows(registry_dir=data_dir)
-                }
-            )
-        )
         self.gofer_cli_path = ensure_local_gofer_cli(data_dir)
-        self.scheduler = WorkflowScheduler(db_path=data_dir / "schedules.db")
-        self.watcher = WorkflowWatcher(resource_limits=self.resource_limits)
-        self._continuous_runs: dict[str, threading.Thread] = {}
-        self._continuous_lock = threading.Lock()
-        self._continuous_stop = threading.Event()
-        self._continuous_thread: threading.Thread | None = None
         self.swarms = SwarmManager(
             data_dir,
             stream=self._swarm_chat_source,
@@ -876,7 +776,9 @@ class GoferUiServer(ThreadingHTTPServer):
         options = with_library_brain(self, options)
         workflow = dict(options["workflow"])
         project = Path(workflow["projectRoot"])
-        workspace_paths = workflow.pop("organizationWorkspacePaths", [str(project)])
+        # Kept in the workflow: a Codex turn may write the ones inside the data folder
+        # (chat._codex_data_writes).
+        workspace_paths = workflow.get("organizationWorkspacePaths", [str(project)])
         workspace_grants = {}
         for value in workspace_paths:
             path = Path(value)
@@ -1180,123 +1082,49 @@ class GoferUiServer(ThreadingHTTPServer):
         finally:
             self._handler_slots.release()
 
-    def sync_schedules(self) -> None:
-        # Mutations reconcile immediately; the monitor also notices external edits.
-        # Polling GETs never rewrite scheduler jobs or restart filesystem watchers.
-        with self._schedule_lock:
-            signature = []
-            for path in sorted(self.data_dir.glob("*.toml")):
-                try:
-                    info = path.stat()
-                except FileNotFoundError:
-                    continue
-                signature.append((str(path), info.st_mtime_ns, info.st_size))
-            current = tuple(signature)
-            if current == self._schedule_signature:
-                return
-            sync_workflow_schedules(self.data_dir, self.scheduler)
-            sync_workflow_watchers(self.data_dir, self.watcher)
-            self._schedule_signature = current
 
-    def start_continuous_monitor(self) -> None:
-        if self._continuous_thread and self._continuous_thread.is_alive():
-            return
-        self._continuous_stop.clear()
-        self._continuous_thread = threading.Thread(
-            target=self._continuous_monitor_loop,
-            name="gofer-continuous-workflow-monitor",
-            daemon=True,
-        )
-        self._continuous_thread.start()
-
-    def stop_continuous_monitor(self) -> None:
-        self._continuous_stop.set()
-        if self._continuous_thread:
-            self._continuous_thread.join(timeout=3)
-
-    def _continuous_monitor_loop(self) -> None:
-        while not self._continuous_stop.is_set():
-            try:
-                self.sync_schedules()
-                self.ensure_continuous_runs()
-            except Exception:  # noqa: BLE001
-                log.exception("Continuous workflow monitor failed")
-            self._continuous_stop.wait(CONTINUOUS_RUN_POLL_SECONDS)
-
-    def ensure_continuous_runs(self) -> None:
-        active_ids: set[str] = set()
-        continuous_workflows: list[AgenticWorkflow] = []
-        for path in sorted(self.data_dir.glob("*.toml")):
-            workflow = _load_workflow_file(path)
-            if workflow is None:
-                continue
-            if not workflow.config.run_continuously:
-                continue
-            continuous_workflows.append(workflow)
-
-        global_limit = self.resource_limits.max_watcher_concurrency
-
-        for workflow in continuous_workflows:
-            active_ids.add(workflow.config.id)
-            with self._continuous_lock:
-                active_count = sum(
-                    1 for thread in self._continuous_runs.values() if thread.is_alive()
-                )
-            if active_count >= global_limit:
-                log.warning(
-                    "Skipping continuous workflow '%s'; global concurrency limit %s reached",
-                    workflow.config.id,
-                    global_limit,
-                )
-                continue
-            self._start_continuous_run_if_needed(workflow.config.id)
-
-        with self._continuous_lock:
-            for workflow_id in list(self._continuous_runs):
-                thread = self._continuous_runs[workflow_id]
-                if workflow_id not in active_ids or not thread.is_alive():
-                    self._continuous_runs.pop(workflow_id, None)
-
-    def _start_continuous_run_if_needed(self, workflow_id: str) -> None:
-        with self._continuous_lock:
-            existing = self._continuous_runs.get(workflow_id)
-            if existing and existing.is_alive():
-                return
-
-            thread = threading.Thread(
-                target=self._run_continuous_workflow_once,
-                args=(workflow_id,),
-                name=f"gofer-continuous-{workflow_id}",
-                daemon=True,
-            )
-            self._continuous_runs[workflow_id] = thread
-            thread.start()
-
-    def _run_continuous_workflow_once(self, workflow_id: str) -> None:
-        try:
-            asyncio.run(
-                run_workflow_payload(
-                    workflow_id, self.data_dir, dry_run=False, started_by="trigger"
-                )
-            )
-            if _continuous_failures.pop(workflow_id, None) is not None:
-                log.info("Continuous workflow '%s' is running again", workflow_id)
-        except Exception as exc:  # noqa: BLE001
-            # It restarts every poll; log each distinct failure once with its traceback.
-            signature = f"{type(exc).__name__}: {exc}"
-            if _continuous_failures.get(workflow_id) != signature:
-                _continuous_failures[workflow_id] = signature
-                log.warning("Continuous workflow '%s' run failed", workflow_id, exc_info=True)
-            else:
-                log.debug(
-                    "Continuous workflow '%s' failed again (%s)", workflow_id, type(exc).__name__
-                )
-            time.sleep(CONTINUOUS_RUN_POLL_SECONDS)
-        finally:
-            with self._continuous_lock:
-                current = self._continuous_runs.get(workflow_id)
-                if current is threading.current_thread():
-                    self._continuous_runs.pop(workflow_id, None)
+# Routes answered from the table (gofer.ui.routes). _dispatch_request runs it only after
+# the host, origin, auth, body framing and expensive-slot checks. Each Mount keeps the
+# answer its old if-chain gave a request no route matches, and maps its handlers'
+# exceptions to answers in the order the old except clauses checked them.
+ROUTES = RouteTable()
+ROUTES.mount(
+    Mount(
+        "/api/rattish/triggers",
+        miss=(405, "Method not allowed"),
+        errors=(
+            (TriggerNotFound, 404),
+            (ApprovalConflict, "_answer_approval_conflict"),
+            (UnseenChanges, "_answer_unseen_changes"),
+            (TriggerError, 400),
+            (LoginEntryError, 500),
+        ),
+    )
+)
+ROUTES.mount(
+    Mount(
+        "/api/rattish/secrets",
+        miss=(405, "Method not allowed"),
+        # The body may hold the secret's value, so a parser's message is never echoed.
+        errors=((WorkflowSecretError, 400), (ValueError, "_answer_unreadable_secret")),
+    )
+)
+ROUTES.mount(
+    Mount(
+        "/api/workflow-shortcuts",
+        miss=(404, "Unknown workflow shortcut request"),
+        errors=(
+            (ShortcutNotFound, 404),
+            (ShortcutChanged, "_answer_shortcut_changed"),
+            (ShortcutApprovalConflict, "_answer_approval_conflict"),
+            (ShortcutUnseenChanges, "_answer_unseen_changes"),
+            (ShortcutConflict, 409),
+            (ShortcutError, 400),
+            (WorkflowRunError, 400),
+        ),
+    )
+)
+ROUTES.mount(Mount("/api/worktree-setup", miss=(404, "Unknown worktree setup request")))
 
 
 class GoferUiRequestHandler(BaseHTTPRequestHandler):
@@ -1408,6 +1236,8 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "Too many active requests; retry shortly"}, status=503)
                 return
         try:
+            if self._answer_route(method, parsed):
+                return
             if parsed.path == "/api/second-brains":
                 self._dispatch_second_brain_request(method)
                 return
@@ -1450,24 +1280,6 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/swarms" or parsed.path.startswith("/api/swarms/"):
                 self._dispatch_swarm_request(method)
                 return
-            if method != "OPTIONS" and (
-                parsed.path == "/api/rattish/triggers"
-                or parsed.path.startswith("/api/rattish/triggers/")
-            ):
-                self._dispatch_rattish_triggers(method, parsed.path, parse_qs(parsed.query))
-                return
-            if method != "OPTIONS" and (
-                parsed.path == "/api/rattish/secrets"
-                or parsed.path.startswith("/api/rattish/secrets/")
-            ):
-                self._dispatch_rattish_secrets(method, parsed.path, parse_qs(parsed.query))
-                return
-            if method != "OPTIONS" and (
-                parsed.path == "/api/workflow-shortcuts"
-                or parsed.path.startswith("/api/workflow-shortcuts/")
-            ):
-                self._dispatch_workflow_shortcuts(method, parsed.path, parse_qs(parsed.query))
-                return
             if method == "GET" and parsed.path == "/api/rattish/cache":
                 self._dispatch_rattish_cache(method, parse_qs(parsed.query))
                 return
@@ -1503,12 +1315,12 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 except WorkflowCreateError as exc:
                     self._send_json({"error": str(exc)}, status=500)
                 return
-            if parsed.path == "/api/worktree-setup" or parsed.path.startswith(
-                "/api/worktree-setup/"
-            ):
-                self._dispatch_worktree_setup(method, parsed.path, parse_qs(parsed.query))
+            legacy = getattr(self, f"_dispatch_{method}", None)
+            if legacy is None:
+                # PATCH has no if-chain of its own; it used to fail with a 500.
+                self._send_json({"error": "Not found"}, status=404)
                 return
-            getattr(self, f"_dispatch_{method}")()
+            legacy()
         except (OrganizationConflict, RemConflict) as exc:
             self._send_json({"error": str(exc)}, status=409)
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
@@ -1538,6 +1350,37 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         finally:
             if acquired and slots is not None:
                 slots.release()
+
+    def _answer_route(self, method: str, parsed: ParseResult) -> bool:
+        """Answer the request from ROUTES; False when no route or Mount covers it.
+
+        The body read is inside the same try as the handler, so a Mount's error map
+        covers a bad body too. Exceptions the map doesn't name go to _dispatch_request's
+        central handler, as they did from the old if-chains.
+        """
+        found = ROUTES.match(method, parsed.path)
+        if found is None:
+            return False
+        if found.route is None:
+            status, message = found.miss or (404, "Not found")
+            self._send_json({"error": message}, status=status)
+            return True
+        route = found.route
+        try:
+            body = None if route.body is None else self._read_json(limit=route.body)
+            query = parse_qs(parsed.query)
+            result = getattr(self, route.handler)(RouteRequest(found.params, query, body))
+        except Exception as exc:
+            answer = found.answer_for(exc)
+            if answer is None:
+                raise
+            if isinstance(answer, int):
+                self._send_json({"error": str(exc)}, status=answer)
+            else:
+                getattr(self, answer)(exc)
+            return True
+        self._send_json(result, status=route.status)
+        return True
 
     def _dispatch_rem_home_request(self, method: str) -> None:
         if method == "OPTIONS":
@@ -1625,7 +1468,18 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                     "tickets": service.kanban.resolve(task_ticket_keys([task])),
                 }
             elif method == "GET" and parts == ["objectives"]:
-                result = rem_poll_result(service.self_work.objectives(), known)
+                # The first page by default; the side pane asks for more as the user
+                # scrolls, and the CLI pages with offset.
+                from gofer.ui.rem_objectives import PAGE
+
+                query = parse_qs(parsed.query)
+                try:
+                    page_size = int(query.get("limit", [str(PAGE)])[0])
+                    page_start = int(query.get("offset", ["0"])[0])
+                except ValueError:
+                    self._send_json({"error": "limit and offset are whole numbers."}, status=400)
+                    return
+                result = rem_poll_result(service.self_work.objectives(page_size, page_start), known)
             elif method == "POST" and parts == ["objectives"]:
                 # The user's change: agent tokens can't write Rem routes, and Rem's own
                 # changes go through its chat decisions and self-work, under Rem's rules.
@@ -2027,9 +1881,15 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             params = {
                 "revision": _optional_query(query, "revision") or "",
                 "recheck": _optional_query(query, "recheck") == "1",
+                # Every document's passages too: the view's fallback when "passages" fails.
+                "passages": _optional_query(query, "passages") == "1",
             }
         if not isinstance(params, dict):
             raise ValueError("Expected Second Brain parameters")
+        if self._agent_token_name and action == "snapshot":
+            # The full snapshot is the view's fallback. It carries every document's text,
+            # left-out ones too, so an agent token gets the light one and asks "passages".
+            params = {**params, "passages": False}
         grants = body.get("workspaceGrants", {})
         if not isinstance(grants, dict):
             raise ValueError("Expected folder access grants")
@@ -2068,6 +1928,12 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 if refusal is not None:
                     self._send_json({"error": refusal, "code": AGENT_BRAIN_PRIVATE}, status=403)
                     return
+            # No agent token reads a document left out of search, as in read_note.
+            if self._agent_token_name:
+                refusal = agent_left_out_refusal(library, action, params)
+                if refusal is not None:
+                    self._send_json({"error": refusal, "code": AGENT_DOCUMENT_LEFT_OUT}, status=403)
+                    return
             result = library.request(action, params)
             if private_closed:
                 result = (
@@ -2075,6 +1941,8 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                     if action == "snapshot"
                     else agent_brain_result(library, action, result)
                 )
+            if self._agent_token_name:
+                result = agent_left_out_result(library, action, result)
         except WorkflowBundleError as exc:
             self._send_json({"error": str(exc)}, status=403)
             return
@@ -2095,33 +1963,37 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"result": result})
 
-    def _dispatch_worktree_setup(self, method: str, path: str, query: dict[str, list[str]]) -> None:
-        """A project's worktree setup and the user's approval of it.
+    # A project's worktree setup and the user's approval of it. Approving lets the setup
+    # run commands in every new worktree, so agent tokens can read it but never approve
+    # it (agent_request_refusal).
 
-        Approving lets the setup run commands in every new worktree, so agent tokens can
-        read it but never approve it (``agent_request_refusal``).
-        """
-        base = self._request_data_dir(query)
-        action = path.removeprefix("/api/worktree-setup").strip("/")
-        if method == "GET" and not action:
-            project = _optional_query(query, "project")
-            if project is None:
-                raise ValueError("project is required")
-            self._send_json(worktree_setup.status(base, project))
-        elif method == "GET" and action == "pending":
-            self._send_json({"pending": worktree_setup.Approvals(base).pending()})
-        elif method == "POST" and action == "approve":
-            body = self._read_json(limit=8192)
-            self._send_json(
-                worktree_setup.approve(
-                    base, str(body.get("project") or ""), str(body.get("sha256") or "")
-                )
-            )
-        elif method == "POST" and action == "revoke":
-            body = self._read_json(limit=8192)
-            self._send_json(worktree_setup.revoke(base, str(body.get("project") or "")))
-        else:
-            self._send_json({"error": "Unknown worktree setup request"}, status=404)
+    @ROUTES.route("GET", "/api/worktree-setup")
+    def _worktree_setup_status(self, request: RouteRequest) -> Any:
+        project = _optional_query(request.query, "project")
+        if project is None:
+            raise ValueError("project is required")
+        return worktree_setup.status(self._request_data_dir(request.query), project)
+
+    @ROUTES.route("GET", "/api/worktree-setup/pending")
+    def _worktree_setup_pending(self, request: RouteRequest) -> Any:
+        base = self._request_data_dir(request.query)
+        return {"pending": worktree_setup.Approvals(base).pending()}
+
+    @ROUTES.route("POST", "/api/worktree-setup/approve", body=8192)
+    def _worktree_setup_approve(self, request: RouteRequest) -> Any:
+        body = request.body or {}
+        return worktree_setup.approve(
+            self._request_data_dir(request.query),
+            str(body.get("project") or ""),
+            str(body.get("sha256") or ""),
+        )
+
+    @ROUTES.route("POST", "/api/worktree-setup/revoke", body=8192)
+    def _worktree_setup_revoke(self, request: RouteRequest) -> Any:
+        body = request.body or {}
+        return worktree_setup.revoke(
+            self._request_data_dir(request.query), str(body.get("project") or "")
+        )
 
     def _send_all_workflow_runs(self, query: dict[str, list[str]]) -> None:
         from gofer.ui.workflow_runs import WorkflowRunsError, all_workflow_runs_payload
@@ -2237,111 +2109,102 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         # A conflict is an answer, not a failure: nothing changed and it names the files.
         self._send_json(payload)
 
-    def _dispatch_rattish_secrets(
-        self, method: str, path: str, query: dict[str, list[str]]
-    ) -> None:
-        """Workflow secrets. No response or error ever contains a saved value."""
-        from gofer.rattish.workflow_secrets import WorkflowSecretError
+    # Workflow secrets. No response or error ever contains a saved value.
 
-        base = self._request_data_dir(query)
-        action = unquote(path.removeprefix("/api/rattish/secrets").strip("/"))
-        workflow_id = _optional_query(query, "workflowId")
-        try:
-            if method == "GET" and not action:
-                self._send_json(rattish_secrets.secrets_payload(base, workflow_id))
-            elif method == "POST" and not action:
-                body = self._read_json(limit=rattish_secrets.MAX_BODY_BYTES)
-                self._send_json(rattish_secrets.save_secret_payload(base, body, workflow_id))
-            elif method == "DELETE" and action and "/" not in action:
-                self._send_json(rattish_secrets.remove_secret_payload(base, action, workflow_id))
-            else:
-                self._send_json({"error": "Method not allowed"}, status=405)
-        except WorkflowSecretError as exc:
-            self._send_json({"error": str(exc)}, status=400)
-        except (ValueError, json.JSONDecodeError):
-            # The body may hold the value, so the parser's message is never echoed.
-            self._send_json({"error": "Send a secret name and value as JSON."}, status=400)
-
-    def _dispatch_workflow_shortcuts(
-        self, method: str, path: str, query: dict[str, list[str]]
-    ) -> None:
-        """Workflow shortcuts: system-wide keys that run a workflow (Settings > Devices).
-
-        Only the owner adds, removes or runs one; agent tokens can only read the list.
-        """
-        from gofer.rattish.workflow_shortcuts import (
-            ApprovalConflict,
-            ShortcutChanged,
-            ShortcutConflict,
-            ShortcutError,
-            ShortcutNotFound,
-            UnseenChanges,
+    @ROUTES.route("GET", "/api/rattish/secrets")
+    def _secrets_list(self, request: RouteRequest) -> Any:
+        return rattish_secrets.secrets_payload(
+            self._request_data_dir(request.query), _optional_query(request.query, "workflowId")
         )
 
-        base = self._request_data_dir(query)
-        action = unquote(path.removeprefix("/api/workflow-shortcuts").strip("/"))
-        try:
-            if method == "GET" and not action:
-                self._send_json(
-                    workflow_shortcuts.list_payload(
-                        base,
-                        details=_optional_query(query, "details") == "1",
-                        workflow_id=_optional_query(query, "workflowId"),
-                    )
-                )
-            elif method == "POST" and not action:
-                body = self._read_json(limit=16384)
-                self._send_json(workflow_shortcuts.set_payload(base, body))
-            elif method == "GET" and action == "target":
-                self._send_json(
-                    workflow_shortcuts.target_payload(base, _optional_query(query, "workflowId"))
-                )
-            elif method == "GET" and "/" not in action:
-                self._send_json(workflow_shortcuts.detail_payload(base, action))
-            elif method == "DELETE" and "/" not in action:
-                self._send_json(workflow_shortcuts.remove_payload(base, action))
-            elif method == "POST" and action.endswith("/run"):
-                body = self._read_json(limit=workflow_shortcuts.MAX_BODY_BYTES)
-                self._send_json(
-                    self._run_async(
-                        workflow_shortcuts.run_payload(base, action.removesuffix("/run"), body)
-                    )
-                )
-            elif method == "GET" and action.endswith("/changes"):
-                self._send_json(
-                    workflow_shortcuts.changes_payload(base, action.removesuffix("/changes"))
-                )
-            elif method == "POST" and action.endswith("/approve"):
-                # Agent tokens never get here (agent_request_refusal), so this is the
-                # user's own Approve this version, as for a trigger.
-                self._send_json(
-                    workflow_shortcuts.approve_payload(
-                        base, action.removesuffix("/approve"), self._read_json(limit=16384)
-                    )
-                )
-            else:
-                self._send_json({"error": "Unknown workflow shortcut request"}, status=404)
-        except ShortcutNotFound as exc:
-            self._send_json({"error": str(exc)}, status=404)
-        except ShortcutChanged as exc:
-            self._send_json(
-                {
-                    "error": str(exc),
-                    "code": exc.code,
-                    "state": exc.state,
-                    "shortcutId": exc.shortcut_id,
-                    "workflowName": exc.workflow_name,
-                },
-                status=409,
-            )
-        except ApprovalConflict as exc:
-            self._send_json({"error": str(exc), "conflict": True}, status=409)
-        except UnseenChanges as exc:
-            self._send_json({"error": str(exc), "unseen": exc.files}, status=409)
-        except ShortcutConflict as exc:
-            self._send_json({"error": str(exc)}, status=409)
-        except (ShortcutError, WorkflowRunError) as exc:
-            self._send_json({"error": str(exc)}, status=400)
+    @ROUTES.route("POST", "/api/rattish/secrets", body=rattish_secrets.MAX_BODY_BYTES)
+    def _secret_save(self, request: RouteRequest) -> Any:
+        return rattish_secrets.save_secret_payload(
+            self._request_data_dir(request.query),
+            request.body or {},
+            _optional_query(request.query, "workflowId"),
+        )
+
+    @ROUTES.route("DELETE", "/api/rattish/secrets/{name}")
+    def _secret_remove(self, request: RouteRequest) -> Any:
+        return rattish_secrets.remove_secret_payload(
+            self._request_data_dir(request.query),
+            request.params["name"],
+            _optional_query(request.query, "workflowId"),
+        )
+
+    def _answer_unreadable_secret(self, _exc: Exception) -> None:
+        self._send_json({"error": "Send a secret name and value as JSON."}, status=400)
+
+    # Workflow shortcuts: system-wide keys that run a workflow (Settings > Devices). Only
+    # the owner adds, removes or runs one; agent tokens can only read the list.
+
+    @ROUTES.route("GET", "/api/workflow-shortcuts")
+    def _shortcuts_list(self, request: RouteRequest) -> Any:
+        return workflow_shortcuts.list_payload(
+            self._request_data_dir(request.query),
+            details=_optional_query(request.query, "details") == "1",
+            workflow_id=_optional_query(request.query, "workflowId"),
+        )
+
+    @ROUTES.route("POST", "/api/workflow-shortcuts", body=16384)
+    def _shortcut_set(self, request: RouteRequest) -> Any:
+        return workflow_shortcuts.set_payload(
+            self._request_data_dir(request.query), request.body or {}
+        )
+
+    @ROUTES.route("GET", "/api/workflow-shortcuts/target")
+    def _shortcut_target(self, request: RouteRequest) -> Any:
+        return workflow_shortcuts.target_payload(
+            self._request_data_dir(request.query), _optional_query(request.query, "workflowId")
+        )
+
+    @ROUTES.route("GET", "/api/workflow-shortcuts/{shortcut_id}")
+    def _shortcut_detail(self, request: RouteRequest) -> Any:
+        return workflow_shortcuts.detail_payload(
+            self._request_data_dir(request.query), request.params["shortcut_id"]
+        )
+
+    @ROUTES.route("DELETE", "/api/workflow-shortcuts/{shortcut_id}")
+    def _shortcut_remove(self, request: RouteRequest) -> Any:
+        return workflow_shortcuts.remove_payload(
+            self._request_data_dir(request.query), request.params["shortcut_id"]
+        )
+
+    @ROUTES.route(
+        "POST", "/api/workflow-shortcuts/{shortcut_id}/run", body=workflow_shortcuts.MAX_BODY_BYTES
+    )
+    def _shortcut_run(self, request: RouteRequest) -> Any:
+        base = self._request_data_dir(request.query)
+        return self._run_async(
+            workflow_shortcuts.run_payload(base, request.params["shortcut_id"], request.body or {})
+        )
+
+    @ROUTES.route("GET", "/api/workflow-shortcuts/{shortcut_id}/changes")
+    def _shortcut_changes(self, request: RouteRequest) -> Any:
+        return workflow_shortcuts.changes_payload(
+            self._request_data_dir(request.query), request.params["shortcut_id"]
+        )
+
+    @ROUTES.route("POST", "/api/workflow-shortcuts/{shortcut_id}/approve", body=16384)
+    def _shortcut_approve(self, request: RouteRequest) -> Any:
+        # Agent tokens never get here (agent_request_refusal), so this is the user's own
+        # Approve this version, as for a trigger.
+        return workflow_shortcuts.approve_payload(
+            self._request_data_dir(request.query), request.params["shortcut_id"], request.body or {}
+        )
+
+    def _answer_shortcut_changed(self, exc: ShortcutChanged) -> None:
+        self._send_json(
+            {
+                "error": str(exc),
+                "code": exc.code,
+                "state": exc.state,
+                "shortcutId": exc.shortcut_id,
+                "workflowName": exc.workflow_name,
+            },
+            status=409,
+        )
 
     def _dispatch_rattish_cache(self, method: str, query: dict[str, list[str]]) -> None:
         """A workflow's result cache: GET shows its size, DELETE clears it."""
@@ -2361,70 +2224,89 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 {"error": f"Could not read or clear the result cache: {exc}"}, status=500
             )
 
-    def _dispatch_rattish_triggers(
-        self, method: str, path: str, query: dict[str, list[str]]
-    ) -> None:
-        base = self._request_data_dir(query)
-        action = path.removeprefix("/api/rattish/triggers").strip("/")
-        try:
-            if method == "GET" and not action:
-                self._send_json(
-                    rattish_triggers.triggers_payload(base, _optional_query(query, "workflowId"))
-                )
-            elif method == "POST" and not action:
-                self._send_json(
-                    rattish_triggers.create_trigger_payload(base, self._read_json()), status=201
-                )
-            elif method == "GET" and action == "pause":
-                self._send_json(rattish_triggers.trigger_pause_payload(base))
-            elif method == "POST" and action == "pause":
-                self._send_json(rattish_triggers.set_trigger_pause_payload(base, self._read_json()))
-            elif method == "GET" and action == "budget":
-                self._send_json(rattish_triggers.daily_budget_payload(base))
-            elif method == "POST" and action == "budget":
-                self._send_json(rattish_triggers.set_daily_budget_payload(base, self._read_json()))
-            elif method == "POST" and action == "preview":
-                self._send_json(rattish_triggers.preview_trigger_payload(self._read_json()))
-            elif method == "POST" and action == "login":
-                self._send_json(
-                    rattish_triggers.set_start_at_login_payload(base, self._read_json())
-                )
-            elif method == "GET" and action.endswith("/changes"):
-                self._send_json(
-                    rattish_triggers.trigger_changes_payload(base, action.removesuffix("/changes"))
-                )
-            elif method == "POST" and action.endswith("/approve"):
-                # Agent tokens never get here (agent_request_refusal), so this is the
-                # user's own Approve this version, as with a ticket's Accept.
-                self._send_json(
-                    rattish_triggers.approve_trigger_payload(
-                        base, action.removesuffix("/approve"), self._read_json()
-                    )
-                )
-            elif method == "POST" and action.endswith("/rotate-token"):
-                self._send_json(
-                    rattish_triggers.rotate_trigger_token_payload(
-                        base, action.removesuffix("/rotate-token")
-                    )
-                )
-            elif method == "POST" and action and "/" not in action:
-                self._send_json(
-                    rattish_triggers.update_trigger_payload(base, action, self._read_json())
-                )
-            elif method == "DELETE" and action and "/" not in action:
-                self._send_json(rattish_triggers.delete_trigger_payload(base, action))
-            else:
-                self._send_json({"error": "Method not allowed"}, status=405)
-        except TriggerNotFound as exc:
-            self._send_json({"error": str(exc)}, status=404)
-        except ApprovalConflict as exc:
-            self._send_json({"error": str(exc), "conflict": True}, status=409)
-        except UnseenChanges as exc:
-            self._send_json({"error": str(exc), "unseen": exc.files}, status=409)
-        except TriggerError as exc:
-            self._send_json({"error": str(exc)}, status=400)
-        except LoginEntryError as exc:
-            self._send_json({"error": str(exc)}, status=500)
+    # Rattish triggers: the routes under Mount("/api/rattish/triggers") above.
+
+    @ROUTES.route("GET", "/api/rattish/triggers")
+    def _triggers_list(self, request: RouteRequest) -> Any:
+        return rattish_triggers.triggers_payload(
+            self._request_data_dir(request.query), _optional_query(request.query, "workflowId")
+        )
+
+    @ROUTES.route("POST", "/api/rattish/triggers", body=0, status=201)
+    def _trigger_create(self, request: RouteRequest) -> Any:
+        return rattish_triggers.create_trigger_payload(
+            self._request_data_dir(request.query), request.body or {}
+        )
+
+    @ROUTES.route("GET", "/api/rattish/triggers/pause")
+    def _triggers_pause_state(self, request: RouteRequest) -> Any:
+        return rattish_triggers.trigger_pause_payload(self._request_data_dir(request.query))
+
+    @ROUTES.route("POST", "/api/rattish/triggers/pause", body=0)
+    def _triggers_set_pause(self, request: RouteRequest) -> Any:
+        return rattish_triggers.set_trigger_pause_payload(
+            self._request_data_dir(request.query), request.body or {}
+        )
+
+    @ROUTES.route("GET", "/api/rattish/triggers/budget")
+    def _triggers_budget(self, request: RouteRequest) -> Any:
+        return rattish_triggers.daily_budget_payload(self._request_data_dir(request.query))
+
+    @ROUTES.route("POST", "/api/rattish/triggers/budget", body=0)
+    def _triggers_set_budget(self, request: RouteRequest) -> Any:
+        return rattish_triggers.set_daily_budget_payload(
+            self._request_data_dir(request.query), request.body or {}
+        )
+
+    @ROUTES.route("POST", "/api/rattish/triggers/preview", body=0)
+    def _trigger_preview(self, request: RouteRequest) -> Any:
+        return rattish_triggers.preview_trigger_payload(request.body or {})
+
+    @ROUTES.route("POST", "/api/rattish/triggers/login", body=0)
+    def _triggers_start_at_login(self, request: RouteRequest) -> Any:
+        return rattish_triggers.set_start_at_login_payload(
+            self._request_data_dir(request.query), request.body or {}
+        )
+
+    @ROUTES.route("GET", "/api/rattish/triggers/{trigger_id}/changes")
+    def _trigger_changes(self, request: RouteRequest) -> Any:
+        return rattish_triggers.trigger_changes_payload(
+            self._request_data_dir(request.query), request.params["trigger_id"]
+        )
+
+    @ROUTES.route("POST", "/api/rattish/triggers/{trigger_id}/approve", body=0)
+    def _trigger_approve(self, request: RouteRequest) -> Any:
+        # Agent tokens never get here (agent_request_refusal), so this is the user's own
+        # Approve this version, as with a ticket's Accept.
+        return rattish_triggers.approve_trigger_payload(
+            self._request_data_dir(request.query), request.params["trigger_id"], request.body or {}
+        )
+
+    @ROUTES.route("POST", "/api/rattish/triggers/{trigger_id}/rotate-token")
+    def _trigger_rotate_token(self, request: RouteRequest) -> Any:
+        return rattish_triggers.rotate_trigger_token_payload(
+            self._request_data_dir(request.query), request.params["trigger_id"]
+        )
+
+    @ROUTES.route("POST", "/api/rattish/triggers/{trigger_id}", body=0)
+    def _trigger_update(self, request: RouteRequest) -> Any:
+        return rattish_triggers.update_trigger_payload(
+            self._request_data_dir(request.query), request.params["trigger_id"], request.body or {}
+        )
+
+    @ROUTES.route("DELETE", "/api/rattish/triggers/{trigger_id}")
+    def _trigger_delete(self, request: RouteRequest) -> Any:
+        return rattish_triggers.delete_trigger_payload(
+            self._request_data_dir(request.query), request.params["trigger_id"]
+        )
+
+    # 409 answers that carry more than the message, shared by triggers and shortcuts.
+
+    def _answer_approval_conflict(self, exc: Exception) -> None:
+        self._send_json({"error": str(exc), "conflict": True}, status=409)
+
+    def _answer_unseen_changes(self, exc: UnseenChanges | ShortcutUnseenChanges) -> None:
+        self._send_json({"error": str(exc), "unseen": exc.files}, status=409)
 
     def _dispatch_social_request(self, method: str, parsed: Any) -> None:
         """Social posts. An agent token acts as Rem, which can only propose and revise."""
@@ -2708,6 +2590,18 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/health":
             self._send_json({"ok": True})
             return
+        if parsed.path == "/api/instance/proof":
+            # Unauthenticated: the CLI asks before it sends the owner token.
+            nonce = parse_qs(parsed.query).get("nonce", [""])[0]
+            proof = headless_support.instance_proof(self.server.api_token, nonce)
+            if proof is None:
+                self._send_json(
+                    {"error": "nonce must be 32 random bytes as 64 lowercase hex characters"},
+                    status=400,
+                )
+            else:
+                self._send_json({"proof": proof})
+            return
         if parsed.path == "/api/computers":
             self._send_json(self.server.computers.read())
             return
@@ -2776,62 +2670,9 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._request_failed("Listing generation jobs", exc)
             return
 
-        if parsed.path == "/api/desktop/trusted-roots":
-            secret = getattr(self.server, "path_grant_secret", "")
-            supplied = self.headers.get("X-Gofer-Desktop-Grant-Secret", "")
-            if not secret or not hmac.compare_digest(secret.encode(), supplied.encode()):
-                self._send_json({"error": "Desktop authentication required"}, status=403)
-                return
-            self._send_json({"roots": list(getattr(self.server, "trusted_project_roots", ()))})
-            return
-
-        if parsed.path == "/api/session":
-            self._send_json(ui_session_payload(self.server))
-            return
-
         if parsed.path == "/api/doctor":
             query = parse_qs(parsed.query)
             self._send_json(health_payload(self._request_data_dir(query)))
-            return
-
-        if parsed.path.startswith("/workflows/") and parsed.path.endswith("/usage"):
-            workflow_id = parsed.path.removeprefix("/workflows/").removesuffix("/usage")
-            query = parse_qs(parsed.query)
-            try:
-                payload = workflow_usage_page_payload(
-                    workflow_id,
-                    self._request_data_dir(query),
-                )
-            except WorkflowLogError as exc:
-                self._send_html(f"<p>{html.escape(str(exc))}</p>", status=404)
-                return
-
-            self._send_html(render_workflow_usage_html(payload))
-            return
-
-        if parsed.path.startswith("/workflows/") and "/logs/" in parsed.path:
-            remainder = parsed.path.removeprefix("/workflows/")
-            workflow_id, run_part = remainder.split("/logs/", 1)
-            if not run_part.endswith("/usage"):
-                self._send_json({"error": "Not found"}, status=404)
-                return
-            run_id = run_part.removesuffix("/usage")
-            query = parse_qs(parsed.query)
-            try:
-                payload = workflow_run_log_payload(
-                    workflow_id,
-                    run_id,
-                    self._request_data_dir(query),
-                    offset=_optional_int_query(query, "offset"),
-                    limit=_optional_int_query(query, "limit"),
-                    tail_bytes=_optional_int_query(query, "tailBytes"),
-                    include_details=query.get("details", ["1"])[0] != "0",
-                )
-            except WorkflowLogError as exc:
-                self._send_html(f"<p>{html.escape(str(exc))}</p>", status=404)
-                return
-
-            self._send_html(render_usage_summary_html(payload.get("usageSummary") or {}))
             return
 
         if parsed.path == "/api/workflows":
@@ -2882,18 +2723,6 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(exc)}, status=404)
                 return
             self._send_json({"document": payload})
-            return
-
-        if parsed.path == "/api/workflow-templates":
-            self._send_json(list_workflow_templates_payload())
-            return
-
-        if parsed.path.startswith("/api/workflow-templates/"):
-            template_name = parsed.path.removeprefix("/api/workflow-templates/")
-            try:
-                self._send_json(workflow_template_payload(template_name))
-            except WorkflowCreateError as exc:
-                self._send_json({"error": str(exc)}, status=404)
             return
 
         if parsed.path == "/api/chat/events":
@@ -3082,14 +2911,6 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(exc)}, status=400)
             return
 
-        if parsed.path in {"/api/runners", "/api/queue"}:
-            query = parse_qs(parsed.query)
-            try:
-                self._send_json(runner_queue_payload(self._request_data_dir(query)))
-            except RunnerQueueError as exc:
-                self._send_json({"error": str(exc)}, status=400)
-            return
-
         if parsed.path == "/api/retention":
             query = parse_qs(parsed.query)
             try:
@@ -3109,64 +2930,12 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(exc)}, status=400)
             return
 
-        if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/history"):
-            workflow_id = parsed.path.removeprefix("/api/workflows/").removesuffix("/history")
-            query = parse_qs(parsed.query)
-            try:
-                self._send_json(
-                    list_workflow_history_payload(
-                        workflow_id,
-                        self._request_data_dir(query),
-                        limit=_optional_int_query(query, "limit"),
-                    )
-                )
-            except WorkflowHistoryError as exc:
-                self._send_json({"error": str(exc)}, status=400)
-            return
-
-        if (
-            parsed.path.startswith("/api/workflows/")
-            and "/history/" in parsed.path
-            and parsed.path.endswith("/diff")
-        ):
-            remainder = parsed.path.removeprefix("/api/workflows/").removesuffix("/diff")
-            workflow_id, revision_id = remainder.split("/history/", 1)
-            query = parse_qs(parsed.query)
-            try:
-                self._send_json(
-                    workflow_revision_diff_payload(
-                        workflow_id,
-                        revision_id,
-                        self._request_data_dir(query),
-                    )
-                )
-            except WorkflowHistoryError as exc:
-                self._send_json({"error": str(exc)}, status=400)
-            return
-
         if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/run-worktrees"):
             workflow_id = parsed.path.removeprefix("/api/workflows/").removesuffix("/run-worktrees")
             query = parse_qs(parsed.query)
             try:
                 self._send_json(
                     workflow_run_worktrees_payload(workflow_id, self._request_data_dir(query))
-                )
-            except WorkflowUpdateError as exc:
-                self._send_json({"error": str(exc)}, status=404)
-            return
-
-        if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/doctor"):
-            workflow_id = parsed.path.removeprefix("/api/workflows/").removesuffix("/doctor")
-            query = parse_qs(parsed.query)
-            self._send_json(health_payload(self._request_data_dir(query), workflow_id))
-            return
-
-        if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/validate"):
-            workflow_id = parsed.path.removeprefix("/api/workflows/").removesuffix("/validate")
-            query = parse_qs(parsed.query)
-            try:
-                self._send_json(
-                    validate_workflow_payload(workflow_id, self._request_data_dir(query))
                 )
             except WorkflowUpdateError as exc:
                 self._send_json({"error": str(exc)}, status=404)
@@ -3602,7 +3371,6 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             except (WorkflowCreateError, json.JSONDecodeError) as exc:
                 self._send_json({"error": str(exc)}, status=400)
                 return
-            self._sync_schedules()
             self._send_json(payload)
             return
 
@@ -3861,7 +3629,6 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             except (WorkflowBundleError, json.JSONDecodeError, ValueError) as exc:
                 self._send_json({"error": str(exc)}, status=400)
                 return
-            self._sync_schedules()
             self._send_json({"workflow": workflow}, status=201)
             return
 
@@ -3892,118 +3659,24 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             self._send_json(payload, status=201)
             return
 
-        if parsed.path == "/api/workflows/import":
-            query = parse_qs(parsed.query)
-            try:
-                body = self._read_json()
-                with _bundle_path_from_body(body) as bundle_path:
-                    if bundle_path and body.get("bundlePath"):
-                        bundle_path = _resolve_ui_bundle_path(
-                            bundle_path,
-                            self._request_data_dir(query),
-                        )
-                        self._assert_bundle_path_allowed(
-                            bundle_path,
-                            body.get("grantId"),
-                            must_exist=True,
-                        )
-                        plan = import_workflow_bundle_payload(
-                            bundle_path,
-                            self._request_data_dir(query),
-                            replace=bool(body.get("replace", False)),
-                            dry_run=bool(body.get("dryRun", False)),
-                            resource_limits=self._resource_limits(),
-                        )
-                        self._sync_schedules()
-                        self._send_json(
-                            {"import": plan},
-                            status=200 if body.get("dryRun") else 201,
-                        )
-                        return
-                workflow = import_workflow_payload(
-                    str(body.get("content", "")),
-                    self._request_data_dir(query),
-                )
-            except WorkflowAlreadyExistsError as exc:
-                self._send_json({"error": str(exc)}, status=409)
-                return
-            except (
-                WorkflowBundleError,
-                WorkflowCreateError,
-                json.JSONDecodeError,
-                ValueError,
-            ) as exc:
-                self._send_json({"error": str(exc)}, status=400)
-                return
-
-            self._sync_schedules()
-            self._send_json({"workflow": workflow}, status=201)
-            return
-
-        if parsed.path == "/api/workflows/import/preview":
-            query = parse_qs(parsed.query)
-            try:
-                body = self._read_json()
-                with _bundle_path_from_body(body) as bundle_path:
-                    if bundle_path and body.get("bundlePath"):
-                        bundle_path = _resolve_ui_bundle_path(
-                            bundle_path,
-                            self._request_data_dir(query),
-                        )
-                        self._assert_bundle_path_allowed(
-                            bundle_path,
-                            body.get("grantId"),
-                            must_exist=True,
-                        )
-                    if not bundle_path:
-                        # An empty path reads the current folder as a ZIP: a 500 before.
-                        raise ValueError("Give the bundle to preview.")
-                    payload = preview_workflow_bundle_payload(
-                        bundle_path,
-                        self._request_data_dir(query),
-                        resource_limits=self._resource_limits(),
-                    )
-            except (WorkflowBundleError, json.JSONDecodeError, ValueError) as exc:
-                self._send_json({"error": str(exc)}, status=400)
-                return
-            self._send_json({"import": payload})
-            return
-
         if parsed.path == "/api/workflows":
             query = parse_qs(parsed.query)
             try:
                 body = self._read_json()
-                if body.get("template"):
-                    workflow = create_workflow_payload(
+                project_root = self._granted_project_root(body)
+                if body.get("starter"):
+                    workflow = create_workflow_from_starter_payload(
+                        str(body.get("starter")),
                         str(body.get("name", "")),
-                        self._request_data_dir(query),
-                        template=body.get("template"),
+                        project_root,
+                        registry_dir=self._request_data_dir(query),
                     )
                 else:
-                    project_root = Path(str(body.get("projectRoot", ""))).expanduser()
-                    if not str(body.get("projectRoot", "")).strip():
-                        raise WorkflowCreateError("Project folder is required")
-                    try:
-                        self._assert_bundle_path_allowed(
-                            project_root,
-                            body.get("projectGrantId"),
-                            must_exist=True,
-                        )
-                    except WorkflowBundleError as exc:
-                        raise WorkflowCreateError(str(exc)) from exc
-                    if body.get("starter"):
-                        workflow = create_workflow_from_starter_payload(
-                            str(body.get("starter")),
-                            str(body.get("name", "")),
-                            project_root,
-                            registry_dir=self._request_data_dir(query),
-                        )
-                    else:
-                        workflow = create_registered_workflow_payload(
-                            str(body.get("name", "")),
-                            project_root,
-                            registry_dir=self._request_data_dir(query),
-                        )
+                    workflow = create_registered_workflow_payload(
+                        str(body.get("name", "")),
+                        project_root,
+                        registry_dir=self._request_data_dir(query),
+                    )
             except WorkflowAlreadyExistsError as exc:
                 self._send_json({"error": str(exc)}, status=409)
                 return
@@ -4011,8 +3684,26 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(exc)}, status=400)
                 return
 
-            self._sync_schedules()
             self._send_json({"workflow": workflow}, status=201)
+            return
+
+        if parsed.path == "/api/workflows/convert-toml":
+            query = parse_qs(parsed.query)
+            try:
+                body = self._read_json()
+                project_root = self._granted_project_root(body)
+                payload = convert_toml_workflow_payload(
+                    Path(str(body.get("path", ""))),
+                    project_root,
+                    self._request_data_dir(query),
+                )
+            except WorkflowAlreadyExistsError as exc:
+                self._send_json({"error": str(exc)}, status=409)
+                return
+            except (WorkflowCreateError, json.JSONDecodeError) as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            self._send_json(payload, status=201)
             return
 
         if parsed.path == "/api/chat/attachments/copy":
@@ -4124,7 +3815,6 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             except (ChatChangeError, json.JSONDecodeError) as exc:
                 self._send_json({"error": str(exc)}, status=409)
                 return
-            self._sync_schedules()
             self._send_json(payload)
             return
 
@@ -4139,7 +3829,6 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             except (ChatChangeError, json.JSONDecodeError) as exc:
                 self._send_json({"error": str(exc)}, status=409)
                 return
-            self._sync_schedules()
             self._send_json(payload)
             return
 
@@ -4311,6 +4000,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             try:
                 body = self._read_json()
                 self._validate_second_brain(body)
+                self._validate_rem_thread_projects(body)
                 with self._rem_swarm_session(body) as (chat_body, swarm_url):
                     response = self._run_async(
                         run_workflow_chat(
@@ -4341,35 +4031,6 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 return
 
             self._send_json(response)
-            return
-
-        if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/validate"):
-            query = parse_qs(parsed.query)
-            try:
-                body = self._read_json()
-                self._send_json(
-                    validate_workflow_draft_payload(
-                        body,
-                        self._request_data_dir(query),
-                    )
-                )
-            except (WorkflowUpdateError, json.JSONDecodeError) as exc:
-                self._send_json({"error": str(exc)}, status=400)
-            return
-
-        if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/validate/fix"):
-            workflow_id = parsed.path.removeprefix("/api/workflows/").removesuffix("/validate/fix")
-            query = parse_qs(parsed.query)
-            try:
-                payload = apply_workflow_validation_fix_payload(
-                    workflow_id,
-                    self._read_json(),
-                    self._request_data_dir(query),
-                )
-            except (WorkflowUpdateError, json.JSONDecodeError) as exc:
-                self._send_json({"error": str(exc)}, status=400)
-                return
-            self._send_json(payload)
             return
 
         if parsed.path.startswith("/api/provider/profiles/") and parsed.path.endswith("/check"):
@@ -4486,7 +4147,6 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             except WorkflowUpdateError as exc:
                 self._send_json({"error": str(exc)}, status=400)
                 return
-            self._sync_schedules()
             self._send_json(payload)
             return
 
@@ -4507,8 +4167,6 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(exc)}, status=400)
                 return
 
-            self._sync_schedules()
-            self._sync_continuous_runs()
             self._send_json({"workflow": workflow})
             return
 
@@ -4548,58 +4206,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(exc)}, status=400)
                 return
 
-            self._sync_schedules()
             self._send_json({"workflow": workflow}, status=201)
-            return
-
-        if (
-            parsed.path.startswith("/api/workflows/")
-            and "/history/" in parsed.path
-            and parsed.path.endswith("/restore")
-        ):
-            remainder = parsed.path.removeprefix("/api/workflows/").removesuffix("/restore")
-            workflow_id, revision_id = remainder.split("/history/", 1)
-            query = parse_qs(parsed.query)
-            try:
-                body = self._read_json()
-                payload = restore_workflow_revision_payload(
-                    workflow_id,
-                    revision_id,
-                    self._request_data_dir(query),
-                    as_copy=bool(body.get("asCopy", False)),
-                )
-            except (WorkflowHistoryError, json.JSONDecodeError, ValueError) as exc:
-                self._send_json({"error": str(exc)}, status=400)
-                return
-
-            self._sync_schedules()
-            self._send_json(payload)
-            return
-
-        if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/export"):
-            workflow_id = parsed.path.removeprefix("/api/workflows/").removesuffix("/export")
-            query = parse_qs(parsed.query)
-            try:
-                body = self._read_json()
-                output_path = _resolve_ui_bundle_path(
-                    Path(str(body.get("outputPath", ""))),
-                    self._request_data_dir(query),
-                )
-                output_path = self._assert_bundle_path_allowed(
-                    output_path,
-                    body.get("grantId"),
-                    must_exist=False,
-                )
-                payload = export_workflow_bundle_payload(
-                    workflow_id,
-                    output_path,
-                    self._request_data_dir(query),
-                    notes=body.get("notes"),
-                )
-            except (WorkflowBundleError, json.JSONDecodeError) as exc:
-                self._send_json({"error": str(exc)}, status=400)
-                return
-            self._send_json(payload, status=201)
             return
 
         if parsed.path == "/api/desktop/path-grants":
@@ -4638,44 +4245,6 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 return
 
             self._send_json({"plan": plan})
-            return
-
-        if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/queue"):
-            workflow_id = parsed.path.removeprefix("/api/workflows/").removesuffix("/queue")
-            query = parse_qs(parsed.query)
-            try:
-                body = self._read_json()
-                parameters = body.get("parameters")
-                if parameters is not None and not isinstance(parameters, dict):
-                    raise RunnerQueueError("parameters must be an object")
-                target_labels = body.get("targetLabels")
-                if target_labels is not None and not isinstance(target_labels, list):
-                    raise RunnerQueueError("targetLabels must be an array")
-                payload = queue_workflow_run_payload(
-                    workflow_id,
-                    self._request_data_dir(query),
-                    priority=int(body.get("priority") or 0),
-                    trigger=str(body.get("trigger") or "ui"),
-                    parameters=parameters,
-                    target_labels=[str(label) for label in (target_labels or [])],
-                )
-            except (RunnerQueueError, json.JSONDecodeError, ValueError) as exc:
-                self._send_json({"error": str(exc)}, status=400)
-                return
-
-            self._send_json(payload, status=202)
-            return
-
-        if parsed.path.startswith("/api/queue/") and parsed.path.endswith("/cancel"):
-            run_id = parsed.path.removeprefix("/api/queue/").removesuffix("/cancel")
-            query = parse_qs(parsed.query)
-            try:
-                payload = cancel_queued_run_payload(run_id, self._request_data_dir(query))
-            except RunnerQueueError as exc:
-                self._send_json({"error": str(exc)}, status=400)
-                return
-
-            self._send_json(payload)
             return
 
         if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/run"):
@@ -4740,64 +4309,6 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
 
         if (
             parsed.path.startswith("/api/workflows/")
-            and "/webhooks/" in parsed.path
-            and parsed.path.endswith("/replay")
-        ):
-            remainder = parsed.path.removeprefix("/api/workflows/")
-            workflow_id, trigger_part = remainder.split("/webhooks/", 1)
-            trigger_id = trigger_part.removesuffix("/replay")
-            query = parse_qs(parsed.query)
-            try:
-                body = self._read_json()
-                run_id = str(body.get("runId") or "")
-                if not run_id:
-                    raise WorkflowTriggerError("runId is required")
-                payload = self._run_async(
-                    replay_workflow_trigger_payload(
-                        workflow_id,
-                        run_id,
-                        self._request_data_dir(query),
-                        trigger_id=trigger_id,
-                        token=self._webhook_token(),
-                        require_token=True,
-                    )
-                )
-            except (WorkflowTriggerError, json.JSONDecodeError) as exc:
-                self._send_json({"error": str(exc)}, status=400)
-                return
-            self._send_json({"trigger": payload}, status=202)
-            return
-
-        if (
-            parsed.path.startswith("/api/workflows/")
-            and "/webhooks/" in parsed.path
-            and parsed.path.endswith("/trigger")
-        ):
-            remainder = parsed.path.removeprefix("/api/workflows/")
-            workflow_id, trigger_part = remainder.split("/webhooks/", 1)
-            trigger_id = trigger_part.removesuffix("/trigger")
-            query = parse_qs(parsed.query)
-            try:
-                body = self._read_json()
-                payload = self._run_async(
-                    trigger_workflow_payload(
-                        workflow_id,
-                        trigger_id,
-                        self._request_data_dir(query),
-                        payload=body,
-                        headers={str(key): str(value) for key, value in self.headers.items()},
-                        source=str(self.headers.get("X-Gofer-Webhook-Source") or "http"),
-                        token=self._webhook_token(),
-                    )
-                )
-            except (WorkflowTriggerError, json.JSONDecodeError) as exc:
-                self._send_json({"error": str(exc)}, status=400)
-                return
-            self._send_json({"trigger": payload}, status=202)
-            return
-
-        if (
-            parsed.path.startswith("/api/workflows/")
             and "/approvals/" in parsed.path
             and (parsed.path.endswith("/approve") or parsed.path.endswith("/reject"))
         ):
@@ -4829,24 +4340,6 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "Not found"}, status=404)
 
     def _dispatch_PUT(self) -> None:
-        parsed = urlparse(self.path)
-        if parsed.path.startswith("/api/workflows/"):
-            workflow_id = parsed.path.removeprefix("/api/workflows/")
-            query = parse_qs(parsed.query)
-            try:
-                workflow = update_workflow_payload(
-                    workflow_id,
-                    self._read_json(),
-                    self._request_data_dir(query),
-                )
-            except (WorkflowUpdateError, json.JSONDecodeError) as exc:
-                self._send_json({"error": str(exc)}, status=400)
-                return
-
-            self._sync_schedules()
-            self._send_json({"workflow": workflow})
-            return
-
         self._send_json({"error": "Not found"}, status=404)
 
     def _dispatch_DELETE(self) -> None:
@@ -4905,20 +4398,6 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             self._send_json(payload)
             return
 
-        if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/chat"):
-            workflow_id = parsed.path.removeprefix("/api/workflows/").removesuffix("/chat")
-            query = parse_qs(parsed.query)
-            try:
-                payload = delete_workflow_chat_payload(
-                    workflow_id,
-                    self._request_data_dir(query),
-                )
-            except WorkflowUpdateError as exc:
-                self._send_json({"error": str(exc)}, status=400)
-                return
-            self._send_json(payload)
-            return
-
         if parsed.path.startswith("/api/workflows/"):
             workflow_id = parsed.path.removeprefix("/api/workflows/")
             query = parse_qs(parsed.query)
@@ -4926,13 +4405,11 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 payload = delete_workflow_payload(
                     workflow_id,
                     self._request_data_dir(query),
-                    source_format=query.get("sourceFormat", [None])[0],
                 )
             except WorkflowUpdateError as exc:
                 self._send_json({"error": str(exc)}, status=404)
                 return
 
-            self._sync_schedules()
             self._send_json(payload)
             return
 
@@ -4951,16 +4428,6 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:
         return
-
-    def _sync_schedules(self) -> None:
-        server = self.server
-        if isinstance(server, GoferUiServer):
-            server.sync_schedules()
-
-    def _sync_continuous_runs(self) -> None:
-        server = self.server
-        if isinstance(server, GoferUiServer):
-            server.ensure_continuous_runs()
 
     def _jev_post(self, parsed: Any, action: str) -> None:
         """Jev key, switch and key check. Responses and errors never contain the key."""
@@ -5378,6 +4845,21 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             # (the documented Settings > Memory rule). The grant stays the folder's own.
             config.update(library_brain(self.server, config))
 
+    def _granted_project_root(self, body: dict[str, Any]) -> Path:
+        """The ``projectRoot`` a request names, once the desktop has granted that folder."""
+        project_root = Path(str(body.get("projectRoot", ""))).expanduser()
+        if not str(body.get("projectRoot", "")).strip():
+            raise WorkflowCreateError("Project folder is required")
+        try:
+            self._assert_bundle_path_allowed(
+                project_root,
+                body.get("projectGrantId"),
+                must_exist=True,
+            )
+        except WorkflowBundleError as exc:
+            raise WorkflowCreateError(str(exc)) from exc
+        return project_root
+
     def _assert_bundle_path_allowed(
         self,
         target_path: Path,
@@ -5491,22 +4973,6 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         if getattr(self, "_request_method", "") == "GET" and "/logs" in self.path:
             self.send_header("ETag", '"' + hashlib.sha256(body).hexdigest() + '"')
             self.send_header("Access-Control-Expose-Headers", "ETag")
-        self._send_common_headers()
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _webhook_token(self) -> str | None:
-        token = self.headers.get("X-Gofer-Webhook-Token")
-        authorization = self.headers.get("Authorization", "")
-        if token is None and authorization.startswith("Bearer "):
-            token = authorization.removeprefix("Bearer ").strip()
-        return token
-
-    def _send_html(self, markup: str, status: int = 200) -> None:
-        body = markup.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
         self._send_common_headers()
         self.end_headers()
         self.wfile.write(body)
@@ -5673,142 +5139,6 @@ def ready_payload(server: GoferUiServer) -> dict[str, Any]:
     return payload
 
 
-def ui_session_payload(server: Any) -> dict[str, Any]:
-    host, port = server.server_address[:2]
-    api_token = server.api_token if isinstance(server, GoferUiServer) else ""
-    return {
-        "apiBaseUrl": f"http://{host}:{port}/api",
-        "apiToken": api_token,
-    }
-
-
-def workflow_usage_page_payload(
-    workflow_id: str,
-    data_dir: Path,
-    *,
-    limit: int = 10,
-) -> dict[str, Any]:
-    runs_payload = list_workflow_run_logs_payload(workflow_id, data_dir)
-    run_summaries: list[dict[str, Any]] = []
-    totals = {
-        "agent_calls": 0,
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "total_tokens": 0,
-        "estimated_cost": 0.0,
-        "agent_time_seconds": 0.0,
-    }
-    for run_log in (runs_payload.get("runs") or [])[:limit]:
-        run_id = str(run_log["id"])
-        try:
-            payload = workflow_run_log_payload(workflow_id, run_id, data_dir)
-        except WorkflowLogError:
-            continue
-        summary = payload.get("usageSummary")
-        if not isinstance(summary, dict):
-            summary = summarize_node_outputs(payload.get("nodeOutputs") or {})
-        run_summaries.append(
-            {
-                "runId": run_id,
-                "status": payload.get("status"),
-                "startedAt": payload.get("startedAt"),
-                "summary": summary,
-            }
-        )
-        run_totals = summary.get("totals") if isinstance(summary, dict) else {}
-        if not isinstance(run_totals, dict):
-            continue
-        for key in ("agent_calls", "input_tokens", "output_tokens", "total_tokens"):
-            totals[key] += int(run_totals.get(key) or 0)
-        totals["estimated_cost"] += float(run_totals.get("estimated_cost") or 0.0)
-        totals["agent_time_seconds"] += float(run_totals.get("agent_time_seconds") or 0.0)
-    return {"workflowId": workflow_id, "runs": run_summaries, "totals": totals}
-
-
-def render_workflow_usage_html(payload: dict[str, Any]) -> str:
-    workflow_id = html.escape(str(payload.get("workflowId") or "workflow"))
-    totals_value = payload.get("totals")
-    totals: dict[str, Any] = totals_value if isinstance(totals_value, dict) else {}
-    rows = []
-    for run in payload.get("runs") or []:
-        if not isinstance(run, dict):
-            continue
-        summary = run.get("summary") if isinstance(run.get("summary"), dict) else {}
-        run_totals = summary.get("totals") if isinstance(summary, dict) else {}
-        if not isinstance(run_totals, dict):
-            run_totals = {}
-        rows.append(
-            "<tr>"
-            f"<td>{html.escape(str(run.get('runId') or ''))}</td>"
-            f"<td>{html.escape(str(run.get('status') or 'unknown'))}</td>"
-            f"<td>{html.escape(str(run_totals.get('agent_calls') or 0))}</td>"
-            f"<td>{html.escape(str(run_totals.get('total_tokens') or 0))}</td>"
-            f"<td>${float(run_totals.get('estimated_cost') or 0.0):.6f}</td>"
-            f"<td>{float(run_totals.get('agent_time_seconds') or 0.0):.2f}s</td>"
-            "</tr>"
-        )
-    table = "".join(rows) or "<tr><td colspan='6'>No usage records found.</td></tr>"
-    return (
-        "<!doctype html><html><head><meta charset='utf-8'>"
-        f"<title>LLM usage for {workflow_id}</title></head><body>"
-        f"<h1>LLM usage for {workflow_id}</h1>"
-        f"{_usage_totals_html(totals)}"
-        "<h2>Recent runs</h2><table>"
-        "<thead><tr><th>Run</th><th>Status</th><th>Calls</th><th>Tokens</th>"
-        "<th>Cost</th><th>Agent time</th></tr></thead>"
-        f"<tbody>{table}</tbody></table></body></html>"
-    )
-
-
-def render_usage_summary_html(summary: dict[str, Any]) -> str:
-    totals = summary.get("totals") if isinstance(summary, dict) else {}
-    if not isinstance(totals, dict):
-        totals = {}
-    return (
-        "<!doctype html><html><head><meta charset='utf-8'>"
-        "<title>LLM run usage</title></head><body>"
-        "<h1>LLM run usage</h1>"
-        f"{_usage_totals_html(totals)}"
-        f"{_usage_nodes_html('Most expensive nodes', summary.get('most_expensive_nodes'))}"
-        f"{_usage_nodes_html('Slowest nodes', summary.get('slowest_nodes'))}"
-        "</body></html>"
-    )
-
-
-def _usage_totals_html(totals: dict[str, Any]) -> str:
-    return (
-        "<section><h2>Summary</h2><dl>"
-        f"<dt>Agent calls</dt><dd>{html.escape(str(totals.get('agent_calls') or 0))}</dd>"
-        f"<dt>Total tokens</dt><dd>{html.escape(str(totals.get('total_tokens') or 0))}</dd>"
-        f"<dt>Estimated cost</dt><dd>${float(totals.get('estimated_cost') or 0.0):.6f}</dd>"
-        f"<dt>Agent time</dt><dd>{float(totals.get('agent_time_seconds') or 0.0):.2f}s</dd>"
-        "</dl></section>"
-    )
-
-
-def _usage_nodes_html(title: str, nodes: Any) -> str:
-    rows = []
-    for node in nodes or []:
-        if not isinstance(node, dict):
-            continue
-        rows.append(
-            "<tr>"
-            f"<td>{html.escape(str(node.get('node_id') or ''))}</td>"
-            f"<td>{html.escape(str(node.get('model') or node.get('provider') or ''))}</td>"
-            f"<td>{html.escape(str(node.get('total_tokens') or 0))}</td>"
-            f"<td>${float(node.get('estimated_cost') or 0.0):.6f}</td>"
-            f"<td>{float(node.get('duration_seconds') or 0.0):.2f}s</td>"
-            "</tr>"
-        )
-    body = "".join(rows) or "<tr><td colspan='5'>None</td></tr>"
-    return (
-        f"<section><h2>{html.escape(title)}</h2><table>"
-        "<thead><tr><th>Node</th><th>Model</th><th>Tokens</th><th>Cost</th>"
-        "<th>Duration</th></tr></thead>"
-        f"<tbody>{body}</tbody></table></section>"
-    )
-
-
 def create_server(
     host: str = "127.0.0.1",
     port: int = 8765,
@@ -5850,13 +5180,8 @@ def _default_allowed_origins() -> set[str]:
 def _requires_ui_api_auth(method: str, path: str) -> bool:
     if method == "POST" and path.startswith("/api/organization-webhooks/"):
         return False  # Routine HMAC authentication is mandatory in its receiver.
-    if method == "OPTIONS" or (method == "GET" and path == "/api/health"):
+    if method == "OPTIONS" or (method == "GET" and path in {"/api/health", "/api/instance/proof"}):
         return False
-    # Webhooks have a workflow-specific token verified by trigger/replay handlers.
-    if method == "POST" and path.startswith("/api/workflows/"):
-        parts = path.removeprefix("/api/workflows/").split("/")
-        if len(parts) == 4 and parts[1] == "webhooks" and parts[3] in {"trigger", "replay"}:
-            return False
     return True
 
 
@@ -5984,17 +5309,13 @@ def serve(
             session.attach(server, rem_settings)
             for warning, line in headless_support.secret_feature_log_lines():
                 (log.warning if warning else log.info)("%s", line)
-        server.scheduler.start(paused=True)
-        server.sync_schedules()
-        server.scheduler.resume()
-        server.watcher.start()
-        server.start_continuous_monitor()
         triggers = TriggerEngine(server.data_dir, owner="app", runner=run_triggered_rattish)
         triggers.start()
         stop_usage_refresh = start_background_refresh(server.data_dir)
         stop_reclaimer = start_leftover_reclaimer()
-        # Scratch folders a stopped or crashed Rem turn or workflow run left behind.
-        start_scratch_cleanup(server.data_dir)
+        # Scratch folders a stopped or crashed Rem turn or workflow run left behind,
+        # and workers' temp files in RAM-backed /tmp: now, hourly and after turns end.
+        stop_temp_cleanup = start_temp_cleanup(server.data_dir)
         # Fresh worktrees of project checks a cancel, crash or restart left behind.
         rem_project_checks.start_sweep(server.data_dir)
         # Run worktrees of workflows deleted while the backend wasn't running.
@@ -6030,13 +5351,11 @@ def serve(
 
             configure_secrets_dir(None)
         stop_reclaimer()
+        stop_temp_cleanup()
         stop_usage_refresh()
-        server.stop_continuous_monitor()
         triggers.stop()
         stop_rattish_runs_for_shutdown(server.data_dir)
         stop_all_workflow_tests()
-        server.watcher.shutdown(wait=False)
-        server.scheduler.shutdown(wait=False)
         server.server_close()
         log.info("Raticode backend stopped")
         print("GOFER_UI_STOPPED", file=sys.stderr, flush=True)

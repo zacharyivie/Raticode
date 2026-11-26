@@ -17,7 +17,8 @@ const timer = setTimeout(() => { console.error("Rem actions browser test timed o
 const entry = `
 import React from "react";
 import {createRoot} from "react-dom/client";
-import {ChatPane, persistChatThreads, loadChatThreads} from "/src/pages/App.jsx";
+import {ChatPane} from "/src/components/ChatPane.jsx";
+import {persistChatThreads, loadChatThreads} from "/src/lib/chatThreads.js";
 import RemActionIcon from "/src/components/RemActionIcon.jsx";
 import {conversationRepository} from "/src/lib/conversationRepository.js";
 import "/src/styles/index.css";

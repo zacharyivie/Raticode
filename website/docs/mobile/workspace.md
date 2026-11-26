@@ -44,6 +44,8 @@ Files is read-only.
 
 The first time you open one of these, Android asks which app to use. Choose Raticode, then **Always**, to make Raticode the default viewer for that kind of file. **Android default apps settings** and **Raticode's Open by default settings** on the same page take you to Android's settings; clear Raticode's defaults there to stop.
 
+The same default applies to **Open** on a file Rem or your computer sent, such as a report: with Raticode as the default for HTML or PDF, it opens in this viewer, which then reads *Opened from Raticode*. Your [app lock](./locks.md#app-lock) covers it like any other Raticode screen, and while the app lock or child lock is on the viewer hides the file and says Raticode is locked. Raticode's other files on the phone, such as camera photos for Rem or Developer log hand-offs, never open here.
+
 What you open this way is treated as untrusted:
 
 - The file opens in a viewer of its own, read only, up to 50 MB. Text shows its first 2 MB.
@@ -95,12 +97,14 @@ The **Auto mode** card turns [Auto mode](../advanced/organizations.md#auto-mode)
 
 - Add a ticket for Rem or an organization, assign it, or hand one of Rem's tickets to an organization.
 - Long-press a ticket to move it.
+- After a move, a notice at the bottom of the board or the ticket's page names the ticket and where it went, such as "REM-12 moved to Backlog.", "REM-12 cancelled." or "REM-12 started." **Undo** on the notice moves the ticket back to the column it came from, as on [your computer's board](../rem/board.md). A move that starts or resumes work, and a move out of **In review** or **Blocked**, gets a notice without Undo, and so does any move of a paused ticket. A notice with Undo stays for about 10 seconds and others for about 4, longer if your phone's accessibility settings ask for more time; **×** closes it. If your computer refuses a move, it says why instead. *Not in a released version yet.*
 - The filters, the column you were on and the open section (**Board**, **Proposed**, **People** or **Self-work**) stay after you leave the board or close the app. A filter that's on is highlighted, and **Clear filters** turns them off. If a saved organization, person or project is gone, that filter shows everything again and the others stay. The phone keeps its own filters, separate from your computer's.
 - Open a ticket to see it at a glance (see [A ticket's page](#a-ticket-s-page)).
 - **History and comments** on a ticket's page lists each status change with its reason, oldest first, and comments from you, Rem and workers. Long results stay folded until you tap **Show the full text**. Add a comment at the bottom.
 - Offline, a ticket shows the history you last loaded. An older computer asks you to update it instead.
 - Tapping a ticket pill in Rem's chat opens that ticket here. A ticket no longer on the board says so.
 - A ticket that contradicts one of the project's decisions shows a red **Violates D-4** badge on its card, and its page shows a **Violates decisions** chip with the reason in the box at the top. Self-work won't start it until you change the ticket or the decision; see [Self-work keeps to decisions](../rem/board.md#self-work-keeps-to-decisions). An older computer sends no marker, so nothing shows. *New in Raticode 0.6.0 and Raticode Mobile 0.36.0.*
+- One of Rem's open tickets shows its [self-work objective](../rem/board.md#self-work-honors-the-objectives) on one short line of its card: the objective it advances, or **Not on an objective: self-work leaves it** while objectives are open. Its page has an **Objective** section with the same words as your computer's sheet, such as why self-work leaves it and **Move it to In progress to start it anyway.** An older computer sends neither, so nothing shows. *Not in a released version yet.*
 - A ticket that [waits for other tickets](../rem/board.md#tickets-that-wait-for-other-tickets) shows **Waits for:** on its card. Its page lists them in **Waits for**, where you add one with **Wait for a ticket…** or remove one with its **×**. If one was cancelled, the card and page show a notice instead. An older computer sends no list, so nothing shows.
 
 ### A ticket's page
@@ -110,11 +114,14 @@ A ticket's page is laid out to be read in a few seconds. Nothing from the earlie
 - **At the top:** the key, who owns the ticket, a large title, and colored chips for its column, **Running**, **Paused** and **High** or **Critical** priority.
 - **Column strip:** a strip of dots shows where the ticket is between **Backlog** and **Done**. A blocked or paused ticket shows the reason in a tinted box.
 - **Auto-approved:** this is a chip. Tap it to read why self-work approved the ticket.
+- **From** a desktop's name: this chip marks a proposal from a self-work pass that ran on a paired desktop through **Run there**. Such a proposal always waits for your approval, even with auto-approval on. Tap it to read why. The card shows the same label, and the self-work report says **To approve, from** that desktop. Not in a released version yet.
 - **Assigned to:** shows the assignee with their avatar. **Change** picks someone else, and **Their projects** opens their page. When a Rem ticket can't be handed to an organization right now, **Why can't I change this?** explains.
 - **Facts:** **Column**, **Priority**, **Project**, **Kind**, **Waits for** and **Added** show as tiles. Tap **Column** to move the ticket.
+- **Done when:** the ticket's finish line, one check per line, above **Why Rem suggests it**. A proposal shows it before you approve. An older computer doesn't send it, so nothing shows. *Not in a released version yet.*
 - **Folded text:** **Why Rem suggests it** and **Last result** show their first sentence, with **Show more** for the rest. **Details** folds when it's long.
 - **Waits for** and **Waited on by:** each lists tickets with a status dot. Tap one to open it. **Waited on by** shows which tickets are waiting for this one.
 - **Pinned actions:** **Move** stays pinned at the bottom of the screen, with **Open** *organization* on an organization's ticket. A proposal pins **Approve** and **Decline** instead.
+- **Cancel ticket:** one of Rem's tickets that isn't done, running or paused also pins **Cancel ticket**. It doesn't ask first: the notice that follows has **Undo**. A cancelled ticket pins **Restore to Backlog** instead of **Move**. *Not in a released version yet.*
 
 An organization's ticket in **Orgs › Issues** uses the same layout. Its first two actions are pinned at the bottom, such as **Accept** and **Request changes** for work to review, or **Approve plan**. The others, and **Cancel ticket**, are under **⋯**. Assignee, priority, due date, project, milestone and epic show as tiles, and tapping one opens its page.
 
@@ -124,7 +131,16 @@ The board also has:
 | --- | --- |
 | **Proposed** | Rem's ideas, with **Approve** and **Decline**. Nothing runs until you approve it. |
 | **People** | Rem and every organization's agents. Tap someone to choose the projects they may work in during self-work. |
-| **Self-work** | What Rem is doing on its own, where it can work, and the report of tickets added and work done. **Self-work settings** opens its settings. |
+| **Self-work** | What Rem is doing on its own, where it can work, its objectives, and the report of tickets added and work done. **Self-work settings** opens its settings. |
+
+**Objectives** sits above the report on the **Self-work** section and lists the [objectives](../rem/board.md#objectives) that guide the self-work session, in the computer's order: open ones first, newest first. *Not in a released version yet.*
+
+- Each row shows the objective and whether it's **Open** or **Done**. Tap it for its **Done when** line (or that it's open-ended), who checked it off and the evidence they gave. One row opens at a time, and a second tap closes it.
+- The count by the heading is this session's done/total, such as **1/3**, as in Rem's side pane on your computer.
+- Objectives finished in earlier sessions are in a folded **Stale** group with how many there are. Tap it to open it.
+- With no objectives for this session, the card says so in the computer's words.
+- The phone shows the first 30, as the side pane does; the card says how many more are on your computer.
+- The list is read-only here. To change it, tell Rem in its chat, typed or spoken. An older computer sends no objectives, so the card doesn't show.
 
 ### Self-work settings
 
@@ -329,6 +345,8 @@ The phone has your trust here, as at the computer, so a tap is your approval. Re
 | **Raticode (chromium)** | Android's WebView | — |
 | **Raticode (gecko)** | Mozilla's engine | Profiles, tracking protection and Firefox extensions under **Extensions**. **Import from Firefox** brings over extensions, settings and bookmarks (not passwords or your Mozilla account). |
 
+In Raticode (gecko), **Profiles** in the menu lists your profiles. Each has its own tabs, favorites, history, sign-ins and site data. **Delete** on a profile asks first: **Delete profile** removes all of that from the phone for good, and **Keep** leaves it. The built-in **Personal** profile can't be deleted.
+
 ### Tabs and the default browser
 
 <AppScreenshot name="phone-browser-tabs" phone caption="One tab list for both built-in browsers, with your computer's open tabs below." />
@@ -358,7 +376,7 @@ In Raticode (gecko), **Extensions** in the menu searches Firefox Add-ons and lis
 - An extension whose button has no window of its own does its work on the page you're viewing, and Raticode says so.
 - **Nothing to open** marks an extension that has neither, such as one that works on every page by itself.
 - Extensions don't run in private tabs. **Open** in a private tab says so and opens nothing. Switch to a regular tab first.
-- The switch turns an extension off without removing it, and **Remove** uninstalls it. Profiles share the same extensions.
+- The switch turns an extension off without removing it. **Remove** asks first, then **Remove extension** uninstalls it with its settings and data, and **Keep** leaves it. Profiles share the same extensions.
 
 ### Privacy and downloads
 

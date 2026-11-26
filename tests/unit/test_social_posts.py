@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -970,6 +972,82 @@ def test_proposers_attach_media_only_from_open_projects(tmp_path: Path, clock: C
                 {"account_id": account["id"], "text": "Bad ref", "media": [{"sha256": ["x"]}]}
             ],
         )
+
+
+def test_a_proposer_file_swapped_after_the_project_check_is_refused(
+    tmp_path: Path, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PIL import Image
+
+    project = tmp_path / "project"
+    private = tmp_path / "Pictures"
+    project.mkdir()
+    private.mkdir()
+    Image.new("RGB", (2, 2), "green").save(private / "secret.png")
+    service = SocialService(
+        tmp_path / "data", secrets=FakeSecrets(), clock=clock, media_roots=lambda: [project]
+    )
+    account = discord(service)
+    checked = project / "shot.png"
+    check = service._check_proposer_media
+
+    def swap_to_link(path: Path) -> None:
+        checked.unlink()
+        checked.symlink_to(private / "secret.png")
+
+    def swap_to_hard_link(path: Path) -> None:
+        checked.unlink()
+        os.link(private / "secret.png", checked)
+
+    for swap in (swap_to_link, swap_to_hard_link):
+        if checked.is_symlink() or checked.exists():
+            checked.unlink()
+        Image.new("RGB", (2, 2), "blue").save(checked)
+
+        def check_then_swap(path: Path, swap: Callable[[Path], None] = swap) -> Any:
+            passed = check(path)
+            swap(path)
+            return passed
+
+        monkeypatch.setattr(service, "_check_proposer_media", check_then_swap)
+        media = service.root / "media"
+        before = sorted(media.iterdir()) if media.exists() else []
+        variants = [
+            {
+                "account_id": account["id"],
+                "text": f"Shot {swap.__name__}",
+                "media": [{"path": str(checked)}],
+            }
+        ]
+        with pytest.raises(SocialError, match="only from a project") as caught:
+            propose(service, account, variants=variants)
+        assert caught.value.code == "forbidden"
+        assert (sorted(media.iterdir()) if media.exists() else []) == before
+
+
+def test_a_file_that_grows_past_the_limit_after_its_size_is_read_is_refused(
+    service: SocialService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PIL import Image
+
+    from gofer.social import service as social_service
+
+    photo = tmp_path / "photo.png"
+    Image.new("RGB", (2, 2), "red").save(photo)
+    monkeypatch.setattr(social_service, "MAX_IMAGE_BYTES", photo.stat().st_size + 100)
+    sniff = social_service._sniff
+
+    def sniff_then_grow(head: bytes) -> str | None:
+        # The size was already read from the open file; now it grows past the limit.
+        with photo.open("ab") as grow:
+            grow.write(b"\0" * 1000)
+        return sniff(head)
+
+    monkeypatch.setattr(social_service, "_sniff", sniff_then_grow)
+    with pytest.raises(SocialError, match="larger than"):
+        service.import_media(photo)
+    media = service.root / "media"
+    assert not media.exists() or not any(media.iterdir())
 
 
 def test_media_type_comes_from_the_bytes_and_png_location_is_removed(

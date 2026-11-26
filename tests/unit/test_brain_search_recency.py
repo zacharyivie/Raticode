@@ -13,6 +13,7 @@ import pytest
 
 from gofer.ui import brain_library
 from gofer.ui.brain_library import BrainLibrary, appeared_at, recency_lift
+from tests.helpers.brain_library import wait_idle
 
 BODY = (
     "## Bin\n\nCompost compost.\n\n"
@@ -25,14 +26,6 @@ def library(tmp_path: Path):
     service = BrainLibrary(tmp_path / "app", start=False)
     yield service
     service.close()
-
-
-def wait_tasks(library: BrainLibrary) -> None:
-    deadline = time.monotonic() + 15
-    while any(task["state"] == "running" for task in library.snapshot()["tasks"]):
-        if time.monotonic() > deadline:
-            pytest.fail("Second Brain tasks did not finish")
-        time.sleep(0.02)
 
 
 def age(path: Path, days: float) -> None:
@@ -54,14 +47,14 @@ def equal_copies(library: BrainLibrary, tmp_path: Path) -> tuple[dict[str, Any],
     bike = "---\ntitle: Bike\n---\n## Chain\n\nOiled it.\n"
     (root / "bike.md").write_text(bike, encoding="utf-8")
     brain = library.open({"root": str(root)})
-    wait_tasks(library)
+    wait_idle(library)
     paths = {doc["id"]: doc["path"] for doc in library.entities("documents", brain["id"])}
     copies = sorted(doc_id for doc_id, path in paths.items() if path != "bike.md")
     older, newer = copies
     age(root / paths[older], 30)
     age(root / paths[newer], 1)
     library.scan(brain["id"])
-    wait_tasks(library)
+    wait_idle(library)
     return brain, older, newer
 
 

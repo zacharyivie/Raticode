@@ -17,7 +17,7 @@ from gofer.core.provider_capabilities import (
     ProviderCapabilityService,
     provider_capabilities_payload_async,
     resolve_provider_executable,
-    validate_provider_selection,
+    validate_provider_selection_async,
 )
 
 
@@ -257,11 +257,6 @@ async def test_sync_capability_apis_fail_fast_inside_running_loop() -> None:
         service.provider("codex")
     with pytest.raises(RuntimeError, match=r"await payload_async\(\) instead"):
         service.payload()
-    with pytest.raises(
-        RuntimeError,
-        match=r"await validate_provider_selection_async\(\) instead",
-    ):
-        validate_provider_selection("codex", None, None, service=service)
 
 
 @pytest.mark.asyncio
@@ -341,7 +336,8 @@ async def test_probe_puts_nvm_executable_directory_on_path(
     assert seen_env["PATH"].split(os.pathsep)[0] == ("/home/user/.nvm/versions/node/v20.20.0/bin")
 
 
-def test_selection_validation_rejects_model_effort_not_in_host_catalog() -> None:
+@pytest.mark.asyncio
+async def test_selection_validation_rejects_model_effort_not_in_host_catalog() -> None:
     capability = ProviderCapability.model_validate(
         {
             "id": "codex",
@@ -360,15 +356,15 @@ def test_selection_validation_rejects_model_effort_not_in_host_catalog() -> None
     )
 
     class StaticService:
-        def provider(self, _provider_id: str) -> ProviderCapability:
+        async def provider_async(self, _provider_id: str) -> ProviderCapability:
             return capability
 
     service = cast(ProviderCapabilityService, StaticService())
-    validate_provider_selection("codex", "gpt-5.6-sol", "high", service=service)
+    await validate_provider_selection_async("codex", "gpt-5.6-sol", "high", service=service)
     with pytest.raises(ProviderCapabilityError, match="Effort 'low'"):
-        validate_provider_selection("codex", "gpt-5.6-sol", "low", service=service)
+        await validate_provider_selection_async("codex", "gpt-5.6-sol", "low", service=service)
     with pytest.raises(ProviderCapabilityError, match="Model 'unknown'"):
-        validate_provider_selection("codex", "unknown", None, service=service)
+        await validate_provider_selection_async("codex", "unknown", None, service=service)
 
 
 @pytest.mark.asyncio

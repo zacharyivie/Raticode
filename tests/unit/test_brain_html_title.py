@@ -4,7 +4,6 @@ one-time re-read corrects titles stored by the older reader."""
 from __future__ import annotations
 
 import copy
-import time
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +11,7 @@ import pytest
 
 from gofer.ui.brain_documents import HTML_READER, extract, html_reader_stale
 from gofer.ui.brain_library import BrainLibrary
+from tests.helpers.brain_library import wait_task
 
 CHART = (
     '<svg viewBox="0 0 10 10"><title>Pie chart of passages</title>'
@@ -62,16 +62,6 @@ def test_og_title_comes_before_the_first_h1():
     )
     assert title(html) == "Shared title"
     assert title("<body><p>No title anywhere.</p></body>") == ""
-
-
-def wait_task(library: BrainLibrary, task: dict[str, Any]) -> dict[str, Any]:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        receipt = library.task(task["id"])
-        if receipt["state"] != "running":
-            return receipt
-        time.sleep(0.02)
-    pytest.fail("Second Brain task did not finish")
 
 
 @pytest.fixture

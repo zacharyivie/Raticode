@@ -59,8 +59,6 @@
 .sb-chip > button { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; color: rgb(var(--color-muted)); }
 .sb-chip > button:hover { background: rgb(var(--color-ink) / .1); color: rgb(var(--color-ink)); }
 
-.sb-type { display: inline-flex; align-items: center; gap: 4px; color: rgb(var(--color-muted)); font-size: 11px; white-space: nowrap; }
-
 .sb-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 48px 24px; text-align: center; color: rgb(var(--color-ink)); }
 .sb-empty > svg { color: rgb(var(--color-muted)); margin-bottom: 4px; }
 .sb-empty h3 { font-size: 14px; font-weight: 600; }

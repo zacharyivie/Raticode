@@ -17,6 +17,7 @@ from gofer.cli.main import app
 from gofer.core import usage_limits
 from gofer.devices.workflows import PhoneWorkflows
 from gofer.rattish.run_service import RattishRunResult
+from gofer.rattish.run_values import saved_values_path
 from gofer.rattish.trigger_service import (
     TriggerRun,
     run_trigger,
@@ -187,6 +188,87 @@ def test_workflow_runs_and_the_phone_show_a_waiting_run(data_dir: Path, project:
     assert row["usageLimitWait"]["label"] == "Waiting for usage limit"
     shown = PhoneWorkflows._run(row)
     assert (shown["status"], shown["summary"]) == ("failed", "Waiting for usage limit")
+
+
+def test_a_record_edited_while_its_run_waits_is_not_resumed(data_dir: Path, project: Path) -> None:
+    source = _agent_workflow(project)
+    provider = ScriptedProvider("claude_code", [(False, "", LIMITED, 1, {})])
+    engine, clock = _real_engine(data_dir, provider)
+    trigger_id = _once(engine.store, source)
+    engine.become_owner()
+    clock.advance(31)
+    engine.tick()
+    _wait_for(lambda: _history(engine.store, trigger_id)[0][0] == "waiting", timeout=60)
+    _wait_for(lambda: not engine._threads, timeout=30)
+    [wait] = engine.store.usage_waits()
+    assert wait.record_sha256 and wait.values_sha256 == ""
+
+    # Something working in the project rewrites what the passed step said.
+    record = Path(wait.record_path)
+    document = json.loads(record.read_text(encoding="utf-8"))
+    [passed] = [run for run in document["runs"] if run["node_id"] == "prepare"]
+    assert passed["outcome"] == "success"
+    passed["output"] = {"stdout": "edited while it waited"}
+    record.write_text(json.dumps(document), encoding="utf-8")
+    started: list[TriggerRun] = []
+    engine._runner = started.append
+
+    clock.moment = RESET + usage_limits.RESET_GRACE
+    engine.tick()
+    assert started == [] and not engine._threads
+    assert _history(engine.store, trigger_id) == [
+        (
+            "failed",
+            "The run's saved record changed while it waited, so Raticode didn't resume it. "
+            "Start it again.",
+        )
+    ]
+    assert engine.store.usage_waits() == []
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.parametrize("edited", [False, True])
+def test_saved_input_values_resume_only_as_they_were_when_the_wait_began(
+    data_dir: Path, project: Path, edited: bool
+) -> None:
+    source = _agent_workflow(project)
+    source.write_text(
+        source.read_text(encoding="utf-8").replace(
+            "  name: Usage Limit\n",
+            '  name: Usage Limit\n  inputs:\n    topic:\n      schema: {"type": "string"}\n',
+        ),
+        encoding="utf-8",
+    )
+    provider = ScriptedProvider("claude_code", [(False, "", LIMITED, 1, {})])
+    engine, clock = _real_engine(data_dir, provider)
+    trigger_id = _once(engine.store, source, inputs={"topic": "news"})
+    engine.become_owner()
+    clock.advance(31)
+    engine.tick()
+    _wait_for(lambda: _history(engine.store, trigger_id)[0][0] == "waiting", timeout=60)
+    _wait_for(lambda: not engine._threads, timeout=30)
+    [wait] = engine.store.usage_waits()
+    values = saved_values_path(Path(wait.record_path))
+    assert wait.values_sha256 and wait.values_sha256 != wait.record_sha256
+    if edited:
+        values.write_text(values.read_text(encoding="utf-8").replace("news", "other"))
+
+    clock.moment = RESET + usage_limits.RESET_GRACE
+    engine.tick()
+    _wait_for(lambda: _history(engine.store, trigger_id)[0][0] != "waiting", timeout=60)
+    _wait_for(lambda: not engine._threads, timeout=30)
+    [(status, message)] = _history(engine.store, trigger_id)
+    if edited:
+        assert (status, message) == (
+            "failed",
+            "The run's saved record changed while it waited, so Raticode didn't resume it. "
+            "Start it again.",
+        )
+        assert len(provider.calls) == 1
+    else:
+        assert status == "passed", message
+        assert len(provider.calls) == 2
+    assert (project / "prepared.txt").read_text(encoding="utf-8") == "x"
 
 
 @pytest.mark.parametrize(
@@ -512,3 +594,38 @@ def test_triggers_saved_before_the_switch_wait_for_usage_limits(
     assert upgraded.usage_waits() == []
     assert usage_waits_by_run(data_dir) == {}
     assert usage_waits_by_run(data_dir / "nowhere") == {}
+
+
+def test_a_wait_saved_before_the_record_hashes_is_not_resumed(
+    data_dir: Path, project: Path
+) -> None:
+    source = _bash_workflow(project)
+    runs = LimitedRuns(project / "run.json", passes_after=1)
+    clock = Clock()
+    engine = _fake_engine(data_dir, project, runs, clock)
+    trigger_id = _once(engine.store, source)
+    engine.become_owner()
+    clock.advance(31)
+    engine.tick()
+    _wait_for(lambda: _history(engine.store, trigger_id)[0][0] == "waiting")
+    _wait_for(lambda: not engine._threads)
+    engine._resign(wait_seconds=1)
+    # Back to version 7: the wait loses its hashes, as one saved by an older Raticode.
+    db = sqlite3.connect(engine.store.path)
+    db.execute("ALTER TABLE usage_waits DROP COLUMN record_sha256")
+    db.execute("ALTER TABLE usage_waits DROP COLUMN values_sha256")
+    db.execute("PRAGMA user_version = 7")
+    db.commit()
+    db.close()
+
+    later = _fake_engine(data_dir, project, runs, Clock(RESET + timedelta(minutes=3)))
+    [wait] = later.store.usage_waits()
+    assert (wait.record_sha256, wait.values_sha256) == (None, None)
+    later.become_owner()
+    later.tick()
+    assert len(runs.started) == 1 and not later._threads
+    assert _history(later.store, trigger_id)[0] == (
+        "failed",
+        "The run's saved record changed while it waited, so Raticode didn't resume it. "
+        "Start it again.",
+    )

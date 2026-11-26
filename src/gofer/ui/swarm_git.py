@@ -30,6 +30,21 @@ def permissions(value: Any = None) -> dict[str, bool]:
     return result
 
 
+ORGANIZATION_PUSH_BLOCKED = (
+    "Pushing and pull requests are off because this run's organization has "
+    "Block git push in worker runs turned on"
+)
+
+
+def organization_blocks_push(run: dict[str, Any]) -> bool:
+    """True when the run belongs to an organization whose Block git push setting is on.
+
+    Older stored runs carry no blockGitPush field and fail closed.
+    """
+    organization = run.get("organization") or {}
+    return bool(organization) and organization.get("blockGitPush", True) is not False
+
+
 def _text(payload: dict[str, Any], key: str, maximum: int = 8000) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or not value.strip() or len(value) > maximum or "\0" in value:
@@ -37,7 +52,13 @@ def _text(payload: dict[str, Any], key: str, maximum: int = 8000) -> str:
     return value
 
 
-def execute(workspace: dict[str, str], settings: Any, payload: dict[str, Any]) -> dict[str, str]:
+def execute(
+    workspace: dict[str, str],
+    settings: Any,
+    payload: dict[str, Any],
+    *,
+    push_blocked_by_organization: bool = False,
+) -> dict[str, str]:
     policy = permissions(settings)
     operation = payload.get("operation")
     if not isinstance(operation, str) or operation not in {
@@ -51,6 +72,8 @@ def execute(workspace: dict[str, str], settings: Any, payload: dict[str, Any]) -
         raise ValueError("Unknown managed Git operation")
     if not policy["local"]:
         raise ValueError("Local Git operations are disabled for this swarm run")
+    if operation in {"push", "create_pr"} and push_blocked_by_organization:
+        raise ValueError(ORGANIZATION_PUSH_BLOCKED)
     if operation in {"push", "create_pr"} and not policy["remote"]:
         raise ValueError("Remote branches and pull requests are disabled for this swarm run")
     root = Path(workspace["path"]).resolve()

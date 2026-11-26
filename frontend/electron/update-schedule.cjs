@@ -1,11 +1,9 @@
-// When Raticode looks for a new version, and when it reminds the user that one is waiting.
-// Kept free of Electron so the timing and the once-a-day rule can be tested with a fake clock.
+// When Raticode looks for a new version. Kept free of Electron so the timing can be tested with
+// a fake clock.
 
 const CHECK_INTERVAL_MS = 10 * 60 * 1000;
 // A failing check waits longer each time: 10, 20, 40, 80 minutes, then every 2 hours.
 const MAX_BACKOFF_MS = 2 * 60 * 60 * 1000;
-// Someone who touched the keyboard or mouse within this long is using the computer.
-const ACTIVE_IDLE_SECONDS = 5 * 60;
 
 /** How long to wait before the next automatic check. */
 function nextCheckDelay({ failures = 0, retryAt = 0, now = Date.now(), intervalMs = CHECK_INTERVAL_MS } = {}) {
@@ -28,7 +26,6 @@ function createUpdateScheduler({
   now = () => Date.now(),
   setTimer = (callback, delay) => setTimeout(callback, delay),
   clearTimer = (handle) => clearTimeout(handle),
-  onSettled = () => {},
 } = {}) {
   let timer = null;
   let running = null;
@@ -78,7 +75,6 @@ function createUpdateScheduler({
     })().finally(() => {
       running = null;
       schedule(nextCheckDelay({ failures, retryAt, now: now(), intervalMs }));
-      try { onSettled(); } catch { /* A reminder failing must not stop the schedule. */ }
     });
     return running;
   }
@@ -103,51 +99,9 @@ function createUpdateScheduler({
   };
 }
 
-/** The local calendar day, such as 2026-11-13. */
-function localDay(date = new Date()) {
-  const pad = (value) => String(value).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-}
-
-/**
- * Whether to show the once-a-day "update Raticode" reminder now. One reminder per calendar day,
- * the first time the user is at Raticode that day. Days away add nothing: the record holds the
- * last day shown, not a count, so coming back after a week shows one reminder for the newest version.
- */
-function reminderDecision({ available, latestVersion, record, today, userActive }) {
-  const last = record && typeof record === "object" ? record : {};
-  if (!available || !latestVersion || !userActive) return { show: false, record: last };
-  if (last.day === today) return { show: false, record: last };
-  return { show: true, record: { day: today, version: String(latestVersion) } };
-}
-
-function readReminderRecord(fs, file) {
-  try {
-    const value = JSON.parse(fs.readFileSync(file, "utf8"));
-    if (!value || typeof value !== "object") return {};
-    return {
-      day: /^\d{4}-\d{2}-\d{2}$/.test(String(value.day || "")) ? String(value.day) : "",
-      version: typeof value.version === "string" ? value.version.slice(0, 64) : "",
-    };
-  } catch {
-    return {};
-  }
-}
-
-function writeReminderRecord(fs, file, record) {
-  const temporary = `${file}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify({ day: record.day, version: record.version })}\n`, { mode: 0o600 });
-  fs.renameSync(temporary, file);
-}
-
 module.exports = {
-  ACTIVE_IDLE_SECONDS,
   CHECK_INTERVAL_MS,
   MAX_BACKOFF_MS,
   createUpdateScheduler,
-  localDay,
   nextCheckDelay,
-  readReminderRecord,
-  reminderDecision,
-  writeReminderRecord,
 };

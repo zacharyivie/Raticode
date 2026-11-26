@@ -20,8 +20,7 @@ REPO = "/work/Raticode/Raticode"
 
 def page(title: str, body: str) -> str:
     return (
-        f"<!doctype html><html><head><title>{title}</title></head>"
-        f"<body><p>{body}</p></body></html>"
+        f"<!doctype html><html><head><title>{title}</title></head><body><p>{body}</p></body></html>"
     )
 
 

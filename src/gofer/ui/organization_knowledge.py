@@ -35,10 +35,9 @@ from gofer.ui.organization_store import (
     ticket_prefix,
 )
 from gofer.utils.process import (
-    NO_REPOSITORY_PROGRAMS,
     build_subprocess_env,
     git_push_blocked_environment,
-    untrusted_repository_git_env,
+    run_repository_git,
 )
 
 KINDS = ("decision", "note", "report", "spec", "finding")
@@ -669,20 +668,11 @@ def _task_root(org: dict[str, Any], task: dict[str, Any]) -> str:
 
 
 def _git(root: str, *args: str) -> subprocess.CompletedProcess[str]:
-    command = ["git", *NO_REPOSITORY_PROGRAMS, "-C", root, *args]
     try:
-        env = untrusted_repository_git_env(root, build_subprocess_env())
+        return run_repository_git(root, *args, timeout=20)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        # Unreadable settings: report a failed git call rather than run it unchecked.
-        return subprocess.CompletedProcess(command, 128, "", str(exc))
-    return subprocess.run(
-        command,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
+        # Git couldn't run, or its settings couldn't be read: report a failed git call.
+        return subprocess.CompletedProcess(list(args), 128, "", str(exc))
 
 
 def _commit_files(root: str, sha: str) -> list[list[Any]]:

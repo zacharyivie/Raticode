@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from gofer.utils.instants import stored_instant
+
 PROVIDER = "claude_code"
 WINDOW = "seven_day"
 SETTING = "daily_allowance_percent"
@@ -47,14 +49,6 @@ WEEK_DAYS = 7.0
 # A credits period's length when neither its start nor its label says (Grok bills monthly).
 DEFAULT_PERIOD_DAYS = 30.0
 _PERIOD_WORDS = {"daily": 1.0, "weekly": WEEK_DAYS, "yearly": 365.0, "annual": 365.0}
-
-
-def _instant(value: Any) -> datetime | None:
-    try:
-        stamp = datetime.fromisoformat(str(value))
-    except (TypeError, ValueError):
-        return None
-    return stamp.astimezone(UTC) if stamp.tzinfo else None
 
 
 def local_day(clock: datetime, zone: ZoneInfo) -> str:
@@ -102,7 +96,10 @@ def period_days(reading: dict[str, Any]) -> float:
     From its start and reset when the provider reported both; else from the label's period
     word (a month is the calendar month before the reset); else DEFAULT_PERIOD_DAYS.
     """
-    start, end = _instant(reading.get("starts_at")), _instant(reading.get("resets_at"))
+    start, end = (
+        stored_instant(reading.get("starts_at"), naive_as_utc=False),
+        stored_instant(reading.get("resets_at"), naive_as_utc=False),
+    )
     if start and end and end > start:
         return max(1.0, (end - start) / timedelta(days=1))
     label = str(reading.get("label") or "").lower()
@@ -167,8 +164,8 @@ def allowance(account: str, reading: dict[str, Any] | None) -> str:
 
 def _rise(last: dict[str, Any], reading: dict[str, Any]) -> float:
     """How much the weekly percent went up from ``last`` to ``reading``."""
-    before = _instant(last.get("resets_at"))
-    after = _instant(reading.get("resets_at"))
+    before = stored_instant(last.get("resets_at"), naive_as_utc=False)
+    after = stored_instant(reading.get("resets_at"), naive_as_utc=False)
     percent = float(reading["percent"])
     if before and after and after - before > SAME_WINDOW:
         # The week reset in between: everything in the new week is new use.
@@ -192,21 +189,21 @@ def advance(
     if state.get("day") != day:
         state = {"day": day, "used": 0.0, "last": state.get("last")}
     last = dict(state["last"]) if isinstance(state.get("last"), dict) else None
-    observed = _instant((reading or {}).get("observed_at"))
-    previous = _instant((last or {}).get("observed_at"))
+    observed = stored_instant((reading or {}).get("observed_at"), naive_as_utc=False)
+    previous = stored_instant((last or {}).get("observed_at"), naive_as_utc=False)
     if reading is not None and observed and (previous is None or observed > previous):
         if last is not None and previous is not None and (busy or last.get("busy")):
             rise = _rise(last, reading)
             gap = observed - previous
             if rise and not busy and gap > LONG_GAP:
-                until = _instant(last.get("busy_until")) or previous
+                until = stored_instant(last.get("busy_until"), naive_as_utc=False) or previous
                 share = max(0.0, min(1.0, (until - previous) / gap))
                 rise *= share
             state["used"] = round(float(state.get("used") or 0.0) + rise, 3)
         last = {
             "percent": float(reading["percent"]),
             "resets_at": reading.get("resets_at") or "",
-            "observed_at": observed.isoformat(),
+            "observed_at": observed.astimezone(UTC).isoformat(),
             "busy": busy,
             "busy_until": clock.isoformat() if busy else "",
         }
@@ -227,7 +224,7 @@ def percent_text(value: float) -> str:
 
 
 def fresh(reading: dict[str, Any] | None, clock: datetime) -> bool:
-    observed = _instant((reading or {}).get("observed_at"))
+    observed = stored_instant((reading or {}).get("observed_at"), naive_as_utc=False)
     return observed is not None and clock - observed <= READING_FRESH
 
 
@@ -248,7 +245,7 @@ def limit(
         return None
     after = " Running work finishes normally."
     if not fresh(reading, clock):
-        seen = _instant((reading or {}).get("observed_at"))
+        seen = stored_instant((reading or {}).get("observed_at"), naive_as_utc=False)
         when = (
             f"the last one is from {seen.astimezone(zone).strftime('%H:%M')}"
             if seen

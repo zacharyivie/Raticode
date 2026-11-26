@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000203",
+  "id": "10000000-0000-4000-8000-000000000203",
+  "sequence": 203,
+  "type": "desktop.read",
+  "payload": {
+    "op": "rem.history",
+    "params": {
+      "before": "rem-msg-0042",
+      "through": "rem-msg-0007"
+    }
+  }
+}

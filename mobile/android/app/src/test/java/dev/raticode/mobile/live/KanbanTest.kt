@@ -82,8 +82,11 @@ class KanbanTest {
         assertTrue(real.organizations.single().employees.any { it.id == "lead" })
         val rem = real.tickets.first { it.title == "Rem todo" }
         assertTrue(rem.isRem); assertEquals(Kanban.REM, rem.assigneeId); assertEquals("high", rem.priority); assertEquals("", rem.organizationId)
+        assertEquals("The board shows it\nnpm test passes", rem.doneWhen)
+        assertEquals(listOf("The board shows it", "npm test passes"), rem.doneWhenLines)
+        assertEquals(emptyList<String>(), real.tickets.first { it.title == "Proposed idea" }.doneWhenLines)
         val org = real.tickets.first { it.title == "Org ticket" }
-        assertFalse(org.isRem); assertEquals("critical", org.priority); assertEquals("Eng", org.owner)
+        assertFalse(org.isRem); assertEquals("critical", org.priority); assertEquals("Eng", org.owner); assertEquals("Eng signs it off", org.doneWhen)
         assertTrue(org.key.startsWith("ENG") || org.key.isNotBlank())
         assertEquals(listOf("Proposed idea", "Second idea"), Kanban.proposed(real).map { it.title }.sorted())
         assertEquals("Why it helps", real.tickets.first { it.title == "Proposed idea" }.proposalReason)
@@ -299,6 +302,74 @@ class KanbanTest {
         assertTrue((Kanban.move(todo.copy(status = "done"), "todo") as OrganizationModel.Move.Allowed).reopen)
     }
 
+    @Test fun undoFollowsTheDesktopsCanUndoMove() {
+        val rem = ticket("/1")
+        // Rem's tickets come back from Backlog, To do, Done and Cancelled.
+        for (from in listOf("backlog", "todo", "done", "cancelled")) {
+            for (to in listOf("backlog", "todo", "done", "cancelled")) assertTrue("$from to $to", Kanban.canUndoMove(rem.copy(status = from), to))
+        }
+        // Never after starting work, for either name of In progress.
+        assertFalse(Kanban.canUndoMove(rem, "running"))
+        assertFalse(Kanban.canUndoMove(rem, "in_progress"))
+        // Never for a paused ticket, whose only move resumes it.
+        assertFalse(Kanban.canUndoMove(rem.copy(paused = "user"), "backlog"))
+        // Not back into In review or Blocked, which a review decides.
+        assertFalse(Kanban.canUndoMove(rem.copy(status = "in_review"), "todo"))
+        assertFalse(Kanban.canUndoMove(rem.copy(status = "blocked"), "backlog"))
+        assertFalse(Kanban.canUndoMove(rem.copy(status = "in_progress"), "todo"))
+        // An organization's tickets come back only from Backlog and To do.
+        val org = ticket("beta/3")
+        assertTrue(Kanban.canUndoMove(org.copy(status = "backlog"), "todo"))
+        assertTrue(Kanban.canUndoMove(org.copy(status = "todo"), "backlog"))
+        assertFalse(Kanban.canUndoMove(org.copy(status = "todo"), "running"))
+        assertFalse(Kanban.canUndoMove(org, "todo"))
+        for (from in listOf("in_progress", "in_review", "done", "cancelled")) assertFalse(from, Kanban.canUndoMove(org.copy(status = from), "todo"))
+        assertFalse(Kanban.canUndoMove(org.copy(status = "todo", paused = "user"), "backlog"))
+    }
+
+    @Test fun aMoveSaysWhatItDidInTheDesktopsWords() {
+        val rem = ticket("/1").copy(key = "REM-12")
+        assertEquals("REM-12 moved to Backlog.", Kanban.moveNotice(rem, "backlog"))
+        assertEquals("REM-12 moved to To do.", Kanban.moveNotice(rem, "todo"))
+        assertEquals("REM-12 moved to Done.", Kanban.moveNotice(rem, "done"))
+        assertEquals("REM-12 cancelled.", Kanban.moveNotice(rem, "cancelled"))
+        assertEquals("REM-12 started.", Kanban.moveNotice(rem, "running"))
+        assertEquals("REM-12 resumed.", Kanban.moveNotice(rem.copy(paused = "user"), "running"))
+        assertEquals("ACM-1 moved to In progress.", Kanban.moveNotice(ticket("acme/1").copy(status = "todo"), "running"))
+        assertEquals("The ticket moved to Backlog.", Kanban.moveNotice(rem.copy(key = ""), "backlog"))
+    }
+
+    @Test fun undoSendsTheTicketBackAtItsNewRevision() {
+        val before = ticket("/1").copy(key = "REM-12")
+        val move = KanbanMove(before, "backlog")
+        assertEquals("backlog", move.params().getString("column"))
+        // Waits for the board to show the ticket at a newer revision.
+        assertNull(Kanban.landed(move, board.tickets))
+        val moved = before.copy(status = "backlog", revision = before.revision + 1)
+        assertEquals(moved, Kanban.landed(move, listOf(ticket("acme/1"), moved)))
+        val back = Kanban.undo(move, moved)!!
+        assertTrue(back.back)
+        val params = back.params()
+        assertEquals("move", params.getString("action")); assertEquals("todo", params.getString("column"))
+        assertEquals(moved.revision, params.getLong("expected_revision")); assertEquals(before.id, params.getString("ticket_id"))
+        assertEquals("REM-12 moved back to To do.", Kanban.notice(back))
+        // An Undo has no Undo of its own, and starting work has none.
+        assertNull(Kanban.undo(back, moved.copy(status = "todo", revision = moved.revision + 1)))
+        assertNull(Kanban.undo(KanbanMove(before, "running"), moved.copy(status = "in_progress")))
+    }
+
+    @Test fun onlyRemsOpenTicketsCanBeCancelledFromTheirPage() {
+        val rem = ticket("/1")
+        assertTrue(Kanban.canCancel(rem))
+        assertTrue(Kanban.canCancel(rem.copy(status = "blocked")))
+        assertFalse(Kanban.canCancel(rem.copy(status = "done")))
+        assertFalse(Kanban.canCancel(rem.copy(status = "cancelled")))
+        assertFalse(Kanban.canCancel(rem.copy(running = true)))
+        assertFalse(Kanban.canCancel(rem.copy(paused = "user")))
+        assertFalse(Kanban.canCancel(ticket("/2")))
+        assertFalse(Kanban.canCancel(ticket("beta/3")))
+    }
+
     @Test fun blockedWorkHasItsOwnColumn() {
         assertEquals(listOf("backlog", "todo", "running", "review", "blocked", "done"), Kanban.COLUMNS)
         assertEquals("Blocked", Kanban.COLUMN_LABELS["blocked"])
@@ -402,6 +473,22 @@ class KanbanTest {
         val marked = (DesktopViews.parse(Kanban.BOARD, JSONObject("""{"tickets":[{"ticket_id":"7","scope":"rem","key":"REM-7","title":"Voice","status":"backlog","auto_approved":true,"revision":1}]}""")) as KanbanBoard).tickets.single()
         assertTrue(marked.autoApproved); assertFalse(marked.proposed)
         assertTrue(Kanban.onBoard(marked))
+    }
+
+    @Test fun aProposalFromAPairedDesktopNamesItAndStillWaits() {
+        val tickets = (DesktopViews.parse(Kanban.BOARD, JSONObject("""{"tickets":[
+            {"ticket_id":"7","scope":"rem","key":"REM-7","title":"Voice","status":"backlog","proposed":true,"proposed_on":"Desk B","revision":1},
+            {"ticket_id":"8","scope":"rem","key":"REM-8","title":"Local","status":"backlog","auto_approved":true,"revision":1}]}""")) as KanbanBoard).tickets
+        val remote = tickets.first { it.id == "7" }
+        assertEquals("Desk B", remote.proposedOn)
+        assertTrue(remote.proposed); assertFalse(remote.autoApproved)
+        assertTrue(Kanban.proposedOnNote(remote).contains("always waits for your approval"))
+        assertFalse(Kanban.proposedOnNote(remote.copy(proposed = false)).contains("waits"))
+        // A local pass, or an older desktop, names no other computer.
+        assertEquals("", tickets.first { it.id == "8" }.proposedOn)
+        val report = (DesktopViews.parse(Kanban.SELF_WORK, JSONObject("""{"report":{"tickets_added":[
+            {"ticket_id":"7","title":"Voice","scope":"rem","proposed":true,"computer_name":"Desk B"}]}}""")) as SelfWorkView).report!!
+        assertEquals("Desk B", report.ticketsAdded.single().computerName)
     }
 
     @Test fun aTicketThatViolatesDecisionsIsMarkedWithItsIdsAndReason() {
@@ -733,5 +820,56 @@ class KanbanTest {
         assertEquals(emptyList<TicketWait>(), old.tickets.first { it.id == "1" }.waitsFor)
         assertEquals(listOf("REM-1", ""), old.tickets.first { it.id == "2" }.waitsFor.map { it.key })
         assertEquals("Waits for: Old and 1 more", Kanban.waitsLine(old.tickets.first { it.id == "2" }))
+    }
+
+    @Test fun readsSelfWorkObjectivesAndTheObjectiveEachTicketServes() {
+        // An older desktop sends no objectives block, and the page shows no card.
+        assertNull(selfWork.objectives)
+        // The view as rem_self_work.py sends it: rem_objectives.view() with the prompt list beside it. The done one comes
+        // first here so the phone's open-first order shows.
+        val json = JSONObject(selfJson.toString()).put("objectives", JSONObject("""{"revision":6,"updated_at":"2026-11-24T10:00:00+00:00","offset":0,
+            "total":2,"open":1,"done":1,"stale":0,
+            "items":[
+              {"id":"a1b2c3d4e5f6","text":"Bolster existing logic","done_when":"Every board read has a test","done":true,"done_by":"rem",
+               "done_evidence":"REM-40 and REM-41 landed with tests.","created_by":"rem","source":"self_work","created_at":"2026-11-24T08:00:00+00:00"},
+              {"id":"0f9e8d7c6b5a","text":"Improve UX quality","done_when":"The phone shows objectives","done":false,"created_by":"user",
+               "source":"user","created_at":"2026-11-24T09:00:00+00:00"}],
+            "prompt":[{"id":"0f9e8d7c6b5a","text":"Improve UX quality","done":false,"done_when":"The phone shows objectives"}]}"""))
+        val objectives = (DesktopViews.parse(Kanban.SELF_WORK, json) as SelfWorkView).objectives!!
+        assertEquals(listOf("Improve UX quality", "Bolster existing logic"), objectives.items.map { it.text })
+        val (open, done) = objectives.items
+        assertFalse(open.done); assertEquals("The phone shows objectives", open.doneWhen)
+        assertTrue(done.done); assertEquals("rem", done.doneBy); assertEquals("REM-40 and REM-41 landed with tests.", done.doneEvidence); assertFalse(done.stale)
+        assertEquals("1/2", Kanban.objectivesCount(objectives))
+        assertEquals(2, objectives.current.size); assertTrue(objectives.staleItems.isEmpty())
+        assertEquals("Done when: The phone shows objectives", Kanban.objectiveDetails(open))
+        assertEquals("Done when: Every board read has a test\nRem checked it off: REM-40 and REM-41 landed with tests.\nWritten by Rem.", Kanban.objectiveDetails(done))
+        assertEquals("Open-ended: no finish line, so Rem never checks it off.\nYou checked it off.\nStale: done in an earlier self-work session, so it doesn't count toward this one.",
+            Kanban.objectiveDetails(open.copy(doneWhen = "", done = true, doneBy = "user", stale = true, createdBy = "user")))
+        // Nothing current: the desktop's empty text, which knows whether earlier sessions finished some.
+        val none = SelfWorkObjectives(emptyList(), 0, 0, 0, 0)
+        assertEquals("", Kanban.objectivesCount(none))
+        assertEquals("None yet. When self-work starts with none, Rem writes its own, each with a finish line.", Kanban.objectivesEmpty(none))
+        val onlyStale = SelfWorkObjectives(listOf(done.copy(stale = true)), 0, 0, 1, 1)
+        assertEquals("None for this session yet.", Kanban.objectivesEmpty(onlyStale))
+        assertTrue(onlyStale.current.isEmpty()); assertEquals(1, onlyStale.staleItems.size)
+
+        // The board: one ticket advances an objective, one self-work leaves while objectives are open.
+        val tickets = (DesktopViews.parse(Kanban.BOARD, JSONObject("""{"tickets":[
+            {"ticket_id":"1","scope":"rem","key":"REM-1","title":"Objectives on the phone","status":"todo","revision":1,
+             "objective":{"id":"0f9e8d7c6b5a","text":"Improve UX quality"},"objective_left":""},
+            {"ticket_id":"2","scope":"rem","key":"REM-2","title":"Rename a setting","status":"backlog","revision":1,"objective":null,
+             "objective_left":"It doesn't advance an open self-work objective, so self-work leaves it where it is. It renames a label."},
+            {"ticket_id":"3","scope":"rem","key":"REM-3","title":"Shipped","status":"done","revision":1,"objective":{"id":"0f9e8d7c6b5a","text":"Improve UX quality"}},
+            {"ticket_id":"4","scope":"rem","key":"REM-4","title":"Older desktop","status":"todo","revision":1}]}""")) as KanbanBoard).tickets
+        val serves = Kanban.objectiveLine(tickets[0])!!
+        assertFalse(serves.off); assertEquals("Improve UX quality", serves.short)
+        assertEquals("Advances the self-work objective “Improve UX quality”.", Kanban.objectivePageText(serves))
+        val left = Kanban.objectiveLine(tickets[1])!!
+        assertTrue(left.off); assertEquals("Not on an objective: self-work leaves it", left.short)
+        assertEquals("It doesn't advance an open self-work objective, so self-work leaves it where it is. It renames a label. Move it to In progress to start it anyway.",
+            Kanban.objectivePageText(left))
+        // A done ticket and one from an older desktop say nothing about objectives.
+        assertNull(Kanban.objectiveLine(tickets[2])); assertNull(Kanban.objectiveLine(tickets[3]))
     }
 }

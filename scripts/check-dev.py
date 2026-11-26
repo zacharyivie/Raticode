@@ -11,11 +11,18 @@ PASS or FAIL line for each, then the output of any check that failed:
 - the repository-wide test files in ``REPO_WIDE_TESTS``
 - ``scripts/check-website-docs.py``
 - ``scripts/check-commit-messages.py``: no commit message credits an AI tool
+- ``scripts/check-dead-code.py``: no function, class, constant, export, frontend module,
+  dependency or CSS class without users
+- ``mobile/android/scripts/check-contract.py``: the phone protocol's schemas and fixtures
+- ``scripts/check-protocol-compat.py``: messages from the last release still fit the
+  protocol. A clone without v* tags prints SKIP and the reason instead.
 
 It doesn't replace the full suite, which is still the rule for changes to shared
 workflow execution, scheduling or CLI behavior. ``tests/unit/test_check_dev.py``
-fails when a test file that reads ``git ls-files`` or ``docs/cli-parity.json`` is
-missing from ``REPO_WIDE_TESTS``, so the list lives here and nowhere else.
+fails when a test file that reads ``git ls-files`` or ``docs/cli-parity.json``, or a
+Python command or test file in ``.github/workflows/contract-check.yml``, is missing
+here, so the lists live here and nowhere else. The phone's Gradle interop tests in
+that workflow stay CI-only.
 
 The tools run with the first Python found among ``--python``, this checkout's
 ``.venv``, the main checkout's ``.venv`` (when run from a git worktree) and the
@@ -51,12 +58,18 @@ REPO_WIDE_TESTS = (
     "tests/unit/test_website_address.py",
     "tests/unit/test_website_mobile_download.py",
     "tests/unit/test_device_protocol.py",
+    "tests/unit/test_mobile_contract.py",
+    "tests/unit/test_protocol_released_compat.py",
+    "tests/unit/test_device_desktop_control.py",
+    "tests/unit/test_check_dead_code.py",
     "tests/unit/test_cli_client.py::test_no_command_accepts_a_credential_on_the_command_line",
 )
 
 PYTEST_WORKERS = "4"
 CHECK_TIMEOUT_SECONDS = 15 * 60
 FAILED_OUTPUT_LINES = 80
+# A passing check whose output has a line starting with this didn't check anything.
+SKIPPED = "Skipped: "
 
 
 @dataclass(frozen=True)
@@ -71,6 +84,13 @@ class Result:
     passed: bool
     seconds: float
     output: str
+
+    @property
+    def skip_reason(self) -> str | None:
+        if not self.passed:
+            return None
+        lines = self.output.splitlines()
+        return next((line for line in lines if line.startswith(SKIPPED)), None)
 
 
 def _venv_python(folder: Path) -> Path | None:
@@ -141,6 +161,12 @@ def build_checks(python: str, base: str, *, parallel_tests: bool) -> list[Check]
             "commit messages",
             [python, "scripts/check-commit-messages.py", "--base", base],
         ),
+        Check("dead code", [python, "scripts/check-dead-code.py"]),
+        Check("phone contract", [python, "mobile/android/scripts/check-contract.py"]),
+        Check(
+            "protocol compat with last release",
+            [python, "scripts/check-protocol-compat.py", "--skip-without-tags"],
+        ),
     ]
 
 
@@ -181,7 +207,7 @@ def run_check(check: Check, root: Path, env: dict[str, str]) -> Result:
 
 
 def summary_line(result: Result) -> str:
-    status = "PASS" if result.passed else "FAIL"
+    status = "SKIP" if result.skip_reason else "PASS" if result.passed else "FAIL"
     return f"{status}  {result.check.name:<34} {result.seconds:6.1f} s"
 
 
@@ -198,6 +224,9 @@ def run_all(
             result = future.result()
             results.append(result)
             write(summary_line(result))
+    for result in results:
+        if result.skip_reason:
+            write(f"{result.check.name}: {result.skip_reason}")
     failed = [result for result in results if not result.passed]
     for result in failed:
         lines = result.output.rstrip().splitlines()

@@ -16,10 +16,6 @@ object LiveJournal {
     const val MAX_JOURNAL_BYTES = 32 * 1024 * 1024
     private val terminal = setOf("Rem", "Completed", "Desktop rejected request", "completed", "failed", "cancelled", "rejected")
 
-    fun requireMessageRoom(messages: JSONArray) {
-        if (messages.length() >= MAX_MESSAGES) throw LiveStorageLimit("Live history is full. Clear completed history in a thread to make room. Pending messages will be kept.")
-    }
-
     fun prepare(state: JSONObject, type: String, thread: String?, payload: JSONObject, requestId: String? = null): Pair<JSONObject, JSONObject> {
         val next = JSONObject(state.toString())
         val outbox = next.optJSONArray("outbox") ?: JSONArray()
@@ -71,6 +67,30 @@ object LiveJournal {
     val SNAPSHOT_TYPES = setOf("sync.snapshot", "thread.history.snapshot", "catalog.snapshot", "thread.search.snapshot",
         "fleet.snapshot", "swarm.snapshot", "approval.snapshot", "desktop.result")
     const val RECENT_SNAPSHOTS = 512
+
+    /** What [receive] decided for one incoming event. */
+    enum class Receipt { APPLY, SKIPPED, DUPLICATE }
+
+    /**
+     * Records an incoming event whose envelope already passed its checks as received in [next]: the recent window for
+     * snapshot types, the received map otherwise. APPLY: the caller applies the payload and commits [next]. SKIPPED:
+     * the payload failed IncomingValidation, so [next] holds the receipt and a cursor moved past it like a handled
+     * event's and nothing from the payload; the caller commits [next] and keeps the connection. DUPLICATE: an event
+     * already recorded, nothing changed. Conflicting identities and out-of-order sequences still throw.
+     */
+    fun receive(next: JSONObject, event: JSONObject, id: String, sequence: Long, type: String): Receipt {
+        val readable = try { IncomingValidation.validate(event); true } catch (_: Exception) { false }
+        val received = next.optJSONObject("received") ?: JSONObject().also { next.put("received", it) }
+        val hash = dev.raticode.mobile.data.FileMetadata.digest(event.toString().toByteArray())
+        if (type in SNAPSHOT_TYPES) { if (!recordRecent(next, id, hash)) return Receipt.DUPLICATE }
+        else if (!recordReceived(received, id, hash)) return Receipt.DUPLICATE
+        require(type == "sync.snapshot" || sequence > next.optLong("cursor", -1))
+        if (readable) return Receipt.APPLY
+        // A handled sync.snapshot moves the cursor to its payload's through_sequence, which an unreadable one can't
+        // be trusted for; the events it covers arrived before it and moved the cursor themselves.
+        if (type != "sync.snapshot") next.put("cursor", sequence)
+        return Receipt.SKIPPED
+    }
 
     fun recordRecent(state: JSONObject, id: String, hash: String): Boolean {
         val recent = state.optJSONArray("received_recent") ?: JSONArray()

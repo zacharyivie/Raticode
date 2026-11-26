@@ -270,3 +270,66 @@ def test_remove_co_authors_preference_defaults_off_and_requires_boolean() -> Non
     preferences.save_commit_message_preference({"stripCoAuthors": False})
     assert preferences.strip_co_authors_enabled() is False
     assert preferences.commit_message_preference()["autoCommit"] is True
+
+
+class _CachedCatalog:
+    def __init__(self, capability: capabilities.ProviderCapability | None) -> None:
+        self.capability = capability
+
+    def cached(self, _provider: str) -> capabilities.ProviderCapability | None:
+        return self.capability
+
+
+def test_rem_task_and_chat_use_the_app_default_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    from gofer.ui.rem_home_models import chat_config, worker_config
+
+    catalog = _CachedCatalog(None)
+    monkeypatch.setattr(capabilities, "provider_capability_service", lambda: catalog)
+    preferences.save_provider_preference(
+        "claude_code", {"defaultModel": "m2", "defaultEffort": "high"}
+    )
+    rem = {"provider": "claude_code", "model": "cli-default", "effort": "", "chat_provider": ""}
+
+    # No catalog read yet: the saved model applies, the effort can't be checked.
+    task = worker_config(rem, {})
+    assert (task["model"], task["effort"]) == ("m2", "")
+    assert chat_config(rem)["model"] == "m2"
+    # A task on another app, and a chat with its own app, start from that app's default.
+    other = {**rem, "provider": "codex", "model": "codex-model"}
+    assert worker_config(other, {"provider": "claude_code"})["model"] == "m2"
+    assert chat_config({**other, "chat_provider": "claude_code"})["model"] == "m2"
+    # What Settings > Rem, the task or the chat names still wins.
+    assert worker_config({**rem, "model": "m1"}, {})["model"] == "m1"
+    assert chat_config({**other, "chat_provider": "claude_code", "chat_model": "m3"})["model"] == (
+        "m3"
+    )
+
+    catalog.capability = capabilities.ProviderCapability(
+        id="claude_code",
+        display_name="Claude Code",
+        available=True,
+        discovery_status="ready",
+        default_model="m1",
+        models=[
+            capabilities.ModelCapability(
+                id="m1",
+                display_name="M1",
+                efforts=[capabilities.EffortCapability(id="low", display_name="Low")],
+            ),
+            capabilities.ModelCapability(
+                id="m2",
+                display_name="M2",
+                efforts=[capabilities.EffortCapability(id="high", display_name="High")],
+            ),
+        ],
+    )
+    # The effort is kept only when the model that runs offers it.
+    assert (worker_config(rem, {})["model"], worker_config(rem, {})["effort"]) == ("m2", "high")
+    assert worker_config({**rem, "model": "m1"}, {})["effort"] == ""
+    assert worker_config({**rem, "effort": "max"}, {})["effort"] == "max"
+
+    # A blocked default is skipped, as Settings > Providers shows it.
+    preferences.save_provider_preference("claude_code", {"deniedModels": ["m2"]})
+    assert preferences.app_default_selection("claude_code", "cli-default", "") == (None, None)
+    assert worker_config(rem, {})["model"] == "cli-default"
+    assert chat_config(rem)["model"] == "cli-default"

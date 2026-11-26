@@ -13,7 +13,6 @@ import {
 } from "./settings.js";
 import {
   ANYWHERE_COMMAND_ID,
-  DEFAULT_ANYWHERE_BINDING,
   DEFAULT_VOICE_BINDING,
   VOICE_COMMAND_ID,
   announceVoicePhase,
@@ -204,7 +203,7 @@ function fakeRemComposer(name, options = {}) {
 
 test("dictating from any app is its own shortcut, off until turned on, and clashes with in-app keys", () => {
   const command = KEYBINDING_COMMANDS.find((item) => item.id === ANYWHERE_COMMAND_ID);
-  assert.equal(command.defaultBinding, DEFAULT_ANYWHERE_BINDING);
+  assert.equal(command.defaultBinding, "Ctrl+Alt+Space");
   assert.equal(command.scope, "system");
   assert.equal(DEFAULT_APP_SETTINGS.devices.dictateAnywhere, false);
   assert.equal(normalizeAppSettings({}).devices.dictateAnywhere, false);
@@ -220,7 +219,7 @@ test("dictating from any app is its own shortcut, off until turned on, and clash
   const graph = normalizeAppSettings({ keybindings: { [ANYWHERE_COMMAND_ID]: "KeyF" } });
   assert.deepEqual(keybindingConflictIds(graph, ANYWHERE_COMMAND_ID, undefined, "Linux x86_64"), ["graph.fit"]);
   // It is never an in-app shortcut: pressing it inside Raticode is left to the system.
-  assert.equal(voiceShortcutLabel(DEFAULT_ANYWHERE_BINDING, "Linux x86_64"), "Ctrl+Alt+Space");
+  assert.equal(voiceShortcutLabel(command.defaultBinding, "Linux x86_64"), "Ctrl+Alt+Space");
 });
 
 test("dictation from another app goes only to Rem's box: the one dictating, else in use, else shown, else loaded", async () => {

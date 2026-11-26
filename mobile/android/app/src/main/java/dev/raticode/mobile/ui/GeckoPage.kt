@@ -321,6 +321,7 @@ private fun ListingRow(gecko: GeckoBrowser, item: GeckoRules.Listing) {
 @Composable
 private fun InstalledRow(gecko: GeckoBrowser, item: GeckoBrowser.Extension, onDismiss: () -> Unit) {
     var message by remember(item.id) { mutableStateOf<String?>(null) }
+    var removing by rememberSaveable(item.id) { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).testTag("geckoExtension-${item.id}")) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -334,12 +335,22 @@ private fun InstalledRow(gecko: GeckoBrowser, item: GeckoBrowser.Extension, onDi
             if (canOpen) TextButton(onClick = { message = gecko.openExtension(item); if (message == null) onDismiss() }, Modifier.testTag("geckoOpen-${item.id}")) { Text("Open") }
             // Settings gets its own button only when Open shows the popup instead.
             if (item.enabled && item.action != null) item.options?.let { url -> TextButton(onClick = { gecko.openOptions(url); onDismiss() }) { Text("Settings") } }
-            TextButton(onClick = { gecko.uninstall(item) }) { Text("Remove") }
+            TextButton(onClick = { removing = true }, Modifier.testTag("geckoRemove-${item.id}")) { Text("Remove") }
             if (item.enabled && !canOpen) Text("Nothing to open", Modifier.padding(start = 4.dp).testTag("geckoNothingToOpen-${item.id}"),
                 style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         message?.let { Text(it, Modifier.padding(horizontal = 12.dp).testTag("geckoOpenMessage-${item.id}"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
     }
+    if (removing) ConfirmRemoval(GeckoRules.removeExtensionTitle(item.name), GeckoRules.REMOVE_EXTENSION_TEXT, "Remove extension", "geckoRemoveExtension",
+        onConfirm = { removing = false; gecko.uninstall(item) }, onKeep = { removing = false })
+}
+
+/** Asks before something is removed for good. Only [confirm] removes it; Keep, Back or a tap outside closes the question. */
+@Composable
+private fun ConfirmRemoval(title: String, text: String, confirm: String, tag: String, onConfirm: () -> Unit, onKeep: () -> Unit) {
+    AlertDialog(onDismissRequest = onKeep, title = { Text(title) }, text = { Text(text) }, modifier = Modifier.testTag(tag),
+        confirmButton = { TextButton(onClick = onConfirm, modifier = Modifier.testTag("${tag}Confirm")) { Text(confirm, color = MaterialTheme.colorScheme.error) } },
+        dismissButton = { TextButton(onClick = onKeep, modifier = Modifier.testTag("${tag}Keep")) { Text("Keep") } })
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -358,6 +369,7 @@ private fun PopupSheet(gecko: GeckoBrowser, popup: GeckoBrowser.Popup) {
 @Composable
 private fun ProfilesSheet(gecko: GeckoBrowser, onDismiss: () -> Unit) {
     var name by remember { mutableStateOf("") }
+    var deleting by rememberSaveable { mutableStateOf<String?>(null) }
     ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.testTag("geckoProfilesSheet")) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 16.dp)) {
             Text("Profiles", Modifier.padding(horizontal = 16.dp).semantics { heading() }, style = MaterialTheme.typography.titleMedium)
@@ -367,7 +379,7 @@ private fun ProfilesSheet(gecko: GeckoBrowser, onDismiss: () -> Unit) {
                 Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).combinedClickableRow { gecko.switchProfile(profile.id); onDismiss() }.padding(start = 8.dp).testTag("geckoProfile-${profile.name}"), verticalAlignment = Alignment.CenterVertically) {
                     RadioButton(profile.id == gecko.saved.currentProfile, { gecko.switchProfile(profile.id); onDismiss() })
                     Text(profile.name, Modifier.weight(1f))
-                    if (profile.id != GeckoRules.DEFAULT_PROFILE) TextButton(onClick = { gecko.deleteProfile(profile.id) }) { Text("Delete") }
+                    if (profile.id != GeckoRules.DEFAULT_PROFILE) TextButton(onClick = { deleting = profile.id }, Modifier.testTag("geckoProfileDelete-${profile.name}")) { Text("Delete") }
                 }
             }
             Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -375,6 +387,11 @@ private fun ProfilesSheet(gecko: GeckoBrowser, onDismiss: () -> Unit) {
                 TextButton(onClick = { if (gecko.addProfile(name)) onDismiss() else gecko.notice = "Name it, or delete a profile first." }, enabled = name.isNotBlank(), modifier = Modifier.testTag("geckoProfileAdd")) { Text("Add") }
             }
         }
+    }
+    // A profile deleted some other way while the question is open just closes it.
+    gecko.saved.profiles.firstOrNull { it.id == deleting && it.id != GeckoRules.DEFAULT_PROFILE }?.let { profile ->
+        ConfirmRemoval(GeckoRules.deleteProfileTitle(profile.name), GeckoRules.DELETE_PROFILE_TEXT, "Delete profile", "geckoDeleteProfile",
+            onConfirm = { deleting = null; gecko.deleteProfile(profile.id) }, onKeep = { deleting = null })
     }
 }
 
@@ -401,7 +418,6 @@ private fun GeckoSettingsSheet(gecko: GeckoBrowser, chromium: BrowserRuntime, on
             BrowserSectionTitle("Default browser")
             Column(Modifier.padding(horizontal = 16.dp)) {
                 EngineChoice(chromium)
-                EdgeEngineChoice(chromium)
             }
             Text("${BrowserTabs.GECKO_NAME} has its own sign-ins, separate from ${BrowserTabs.CHROMIUM_NAME}'s. Android keeps the Firefox app's data private to Firefox, so its passwords and account can't be read from here.",
                 Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

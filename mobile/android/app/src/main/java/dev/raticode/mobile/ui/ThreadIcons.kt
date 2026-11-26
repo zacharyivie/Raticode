@@ -118,6 +118,8 @@ internal object ThreadIcons {
     val Info = lucide("Info", RING, "M12 16v-4", "M12 8h.01")
     val User = lucide("User", "M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2", "M16 7a4 4 0 1 1 -8 0a4 4 0 1 1 8 0")
     val Flag = lucide("Flag", "M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z", "M4 22v-7")
+    /** A self-work objective, as on the desktop. */
+    val Target = lucide("Target", RING, "M12 6a6 6 0 1 0 0 12a6 6 0 1 0 0-12", "M12 10a2 2 0 1 0 0 4a2 2 0 1 0 0-4")
     val Lightbulb = lucide("Lightbulb", "M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5", "M9 18h6", "M10 22h4")
     val Hourglass = lucide("Hourglass", "M5 22h14", "M5 2h14", "M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22",
         "M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2")

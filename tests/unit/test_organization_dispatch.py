@@ -10,12 +10,14 @@ from typing import Any
 import pytest
 
 from gofer.ui.organizations import OrganizationManager
+from tests.helpers.organizations import act, as_worker
 
 
 def start(tmp_path: Path, stream: Any) -> OrganizationManager:
     return OrganizationManager(tmp_path / "data", stream=stream, start_runtime=False)
 
 
+# Not the shared company: adds a milestone and an epic that the dispatch tests place work in.
 def company(manager: OrganizationManager, root: Path, **config: Any) -> Any:
     return manager.call(
         str(root),
@@ -37,30 +39,6 @@ def company(manager: OrganizationManager, root: Path, **config: Any) -> Any:
                 }
             },
         },
-    )
-
-
-def act(
-    manager: OrganizationManager,
-    org: dict[str, Any],
-    action: str,
-    actor: str = "user",
-    **params: Any,
-) -> Any:
-    return manager.call(
-        org["projectRoot"], actor, {"organizationId": org["id"], "action": action, "params": params}
-    )
-
-
-def as_worker(manager: OrganizationManager, org: dict[str, Any], action: str, **params: Any) -> Any:
-    state = manager.store.get("", org["id"])
-    return manager.call(
-        org["projectRoot"],
-        "employee:mira",
-        {"organizationId": org["id"], "action": action, "params": params},
-        employee_id="mira",
-        bound_org=org["id"],
-        generation=state["runtime"]["generation"],
     )
 
 

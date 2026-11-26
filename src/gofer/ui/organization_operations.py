@@ -5,15 +5,16 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from apscheduler.triggers.cron import CronTrigger
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
+from gofer.rattish.triggers import cron_with_day_names, parse_cron
 from gofer.ui.organization_hours import hours_state
 from gofer.ui.organization_schedule import schedule_state, template
 from gofer.ui.organization_store import (
@@ -27,6 +28,8 @@ from gofer.ui.organization_store import (
 )
 from gofer.utils.atomic_output import open_binary_input
 from gofer.utils.instants import aware_instant
+
+logger = logging.getLogger(__name__)
 
 
 class Routine(BaseModel):
@@ -46,10 +49,14 @@ class Routine(BaseModel):
     revision: int = 1
 
     @model_validator(mode="after")
-    def validate_schedule(self) -> Routine:
+    def validate_schedule(self, info: ValidationInfo) -> Routine:
         ZoneInfo(self.timezone)
         if self.cron:
-            CronTrigger.from_crontab(self.cron, timezone=self.timezone)
+            # Crontab weekdays (Sunday = 0), stored as day names like Rem tasks. Cron text
+            # the routine already had keeps running even if new saves can't use it.
+            saved = self.cron == (info.context or {}).get("saved_cron")
+            parse_cron(self.cron, self.timezone, saved=saved)
+            self.cron = cron_with_day_names(self.cron)
         if self.cron and self.intervalSeconds:
             raise ValueError("Choose cron or interval")
         if self.intervalSeconds and self.intervalSeconds < 60:
@@ -66,9 +73,15 @@ MAX_QUEUED_OCCURRENCES = 3
 
 def next_occurrence(routine: dict[str, Any], at: datetime) -> str | None:
     if routine.get("cron"):
-        result = CronTrigger.from_crontab(
-            routine["cron"], timezone=routine["timezone"]
-        ).get_next_fire_time(None, at + timedelta(seconds=1))
+        try:
+            schedule = parse_cron(routine["cron"], routine["timezone"], saved=True)
+        except ValueError as exc:
+            # One routine whose saved schedule can't be read stops; the others still run.
+            logger.warning(
+                "Routine %s has a schedule that can't be read: %s", routine.get("id"), exc
+            )
+            return None
+        result = schedule.get_next_fire_time(None, at + timedelta(seconds=1))
         return result.astimezone(UTC).isoformat() if result else None
     if routine.get("intervalSeconds"):
         return (at + timedelta(seconds=routine["intervalSeconds"])).isoformat()
@@ -882,7 +895,15 @@ def operation(
         )
     prepared: dict[str, Any] = {}
     if action == "routine_save":
-        routine = Routine.model_validate(params.get("routine", {})).model_dump()
+        draft = params.get("routine", {})
+        previous = (
+            org["runtime"]
+            .get("routines", {})
+            .get(draft.get("id") if isinstance(draft, dict) else None, {})
+        )
+        routine = Routine.model_validate(
+            draft, context={"saved_cron": previous.get("cron")}
+        ).model_dump()
         refused = set(routine["task"]) - TASK_EDIT_FIELDS - {"id", "comments", "turns"}
         if refused:
             raise ValueError("Routine tasks can't set these fields: " + ", ".join(sorted(refused)))

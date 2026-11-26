@@ -2,14 +2,15 @@
 // landing components and #anchors, which VitePress's dead-link check does not cover.
 // It also checks what search engines read: the sitemap, robots.txt, each page's title,
 // description, canonical address and link preview tags, the 404 page and the home page's
-// structured data. It also checks /.well-known/security.txt.
+// structured data. It also checks /.well-known/security.txt and where the support banner sits.
 // Run after `npm run build`: `npm run check:links`. External links are listed, not fetched.
 import { execFileSync } from 'node:child_process'
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
 import { join, relative, posix } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { securityTxtLifetimeDays, securityTxtPath, siteLocation, supportMailto } from '../data/site.ts'
+import { securityTxtLifetimeDays, securityTxtPath, siteLocation, supportMailto, supportProjectUrl } from '../data/site.ts'
 import { desktopRelease } from '../data/releases.ts'
+import { supportBannerProblems } from './support-banner.mjs'
 
 const dist = fileURLToPath(new URL('../.vitepress/dist/', import.meta.url))
 // Use the same WEBSITE_URL and WEBSITE_BASE as the build.
@@ -66,6 +67,8 @@ for (const file of htmlFiles(dist)) {
     // Every email link uses the support address in data/site.ts, so changing it there and
     // missing a page fails here.
     if (link.startsWith('mailto:') && link !== supportMailto) problems.push(`${page}: ${link} is not ${supportMailto}`)
+    // Donations go to one page, the address in data/site.ts.
+    if (/^https?:\/\/(www\.)?buymeacoffee\.com/i.test(link) && link !== supportProjectUrl) problems.push(`${page}: ${link} is not ${supportProjectUrl}`)
     if (!link || /^(mailto:|tel:|javascript:|data:)/.test(link)) continue
     // Absolute links to this site (canonical, og:url, og:image) must resolve like internal ones.
     if (link.startsWith(siteUrl)) { checkSitePath(page, link.slice(siteOrigin.length), link); continue }
@@ -170,6 +173,31 @@ for (const name of ['index.html', 'docs/support.html', 'docs/privacy.html', 'doc
   if (!existsSync(path) || !readFileSync(path, 'utf8').includes(`href="${supportMailto}"`)) {
     problems.push(`${name}: no ${supportMailto} link`)
   }
+}
+
+// Every page shows the support banner once, linking only to the support page in
+// data/site.ts: the home page at the bottom, docs pages under "On this page"
+// (support-banner.mjs).
+for (const file of pages) {
+  problems.push(...supportBannerProblems(relative(dist, file).split('\\').join('/'), readFileSync(file, 'utf8'), supportProjectUrl))
+}
+// A docs page also ends with a compact banner for narrow screens. The site's CSS must hide it
+// wherever the aside, and its banner, is on screen, or wide screens show two.
+const assets = join(dist, 'assets')
+const builtCss = (existsSync(assets) ? readdirSync(assets) : []).filter((file) => file.endsWith('.css'))
+  .map((file) => readFileSync(join(assets, file), 'utf8')).join('\n')
+if (!/@media\s*\(min-width:\s*1280px\)\s*\{[^{}]*\.VPDoc\.has-aside \.support-banner-end\s*\{\s*display:\s*none/.test(builtCss)) {
+  problems.push('docs pages: no CSS hides .support-banner-end from 1280px wide, so wide screens would show the banner twice')
+}
+// The 404 page is drawn in the browser, so check its template: one compact banner, after
+// the heading and the list of links.
+const notFoundSource = readFileSync(fileURLToPath(new URL('../.vitepress/theme/components/NotFoundPage.vue', import.meta.url)), 'utf8')
+const notFoundTemplate = notFoundSource.slice(notFoundSource.indexOf('<template>'))
+const notFoundBanners = notFoundTemplate.match(/<SupportBanner\b[^>]*>/g) ?? []
+if (notFoundBanners.length !== 1 || !/\bvariant="compact"/.test(notFoundBanners[0])) {
+  problems.push(`404 page: shows the support banner ${notFoundBanners.length} times, expected one compact banner`)
+} else if (notFoundTemplate.indexOf(notFoundBanners[0]) < notFoundTemplate.indexOf('</ul>') || notFoundTemplate.indexOf('</ul>') < notFoundTemplate.indexOf('</h1>')) {
+  problems.push('404 page: the support banner comes before its heading and links; it belongs below them')
 }
 
 // The home page describes the site and the app as schema.org data.

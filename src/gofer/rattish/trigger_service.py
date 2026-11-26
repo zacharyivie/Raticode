@@ -52,6 +52,14 @@ workflow is going. After ``MAX_WAITS`` waits the entry fails with the last error
 waiting run counts as live for the overlap policy. Each trigger can turn this off (Wait
 for a usage limit to reset), and then such a run fails as before.
 
+The resume reuses what the waiting run's record and saved values file hold, and on a
+registered workflow those sit in the project, where anything working there could edit
+them during the wait. So the wait keeps both files' SHA-256 (``HeldRunFiles``), and the
+resume reads each file once, compares, and parses those same bytes. A changed, missing
+or unreadable file, or a wait saved before the hashes were kept, fails the entry with
+``RECORD_CHANGED_MESSAGE`` instead of starting. Resume from the Runs list is the user's
+own start and doesn't check.
+
 Every run goes through ``run_rattish_file``, the same path as ``Raticode rattish run``;
 a resumed one through ``resume_rattish_run``.
 """
@@ -60,6 +68,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import hashlib
 import hmac
 import json
 import os
@@ -94,6 +103,11 @@ from gofer.rattish.run_service import (
     resume_rattish_run,
     resume_refusal,
     run_rattish_file,
+)
+from gofer.rattish.run_values import (
+    SavedValuesUnavailable,
+    parse_saved_values,
+    saved_values_path,
 )
 from gofer.rattish.trigger_approval import (
     APPROVAL_SKIP_MESSAGE,
@@ -134,6 +148,10 @@ else:
 
 log = get_logger(__name__)
 
+RECORD_CHANGED_MESSAGE = (
+    "The run's saved record changed while it waited, so Raticode didn't resume it. Start it again."
+)
+
 # How late a scheduled time may be noticed and still count as on time. Anything
 # later means the computer slept or nothing was running.
 LATE_GRACE_SECONDS = 60
@@ -157,6 +175,51 @@ _DUMMY_TOKEN_HASH = hash_token("no such trigger")
 
 
 @dataclass(frozen=True, slots=True)
+class HeldRunFiles:
+    """A waiting run's record and saved values file, each read once: bytes, or None if absent."""
+
+    record: bytes | None
+    values: bytes | None
+
+    @classmethod
+    def read(cls, record_path: Path) -> HeldRunFiles:
+        """Both files as they are now. Raises OSError for one that is there but unreadable."""
+        return cls(_read_if_there(record_path), _read_if_there(saved_values_path(record_path)))
+
+    def hashes(self) -> tuple[str, str]:
+        """Each file's SHA-256, or "" for a file that wasn't there."""
+        return _sha256(self.record), _sha256(self.values)
+
+
+def _read_if_there(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _sha256(data: bytes | None) -> str:
+    return "" if data is None else hashlib.sha256(data).hexdigest()
+
+
+def held_files_if_unchanged(wait: UsageWait) -> HeldRunFiles | None:
+    """The waiting run's files when both still hash to what the wait saved, else None."""
+    if wait.record_sha256 is None or wait.values_sha256 is None:
+        return None  # Saved before Raticode kept the hashes.
+    try:
+        held = HeldRunFiles.read(Path(wait.record_path))
+    except OSError:
+        return None
+    record_hash, values_hash = held.hashes()
+    if not (
+        hmac.compare_digest(record_hash, wait.record_sha256)
+        and hmac.compare_digest(values_hash, wait.values_sha256)
+    ):
+        return None
+    return held
+
+
+@dataclass(frozen=True, slots=True)
 class TriggerRun:
     """Everything a runner needs to start one run."""
 
@@ -176,8 +239,10 @@ class TriggerRun:
     # Called with (path, role) when a covered file changed right before its use.
     on_file_changed: Callable[[str, str], None] | None = None
     # The record of the run this one resumes after a usage limit reset, or None for
-    # a new run. A resumed run uses that run's saved inputs and trigger events.
+    # a new run. A resumed run uses that run's saved inputs and trigger events, from
+    # ``resume_files``: the bytes the scheduler checked, never a second read.
     resume_record: str | None = None
+    resume_files: HeldRunFiles | None = None
 
     def approved_files(self) -> ApprovedFiles | None:
         if self.approved is None:
@@ -210,13 +275,24 @@ def run_trigger(run: TriggerRun, **options: Any) -> RattishRunResult:
         **options,
     }
     if run.resume_record is not None:
-        record = Path(run.resume_record)
-        document = json.loads(record.read_text(encoding="utf-8"))
+        held = run.resume_files
+        if held is None or held.record is None:
+            raise RattishResumeRefused(
+                "This run's saved record is missing, so it can't resume. Start it again."
+            )
+        document = json.loads(held.record.decode("utf-8"))
+        try:
+            values = parse_saved_values(document, held.values)
+        except SavedValuesUnavailable as exc:
+            raise RattishResumeRefused(str(exc)) from None
+        # The password inputs the resumed run didn't save, given again from the trigger.
+        withheld = {name: run.inputs[name] for name in values.withheld_inputs if name in run.inputs}
         return asyncio.run(
             resume_rattish_run(
                 run.source,
                 document,
-                resume_inputs=_withheld_inputs(run, record, document),
+                resume_inputs=withheld or None,
+                resume_values=values,
                 **common,
             )
         )
@@ -228,20 +304,6 @@ def run_trigger(run: TriggerRun, **options: Any) -> RattishRunResult:
             **common,
         )
     )
-
-
-def _withheld_inputs(
-    run: TriggerRun, record: Path, document: Mapping[str, Any]
-) -> dict[str, Any] | None:
-    """The password inputs the resumed run didn't save, given again from the trigger."""
-    from gofer.rattish.run_values import SavedValuesUnavailable, read_saved_values
-
-    try:
-        withheld = read_saved_values(record, document).withheld_inputs
-    except SavedValuesUnavailable:
-        return None  # The resume refuses with the reason.
-    given = {name: run.inputs[name] for name in withheld if name in run.inputs}
-    return given or None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1100,7 +1162,15 @@ class TriggerEngine:
                     continue  # Resumes once the run in the way ends.
                 if self.store.take_usage_wait(wait.event_id) is None:
                     continue
-                self._start(_Occurrence(trigger), now, event_id=wait.event_id, resume=wait)
+                held = held_files_if_unchanged(wait)
+                if held is None:
+                    self.store.update_event(
+                        wait.event_id, status="failed", message=RECORD_CHANGED_MESSAGE
+                    )
+                    continue
+                self._start(
+                    _Occurrence(trigger), now, event_id=wait.event_id, resume=wait, held=held
+                )
 
     def _start(
         self,
@@ -1109,6 +1179,7 @@ class TriggerEngine:
         *,
         event_id: int | None = None,
         resume: UsageWait | None = None,
+        held: HeldRunFiles | None = None,
     ) -> DispatchOutcome:
         trigger = occurrence.trigger
         refused, approved = self._refuse_unapproved(occurrence, now, event_id)
@@ -1200,6 +1271,7 @@ class TriggerEngine:
                 else self._file_changed_callback(trigger, run_id, approved.fingerprint)
             ),
             resume_record=resume.record_path if resume is not None else None,
+            resume_files=held,
         )
         # Every triggered run counts, so a computer-wide limit set later today sees it.
         self.store.start_spend(
@@ -1466,6 +1538,11 @@ class TriggerEngine:
         line = usage_wait_message(hit.provider, until, named, now)
         if waits:
             line = line[:-1] + f" (wait {waits + 1} of {usage_limits.MAX_WAITS})."
+        try:
+            record_sha256, values_sha256 = HeldRunFiles.read(record).hashes()
+        except OSError:
+            log.exception("Could not read the record of run %s to wait", run.run_id)
+            return "failed", message
         wait = UsageWait(
             event_id=event_id,
             trigger_id=trigger.id,
@@ -1476,6 +1553,8 @@ class TriggerEngine:
             resume_at=iso(until),
             waits=waits + 1,
             error=message[:1000],
+            record_sha256=record_sha256,
+            values_sha256=values_sha256,
         )
         try:
             self.store.add_usage_wait(wait, message=line)

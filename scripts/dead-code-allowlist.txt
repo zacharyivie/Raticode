@@ -1,0 +1,40 @@
+# Names scripts/check-dead-code.py may report but Raticode keeps on purpose.
+# One per line, with the reason after a '#':
+#
+#   name  # reason
+#   src/gofer/module.py:name  # reason, for that file only
+#   .library-*  # reason, for CSS classes; * and [...] patterns work there
+#
+# Delete unused code rather than listing it here. A name belongs here only when
+# something outside this repository calls it, or a framework calls it by a name
+# the check can't see.
+#
+# Code only tests call stays only as a test seam: a reason that starts with
+# "test seam:" says what the tests use it for. Otherwise remove it and test the
+# production path instead.
+src/gofer/cli/commands/second_brain.py:option_names  # test seam: tests check the fast path accepts the same options as the Typer command
+src/gofer/core/model_lifecycle.py:clear_cache  # test seam: tests empty the model lifecycle cache between cases
+src/gofer/rattish/mcp_tool.py:clear_list_cache  # test seam: tests empty the MCP tool list cache between cases
+src/gofer/core/provider_accounts.py:unregister_adapter  # test seam: tests take away a fake provider adapter they registered
+src/gofer/core/approvals.py:RecordingNotificationAdapter  # test seam: tests read the notifications a run sent
+src/gofer/ui/organizations.py:running_workers  # test seam: tests wait for organization workers to finish; the app counts worker claims
+src/gofer/ui/rem_home.py:running_workers  # test seam: tests wait for Rem's task workers to finish; the app counts worker claims
+src/gofer/ui/server.py:_dispatch_GET  # test seam: tests replace it to fake a route; the app calls it by getattr in _dispatch_request
+src/gofer/ui/server.py:_dispatch_POST  # test seam: the app calls it by getattr in _dispatch_request
+src/gofer/ui/server.py:_dispatch_PUT  # test seam: the app calls it by getattr in _dispatch_request
+src/gofer/ui/server.py:_dispatch_DELETE  # test seam: the app calls it by getattr in _dispatch_request
+src/gofer/social/service.py:verify_log  # test seam: tests check the Posts audit log's hash chain; kept because removing the chain check isn't clearly security-neutral
+frontend/src/lib/remHomeSample.js:SAMPLE_PROJECTS  # test seam: the Rem home browser test loads the sample projects
+frontend/src/lib/remComposer.js:resetRemComposer  # test seam: tests empty Rem's shared composer between cases
+frontend/src/lib/secondBrainStore.js:resetSecondBrainStore  # test seam: tests empty the Second Brain store between cases
+frontend/src/lib/secondBrainStore.js:loadSampleLibrary  # test seam: the Second Brain unit tests and visual browser test load the sample library
+src/gofer/social/providers/linkedin.py:API_VERSION_SUNSET  # test seam: a test fails 60 days before LinkedIn retires API_VERSION, so both are bumped in time
+docs/cli-parity.json:POST /api/workflows/*/webhooks/*/trigger  # outside services call a workflow's webhook; nothing in Raticode does
+docs/cli-parity.json:POST /api/chat/changes/redo  # ChatPane.jsx builds /chat/changes/${action} from the Undo or Redo button
+docs/cli-parity.json:POST /api/chat/changes/undo  # ChatPane.jsx builds /chat/changes/${action} from the Undo or Redo button
+.xterm-*  # CSS classes owned by xterm.js, which builds the terminal's DOM
+.lucide  # CSS class lucide-react puts on every icon it draws
+frontend/src/styles/index.css:.text-*-[0-9]*  # dark-mode shades for Tailwind text colours, kept for every shade so a new utility gets its dark colour
+frontend/src/styles/index.css:.border-*-[0-9]*  # dark-mode shades for Tailwind border colours, kept for every shade so a new utility gets its dark colour
+frontend/src/styles/index.css:.enabled:*  # dark-mode shades for Tailwind enabled: variants, kept for every shade so a new utility gets its dark colour
+frontend/src/styles/index.css:.animate-bounce  # the reduced-motion rule stops Tailwind's animate-bounce whenever a view uses it; App.test.mjs pins the rule

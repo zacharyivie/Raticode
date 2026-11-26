@@ -40,15 +40,18 @@ import kotlinx.coroutines.delay
 
 /**
  * Signing an account in from this phone, for the Account menu and the Usage cards. [available] is false for a desktop
- * that doesn't take `provider.account.sign_in`; [states] holds the sign-ins this phone started, by account name.
+ * that doesn't take `provider.account.sign_in`; [states] holds the sign-ins this phone started, by
+ * [ThreadAccounts.signInId]: read one with [state].
  */
 internal data class PhoneSignIn(
     val available: Boolean,
     val states: Map<String, ThreadAccounts.SignIn>,
     val start: (provider: String, name: String) -> Unit,
     val cancel: (provider: String, name: String) -> Unit,
-    val dismiss: (name: String) -> Unit,
-)
+    val dismiss: (provider: String, name: String) -> Unit,
+) {
+    fun state(provider: String, name: String): ThreadAccounts.SignIn? = states[ThreadAccounts.signInId(provider, name)]
+}
 
 @RequiresApi(29)
 internal fun phoneSignIn(client: LiveClient) = PhoneSignIn(client.accountSignInSync, client.accountSignIns,
@@ -105,7 +108,7 @@ internal fun AccountSignInPanel(provider: String, name: String, signIn: ThreadAc
                 }
                 signIn.done -> {
                     Text("$name is signed in.", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("accountSignInDone"))
-                    TextButton(onClick = { actions.dismiss(name) }) { Text("Done") }
+                    TextButton(onClick = { actions.dismiss(provider, name) }) { Text("Done") }
                 }
                 else -> {
                     Text(signIn.reason.ifBlank { "The sign-in didn't finish." }, style = MaterialTheme.typography.bodyMedium,
@@ -114,7 +117,7 @@ internal fun AccountSignInPanel(provider: String, name: String, signIn: ThreadAc
                         modifier = Modifier.testTag("accountSignInRefusedHelp"))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(onClick = { actions.start(provider, name) }, Modifier.testTag("accountSignInRetry")) { Text("Try again") }
-                        TextButton(onClick = { actions.dismiss(name) }) { Text("Close") }
+                        TextButton(onClick = { actions.dismiss(provider, name) }) { Text("Close") }
                     }
                 }
             }

@@ -17,7 +17,8 @@ from gofer.core.worker_claims import WAIT_SECONDS, WorkerClaims, waiting_reason
 from gofer.ui.organizations import OrganizationManager
 from gofer.ui.rem_home import RemHome
 from gofer.ui.rem_self_work import PRIORITY_REASON
-from tests.unit.test_organization_placement import act, company, runtime
+from tests.helpers.organizations import act
+from tests.unit.test_organization_placement import company, runtime
 from tests.unit.test_rem_kanban import add, at, set_options, tick
 from tests.unit.test_rem_kanban import board as board
 from tests.unit.test_rem_pause_resume import run_of, runs, start_task

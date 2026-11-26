@@ -1,7 +1,6 @@
 const { contextBridge, ipcRenderer, webFrame, webUtils } = require("electron");
 
 const API_BASE_URL_ARG = "--gofer-api-base-url=";
-const BROWSER_PRELOAD_ARG = "--gofer-browser-preload=";
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:8765";
 const LOCAL_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 
@@ -22,12 +21,6 @@ function readApiBaseUrl() {
   const value = arg ? arg.slice(API_BASE_URL_ARG.length) : DEFAULT_API_BASE_URL;
 
   return isSafeLocalHttpUrl(value) ? value : DEFAULT_API_BASE_URL;
-}
-
-function readBrowserPreloadPath() {
-  const arg = process.argv.find((value) => value.startsWith(BROWSER_PRELOAD_ARG));
-  const value = arg ? arg.slice(BROWSER_PRELOAD_ARG.length) : "";
-  return value.startsWith("file:") ? value : "";
 }
 
 function isSafeLocalHttpUrl(value) {
@@ -219,6 +212,7 @@ contextBridge.exposeInMainWorld("goferDesktop", {
     replaceProject: (projectRoot, options = {}) => invokeDesktop("gofer:replace-project", { ...options, projectRoot, grantId: grantForPath(projectRoot) }),
     listProjectFiles: (projectRoot) => invokeDesktop("gofer:list-project-files", { projectRoot, grantId: grantForPath(projectRoot) }),
     searchProject: (projectRoot, options = {}) => invokeDesktop("gofer:search-project", { ...options, projectRoot, grantId: grantForPath(projectRoot) }),
+    undoReplace: (projectRoot) => invokeDesktop("gofer:undo-replace", { projectRoot, grantId: grantForPath(projectRoot) }),
     listDirectory: (options = {}) =>
       listDirectory(options),
     openPath: (targetPath) =>
@@ -292,7 +286,6 @@ contextBridge.exposeInMainWorld("goferDesktop", {
 
 contextBridge.exposeInMainWorld("goferBrowser", {
   platform: process.platform,
-  preloadPath: readBrowserPreloadPath(),
   create: (options = {}) => createBrowser(options),
   adopt: (id, webContentsId, clientId = "") => browserAction(id, "adopt", {
     clientId: typeof clientId === "string" ? clientId : "",
@@ -417,7 +410,6 @@ contextBridge.exposeInMainWorld("goferBrowser", {
     action: ["take-opens", "status", "open-settings", "make-default"].includes(action) ? action : "",
   }),
   onExternalOpen: (callback) => subscribeToBrowserEvent("gofer:external-open", callback),
-  onPrompt: (callback) => subscribeToBrowserEvent("gofer:browser-prompt", callback),
   onState: (callback) => subscribeToBrowserEvent("gofer:browser-state", callback),
 });
 
@@ -779,10 +771,8 @@ contextBridge.exposeInMainWorld("goferUpdates", {
   check: () => ipcRenderer.invoke("gofer:check-for-updates"),
   downloadAndInstall: () => ipcRenderer.invoke("gofer:download-and-install-update"),
   installDownloaded: () => ipcRenderer.invoke("gofer:install-downloaded-update"),
-  openRelease: () => ipcRenderer.invoke("gofer:open-update-release"),
   getState: () => ipcRenderer.invoke("gofer:get-update-state"),
   setAutomatic: (enabled) => ipcRenderer.invoke("gofer:set-automatic-update-checks", enabled === true),
-  dismissReminder: () => ipcRenderer.invoke("gofer:dismiss-update-reminder"),
   onState: (callback) => {
     if (typeof callback !== "function") return () => {};
     const listener = (_event, payload) => callback(payload);

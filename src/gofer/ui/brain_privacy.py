@@ -18,6 +18,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from gofer.core.provider_profiles import load_provider_profiles
+from gofer.ui.brain_folders import LEFT_OUT_REFUSAL, is_left_out
 
 
 def local_profile(profile: Any) -> bool:
@@ -153,8 +154,28 @@ def brain_is_private(brain: dict[str, Any]) -> bool:
     return not (brain.get("settings") or {}).get("allowCloud")
 
 
+def private_folders_inside(root: Path, brains: Iterable[dict[str, Any]]) -> set[Path]:
+    """Folders of the private brains among [brains] that sit inside [root], not at it.
+
+    Their files belong to that private brain, so an index of [root] (a brain's or the
+    Settings > Memory folder's) leaves them out. [root] is taken as given, so pass it
+    resolved; the brains' folders are resolved here.
+    """
+    outer = Path(root)
+    inside: set[Path] = set()
+    for brain in brains:
+        if not brain_is_private(brain) or not brain.get("root"):
+            continue
+        folder = _canonical(brain["root"])
+        if folder != outer and folder.is_relative_to(outer):
+            inside.add(folder)
+    return inside
+
+
 # The error code an agent token gets when a request names a private brain.
 AGENT_BRAIN_PRIVATE = "brain_private"
+# The error code an agent token gets when a read names a document left out of search.
+AGENT_DOCUMENT_LEFT_OUT = "document_left_out"
 # Second Brain reads that look up one document by ``params["id"]``.
 _DOCUMENT_ACTIONS = frozenset({"original", "related", "connections"})
 
@@ -241,13 +262,79 @@ def agent_brain_refusal(library: Any, action: str, params: dict[str, Any]) -> st
     return None
 
 
+def agent_left_out_refusal(library: Any, action: str, params: dict[str, Any]) -> str | None:
+    """Why an agent token can't read this document, or None.
+
+    Every agent token, ``--private-brains`` or not, is refused an original, related or
+    connections read about a document left out of search, with read_note's words. The
+    Library's own window still opens it for the user. An unknown document is left to
+    the library.
+    """
+    if action not in _DOCUMENT_ACTIONS or params.get("id") is None:
+        return None
+    try:
+        doc = library.entity("documents", str(params["id"]))
+    except ValueError:
+        return None
+    return LEFT_OUT_REFUSAL if is_left_out(doc) else None
+
+
+def agent_left_out_result(library: Any, action: str, result: Any) -> Any:
+    """Drop left-out documents from a related, connections or passages read for an agent token.
+
+    passages answers a left-out document as missing, like one that is gone.
+    """
+    if action == "related" and isinstance(result, list):
+        hidden = _left_out_ids(library, result)
+        return [doc_id for doc_id in result if doc_id not in hidden]
+    if action == "passages" and isinstance(result, dict):
+        documents = result.get("documents") or []
+        hidden = _left_out_ids(library, [doc.get("id") for doc in documents])
+        if not hidden:
+            return result
+        return {
+            **result,
+            "documents": [doc for doc in documents if doc.get("id") not in hidden],
+            "missing": [
+                *(result.get("missing") or []),
+                *(d["id"] for d in documents if d.get("id") in hidden),
+            ],
+        }
+    if action != "connections" or not isinstance(result, dict):
+        return result
+    links = result.get("links") or {}
+    similar = result.get("similar") or []
+    hidden = _left_out_ids(
+        library,
+        [
+            *(links.get("cites") or []),
+            *(links.get("citedBy") or []),
+            *(item.get("docId") for item in similar),
+        ],
+    )
+    if not hidden:
+        return result
+    return {
+        **result,
+        "links": {key: [i for i in ids if i not in hidden] for key, ids in links.items()},
+        "similar": [item for item in similar if item.get("docId") not in hidden],
+    }
+
+
+def _left_out_ids(library: Any, doc_ids: Iterable[Any]) -> set[str]:
+    ids = [str(doc_id) for doc_id in doc_ids if doc_id]
+    brain_ids = [brain["id"] for brain in library.brains()]
+    return {doc_id for doc_id, doc in library.documents(ids, brain_ids).items() if is_left_out(doc)}
+
+
 def agent_brain_result(library: Any, action: str, result: Any) -> Any:
     """Drop private brains' documents from a read whose sources can span brains.
 
     report_sources and job_sources can reach other brains through a collection or a
-    saved search, after the brains the request named were checked.
+    saved search, after the brains the request named were checked. passages names
+    documents by ID from any brain; a private one is answered as missing.
     """
-    if action not in {"report_sources", "job_sources"} or not isinstance(result, dict):
+    if action not in {"report_sources", "job_sources", "passages"} or not isinstance(result, dict):
         return result
     private = {brain["id"] for brain in library.brains() if brain_is_private(brain)}
     if not private:
@@ -264,6 +351,11 @@ def agent_brain_result(library: Any, action: str, result: Any) -> Any:
             return False
         return _private_brain_holding(library, str(source.get("id"))) is None
 
+    if action == "passages":
+        shown = [doc for doc in result.get("documents", []) if allowed(doc)]
+        kept = {doc["id"] for doc in shown}
+        hidden = [doc["id"] for doc in result.get("documents", []) if doc["id"] not in kept]
+        return {**result, "documents": shown, "missing": [*result.get("missing", []), *hidden]}
     sources = [source for source in result.get("sources", []) if allowed(source)]
     return {**result, "sources": sources}
 

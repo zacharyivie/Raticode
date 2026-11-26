@@ -20,6 +20,7 @@ Turn it on in **More › App lock**, and choose how long Raticode may be off scr
 - Turning it on or off, or allowing a longer time, asks first.
 - After a phone restart or a crash, it always asks.
 - The share sheet asks too.
+- A file Rem or your computer sent that you opened in Raticode's own viewer asks too. A file another app opened with Raticode doesn't, since it isn't Raticode's.
 - On Android 13 and newer, the recent apps preview is hidden.
 
 While Raticode is locked, background sync, alerts, replies typed on alerts and messages waiting to send keep going. A notification you tap while locked opens where it points once you unlock.

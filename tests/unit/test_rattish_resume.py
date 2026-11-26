@@ -413,12 +413,6 @@ def test_the_cli_resumes_a_failed_run(tmp_path: Path) -> None:
     [path] = (registered.workflow_root / "logs").glob("*.json")
     earlier = json.loads(path.read_text())["run_id"]
 
-    options = runner.invoke(
-        app,
-        ["workflow", "resume", registered.workflow_id, "--run-id", earlier, "--force", *arguments],
-    )
-    assert options.exit_code == 1 and "resume where they stopped" in options.output
-
     flag.write_text("")
     resumed = runner.invoke(
         app, ["workflow", "resume", registered.workflow_id, "--run-id", earlier, *arguments]

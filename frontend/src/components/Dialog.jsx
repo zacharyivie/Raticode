@@ -43,6 +43,7 @@ export function Dialog({
   initialFocusRef,
   onClose,
   overlayClassName = "fixed inset-0 z-50 grid place-items-center ui-scrim px-4",
+  overlayProps = {},
   panelClassName = "",
   panelProps = {},
   title,
@@ -118,11 +119,11 @@ export function Dialog({
   }, [initialFocusRef]);
 
   return (
-    <div className={overlayClassName}>
+    <div {...overlayProps} className={overlayClassName}>
       <div
         {...panelProps}
         ref={panelRef}
-        aria-describedby={descriptionId}
+        aria-describedby={descriptionId ?? panelProps["aria-describedby"]}
         aria-labelledby={titleId}
         aria-modal="true"
         className={panelClassName}

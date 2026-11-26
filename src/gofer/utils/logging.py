@@ -8,8 +8,6 @@ import threading
 from types import TracebackType
 from typing import Any
 
-_configured = False
-
 # The desktop app reads lines with this prefix from the backend's stderr and shows
 # them in Settings > Developer with their level. Every record is one JSON line.
 DESKTOP_LOG_PREFIX = "GOFER_LOG "
@@ -17,18 +15,6 @@ DESKTOP_LOG_PREFIX = "GOFER_LOG "
 MAX_DESKTOP_MESSAGE = 16_000
 _LEVEL_NAMES = {logging.DEBUG: "debug", logging.INFO: "info", logging.WARNING: "warn"}
 _desktop_handler: logging.Handler | None = None
-
-
-def configure_logging(level: str = "INFO") -> None:
-    global _configured
-    if _configured:
-        return
-    logging.basicConfig(
-        stream=sys.stderr,
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    _configured = True
 
 
 def get_logger(name: str) -> logging.Logger:

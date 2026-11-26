@@ -14,6 +14,7 @@ from gofer.core.command_slots import read_settings, slots_root
 from gofer.core.computers import local_room_limit
 from gofer.core.resources import ResourceLimits
 from gofer.core.worker_claims import ORGANIZATIONS, PHONE, THIS_COMPUTER, Claim, WorkerClaims
+from gofer.devices.application import incoming_job
 from gofer.devices.registry import PairingError, device_id
 from gofer.ui.chat import _messages_with_attachment_paths, stream_workflow_chat
 from gofer.ui.chat_jobs import ChatJobs
@@ -93,6 +94,51 @@ def validate_context(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def unattended_workflow(workflow: dict[str, Any], provider: str) -> dict[str, Any]:
+    """The host grant's workflow under the limits of a task a paired desktop handed over.
+
+    Work another desktop's organization sends runs with nobody here watching, like a
+    handed-over Rem task (gofer.ui.rem_home): Claude Code's sandbox, Codex kept to the
+    same data folder writes, no push, no browser, subagents, swarms or MCP servers, and
+    not this computer's Second Brain, because the answer goes back to the other desktop.
+    """
+    resources = {
+        **(workflow.get("remResources") or {}),
+        "agents": False,
+        "browser": False,
+        "mcpServers": [],
+    }
+    kept = {
+        key: value for key, value in workflow.items() if key not in {"remSecondBrain", "remBrowser"}
+    }
+    return {
+        **kept,
+        "remResources": resources,
+        "remManagedTask": {
+            "readOnly": False,
+            "unattended": True,
+            "networkAccess": bool(resources.get("web")),
+            **({"claudeSandbox": True} if provider == "claude_code" else {}),
+            "limitDataFolder": True,
+        },
+        "remBlockGitPush": True,
+        "remUnattended": True,
+        "remSwarmAccess": {**(workflow.get("remSwarmAccess") or {}), "enabled": False},
+    }
+
+
+def _unattended_instructions(provider: str) -> str:
+    """Rem's identity and the unwatched rules for work another desktop's organization sent."""
+    from gofer.ui.chat import REM_IDENTITY
+    from gofer.ui.claude_sandbox import sandbox_instructions
+    from gofer.ui.rem_self_work import SENT_BY_DESKTOP
+
+    sandbox = (
+        sandbox_instructions(read_only=False, scratch=None) if provider == "claude_code" else ""
+    )
+    return REM_IDENTITY + SENT_BY_DESKTOP + sandbox
+
+
 def _sender_label(request: dict[str, Any]) -> str:
     """A worker label for a claimed request: "phone turn", or "work from <desktop>"."""
     if request.get("peer_role") != "desktop":
@@ -100,17 +146,12 @@ def _sender_label(request: dict[str, Any]) -> str:
     return f"work from {request.get('peer_name') or 'another desktop'}"
 
 
-def _incoming(request: dict[str, Any]) -> bool:
-    """Whether a claimed request is work another desktop's organization sent."""
-    event = request.get("event") or {}
-    payload = event.get("payload") or {}
-    return bool(event.get("type") == "job.submit" and payload.get("organization"))
-
-
 class DeviceWork(Protocol):
     def claim(
         self, *, own: bool = True, organization: bool = True, waiting: str | None = None
     ) -> dict[str, Any] | None: ...
+
+    def incoming_waiting(self) -> bool: ...
 
     def authorized(self, peer: str, thread: str) -> bool: ...
 
@@ -218,16 +259,23 @@ class DeviceChatBridge:
         # limit lowered by CPU and memory pressure, as placed starts do. Its worker is
         # taken before the request is, under the claims' one lock, so a Rem or
         # organization start on another thread can't take the same one. A computer short
-        # of memory with a worker running takes none, and the sender is told so.
-        computer_id = self.computer_id()
-        room = local_room_limit(self.data_dir)
-        worker = self.claims.claim(computer_id, ORGANIZATIONS, room)
-        # Short of memory with a worker free: say so. A full computer waits for a worker.
-        waiting = (
-            self.claims.held_back(computer_id)
-            if worker is None and self.claims.held(computer_id) < room
-            else None
-        )
+        # of memory with a worker running takes none, and the sender is told so. With no
+        # such job waiting, no worker is taken, so an empty tick never makes a Rem or
+        # organization start elsewhere read this computer as full.
+        worker: Claim | None = None
+        waiting: str | None = None
+        if self.application.incoming_waiting():
+            computer_id = self.computer_id()
+            room = local_room_limit(self.data_dir)
+            worker = self.claims.claim(computer_id, ORGANIZATIONS, room)
+            # Short of memory with a worker free: say so. A full computer waits for one.
+            waiting = (
+                self.claims.held_back(computer_id)
+                if worker is None and self.claims.held(computer_id) < room
+                else None
+            )
+        elif not own:
+            return False
         try:
             # Asked even with no room, so a waiting organization job says it waits.
             request = self.application.claim(
@@ -241,7 +289,7 @@ class DeviceChatBridge:
             if worker is not None:
                 worker.release()
             return False
-        if not _incoming(request) and worker is not None:
+        if not incoming_job(request.get("event") or {}) and worker is not None:
             worker.release()
             worker = None
         if worker is not None:
@@ -323,6 +371,10 @@ class DeviceChatBridge:
                 )
                 local_workflow["chatThreadId"] = thread
                 local_workflow.setdefault("chatThreadTitle", context.get("title") or "")
+                # Phone turns and remote threads keep the host grant as it is.
+                organization_job = incoming_job(event)
+                if organization_job:
+                    local_workflow = unattended_workflow(local_workflow, provider)
                 files = request.get("attachments") or []
                 if files:
                     # Save uploads with the desktop thread's own attachments. The
@@ -367,7 +419,7 @@ class DeviceChatBridge:
                 terminal = False
 
                 async def provider_source(**options: Any) -> AsyncGenerator[dict[str, Any], None]:
-                    if event.get("payload", {}).get("organization"):
+                    if organization_job:
                         options["workflow"] = {
                             **options.get("workflow", {}),
                             "organizationRun": event["payload"]["organization"],
@@ -385,9 +437,7 @@ class DeviceChatBridge:
                     wrapped = stream_with_fleet_tools(
                         provider_source,
                         self.fleet_control,
-                        read_only_override=True
-                        if event.get("payload", {}).get("organization")
-                        else None
+                        read_only_override=None
                         if context.get("desktop_parity")
                         else context.get("fleet_execute") is not True,
                         file_scope=(request["peer"], event["thread_id"], event["request_id"]),
@@ -402,8 +452,9 @@ class DeviceChatBridge:
                 from gofer.ui.rem_threads import stream_with_thread_tools
 
                 async def thread_source(**options: Any) -> AsyncGenerator[dict[str, Any], None]:
-                    if event.get("payload", {}).get("organization"):
-                        async for output in fleet_source(**options):
+                    if organization_job:
+                        # No fleet or thread tools: they reach other computers and threads.
+                        async for output in provider_source(**options):
                             yield output
                         return
                     async for output in stream_with_thread_tools(fleet_source, **options):
@@ -436,7 +487,7 @@ class DeviceChatBridge:
                     factory = remote_source
 
                 account = None
-                if not context.get("machine") and not event.get("payload", {}).get("organization"):
+                if not context.get("machine") and not organization_job:
                     # The thread's own account wins over Rem's setting, as on the desktop.
                     # A paired desktop running the thread has its own accounts.
                     account = await asyncio.to_thread(self._turn_account, thread, context, provider)
@@ -444,6 +495,11 @@ class DeviceChatBridge:
                     chat_turn,
                     factory,
                     **({"provider_profile": account} if account else {}),
+                    **(
+                        {"agent_instructions": _unattended_instructions(provider)}
+                        if organization_job
+                        else {}
+                    ),
                     provider=provider,
                     model=model,
                     messages=messages,

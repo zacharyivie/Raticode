@@ -16,6 +16,7 @@ from gofer.ui.organization_operations import Routine, schedule_routines
 from gofer.ui.organization_store import Employee, OrganizationConflict
 from gofer.ui.organizations import OrganizationManager
 from gofer.utils.process import git_push_blocked_environment
+from tests.helpers.organizations import act
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -43,6 +44,7 @@ def start_manager(tmp_path: Path, stream: Any = final) -> OrganizationManager:
     return OrganizationManager(tmp_path / "data", stream=stream, start_runtime=False)
 
 
+# Not the shared company: a builder outside the lead's reports and no project.
 def company(manager: OrganizationManager, root: Path, **config: Any) -> Any:
     employees = config.pop(
         "employees", [{"id": "lead", "name": "Avery"}, {"id": "builder", "name": "Mira"}]
@@ -54,18 +56,6 @@ def company(manager: OrganizationManager, root: Path, **config: Any) -> Any:
             "action": "create",
             "params": {"config": {"name": "Studio", "employees": employees, **config}},
         },
-    )
-
-
-def act(
-    manager: OrganizationManager,
-    org: dict[str, Any],
-    action: str,
-    actor: str = "user",
-    **params: Any,
-) -> Any:
-    return manager.call(
-        org["projectRoot"], actor, {"organizationId": org["id"], "action": action, "params": params}
     )
 
 

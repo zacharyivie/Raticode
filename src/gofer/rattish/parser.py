@@ -585,7 +585,8 @@ class RattishParser:
             if next_index is None or self._view(next_index).indent_columns != indent:
                 break
             self.index = next_index
-        assert start is not None and entries
+        if start is None or not entries:
+            self._raise_eof("RATTISH_EXPECTED_TOKEN", "Expected a map entry.")
         end = SourcePosition(**entries[-1]["span"]["end"])
         return {"kind": "map", "entries": entries, "span": SourceSpan(start, end).to_json()}
 
@@ -621,6 +622,15 @@ class RattishParser:
                 value = self._parse_inline_value(rest, view.line, value_start)
                 end = self._value_field_end(value, view.line)
             else:
+                next_index = self._next_meaningful_index(self.index)
+                if next_index is None or self._view(next_index).indent_columns != indent + 2:
+                    self._raise(
+                        "RATTISH_EXPECTED_TOKEN",
+                        "List item '-' needs a value.",
+                        view.line,
+                        dash_index,
+                        dash_index + 1,
+                    )
                 self._skip_ignorable()
                 value = self._parse_value_map(indent + 2)
                 end = SourcePosition(**value["span"]["end"])
@@ -1380,10 +1390,39 @@ class PredicateParser:
                     index < len(text) and not text[index].isspace() and text[index] not in "()<>!="
                 ):
                     index += 1
+                if index == start:
+                    # A character no rule above consumes, such as a lone '=' or '!'.
+                    # Stop here: carrying on without advancing would loop forever.
+                    self._lone_symbol_error(text[index], start)
                 tokens.append(PredicateToken("word", text[start:index], start, index))
                 continue
             continue
         return tokens
+
+    def _lone_symbol_error(self, char: str, index: int) -> Never:
+        if char == "=":
+            message = "A single '=' is not an operator; use '==' to compare."
+            suggestions: tuple[str, ...] = ("==",)
+        elif char == "!":
+            message = "A single '!' is not an operator; use 'not' to negate or '!=' to compare."
+            suggestions = ("not", "!=")
+        else:
+            message = f"Unexpected character {char!r} in predicate."
+            suggestions = ()
+        position = self.base_index + index
+        raise RattishParseError(
+            [
+                RattishDiagnostic(
+                    code="RATTISH_INVALID_TOKEN",
+                    severity="error",
+                    phase="lexer",
+                    message=message,
+                    file=self.source_id,
+                    span=SourceSpan(self.line.position(position), self.line.position(position + 1)),
+                    suggestions=suggestions,
+                )
+            ]
+        )
 
     def _parse_or(self) -> dict[str, Any]:
         left = self._parse_and()

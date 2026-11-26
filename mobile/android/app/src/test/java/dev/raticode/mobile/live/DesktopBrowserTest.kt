@@ -34,9 +34,8 @@ class DesktopBrowserTest {
 
     @Test fun saysWhenTheComputersTabsRunInEdge() {
         val edge = DesktopBrowser.parse(answer().put("engine", "edge"))
-        assertTrue(edge.edge); assertFalse(edge.firefox); assertEquals("edge", edge.engine)
-        assertFalse(DesktopBrowser.parse(answer()).edge)
-        assertFalse(DesktopBrowser.parse(answer().put("engine", "firefox")).edge)
+        assertFalse(edge.firefox); assertEquals("edge", edge.engine)
+        assertEquals("raticode", DesktopBrowser.parse(answer()).engine)
         for (odd in listOf("Edge", "msedge", "chromium")) assertEquals(odd, "raticode", DesktopBrowser.parse(answer().put("engine", odd)).engine)
     }
 

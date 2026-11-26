@@ -214,8 +214,14 @@ def test_invitation_creator_sends_work_using_shared_thread_ids(desktops):
             "project_id": project,
         },
     )
-    second.fleet_probed.clear()
-    shared = wait(lambda: peer_row(second, first)["shared_threads"])
+
+    # A probe started before the grant may still be running and answer without the
+    # thread, so ask again on every poll instead of waiting for the next refresh.
+    def shared_threads() -> list[dict[str, Any]]:
+        second.fleet_probed.clear()
+        return cast(list[dict[str, Any]], peer_row(second, first)["shared_threads"])
+
+    shared = wait(shared_threads)
     assert shared == [
         {
             "thread_id": thread,
@@ -805,6 +811,7 @@ class Researcher:
         self.release = threading.Event()
         self.working = threading.Event()
         self.runs: list[str] = []
+        self.answer = "The slowdown has three causes."
 
     async def __call__(self, **kwargs: Any) -> Any:
         import asyncio
@@ -854,14 +861,17 @@ class Researcher:
                 "params": {
                     "name": "save_report",
                     "arguments": {
-                        "path": "findings.html",
+                        # Saved reports are never replaced, so a later run picks a new name.
+                        "path": "findings.html"
+                        if len(self.runs) == 1
+                        else f"findings-{len(self.runs)}.html",
                         "content": "<!doctype html><html><body>Three causes</body></html>",
                     },
                 },
             },
         )[1]["result"]
         assert not response.get("isError"), response
-        yield {"type": "final", "message": {"body": "The slowdown has three causes."}}
+        yield {"type": "final", "message": {"body": self.answer}}
 
 
 def rem_on(control: DeviceControl, data: Path, project: Path, source: Any) -> Any:
@@ -1042,7 +1052,8 @@ def fleet_pair(desktops, tmp_path, monkeypatch: pytest.MonkeyPatch) -> Iterator[
 def test_research_task_pinned_to_a_paired_desktop_runs_there_and_reports_back(fleet_pair):
     import sqlite3
 
-    from gofer.core.usage_ledger import activity_payload, record_invocation, run_usage
+    from gofer.core.usage_history import resolve_range, usage_history
+    from gofer.core.usage_ledger import record_invocation, run_usage
     from gofer.core.worker_claims import THIS_COMPUTER
 
     p = fleet_pair
@@ -1096,13 +1107,110 @@ def test_research_task_pinned_to_a_paired_desktop_runs_there_and_reports_back(fl
     assert '"total_tokens": 1500' in tokens and cost == pytest.approx(0.42)
     # It counts for its run, not toward this computer's account totals.
     assert run_usage([run["id"]], p.main_home.data_dir)[run["id"]]["total_tokens"] == 1500
-    assert activity_payload(p.main_home.data_dir)["activity"]["calls"] == 0
+    assert usage_history(p.main_home.data_dir, resolve_range())["activity"]["calls"] == 0
     # The worker keeps its call-by-call row under its own account.
-    assert activity_payload(p.worker_home.data_dir)["activity"]["calls"] == 1
+    assert usage_history(p.worker_home.data_dir, resolve_range())["activity"]["calls"] == 1
     # Another pass adds no second row.
     p.main_home.remote.follow()
     with sqlite3.connect(p.main_home.data_dir / "usage.sqlite3") as db:
         assert db.execute("SELECT COUNT(*) FROM usage_invocations").fetchone()[0] == 1
+
+
+def self_work_pass(home: Any, run: dict[str, Any], project: Path, session: str) -> None:
+    """File a finished run as a self-work research pass, as _start_research records one."""
+    with home.store.connect() as db:
+        state = home.store.setting(db, "self_work_state")
+        state.setdefault("passes", []).append(
+            {
+                "kind": "research",
+                "run_id": run["id"],
+                "task_id": run["task_id"],
+                "thread_id": run["thread_id"],
+                "title": run["recipe"]["title"],
+                "target": str(project),
+                "key": f"{project}#0",
+                "session_id": session,
+                "board": True,
+                "objective": "",
+                "deepening": False,
+                "hotspots": [],
+            }
+        )
+        home.store.set_setting(db, "self_work_state", state)
+
+
+def test_self_work_proposals_from_a_paired_desktop_wait_even_with_auto_approve(fleet_pair):
+    """A self-work pass the user sent to a paired desktop (Run there) can't approve its
+    own proposals here: they wait for the user and name that desktop. A pass that ran on
+    this computer is still auto-approved."""
+    import json
+
+    p = fleet_pair
+    home = p.main_home
+    home.kanban.set_participant_projects(
+        "user", {"participant_id": "rem", "projects": [str(p.project)], "expected_revision": 0}
+    )
+    revision = home.self_work.view()["settings"]["revision"]
+    home.self_work.update_settings(
+        {
+            "auto_approve_proposals": True,
+            "confirm_auto_approve": True,
+            "expected_revision": revision,
+        }
+    )
+
+    def ideas(title: str) -> str:
+        body = {"proposals": [{"title": title, "description": f"Build {title}", "why": "Slow"}]}
+        return f"Findings.\n```json\n{json.dumps(body)}\n```"
+
+    def board() -> dict[str, dict[str, Any]]:
+        return {t["title"]: t for t in home.kanban.board()["tickets"]}
+
+    # On the paired desktop: its answer carries the proposal back to this computer.
+    p.researcher.answer = ideas("Cache the plugin index")
+    there = p.pin()
+    p.handed_over(there["id"])
+    p.researcher.release.set()
+    there = p.both(lambda: (r := run_body(home, there["id"]))["state"] == "succeeded" and r)
+    assert there["remote"]["computer_name"] == "Desk B"
+    self_work_pass(home, there, p.project, "session-1")
+    home.self_work.reconcile()
+    remote = board()["Cache the plugin index"]
+    assert remote["status"] == "backlog"
+    assert remote["proposed"] is True and remote["auto_approved"] is False
+    assert remote["proposed_on"] == "Desk B"
+    comments = home.kanban.timeline({"ticket_id": remote["ticket_id"], "scope": "rem"})["comments"]
+    titles = [c["title"] for c in comments]
+    assert "Proposed on Desk B" in titles and "Auto-approved by self-work" not in titles
+    added = home.self_work.view()["report"]["tickets_added"]
+    assert [(a["proposed"], a["auto_approved"], a["computer_name"]) for a in added] == [
+        (True, False, "Desk B")
+    ]
+
+    # On this computer: the same answer is approved on its own, as before.
+    p.researcher.answer = ideas("Lazy-load the settings page")
+    here = home.create_task(
+        {
+            "request_id": "here",
+            "title": "Research here",
+            "type": "research",
+            "prompt": "What would make startup faster?",
+            "project_dir": str(p.project),
+            "acceptance_criteria": [
+                {"id": "answer", "description": "Name the causes with sources"},
+                {"id": "report", "description": "Save a readable report"},
+            ],
+        }
+    )["task"]["active_run"]
+    here = p.both(lambda: (r := run_body(home, here["id"]))["state"] == "succeeded" and r)
+    assert not here.get("remote")
+    self_work_pass(home, here, p.project, "session-1")
+    home.self_work.reconcile()
+    local = board()["Lazy-load the settings page"]
+    assert local["proposed"] is False and local["auto_approved"] is True
+    assert local["proposed_on"] == ""
+    # The paired desktop's proposal still waits.
+    assert board()["Cache the plugin index"]["proposed"] is True
 
 
 def test_stop_here_stops_the_task_there_and_settles_as_stopped(fleet_pair):
@@ -1264,6 +1372,118 @@ def test_a_develop_task_pinned_to_a_paired_desktop_is_refused_with_a_reason(flee
     )
     details = [e["payload"]["detail"] for e in status["events"] if e["type"] == "job.status"]
     assert "Only research and conversation tasks run on another computer for now" in details
+    assert p.worker_home.store.tasks() == []
+
+
+def on_main(p: Pair, condition: Callable[[], Any], timeout: float = 60) -> Any:
+    """Tick only this computer's Rem, and deliver, until ``condition`` holds.
+
+    The worker's Rem isn't ticked, so nothing handed over to it is admitted there.
+    """
+    end = time.monotonic() + timeout
+    last_probe = 0.0
+    while time.monotonic() < end:
+        p.main_home.tick()
+        if result := condition():
+            return result
+        if time.monotonic() - last_probe > 0.5:
+            last_probe = time.monotonic()
+            p.deliver()
+        time.sleep(0.05)
+    raise AssertionError("condition not met")
+
+
+def held_over(p: Pair, count: int) -> list[dict[str, Any]]:
+    """The tasks handed over to the worker, once it holds ``count`` of them."""
+    app = p.worker.application
+    assert app is not None
+    return cast(list[dict[str, Any]], on_main(p, lambda: len(t := app.rem_tasks()) >= count and t))
+
+
+def test_your_own_task_takes_the_free_worker_before_an_earlier_handed_over_one(fleet_pair):
+    """A task another desktop hands over waits behind this computer's own work, as
+    self-work does, even when it was queued first."""
+    p = fleet_pair
+    p.worker_home.configure(
+        {
+            "provider": "codex",
+            "model": "cli-default",
+            "command_slots": {"maxWorkers": 1},
+            "projects": [{"root": str(p.project), "name": p.project.name}],
+            "resources": {"web": True},
+        }
+    )
+    p.pin()
+    held_over(p, 1)
+    # The worker's Rem makes its own run for the handed-over task; it is queued.
+    p.worker_home.remote.receive()
+    [held] = p.worker.application.rem_tasks()  # type: ignore[union-attr]
+    handed = run_body(p.worker_home, held["run_id"])
+    assert handed["state"] == "queued"
+    # It names the desktop that sent it, and so do the checks that came with it.
+    assert handed["remote_origin"]["computer_id"] == identity(p.main)
+    assert "self_work" not in handed
+    assert {c["authored_by"] for c in handed["recipe"]["acceptance_criteria"]} == {
+        f"desktop:{identity(p.main)}"
+    }
+    # Then the user queues a task of their own here, with one worker free.
+    own = p.worker_home.create_task(
+        {
+            "request_id": "own",
+            "title": "My own question",
+            "type": "research",
+            "prompt": "What changed in the startup path?",
+            "project_dir": str(p.project),
+            "computer": p.worker_home.computer_id(),
+        }
+    )["task"]["active_run"]
+    p.worker_home.tick()
+    wait(lambda: p.researcher.runs)
+    assert p.researcher.runs == [own["id"]]
+    assert run_body(p.worker_home, own["id"])["state"] == "executing"
+    assert run_body(p.worker_home, handed["id"])["state"] == "queued"
+    # Once the user's task ends, the handed-over one gets the worker.
+    p.researcher.release.set()
+    p.both(lambda: len(p.researcher.runs) == 2)
+    assert p.researcher.runs == [own["id"], handed["id"]]
+
+
+def test_a_desktop_past_its_cap_of_handed_over_tasks_is_refused_with_the_reason(fleet_pair):
+    from gofer.devices.application import REM_TASKS_PER_DESKTOP, host_template
+
+    p = fleet_pair
+    assert REM_TASKS_PER_DESKTOP == 10
+    project_id = peer_row(p.main, p.worker)["catalog"]["projects"][0]["id"]
+    for index in range(REM_TASKS_PER_DESKTOP):
+        p.main.action(
+            {
+                "action": "send",
+                "kind": "job.submit",
+                "device_id": identity(p.worker),
+                "thread_id": host_template(identity(p.main)),
+                "project_id": project_id,
+                "request_id": str(uuid4()),
+                "text": f"Question {index}",
+                "rem_task": {
+                    "run_id": f"run-{index}",
+                    "type": "research",
+                    "execution_mode": "work",
+                    "title": f"Question {index}",
+                    "prompt": "Read the logs",
+                    "checks": [],
+                },
+            }
+        )
+    # Ten are queued there, none of them started yet.
+    assert len(held_over(p, REM_TASKS_PER_DESKTOP)) == REM_TASKS_PER_DESKTOP
+    # The eleventh, handed over by this computer's Rem, is refused, and its run here
+    # says why, naming the cap.
+    run = p.pin()
+    done = on_main(p, lambda: (r := run_body(p.main_home, run["id"]))["state"] == "failed" and r)
+    assert "Desk B refused this task" in done["summary_short"]
+    assert "already has 10 tasks from this computer queued or running" in done["summary_short"]
+    assert "the most it takes from one computer at once" in done["summary_short"]
+    assert len(p.worker.application.rem_tasks()) == REM_TASKS_PER_DESKTOP  # type: ignore[union-attr]
     assert p.worker_home.store.tasks() == []
 
 

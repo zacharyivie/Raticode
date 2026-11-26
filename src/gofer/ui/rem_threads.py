@@ -12,7 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from gofer.ui.swarm_tools import TOOL_FAILURE_HINT, SwarmToolServer
-from gofer.utils.process import NO_REPOSITORY_PROGRAMS, build_subprocess_env
+from gofer.utils.process import run_repository_git
 
 INSTRUCTIONS = """Rem thread tools are available. Open projects are listed below.
 Global scope uses the configured provider permissions and selected Rem resources.
@@ -99,13 +99,8 @@ def thread_tools(
 
 def _git_worktrees(project: Path) -> set[Path]:
     try:
-        result = subprocess.run(
-            ["git", *NO_REPOSITORY_PROGRAMS, "-C", str(project), "worktree", "list", "--porcelain"],
-            capture_output=True,
-            text=True,
-            timeout=GIT_TIMEOUT_SECONDS,
-            check=False,
-            env=build_subprocess_env(),
+        result = run_repository_git(
+            project, "worktree", "list", "--porcelain", timeout=GIT_TIMEOUT_SECONDS
         )
     except (OSError, subprocess.TimeoutExpired):
         return set()

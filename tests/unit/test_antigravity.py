@@ -293,26 +293,6 @@ async def test_cancellation_and_timeout_drain_native_process(monkeypatch, tmp_pa
         assert events[-1]["exitCode"] != 0
 
 
-def test_antigravity_short_native_slug_and_default_sentinel():
-    from gofer.core.planner import _provider_binary
-
-    assert _provider_binary("antigravity") == "agy"
-    models = capabilities._antigravity_models_from_listing("auto  Auto\n")
-    assert models[0].id == "auto"
-    capabilities._validate_capability_selection(
-        capabilities.ProviderCapability(
-            id="antigravity",
-            display_name="Antigravity",
-            available=True,
-            discovery_status="ready",
-            models=models,
-            supports_custom_model=True,
-        ),
-        "cli-default",
-        "cli-default",
-    )
-
-
 async def test_rem_routes_existing_thread_to_native_antigravity(monkeypatch, tmp_path):
     from gofer.ui import chat
 

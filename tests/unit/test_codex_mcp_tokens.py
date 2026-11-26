@@ -213,30 +213,3 @@ async def test_streamed_codex_turn_gets_token_in_env_only(
     assert _token(url) not in "\0".join(command)
     assert _token(url) not in kwargs["stdin"].decode()
     assert kwargs["env"][f"{CODEX_MCP_TOKEN_ENV_PREFIX}1"] == _token(url)
-
-
-@pytest.mark.asyncio
-async def test_one_shot_codex_turn_gets_token_in_env_only(
-    servers, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _patch_chat(monkeypatch)
-    calls: list[tuple[list[str], dict[str, Any]]] = []
-
-    async def run(command: list[str], **kwargs: Any) -> tuple[int, str, str]:
-        calls.append((command, kwargs))
-        return 0, CODEX_ANSWER, ""
-
-    monkeypatch.setattr(chat, "run_subprocess", run)
-    url = servers[0].register(lambda _n, _a: "ok", [])
-    result = await chat.run_workflow_chat(
-        "codex",
-        "cli-default",
-        [{"role": "user", "body": "hi"}],
-        _workflow(tmp_path, url),
-        data_dir=tmp_path / "data",
-        trusted_swarm_url=url,
-    )
-    assert result["message"]["body"] == "Done"
-    [(command, kwargs)] = calls
-    assert _token(url) not in "\0".join(command)
-    assert kwargs["env"][f"{CODEX_MCP_TOKEN_ENV_PREFIX}1"] == _token(url)

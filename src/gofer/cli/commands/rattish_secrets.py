@@ -15,6 +15,7 @@ from typing import Any
 
 import typer
 
+from gofer.cli.output import fail
 from gofer.utils.paths import get_data_dir
 
 app = typer.Typer(
@@ -27,7 +28,7 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-_DATA_DIR_OPTION = typer.Option(None, "--data-dir", help="Override the app data directory.")
+_DATA_DIR_OPTION = typer.Option(None, "--data-dir", help="Override the data folder.")
 _FORMAT_OPTION = typer.Option("text", "--format", help="Output format: text or json.")
 
 
@@ -37,19 +38,11 @@ def _require_format(output_format: str) -> None:
         raise typer.Exit(2)
 
 
-def _fail(message: str, output_format: str, code: int = 1) -> typer.Exit:
-    if output_format == "json":
-        typer.echo(json.dumps({"ok": False, "error": message}, sort_keys=True))
-    else:
-        typer.echo(message, err=True)
-    return typer.Exit(code)
-
-
 def _refuse_agent(action: str, output_format: str) -> None:
     from gofer.cli.commands._backend import agent_session
 
     if agent_session():
-        raise _fail(
+        raise fail(
             f"Only you can {action}. This command is running inside a Raticode agent turn; "
             "run it from your own terminal or use Workflow settings > Secrets.",
             output_format,
@@ -92,12 +85,12 @@ def set_secret(
     try:
         check_name(name)
     except WorkflowSecretError as exc:
-        raise _fail(str(exc), output_format, code=2) from None
+        raise fail(str(exc), output_format, code=2) from None
     value = _read_value(name, from_stdin)
     try:
         entry = save_workflow_secret(name, value, data_dir or get_data_dir())
     except WorkflowSecretError as exc:
-        raise _fail(str(exc), output_format) from None
+        raise fail(str(exc), output_format) from None
     if output_format == "json":
         typer.echo(json.dumps({"ok": True, "secret": entry}, sort_keys=True))
         return
@@ -145,7 +138,7 @@ def remove_secret(
     try:
         result: dict[str, Any] = remove_workflow_secret(name, data_dir or get_data_dir())
     except WorkflowSecretError as exc:
-        raise _fail(str(exc), output_format) from None
+        raise fail(str(exc), output_format) from None
     if output_format == "json":
         typer.echo(json.dumps({"ok": True, **result}, sort_keys=True))
         return

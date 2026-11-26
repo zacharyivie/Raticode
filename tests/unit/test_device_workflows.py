@@ -166,7 +166,7 @@ def test_views_show_open_project_workflows_without_paths(desk, tmp_path):
 
 
 def test_phone_lists_and_runs_workflows_found_outside_raticode(desk):
-    from gofer.rattish.workspaces import discover_registered_workflows
+    from gofer.rattish.workspaces import discover_project_workflows
 
     app, peer, context, send, _, release, ran, base = desk
     root = Path(context["projects"][0]["root"])
@@ -174,7 +174,7 @@ def test_phone_lists_and_runs_workflows_found_outside_raticode(desk):
         folder = root / team / "daily"
         folder.mkdir(parents=True)
         (folder / "workflow.rattish").write_text(SOURCE, encoding="utf-8")
-    discovered = discover_registered_workflows(root, registry_dir=base)
+    discovered = discover_project_workflows(root, registry_dir=base).workflows
     ids = {workflow.relative_folder: workflow.workflow_id for workflow in discovered}
 
     listed = send("desktop.read", "workflows.list")["value"]["workflows"]
@@ -886,7 +886,7 @@ def test_phone_shows_daily_limits_and_when_they_are_reached(desk):
     assert listed[plain.id]["daily_limit"] == "" and listed[plain.id]["limit_reached"] is False
     # The Time limit shows read-only: 6 hours unless changed on the computer.
     assert listed[capped.id]["time_limit"] == "Time limit: 6 h"
-    store.update(plain.id, max_run_seconds=None)
+    store.update(plain.id, max_run_seconds=None, actor="user")
     view = send("desktop.read", "workflows.read", {"workflow_id": shown.workflow_id})["value"]
     assert {item["trigger_id"]: item for item in view["triggers"]}[plain.id][
         "time_limit"

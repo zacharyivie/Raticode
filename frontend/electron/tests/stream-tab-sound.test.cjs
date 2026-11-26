@@ -131,7 +131,7 @@ for (const [name, spec] of Object.entries(ENGINES)) {
 
       // A tab in the background, not on screen, still says it plays: this keeps it from being unloaded.
       contents.setView({ width: 800, height: 600, scale: 1 }, false);
-      await contents.evaluateIn("test", "document.querySelector('audio').play().then(() => true)", { userGesture: true, userActivation: true });
+      await contents.evaluateIn("test", "document.querySelector('audio').play().then(() => true)", { userGesture: true });
       await waitFor(() => contents.isCurrentlyAudible(), "a hidden tab playing sound was not reported as playing");
       assert.deepEqual(changes, [true, false, true]);
     } finally {

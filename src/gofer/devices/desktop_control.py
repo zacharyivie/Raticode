@@ -79,109 +79,8 @@ from gofer.devices.tailnet import is_tailnet_address
 from gofer.devices.wake import clean_address, hardware_address, private_ipv4
 from gofer.ui.file_mentions import file_mentions
 from gofer.ui.rem_ticket_activity import visible_comments
+from gofer.utils.images import sniff_image_type
 
-READ_OPS = frozenset(
-    {
-        "overview",
-        "browser.tabs",
-        "computers.list",
-        "computers.placement",
-        "developer.log",
-        "files.list",
-        "files.text",
-        "kanban.board",
-        "kanban.timeline",
-        "media.image",
-        "media.preview",
-        "rem.draft",
-        "rem.history",
-        "rem.home",
-        "rem.decisions",
-        "rem.memories",
-        "rem.notices",
-        "rem.search",
-        "rem.task",
-        "rem.thread",
-        "organizations.list",
-        "organizations.read",
-        "organizations.note",
-        "posts.list",
-        "provider.accounts",
-        "selfwork.read",
-        "settings.get",
-        "source_control.commit",
-        "source_control.diff",
-        "source_control.history",
-        "source_control.list",
-        "source_control.read",
-        "usage.overview",
-        "workflows.failure",
-        "workflows.list",
-        "workflows.read",
-        "workflows.runs",
-        "workflows.tests",
-        "workflows.tests.estimate",
-        "workflows.trigger.changes",
-    }
-)
-ACTION_OPS = frozenset(
-    {
-        "browser.open",
-        "computers.place",
-        "computers.set",
-        "files.link",
-        "files.open",
-        "kanban.participant",
-        "kanban.ticket",
-        "selfwork.settings",
-        "selfwork.stop",
-        "selfwork.report.seen",
-        "rem.attachment",
-        "rem.message",
-        "rem.instruct",
-        "rem.tidy",
-        "rem.decision.change",
-        "rem.memory.add",
-        "rem.memory.edit",
-        "rem.memory.forget",
-        "rem.memory.mode",
-        "rem.memory.undo",
-        "rem.task.create",
-        "rem.task.run",
-        "rem.task.pause",
-        "rem.task.resume",
-        "rem.task.delete",
-        "rem.run.cancel",
-        "rem.run.acknowledge",
-        "rem.run.acknowledge_all",
-        "rem.run.retry_review",
-        "rem.run.pause",
-        "rem.run.resume",
-        "rem.run.wake",
-        "organizations.control",
-        "computers.run_there",
-        "organizations.task",
-        "organizations.knowledge",
-        "organizations.worker",
-        "organizations.schedule",
-        "organizations.backlog_pull",
-        "organizations.requests",
-        "organizations.auto_mode",
-        "posts.decide",
-        "provider.account.sign_in",
-        "swarms.start",
-        "settings.update",
-        "workflows.run",
-        "workflows.stop",
-        "workflows.resume",
-        "workflows.rerun",
-        "workflows.trigger",
-        "workflows.trigger.approve",
-        "workflows.triggers.pause",
-        "workflows.tests.try",
-        "workflows.tests.use_model",
-    }
-)
 # Result bodies are JSON text split into parts. Escaping can at most double a
 # part inside the record, which stays below the 65,536-byte record limit.
 CHUNK = 24000
@@ -411,12 +310,6 @@ _SCHEME = re.compile(r"^[a-z][a-z\d+.-]*:", re.IGNORECASE)
 _WINDOWS_DRIVE = re.compile(r"^[a-z]:[\\/]", re.IGNORECASE)
 # Message images the phone fetches through the desktop, identified by their bytes.
 IMAGE_LIMIT = 768 * 1024
-IMAGE_SIGNATURES = (
-    (b"\xff\xd8\xff", "image/jpeg"),
-    (b"\x89PNG\r\n\x1a\n", "image/png"),
-    (b"GIF87a", "image/gif"),
-    (b"GIF89a", "image/gif"),
-)
 # Characters the phone strips from file names; an offer must already be clean.
 _HIDDEN = set("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 
@@ -1037,6 +930,16 @@ def _decision_card(value: Any) -> dict[str, Any] | None:
     }
 
 
+def _decision_read_from(item: dict[str, Any]) -> dict[str, str] | None:
+    """``read_from``: the commit (short hash) and author name that added a record file."""
+    from gofer.ui.rem_decisions import read_from
+
+    read = read_from(item)
+    if read is None:
+        return None
+    return {"commit": _text(read["commit"], 40), "author": _alert_text(read["author"], 100)}
+
+
 def _decision_check(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict) or not value.get("ran_at"):
         return None
@@ -1216,6 +1119,9 @@ def _decision_item(item: dict[str, Any]) -> dict[str, Any]:
         # carried over from what Raticode did before decisions existed.
         "last_check": _decision_check(item.get("last_check")),
         "carried_over": (item.get("source") or {}).get("via") == "carried over",
+        # A record file Raticode read in rather than wrote: the commit that added it on the
+        # landing branch and that commit's author's name; null once the user decided on it.
+        "read_from": _decision_read_from(item),
         # A waiting question's asked line: who asked it, when, and what waits on it.
         "asked": _decision_asked(item.get("asked")),
         "history": [
@@ -1379,12 +1285,7 @@ def _newest(items: list[dict[str, Any]], budget: int = 600_000) -> list[dict[str
 
 
 def image_type(data: bytes) -> str | None:
-    for signature, mime in IMAGE_SIGNATURES:
-        if data.startswith(signature):
-            return mime
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    return None
+    return sniff_image_type(data)
 
 
 def fetch_image(url: str) -> dict[str, Any]:

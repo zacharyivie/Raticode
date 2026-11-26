@@ -120,11 +120,6 @@ def _spans(content: str, name: str) -> Iterator[tuple[int, int, str]]:
     yield from sorted(set(found))
 
 
-def find_links(content: str, name: str, root: Path, folder: Path) -> list[LinkCheck]:
-    """Every link in a note that resolves to a file path, in document order."""
-    return [check_link(link, root, folder) for _, _, link in _spans(content, name)]
-
-
 def rewrite_links(
     content: str, name: str, root: Path, folder: Path
 ) -> tuple[str, list[LinkCheck], list[LinkCheck]]:

@@ -35,18 +35,20 @@ from gofer.subscriptions.cli_providers import CliSubscription
 from gofer.subscriptions.codex import CodexSubscription
 from gofer.subscriptions.grok_headless import GrokConversationSubscription
 from gofer.utils.atomic_output import mkdir_without_links
+from gofer.utils.images import sniff_image_type
 from gofer.utils.terminal_text import one_line
 
 REPLY_KEY = re.compile(r'"reply"\s*:\s*"')
 
-# Image formats that every image-capable chat model reads, recognised by their first
-# bytes rather than by the type or name the upload claimed.
-IMAGE_SIGNATURES: tuple[tuple[bytes, str, str], ...] = (
-    (b"\x89PNG\r\n\x1a\n", "image/png", ".png"),
-    (b"\xff\xd8\xff", "image/jpeg", ".jpg"),
-    (b"GIF87a", "image/gif", ".gif"),
-    (b"GIF89a", "image/gif", ".gif"),
-)
+# Image formats that every image-capable chat model reads, and the file suffix each is
+# saved with. The type comes from the image's first bytes (sniff_image_type), never from
+# the type or name the upload claimed.
+IMAGE_SUFFIXES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
 # Claude's limit for one image; the other CLIs accept at least this much.
 CHAT_IMAGE_LIMIT = 5 * 1024 * 1024
 CHAT_IMAGE_BUDGET = 20 * 1024 * 1024
@@ -187,12 +189,9 @@ class ChatImage:
 
 def image_kind(data: bytes) -> tuple[str, str] | None:
     """The media type and file suffix of a supported image, from its first bytes."""
-    for signature, media_type, suffix in IMAGE_SIGNATURES:
-        if data.startswith(signature):
-            return media_type, suffix
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp", ".webp"
-    return None
+    media_type = sniff_image_type(data)
+    suffix = IMAGE_SUFFIXES.get(media_type or "")
+    return (media_type, suffix) if media_type and suffix else None
 
 
 def _reply_account(provider: str, config: dict[str, Any], data_dir: Path | None) -> str | None:

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "raticode"
-version = "0.6.0"
+version = "0.6.1"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 authors = [{ name = "Raticode", email = "support@raticode.dev" }]
@@ -15,13 +15,9 @@ dependencies = [
     "apscheduler>=3.11.3",
     "networkx>=3.3",
     "pydantic>=2.14.3",
-    "pydantic-settings>=2.16.2",
     "rich>=13.7",
     "anyio>=4.16.0",
-    "python-dotenv>=1.2.3",
-    "sqlalchemy>=2.1.8",
     "tomli-w>=1.0",
-    "questionary>=2.0",
     "jsonschema>=4.23",
     "referencing>=0.35",
     "tzdata>=2026.4",
@@ -44,7 +40,6 @@ Changelog = "https://github.com/zacharyivie/Raticode/releases"
 devices = [
     "cryptography==50.0.2",
     "pyOpenSSL==26.4.0",
-    "tink==1.16.1",
     "keyring==25.7.0",
     "segno==1.6.6",
 ]

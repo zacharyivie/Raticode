@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { CheckCheck, ChevronDown, ChevronRight, MoreHorizontal, Plus, Target } from "lucide-react";
+import { CheckCheck, ChevronDown, ChevronRight, MoreHorizontal, Play, Plus, Square, Target } from "lucide-react";
 import { dismissibleUpdates, groupTasks, statusLine } from "../lib/remHome.js";
 import { acknowledgeAllRemRuns, connectRemHome, deleteRemTask, openNewTask, openTaskSheet, showRemMessage, useRemHome } from "../lib/remHomeStore.js";
+import { modeLabel, saveSelfWork, selfWorkToggle, useKanban } from "../lib/remKanban.js";
 import { taskObjective } from "../lib/remObjectives.js";
 import { RemMenu, TaskGlyph, taskActions, typeLabel } from "./RemHomeParts.jsx";
 import RemObjectives from "./RemObjectives.jsx";
@@ -72,6 +73,37 @@ function Group({ group, now }) {
   </section>;
 }
 
+// Start or stop self-work, under Rem's name so it's always in view. Off, Start begins work now;
+// on, it shows what self-work is doing and stops it, and while self-work waits for quiet
+// minutes, Start now skips the wait. A failed poll keeps the last state quietly; only a failed
+// click shows its error.
+function SelfWorkToggle({ active }) {
+  const { selfWork, error, run } = useKanban(active, 5000);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const toggle = selfWorkToggle(selfWork);
+  if (!toggle) return null;
+  const Icon = toggle.on ? Square : Play;
+  const send = async change => {
+    setBusy(true);
+    try { setFailed(!(await run(() => saveSelfWork(change)))); } finally { setBusy(false); }
+  };
+  return <div className="rem-self-work" data-on={toggle.on || undefined} data-mode={toggle.mode} data-testid="rem-self-work">
+    <button type="button" className="rem-self-work-toggle" disabled={busy} onClick={() => send(toggle.change)}
+      title={toggle.on ? "Turn self-work off. Work already running finishes." : "Start self-work now, without waiting for quiet minutes. It keeps going until you stop it, and your objectives stay as they are."}>
+      <Icon size={12} fill="currentColor" aria-hidden="true" />
+      <span>{toggle.label}</span>
+      {toggle.on ? <small className="rem-self-work-mode">{modeLabel(toggle.mode)}</small> : null}
+    </button>
+    {toggle.detail || toggle.startNow ? <p className="rem-self-work-line" title={toggle.detail}>
+      {toggle.detail}
+      {toggle.startNow ? <> <button type="button" className="rem-self-work-now" disabled={busy} onClick={() => send(toggle.startNow)}
+        title="Start self-work now instead of waiting for quiet minutes">Start now</button></> : null}
+    </p> : null}
+    {failed && error ? <p role="alert" className="rem-self-work-error">{error}</p> : null}
+  </div>;
+}
+
 export default function RemHomeSidebar({ active, open, onOpen, projectOptions = [], projectRoot = "" }) {
   const store = useRemHome();
   const now = useMinuteClock();
@@ -92,6 +124,7 @@ export default function RemHomeSidebar({ active, open, onOpen, projectOptions = 
       </button>
       <button type="button" className="rem-side-icon" aria-label="New task" title="New task" onClick={openNewTask}><Plus size={16} /></button>
     </div>
+    <SelfWorkToggle active={active} />
     <div className="rem-side-scroll">
       {store.status === "ready" || store.objectives.items.length ? <RemObjectives objectives={store.objectives} tasks={store.tasks} /> : null}
       {store.decisions.items.length ? <RemDecisions decisions={store.decisions} project={projectRoot} /> : null}

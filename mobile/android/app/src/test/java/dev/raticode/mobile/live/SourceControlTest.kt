@@ -27,10 +27,9 @@ class SourceControlTest {
         assertEquals("Add bar", first.lastCommit?.subject)
         assertFalse(first.detailed)
         assertEquals("3 changed files", SourceControl.headline(first))
-        assertEquals("2 to push", SourceControl.syncText(first))
+        assertEquals("origin/dev" to (2 to 0), first.upstream to (first.ahead to first.behind))
         assertEquals("dev", SourceControl.branchText(first))
         assertEquals("Not a Git repository", SourceControl.headline(list.projects[1]))
-        assertEquals("", SourceControl.syncText(list.projects[1]))
     }
 
     @Test fun readParsesFilesHistoryAndWorktrees() {
@@ -55,15 +54,12 @@ class SourceControlTest {
 
     @Test fun branchStatesReadAsWords() {
         val ok = SourceControl.parse(JSONObject("""{"project_id":"p","state":"ok","branch":"main","upstream":"origin/main","ahead":0,"behind":0}"""))
-        assertEquals("Up to date with origin/main", SourceControl.syncText(ok))
+        assertEquals("origin/main" to (0 to 0), ok.upstream to (ok.ahead to ok.behind))
         assertFalse(SourceControl.attention(ok))
         val behind = ok.copy(ahead = 1, behind = 3)
-        assertEquals("1 to push, 3 to pull", SourceControl.syncText(behind))
         assertTrue(SourceControl.attention(behind))
-        assertEquals("No upstream branch", SourceControl.syncText(ok.copy(upstream = "", ahead = null, behind = null)))
         val detached = ok.copy(branch = "", detached = true, head = "abcdef123456", upstream = "")
         assertEquals("Detached at abcdef1", SourceControl.branchText(detached))
-        assertEquals("Detached HEAD", SourceControl.syncText(detached))
         assertEquals("No commits yet", SourceControl.branchText(ok.copy(branch = "", detached = false, head = "")))
         val merging = ok.copy(operation = "merge", changes = SourceChanges(1, 0, 1, 0, 1))
         assertEquals("Merge in progress", SourceControl.headline(merging))
@@ -82,7 +78,7 @@ class SourceControlTest {
         val (repo, plain) = list.projects
         assertEquals("Raticode", repo.name)
         assertEquals("dev", SourceControl.branchText(repo))
-        assertEquals("1 to push", SourceControl.syncText(repo))
+        assertEquals(1 to 0, repo.ahead to repo.behind)
         assertEquals(SourceChanges(3, 1, 1, 1, 0), repo.changes)
         assertEquals("Add bar settings", repo.lastCommit?.subject)
         assertEquals("Not a Git repository", SourceControl.headline(plain))

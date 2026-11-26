@@ -8,7 +8,9 @@ When a run starts, Raticode checks the file and copies it into the run's folder,
 the run record, as ``<run_id>.files/<input>/<file name>``. The folders are owner-only
 (0700) and the copy is readable only by this user (0600). The input is then bound to the
 copy's absolute path, so later changes to the original can't change the run, and the
-saved inputs (``run_values``) record that path. Resume, Run again and Run from here give
+saved inputs (``run_values``) record that path. The copy's SHA-256 is taken while it is
+written, so a cached step (``result_cache``) can name the file by its contents instead of
+by this run's path without reading it again. Resume, Run again and Run from here give
 the new run its own copy of the earlier run's copy, a hard link where the file system
 allows one, so deleting either run never takes the other's file. ``delete_run_files``
 removes the folder with the run, and ``remove_orphaned_files`` sweeps folders whose run
@@ -24,6 +26,7 @@ triggered run says so when the input is required, and a trigger's own inputs ref
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import mimetypes
 import os
 import re
@@ -316,8 +319,11 @@ def _private_dir(path: Path) -> None:
         os.chmod(path, 0o700)
 
 
-def _copy_into(source: Path, destination: Path, spec: FileInputSpec) -> None:
-    """Copy at most ``spec.max_size`` bytes of a regular file into a new 0600 file."""
+def _copy_into(source: Path, destination: Path, spec: FileInputSpec) -> str:
+    """Copy at most ``spec.max_size`` bytes of a regular file into a new 0600 file.
+
+    Returns the SHA-256 of the bytes copied, as hex.
+    """
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
         reader = os.open(source, flags)
@@ -337,6 +343,7 @@ def _copy_into(source: Path, destination: Path, spec: FileInputSpec) -> None:
             0o600,
         )
         copied = 0
+        digest = hashlib.sha256()
         try:
             while chunk := os.read(reader, _COPY_CHUNK):
                 copied += len(chunk)
@@ -345,6 +352,7 @@ def _copy_into(source: Path, destination: Path, spec: FileInputSpec) -> None:
                         f"File input {spec.name!r}: {source.name} grew past "
                         f"{format_size(spec.max_size)} while it was copied."
                     )
+                digest.update(chunk)
                 view = memoryview(chunk)
                 while view:
                     view = view[os.write(writer, view) :]
@@ -359,9 +367,16 @@ def _copy_into(source: Path, destination: Path, spec: FileInputSpec) -> None:
                 os.close(writer)
     finally:
         os.close(reader)
+    return digest.hexdigest()
 
 
-def _link_or_copy(source: Path, destination: Path, spec: FileInputSpec) -> None:
+def _file_digest(path: Path) -> str:
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def _link_or_copy(source: Path, destination: Path, spec: FileInputSpec) -> str:
+    """Link or copy an earlier run's copy; returns the new copy's SHA-256 as hex."""
     try:
         info = source.lstat()
     except OSError:
@@ -369,10 +384,10 @@ def _link_or_copy(source: Path, destination: Path, spec: FileInputSpec) -> None:
     if info is not None and stat.S_ISREG(info.st_mode):
         try:
             os.link(source, destination, follow_symlinks=False)
-            return
+            return _file_digest(destination)
         except OSError:
             pass
-    _copy_into(source, destination, spec)
+    return _copy_into(source, destination, spec)
 
 
 def _inside(path: Path, folder: Path) -> bool:
@@ -411,6 +426,23 @@ def missing_copies_message(names: list[str]) -> str:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class StagedInputs:
+    """A run's inputs bound to its file copies, and what each copy holds.
+
+    ``contents`` maps each copy's path to ``file:<input>/<name>#sha256:<digest>``, which
+    the result cache uses in place of the path, so a new copy of the same bytes keeps
+    its saved answers.
+    """
+
+    inputs: dict[str, Any]
+    contents: dict[str, str]
+
+
+def content_token(input_name: str, file_name: str, digest: str) -> str:
+    return f"file:{input_name}/{file_name}#sha256:{digest}"
+
+
 def stage_file_inputs(
     ir: Mapping[str, Any],
     inputs: Mapping[str, Any],
@@ -419,7 +451,7 @@ def stage_file_inputs(
     data_dir: Path,
     reuse_from: Path | None = None,
     base: Path | None = None,
-) -> dict[str, Any]:
+) -> StagedInputs:
     """Copy each file input into the run folder; ``inputs`` bound to the copies.
 
     ``reuse_from`` is the record of the run whose saved inputs these are (Resume, Run
@@ -431,11 +463,12 @@ def stage_file_inputs(
     specs = file_input_specs(ir)
     supplied = [name for name in specs if isinstance(inputs.get(name), str)]
     if not supplied:
-        return dict(inputs)
+        return StagedInputs(dict(inputs), {})
     folder = run_files_dir(record)
     earlier = run_files_dir(reuse_from) if reuse_from is not None else None
     uploads = uploads_dir(data_dir)
     result = dict(inputs)
+    contents: dict[str, str] = {}
     consumed: list[Path] = []
     try:
         _private_dir(folder)
@@ -448,14 +481,15 @@ def stage_file_inputs(
                 if not value.is_file():
                     raise FileInputError(missing_copies_message([name]))
                 destination = target_dir / safe_file_name(value.name)
-                _link_or_copy(value, destination, spec)
+                digest = _link_or_copy(value, destination, spec)
             else:
                 source = check_file(spec, str(value), base=base)
                 destination = target_dir / safe_file_name(source.name)
-                _copy_into(source, destination, spec)
+                digest = _copy_into(source, destination, spec)
                 if _inside(source, uploads):
                     consumed.append(source)
             result[name] = str(destination)
+            contents[str(destination)] = content_token(name, destination.name, digest)
     except FileInputError:
         remove_tree(folder)
         raise
@@ -466,7 +500,7 @@ def stage_file_inputs(
         ) from None
     for upload in consumed:
         remove_upload(upload, data_dir)
-    return result
+    return StagedInputs(result, contents)
 
 
 def remove_tree(folder: Path) -> None:

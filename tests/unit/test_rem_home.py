@@ -1763,6 +1763,59 @@ def test_all_providers_execute_and_verify_using_selected_model(
         assert all(o["permission_mode"] == "dontAsk" for o in observed)
 
 
+def test_handed_over_task_runs_unattended_without_this_computers_brain(
+    home: RemHome, tmp_path: Path
+):
+    original = home.source
+    observed: list[dict[str, Any]] = []
+
+    async def source(**kwargs):
+        observed.append(kwargs)
+        async for event in original(**kwargs):
+            yield event
+
+    brain = tmp_path / "brain"
+    brain.mkdir()
+    home.source = source
+    home.configure(
+        {
+            "provider": "claude_code",
+            "brain": {"enabled": True, "root": str(brain)},
+            "resources": {
+                "browser": True,
+                "agents": True,
+                "mcpServers": [{"name": "x", "url": "http://127.0.0.1:9/mcp"}],
+            },
+        }
+    )
+    task = home.create_task(
+        {"request_id": "remote:req", **recipe(tmp_path, type="research")},
+        remote_origin={
+            "computer_id": "desk-a",
+            "computer_name": "Desk A",
+            "request_id": "req",
+            "run_id": "sender-run",
+        },
+    )["task"]
+    wait_run(home, task["id"], {"succeeded", "blocked", "failed"})
+    worker = observed[0]
+    workflow = worker["workflow"]
+    managed = workflow["remManagedTask"]
+    assert managed["unattended"] is True
+    assert managed["limitDataFolder"] is True
+    assert managed["claudeSandbox"] is True
+    assert workflow["remBlockGitPush"] is True
+    assert workflow["remUnattended"] is True
+    assert workflow["remSwarmAccess"]["enabled"] is False
+    # This computer's notes never reach an answer that goes back to another computer.
+    assert "remSecondBrain" not in workflow
+    resources = workflow["remResources"]
+    assert resources["browser"] is False and resources["agents"] is False
+    assert "x" not in [s["name"] for s in resources.get("mcpServers", [])]
+    assert "A paired desktop handed this task over" in worker["agent_instructions"]
+    assert "git push is blocked" in worker["agent_instructions"]
+
+
 @pytest.mark.parametrize("provider", ["codex", "claude_code"])
 def test_reviewers_get_a_private_scratch_folder(home: RemHome, tmp_path: Path, provider: str):
     original = home.source

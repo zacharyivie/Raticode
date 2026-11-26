@@ -1,0 +1,26 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000281",
+  "id": "10000000-0000-4000-8000-000000000281",
+  "sequence": 281,
+  "type": "desktop.action",
+  "payload": {
+    "op": "rem.decision.change",
+    "params": {
+      "action": "replace",
+      "id": "D-4",
+      "expected_revision": 9,
+      "answer": "Store sessions in SQLite, not in Redis.",
+      "why": "One file to back up; no server to run.",
+      "context": "Sessions lived in Redis, which only the web app used.",
+      "options": "Keep Redis; move to Postgres.",
+      "consequences": "Session reads go through the app's own database.",
+      "check": "No change adds a Redis client.",
+      "applies_to": ["src/sessions/**"],
+      "forbids": ["src/**/redis*.py"],
+      "signals": ["redis"],
+      "note": "Changed from the phone"
+    }
+  }
+}

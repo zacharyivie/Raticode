@@ -100,7 +100,10 @@ if (!fs.existsSync(os.tmpdir())) throw new Error("child removed the shared folde
   assert.deepEqual(runsIn(base), []);
 });
 
-test("A parent folder another name points at is refused, and the run keeps the normal temp folder", linuxOnly, (t) => {
+// The run folder's place in the normal temp folder, where a run goes when its base is refused.
+const fallbackRuns = (temp) => path.join(temp, `raticode-tests-${process.getuid()}`);
+
+test("A parent folder another name points at is refused, and the run uses a folder in the normal temp folder instead", linuxOnly, (t) => {
   const base = fixture(t);
   const elsewhere = fs.mkdtempSync(path.join(base, "elsewhere-"));
   fs.symlinkSync(elsewhere, path.join(base, `raticode-tests-${process.getuid()}`));
@@ -109,7 +112,53 @@ test("A parent folder another name points at is refused, and the run keeps the n
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stderr, /not a private folder/);
   assert.deepEqual(fs.readdirSync(elsewhere), []);
-  assert.equal(result.stdout.trim(), normalTemp);
+  assert.equal(path.dirname(result.stdout.trim()), fallbackRuns(normalTemp));
+  assert.deepEqual(fs.readdirSync(fallbackRuns(normalTemp)), []);
+});
+
+// Inside an agent's sandbox /var/tmp is read-only. The run used to fall back to the
+// sandbox's RAM-backed temp folder with no cleanup, and its browser profiles piled up.
+test("A run whose base can't be written still removes everything it wrote to the normal temp folder", linuxOnly, async (t) => {
+  const base = fixture(t);
+  const readOnly = fs.mkdtempSync(path.join(base, "read-only-"));
+  fs.chmodSync(readOnly, 0o500);
+  const normalTemp = fs.mkdtempSync(path.join(base, "normal-temp-"));
+  const env = { ...childEnv(readOnly), TMPDIR: normalTemp };
+
+  const result = spawnSync(process.execPath, ["-e", WRITE], { env, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(path.dirname(result.stdout.trim()), fallbackRuns(normalTemp));
+  assert.deepEqual(fs.readdirSync(normalTemp), [`raticode-tests-${process.getuid()}`]);
+  assert.deepEqual(fs.readdirSync(fallbackRuns(normalTemp)), []);
+
+  const failed = spawnSync(process.execPath, ["-e", `${WRITE}throw new Error("test failed");`], { env, encoding: "utf8" });
+  assert.notEqual(failed.status, 0);
+  assert.deepEqual(fs.readdirSync(fallbackRuns(normalTemp)), []);
+
+  const stopped = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["-e", `${WRITE}setInterval(() => {}, 1000);`], { env, stdio: ["ignore", "pipe", "inherit"] });
+    child.stdout.once("data", () => child.kill("SIGTERM"));
+    child.on("error", reject);
+    child.on("exit", (code, signal) => resolve(signal));
+  });
+  assert.equal(stopped, "SIGTERM");
+  assert.deepEqual(fs.readdirSync(fallbackRuns(normalTemp)), []);
+});
+
+// A sandbox can number processes on its own, so a run only clears dead runs from its own namespace.
+test("A dead-looking run from another process namespace is left for Raticode to clear", linuxOnly, (t) => {
+  const base = fixture(t);
+  const runs = path.join(base, `raticode-tests-${process.getuid()}`);
+  fs.mkdirSync(runs, { mode: 0o700 });
+  const namespace = Number(/\[(\d+)\]/.exec(fs.readlinkSync("/proc/self/ns/pid"))[1]).toString(36);
+  const dead = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }).stdout;
+  const other = path.join(runs, `nzzzzzz-r${dead}-abcdef`);
+  const ours = path.join(runs, `n${namespace}-r${dead}-abcdef`);
+  for (const dir of [other, ours]) fs.mkdirSync(dir);
+
+  assert.equal(run(base, "").status, 0);
+  assert.equal(fs.existsSync(other), true);
+  assert.equal(fs.existsSync(ours), false);
 });
 
 // Every test that makes a temporary folder must either remove each one or load the

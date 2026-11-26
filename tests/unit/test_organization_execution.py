@@ -638,6 +638,122 @@ def test_managed_swarm_stops_at_reserved_turn_limit(
         swarms.close()
 
 
+@pytest.mark.parametrize("block_git_push", [None, False])
+def test_organization_push_block_covers_its_delegated_swarm(
+    setup: Any, tmp_path: Path, block_git_push: bool | None
+) -> None:
+    from gofer.ui.swarm_workspaces import git
+    from gofer.ui.swarms import SwarmManager
+
+    manager, org, call = setup
+    git(tmp_path, "init")
+    (tmp_path / "tracked.txt").write_text("base")
+    git(tmp_path, "add", "tracked.txt")
+    git(tmp_path, "commit", "-m", "Fixture")
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    git(remote, "init", "--bare")
+    git(tmp_path, "remote", "add", "origin", str(remote))
+    turns: list[tuple[dict[str, Any], str, dict[str, str]]] = []
+
+    async def agent(**kwargs: Any) -> Any:
+        token = next(key for key, value in swarms._tokens.items() if value[2] == "lead")
+        outcomes = {}
+        for operation, extra in (
+            ("push", {}),
+            ("create_pr", {"base": "main", "title": "Change", "body": "Body"}),
+        ):
+            try:
+                swarms.tool(token, {"action": "git", "operation": operation, **extra})
+                outcomes[operation] = "ok"
+            except ValueError as error:
+                outcomes[operation] = str(error)
+        turns.append((kwargs["workflow"], kwargs["agent_instructions"], outcomes))
+        yield {"type": "final", "message": {"body": "Tried to publish"}}
+
+    swarms = SwarmManager(tmp_path / "swarms", stream=agent)
+    manager.executions.swarms = swarms
+    try:
+        swarm = swarms.create(
+            tmp_path,
+            {
+                "name": "Publishers",
+                "gitPermissions": {"local": True, "remote": True},
+                "agents": [
+                    {
+                        "id": "lead",
+                        "name": "Lead",
+                        "role": "Coordinate",
+                        "isOrchestrator": True,
+                        "permissionMode": "workspace-write",
+                        "resources": org["config"]["employees"][0]["resources"],
+                    }
+                ],
+            },
+        )
+        current = call("read")
+        config = {
+            **current["config"],
+            "executionTargets": [
+                {
+                    "id": "team",
+                    "kind": "swarm",
+                    "employees": ["worker"],
+                    "swarmId": swarm["id"],
+                    "turnLimit": 1,
+                }
+            ],
+        }
+        if block_git_push is not None:
+            config["blockGitPush"] = block_git_push
+        call(
+            "configure",
+            config=config,
+            expectedRevision=current["revision"],
+            reason="Grant swarm",
+        )
+        call("task_create", title="Publish", assignee="worker", execution={"targetId": "team"})
+        call("control", state="running")
+        manager.dispatch()
+        drain(manager)
+        assert turns, call("attempts")["items"][0]
+        for workflow, instructions, outcomes in turns:
+            if block_git_push is False:
+                # The swarm's own remote permission applies.
+                assert workflow["remBlockGitPush"] is False
+                assert outcomes["push"] == "ok"
+                assert "Block git push" not in outcomes["create_pr"]
+                assert '"remote": true' in instructions
+            else:
+                assert workflow["remBlockGitPush"] is True
+                for refusal in outcomes.values():
+                    assert "Block git push in worker runs" in refusal
+                assert '"remote": false' in instructions
+        if block_git_push is not False:
+            assert git(remote, "for-each-ref") == ""
+        run = swarms.get(tmp_path, swarm["id"], include_history=False)["run"]
+        assert run["organization"]["blockGitPush"] is (block_git_push is not False)
+    finally:
+        swarms.close()
+
+
+def test_older_organization_swarm_runs_without_the_setting_block_push(tmp_path: Path) -> None:
+    from gofer.ui import swarm_git
+
+    workspace = {"path": str(tmp_path), "branch": "raticode/swarm/s/attempt/a"}
+    stored = {"organization": {"organizationId": "org", "taskId": "task"}}
+    assert swarm_git.organization_blocks_push(stored) is True
+    assert swarm_git.organization_blocks_push({}) is False
+    assert swarm_git.organization_blocks_push({"organization": {"blockGitPush": False}}) is False
+    with pytest.raises(ValueError, match="Block git push in worker runs"):
+        swarm_git.execute(
+            workspace,
+            {"local": True, "remote": True},
+            {"operation": "push"},
+            push_blocked_by_organization=swarm_git.organization_blocks_push(stored),
+        )
+
+
 def test_lost_remote_submit_reply_requests_stop_and_blocks_relaunch(
     setup: Any, monkeypatch: Any
 ) -> None:

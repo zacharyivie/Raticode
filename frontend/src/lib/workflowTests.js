@@ -1,4 +1,4 @@
-import { apiUrl } from "./api.js";
+import { apiJson } from "./api.js";
 
 // Test sets for Rattish workflows: the Studio Tests panel's API calls and the pure
 // helpers behind its case editor. The backend owns validation; these helpers only
@@ -29,30 +29,17 @@ export const EXPECT_STATUS = [
   ["any", "Either"],
 ];
 
-async function send(path, options) {
-  const response = await fetch(apiUrl(path), options);
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `Request failed (${response.status}).`);
-  return payload;
-}
-
-function post(path, body) {
-  return send(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body ?? {}),
-  });
-}
+const send = (path, options = {}) => apiJson(path, { ...options, failure: status => `Request failed (${status}).` });
 
 const base = (workflowId) => `/workflows/${encodeURIComponent(workflowId)}/tests`;
 
 export const workflowTestsApi = {
   load: (workflowId) => send(base(workflowId)),
-  save: (workflowId, testSet) => post(base(workflowId), { testSet }),
-  run: (workflowId, options = {}) => post(`${base(workflowId)}/run`, options),
+  save: (workflowId, testSet) => send(base(workflowId), { method: "POST", body: { testSet } }),
+  run: (workflowId, options = {}) => send(`${base(workflowId)}/run`, { method: "POST", body: options ?? {} }),
   result: (workflowId, resultId) => send(`${base(workflowId)}/results/${encodeURIComponent(resultId)}`),
-  stop: (workflowId, resultId) => post(`${base(workflowId)}/results/${encodeURIComponent(resultId)}/stop`),
-  estimate: (workflowId, options = {}) => post(`${base(workflowId)}/estimate`, options),
+  stop: (workflowId, resultId) => send(`${base(workflowId)}/results/${encodeURIComponent(resultId)}/stop`, { method: "POST", body: {} }),
+  estimate: (workflowId, options = {}) => send(`${base(workflowId)}/estimate`, { method: "POST", body: options ?? {} }),
 };
 
 // Provider capabilities use runtime IDs (claude_code); Rattish sources use claude-code.

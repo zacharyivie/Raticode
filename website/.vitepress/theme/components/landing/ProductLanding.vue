@@ -11,6 +11,7 @@ import FeatureBento from './FeatureBento.vue'
 import LocalFirst from './LocalFirst.vue'
 import DownloadSection from './DownloadSection.vue'
 import FinalCta from './FinalCta.vue'
+import SupportBanner from '../SupportBanner.vue'
 import LandingFooter from './LandingFooter.vue'
 
 const root = ref<HTMLElement | null>(null)
@@ -49,8 +50,18 @@ onBeforeUnmount(() => observer?.disconnect())
       <FeatureBento />
       <LocalFirst />
       <DownloadSection />
+      <!-- At the bottom of the page, after the downloads. -->
+      <div class="rc-container support-strip">
+        <SupportBanner />
+      </div>
       <FinalCta />
     </main>
     <LandingFooter />
   </div>
 </template>
+
+<style scoped>
+.support-strip {
+  padding-top: clamp(8px, 2vw, 24px);
+}
+</style>

@@ -21,6 +21,7 @@ from uuid import uuid4
 
 from gofer.ui.rem_home_models import completion_recap, now
 from gofer.ui.rem_home_sleep import asleep
+from gofer.utils.instants import stored_instant
 
 # What one entry may hold. Longer text is kept in ``details``, which clients fold away.
 BODY_CHARS = 1200
@@ -55,14 +56,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS kanban_comments_dedupe
 def _clip(text: Any, limit: int) -> str:
     value = str(text or "").strip()
     return value if len(value) <= limit else value[: limit - 1].rstrip() + "…"
-
-
-def _instant(value: Any) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def split_text(text: Any) -> tuple[str, str]:
@@ -192,7 +185,7 @@ def run_phase(run: dict[str, Any] | None, at: datetime | None = None) -> str:
     if state == "paused":
         return "paused"
     if state == "queued":
-        until = _instant(run.get("not_before")) if run.get("not_before") else None
+        until = stored_instant(run.get("not_before"))
         if run.get("waiting_for") and until and until > (at or datetime.now(UTC)):
             return "waiting"
         return "review" if run.get("resume_review") else "working"
@@ -239,7 +232,10 @@ def target_status(
         return None
     target = PHASE_STATUS[phase]
     if ticket["status"] == "blocked" and target == "done" and run is not None:
-        finished, blocked = _instant(run.get("finished_at")), _instant(ticket.get("blocked_at"))
+        finished, blocked = (
+            stored_instant(run.get("finished_at")),
+            stored_instant(ticket.get("blocked_at")),
+        )
         if not finished or (blocked is not None and finished <= blocked):
             return None
     if ticket["status"] == "blocked" and phase == "missing":
@@ -631,7 +627,7 @@ def _same_comment(earlier: dict[str, Any], later: dict[str, Any]) -> bool:
         str(earlier.get(k) or "") != str(later.get(k) or "") for k in ("actor", "body", "decision")
     ):
         return False
-    first, second = _instant(earlier.get("at")), _instant(later.get("at"))
+    first, second = stored_instant(earlier.get("at")), stored_instant(later.get("at"))
     return (
         first is not None
         and second is not None

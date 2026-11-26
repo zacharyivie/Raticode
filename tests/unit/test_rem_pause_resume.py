@@ -482,7 +482,7 @@ def test_a_workflow_that_may_not_act_cannot_turn_self_work_off(board):
     [
         ("turn on self-work", "enable"),
         ("Please enable self work.", "enable"),
-        ("start your self-work mode", "enable"),
+        ("start your self-work mode", "start_now"),
         ("stop self-work", "disable"),
         ("Turn off self work", "disable"),
         ("pause self-work for now", "disable"),

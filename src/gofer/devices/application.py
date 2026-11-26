@@ -74,6 +74,9 @@ _FINGERPRINT = {"oneOf": [{"type": "string", "pattern": "^[0-9a-f]{64}$"}, {"typ
 CATALOG_FRESH = 120.0
 # How long before asking again a desktop that refused the fingerprint request.
 CATALOG_RETRY = 600.0
+# How many Rem tasks one paired desktop may have queued or running here at once. The
+# next one it hands over is refused, with a reason that desktop shows on the task.
+REM_TASKS_PER_DESKTOP = 10
 
 
 def _desktop_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -238,6 +241,17 @@ READ_ONLY_KINDS = frozenset(
 RECENT_READS = 2048
 
 
+def incoming_job(event: dict[str, Any]) -> bool:
+    """Whether a request is work another desktop's organization sent."""
+    payload = event.get("payload") or {}
+    return bool(event.get("type") == "job.submit" and payload.get("organization"))
+
+
+def _bridge_starts_incoming(event: dict[str, Any]) -> bool:
+    """Incoming work the chat bridge starts: never a handed-over Rem task, which Rem runs."""
+    return incoming_job(event) and "rem_task" not in event["payload"]
+
+
 def host_template(peer: str) -> str:
     """The grant a paired desktop's remote threads are created from."""
     return str(uuid5(NAMESPACE_URL, "raticode-thread-host:" + peer))
@@ -298,6 +312,7 @@ class DeviceApplication:
               CREATE TABLE IF NOT EXISTS device_work (
                 peer TEXT NOT NULL,request TEXT NOT NULL,thread TEXT NOT NULL,
                 event BLOB NOT NULL,state TEXT NOT NULL,turn TEXT NOT NULL,
+                incoming INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(peer,request));
               CREATE TABLE IF NOT EXISTS device_message_attachments (
                 peer TEXT NOT NULL, request TEXT NOT NULL, value BLOB NOT NULL,
@@ -344,6 +359,7 @@ class DeviceApplication:
             """)
         self.files = DeviceFiles(registry)
         with registry.transaction():
+            self._mark_incoming_work()
             # A Rem task a paired desktop handed over runs as this desktop's own Rem
             # run, which survives a restart, so it keeps running (gofer.ui.rem_remote_tasks).
             handed_over = (
@@ -376,6 +392,30 @@ class DeviceApplication:
         from gofer.devices.phone_guard import PhoneLocks
 
         self.locks = PhoneLocks(self)
+
+    def _mark_incoming_work(self) -> None:
+        """Add ``device_work.incoming`` to an older database and mark its queued jobs.
+
+        ``incoming`` is 1 for work another desktop's organization sent that the chat
+        bridge starts, so it can ask whether any waits (``incoming_waiting``) without
+        decrypting every queued request.
+        """
+        db = self.registry.db
+        columns = {row[1] for row in db.execute("PRAGMA table_info(device_work)")}
+        if "incoming" not in columns:
+            db.execute("ALTER TABLE device_work ADD COLUMN incoming INTEGER NOT NULL DEFAULT 0")
+            for row in db.execute(
+                "SELECT peer,request,event FROM device_work WHERE state='accepted'"
+            ).fetchall():
+                if _bridge_starts_incoming(self._decode(row["peer"], row["event"])):
+                    db.execute(
+                        "UPDATE device_work SET incoming=1 WHERE peer=? AND request=?",
+                        (row["peer"], row["request"]),
+                    )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS device_work_incoming_queued ON device_work(thread) "
+            "WHERE state='accepted' AND incoming=1"
+        )
 
     def _encode(self, peer: str, value: dict[str, Any]) -> bytes:
         raw = json.dumps(value, separators=(",", ":"), ensure_ascii=True).encode()
@@ -1248,7 +1288,8 @@ class DeviceApplication:
                 ):
                     raise PairingError("work_quota")
                 db.execute(
-                    "INSERT INTO device_work VALUES (?,?,?,?,?,?)",
+                    "INSERT INTO device_work (peer,request,thread,event,state,turn,incoming) "
+                    "VALUES (?,?,?,?,?,?,?)",
                     (
                         peer,
                         event["request_id"],
@@ -1256,6 +1297,7 @@ class DeviceApplication:
                         self._encode(peer, event),
                         "accepted",
                         str(uuid4()),
+                        int(_bridge_starts_incoming(event)),
                     ),
                 )
                 if kind == "job.submit" and payload.get("rem_task") is not None:
@@ -1347,9 +1389,7 @@ class DeviceApplication:
                 if own and organization:
                     row = candidate
                     break
-                incoming = bool(
-                    queued["type"] == "job.submit" and queued["payload"].get("organization")
-                )
+                incoming = incoming_job(queued)
                 if organization if incoming else own:
                     row = candidate
                     break
@@ -1399,6 +1439,26 @@ class DeviceApplication:
                 "attachments": attachments,
             }
 
+    def incoming_waiting(self) -> bool:
+        """Whether work another desktop's organization sent waits to start here.
+
+        One indexed query, asked before the chat bridge takes a worker for it, with
+        the same conditions ``claim`` starts a request under.
+        """
+        with self.registry.lock:
+            return bool(
+                self.registry.db.execute(
+                    # CROSS JOIN keeps device_work first, read through the partial index
+                    # of queued incoming jobs, so an empty queue reads no rows.
+                    "SELECT EXISTS (SELECT 1 FROM device_work w "
+                    "CROSS JOIN peers p ON p.device_id=w.peer "
+                    "CROSS JOIN device_grants g ON g.peer=w.peer AND g.thread=w.thread WHERE "
+                    "w.state='accepted' AND w.incoming=1 AND p.state='active' AND NOT EXISTS "
+                    "(SELECT 1 FROM device_work busy WHERE busy.thread=w.thread AND "
+                    "busy.state='running'))"
+                ).fetchone()[0]
+            )
+
     def _tell_waiting(
         self, peer: str, request: str, event: dict[str, Any], reason: str | None = None
     ) -> None:
@@ -1435,7 +1495,8 @@ class DeviceApplication:
 
         Called inside ``_handle``'s transaction. The task reuses "Run threads from this
         desktop": it comes on that grant's thread, for one of the projects it shares,
-        with a provider it allows, and only read-only task types run here.
+        with a provider it allows, and only read-only task types run here. One desktop
+        has at most ``REM_TASKS_PER_DESKTOP`` of them queued or running here at once.
         """
         payload = event["payload"]
         task = payload["rem_task"]
@@ -1459,6 +1520,17 @@ class DeviceApplication:
         provider = task.get("provider")
         if provider and provider not in (context.get("provider_permissions") or {}):
             return f"{self.name} doesn't allow that provider for that computer's work"
+        # Its own request sent again isn't another task.
+        held = self.registry.db.execute(
+            "SELECT COUNT(*) FROM device_rem_tasks WHERE peer=? AND settled=0 AND request!=?",
+            (peer, event["request_id"]),
+        ).fetchone()[0]
+        if held >= REM_TASKS_PER_DESKTOP:
+            return (
+                f"{self.name} already has {REM_TASKS_PER_DESKTOP} tasks from this computer "
+                "queued or running, the most it takes from one computer at once. Run this "
+                "one again when one of them ends."
+            )
         return None
 
     def rem_tasks(self) -> list[dict[str, Any]]:
@@ -1740,7 +1812,7 @@ class DeviceApplication:
             ).fetchone()
             if row is not None and row["state"] == "cancelled":
                 event = self._decode(peer, row["event"])
-                if event["type"] == "job.submit" and event["payload"].get("organization"):
+                if incoming_job(event):
                     self._emit(
                         peer,
                         event,
@@ -2272,7 +2344,8 @@ class DeviceApplication:
                 "payload": {"text": message, "attachment_ids": []},
             }
             db.execute(
-                "INSERT INTO device_work VALUES (?,?,?,?,?,?)",
+                "INSERT INTO device_work (peer,request,thread,event,state,turn) "
+                "VALUES (?,?,?,?,?,?)",
                 (peer, request, thread, self._encode(peer, event), "accepted", str(uuid4())),
             )
 

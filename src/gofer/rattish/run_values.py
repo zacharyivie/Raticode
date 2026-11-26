@@ -55,6 +55,9 @@ class SavedValuesUnavailable(RuntimeError):
     """Raised with a sentence for the user when saved values can't be used."""
 
 
+_UNREADABLE = "This run's saved input values can't be read. Start a new run instead."
+
+
 def saved_values_path(record: Path) -> Path:
     """The saved values file for the run whose record is ``record``."""
     # Writes and removals refuse linked parents, so name the folder by its real path.
@@ -154,16 +157,33 @@ def read_saved_values(record: Path, document: Mapping[str, Any]) -> SavedRunValu
     if refusal is not None:
         raise SavedValuesUnavailable(refusal)
     try:
-        saved = json.loads(saved_values_path(record).read_text(encoding="utf-8"))
+        data: bytes | None = saved_values_path(record).read_bytes()
     except FileNotFoundError:
+        data = None
+    except OSError:
+        raise SavedValuesUnavailable(_UNREADABLE) from None
+    return parse_saved_values(document, data)
+
+
+def parse_saved_values(document: Mapping[str, Any], data: bytes | None) -> SavedRunValues:
+    """``read_saved_values`` for a values file already read: its bytes, or None if missing.
+
+    A triggered run that resumes after a usage limit parses the bytes it checked.
+    """
+    if not document.get("input_names") and not document.get("trigger_event_count"):
+        return SavedRunValues()
+    refusal = saved_values_refusal(document)
+    if refusal is not None:
+        raise SavedValuesUnavailable(refusal)
+    if data is None:
         raise SavedValuesUnavailable(
             "This run's saved input values are missing, so it can't use them. "
             "Start a new run instead."
-        ) from None
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        raise SavedValuesUnavailable(
-            "This run's saved input values can't be read. Start a new run instead."
-        ) from None
+        )
+    try:
+        saved = json.loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        raise SavedValuesUnavailable(_UNREADABLE) from None
     if (
         not isinstance(saved, dict)
         or saved.get("saved_values_version") != SAVED_VALUES_VERSION

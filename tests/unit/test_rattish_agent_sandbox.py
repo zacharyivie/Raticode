@@ -527,7 +527,7 @@ def test_triggers_section_and_cli_name_unsandboxed_steps(tmp_path: Path) -> None
     from typer.testing import CliRunner
 
     from gofer.cli.main import app
-    from gofer.rattish.workspaces import discover_registered_workflows
+    from gofer.rattish.workspaces import discover_project_workflows
     from gofer.ui.rattish_triggers import create_trigger_payload, triggers_payload
 
     data = tmp_path / "data"
@@ -538,7 +538,7 @@ def test_triggers_section_and_cli_name_unsandboxed_steps(tmp_path: Path) -> None
         "Node loose:\n  type: agent\n  provider: claude-code\n  prompt: Hi.\n  sandbox: off\n"
         "  needs: safe\n",
     )
-    (registered,) = discover_registered_workflows(source.parent, registry_dir=data)
+    (registered,) = discover_project_workflows(source.parent, registry_dir=data).workflows
     expected = [
         {"node": "loose", "provider": "claude-code", "reason": "the step sets sandbox: off"}
     ]
@@ -617,7 +617,7 @@ def test_triggers_section_and_cli_name_steps_that_widen_their_sandbox(tmp_path: 
     from typer.testing import CliRunner
 
     from gofer.cli.main import app
-    from gofer.rattish.workspaces import discover_registered_workflows
+    from gofer.rattish.workspaces import discover_project_workflows
     from gofer.ui.rattish_triggers import create_trigger_payload, triggers_payload
 
     data = tmp_path / "data"
@@ -626,7 +626,7 @@ def test_triggers_section_and_cli_name_steps_that_widen_their_sandbox(tmp_path: 
         tmp_path,
         "Node fetch:\n  type: agent\n  provider: claude-code\n  prompt: Hi.\n  network: any\n",
     )
-    (registered,) = discover_registered_workflows(source.parent, registry_dir=data)
+    (registered,) = discover_project_workflows(source.parent, registry_dir=data).workflows
     expected = [{"node": "fetch", "kind": "network", "reason": "its shell can reach any host"}]
     assert triggers_payload(data, registered.workflow_id)["sandbox"]["widened"] == expected
     created = create_trigger_payload(

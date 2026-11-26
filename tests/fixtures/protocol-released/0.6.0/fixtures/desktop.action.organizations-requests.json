@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000213",
+  "id": "10000000-0000-4000-8000-000000000213",
+  "sequence": 213,
+  "type": "desktop.action",
+  "payload": {
+    "op": "organizations.requests",
+    "params": {
+      "organization_id": "org1",
+      "decision": "approve",
+      "request_ids": [
+        "8af2f1b7-d7ce-4309-9e19-1a1d4c9edf32",
+        "dbad867e-0000-4000-8000-000000000001"
+      ]
+    }
+  }
+}

@@ -279,7 +279,7 @@ def export_organization(
 
     def export(backend: Backend, out: Output) -> dict[str, Any]:
         package = call(backend, "export", organization_id)
-        file.write_bytes(base64.b64decode(package["zip"]))
+        res.write_private_bytes(file, base64.b64decode(package["zip"]))
         return {"path": str(file.resolve()), "files": sorted(package.get("files", {}))}
 
     finish(current, export, lambda d: f"Wrote {len(d['files'])} package files to {d['path']}")

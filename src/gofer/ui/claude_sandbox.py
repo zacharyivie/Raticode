@@ -25,22 +25,23 @@ from pathlib import Path
 from typing import Any
 
 from gofer.core.agent_credentials import (
-    DATA_CREDENTIAL_FOLDERS,
     HOME_SECRET_PATHS,
     data_credential_names,
 )
 from gofer.core.agent_credentials import secrets_folders as _secrets_folders
+from gofer.utils.process import run_repository_git
 
 # Credential stores a shell started by an unattended agent has no reason to read.
 SECRET_PATHS = HOME_SECRET_PATHS
-# Raticode's own data folder holds paired-device keys, site grants and every
-# provider's account folders (gofer.core.agent_credentials). The shell can't see the
-# folder at all; the Read tool is kept from these parts of it.
-DATA_SECRETS = (*DATA_CREDENTIAL_FOLDERS, "claude-accounts")
 
 
 def data_secrets(data_dir: Path) -> list[str]:
-    """Every credential folder in the data folder, as names (see agent_credentials)."""
+    """Every credential folder in the data folder, as names (see agent_credentials).
+
+    Raticode's own data folder holds paired-device keys, site grants and every
+    provider's account folders. The shell can't see the folder at all; the Read tool
+    is kept from these parts of it.
+    """
     return data_credential_names(data_dir)
 
 
@@ -87,12 +88,8 @@ def git_common_dir(root: Path) -> Path | None:
 def repository_git_dir(root: Path) -> Path | None:
     """The shared ``.git`` folder of the repository ``root`` is in, or None outside one."""
     try:
-        completed = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
+        completed = run_repository_git(
+            root, "rev-parse", "--path-format=absolute", "--git-common-dir", timeout=10
         )
     except (OSError, subprocess.SubprocessError):
         return None

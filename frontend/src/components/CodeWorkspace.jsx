@@ -61,6 +61,8 @@ import {
 } from "../lib/settings.js";
 import raticodeIcon from "../assets/roundel.png";
 import { Dialog } from "./Dialog.jsx";
+import { menuTrigger, PopupMenu } from "./PopupMenu.jsx";
+import { useConfirm } from "./ConfirmDialog.jsx";
 import MarkdownContent from "./MarkdownContent.jsx";
 import IntegratedBrowser, { HtmlModeToggle } from "./IntegratedBrowser.jsx";
 import GeckoBrowser from "./GeckoBrowser.jsx";
@@ -68,6 +70,7 @@ import { BrowserEngineBadge, BrowserFamilyChooser, BrowserGroupNewTab, BrowserTa
 import { useBrowserHost } from "../lib/browserHost.js";
 import { browserFamilyChoices, geckoTabPath, groupBrowserTabPaths, groupedBrowserPaths, isGeckoWindowTab } from "../lib/browserTabs.js";
 import { pendingRemApprovals } from "../lib/browserUi.js";
+import { newRemApprovals, showBackgroundNotice } from "../lib/backgroundNotices.js";
 import { WEB_BROWSER_OPTIONS, webBrowserEngine } from "../lib/browserEngines.js";
 
 import { textEditorSessions, discardedSessionPaths, codeCloseProtection } from "../lib/codeEditorSessions.js";
@@ -141,7 +144,10 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   // Reports a Rem approval waiting in a tab that isn't on screen, so the app
   // can show it while this area is hidden.
   onHiddenApprovalChange,
+  // Opens the tab a background notice about a Rem approval names.
+  onShowApproval,
 }, ref) {
+  const [confirm, confirmDialog] = useConfirm();
   const browserVariant = variant === "browser";
   const browserStatus = useBrowserEngineStatus(browserVariant);
   // The Browser can move to a window of its own; listeners follow it there.
@@ -155,7 +161,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   const textEditorRefs = useRef(new Map());
   const workspaceRef = useRef(null);
   const tabMenuRef = useRef(null);
-  const tabMenuFirstActionRef = useRef(null);
+  const tabMenuTriggerRef = useRef(null);
   const draggedPathRef = useRef("");
   const documentPathOrderRef = useRef(openPaths);
   const [fileStates, setFileStates] = useState({});
@@ -419,10 +425,10 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
       const message = targets.length === 1
         ? `Close ${fileName(targets[0])} without saving your changes?`
         : `Close ${targets.length} files? Unsaved changes in ${remainingDirtyPaths.length} file${remainingDirtyPaths.length === 1 ? "" : "s"} will be discarded.`;
-      if (!window.confirm(message)) return;
+      if (!await confirm({ message, confirmLabel: targets.length === 1 ? "Close without saving" : `Close ${targets.length} files`, danger: true })) return;
     }
     finishClosingWorkspacePaths(targets, remainingDirtyPaths.includes(sourcePath));
-  }, [fileStates, finishClosingWorkspacePaths, workflowTabs, openPaths, rattishDirty, rattishDocuments, onBeforeCloseWorkflowTabs, saveBeforeClosePaths, settings.general.autosave, sourcePath]);
+  }, [confirm, fileStates, finishClosingWorkspacePaths, workflowTabs, openPaths, rattishDirty, rattishDocuments, onBeforeCloseWorkflowTabs, saveBeforeClosePaths, settings.general.autosave, sourcePath]);
 
   const saveAndClosePromptedPaths = useCallback(async () => {
     if (!unsavedClosePrompt || unsavedClosePrompt.saving) return;
@@ -449,7 +455,6 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
 
   useEffect(() => {
     if (!tabMenu) return undefined;
-    tabMenuFirstActionRef.current?.focus();
     function dismissMenu(event) {
       if (tabMenuRef.current?.contains(event.target)) return;
       setTabMenu(null);
@@ -608,6 +613,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   function openTabMenu(event, path, groupPaths) {
     event.preventDefault();
     event.stopPropagation();
+    tabMenuTriggerRef.current = menuTrigger(event);
     const bounds = event.currentTarget.getBoundingClientRect();
     const requestedLeft = event.clientX || bounds.left + 12;
     const requestedTop = event.clientY || bounds.bottom - 2;
@@ -1006,8 +1012,22 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
     });
   }
 
+  // Rem's approval requests in tabs; each new one is announced once while Raticode
+  // is in the background.
+  const remApprovals = pendingRemApprovals(browserViewStates);
+  const announcedApprovalsRef = useRef(new Set());
+  const onShowApprovalRef = useRef(onShowApproval);
+  onShowApprovalRef.current = onShowApproval;
+  useEffect(() => {
+    if (!browserVariant) return;
+    for (const item of newRemApprovals(announcedApprovalsRef.current, remApprovals)) {
+      announcedApprovalsRef.current.add(item.requestId);
+      const tab = codeTabLabel(item.path, browserViewTabMetadata(browserTabs[item.path], browserViewStates[item.path]));
+      showBackgroundNotice({ title: `${item.agentLabel} needs your approval in ${tab}`, tag: `rem-approval-${item.requestId}`, open: () => onShowApprovalRef.current?.(item.path) });
+    }
+  });
   // Rem's approval requests in tabs the user is not looking at.
-  const hiddenApproval = pendingRemApprovals(browserViewStates)
+  const hiddenApproval = remApprovals
     .find((item) => openPaths.includes(item.path) && !(active && [primaryPath, splitPath].includes(item.path))) || null;
   const hiddenApprovalKey = hiddenApproval ? JSON.stringify({ path: hiddenApproval.path, agentLabel: hiddenApproval.agentLabel, label: hiddenApproval.label || "", title: codeTabLabel(hiddenApproval.path, browserViewTabMetadata(browserTabs[hiddenApproval.path], browserViewStates[hiddenApproval.path])) }) : "";
   const onHiddenApprovalChangeRef = useRef(onHiddenApprovalChange);
@@ -1118,12 +1138,15 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
         ) : null}
       </div>
       {tabMenu ? (
-        <div
-          ref={tabMenuRef}
+        <PopupMenu
+          menuRef={tabMenuRef}
           aria-label={`${fileName(tabMenu.path)} tab actions`}
           className="fixed z-[100] w-44 rounded-md border border-line bg-white p-1 text-[11px] text-ink shadow-lg"
-          role="menu"
           style={{ left: tabMenu.left, top: tabMenu.top }}
+          onClose={(options) => {
+            setTabMenu(null);
+            if (options?.restoreFocus) tabMenuTriggerRef.current?.focus?.();
+          }}
         >
           <button
             className="flex h-7 w-full items-center rounded px-2 text-left hover:bg-slate-100 disabled:cursor-default disabled:text-muted disabled:hover:bg-transparent"
@@ -1172,7 +1195,6 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
           ) : null}
           <div className="my-1 border-t border-line" role="separator" />
           <button
-            ref={tabMenuFirstActionRef}
             className="flex h-7 w-full items-center rounded px-2 text-left hover:bg-slate-100"
             role="menuitem"
             type="button"
@@ -1206,7 +1228,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
           >
             Close all
           </button>
-        </div>
+        </PopupMenu>
       ) : null}
       {unsavedClosePrompt ? (
         <UnsavedChangesDialog
@@ -1225,6 +1247,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
           onSave={() => void saveAndClosePromptedPaths()}
         />
       ) : null}
+      {confirmDialog}
     </section>
   );
 });
@@ -1412,6 +1435,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
   managedDocument,
   onSaveDocument,
 }, ref) {
+  const [confirm, confirmDialog] = useConfirm();
   const containerRef = useRef(null);
   const editorRef = useRef(null);
   const diffEditorRef = useRef(null);
@@ -1520,10 +1544,13 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
   const save = useCallback(async () => {
     const model = modelRef.current;
     if (!model || !editableRef.current || savingRef.current) return null;
+    if (model.getValue() === savedContentRef.current) return true;
+    if (recoveryConflictRef.current) {
+      const replace = await confirm({ confirmLabel: "Replace with draft", danger: true, message: "The file changed on disk while Raticode was closed. Replace it with your recovered draft?" });
+      if (!replace || modelRef.current !== model || savingRef.current) return null;
+    }
     const content = model.getValue();
     const savingVersion = model.getAlternativeVersionId();
-    if (content === savedContentRef.current) return true;
-    if (recoveryConflictRef.current && !window.confirm("The file changed on disk while Raticode was closed. Replace it with your recovered draft?")) return null;
     let fileWritten = false;
     window.clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = null;
@@ -1571,7 +1598,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
         scheduleAutosaveRef.current();
       }
     }
-  }, [path, refreshGitBaseline]);
+  }, [confirm, path, refreshGitBaseline]);
 
   useEffect(() => {
     scheduleAutosaveRef.current = () => {
@@ -2035,6 +2062,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
         {!["typescript", "javascript", "json", "css", "scss", "less", "html", "rattish"].includes(languageForPath(path)) ? <span title="Syntax coloring and word suggestions are available. This language has no semantic completion, definitions, diagnostics, or formatter.">Syntax editing</span> : null}
         <span>Spaces: {editorSettings.tabSize}</span>
       </div>
+      {confirmDialog}
     </section>
   );
 });
@@ -2140,8 +2168,6 @@ export function SvgPreview({ content, path, onEdit }) {
     </div>
   );
 }
-
-export function ImagePreview({ path }) { return <MediaPreview path={path} />; }
 
 export function MediaPreview({ path, active = true }) {
   const kind = mediaKind(path) || "image";

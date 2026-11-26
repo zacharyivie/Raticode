@@ -13,7 +13,9 @@ import base64
 import inspect
 import json
 import shutil
+import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -107,7 +109,11 @@ def _run_path(workflow_id: str, run_id: str) -> str:
     return f"/workflows/{quote(workflow_id)}/logs/{quote(run_id)}"
 
 
-def _run_state(backend: Backend, workflow_id: str, run_id: str) -> dict[str, Any]:
+# A run started in the background can take a moment to appear in the run list.
+_NEW_RUN_GRACE = 30.0
+
+
+def _listed_run(backend: Backend, workflow_id: str, run_id: str) -> dict[str, Any] | None:
     # The run list carries awaitingApproval, which the full log doesn't.
     page = backend.request(
         "GET", f"/workflows/{quote(workflow_id)}/logs", query={"q": run_id, "limit": 50}
@@ -115,7 +121,7 @@ def _run_state(backend: Backend, workflow_id: str, run_id: str) -> dict[str, Any
     for run in page.get("runs", []):
         if run.get("id") == run_id:
             return dict(run)
-    raise failure(f"Run '{run_id}' was not found", ExitCode.NOT_FOUND)
+    return None
 
 
 def _wait_for_run(
@@ -125,26 +131,39 @@ def _wait_for_run(
     run_id: str,
     timeout: float,
     interval: float = 2.0,
+    clock: Callable[[], float] = time.monotonic,
+    grace: float = _NEW_RUN_GRACE,
 ) -> dict[str, Any]:
     """Wait for a run to finish or stop at an approval.
 
     With ``out``, each new run event is printed as it appears (NDJSON events, then the
     result line). Returns the final state, or raises with the exit code the run ended
-    with: 1 failed or stopped, 7 waiting on an approval, 8 timed out.
+    with: 1 failed or stopped, 7 waiting on an approval, 8 timed out. ``grace`` is how
+    long a run this command just started may take to appear in the run list.
     """
     seen = 0
+    listed = False
+    grace_ends = clock() + min(timeout, grace)
     if out is not None:
         out.begin_stream()
 
     def check() -> tuple[bool, dict[str, Any]]:
-        nonlocal seen
+        nonlocal seen, listed
+        # A run that just started may not be listed yet; it isn't missing until the
+        # grace period ends without it ever showing up.
+        found = _listed_run(backend, workflow_id, run_id)
+        if found is None:
+            if listed or clock() >= grace_ends:
+                raise failure(f"Run '{run_id}' was not found", ExitCode.NOT_FOUND)
+            return False, {"id": run_id, "status": "starting"}
+        listed = True
         if out is not None:
             events = backend.request("GET", _run_path(workflow_id, run_id) + "/events")
             run_events = (events.get("events") or {}).get("runEvents") or []
             for event in run_events[seen:]:
                 out.event(event)
             seen = max(seen, len(run_events))
-        state = _run_state(backend, workflow_id, run_id)
+        state = found
         finished = str(state.get("status") or "") in _FINISHED
         return finished or bool(state.get("awaitingApproval")), state
 
@@ -910,8 +929,9 @@ def wait_for_run(
     limit = res.duration(current, timeout, 3600)
     finish(
         current,
+        # An existing run: a run ID that isn't listed is wrong, so don't wait for it.
         lambda b, out: _wait_for_run(
-            b, out if follow else None, workflow_id, run_id, limit, interval
+            b, out if follow else None, workflow_id, run_id, limit, interval, grace=0
         ),
         lambda d: f"Run {run_id}: {d.get('status')}",
     )

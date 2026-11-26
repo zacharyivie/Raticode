@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 from typing import Any
 
@@ -15,10 +14,10 @@ from gofer.ui.report_links import (
     OUTSIDE,
     TEMPORARY,
     check_link,
-    find_links,
     rewrite_links,
 )
 from gofer.ui.report_outputs import save_report
+from tests.helpers.brain_library import wait_task
 
 # A path that is neither inside a test brain nor in a temporary folder.
 OUTSIDE_FILE = "/usr/share/raticode-test-missing/figure.png"
@@ -109,22 +108,10 @@ def test_rewrite_is_idempotent(vault: Path) -> None:
     text = f'<a href="{vault}/Assets/chart one.png">c</a><a href="/tmp/x.png">t</a>'
     once, rewritten, flagged = rewrite_links(text, "a.html", vault, vault / "Reports")
     assert len(rewritten) == 1 and [check.reason for check in flagged] == [TEMPORARY]
-    again, rewritten_again, _ = rewrite_links(once, "a.html", vault, vault / "Reports")
+    again, rewritten_again, flagged_again = rewrite_links(once, "a.html", vault, vault / "Reports")
     assert again == once and rewritten_again == []
-    assert [check.reason for check in find_links(once, "a.html", vault, vault / "Reports")] == [
-        None,
-        TEMPORARY,
-    ]
-
-
-def wait_task(library: BrainLibrary, task: dict[str, Any]) -> dict[str, Any]:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        receipt = library.task(task["id"])
-        if receipt["state"] != "running":
-            return receipt
-        time.sleep(0.02)
-    pytest.fail("Second Brain task did not finish")
+    assert [check.reason for check in flagged_again] == [TEMPORARY]
+    assert check_link(rewritten[0].relative, vault, vault / "Reports").reason is None
 
 
 def link_issues(library: BrainLibrary) -> list[dict[str, Any]]:

@@ -110,7 +110,6 @@ android {
     lint { error += listOf("MissingOnRenderProcessGone") }
     // GeckoView's engine is large; compressed in the APK it takes about half the download.
     packaging { jniLibs { useLegacyPackaging = true } }
-    sourceSets.getByName("test").resources.directories.add("../protocol/v1/fixtures")
     sourceSets.getByName("test").resources.directories.add("../protocol/probes/public-test-identities")
     sourceSets.getByName("test").kotlin.srcDir("src/testShared/java")
     sourceSets.getByName("androidTest").kotlin.srcDir("src/testShared/java")

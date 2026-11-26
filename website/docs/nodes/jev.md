@@ -102,7 +102,7 @@ Fields for this node only. The [shared node fields](./index.md#shared-node-field
 
 ## Result cache
 
-New in 0.5.5. With `cache: 12h`, a run reuses an earlier answer to the same question about the same state instead of calling Jev again, while the answer is younger than the duration. The key covers the model, the question and state after bindings, the criteria or options, the threshold and the rest of the node's compiled settings. A cached step shows as **Cached** in the Run Timeline, makes no call and records 0 tokens and $0. The output is the saved one, including its original `input_tokens`, `output_tokens` and `latency_ms`.
+New in 0.5.5. With `cache: 12h`, a run reuses an earlier answer to the same question about the same state instead of calling Jev again, while the answer is younger than the duration. The key covers the model, the question and state after bindings, the criteria or options, the threshold and the rest of the node's compiled settings. A [file input](../workflows/inputs.md#file-inputs) counts by its contents and file name, not by the path of the run's copy, and a run [in a worktree](../workflows/rattish.md#run-in-a-worktree) counts by the project the worktree was made from, not by its own worktree folder. A cached step shows as **Cached** in the Run Timeline, makes no call and records 0 tokens and $0. The output is the saved one, including its original `input_tokens`, `output_tokens` and `latency_ms`.
 
 Saving, limits, clearing and test sets work as described for [common-llm-task](./common-llm-task.md#result-cache).
 

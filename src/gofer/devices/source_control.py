@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from gofer.devices.desktop_control import Refused
-from gofer.utils.process import NO_REPOSITORY_PROGRAMS, untrusted_repository_git_env
+from gofer.utils.process import run_repository_git
 
 READS = frozenset(
     {
@@ -87,23 +87,15 @@ def _environment() -> dict[str, str]:
 def git(root: str, *args: str, codes: tuple[int, ...] = (0,)) -> str:
     """Run one read-only Git command in ``root`` and return its output."""
     try:
-        done = subprocess.run(
-            # Status runs clean filters on changed files; the repository's own filter
-            # commands are blanked like the desktop's (git-status.cjs).
-            [
-                "git",
-                *NO_REPOSITORY_PROGRAMS,
-                "-c",
-                "core.quotepath=false",
-                "-C",
-                root,
-                *args,
-            ],
-            capture_output=True,
+        # Status runs clean filters on changed files; the repository's own filter
+        # commands are blanked like the desktop's (git-status.cjs).
+        done = run_repository_git(
+            root,
+            *args,
             timeout=TIMEOUT,
-            env=untrusted_repository_git_env(root, _environment()),
-            stdin=subprocess.DEVNULL,
-            check=False,
+            env=_environment(),
+            text=False,
+            config=("core.quotepath=false",),
         )
     except subprocess.TimeoutExpired as exc:
         raise GitError(SLOW) from exc

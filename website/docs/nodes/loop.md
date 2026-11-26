@@ -40,7 +40,7 @@ Node record:
 | `source.type` | Notes |
 | --- | --- |
 | `count` | Defaults to 1. Zero is allowed. |
-| `tabular` | Needs a path. |
+| `tabular` | Needs a path to a `.csv`, `.tsv`, `.jsonl` or `.xlsx` file. |
 | `directory` | Needs a path. Defaults to glob `*` without file content. |
 | `trigger-events` | Can also include content. |
 | `infinite` | Needs a break, timeout or run limit. |
@@ -70,6 +70,14 @@ Node work:
 - Inside the body, bind from `node.step.output`, not a `loop.*` alias.
 - Fields depend on the source. Count items carry `index`. Directory items have `path`, `name` and `directory`, plus `file_content` when requested. For other sources, check the compiled contract first.
 - Directory and tabular files are opened when the loop starts, after upstream nodes finish.
+- Tabular files are `.csv`, `.tsv`, `.jsonl` or `.xlsx`. Each row becomes one item.
+- CSV and JSONL files must be UTF-8. A leading byte-order mark, which Excel's "CSV UTF-8" export writes, is dropped.
+- `.tsv` files are tab-separated. A `.csv` file uses commas, unless its header line has only semicolons or only tabs; then that character separates values.
+- The first row of a CSV, TSV or `.xlsx` file is the header, and its names become the item's keys. Every column needs its own name: a blank or repeated header fails the loop. Empty columns after the last header are ignored.
+- A row shorter than the header gets `null` for its missing cells. A row with more values than the header fails the loop, usually because a value contains the separator and isn't quoted.
+- Each JSONL line must be a JSON object. Blank lines are skipped.
+- Errors name the file and the line (the row in `.xlsx`), such as `people.csv line 4 has 3 values but the header row names 2 columns`.
+- With `include-content: true`, a directory file that isn't UTF-8 text fails the loop and is named in the error. Narrow `glob` to text files, such as `*.md`.
 - Zero matching files succeeds with zero body runs.
 
 ## Configuration

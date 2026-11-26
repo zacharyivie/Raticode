@@ -46,10 +46,10 @@ test("disconnection only changes targeted active records and malformed sessions 
   for (const value of ["broken", "null", '{"version":2,"records":[]}', '{"version":1,"records":[null,{}]}']) assert.deepEqual(restoreWorkflowRunRecords(value), []);
 });
 
-test("queue cancellation uses the queue identity, while an acknowledged stop stays stopping until terminal confirmation", () => {
-  let records = mergeWorkflowRunRecords([], [{ id: "queue one", status: "claimed", queueRun: true }], atlas);
+test("a run stops through its own workflow and run, and an acknowledged stop stays stopping until terminal confirmation", () => {
+  let records = mergeWorkflowRunRecords([], [{ id: "queue one", status: "claimed" }], atlas);
   assert.equal(records[0].status, "running");
-  assert.equal(exactWorkflowRunStopPath(records[0]), "/queue/queue%20one/cancel");
+  assert.equal(exactWorkflowRunStopPath(records[0]), `/workflows/${encodeURIComponent(records[0].workflowId)}/runs/queue%20one/stop`);
   records = records.map(record => ({ ...record, status: "stopping" }));
   records = mergeWorkflowRunRecords(records, [{ id: "queue one", status: "running" }], atlas);
   assert.equal(records[0].status, "stopping");
@@ -75,15 +75,6 @@ test("submission without an acknowledged execution cannot expose Stop", () => {
   assert.equal(exactWorkflowRunStopPath({ workflowId: "digest", runId: "pending", status: "submitting" }), null);
 });
 
-test("a queue entry and its execution log contribute one run to global counts", () => {
-  const records = mergeWorkflowRunRecords([], [
-    { id: "queued-one", status: "success", queueRun: true, logPath: "/logs/one" },
-    { id: "execution-one", status: "success", logPath: "/logs/one" },
-    { id: "execution-two", status: "running", logPath: "/logs/two" },
-  ], atlas);
-  assert.equal(workflowRunSummary(records).unread.length, 1);
-  assert.equal(workflowRunSummary(records).active.length, 1);
-});
 
 
 test("Problems show failed nodes with their cause and clear after successful retry", () => {
@@ -161,9 +152,9 @@ test("the workflow list reports compile errors, active runs, and the newest fini
 
   // A compile error outranks run history because the workflow cannot run.
   assert.equal(workflowListStatus({ ...workflow, invalid: true }, records).key, "invalid");
-  // Legacy payloads carry the newest run status before the registry scans logs.
-  assert.equal(workflowListStatus({ id: "legacy", status: "Error" }).label, "Failed");
-  assert.equal(workflowListStatus({ id: "legacy", status: "Scheduled" }).detail, "Scheduled");
+  // Only the run registry reports runs; a status on the workflow itself never does.
+  const notRun = workflowListStatus({ id: "fresh", status: "Error" });
+  assert.deepEqual([notRun.label, notRun.detail], ["Ready", "Not run yet"]);
 });
 
 test("the workflow list says a run is waiting for approval instead of running", () => {

@@ -37,6 +37,7 @@ The file writes `reports/note.txt` only when you run it.
 - Save files as `.rattish`, indented with two spaces.
 - Use kebab-case for node IDs and field names.
 - Keywords are case-insensitive, and `format` normalizes their spelling. Prompts, commands, paths, model IDs and data strings keep their case.
+- Unquoted map keys are read lowercased too. Quote a key whose case matters, such as an environment variable or URL parameter name (`"DEBUG": "1"`), or write the map as JSON. `check` warns when `env`, `params` or MCP `arguments` would change a name, and fails when two keys in one map are the same once read, such as `Path` and `path`.
 - Comments start with `#`.
 - Quote a string that would otherwise read as a literal. `memory: "none"` is the string; unquoted `none` means no value.
 
@@ -165,4 +166,23 @@ Raticode rattish preflight WORKFLOW_PATH --format json
 
 The installed docs and contracts match the CLI that compiles your workflow. When an example written for another version disagrees, trust the CLI's diagnostics. The [node reference](../nodes/index.md) lists all 27 built-in types.
 
-Write new workflows in Rattish. The older TOML workflow commands remain only for compatibility.
+## Convert a TOML workflow
+
+Raticode 0.6.0 and earlier also ran workflows written as TOML files in the data folder. From 0.6.1, Raticode doesn't load, list, run, schedule or watch them. Convert each one to `workflow.rattish` to keep using it:
+
+```bash
+Raticode rattish convert ~/.local/share/gofer/my-workflow.toml --project /path/to/project
+Raticode rattish convert my-workflow.toml --output converted/workflow.rattish
+```
+
+- `--project DIR` writes the workflow into that project and registers it, so it shows up in Workflows. `--output FILE` only writes the file.
+- The converter maps each node, route and agent, then checks the result as `Raticode rattish check` would.
+- Some settings live outside the file in Rattish. For a schedule, a file watch, a webhook or a plain-text secret, it prints the command to run, such as `Raticode rattish triggers add cron ...` or `Raticode rattish secrets set NAME`. It never writes a secret into `workflow.rattish`.
+- It lists, node by node, anything it couldn't convert, such as subflows and components, and exits 1. `--allow-partial` writes the rest anyway. `--format json` prints the same report as JSON.
+- It never changes or deletes the `.toml` file.
+
+In the desktop app, Workflows shows a notice while TOML workflow files are left in the data folder, such as "2 old TOML workflows aren't loaded any more". Choose **Convert to Rattish** next to a file and pick the project folder it goes into.
+
+The old `schedules.db`, `runner-queue.db` and `workflow-revisions` folder stay in the data folder untouched. Raticode doesn't read them any more, and you can delete them once your workflows are converted.
+
+Converting is new in 0.6.1.

@@ -18,12 +18,12 @@ test("between full scans only workflows that can have changed are read", () => {
       { workflowId: "active", status: "running" },
       { workflowId: "lost", status: "disconnected" },
     ],
-    queueRuns: [{ workflowId: "queued" }],
     latest,
     previousLatest,
   });
-  // Idle has only finished runs and an unchanged latest run, so it waits for the next full scan.
-  assert.deepEqual(scanned.map(w => w.id), ["active", "lost", "queued", "changed", "fresh"]);
+  // Idle and queued have only finished runs and an unchanged latest run, so they wait for
+  // the next full scan.
+  assert.deepEqual(scanned.map(w => w.id), ["active", "lost", "changed", "fresh"]);
 });
 
 test("without a workflow list, only active and queued work is read", () => {

@@ -15,6 +15,17 @@ class GeckoRulesTest {
         assertFalse(GeckoRules.mayAsk(activeTab = false, waiting = 0))
     }
 
+    /** Deleting a profile or removing an extension asks first and says what goes with it. */
+    @Test fun deletingAProfileOrRemovingAnExtensionAsksFirst() {
+        assertEquals("Delete Work?", GeckoRules.deleteProfileTitle("Work"))
+        assertEquals("Delete this profile?", GeckoRules.deleteProfileTitle(" "))
+        for (what in listOf("tabs", "favorites", "history", "sign-ins", "site data", "this phone", "can't be restored"))
+            assertTrue("The question names $what", GeckoRules.DELETE_PROFILE_TEXT.contains(what))
+        assertEquals("Remove uBlock Origin?", GeckoRules.removeExtensionTitle("uBlock Origin"))
+        assertEquals("Remove this extension?", GeckoRules.removeExtensionTitle(""))
+        assertTrue(GeckoRules.REMOVE_EXTENSION_TEXT.contains("settings and data"))
+    }
+
     @Test fun savedStateRoundTripsAndKeepsProfilesApart() {
         val work = GeckoRules.Profile("w1", "Work")
         val saved = GeckoRules.Saved(

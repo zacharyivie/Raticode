@@ -93,7 +93,7 @@ private fun UsageAccountCard(card: UsageCard, now: Instant, signIns: PhoneSignIn
             if (!card.needsSignIn) card.weekly?.let { WeeklyBurndown(it, card.observedAt) }
             // A Codex or Grok account signs in from here; Claude Code accounts and default sign-ins sign in on the computer.
             val actions = signIns?.takeIf { it.available && card.phoneSignIn }
-            val signing = actions?.states?.get(card.profile)
+            val signing = actions?.state(card.provider, card.profile)
             if (actions != null && signing != null) AccountSignInPanel(card.provider, card.profile, signing, actions)
             else if (card.needsSignIn && actions != null) {
                 Note("Rem skips this account until it's signed in.")

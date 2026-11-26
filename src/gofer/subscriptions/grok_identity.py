@@ -12,9 +12,7 @@ import threading
 from gofer.utils.process import env_with_executable_on_path, run_subprocess
 
 
-async def grok_build_version(
-    executable: str, cancel_event: threading.Event | None = None
-) -> str:
+async def grok_build_version(executable: str, cancel_event: threading.Event | None = None) -> str:
     """Require source-backed root/agent help and structured version output."""
     outputs: list[str] = []
     for arguments in (["--help"], ["agent", "--help"], ["version", "--json"]):

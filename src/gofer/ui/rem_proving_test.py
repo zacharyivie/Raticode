@@ -25,6 +25,8 @@ from __future__ import annotations
 import re
 import shlex
 import threading
+import xml.etree.ElementTree as ElementTree
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -158,9 +160,38 @@ def _python(source: Path, folder: Path) -> str:
     return FALLBACK_PYTHON
 
 
-def _command(plan: dict[str, str], checkout: Path, python: str) -> str:
+# ``python -m pytest`` puts the working folder first on the import path, so a ``pytest``
+# folder committed in the project would run in place of the real one and print whatever
+# it likes. The real pytest is imported from the environment first; then the folder goes
+# back on the path, as ``python -m pytest`` has it, so tests still import the project.
+PYTEST_START = (
+    "import sys; first = sys.path.pop(0); import pytest; sys.path.insert(0, first); "
+    "sys.exit(pytest.main())"
+)
+# Results bigger than this aren't read: one named test writes a few hundred bytes.
+JUNIT_MAX_BYTES = 2_000_000
+
+
+def _junit_path(box: Path) -> Path:
+    """Where pytest writes its results for one side: the side's own scratch folder."""
+    return box / checks.BOX_SCRATCH / "proving-test-results.xml"
+
+
+def _command(plan: dict[str, str], checkout: Path, python: str, junit: Path | None = None) -> str:
     if plan["kind"] == "pytest":
-        return shlex.join([python, "-m", "pytest", "-p", "no:cacheprovider", plan["test"]])
+        # The results name each test from the rootdir; fixing it at the checkout makes
+        # them match the planned node ID exactly (``ran_tests``). The xunit1 format adds
+        # each result's real file, which a dotted class path can't tell apart: a root
+        # ``tests.test_calc.py`` gives the same class path as ``tests/test_calc.py``.
+        # These come after the project's ``addopts``, so they win over its settings.
+        report = (
+            ["--rootdir=.", "-o", "junit_family=xunit1", f"--junitxml={junit}"]
+            if junit is not None
+            else []
+        )
+        return shlex.join(
+            [python, "-c", PYTEST_START, "-p", "no:cacheprovider", *report, plan["test"]]
+        )
     # node --test from the file's own package folder, as its npm test would.
     file = PurePosixPath(plan["file"])
     home = PurePosixPath(".")
@@ -185,6 +216,62 @@ def outcome(result: dict[str, Any], kind: str) -> str:
     if kind == "pytest" and code in {4, 5}:
         return "not_found"
     return "failed"
+
+
+def _result_name(node: str) -> tuple[str, str, str]:
+    """The ``(file, classname, name)`` pytest's xunit1 results give the test at ``node``
+    when the rootdir is the checkout: ``tests/a/test_b.py::TestC::test_d[1]`` is
+    ``("tests/a/test_b.py", "tests.a.test_b.TestC", "test_d[1]")``."""
+    file, rest = node.split("::", 1)
+    while file.startswith("./"):
+        file = file[2:]
+    parts = rest.split("::")
+    module = file.removesuffix(".py").replace("/", ".")
+    return file, ".".join([module, *parts[:-1]]), parts[-1]
+
+
+@dataclass(frozen=True)
+class Counted:
+    """What pytest's results say about the named test: how many of its runs there were,
+    how many passed, and how many results were some other test."""
+
+    ran: int
+    passed: int
+    others: int
+
+    @property
+    def proven(self) -> bool:
+        return self.passed > 0 and self.passed == self.ran and self.others == 0
+
+
+def ran_tests(results: bytes | None, node: str) -> Counted | None:
+    """Pytest's results for ``node``; None when there is no readable file.
+
+    A pass counts only from here: an exit code of 0 also comes from a run that only
+    listed the tests (``addopts = --co``), or one that deselected the named test and ran
+    another. A result is the named test only when its real file, class path and name all
+    match; a node named without parameters matches each parametrized run
+    (``test_d[1]``). Any other result in the file means the run wasn't the named test
+    alone, so it proves nothing (``Counted.proven``)."""
+    if not results:
+        return None
+    try:
+        root = ElementTree.fromstring(results)
+    except ElementTree.ParseError:
+        return None
+    file, classname, name = _result_name(node)
+    ran = passed = others = 0
+    for case in root.iter("testcase"):
+        found = case.get("name") or ""
+        where = (case.get("file") or "").replace("\\", "/")
+        same_name = found == name or ("[" not in name and found.startswith(name + "["))
+        if where != file or case.get("classname") != classname or not same_name:
+            others += 1
+            continue
+        ran += 1
+        if not any(child.tag in {"failure", "error", "skipped"} for child in case):
+            passed += 1
+    return Counted(ran, passed, others)
 
 
 def not_run(test: str, reason: str, **extra: Any) -> dict[str, Any]:
@@ -218,17 +305,17 @@ def _side(
     try:
         try:
             checkout, made, setup = checks._make_fresh(
-                folder,
+                checks.folder_commit(folder, commit),
                 box,
                 data_dir=data_dir,
                 source=source,
                 cancel=cancel,
-                commit=commit,
                 overlay=overlay,
             )
         except (checks.NoFreshWorktree, OSError) as exc:
             return {"skipped": f"no fresh worktree of commit {commit[:12]}: {exc}"}
-        command = _command(plan, checkout, python)
+        junit = _junit_path(box) if plan["kind"] == "pytest" else None
+        command = _command(plan, checkout, python, junit)
         result = checks._run_in(
             command,
             folder,
@@ -238,16 +325,39 @@ def _side(
             timeout=timeout,
             platform=platform,
             ran_folder=checkout,
+            keep=junit,
+            keep_limit=JUNIT_MAX_BYTES,
         )
         if result.get("skipped"):
             return {"skipped": str(result["skipped"])}
+        found = outcome(result, plan["kind"])
+        detail = str(result.get("detail") or "")
+        if junit is not None and found == "passed":
+            counted = ran_tests(result.get("kept"), plan["test"])
+            if counted is None or not counted.proven:
+                # Exit 0 without the named test passing alone: collect-only settings, or the
+                # test deselected while another one ran.
+                found = "not_found"
+                if counted is None:
+                    detail = "pytest exited 0 but wrote no results Raticode could read"
+                elif counted.others:
+                    detail = (
+                        f"pytest exited 0 but its results include {counted.others} other "
+                        f"test{'s' if counted.others != 1 else ''} besides {plan['test']}"
+                    )
+                else:
+                    detail = (
+                        f"pytest exited 0 but its results don't show {plan['test']} ran and passed"
+                    )
+        # Shown without this side's own scratch path, so both sides read the same.
+        shown = command.replace(str(junit), "<scratch>/" + junit.name) if junit else command
         return {
             "commit": made,
-            "command": command,
+            "command": shown,
             "exit_code": result.get("exit_code"),
-            "outcome": outcome(result, plan["kind"]),
+            "outcome": found,
             "seconds": result.get("seconds"),
-            "detail": result.get("detail") or "",
+            "detail": detail,
             "output": str(result.get("output") or "")[-OUTPUT_CHARS:],
             **({"setup": setup} if setup else {}),
         }

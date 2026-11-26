@@ -119,13 +119,18 @@ def _id_time(run_id: str) -> datetime | None:
         return None
 
 
+def run_error_message(document: Mapping[str, Any]) -> str:
+    """A run record's error message, cut to the length the run lists show."""
+    error = document.get("error")
+    message = error.get("message") if isinstance(error, Mapping) else None
+    return str(message)[:300] if message else ""
+
+
 def _summary_of(document: Mapping[str, Any]) -> dict[str, Any]:
     """What the lists and clean-up need from one run record, and nothing else."""
     from gofer.rattish.run_service import run_started_by
 
     usage = document.get("usage")
-    error = document.get("error")
-    message = error.get("message") if isinstance(error, Mapping) else None
     entry: dict[str, Any] = {
         "run_id": str(document.get("run_id") or ""),
         "status": str(document.get("status") or ""),
@@ -135,7 +140,7 @@ def _summary_of(document: Mapping[str, Any]) -> dict[str, Any]:
         "duration_ms": document.get("duration_ms") or 0,
         "started_by": run_started_by(document),
         "resumed_from": (document.get("resumed_from") or {}).get("run_id"),
-        "error": str(message)[:300] if message else "",
+        "error": run_error_message(document),
         "usage": (
             {key: value for key, value in usage.items() if key not in {"nodes", "limits"}}
             if isinstance(usage, Mapping)

@@ -15,7 +15,6 @@ export const DEFAULT_VOICE_BINDING = "Mod+Alt+KeyV";
 // it on. It is separate from the in-app shortcut so Hold to talk keeps working inside
 // Raticode (a system-wide key can't tell when it is let go).
 export const ANYWHERE_COMMAND_ID = "voice.dictateAnywhere";
-export const DEFAULT_ANYWHERE_BINDING = "Ctrl+Alt+Space";
 
 // "toggle": press once to start and again to stop. "hold": listen only while held.
 export const DICTATION_MODES = [["toggle", "Press to start and stop"], ["hold", "Hold to talk"]];

@@ -1,29 +1,8 @@
 #!/usr/bin/env python3
-"""Validate public protocol fixtures. Does not send messages or execute desktop work."""
+"""Validate the v2 protocol schemas and fixtures. Does not send messages or execute desktop work."""
 import json
 from pathlib import Path
 from jsonschema import Draft202012Validator
-root = Path(__file__).resolve().parents[1] / 'protocol' / 'v1'
-validators = {}
-for name in ('event', 'invitation', 'frame', 'session'):
-    schema = json.loads((root / f'{name}.schema.json').read_text())
-    Draft202012Validator.check_schema(schema)
-    validators[name] = Draft202012Validator(schema)
-count = 0
-for path in sorted((root / 'fixtures').glob('*.json')):
-    validators[path.stem if path.stem in ('invitation', 'frame', 'session') else 'event'].validate(json.loads(path.read_text()))
-    count += 1
-# Negative shape checks guard against broadening the contract accidentally.
-sample = json.loads((root / 'fixtures/chat.submit.json').read_text())
-for mutate in (
-    lambda e: e.update(version=2), lambda e: e.update(type='shell.exec'),
-    lambda e: e.update(request_id=None), lambda e: e.update(sequence=-1),
-    lambda e: e['payload'].update(command='execute'),
-):
-    value = json.loads(json.dumps(sample)); mutate(value)
-    assert not validators['event'].is_valid(value), value
-print(f'{count} protocol fixtures and 5 negative cases passed; no network operations.')
-
 # The desktop loads these files at run time; this is the only copy.
 v2 = Path(__file__).resolve().parents[3] / 'src' / 'gofer' / 'devices' / 'protocol' / 'v2'
 if not v2.is_dir():

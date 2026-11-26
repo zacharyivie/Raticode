@@ -70,7 +70,24 @@ class ThreadAccountsTest {
         assertEquals("", ThreadAccounts.expires(accounts.getValue("odd").signIn!!))
         assertFalse(accounts.getValue("plain").phoneSignIn)
         assertNull(accounts.getValue("plain").signIn)
-        assertEquals(setOf("work", "odd"), ThreadAccounts.signIns(view).keys)
+        assertEquals(setOf("codex/work", "codex/odd"), ThreadAccounts.signIns(view).keys)
+    }
+
+    @Test fun sameNamedAccountsOfTwoProvidersKeepTheirOwnSignIns() {
+        val view = ThreadAccounts.parse(ThreadAccounts.key(null), JSONObject("""{"providers":[
+            {"provider":"codex","label":"Codex","accounts":[{"name":"work","state":"needs_sign_in","needs_sign_in":true,"phone_sign_in":true,
+             "sign_in":{"state":"waiting","url":"https://auth.openai.com/codex/device","code":"CODX-11111","seconds_left":840}}]},
+            {"provider":"grok","label":"Grok","accounts":[{"name":"work","state":"needs_sign_in","needs_sign_in":true,"phone_sign_in":true,
+             "sign_in":{"state":"waiting","url":"https://accounts.x.ai/device","code":"GROK-22222","seconds_left":840}}]}]}"""))
+        val signIns = ThreadAccounts.signIns(view)
+        assertEquals(2, signIns.size)
+        assertEquals("CODX-11111", signIns.getValue(ThreadAccounts.signInId("codex", "work")).code)
+        assertEquals("GROK-22222", signIns.getValue(ThreadAccounts.signInId("grok", "work")).code)
+        // Each sign-in's answer has its own screen key, so one never lands on the other's panel.
+        val codex = DesktopViews.key(ThreadAccounts.SIGN_IN, ThreadAccounts.signInParams("codex", "work"))
+        val grok = DesktopViews.key(ThreadAccounts.SIGN_IN, ThreadAccounts.signInParams("grok", "work"))
+        assertNotEquals(codex, grok)
+        assertEquals(ThreadAccounts.signInId("grok", "work"), grok.removePrefix(ThreadAccounts.SIGN_IN_KEY))
     }
 
     @Test fun aRefusedSignInKeepsCodexsMessageAndWhereToTurnItOn() {
@@ -99,7 +116,7 @@ class ThreadAccountsTest {
         assertEquals("codex", start.getString("provider"))
         assertFalse(start.has("cancel"))
         assertTrue(ThreadAccounts.signInParams("codex", "work", cancel = true).getBoolean("cancel"))
-        assertEquals(ThreadAccounts.SIGN_IN_KEY + "work", DesktopViews.key(ThreadAccounts.SIGN_IN, start))
+        assertEquals(ThreadAccounts.SIGN_IN_KEY + "codex/work", DesktopViews.key(ThreadAccounts.SIGN_IN, start))
         assertTrue(ThreadAccounts.SIGN_IN in DesktopViews.ACTIONS)
     }
 }

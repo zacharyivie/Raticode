@@ -117,7 +117,7 @@ internal fun AccountMenu(menu: ThreadAccounts.Menu, choice: String, enabled: Boo
         }
         signIn?.let { Text("${it}: ${ThreadAccounts.SIGN_IN_HELP}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("threadAccountSignInHelp")) }
         signIns?.let { actions -> menu.accounts.forEach { account ->
-            actions.states[account.name]?.let { AccountSignInPanel(menu.provider, account.name, it, actions) }
+            actions.state(menu.provider, account.name)?.let { AccountSignInPanel(menu.provider, account.name, it, actions) }
         } }
         warning?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary,
             modifier = Modifier.testTag("threadAccountWarning").semantics { liveRegion = LiveRegionMode.Polite }) }

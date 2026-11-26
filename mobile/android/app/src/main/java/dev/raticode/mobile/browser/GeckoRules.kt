@@ -239,6 +239,14 @@ internal object GeckoRules {
         else -> ExtensionOpen.Refused("$name has nothing to open. It works on the pages you visit by itself.")
     }
 
+    /** The question asked before a profile and everything in it is deleted; nothing is deleted until it's answered. */
+    fun deleteProfileTitle(name: String) = "Delete ${name.ifBlank { "this profile" }}?"
+    const val DELETE_PROFILE_TEXT = "Its tabs, favorites, history, sign-ins and site data on this phone are removed and can't be restored."
+
+    /** The question asked before an extension is uninstalled. */
+    fun removeExtensionTitle(name: String) = "Remove ${name.ifBlank { "this extension" }}?"
+    const val REMOVE_EXTENSION_TEXT = "Its settings and data are removed."
+
     /** Shown when a button press opened no popup or tab: the extension handles the press itself, on the page in view. */
     fun extensionActedOnPage(name: String) = "$name has no window to open. Its button works on the page you're viewing."
 

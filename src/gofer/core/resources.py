@@ -67,10 +67,6 @@ def bundle_resource_limits_from_env(
     return ResourceLimits.model_validate({**base.model_dump(), **overrides})
 
 
-def byte_len(value: str) -> int:
-    return len(value.encode("utf-8", errors="replace"))
-
-
 def require_limit(actual: int, limit: int, label: str) -> None:
     if actual > limit:
         raise ResourceLimitError(f"{label} exceeded limit {limit} bytes (got {actual} bytes)")
@@ -109,40 +105,3 @@ def read_text_limited(
     # Match Path.read_text's universal newline handling after decoding, including
     # encodings where a newline occupies more than one byte.
     return data.decode(encoding, errors=errors).replace("\r\n", "\n").replace("\r", "\n")
-
-
-def truncate_text_bytes(value: str, max_bytes: int, label: str = "content") -> str:
-    encoded = value.encode("utf-8", errors="replace")
-    if len(encoded) <= max_bytes:
-        return value
-    if max_bytes <= 0:
-        return f"[{label} truncated; limit 0 bytes]"
-    suffix = f"\n[{label} truncated at {max_bytes} bytes]".encode()
-    head_size = max(0, max_bytes - len(suffix))
-    truncated = encoded[:head_size] + suffix
-    return truncated[:max_bytes].decode("utf-8", errors="replace")
-
-
-def tail_text_file(path: Path, max_bytes: int) -> tuple[str, bool]:
-    max_bytes = max(0, max_bytes)
-    size = path.stat().st_size
-    with _open_regular_binary_input(path) as fh:
-        if size > max_bytes:
-            fh.seek(max(0, size - max_bytes))
-            data = fh.read(max_bytes)
-            return data.decode("utf-8", errors="replace"), True
-        # A running workflow can append after stat. Bound this branch too and
-        # retain one extra byte to detect truncation without reading the whole log.
-        data = fh.read(max_bytes + 1)
-        return data[:max_bytes].decode("utf-8", errors="replace"), len(data) > max_bytes
-
-
-def read_text_file_range(path: Path, *, offset: int = 0, max_bytes: int) -> tuple[str, int, int]:
-    size = path.stat().st_size
-    start = max(0, min(offset, size))
-    length = max(0, max_bytes)
-    with _open_regular_binary_input(path) as fh:
-        fh.seek(start)
-        data = fh.read(length)
-    end = start + len(data)
-    return data.decode("utf-8", errors="replace"), start, end

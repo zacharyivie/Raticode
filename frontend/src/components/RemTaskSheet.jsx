@@ -12,6 +12,7 @@ import { WorktreeSetupNotice } from "./WorktreeSetup.jsx";
 import { ThreadContextSent } from "./ContextSent.jsx";
 import { TicketPills } from "./TicketPill.jsx";
 import { taskTickets } from "../lib/ticketMentions.js";
+import { useRovingChoice } from "../lib/useRovingChoice.js";
 import { closeTaskSheet, createRemTask, deleteRemTask, loadRemTask, openRemThread, openTaskSheet, runRemRunThere, updateRemTask } from "../lib/remHomeStore.js";
 
 // One task, shown in the Rem sidebar in place of the task list: live status above
@@ -129,11 +130,7 @@ export default function TaskSheet({ sheet, tasks, projectOptions, now, messages,
           <textarea ref={promptRef} id="rem-task-prompt" rows={4} value={draft.prompt} placeholder="Describe the outcome you want, in plain words." onChange={event => update({ prompt: event.target.value })} aria-invalid={Boolean(errors.prompt) || undefined} />
         </Field>
         <Field label="Kind of work">
-          {CREATABLE_TYPES.includes(draft.type) ? <div className="rem-types" role="radiogroup" aria-label="Kind of work">
-            {CREATABLE_TYPES.map(type => <button key={type} type="button" role="radio" aria-checked={draft.type === type} data-type={type} onClick={() => update({ type })}>
-              <TaskTypeIcon type={type} size={16} /><span>{TASK_TYPES[type].label}</span>
-            </button>)}
-          </div> : <p className="rem-static-type"><TaskTypeIcon type={draft.type} size={15} />{typeLabel(draft.type)}</p>}
+          {CREATABLE_TYPES.includes(draft.type) ? <KindOfWork type={draft.type} onChange={type => update({ type })} /> : <p className="rem-static-type"><TaskTypeIcon type={draft.type} size={15} />{typeLabel(draft.type)}</p>}
           <p className="rem-field-note">{TASK_TYPES[draft.type]?.blurb}</p>
         </Field>
         <Field label="Project" error={errors.project_dir} htmlFor="rem-task-project">
@@ -236,11 +233,23 @@ function AfterField({ value, tasks, choices, editable, started, onChange }) {
   </Field>;
 }
 
+function KindOfWork({ type, onChange }) {
+  const choice = useRovingChoice({ keys: CREATABLE_TYPES, selected: type, onSelect: onChange });
+  return <div className="rem-types" role="radiogroup" aria-label="Kind of work">
+    {CREATABLE_TYPES.map(item => <button key={item} type="button" role="radio" aria-checked={type === item} data-type={item} onClick={() => onChange(item)} {...choice(item)}>
+      <TaskTypeIcon type={item} size={16} /><span>{TASK_TYPES[item].label}</span>
+    </button>)}
+  </div>;
+}
+
+const SCHEDULE_KIND_KEYS = SCHEDULE_KINDS.map(([value]) => value);
+
 function ScheduleFields({ schedule, onChange, isNew, note }) {
   const kind = schedule.kind === "now" ? "once" : schedule.kind;
+  const often = useRovingChoice({ keys: SCHEDULE_KIND_KEYS, selected: kind, onSelect: value => onChange({ kind: value }) });
   return <div className="rem-schedule">
     <div className="rem-segments" role="radiogroup" aria-label="How often">
-      {SCHEDULE_KINDS.map(([value, label]) => <button key={value} type="button" role="radio" aria-checked={kind === value} onClick={() => onChange({ kind: value })}>{label}</button>)}
+      {SCHEDULE_KINDS.map(([value, label]) => <button key={value} type="button" role="radio" aria-checked={kind === value} onClick={() => onChange({ kind: value })} {...often(value)}>{label}</button>)}
     </div>
     {kind === "weekly" ? <div className="rem-weekdays" role="group" aria-label="Days">
       {WEEKDAYS.map(day => {
@@ -254,14 +263,17 @@ function ScheduleFields({ schedule, onChange, isNew, note }) {
   </div>;
 }
 
+// A check a paired desktop sent with a task it handed over; edited here, it becomes the user's.
+const fromDesktop = item => String(item.authored_by || "").startsWith("desktop:");
+
 function Criteria({ criteria, onChange }) {
   const [next, setNext] = useState("");
   const add = () => { const text = next.trim(); if (!text) return; onChange([...criteria, { description: text, authored_by: "user" }]); setNext(""); };
   return <div className="rem-criteria">
     {criteria.length ? <ul>{criteria.map((item, index) => <li key={item.id || index}>
       <ShieldCheck size={14} aria-hidden="true" />
-      <input aria-label={`Check ${index + 1}`} value={item.description} onChange={event => onChange(criteria.map((entry, at) => at === index ? { ...entry, description: event.target.value, authored_by: entry.authored_by === "rem_recommended" ? "user" : entry.authored_by } : entry))} />
-      {item.authored_by === "rem_recommended" ? <span className="rem-tag" title="Rem suggested this check">Suggested</span> : item.authored_by === "project_rules" ? <span className="rem-tag" title="Required by the project's instructions">Project</span> : null}
+      <input aria-label={`Check ${index + 1}`} value={item.description} onChange={event => onChange(criteria.map((entry, at) => at === index ? { ...entry, description: event.target.value, authored_by: entry.authored_by === "rem_recommended" || fromDesktop(entry) ? "user" : entry.authored_by } : entry))} />
+      {item.authored_by === "rem_recommended" ? <span className="rem-tag" title="Rem suggested this check">Suggested</span> : item.authored_by === "project_rules" ? <span className="rem-tag" title="Required by the project's instructions">Project</span> : fromDesktop(item) ? <span className="rem-tag" title="Sent with this task by the paired desktop that handed it over">Paired desktop</span> : null}
       <button type="button" aria-label={`Remove check ${index + 1}`} title="Remove" onClick={() => onChange(criteria.filter((_, at) => at !== index))}><X size={13} /></button>
     </li>)}</ul> : <p className="rem-field-note">Leave this empty and Rem will suggest checks before it starts.</p>}
     <div className="rem-criteria-add">

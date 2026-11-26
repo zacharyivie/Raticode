@@ -444,7 +444,7 @@ class WorkflowsTest {
         assertEquals("approved", older.approval)
         assertFalse(older.needsApproval)
 
-        val params = Workflows.changesParams(workflow, changed)
+        val params = Workflows.changesParams(workflow.id, changed.id)
         val key = DesktopViews.key(Workflows.CHANGES, params)
         assertEquals("workflows.trigger.changes:wf-1/trg_1", key)
         val changes = DesktopViews.parse(key, JSONObject("""{"workflow_id": "wf-1", "trigger_id": "trg_1", "approval": "changed",

@@ -25,9 +25,8 @@ from typing import Any
 from gofer.utils.atomic_output import open_binary_input
 from gofer.utils.brand_compat import LEGACY_SWARM_BRANCH_PREFIX
 from gofer.utils.process import (
-    NO_REPOSITORY_PROGRAMS,
     build_subprocess_env,
-    untrusted_repository_git_env,
+    run_repository_git,
 )
 
 # Untracked files that look like credentials stay out of the start snapshot.
@@ -58,36 +57,36 @@ SECRET_FILE_PATTERNS = (
 SLOW_GIT_SECONDS = 600
 
 
-def _untrusted_env(root: Path, env: dict[str, str]) -> dict[str, str]:
+_SWARM_GIT_CONFIG = ("commit.gpgsign=false", "user.name=Raticode", "user.email=swarm@localhost")
+
+
+def _run_git(
+    root: Path,
+    *args: str,
+    env: dict[str, str] | None = None,
+    timeout: float = 30,
+    text: bool = True,
+) -> subprocess.CompletedProcess[Any]:
+    """Git's result; ValueError when it fails, can't run or its settings can't be read."""
     try:
-        return untrusted_repository_git_env(root, env)
+        result = run_repository_git(
+            root,
+            *args,
+            timeout=timeout,
+            env=build_subprocess_env(env, inherit_parent=env is None),
+            text=text,
+            config=_SWARM_GIT_CONFIG,
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        # Unreadable settings: fail like any git error rather than run it unchecked.
         raise ValueError(str(exc)) from exc
+    if result.returncode:
+        stderr = result.stderr if text else result.stderr.decode(errors="replace")
+        raise ValueError(stderr.strip() or "Git operation failed")
+    return result
 
 
 def git(root: Path, *args: str, env: dict[str, str] | None = None, timeout: float = 30) -> str:
-    result = subprocess.run(
-        [
-            "git",
-            *NO_REPOSITORY_PROGRAMS,
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "user.name=Raticode",
-            "-c",
-            "user.email=swarm@localhost",
-            *args,
-        ],
-        cwd=root,
-        env=_untrusted_env(root, build_subprocess_env(env, inherit_parent=env is None)),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    if result.returncode:
-        raise ValueError(result.stderr.strip() or "Git operation failed")
-    return result.stdout.strip()
+    return str(_run_git(root, *args, env=env, timeout=timeout).stdout).strip()
 
 
 def prepare_run(root: Path, directory: Path, *, name: str = "") -> dict[str, Any]:
@@ -294,20 +293,15 @@ def cleanup_run(workspace: dict[str, Any], attempts: list[dict[str, Any]]) -> di
         bundle = archive / "commits.bundle"
         git(path, "bundle", "create", str(bundle), "HEAD", timeout=SLOW_GIT_SECONDS)
         git(path, "bundle", "verify", str(bundle), timeout=SLOW_GIT_SECONDS)
-        patch = subprocess.run(
-            [
-                "git",
-                *NO_REPOSITORY_PROGRAMS,
-                "diff",
-                "--binary",
-                "--no-ext-diff",
-                "--no-textconv",
-                "HEAD",
-            ],
-            cwd=path,
-            env=_untrusted_env(path, build_subprocess_env()),
-            capture_output=True,
-            check=True,
+        patch = _run_git(
+            path,
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            "--no-textconv",
+            "HEAD",
+            timeout=SLOW_GIT_SECONDS,
+            text=False,
         ).stdout
         (archive / "working.patch").write_bytes(patch)
         files = git(path, "ls-files", "-z", "--modified", "--others").split("\0")

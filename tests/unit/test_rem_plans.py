@@ -332,6 +332,50 @@ def test_answering_the_last_question_in_chat_hands_the_plan_back(home: RemHome, 
     assert len(turns) == 3 and plans.HANDBACK_RULES in turns[2]
 
 
+def test_rems_chat_lists_a_plans_answers_only_until_the_plan_is_handed_back(
+    home: RemHome, project: Path, monkeypatch: pytest.MonkeyPatch
+):
+    configure(home, project)
+    listed: list[list[str]] = []
+    real = decisions.for_prompt
+
+    def spy(*args: Any, **kw: Any) -> list[dict[str, Any]]:
+        found = real(*args, **kw)
+        if kw.get("chat"):
+            listed.append([e["id"] for e in found if "id" in e])
+        return found
+
+    monkeypatch.setattr(decisions, "for_prompt", spy)
+    turns: list[str] = []
+
+    def generate(prompt: str, config: Any, cancel: Any) -> dict[str, Any]:
+        turns.append(prompt)
+        if len(turns) == 1:
+            return plan_reply(project, TOPICS[:2])
+        return {"reply": "Noted.", "tickets": []}
+
+    home.generate = generate
+    home.submit_message({"request_id": "m1", "body": "Plan offline sync with me"})
+    idle(home)
+    first, last = _plan(home)[1]["questions"]
+    home.change_decisions({"action": "use", "id": first})
+    idle(home)
+    home.submit_message({"request_id": "m2", "body": "What is still open?"})
+    idle(home)
+    assert _plan(home)[1]["status"] == "asking"
+    assert first in listed[-1]
+    home.change_decisions({"action": "use", "id": last})
+    idle(home)
+    for _ in range(3):
+        home.next_plan_check = 0.0
+        idle(home)
+    assert _plan(home)[1]["status"] == "handed_back"
+    home.submit_message({"request_id": "m3", "body": "Thanks, what's next?"})
+    idle(home)
+    assert len(turns) == 4, "plan, question, hand-back, next message"
+    assert not {first, last} & set(listed[-1])
+
+
 # Slices -----------------------------------------------------------------------------------
 
 

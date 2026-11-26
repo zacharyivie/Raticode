@@ -266,11 +266,13 @@ def probe_headless(binary: Path, root: Path | None = None) -> dict[str, Any]:
             if allowed.get("ok") is not True:
                 raise RuntimeError(f"An agent token couldn't read workflows: {allowed}")
             refused = _envelope(
-                run(cli, "api", "GET", "/session", *agent, cwd=base, env=env, expect=(5,)),
-                "agent GET /session",
+                run(
+                    cli, "api", "GET", "/provider/accounts", *agent, cwd=base, env=env, expect=(5,)
+                ),
+                "agent GET /provider/accounts",
             )
             if refused.get("ok") is not False:
-                raise RuntimeError(f"An agent token read the owner session: {refused}")
+                raise RuntimeError(f"An agent token read the owner's provider accounts: {refused}")
         finally:
             status = _stop(process)
         if os.name != "nt":
@@ -290,7 +292,7 @@ def probe_headless(binary: Path, root: Path | None = None) -> dict[str, Any]:
                 "api GET /health with the owner token",
                 "rem tasks list (a backend command)",
                 "tokens create/list",
-                "agent token reads /workflows and is refused /session (exit 5)",
+                "agent token reads /workflows and is refused /provider/accounts (exit 5)",
                 "endpoint removed on stop" if os.name != "nt" else "stopped",
                 "client exits 6 once the backend is gone",
             ],

@@ -19,7 +19,6 @@ class TabRecoveryTest {
         assertEquals(Decision.Restore(0L), recovery.gone("a")); recovery.restored("a")
         assertEquals(Decision.Restore(TabRecovery.BACKOFF_MS[1]), recovery.gone("a")); recovery.restored("a")
         assertEquals(Decision.Restore(TabRecovery.BACKOFF_MS[2]), recovery.gone("a")); recovery.restored("a")
-        assertEquals(TabRecovery.MAX_RESTORES, recovery.recentRestores("a"))
         assertEquals(Decision.GiveUp, recovery.gone("a"))
         // Another tab still reloads by itself.
         assertEquals(Decision.Restore(0L), recovery.gone("b"))

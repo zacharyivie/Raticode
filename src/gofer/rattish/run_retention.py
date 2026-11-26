@@ -110,20 +110,6 @@ def read_run_record(path: Path, *, settled: bool = False) -> RunRecord:
     return RunRecord(document, path)
 
 
-def run_record_paths(directory: Path) -> list[Path]:
-    """A workflow's run records, newest first."""
-    if not directory.is_dir():
-        return []
-    stamped = []
-    for path in directory.glob("*.json"):
-        try:
-            if path.is_file():
-                stamped.append((path.stat().st_mtime_ns, path.name, path))
-        except OSError:
-            continue
-    return [path for _, _, path in sorted(stamped, reverse=True)]
-
-
 def run_record_count(directory: Path) -> int:
     """How many run records a workflow has, at most, counted by name without a stat."""
     try:
@@ -135,18 +121,6 @@ def run_record_count(directory: Path) -> int:
             )
     except FileNotFoundError:
         return 0
-
-
-def load_run_records(directory: Path) -> tuple[list[RunRecord], int]:
-    """Readable run records, newest first, and how many were unreadable."""
-    records: list[RunRecord] = []
-    skipped = 0
-    for path in run_record_paths(directory):
-        try:
-            records.append(read_run_record(path))
-        except RunRecordError:
-            skipped += 1
-    return records, skipped
 
 
 def summary_run_records(
@@ -172,24 +146,6 @@ def summary_run_records(
             document["resumed_from"] = {"run_id": entry.summary["resumed_from"]}
         records.append(RunRecord(document, entry.path))
     return records, skipped
-
-
-def protected_run_ids(records: Collection[RunRecord], data_dir: Path, workflow_id: str) -> set[str]:
-    """Runs that must survive any prune.
-
-    Running runs, runs waiting on an approval, runs a Raticode process is
-    resuming, and the run each running run resumed. Raises OSError when pending
-    approvals can't be read, so a caller prunes nothing rather than guess.
-    """
-    from gofer.rattish.run_service import is_rattish_run_being_resumed
-
-    protected = _protected_by_status_and_approvals(records, data_dir, workflow_id)
-    protected.update(
-        record.run_id
-        for record in records
-        if is_rattish_run_being_resumed(data_dir, workflow_id, record.run_id)
-    )
-    return protected
 
 
 def _protected_by_status_and_approvals(

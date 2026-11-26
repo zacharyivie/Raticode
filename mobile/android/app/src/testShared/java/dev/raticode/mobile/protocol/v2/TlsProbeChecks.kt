@@ -119,7 +119,6 @@ class TlsProbeChecks(private val read: (String) -> ByteArray) {
         ciphertext.toByteArray().toList().chunked(2048).forEach {
             records.addAll(decoder.feed(server.step(it.toByteArray()).plaintext))
         }
-        decoder.endOfStream()
         assertEquals(2, records.size)
         assertEquals(65528, records[0].getString("v").length)
         assertEquals(1, records[1].getInt("v"))

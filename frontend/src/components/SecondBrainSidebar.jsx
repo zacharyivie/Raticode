@@ -95,7 +95,7 @@ export default function SecondBrainSidebar({ active, open, onOpen }) {
       </form>
       <div className="sb-side-scroll">
         <Group title="Saved searches">
-          {savedSearches.map(item => { const Icon = item.builtIn ? VIEW_ICONS[item.icon] || Search : Search; return <button key={item.id} type="button" className="sb-side-row" aria-current={current("search", item.id) ? "page" : undefined} onClick={() => { applySavedSearch(item.id); onOpen(); }}><Icon size={14} aria-hidden="true" /><span>{item.name}</span><small>{counts[item.id]}</small></button>; })}
+          {savedSearches.map(item => { const Icon = item.builtIn ? VIEW_ICONS[item.icon] || Search : Search; return <button key={item.id} type="button" className="sb-side-row" aria-current={current("search", item.id) ? "page" : undefined} onClick={() => { applySavedSearch(item.id); onOpen(); }}><Icon size={14} aria-hidden="true" /><span>{item.name}</span>{store.passagesLoading && item.text?.trim() ? <small title="Loading passages" aria-label="Loading passages">…</small> : <small>{counts[item.id]}</small>}</button>; })}
         </Group>
         <Group title="Projects" count={projects.length} action={<button type="button" className="sb-side-icon" aria-label="Topic map" title="Topic map" onClick={() => go("map", { mapTopicId: "" })}><Network size={14} /></button>}>
           {projects.slice(0, 8).map(item => <button key={item.id} type="button" className="sb-side-row" aria-current={open && view.section === "projects" && view.projectId === item.id ? "page" : undefined} onClick={() => go("projects", { projectId: item.id, projectTab: "reports" })}><FolderKanban size={14} aria-hidden="true" /><span>{item.name}</span><small>{item.counts.reports + item.counts.knowledge}</small></button>)}

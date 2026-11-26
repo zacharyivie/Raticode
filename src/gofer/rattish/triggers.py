@@ -84,7 +84,7 @@ MAX_DAILY_TOKENS = 10_000_000_000
 # Spending older than this can't fall inside any time zone's "today".
 SPEND_KEPT_DAYS = 3
 COST_REPORTING_PROVIDERS = frozenset({"claude_code"})
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 # Who approved a trigger's workflow version, as shown in the Triggers section.
 APPROVED_BY = ("desktop", "studio", "phone", "cli", "upgrade")
 USER_ONLY = (
@@ -92,14 +92,25 @@ USER_ONLY = (
     "workflow's Triggers section, on your phone, or with Raticode rattish triggers approve "
     "from your own terminal."
 )
+LIMITS_USER_ONLY = (
+    "Only you can raise or remove a trigger's daily limits or Time limit; an agent turn can "
+    "only lower them. Change them in the workflow's Triggers section or with Raticode rattish "
+    "triggers update from your own terminal."
+)
 _MAX_CRON_LENGTH = 200
 _MAX_GLOB_LENGTH = 300
 _MAX_LABEL_LENGTH = 120
 _CRON_WEEKDAYS = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")
+# APScheduler's own weekday numbers start at Monday = 0.
+_APS_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
 class TriggerError(ValueError):
     """Raised with a sentence for the user when a trigger can't be saved."""
+
+
+class UserOnlyError(TriggerError):
+    """Raised when someone other than the user asks for a decision only the user may make."""
 
 
 class TriggerNotFound(TriggerError):
@@ -209,6 +220,10 @@ class UsageWait:
 
     ``run_id`` is the run that failed, which resumes as a new run at ``resume_at``.
     ``waits`` counts this wait too, up to ``usage_limits.MAX_WAITS``.
+    ``record_sha256`` and ``values_sha256`` are the SHA-256 of the run's record and of
+    its saved values file when the wait began, or "" for a file that wasn't there.
+    The run resumes only while both files still match. None is a wait saved before
+    Raticode kept these, which never resumes on its own.
     """
 
     event_id: int
@@ -220,6 +235,8 @@ class UsageWait:
     resume_at: str
     waits: int
     error: str
+    record_sha256: str | None = None
+    values_sha256: str | None = None
 
 
 def _usage_wait(row: sqlite3.Row) -> UsageWait:
@@ -233,6 +250,8 @@ def _usage_wait(row: sqlite3.Row) -> UsageWait:
         resume_at=row["resume_at"],
         waits=int(row["waits"]),
         error=row["error"],
+        record_sha256=row["record_sha256"],
+        values_sha256=row["values_sha256"],
     )
 
 
@@ -381,26 +400,31 @@ def validate_timezone(timezone: str) -> tzinfo:
         ) from None
 
 
-def _cron_weekday_index(token: str) -> int:
+def _cron_weekday_index(token: str, *, monday_zero: bool = False) -> int:
+    """A weekday's number: crontab's (Sunday = 0, 7 too) or APScheduler's (Monday = 0)."""
+    days, top = (_APS_WEEKDAYS, 6) if monday_zero else (_CRON_WEEKDAYS, 7)
     if token.isdigit():
         number = int(token)
-        if 0 <= number <= 7:
+        if 0 <= number <= top:
             return number % 7
-    elif token[:3] in _CRON_WEEKDAYS and len(token) in {3, *range(6, 10)}:
-        return _CRON_WEEKDAYS.index(token[:3])
-    raise TriggerError(f"Weekday {token!r} isn't valid. Use 0-7 or sun-sat.")
+    elif token[:3] in days and len(token) in {3, *range(6, 10)}:
+        return days.index(token[:3])
+    raise TriggerError(f"Weekday {token!r} isn't valid. Use 0-{top} or sun-sat.")
 
 
-def _normalize_cron_weekdays(field: str) -> str:
-    """Translate crontab weekdays (0 or 7 is Sunday) to day names.
+def _cron_weekday_set(field: str, *, monday_zero: bool = False) -> set[str] | None:
+    """The days a cron weekday field picks, or None for every day.
 
-    APScheduler numbers weekdays from Monday, so handing it "0" or "1-5" directly
-    would quietly run on the wrong days. Names mean the same thing to both.
+    Crontab counts from Sunday = 0 (7 is Sunday too). ``monday_zero`` reads the field
+    the way APScheduler does, from Monday = 0, which is how Rem tasks and organization
+    routines ran their cron text before they stored day names.
     """
+    field = field.strip().lower()
     if field in {"*", "?"}:
-        return "*"
-    selected: list[int] = []
-    for term in field.lower().split(","):
+        return None
+    days = _APS_WEEKDAYS if monday_zero else _CRON_WEEKDAYS
+    selected: set[str] = set()
+    for term in field.split(","):
         body, _, step_text = term.partition("/")
         step = 1
         if step_text:
@@ -411,19 +435,95 @@ def _normalize_cron_weekdays(field: str) -> str:
             first, last = 0, 6
         elif "-" in body:
             start, _, end = body.partition("-")
-            first, last = _cron_weekday_index(start), _cron_weekday_index(end)
-            if end.isdigit() and int(end) == 7:
+            first = _cron_weekday_index(start, monday_zero=monday_zero)
+            last = _cron_weekday_index(end, monday_zero=monday_zero)
+            if not monday_zero and end.isdigit() and int(end) == 7:
                 last = 7
             if first > last:
                 raise TriggerError(f"Weekday range {body!r} runs backwards.")
         else:
-            first = last = _cron_weekday_index(body)
-        selected.extend(day % 7 for day in range(first, last + 1, step))
-    return ",".join(_CRON_WEEKDAYS[day] for day in sorted(set(selected)))
+            first = last = _cron_weekday_index(body, monday_zero=monday_zero)
+        selected.update(days[day % 7] for day in range(first, last + 1, step))
+    return selected
 
 
-def parse_cron(expression: str, timezone: str) -> CronTrigger:
-    """Parse a standard five-field crontab expression in an IANA time zone."""
+def _normalize_cron_weekdays(field: str) -> str:
+    """Translate crontab weekdays (0 or 7 is Sunday) to day names.
+
+    APScheduler numbers weekdays from Monday, so handing it "0" or "1-5" directly
+    would quietly run on the wrong days. Names mean the same thing to both.
+    """
+    selected = _cron_weekday_set(field)
+    if selected is None:
+        return "*"
+    return ",".join(day for day in _CRON_WEEKDAYS if day in selected)
+
+
+def cron_with_day_names(expression: str, *, monday_zero: bool = False) -> str:
+    """``expression`` with its weekday field written as day names, such as ``0 9 * * mon-fri``.
+
+    Rem tasks and organization routines store their cron text this way, so it means the
+    same days to crontab, to APScheduler and to anyone reading it. Numbers are read the
+    crontab way (Sunday = 0); ``monday_zero`` reads them from Monday = 0 instead, for text
+    saved before names were stored. Text that already uses names comes back the same.
+    """
+    fields = str(expression or "").split()
+    if len(fields) != 5:
+        return str(expression or "")
+    selected = _cron_weekday_set(fields[4], monday_zero=monday_zero)
+    if selected is None or len(selected) == 7:
+        fields[4] = "*"
+        return " ".join(fields)
+    indexes = [i for i, day in enumerate(_CRON_WEEKDAYS) if day in selected]
+    runs: list[list[int]] = []
+    for index in indexes:
+        if runs and runs[-1][-1] == index - 1:
+            runs[-1].append(index)
+        else:
+            runs.append([index])
+    # Three or more days in a row read best as a range: mon-fri.
+    fields[4] = ",".join(
+        f"{_CRON_WEEKDAYS[run[0]]}-{_CRON_WEEKDAYS[run[-1]]}"
+        if len(run) >= 3
+        else ",".join(_CRON_WEEKDAYS[i] for i in run)
+        for run in runs
+    )
+    return " ".join(fields)
+
+
+def saved_cron_day_names(expression: str) -> str:
+    """Cron text a Rem task or organization routine saved with numbered weekdays, in names.
+
+    Both used to hand their cron text to APScheduler, which counts weekdays from
+    Monday = 0 and puts Sunday last. Saves now always store names that read the crontab
+    way, so a weekday field with numbers, or with names crontab can't read (a range
+    ending on Sunday, such as sat-sun), was saved before that. It is read Monday-first,
+    keeping the days the schedule ran on. Names that crontab reads mean the same days to
+    APScheduler, so they stay. Running it again changes nothing. Text that was never
+    valid comes back unchanged and fails the same way it did before.
+    """
+    fields = str(expression or "").split()
+    if len(fields) != 5:
+        return expression
+    if not any(c.isdigit() for c in fields[4]):
+        try:
+            _cron_weekday_set(fields[4])
+            return expression
+        except TriggerError:
+            pass
+    try:
+        return cron_with_day_names(expression, monday_zero=True)
+    except TriggerError:
+        return expression
+
+
+def parse_cron(expression: str, timezone: str, *, saved: bool = False) -> CronTrigger:
+    """Parse a standard five-field crontab expression in an IANA time zone.
+
+    ``saved`` reads a Rem task's or organization routine's schedule as it was stored. It
+    skips the checks new schedules get, so one saved before they existed (a day of the
+    month together with a weekday, which APScheduler reads as both at once) keeps running.
+    """
     text = str(expression or "").strip()
     if not text:
         raise TriggerError("Enter a cron expression, such as 0 9 * * 1-5.")
@@ -438,7 +538,7 @@ def parse_cron(expression: str, timezone: str) -> CronTrigger:
         )
     zone = validate_timezone(timezone)
     minute, hour, day, month, weekday = fields
-    if day not in {"*", "?"} and weekday not in {"*", "?"}:
+    if not saved and day not in {"*", "?"} and weekday not in {"*", "?"}:
         # Crontab means "either one" here and APScheduler means "both at once".
         raise TriggerError("Use a day of the month or a weekday, not both.")
     try:
@@ -452,7 +552,7 @@ def parse_cron(expression: str, timezone: str) -> CronTrigger:
         )
     except ValueError as exc:
         raise TriggerError(f"That cron expression isn't valid: {exc}") from None
-    if next_occurrence(schedule, utc_now()) is None:
+    if not saved and next_occurrence(schedule, utc_now()) is None:
         # Such as 0 9 31 2 *: February never has a 31st, so this would never run.
         raise TriggerError(
             "That schedule never runs: no date matches its day of the month and month."
@@ -663,6 +763,25 @@ def clean_max_run_seconds(value: Any) -> int | None:
     return int(number)
 
 
+def _check_limits_not_loosened(
+    before: TriggerRecord | None,
+    after: TriggerRecord,
+) -> None:
+    """Refuse a limit an agent raised or removed. Equal or lower values pass.
+
+    ``before`` is the trigger as saved, or None for a new trigger, whose daily limits
+    start at none and whose Time limit starts at the default.
+    """
+    pairs: tuple[tuple[float | None, float | None], ...] = (
+        (before.daily_max_cost_usd if before else None, after.daily_max_cost_usd),
+        (before.daily_max_tokens if before else None, after.daily_max_tokens),
+        (before.max_run_seconds if before else DEFAULT_MAX_RUN_SECONDS, after.max_run_seconds),
+    )
+    for old, new in pairs:
+        if old is not None and (new is None or new > old):
+            raise UserOnlyError(LIMITS_USER_ONLY)
+
+
 def _clean_switch(value: Any, what: str) -> bool:
     """An on/off setting: only true or false, so a typo can't turn it on or off."""
     if not isinstance(value, bool):
@@ -807,7 +926,9 @@ class TriggerStore:
                             provider TEXT NOT NULL,
                             resume_at TEXT NOT NULL,
                             waits INTEGER NOT NULL,
-                            error TEXT NOT NULL
+                            error TEXT NOT NULL,
+                            record_sha256 TEXT,
+                            values_sha256 TEXT
                         );
                         COMMIT;
                         """
@@ -858,6 +979,18 @@ class TriggerStore:
                             continue
                         try:
                             db.execute(f"ALTER TABLE spend ADD COLUMN {column} {kind}")
+                        except sqlite3.OperationalError as exc:
+                            if "duplicate column" not in str(exc):
+                                raise
+                    # Version 8 keeps what a waiting run's record and saved values
+                    # hashed to, so a resume refuses files changed while it waited.
+                    # Waits saved before it have NULL there and don't resume.
+                    wait_columns = {row[1] for row in db.execute("PRAGMA table_info(usage_waits)")}
+                    for column in ("record_sha256", "values_sha256"):
+                        if column in wait_columns:
+                            continue
+                        try:
+                            db.execute(f"ALTER TABLE usage_waits ADD COLUMN {column} TEXT")
                         except sqlite3.OperationalError as exc:
                             if "duplicate column" not in str(exc):
                                 raise
@@ -966,14 +1099,15 @@ class TriggerStore:
 
         Saving it approves the workflow as it is now when ``actor`` is the user. Any other
         actor leaves it waiting for the user's approval, and can't turn on
-        ``run_unapproved``. ``max_run_seconds`` is the Time limit; None or 0 means none.
+        ``run_unapproved`` or turn off the default Time limit. ``max_run_seconds`` is the
+        Time limit; None or 0 means none.
         ``wait_usage_limit`` is Wait for a usage limit to reset, on unless turned off.
         """
         if kind not in TRIGGER_KINDS:
             raise TriggerError(f"Trigger type must be one of: {', '.join(TRIGGER_KINDS)}.")
         source, workflow_id, project_root, ir = _compile_for_trigger(source_path, self.data_dir)
         if run_unapproved and actor != "user":
-            raise TriggerError(USER_ONLY)
+            raise UserOnlyError(USER_ONLY)
         moment = iso(now or utc_now())
         token = new_webhook_token() if kind == "webhook" else None
         snapshot = take_snapshot(source, self.data_dir) if actor == "user" else None
@@ -998,6 +1132,8 @@ class TriggerStore:
             max_run_seconds=clean_max_run_seconds(max_run_seconds),
             wait_usage_limit=_clean_switch(wait_usage_limit, "Wait for a usage limit to reset"),
         )
+        if actor != "user":
+            _check_limits_not_loosened(None, record)
         with self._transaction() as db:
             db.execute(
                 """
@@ -1058,10 +1194,11 @@ class TriggerStore:
         the limit; leave them out to keep them.
         This never approves the workflow, even for the user: changes waiting for review
         stay waiting until ``approve_trigger``, so changing or turning on a trigger can't
-        approve a change nobody looked at. Only the user may turn on ``run_unapproved``.
+        approve a change nobody looked at. Only the user may turn on ``run_unapproved``,
+        and only the user may raise or remove a limit: any other actor can only lower one.
         """
         if run_unapproved and actor != "user":
-            raise TriggerError(USER_ONLY)
+            raise UserOnlyError(USER_ONLY)
         current = self.get(trigger_id)
         moment = iso(now or utc_now())
         updated = current
@@ -1106,6 +1243,8 @@ class TriggerStore:
                 updated,
                 wait_usage_limit=_clean_switch(wait_usage_limit, "Wait for a usage limit to reset"),
             )
+        if actor != "user":
+            _check_limits_not_loosened(current, updated)
         updated = replace(updated, updated_at=moment)
         with self._transaction() as db:
             changed = db.execute(
@@ -1260,7 +1399,7 @@ class TriggerStore:
         ``keep_run_mark``, for an approval that doesn't cover the marked file.
         """
         if actor != "user":
-            raise TriggerError(USER_ONLY)
+            raise UserOnlyError(USER_ONLY)
         with self._transaction() as db:
             if db.execute("SELECT 1 FROM triggers WHERE id = ?", (trigger_id,)).fetchone() is None:
                 raise TriggerNotFound(f"No trigger with ID {trigger_id!r}.")
@@ -1424,8 +1563,8 @@ class TriggerStore:
                 """
                 INSERT OR REPLACE INTO usage_waits (
                     event_id, trigger_id, source_path, run_id, record_path, provider,
-                    resume_at, waits, error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    resume_at, waits, error, record_sha256, values_sha256
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     wait.event_id,
@@ -1437,6 +1576,8 @@ class TriggerStore:
                     wait.resume_at,
                     wait.waits,
                     wait.error,
+                    wait.record_sha256,
+                    wait.values_sha256,
                 ),
             )
             db.execute(
@@ -1904,10 +2045,6 @@ def daily_allowance(
     return DailyAllowance(tuple(states))
 
 
-UNSANDBOXED_NOTICE = (
-    "Runs unsandboxed: a step's shell can change any file you can, read your credentials "
-    "and reach any host, with nobody watching."
-)
 _sandbox_lock = threading.Lock()
 _sandbox_cache: dict[tuple[str, str], tuple[tuple[Any, ...], list[dict[str, str]]]] = {}
 
@@ -2236,7 +2373,7 @@ def approve_trigger(
     own.
     """
     if actor != "user":
-        raise TriggerError(USER_ONLY)
+        raise UserOnlyError(USER_ONLY)
     record = store.get(trigger_id)
     approval = store.approval(trigger_id)
     approved = approval.snapshot if approval else None

@@ -50,7 +50,7 @@ Field names ignore case, and so do values. Quote a value with spaces (`tag:"hybr
 | Matching mode | How it works |
 | --- | --- |
 | Exact | Works as soon as files are indexed |
-| Related meaning | Local semantic search. Turn on **Enable related-meaning search** in Brain settings; the first use downloads the model weights. |
+| Related meaning | Local semantic search. Turn on **Enable related-meaning search** in Brain settings; the first use downloads the model weights from Hugging Face ([Privacy](../privacy.md)). |
 | **Combined** | Ranks each document by both lists (reciprocal rank fusion), so one found by words and meaning moves up. Rem's search uses it when a selected brain has related meaning on. |
 
 Cloud embeddings need a configured API profile and explicit cloud permission.
@@ -106,6 +106,8 @@ Select text to save a citation or add it to a collection. Each passage keeps its
 
 A **collection** holds a research brief, evidence sections, open questions and sources. Build a comparison to see cited answers per source, disagreements, and questions a source doesn't address.
 
+Deleting a collection, a saved search or a research job can be undone from the notice that follows, such as "Deleted collection “Reading list”." **Undo** puts it back as it was, in the same place in its list. The notice stays for at least 10 seconds, and doesn't close while the pointer is on it or it has focus. Undo after deleting a collection doesn't reopen it. Documents work differently: deleting one asks first and moves its file to the brain's `.raticode/trash` folder. New in 0.6.1.
+
 Raticode picks up outside edits to files while it runs. Renames keep a source's identity when it can tell. Changed or missing sources show citation warnings and keep their historical evidence.
 
 When an update changes how Raticode reads a format, such as the HTML section headings above, it re-reads those documents once. Citations on a document's current version are found again by their exact quote. Citations pinned to an older version keep that version's passages. A quote that can't be found again shows as needing relocation, with the passage it came from.
@@ -121,13 +123,13 @@ A private brain, one with **Allow cloud processing** off, stays private when its
 - A project that is a private brain, or sits inside one, is refused. Rem drops it from its open projects and says why, and a task or thread in it stops. The message names the brain and the two fixes: turn on **Allow cloud processing** for it, or use a provider on localhost.
 - A project that holds a private brain in one of its folders runs only in Claude Code's sandbox, which Raticode uses for self-work and reviews. The sandbox hides the brain's folder from shell commands and from Claude Code's Read, Edit, Grep and Glob tools. Any other turn in that project is refused with the same message, since nothing else can hide the folder.
 
-A private brain can also sit inside another brain's folder. The outer brain leaves the private brain's folder out of its own index, so its notes never reach Rem or an agent token through the outer brain, even when the outer brain allows cloud processing. When you register a brain inside another one, or turn **Allow cloud processing** off for it, the outer brain drops those files at its next refresh, within a minute while Raticode is open.
+A private brain can also sit inside another brain's folder. The outer brain leaves the private brain's folder out of its own index, so its notes never reach Rem or an agent token through the outer brain, even when the outer brain allows cloud processing. When you register a brain inside another one, or turn **Allow cloud processing** off for it, the outer brain drops those files at its next refresh, within a minute while Raticode is open. The **Settings > Memory** folder follows the same rule when it isn't a registered brain itself, as described below.
 
 Organizations, threads hosted for a paired phone or desktop, and Rem's tasks get the same check. It runs again at the start of every turn, so turning **Allow cloud processing** off stops a running thread at its next turn. The **Settings > Memory** folder, and the knowledge folder a turn was given, were approved when you chose them and never count as private here.
 
-Turns that name only a folder use the brain registered at that folder, so they get the same search, passages and citations as a thread. This covers [Organizations](../advanced/organizations.md) employees, threads hosted for a paired phone or desktop, and Rem's quick note lookups in chat. The folder was approved when you chose it, so this needs no **Allow cloud processing**, and nothing is added to the organization's saved settings or asks for approval again. Once the Library serves the folder, Raticode deletes the folder's old `.raticode/second-brain.sqlite3` index.
+Turns that name only a folder use the brain registered at that folder, so they get the same search, passages and citations as a thread. This covers [Organizations](../advanced/organizations.md) workers, threads hosted for a paired phone or desktop, and Rem's quick note lookups in chat. The folder was approved when you chose it, so this needs no **Allow cloud processing**, and nothing is added to the organization's saved settings or asks for approval again. Once the Library serves the folder, Raticode deletes the folder's old `.raticode/second-brain.sqlite3` index.
 
-A folder that isn't a registered brain keeps a simple word index in `.raticode/second-brain.sqlite3` inside it. That index holds the text the Library would read: HTML without its markup, styles or scripts, and Markdown without front matter. A search for `color` doesn't match a page's CSS.
+A folder that isn't a registered brain keeps a simple word index in `.raticode/second-brain.sqlite3` inside it. That index holds the text the Library would read: HTML without its markup, styles or scripts, and Markdown without front matter. A search for `color` doesn't match a page's CSS. It leaves out every registered brain inside the folder that has **Allow cloud processing** off: search skips that brain's folder, `read_note` refuses a path in it, and notes indexed before the brain was registered or made private drop out at the next turn. Turning **Allow cloud processing** on brings them back at the next turn.
 
 Rem then gets these tools, limited to the selected brains:
 
@@ -180,15 +182,17 @@ Reports record source versions, generation details and checkable citations. Revi
 | **Inbox** | Captured public pages, excerpts and added local files. Review or discard; discarded files move to the brain's `.raticode/trash` folder. |
 | **Library health** | Extraction problems, missing metadata, duplicates, dead links, citations needing attention, [older report versions](#report-families-and-replaced-reports), [dated report series](#dated-report-series) and reports past their check-by date. On macOS and Linux it also warns when other accounts on the computer can read the brain folder or its `.git` history; **Make private** applies the owner-only rule again. Under **Backups** it lists a backup [kept because it was much smaller](#when-a-backup-is-much-smaller) than the last one, with both copies' counts. Under **Case-only twins** it lists [files whose names differ only by letter case](#files-whose-names-differ-only-by-case); **Open folder** opens the folder that holds them. |
 | **Research jobs** | Summaries, digests and comparison refreshes with a visible scope, destination, provider, schedule and limits. They run while the backend runs; their output is left out of new evidence by default. |
-| **Import** | Previews a brain package and verifies its files before creating a new destination. Import a copy for new identities, or restore identities when the original isn't registered. Imported jobs start off; cloud access and semantic indexing need setting up again. |
+| **Import** | Previews a brain package and verifies its files before creating a new destination. Import a copy for new identities, restore identities when the original isn't registered, or [restore over a brain whose folder is gone](#restore-a-brain-whose-folder-is-gone). Imported jobs start off; cloud access and semantic indexing need setting up again. |
 | **Export** | A plain document ZIP, a research collection, or a complete brain package. Never overwrites a destination. |
 | **Backups** | From 0.5.5. Saves a complete brain package to a folder of your choice on a schedule, checks each copy and keeps the last few, plus one copy from each recent week and month. See [Scheduled backups](#scheduled-backups). |
 
 - Collection packages keep their cited sources, including evidence from other brains.
 - Complete packages keep attachments and vault settings, and leave out Raticode caches and common credential files.
 - A complete package can hold at most 1 GB, and no single file over 32 MB. From 0.5.5, Raticode checks the size before it starts and names the limit it would pass.
+- A document ZIP has no total size limit, because Raticode writes it one file at a time. Each file can still be at most 32 MB, and a file over that is named before anything is written. New in 0.6.1.
 - From 0.5.5, **Include Rem's conversation archive** decides whether the folder where Rem archives its conversations goes in a document or complete export. It shows the archive's size, and starts off when the package wouldn't fit with it. Archived conversations that a report, citation or collection uses always go in, so restored evidence still opens.
 - Brain settings import and export bibliographies as CSL JSON, BibTeX and RIS.
+- Second Brain's dialogs, such as **Capture to Inbox**, **Edit metadata**, **New collection** and **Create cited report**, keep what you enter. Once a field has changed, a click outside the dialog leaves it open, and Escape asks before discarding it: **Keep editing** goes back to the dialog as it was. New in 0.6.1.
 
 ### Scheduled backups
 
@@ -261,6 +265,20 @@ A brain folder emptied by a bad sync, a mistaken delete or a drive that didn't m
 **Brain settings > Backups** then shows both copies' files, documents and size, and **Library health** lists it under **Backups** with the same counts. Check the brain folder first. If files went missing, restore them from the last full backup with **Import brain**. If you removed them on purpose, or left out Rem's conversation archive, choose **Accept smaller size**: Raticode makes a new backup, that copy becomes the one later backups compare with, and older copies rotate out again by the rules above.
 
 To restore, choose **Import brain**, pick a backup and choose **Restore this brain** on a new computer, or **Import as a new brain** for a separate copy. Backup settings stay on this computer: they aren't saved in the brain folder or in packages.
+
+#### Restore a brain whose folder is gone
+
+New in 0.6.1.
+
+When a disk fails or a folder is deleted, the brain stays in the list as unavailable. Its backups can be restored over it:
+
+1. Choose **Import brain**, pick one of its backups and choose **Preview import**.
+2. Choose **Restore this brain here**. The preview names the missing folder and fills it in as the **Destination folder**. Keep it, or choose another new folder.
+3. Choose **Restore**.
+
+Raticode unpacks the package into the destination, then moves the brain there the way **Locate** does and indexes the restored files again. The brain keeps its ID, its brain settings, its **Backups** settings and **Last verified backup**, and every Rem thread that uses it. Reports, collections and citations stay as they were on this computer, and documents match the restored files by path.
+
+The option shows only when the backup's brain is registered here and its folder is missing. If the folder still exists, Raticode refuses to restore over it: choose **Import as a new brain** for a separate copy instead.
 
 ### Rem's database backups
 
@@ -339,7 +357,7 @@ Some folders hold material you keep but rarely want first, such as old drafts or
 | --- | --- |
 | **Search normally** | The default. |
 | **List after other results** | The folder's files are still searched, but they rank after every current match and before [replaced reports](#report-families-and-replaced-reports). Rem's `search` and `read_note` give them `status: lowered` with `folder` naming the folder. |
-| **Leave out of search** | The folder's files aren't indexed or given to Rem: its `search` doesn't find or list them, and `read_note` refuses them. The Library still lists them under **More filters > Left out**, each naming the rule that left it out. |
+| **Leave out of search** | The folder's files aren't indexed or given to Rem: its `search` doesn't find or list them, and `read_note` refuses them. [Agent tokens](../reference/headless.md#agent-tokens) can't open them or see them among another document's related files and connections, and a `save_note` or `save_report` citation that quotes one is left out with the same refusal. The Library still lists and opens them under **More filters > Left out**, each naming the rule that left it out. |
 
 Set a rule in **Brain settings > Folders**, which lists every folder in the brain with its file count, or from the **Folder** menu on a Library search result, which sets the rule for that file's folder.
 

@@ -20,11 +20,14 @@ summary row for it, with the real provider and model and the computer's ID, whic
 keeps it out of this computer's account totals.
 
 On the receiving desktop, ``receive`` turns each handed-over task (accepted only on the
-"Run threads from this desktop" grant, for read-only task types, by
-gofer.devices.application) into a task for its own Rem in the matched project, pinned
-to itself so it is never forwarded. Rem admits it under its own worker limit and counts
-it as ``rem``. When the run ends its answer, report path and usage go back; a Stop from
-the sender stops the run here first.
+"Run threads from this desktop" grant, for read-only task types and at most
+``REM_TASKS_PER_DESKTOP`` queued or running per desktop, by gofer.devices.application)
+into a task for its own Rem in the matched project, pinned to itself so it is never
+forwarded. Its run carries ``remote_origin``, naming the sending desktop, and its checks
+name that desktop as their author. Rem admits it under its own worker limit and counts
+it as ``rem``, after the user's own work here, as it does self-work. When the run ends
+its answer, report path and usage go back; a Stop from the sender stops the run here
+first.
 """
 
 from __future__ import annotations
@@ -45,7 +48,7 @@ from gofer.devices.organization_jobs import (
     REM_TASK_PROMPT,
 )
 from gofer.devices.registry import PairingError
-from gofer.ui.rem_home_models import ACTIVE, RemConflict
+from gofer.ui.rem_home_models import ACTIVE, RemConflict, desktop_author
 from gofer.ui.rem_placement import start_for
 from gofer.utils.logging import get_logger
 
@@ -67,6 +70,22 @@ MAX_ANSWER = 256 * 1024
 
 def offline_reason(name: str) -> str:
     return f"Waiting for {name} to come back; this run's work is there"
+
+
+def answered_on(run: dict[str, Any]) -> dict[str, str] | None:
+    """The paired desktop whose answer a run holds, or None for a run on this computer.
+
+    A stand-in keeps its ``remote`` handle when it settles, so the handle marks every
+    answer that came back from another desktop. Self-work never auto-approves what such
+    an answer proposes (gofer.ui.rem_self_work ``_ingest``).
+    """
+    handle = run.get("remote")
+    if not isinstance(handle, dict) or not handle.get("computer_id"):
+        return None
+    return {
+        "id": str(handle["computer_id"]),
+        "name": str(handle.get("computer_name") or "another computer"),
+    }
 
 
 class RemoteTasks:
@@ -507,30 +526,27 @@ class RemoteTasks:
             "schedule": {"kind": "once", "timezone": "UTC"},
         }
         if task.get("checks"):
+            # The sending desktop wrote these, not the user on this computer.
+            author = desktop_author(item["peer"])
             recipe["acceptance_criteria"] = [
-                {"id": c["id"], "description": c["description"], "authored_by": "user"}
+                {"id": c["id"], "description": c["description"], "authored_by": author}
                 for c in task["checks"]
             ]
         if task.get("provider"):
             recipe["provider"] = task["provider"]
-        created = self.home.create_task({"request_id": f"remote:{item['request']}", **recipe})
+        created = self.home.create_task(
+            {"request_id": f"remote:{item['request']}", **recipe},
+            # Saved with the run: it waits behind this computer's own work for a worker.
+            remote_origin={
+                "computer_id": item["peer"],
+                "computer_name": item["peer_name"],
+                "request_id": item["request"],
+                "run_id": task["run_id"],
+            },
+        )
         run = created["task"].get("active_run") or created["task"].get("last_run")
         if not run:
             raise ValueError("Rem didn't start it")
-        from gofer.ui.rem_home import Superseded
-
-        try:
-            self.home._update(
-                run["id"],
-                remote_origin={
-                    "computer_id": item["peer"],
-                    "computer_name": item["peer_name"],
-                    "request_id": item["request"],
-                    "run_id": task["run_id"],
-                },
-            )
-        except Superseded:
-            pass
         return str(run["id"])
 
     @staticmethod

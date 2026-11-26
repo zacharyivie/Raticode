@@ -10,11 +10,12 @@ import threading
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable
 from pathlib import Path
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict, overload
 
 import anyio
 import anyio.abc
 
+from gofer.cli.client import ENV_AGENT_SESSION
 from gofer.core.command_slots import path_with_wrappers_first, scoped_command
 
 
@@ -24,13 +25,6 @@ class ProcessStreamEvent(TypedDict):
     text: str
     returncode: int | None
     output_truncated: NotRequired[bool]
-
-
-class ProcessError(Exception):
-    def __init__(self, returncode: int, stderr: str) -> None:
-        self.returncode = returncode
-        self.stderr = stderr
-        super().__init__(f"Process exited with code {returncode}: {stderr[:200]}")
 
 
 # Credentials a child process must never inherit, even from a copied parent env or an
@@ -106,8 +100,8 @@ def build_subprocess_env(
     for name in CREDENTIAL_ENV_VARS:
         env.pop(name, None)
     # Marks providers, Rem workers and workflow commands as agents: the CLI then
-    # refuses to read the headless owner token (gofer.ui.headless).
-    env["RATICODE_AGENT_SESSION"] = "1"
+    # refuses the headless owner token and user-only commands (gofer.cli.client).
+    env[ENV_AGENT_SESSION] = "1"
     # Settings > Rem > Remove Co-authored-by lines: a commit-msg hook for every
     # commit made in this child, including an agent's own `git commit`.
     from gofer.core.commit_attribution import hook_environment
@@ -186,7 +180,8 @@ def _repository_command_overrides(output: str) -> dict[str, str]:
 
 
 def untrusted_repository_git_env(directory: Path | str, env: dict[str, str]) -> dict[str, str]:
-    """``env`` for git in a checkout an agent can edit: no repository-named programs.
+    """``env`` for git in a checkout an agent can edit: no repository-named programs, and
+    no replace refs or grafts that swap one commit's contents for another's.
 
     Pair it with NO_REPOSITORY_PROGRAMS on the command line. It overrides every filter,
     textconv, external diff, merge driver and hook command the repository's own config
@@ -227,7 +222,91 @@ def untrusted_repository_git_env(directory: Path | str, env: dict[str, str]) -> 
             "Couldn't read the repository's git settings: "
             + (result.stderr.strip() or f"git exited with {result.returncode}")
         )
-    return with_git_config(env, _repository_command_overrides(result.stdout))
+    # A replace ref (``git replace X Y``) or a graft in the shared ``.git`` would make git
+    # show Y's files when asked for X: a check or review of commit X would see other code
+    # than the commit that lands.
+    sealed = {**env, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_GRAFT_FILE": os.devnull}
+    return with_git_config(sealed, _repository_command_overrides(result.stdout))
+
+
+@overload
+def run_repository_git(
+    cwd: Path | str,
+    *args: str,
+    timeout: float,
+    input: str | None = None,
+    env: dict[str, str] | None = None,
+    text: Literal[True] = True,
+    git_dir: bool = False,
+    config: Iterable[str] = (),
+) -> subprocess.CompletedProcess[str]: ...
+
+
+@overload
+def run_repository_git(
+    cwd: Path | str,
+    *args: str,
+    timeout: float,
+    input: bytes | None = None,
+    env: dict[str, str] | None = None,
+    text: Literal[False],
+    git_dir: bool = False,
+    config: Iterable[str] = (),
+) -> subprocess.CompletedProcess[bytes]: ...
+
+
+@overload
+def run_repository_git(
+    cwd: Path | str,
+    *args: str,
+    timeout: float,
+    input: str | bytes | None = None,
+    env: dict[str, str] | None = None,
+    text: bool,
+    git_dir: bool = False,
+    config: Iterable[str] = (),
+) -> subprocess.CompletedProcess[Any]: ...
+
+
+def run_repository_git(
+    cwd: Path | str,
+    *args: str,
+    timeout: float,
+    input: str | bytes | None = None,
+    env: dict[str, str] | None = None,
+    text: bool = True,
+    git_dir: bool = False,
+    config: Iterable[str] = (),
+) -> subprocess.CompletedProcess[Any]:
+    """Run git in a repository an agent can edit, with nothing the repository names run.
+
+    The one way the backend runs git itself: NO_REPOSITORY_PROGRAMS on the command line,
+    untrusted_repository_git_env for the environment, no terminal prompt, and stdin closed
+    unless ``input`` is given. ``config`` adds ``-c key=value`` settings, ``env`` replaces
+    build_subprocess_env() as the base environment, and with ``git_dir`` ``cwd`` is the
+    repository's git folder itself (``--git-dir``), so no ``.git`` file in a checkout
+    decides which repository git reads. Output is captured and a failing exit code is
+    returned, not raised. Like subprocess.run this raises OSError and TimeoutExpired, and
+    when the repository's settings can't be read it raises before git runs.
+
+    The exception is the user's own Commit button (ui/commit_message.py and
+    ui/generation_jobs.py), which runs ``git commit`` with the repository's hooks and
+    signing on purpose.
+    """
+    where = [f"--git-dir={cwd}"] if git_dir else ["-C", str(cwd)]
+    settings = [part for setting in config for part in ("-c", setting)]
+    base = build_subprocess_env() if env is None else env
+    sealed = untrusted_repository_git_env(cwd, {**base, "GIT_TERMINAL_PROMPT": "0"})
+    return subprocess.run(
+        ["git", *NO_REPOSITORY_PROGRAMS, *settings, *where, *args],
+        input=input,
+        stdin=subprocess.DEVNULL if input is None else None,
+        capture_output=True,
+        text=text,
+        timeout=timeout,
+        check=False,
+        env=sealed,
+    )
 
 
 def with_git_config(env: dict[str, str], settings: dict[str, str]) -> dict[str, str]:

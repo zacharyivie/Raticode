@@ -49,7 +49,7 @@ Fields for this node only. The [shared node fields](./index.md#shared-node-field
 | `method` | string | `"GET"` | HTTP method. |
 | `url` | string | Required | HTTP or HTTPS endpoint. |
 | `headers` | object | `{}` | String HTTP headers. |
-| `params` | object | `{}` | String query parameters. |
+| `params` | object | `{}` | String query parameters. Unquoted names are read lowercased, so quote a name whose case matters: `"userId": "7"`, not `userId: "7"`. |
 | `json` | any JSON value | Not set | JSON request body; excludes authored body. |
 | `body` | string or null | Not set | Text request body. |
 | `request-timeout` | string | `"30s"` | Per-request timeout. |

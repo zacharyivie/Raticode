@@ -7,6 +7,7 @@ an exception: only the user changes decisions, and a request that would weaken o
 Fake providers and isolated data, through the board's own fixtures.
 """
 
+import json
 from typing import Any
 
 import pytest
@@ -488,6 +489,48 @@ def test_a_research_worker_gets_the_project_decisions_once(board):
         assert '"project_decisions":' not in instructions
         assert "project_decisions_rule" in instructions
         assert "Keep to project_decisions." in instructions
+
+
+def test_research_lists_a_plans_answers_so_a_proposal_against_one_is_caught(board):
+    home, fake, _ = board
+    with home.store.connect() as db:
+        _, item = decision_book.file_request(
+            db,
+            home.store,
+            request(topic="plan:imports", question="Which format do plan imports read?"),
+            project=project_of(home),
+            decides_alone=False,
+            plan="P-1",
+        )
+    answer = home.change_decisions({"action": "use", "id": item["id"]})
+    assert {i["id"]: i["status"] for i in answer["items"]}[item["id"]] == "confirmed"
+    body = json.dumps(
+        {
+            "proposals": [
+                {"title": "YAML imports", "description": "Read YAML", "why": "Asked for"},
+                {
+                    "title": "TOML imports",
+                    "description": "Read TOML instead of JSON",
+                    "why": "Faster",
+                    "conflicts_with": [item["id"]],
+                },
+            ],
+            "duplicates": [],
+        }
+    )
+    fake.answers[RESEARCH] = f"Findings.\n```json\n{body}\n```"
+    at(home, 15)
+    tick(home)
+    research_done(home, "YAML imports")
+    research = titled(fake, RESEARCH)
+    assert research
+    for call in research:
+        # The research task cites neither the plan nor the answer, yet lists it once.
+        assert call["agent_instructions"].count("Which format do plan imports read?") == 1
+    # So research can name it, and the guard keeps the contradicting idea off the board.
+    assert ticket_or_none(home, "TOML imports") is None
+    notes = [n["text"] for n in home.self_work.view()["report"]["notes"]]
+    assert any("Didn't add “TOML imports”" in n and item["id"] in n for n in notes)
 
 
 def test_a_develop_worker_in_the_same_project_still_gets_project_decisions(board):

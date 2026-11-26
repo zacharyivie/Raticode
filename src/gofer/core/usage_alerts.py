@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from gofer.core.usage_ledger import usage_db
+from gofer.utils.instants import stored_instant
 from gofer.utils.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
@@ -150,7 +151,7 @@ def window_name(window: dict[str, Any], kind: str) -> str:
 
 def reset_text(resets_at: str, now: datetime | None = None) -> str:
     """The reset time in this computer's time zone, such as ``today at 3:40 PM``."""
-    stamp = _parse(resets_at)
+    stamp = stored_instant(resets_at)
     if stamp is None:
         return "Its reset time wasn't reported."
     local = stamp.astimezone()
@@ -167,14 +168,6 @@ def reset_text(resets_at: str, now: datetime | None = None) -> str:
     return f"It resets {day} at {clock}{' ' + zone if zone else ''}."
 
 
-def _parse(value: Any) -> datetime | None:
-    try:
-        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
-
-
 def _needs_sign_in(account: dict[str, Any]) -> bool:
     return account.get("needs_sign_in") is True or account.get("status") == "auth_required"
 
@@ -189,7 +182,7 @@ def _readings(
     for account in accounts:
         if _needs_sign_in(account) or account.get("status") != "available":
             continue
-        observed = _parse(account.get("observed_at"))
+        observed = stored_instant(account.get("observed_at"))
         if observed is None or (now - observed).total_seconds() > READING_FRESH_SECONDS:
             continue
         seen: set[str] = set()
@@ -199,7 +192,7 @@ def _readings(
             kind = window_kind(window)
             if kind is None or str(window["id"]) in seen:
                 continue
-            resets = _parse(window.get("resets_at")) if window.get("resets_at") else None
+            resets = stored_instant(window.get("resets_at"))
             if resets is not None and resets <= now:
                 continue
             percent = window_used_percent(window)
@@ -219,7 +212,7 @@ def _armed(row: sqlite3.Row | None, percent: float, threshold: int, now: datetim
     """Whether this level may alert: never sent, or its window has reset since."""
     if row is None:
         return True
-    resets = _parse(row["resets_at"]) if row["resets_at"] else None
+    resets = stored_instant(row["resets_at"])
     if resets is not None:
         return resets <= now
     # No reset time was reported: a reading back under the level means a new window.

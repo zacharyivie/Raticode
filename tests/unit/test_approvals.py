@@ -13,7 +13,7 @@ from gofer.core.approvals import (
     _send_email_sync,
 )
 from gofer.core.http import HttpRequest, HttpResponse
-from gofer.core.operations import HttpRetryPolicy
+from gofer.core.http_retry import HttpRetryPolicy
 
 
 class FakeHttpClient:

@@ -4,16 +4,20 @@ The command is the project's ``checks.fast`` decision (``rem_decisions``), found
 project scan (``rem_project_scan``) and confirmed by the user, or provisional while
 self-work's auto mode is on. A worker's own claim that it ran the checks isn't the proof:
 Raticode runs the command itself (``run_check``) in a fresh worktree of the commit that
-lands: a detached ``git worktree add`` of the task worktree's HEAD under the data folder's
-``run-scratch/check-<id>``, with the links and copies of the project's approved worktree
-setup made in it, removed afterwards. A file the worker forgot to commit isn't there, so
-the check fails instead of passing on it. Where no fresh worktree can be made (no git, an
-unreadable commit, a setup that fails, or one with commands, which would run the worker's
-committed files outside the sandbox) it runs in the task's worktree and the result says
-why (``ran_in``). A failure runs once more on the same commit, in another fresh worktree
-(``may_rerun``): a pass then goes to review marked ``flaky`` and is saved as the
-project's flake record (``note_flake``), and only a failure that repeats goes back to
-the worker with the output before any reviewer turn.
+lands: a detached ``git worktree add`` under the data folder's ``run-scratch/check-<id>``,
+with the links and copies of the project's approved worktree setup made in it, removed
+afterwards. The repository and the commit come from Raticode's records
+(``recorded_commit``): Rem's own worktree's repository and branch, or the project's
+repository and the branch the worktree skill had the worker write. They are never read
+from the task's folder, whose ``.git`` file the worker can point anywhere. A file the
+worker forgot to commit isn't there, so the check fails instead of passing on it. In a
+git project, a commit that can't be read or checked out, or a setup that fails, fails
+the check without running it (``ran_in`` ``not_run``). It runs in the task's folder only
+outside git, or when the approved setup runs commands, which would run the worker's
+committed files outside the sandbox; ``ran_in_reason`` says why. A failure runs once more
+on the same commit, in another fresh worktree (``may_rerun``): a pass then goes to review
+marked ``flaky`` and is saved as the project's flake record (``note_flake``), and only a
+failure that repeats goes back to the worker with the output before any reviewer turn.
 
 The command runs only in the exact text the decision holds. Rem can't change that text
 (only the user can), and a provisional one runs only while auto mode is on
@@ -39,10 +43,12 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -51,10 +57,9 @@ from uuid import uuid4
 from gofer.core import command_slots
 from gofer.ui import worktree_setup
 from gofer.utils.process import (
-    NO_REPOSITORY_PROGRAMS,
     build_subprocess_env,
     git_push_blocked_environment,
-    untrusted_repository_git_env,
+    run_repository_git,
 )
 
 log = logging.getLogger(__name__)
@@ -77,14 +82,7 @@ def head(folder: str | Path) -> str:
     import subprocess
 
     try:
-        result = subprocess.run(
-            ["git", *NO_REPOSITORY_PROGRAMS, "-C", str(folder), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-            env=untrusted_repository_git_env(folder, build_subprocess_env()),
-        )
+        result = run_repository_git(folder, "rev-parse", "HEAD", timeout=15)
     except (OSError, subprocess.SubprocessError):
         return ""
     return result.stdout.strip() if result.returncode == 0 else ""
@@ -97,23 +95,14 @@ def leftovers(folder: str | Path) -> set[str]:
     import subprocess
 
     try:
-        result = subprocess.run(
-            [
-                "git",
-                *NO_REPOSITORY_PROGRAMS,
-                "-C",
-                str(folder),
-                "status",
-                "--porcelain",
-                "-z",
-                "--ignored",
-                "--untracked-files=normal",
-            ],
-            capture_output=True,
-            text=True,
+        result = run_repository_git(
+            folder,
+            "status",
+            "--porcelain",
+            "-z",
+            "--ignored",
+            "--untracked-files=normal",
             timeout=30,
-            check=False,
-            env=untrusted_repository_git_env(folder, build_subprocess_env()),
         )
     except (OSError, subprocess.SubprocessError):
         return set()
@@ -263,9 +252,15 @@ def _run_in(
     timeout: int,
     platform: str | None,
     ran_folder: Path | None = None,
+    keep: Path | None = None,
+    keep_limit: int = 2_000_000,
 ) -> dict[str, Any]:
     """Run ``command`` in the sandbox in ``ran_folder`` (default ``folder``), with its
-    temporary files in ``box``'s scratch folder. The caller holds ``_running``."""
+    temporary files in ``box``'s scratch folder. The caller holds ``_running``.
+
+    ``keep`` names a file in that scratch folder the command writes, such as test
+    results; its bytes come back as ``kept`` (None when missing, a link or larger than
+    ``keep_limit``) before the folder is removed."""
     started_at = datetime.now(UTC).isoformat(timespec="seconds")
     root = (ran_folder or Path(folder)).resolve()
     base = {"command": command, "folder": str(folder), "ran_at": started_at}
@@ -297,10 +292,12 @@ def _run_in(
             if lease is not None:
                 lease.release()
     finally:
+        kept = _read_kept(keep, scratch, keep_limit) if keep is not None else None
         shutil.rmtree(scratch, ignore_errors=True)
     code = step.get("exitCode")
     return {
         **base,
+        **({"kept": kept} if keep is not None else {}),
         "head": head(root),
         "exit_code": code,
         "passed": bool(step.get("ok")),
@@ -309,6 +306,29 @@ def _run_in(
         "detail": step.get("detail") or "",
         "sandboxed": True,
     }
+
+
+def _read_kept(path: Path, scratch: Path, limit: int) -> bytes | None:
+    """``path``'s bytes when it is a plain file inside ``scratch``, else None."""
+    try:
+        if not path.resolve().is_relative_to(scratch.resolve()):
+            return None
+        # Non-blocking, so a pipe the sandboxed command left in its place can't hold the
+        # backend (and every later check) waiting for a writer that never comes.
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            return None
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            return source.read(limit + 1)[:limit]
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
 
 
 # A fresh worktree for each run ---------------------------------------------------------
@@ -322,27 +342,47 @@ BOX_SCRATCH = "scratch"
 BOX_NOTE = "repository.json"
 FRESH_WORKTREE = "fresh_worktree"
 TASK_WORKTREE = "task_worktree"
+# In a git project, no fresh worktree of the commit that lands could be made, so the
+# command never ran and the check fails.
+NOT_RUN = "not_run"
 GIT_TIMEOUT_SECONDS = 300
 OVERLAY_BATCH = 100
 
 
 class NoFreshWorktree(Exception):
-    """Why the check runs in the task's worktree instead of a fresh one."""
+    """Why no fresh worktree of the commit that lands could be made.
+
+    ``in_place`` is true only where running the command in the task's folder is the
+    accepted fallback: a project outside git, or an approved setup that runs commands.
+    Anything else fails the check without running it.
+    """
+
+    def __init__(self, reason: str, *, in_place: bool = False) -> None:
+        super().__init__(reason)
+        self.in_place = in_place
 
 
-def _git(folder: str | Path, *args: str, timeout: int = 30) -> str:
-    """Run git on a repository an agent may have edited; its output, or NoFreshWorktree."""
+@dataclass(frozen=True)
+class Commit:
+    """A commit to check out, and the repository and subfolder it is checked in."""
+
+    git_dir: str
+    """The repository's shared git folder, which the fresh worktree is added to."""
+    commit: str
+    prefix: str
+    """The project's folder inside the repository: "" or "sub/folder/"."""
+
+
+def _git(folder: str | Path, *args: str, timeout: int = 30, git_dir: bool = False) -> str:
+    """Run git on a repository an agent may have edited; its output, or NoFreshWorktree.
+
+    With ``git_dir`` ``folder`` is the repository's git folder itself (``--git-dir``), so
+    no ``.git`` file in any checkout decides which repository git reads.
+    """
     import subprocess
 
     try:
-        result = subprocess.run(
-            ["git", *NO_REPOSITORY_PROGRAMS, "-C", str(folder), *args],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            env=untrusted_repository_git_env(folder, build_subprocess_env()),
-        )
+        result = run_repository_git(folder, *args, timeout=timeout, git_dir=git_dir)
     except FileNotFoundError as exc:
         raise NoFreshWorktree("git isn't installed") from exc
     except (OSError, subprocess.SubprocessError) as exc:
@@ -353,43 +393,114 @@ def _git(folder: str | Path, *args: str, timeout: int = 30) -> str:
     return result.stdout.rstrip("\n")
 
 
+def _has_git(folder: Path) -> bool:
+    """Whether the folder or a folder above it has a ``.git`` file or a ``.git`` folder
+    with a ``HEAD``: a repository git can't read there is broken, not missing."""
+    return any(
+        (path / ".git").is_file() or (path / ".git" / "HEAD").exists()
+        for path in (folder, *folder.parents)
+    )
+
+
+def recorded_commit(
+    repository: str | Path, project: str | Path | None = None, branch: str | None = None
+) -> Commit:
+    """The commit that lands, read from the project's repository as Raticode recorded it.
+
+    ``repository`` is a folder of that repository: Rem's own worktree's ``repository``,
+    or the project folder for work under a worktree skill or done in place. ``branch`` is
+    the work's branch, whose tip is read from the repository's ``refs/heads``; without
+    one, the project's own checked-out commit lands (work done in place). ``project`` is
+    the project folder (default ``repository``): its place in the repository is the
+    subfolder the check runs in. The task's folder is never read, so pointing its ``.git``
+    file at another repository or commit changes nothing here.
+
+    Raises NoFreshWorktree, with ``in_place`` only when the project isn't in git at all.
+    """
+    repository = Path(repository).resolve()
+    project = Path(project).resolve() if project else repository
+    try:
+        common = _git(repository, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        top = _git(repository, "rev-parse", "--show-toplevel")
+    except NoFreshWorktree as exc:
+        raise NoFreshWorktree(
+            f"the folder isn't in a git repository ({exc})",
+            in_place=repository.is_dir() and not _has_git(repository),
+        ) from exc
+    try:
+        inside = project.relative_to(Path(top).resolve())
+    except ValueError as exc:
+        raise NoFreshWorktree(f"the project {project} isn't inside the repository {top}") from exc
+    prefix = "" if inside == Path(".") else inside.as_posix() + "/"
+    try:
+        if branch:
+            commit = _git(
+                common, "rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}", git_dir=True
+            )
+        else:
+            commit = _git(repository, "rev-parse", "--verify", "HEAD^{commit}")
+    except NoFreshWorktree as exc:
+        what = f"the tip of branch {branch}" if branch else "its commit"
+        raise NoFreshWorktree(f"{what} can't be read ({exc})") from exc
+    return Commit(git_dir=common, commit=commit, prefix=prefix)
+
+
+def recorded_head(
+    repository: str | Path, project: str | Path | None = None, branch: str | None = None
+) -> str:
+    """``recorded_commit``'s commit, or "" when it can't be read."""
+    try:
+        return recorded_commit(repository, project, branch).commit
+    except (NoFreshWorktree, OSError):
+        return ""
+
+
+def folder_commit(folder: str | Path, commit: str = "HEAD") -> Commit:
+    """``commit`` as the folder's own repository reads it. For the proving test, whose
+    base and tip are commits ``rem_proving_test.run`` already read from the folder."""
+    common = _git(folder, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    prefix = _git(folder, "rev-parse", "--show-prefix")
+    found = _git(folder, "rev-parse", "--verify", f"{commit}^{{commit}}")
+    return Commit(git_dir=common, commit=found, prefix=prefix)
+
+
 def _make_fresh(
-    folder: Path,
+    target: Commit,
     box: Path,
     *,
     data_dir: Path,
     source: Path,
     cancel: threading.Event | None,
-    commit: str | None = None,
     overlay: tuple[str, list[str]] | None = None,
 ) -> tuple[Path, str, str]:
-    """A detached worktree of ``folder``'s HEAD (or ``commit``) in ``box`` with the
-    project's approved setup run in it: the matching folder in it, the commit and the
-    setup's summary.
+    """A detached worktree of ``target``'s commit in ``box``, added from its repository's
+    git folder, with the project's approved setup run in it: the project's folder in it,
+    the commit and the setup's summary.
 
     ``overlay`` is another commit and repository-relative paths: those files are taken
     from that commit into the worktree before the setup runs, as the task's proving test
     does with its test files on the base commit (``rem_proving_test``).
     """
-    try:
-        common = _git(folder, "rev-parse", "--path-format=absolute", "--git-common-dir")
-        prefix = _git(folder, "rev-parse", "--show-prefix")
-    except NoFreshWorktree as exc:
-        raise NoFreshWorktree(f"the folder isn't in a git repository ({exc})") from exc
-    try:
-        commit = _git(folder, "rev-parse", "--verify", f"{commit or 'HEAD'}^{{commit}}")
-    except NoFreshWorktree as exc:
-        raise NoFreshWorktree(f"its commit can't be read ({exc})") from exc
+    commit = target.commit
     box.mkdir(parents=True, mode=0o700, exist_ok=True)
     tree = box / BOX_WORKTREE
     # Written before the worktree exists, so a crash at any point leaves what the sweep
     # needs to remove it.
     (box / BOX_NOTE).write_text(
-        json.dumps({"git_dir": common, "worktree": str(tree), "commit": commit}),
+        json.dumps({"git_dir": target.git_dir, "worktree": str(tree), "commit": commit}),
         encoding="utf-8",
     )
     try:
-        _git(folder, "worktree", "add", "--detach", str(tree), commit, timeout=GIT_TIMEOUT_SECONDS)
+        _git(
+            target.git_dir,
+            "worktree",
+            "add",
+            "--detach",
+            str(tree),
+            commit,
+            timeout=GIT_TIMEOUT_SECONDS,
+            git_dir=True,
+        )
     except NoFreshWorktree as exc:
         raise NoFreshWorktree(f"git couldn't check out commit {commit[:12]} ({exc})") from exc
     if overlay is not None:
@@ -404,9 +515,9 @@ def _make_fresh(
                     f"git couldn't add files from commit {other[:12]} to commit "
                     f"{commit[:12]} ({exc})"
                 ) from exc
-    checkout = tree / prefix
+    checkout = tree / target.prefix
     if not checkout.is_dir():
-        raise NoFreshWorktree(f"commit {commit[:12]} has no {prefix.rstrip('/')} folder")
+        raise NoFreshWorktree(f"commit {commit[:12]} has no {target.prefix.rstrip('/')} folder")
     # Only the setup's links and copies: its commands would run the worker's own files
     # (a setup script, package scripts) outside the sandbox before anyone reviewed them.
     setup = worktree_setup.prepare_quietly(
@@ -420,7 +531,8 @@ def _make_fresh(
     if setup is not None and setup.get("status") == "commands_not_run":
         raise NoFreshWorktree(
             "the project's worktree setup runs commands, and Raticode never runs them "
-            "outside the sandbox on work nobody has reviewed yet"
+            "outside the sandbox on work nobody has reviewed yet",
+            in_place=True,
         )
     if setup is not None and setup.get("status") != "passed":
         raise NoFreshWorktree(
@@ -501,24 +613,32 @@ def run_check(
     folder: str | Path,
     *,
     data_dir: Path,
+    repository: str | Path | None = None,
+    branch: str | None = None,
+    project: str | Path | None = None,
     source: str | Path | None = None,
     cancel: threading.Event | None = None,
     timeout: int = TIMEOUT_SECONDS,
     platform: str | None = None,
 ) -> dict[str, Any]:
-    """Run the check on the commit in ``folder`` in a fresh worktree of it; the result.
+    """Run the check on the commit that lands, in a fresh worktree of it; the result.
 
-    The worktree is a detached ``git worktree add`` of the folder's HEAD in
+    The commit is ``recorded_commit(repository, project, branch)``: read from the
+    project's repository as Raticode recorded it, never from ``folder``, the task's
+    folder, whose ``.git`` file the worker can write. Without ``repository`` the folder
+    is the project itself, worked in place, and its checked-out commit lands. The
+    worktree is a detached ``git worktree add`` of that commit in
     ``run-scratch/check-<id>``; the links and copies of the project's approved worktree
-    setup are made in it from ``source`` (the project folder, default ``folder``). A
-    setup with commands isn't applied: they would run the worker's files outside the
-    sandbox, so the check runs in ``folder`` instead. Then ``command`` runs there as
-    ``run`` would, and the worktree is removed.
+    setup are made in it from ``source`` (the project folder, default ``folder``). Then
+    ``command`` runs there as ``run`` would, and the worktree is removed.
+
     The result has ``ran_in`` ``fresh_worktree``, ``head`` the commit and ``ran_folder``
-    the folder it ran in. Where no fresh worktree can be made (outside git, an unreadable
-    commit, a setup that fails or has commands) it runs in ``folder`` instead, with
-    ``ran_in`` ``task_worktree`` and the reason in ``ran_in_reason``. Leftovers of earlier runs are
-    swept first.
+    the folder it ran in. In a git project where no fresh worktree can be made (a commit
+    that can't be read or checked out, a setup that fails or isn't approved) the command
+    doesn't run: ``passed`` is false, ``ran_in`` ``not_run`` and ``ran_in_reason`` says
+    why. Only outside git, or for an approved setup with commands (they would run the
+    worker's files outside the sandbox), does it run in ``folder`` instead, with ``ran_in``
+    ``task_worktree`` and the reason. Leftovers of earlier runs are swept first.
     """
     problem = sandbox_problem(platform)
     if problem:
@@ -527,10 +647,13 @@ def run_check(
     with _running:
         _sweep(data_dir)
         box = _new_box(data_dir)
+        commit = ""
         try:
             try:
+                target = recorded_commit(repository or folder, project or repository, branch)
+                commit = target.commit
                 checkout, commit, setup = _make_fresh(
-                    folder.resolve(),
+                    target,
                     box,
                     data_dir=data_dir,
                     source=Path(source) if source else folder,
@@ -543,15 +666,18 @@ def run_check(
                     if isinstance(exc, NoFreshWorktree)
                     else f"no folder for a fresh worktree: {exc}"
                 )
+                in_place = isinstance(exc, NoFreshWorktree) and exc.in_place
                 if cancel is not None and cancel.is_set():
                     # Stopped while the worktree was made: nothing runs in its place.
                     return {
                         **_skipped(command, folder, "The run was cancelled"),
                         "sandboxed": True,
                         "detail": "The run was cancelled",
-                        "ran_in": TASK_WORKTREE,
+                        "ran_in": NOT_RUN,
                         "ran_in_reason": reason,
                     }
+                if not in_place:
+                    return _not_run(command, folder, commit, reason)
                 result = _run_in(
                     command,
                     folder,
@@ -561,6 +687,9 @@ def run_check(
                     timeout=timeout,
                     platform=platform,
                 )
+                # The commit read from the repository, not from the folder it ran in.
+                if commit and not result.get("skipped"):
+                    result["head"] = commit
                 return {**result, "ran_in": TASK_WORKTREE, "ran_in_reason": reason}
             result = _run_in(
                 command,
@@ -579,6 +708,24 @@ def run_check(
             return result
         finally:
             _remove_box(box)
+
+
+def _not_run(command: str, folder: str | Path, commit: str, reason: str) -> dict[str, Any]:
+    """The failed result of a check that couldn't check out the commit that lands."""
+    return {
+        "command": command,
+        "folder": str(folder),
+        "ran_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "head": commit,
+        "exit_code": None,
+        "passed": False,
+        "seconds": 0,
+        "output": "",
+        "detail": f"Raticode couldn't make a fresh worktree of the commit that lands: {reason}",
+        "sandboxed": True,
+        "ran_in": NOT_RUN,
+        "ran_in_reason": reason,
+    }
 
 
 def broken(result: dict[str, Any]) -> bool:
@@ -708,6 +855,17 @@ FEEDBACK_START = "Raticode ran this project's check ("
 
 def feedback(result: dict[str, Any], decision_id: str) -> str:
     """What the worker is told when Raticode's run of the check failed."""
+    if result.get("ran_in") == NOT_RUN:
+        commit = str(result.get("head") or "")[:12]
+        return (
+            f"{FEEDBACK_START}{decision_id}) itself, but it couldn't check out the commit "
+            f"that lands{f' ({commit})' if commit else ''} from the project's repository, so "
+            f"`{result['command']}` didn't run and the check failed: "
+            f"{result.get('ran_in_reason') or 'no reason given'}. Commit the work on its "
+            "branch, make sure git can check that commit out from the project's repository, "
+            "land it again if the task lands, and report the actual result. Don't change or "
+            "skip the check to get around it; only the user can change the decided command."
+        )
     why = result.get("detail") or f"exited with code {result.get('exit_code')}"
     tail = str(result.get("output") or "").strip()
     fresh = result.get("ran_in") == FRESH_WORKTREE
@@ -735,8 +893,10 @@ REVIEW_GUIDANCE = (
     "raticode_check is a receipt Raticode produced itself: after the worker finished, it "
     "ran the project's decided check in its own sandbox on the commit shown, and the "
     "worker can't write or change this record. Trust it over the worker's receipts and "
-    "summary. ran_in fresh_worktree means it ran in a new worktree of that commit, so only "
-    "committed files were there; task_worktree means it ran in the worker's own folder, "
+    "summary. ran_in fresh_worktree means it ran in a new worktree of that commit, read "
+    "from the project's repository, so only committed files were there; not_run means "
+    "that commit couldn't be checked out, so the command never ran and the check failed; "
+    "task_worktree means it ran in the worker's own folder, "
     "where files the worker never committed could have helped it pass, and ran_in_reason "
     "says why. A pass proves that command passed on that commit, and a worker receipt or "
     "claim that contradicts it is wrong. It proves nothing the command doesn't test, so "
@@ -801,6 +961,13 @@ def summary(result: dict[str, Any]) -> str:
     elif result.get("confirmed"):
         note = " again on a rerun of the same commit"
     commit = str(result.get("head") or "")[:12]
+    if result.get("ran_in") == NOT_RUN:
+        return (
+            f"Raticode didn't run `{result['command']}`: it couldn't make a fresh worktree "
+            f"of {f'commit {commit}' if commit else 'the commit that lands'} for "
+            f"{result['folder']} ({result.get('ran_in_reason') or 'no reason given'}), so "
+            "the check failed."
+        )
     if result.get("ran_in") == FRESH_WORKTREE:
         where = f"a fresh worktree of commit {commit} from {result['folder']}"
     else:

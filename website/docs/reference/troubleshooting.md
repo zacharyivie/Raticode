@@ -51,9 +51,11 @@ Open the failing step in **Runs** and read its output and error. Services, provi
 
 Look at routes and `allow-fail` before adding retries. Retrying a write, a network request or a remote job can repeat its side effect. **Stop** cancels the run but doesn't restore your project.
 
-## Schedules or the runner queue reject a Rattish workflow
+## An old TOML workflow is missing from Workflows
 
-`Raticode schedule`, `Raticode watch` and the runner queue still use the older workflow format. For a `workflow.rattish`, use [triggers](../workflows/triggers.md), or call `Raticode rattish run` from another tool.
+From 0.6.1, Raticode doesn't load workflows written as TOML files. Workflows shows a notice while `.toml` workflow files are left in the data folder. Choose **Convert to Rattish**, or run `Raticode rattish convert FILE.toml --project DIR`. See [Convert a TOML workflow](../workflows/rattish.md#convert-a-toml-workflow).
+
+Their schedules and file watches don't run any more either. The converter prints the [trigger](../workflows/triggers.md) commands that bring them back.
 
 ## A trigger didn't fire
 

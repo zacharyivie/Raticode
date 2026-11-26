@@ -24,8 +24,6 @@ from gofer.devices.registry import DeviceRegistry, PairingError
 
 # Peers that have not announced a larger limit keep the original 10 MiB contract.
 MAX_FILE = 10 * 1024 * 1024
-# The largest single file this store accepts once both peers announce it.
-MAX_FILE_LARGE = 2_000_000_000
 MAX_TOTAL = 4_000_000_000
 MAX_FILES = 128
 CHUNK = 16 * 1024

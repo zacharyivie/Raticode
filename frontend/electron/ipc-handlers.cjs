@@ -34,6 +34,7 @@ const desktopIpcHandlers = [
   ["gofer:list-project-files", "listProjectFiles"],
   ["gofer:search-project", "searchProject"],
   ["gofer:replace-project", "replaceProject"],
+  ["gofer:undo-replace", "undoReplace"],
   ["gofer:open-path", "openPath"],
   ["gofer:reveal-path", "revealPath"],
   ["gofer:path-info", "pathInfo"],
@@ -85,10 +86,8 @@ const updateIpcHandlers = [
   ["gofer:check-for-updates", "checkForUpdates"],
   ["gofer:download-and-install-update", "downloadAndInstallUpdate"],
   ["gofer:install-downloaded-update", "installDownloadedUpdate"],
-  ["gofer:open-update-release", "openUpdateRelease"],
   ["gofer:get-update-state", "getUpdateState"],
   ["gofer:set-automatic-update-checks", "setAutomaticUpdateChecks"],
-  ["gofer:dismiss-update-reminder", "dismissUpdateReminder"],
 ];
 
 const ipcHandlerDefinitions = [...desktopIpcHandlers, ...updateIpcHandlers];

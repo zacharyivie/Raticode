@@ -17,8 +17,6 @@ A run records the steps that actually happened: branch choices, node failures an
 
 Neither check runs the workflow.
 
-In the desktop app, run Rattish workflows with **Local**. Run preview's **Remote** target queues the run for the legacy runner queue, which loads workflows through the legacy loader; see [Runner queue](../workflows/runner-queue.md).
-
 ## Start and inspect
 
 Choose **Run**. **Run preview** opens first and lists:
@@ -53,9 +51,26 @@ Open the bottom panel:
 | Changes | What a run of a [`workspace: worktree`](../workflows/rattish.md#run-in-a-worktree) workflow changed, with **Land** and **Discard**. Shown only for those runs |
 | Terminal | Commands you run manually |
 
-Select a run to see each node's output and errors. A failed node isn't always a failed run: with `allow-fail: true`, a failure can route to a recovery branch on purpose. Check the workflow's final outcome separately from any one node's result.
+Select a run to see each node's output and errors. The Studio's run menu and **All runs** list name each run's status, such as **Failed** or **Succeeded**, and show the first line of a failed or interrupted run's error under its date (new in 0.6.1). A failed node isn't always a failed run: with `allow-fail: true`, a failure can route to a recovery branch on purpose. Check the workflow's final outcome separately from any one node's result.
 
 <AppScreenshot name="studio-workflow-run" caption="A finished run. run-tests shows its allowed failure, which routed to fix; the other nodes succeeded, and Run Timeline lists every activation." />
+
+### A node's output
+
+Select a node after a run and open its **Run** tab. **Latest activation** gives the status and duration of the node's last activation, then its text in tabs:
+
+| View | Shows |
+| --- | --- |
+| Output | What the node returned. An agent node's answer reads as plain text with its own line breaks; any other result is indented JSON |
+| Stdout | What a bash-command or script node printed |
+| Stderr | What it printed to its error stream, in red |
+| Error | Why the activation failed, in red. A failed activation opens on this view |
+
+Only the views that have text appear. **Copy** copies the view you're looking at. Drag the bottom edge of the text to make it taller. **Raw data** opens the node's whole result as JSON.
+
+When a run's output is too large to send to the app in full, the tab says some of it was cut.
+
+**Activation history** lists each activation of the node, newest first, with its lineage ID under it. Select a finished activation to open its own output and error in the same views. That is how you see what an earlier pass of a loop printed, or what a failed try said before a later one passed.
 
 ## Every workflow's runs
 
@@ -71,7 +86,7 @@ The **Workflow runs** view lists runs from every registered workflow, newest fir
 | --- | --- |
 | Workflow | The workflow's name and its project |
 | Started by | **Manual** (the Studio or a terminal), **Trigger** (a schedule, file watch, webhook or polling trigger), **Phone** (Raticode Mobile) or **Rem** (Rem, its workers or organization agents) |
-| Status | Passed, failed, running, stopped or interrupted, whether it waits on an approval, and **switched provider** when a model step moved to a [fallback provider](../nodes/agent.md#fallback-providers) (hover for which and why) |
+| Status | Passed, failed, running, stopped or interrupted, whether it waits on an approval, and **switched provider** when a model step moved to a [fallback provider](../nodes/agent.md#fallback-providers) (hover for which and why). A failed or interrupted run shows the first line of its error underneath; **Show full error** opens the whole message (new in 0.6.1) |
 | Started | How long ago it started; hover for the exact time |
 | Duration | How long it ran, or has been running |
 | Tokens and Est. cost | The run's [model usage](#model-usage-and-cost); runs saved before usage tracking show a dash |

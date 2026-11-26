@@ -21,6 +21,7 @@ from gofer.ui.rem_home_landing import branch_tips
 from gofer.ui.rem_home_models import ACTIVE
 from gofer.ui.rem_home_store import NEWEST_RUN
 from gofer.ui.rem_home_worktree import WorktreeError, _git
+from gofer.utils.instants import stored_instant
 
 # Tickets closed or declined this recently are listed, newest first, at most CLOSED_LIMIT.
 CLOSED_WITHIN = timedelta(days=14)
@@ -45,14 +46,6 @@ def project_commit(root: str, integration: str | None = None) -> tuple[str, str]
         return "", _git(root, "rev-parse", "--verify", "-q", "HEAD^{commit}")
     except WorktreeError:
         return "", ""
-
-
-def _instant(value: Any) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else None
 
 
 def last_report(
@@ -99,7 +92,7 @@ def recently_closed(
     for ticket in tickets:
         if ticket.get("project_dir") != target or ticket.get("status") not in {"done", "cancelled"}:
             continue
-        at = _instant(ticket.get("updated_at"))
+        at = stored_instant(ticket.get("updated_at"), naive_as_utc=False)
         if at is None or clock - at > CLOSED_WITHIN:
             continue
         declined = (ticket.get("proposal") or {}).get("state") == "declined"

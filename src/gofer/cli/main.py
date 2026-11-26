@@ -38,7 +38,6 @@ from pathlib import Path
 import typer
 
 from gofer.cli.commands import (
-    agent,
     api,
     brain,
     doctor,
@@ -49,15 +48,12 @@ from gofer.cli.commands import (
     rattish_triggers,
     rem,
     rem_api,
-    runner,
-    schedule,
     schema,
     social,
     swarm,
     system,
     tickets,
     tokens,
-    watch,
     workflow,
     workflows,
 )
@@ -70,17 +66,12 @@ app = typer.Typer(
         "docs --format json lists the installed language docs, contracts and schemas. "
         "Commands that print records, such as lists and status, accept --format json. "
         "Commands that talk to a running backend print a JSON envelope by default; the "
-        "others print bare JSON data with --format json. Errors go to stderr. Groups "
-        "marked [Legacy TOML] work only with older TOML workflows."
+        "others print bare JSON data with --format json. Errors go to stderr."
     ),
     no_args_is_help=True,
 )
 app.add_typer(workflow.app, name="workflow")
-app.add_typer(agent.app, name="agent")
 app.add_typer(provider.app, name="provider")
-app.add_typer(runner.app, name="runner")
-app.add_typer(schedule.app, name="schedule")
-app.add_typer(watch.app, name="watch")
 app.add_typer(rattish.app, name="rattish")
 app.add_typer(rem.app, name="rem")
 rem_api.register(rem.app)
@@ -155,6 +146,7 @@ def second_brain(
     memory_folder: bool = typer.Option(False, "--memory-folder"),
     report_theme_file: Path | None = typer.Option(None, "--report-theme-file"),
     task_report_tool: bool = typer.Option(False, "--task-report-tool"),
+    private_brain_folder: list[Path] | None = typer.Option(None, "--private-brain-folder"),
 ) -> None:
     """Serve the native Rem knowledge tools over MCP stdio."""
     from gofer.cli.commands.second_brain import run_second_brain
@@ -174,6 +166,7 @@ def second_brain(
         memory_folder,
         report_theme_file,
         task_report_tool,
+        private_brain_folder,
     )
 
 
@@ -187,8 +180,8 @@ _DATA_DIR_OPTION = typer.Option(
     None,
     "--data-dir",
     help=(
-        "Raticode app data directory for global settings, schedules, registries, and app "
-        "state. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard data folder."
+        "Raticode data folder for global settings, schedules, registries, and app "
+        "state. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard location."
     ),
 )
 _HEADLESS_OPTION = typer.Option(

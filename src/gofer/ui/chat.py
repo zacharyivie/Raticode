@@ -14,7 +14,7 @@ import sys
 import tempfile
 import threading
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -86,7 +86,7 @@ from gofer.subscriptions.cli_providers import (
     stream_cli,
 )
 from gofer.subscriptions.codex import codex_exec_input
-from gofer.ui import claude_sandbox
+from gofer.ui import claude_sandbox, temp_cleanup
 from gofer.ui.browser_tools import releases_browser_access, with_agent_browser
 from gofer.ui.chat_media import ChatMediaError, resolve_chat_attachment
 from gofer.ui.chat_sessions import ChatSession, with_chat_session
@@ -1093,226 +1093,49 @@ async def run_workflow_chat(
     conversation_id: str | None = None,
     reset_session: bool = False,
 ) -> dict[str, Any]:
-    if (
-        conversation_id
-        or (workflow or {}).get("chatThreadId")
-        or provider in ADDITIONAL_PROVIDERS | ACP_PROVIDERS | {"antigravity"}
-    ):
-        source = stream_workflow_chat(
-            provider,
-            model,
-            messages,
-            workflow,
-            effort=effort,
-            working_dir=working_dir,
-            data_dir=data_dir,
-            resource_limits=resource_limits,
-            permission_mode=permission_mode,
-            trusted_swarm_url=trusted_swarm_url,
-            trusted_rem_threads_url=trusted_rem_threads_url,
-            trusted_organization_url=trusted_organization_url,
-            trusted_rem_artifacts_url=trusted_rem_artifacts_url,
-            trusted_rem_wait_url=trusted_rem_wait_url,
-            conversation_id=conversation_id,
-            reset_session=reset_session,
-        )
-        try:
-            async for event in source:
-                if event["type"] == "error":
-                    raise ChatProviderError(event["error"])
-                if event["type"] == "final":
-                    return event
-            raise ChatProviderError("Provider ended without a result")
-        finally:
-            close = getattr(source, "aclose", None)
-            if close is not None:
-                await close()
-    if provider not in {
-        "codex",
-        "claude_code",
-        "antigravity",
-        *ADDITIONAL_PROVIDERS,
-        *ACP_PROVIDERS,
-    }:
-        raise ChatProviderError(f"Unknown provider '{provider}'")
-    if provider_preference(provider).get("enabled") is False:
-        raise ChatProviderError(
-            f"Provider '{provider}' is disabled. Enable it in Settings > Providers."
-        )
-    # ``cli-default`` deliberately leaves model selection to the local CLI.
-    # It remains supported for existing API clients and cannot be catalog
-    # validated because the CLI may choose dynamically.
-    try:
-        provider_permission_args(provider, permission_mode)
-    except ValueError as exc:
-        raise ChatProviderError(str(exc)) from exc
-    if model != "cli-default" or effort:
-        try:
-            await validate_provider_selection_async(
-                provider,
-                None if model == "cli-default" else model,
-                effort,
-            )
-        except ProviderCapabilityError as exc:
-            raise ChatProviderError(str(exc)) from exc
+    """Run one chat turn and return its final event.
 
-    binary = {
-        "codex": "codex",
-        "claude_code": "claude",
-        "cursor": "cursor-agent",
-        "copilot": "copilot",
-        "opencode": "opencode",
-        "antigravity": "agy",
-        "grok": "grok",
-    }[provider]
-    binary_path = resolve_provider_executable(cast(ProviderName, provider))
-    if binary_path is None:
-        raise ChatProviderError(cli_missing(binary))
-
-    resolved_data_dir = (data_dir or get_data_dir()).resolve()
-    resolved_working_dir = _chat_working_dir(workflow, working_dir or resolved_data_dir)
-    limits = _limits_from_workflow(workflow, resource_limits)
-    resolved_working_dir.mkdir(parents=True, exist_ok=True)
-    gofer_cli_path = ensure_local_gofer_cli(resolved_data_dir)
-    try:
-        workflow = with_library_resources(workflow, resolved_data_dir)
-    except ValueError as exc:
-        raise ChatProviderError(str(exc)) from exc
-    workflow = with_second_brain(
+    The streaming path does every check a turn needs (private brains, sandbox,
+    accounts), so this only collects its final event.
+    """
+    source = stream_workflow_chat(
+        provider,
+        model,
+        messages,
         workflow,
-        gofer_cli_path,
-        _brain_context(workflow, None, provider, model),
-        resolved_data_dir,
-    )
-    workflow = with_report_outputs(
-        workflow, gofer_cli_path, resolved_working_dir, resolved_data_dir
-    )
-    workflow = _with_browser(workflow, gofer_cli_path, resolved_data_dir, resolved_working_dir)
-    messages, _ = await _compact_chat_messages_if_needed(
-        provider=provider,
-        model=model,
         effort=effort,
-        messages=_without_narration(messages),
-        binary_path=binary_path,
-        data_dir=resolved_data_dir,
-        working_dir=resolved_working_dir,
-        limits=limits,
-    )
-    try:
-        messages, image_paths = _messages_with_attachment_paths(
-            messages,
-            workflow=workflow,
-            data_dir=resolved_data_dir,
-        )
-    except ChatMediaError as exc:
-        raise ChatProviderError(str(exc)) from exc
-    prompt = build_chat_prompt(
-        provider=provider,
-        model=model,
-        messages=messages,
-        workflow=workflow,
-        gofer_cli_path=gofer_cli_path,
-    )
-    extra_paths = _trusted_workflow_paths(workflow, resolved_working_dir)
-    if provider in ADDITIONAL_PROVIDERS:
-        extra_paths += _skill_read_paths(workflow)
-    resources = AgentResources.model_validate((workflow or {}).get("remResources") or {})
-    command = _build_chat_command(
-        provider=provider,
-        model=model,
-        effort=effort,
-        prompt=prompt,
-        binary_path=binary_path,
-        data_dir=resolved_data_dir,
-        working_dir=resolved_working_dir,
-        extra_paths=extra_paths,
-        image_paths=image_paths,
+        working_dir=working_dir,
+        data_dir=data_dir,
+        resource_limits=resource_limits,
         permission_mode=permission_mode,
-        network_access=((workflow or {}).get("remManagedTask") or {}).get("networkAccess") is True,
-        read_only=((workflow or {}).get("remManagedTask") or {}).get("readOnly") is True,
         trusted_swarm_url=trusted_swarm_url,
         trusted_rem_threads_url=trusted_rem_threads_url,
         trusted_organization_url=trusted_organization_url,
         trusted_rem_artifacts_url=trusted_rem_artifacts_url,
         trusted_rem_wait_url=trusted_rem_wait_url,
-        resources=resources,
-        second_brain_cli_path=(
-            gofer_cli_path
-            if (
-                ((workflow or {}).get("remSecondBrain") or {}).get("enabled") is True
-                or ((workflow or {}).get("remReportTheme") or {}).get("format")
-            )
-            else None
-        ),
+        conversation_id=conversation_id,
+        reset_session=reset_session,
     )
-    protocol = ProtocolLines()
-    parsed_answer: str | None = None
-    parsed_error: str | None = None
-
-    def observe_stdout(chunk: str) -> None:
-        nonlocal parsed_answer, parsed_error
-        for line in protocol.feed(chunk):
-            if payload := _json_object(line):
-                parsed_error = _provider_error_message([payload]) or (
-                    None if payload.get("type") in TERMINAL_PROVIDER_RECORDS else parsed_error
-                )
-                if not _provider_error_message([payload]):
-                    answer = _provider_final_message(provider, [payload])
-                    if answer:
-                        parsed_answer = retained_text(answer)
-
-    if provider == "codex":
-        command = codex_sandbox.credential_guard(command, data_dir=resolved_data_dir)
-    private_config: Path | None = None
     try:
-        command, private_config = _private_mcp_config(provider, command)
-        command, stdin = _prompt_via_stdin(provider, command, data_dir=resolved_data_dir)
-        returncode, stdout, stderr = await run_subprocess(
-            command,
-            stdin=stdin,
-            cwd=resolved_working_dir,
-            # Codex reads Raticode's tool tokens from here, never from its arguments.
-            env=env_with_executable_on_path(
-                binary_path, codex_mcp_token_env(resources) if provider == "codex" else None
-            ),
-            timeout=None,
-            max_output_bytes=limits.max_subprocess_output_bytes,
-            on_stdout=observe_stdout,
-        )
-    except ProtocolRecordLimitError as exc:
-        raise ChatProviderError(str(exc)) from exc
-    except OSError as exc:
-        # The chat shows this to the user; the app log keeps it for diagnosis.
-        log.warning("Could not start the %s CLI (%s)", binary, type(exc).__name__, exc_info=True)
-        raise ChatProviderError(cli_start_failed(binary, exc)) from exc
+        async for event in source:
+            if event["type"] == "error":
+                raise ChatProviderError(event["error"])
+            if event["type"] == "final":
+                return event
+        raise ChatProviderError("Provider ended without a result")
     finally:
-        if private_config is not None:
-            shutil.rmtree(private_config, ignore_errors=True)
+        close = getattr(source, "aclose", None)
+        if close is not None:
+            await close()
 
-    if protocol.buffer:
-        observe_stdout("\n")
-    if returncode != 0 or parsed_error:
-        raise ChatProviderError(
-            parsed_error
-            or plain_terminal_text(stderr).strip()
-            or stdout
-            or f"{PROVIDER_EXITED} {returncode}"
-        )
 
-    payloads = _json_payloads(stdout)
-    final_message = parsed_answer or _provider_final_message(provider, payloads)
-    if not final_message and payloads:
-        raise ChatProviderError(NO_FINAL_ANSWER)
-    return {
-        "provider": provider,
-        "model": model,
-        "effort": effort,
-        "message": {
-            "role": "assistant",
-            "body": final_message or stdout or stderr,
-        },
-    }
-
+# Who Rem is in a chat turn that brings no instructions of its own.
+REM_IDENTITY = (
+    "You are Rem, the coding agent for Raticode.\n"
+    'Rem stands for Raticode Environment Manager. Treat Rem as a name: always use "Rem"\n'
+    'in the UI and normal conversation, never "REM". Explain the full name only when asked.\n'
+    "Help users build workflows, edit code, debug, and understand their projects."
+)
 
 CLAUDE_SANDBOX_BLOCKED = (
     "Blocked: this unattended run needs Claude Code's sandbox, which can't start."
@@ -1361,30 +1184,49 @@ def _command_slot_environment(
 
 
 def _codex_data_writes(
-    managed_task: dict[str, Any],
+    workflow: dict[str, Any] | None,
     scratch: Path | None,
     slot_env: dict[str, str],
+    data_dirs: Iterable[Path] = (),
 ) -> list[Path] | None:
     """Where in the data folder an unwatched Codex turn may write, or None for anywhere.
 
-    Rem marks the turns whose Claude Code shell it sandboxes (self-work and reviews).
-    Codex gets the same allow-list there: its scratch folder and the command-slot
-    folders queued tests report progress and wait in. The guard adds a working folder
-    inside the data folder. Native Windows and Codex's older settings ignore it.
+    Rem marks the turns whose Claude Code shell it sandboxes (self-work and reviews);
+    organization worker turns (``organizationRun``) count too. Codex gets the same
+    allow-list there: its scratch folder and the command-slot folders queued tests
+    report progress and wait in. The guard adds a working folder inside the data
+    folder. An organization worker also writes its workspaces that sit inside one of
+    ``data_dirs``, such as its shared-repository checkout. Native Windows and Codex's
+    older settings ignore it.
     """
-    if managed_task.get("limitDataFolder") is not True:
+    context = workflow or {}
+    managed_task = context.get("remManagedTask") or {}
+    if managed_task.get("limitDataFolder") is not True and not context.get("organizationRun"):
         return None
     root = slot_env.get(COMMAND_SLOTS_ROOT_ENV)
     activity = slot_env.get(COMMAND_ACTIVITY_ENV)
     if scratch is not None:
         # Codex's sandbox can't open a folder that isn't there yet.
         scratch.mkdir(parents=True, exist_ok=True)
+    folders = [Path(os.path.abspath(folder)) for folder in data_dirs]
+    given = context.get("organizationWorkspacePaths")
+    workspaces = [
+        path
+        for path in (
+            Path(os.path.abspath(value))
+            for value in (given if isinstance(given, list) else [])
+            if isinstance(value, str) and os.path.isabs(value)
+        )
+        # Strictly inside: a workspace that is or holds a data folder opens none of it.
+        if any(path != folder and path.is_relative_to(folder) for folder in folders)
+    ]
     return [
         path
         for path in (
             scratch,
             Path(activity).parent if activity else None,
             Path(root) / "queue" if root else None,
+            *workspaces,
         )
         if path is not None and path.is_dir()
     ]
@@ -1565,13 +1407,14 @@ async def stream_workflow_chat(
         trust_data_dir = False
     # Checked at the start of every turn, so turning Allow cloud processing off stops
     # a running thread at its next turn.
+    library_dir = (library_data_dir or accounts_dir).resolve()
     private_brains = _private_brains_in_turn(
         provider=provider,
         provider_profile=provider_profile,
         workflow=workflow,
         working_dir=resolved_working_dir,
         data_dir=resolved_data_dir,
-        library_dir=(library_data_dir or accounts_dir).resolve(),
+        library_dir=library_dir,
         sandboxed=sandboxed,
     )
     resolved_working_dir.mkdir(parents=True, exist_ok=True)
@@ -1585,6 +1428,7 @@ async def stream_workflow_chat(
         gofer_cli_path,
         _brain_context(workflow, conversation_id, provider, model),
         resolved_data_dir,
+        library_dir,
     )
     workflow = with_report_outputs(
         workflow, gofer_cli_path, resolved_working_dir, resolved_data_dir
@@ -1827,7 +1671,13 @@ async def stream_workflow_chat(
             command,
             data_dir=resolved_data_dir,
             codex_home=Path(account_env["CODEX_HOME"]) if "CODEX_HOME" in account_env else None,
-            data_writable=_codex_data_writes(managed_task, trusted_scratch_dir, slot_env),
+            data_writable=_codex_data_writes(
+                workflow,
+                trusted_scratch_dir,
+                slot_env,
+                # A worker's own data folder and Raticode's, which holds its checkouts.
+                data_dirs=[resolved_data_dir, library_dir],
+            ),
         )
     if provider == "claude_code":
         # Remove Co-authored-by lines: Claude Code's sandbox replaces GIT_CONFIG_PARAMETERS
@@ -2081,6 +1931,8 @@ async def stream_workflow_chat(
         raise ChatProviderError(f"Could not prepare '{binary}' CLI: {exc}") from exc
     # The sandbox leaves empty mount points in the folder Claude Code starts in.
     stub_root = claude_sandbox.track_mount_stubs(process_cwd) if sandboxed else None
+    # Files this turn's commands leave in /tmp are kept until it ends, then swept.
+    temp_turn = temp_cleanup.turn_started()
     try:
         exec_command, stdin = _prompt_via_stdin(
             provider, exec_command, env=process_env, data_dir=resolved_data_dir
@@ -2265,6 +2117,7 @@ async def stream_workflow_chat(
         project_tracker.close()
         if private_config is not None:
             shutil.rmtree(private_config, ignore_errors=True)
+        temp_cleanup.turn_finished(temp_turn)
 
 
 def _text_delta_event(
@@ -2279,11 +2132,6 @@ def _text_delta_event(
         "text": trace["text"],
         "deltaStreamId": trace["streamId"],
     }
-
-
-def _complete_json_lines(buffer: str, chunk: str) -> tuple[list[str], str]:
-    lines = f"{buffer}{chunk}".split("\n")
-    return lines[:-1], lines[-1]
 
 
 def _retained_provider_payload(value: Any) -> Any:
@@ -3429,23 +3277,13 @@ def _trusted_workflow_paths(
     if not isinstance(workflow, dict):
         return []
     selected = _selected_workflow_context(workflow)
-    trusted_paths: list[Path] = []
     project_root = workflow.get("projectRoot") or (selected or {}).get("projectRoot")
-    if isinstance(project_root, str) and project_root.strip():
-        project_path = Path(project_root).expanduser()
-        if not project_path.is_absolute() and not _looks_like_windows_absolute_path(project_path):
-            project_path = path_base / project_path
-        trusted_paths.append(project_path)
-    for entry in (selected or {}).get("filesystemAccess") or []:
-        if not isinstance(entry, dict) or not entry.get("path"):
-            continue
-        if entry.get("read", True) is False or entry.get("write", True) is False:
-            continue
-        path = Path(str(entry["path"])).expanduser()
-        if not path.is_absolute():
-            path = path_base / path
-        trusted_paths.append(path)
-    return trusted_paths
+    if not isinstance(project_root, str) or not project_root.strip():
+        return []
+    project_path = Path(project_root).expanduser()
+    if not project_path.is_absolute() and not _looks_like_windows_absolute_path(project_path):
+        project_path = path_base / project_path
+    return [project_path]
 
 
 def _private_brains_in_turn(
@@ -3973,12 +3811,7 @@ def measured_chat_prompt(
         if isinstance(rules_file, str) and rules_file and not brain_rules
         else report_theme_rules(report_theme)
     )
-    identity = agent_instructions or (
-        "You are Rem, the coding agent for Raticode.\n"
-        'Rem stands for Raticode Environment Manager. Treat Rem as a name: always use "Rem"\n'
-        'in the UI and normal conversation, never "REM". Explain the full name only when asked.\n'
-        "Help users build workflows, edit code, debug, and understand their projects."
-    )
+    identity = agent_instructions or REM_IDENTITY
     tool_settings = (
         f"run commands={str(resources.shell).lower()}, web search={str(resources.web).lower()}, "
         f"subagents={str(resources.agents).lower()}, browser={str(resources.browser).lower()}"
@@ -4146,18 +3979,6 @@ def _gofer_cli_prompt_context(gofer_cli_path: Path | None) -> str:
         f"`rem skill add`, or `rem mcp add` (see `{gofer_cli_path} rem --help`). They work with "
         "every provider and appear in Thread tools, where the user turns them on per thread."
     )
-
-
-def _load_skill_text() -> str:
-    try:
-        skill_path = rattish_assistant_skill_path()
-        return skill_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError, RattishArtifactError):
-        return (
-            "The packaged Raticode workflow-builder skill is unavailable. Author only "
-            "Rattish source and run `Raticode rattish docs --format json` to locate the installed "
-            "language specification and node contracts."
-        )
 
 
 def _rattish_docs_prompt_context() -> str:

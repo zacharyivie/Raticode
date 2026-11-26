@@ -76,6 +76,7 @@ from gofer.ui.rem_project_checks import FEEDBACK_START, FLAKES_SETTING
 from gofer.ui.rem_verified_work import BLOCK_CAUSES
 from gofer.ui.rem_verified_work import _cause as block_cause
 from gofer.ui.rem_verified_work import _Entry as Entry
+from gofer.utils.instants import stored_instant
 
 TAG = "Guardrail"
 TITLE = "Guardrail retro of the last 14 days"
@@ -104,7 +105,6 @@ MAX_LEFT_OUT = MAX_CAUSES
 # The verdicts self-work keeps between looks (self_work_state.guardrail_retro.verdicts).
 MAX_VERDICTS = 50
 # The cheapest lasting fix first; a proposal names one of these.
-FIXES = ("test", "lint", "agents_pointer", "raticode_bug")
 FIX_LABELS = {
     "test": "a test or check",
     "lint": "a lint rule",
@@ -182,14 +182,6 @@ _CAUGHT = re.compile(
     r"against|instead of|rather than)\b[^.;\n]{0,40}$",
     re.IGNORECASE,
 )
-
-
-def _instant(value: Any) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def _clip(text: Any, limit: int) -> str:
@@ -412,7 +404,7 @@ def collect(db: sqlite3.Connection, clock: datetime, window: timedelta = WINDOW)
         identity, created, finished, project, ticket, state, summary = row[:7]
         passed, skipped, output, repeated, wrong, repairs, feedback, notes = row[7:]
         runs[str(identity)] = {
-            "at": _instant(finished) or _instant(created),
+            "at": stored_instant(finished) or stored_instant(created),
             "project": str(project or ""),
             "ticket": str(ticket or ""),
             "state": str(state or ""),
@@ -423,7 +415,7 @@ def collect(db: sqlite3.Connection, clock: datetime, window: timedelta = WINDOW)
             "wrong_project": str(wrong or ""),
             "repairs": int(repairs or 0),
             "feedback": str(feedback or ""),
-            "finished": _instant(finished),
+            "finished": stored_instant(finished),
             "notes": _review_notes(notes),
         }
     projects = {
@@ -463,7 +455,7 @@ def collect(db: sqlite3.Connection, clock: datetime, window: timedelta = WINDOW)
         _REQUEST_CHANGES,
         _MOVED,
     ):
-        at = _instant(row[1])
+        at = stored_instant(row[1])
         ticket, kind, author, source, goal, title, entry_run, details, body = (
             str(value or "") for value in (row[0], *row[2:])
         )
@@ -548,7 +540,7 @@ def collect(db: sqlite3.Connection, clock: datetime, window: timedelta = WINDOW)
     # (rem_project_checks.note_flake). Each run counts once per test.
     for project, flakes in _flake_records(db).items():
         for flake in flakes:
-            at = _instant(flake.get("at"))
+            at = stored_instant(flake.get("at"))
             run_id = str(flake.get("run_id") or "")
             if not run_id or at is None or not since <= at <= clock:
                 continue
@@ -615,7 +607,7 @@ def landed_fixes(db: sqlite3.Connection, numbers: dict[str, int] | None = None) 
         "WHERE json_extract(body,'$.kind')='status' AND json_extract(body,'$.to')='done' "
         "AND coalesce(json_extract(body,'$.from'),'')<>'done' ORDER BY seq",
     ):
-        when = _instant(moment)
+        when = stored_instant(moment)
         if when is not None:
             landed[str(ticket)] = when
     fixes = []
@@ -689,7 +681,7 @@ def earlier_tickets(
         if not cause or (projects is not None and project and project not in projects):
             continue
         identity = str(ticket.get("id") or "")
-        at = _instant(ticket.get("updated_at")) or clock
+        at = stored_instant(ticket.get("updated_at")) or clock
         proposal = ticket.get("proposal") if isinstance(ticket.get("proposal"), dict) else {}
         if ticket.get("status") == "blocked":
             blocks = _last_entry_titles(db, "blocked") if blocks is None else blocks
@@ -886,7 +878,7 @@ def verdict_fixes(verdicts: list[dict[str, Any]]) -> list[LandedFix]:
     """Each kept verdict as a fix timed at its retro's start; unusable ones left out."""
     fixes = []
     for index, item in enumerate(verdicts):
-        cause, when = same_cause(item.get("cause")), _instant(item.get("at"))
+        cause, when = same_cause(item.get("cause")), stored_instant(item.get("at"))
         verdict = str(item.get("verdict") or "")
         if not cause or when is None or verdict not in VERDICTS:
             continue
@@ -1021,7 +1013,7 @@ def save_verdicts(
     ]
     merged = [*new, *older]
     merged.sort(
-        key=lambda v: _instant(v.get("at")) or datetime.min.replace(tzinfo=UTC), reverse=True
+        key=lambda v: stored_instant(v.get("at")) or datetime.min.replace(tzinfo=UTC), reverse=True
     )
     return merged[:MAX_VERDICTS]
 
@@ -1094,7 +1086,7 @@ def target(listed: list[dict[str, Any]], usable: list[str]) -> str:
 
 def due(state: dict[str, Any], clock: datetime, *, session_ended: bool) -> bool:
     """Whether to look again: a week after the last look, or a session's end a day after."""
-    last = _instant(state.get("checked_at"))
+    last = stored_instant(state.get("checked_at"))
     if last is None:
         return True
     gap = clock - last

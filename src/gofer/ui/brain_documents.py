@@ -268,7 +268,11 @@ def read_source(root: Path, relative: str, limit: int = MAX_FILE) -> bytes:
         info = os.fstat(handle.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
             raise ValueError("Source is not a regular file within the size limit")
-        data = handle.read(limit + 1)
+        # read(n) reserves n bytes up front, so asking for the limit would hold 32 MiB
+        # for every small note. Ask for the file's size; read on only if it grew.
+        data = handle.read(info.st_size + 1)
+        if len(data) > info.st_size:
+            data += handle.read(limit + 1 - len(data))
         if len(data) > limit:
             raise ValueError("Source exceeds the size limit")
         return data

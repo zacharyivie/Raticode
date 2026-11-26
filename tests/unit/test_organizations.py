@@ -28,6 +28,7 @@ def manager(tmp_path) -> Any:
     result.close()
 
 
+# Not the shared company: workers with roles and no project.
 def company(manager, tmp_path) -> Any:
     return manager.call(
         str(tmp_path),
@@ -220,7 +221,8 @@ def test_concurrent_config_writers_only_one_wins(manager, tmp_path) -> Any:
     assert sorted(map(str, results)) == ["2", "conflict"]
 
 
-def wait_idle(manager) -> Any:
+# Waits on the manager's own runs, not Second Brain tasks (see tests/helpers/brain_library.py).
+def wait_runs_finished(manager) -> Any:
     deadline = time.monotonic() + 5
     while manager._active and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -278,7 +280,7 @@ def test_explicit_resume_all_lifts_roster_holds_and_dispatches_approved_work(
     assert manager._wake.is_set()
     for _ in range(3):
         manager.dispatch()
-        wait_idle(manager)
+        wait_runs_finished(manager)
     current = call(manager, org, "read")
     assert [task["status"] for task in current["runtime"]["tasks"]] == [
         "in_review",
@@ -331,7 +333,7 @@ def test_resuming_employee_does_not_reset_exhausted_limits(manager, tmp_path, li
     call(manager, org, "task_create", title="Second", assignee="builder")
     call(manager, org, "control", state="running")
     manager.dispatch()
-    wait_idle(manager)
+    wait_runs_finished(manager)
     current = call(manager, org, "read")
     usage = current["runtime"]["usage"]
     current["config"]["employees"][1]["paused"] = True
@@ -345,7 +347,7 @@ def test_resuming_employee_does_not_reset_exhausted_limits(manager, tmp_path, li
     )
     call(manager, org, "control", state="running")
     manager.dispatch()
-    wait_idle(manager)
+    wait_runs_finished(manager)
     current = call(manager, org, "read")
     assert current["runtime"]["usage"] == usage
     assert current["runtime"]["tasks"][1]["status"] == "todo"
@@ -374,7 +376,7 @@ def test_start_work_while_running_preserves_active_turn(manager, tmp_path) -> An
         assert all(not cancel.is_set() for _, cancel, _ in manager._active.values())
     finally:
         release.set()
-        wait_idle(manager)
+        wait_runs_finished(manager)
     assert call(manager, org, "read")["runtime"]["tasks"][0]["status"] == "in_review"
 
 
@@ -390,7 +392,7 @@ def test_execution_reuses_rem_and_retains_conversation(manager, tmp_path) -> Any
     task = call(manager, org, "task_create", title="Build", assignee="builder")
     call(manager, org, "control", state="running")
     manager.dispatch()
-    wait_idle(manager)
+    wait_runs_finished(manager)
     current = call(manager, org, "read")
     done = current["runtime"]["tasks"][0]
     assert done["status"] == "in_review" and done["claim"] is None
@@ -408,9 +410,10 @@ def test_execution_reuses_rem_and_retains_conversation(manager, tmp_path) -> Any
         e["kind"] == "turn_finished" and e["payload"]["taskId"] == task["id"] for e in events
     )
     assert all("/mcp/" not in json.dumps(e) for e in events)
-    from gofer.core.usage_ledger import activity_payload, usage_db
+    from gofer.core.usage_history import resolve_range, usage_history
+    from gofer.core.usage_ledger import usage_db
 
-    assert activity_payload(manager.data_dir)["activity"]["calls"] == 1
+    assert usage_history(manager.data_dir, resolve_range())["activity"]["calls"] == 1
     # The call names its run and thread, and the ticket adds up its runs' use.
     with usage_db(manager.data_dir) as db:
         row = db.execute("SELECT run_id, thread_id FROM usage_invocations").fetchone()
@@ -436,7 +439,7 @@ def test_restore_cancels_active_turn_and_preserves_tasks(manager, tmp_path) -> A
     manager.dispatch()
     assert entered.wait(3)
     call(manager, org, "restore", revision=1, expectedRevision=1, reason="Recover healthy state")
-    wait_idle(manager)
+    wait_runs_finished(manager)
     task = call(manager, org, "read")["runtime"]["tasks"][0]
     assert task["status"] == "blocked" and task["claim"] is None
     assert not any(c["body"] == "Late response" for c in task["comments"])
@@ -562,7 +565,7 @@ def test_budget_and_memory_survive_configuration_restore(manager, tmp_path) -> A
     call(manager, org, "task_create", title="Second", assignee="builder")
     call(manager, org, "control", state="running")
     manager.dispatch()
-    wait_idle(manager)
+    wait_runs_finished(manager)
     manager.dispatch()
     current = call(manager, org, "read")
     assert current["runtime"]["state"] == "paused"
@@ -762,7 +765,7 @@ def test_distinct_workspaces_run_concurrently_but_shared_workspaces_serialize(
         assert set(entered) == {tmp_path, other}
     finally:
         release.set()
-        wait_idle(manager)
+        wait_runs_finished(manager)
 
 
 def test_package_does_not_grant_local_workspace_paths() -> Any:
@@ -968,7 +971,7 @@ def test_global_dispatch_uses_owned_default_after_original_project_is_removed(
     call(manager, org, "task_create", title="Review", assignee="builder")
     call(manager, org, "control", state="running")
     manager.dispatch()
-    wait_idle(manager)
+    wait_runs_finished(manager)
     assert captured[0]["working_dir"] == other
     assert captured[0]["workflow"]["organizationWorkspacePaths"] == [str(other)]
 
@@ -1127,7 +1130,7 @@ def test_audit_cancellation_reaches_provider_and_revokes_capability(manager, tmp
             generation=0,
             run_id=turn,
         )
-    wait_idle(manager)
+    wait_runs_finished(manager)
     current = call(manager, org, "read")
     assert all(t["status"] == "cancelled" for t in current["runtime"]["tasks"])
     assert current["runtime"]["tasks"][0]["cancellation"] == "acknowledged"
@@ -1144,7 +1147,7 @@ def test_audit_setup_and_thread_start_failure_release_capacity(
     runtime_root = manager.data_dir.parent / ".raticode-employee-runtime"
     runtime_root.write_text("not a directory")
     manager.dispatch()
-    wait_idle(manager)
+    wait_runs_finished(manager)
     task = call(manager, org, "read")["runtime"]["tasks"][0]
     assert task["status"] == "blocked" and task["claim"] is None
     assert not manager._active_roots
@@ -1189,7 +1192,7 @@ def test_audit_followup_preserves_nondefault_workspace(manager, tmp_path) -> Any
     call(manager, org, "control", state="running")
     for _ in range(2):
         manager.dispatch()
-        wait_idle(manager)
+        wait_runs_finished(manager)
     assert observed == list(map(str, roots))
     followup = call(manager, org, "read")["runtime"]["tasks"][1]
     assert followup["workspacePath"] == str(roots[1])
@@ -1314,7 +1317,7 @@ def test_cosmetic_and_instruction_edits_preserve_active_work(manager, tmp_path) 
         assert not next(iter(manager._active.values()))[1].is_set()
     finally:
         release.set()
-        wait_idle(manager)
+        wait_runs_finished(manager)
 
 
 def test_routines_are_durable_deduplicated_and_queue_dependencies(manager, tmp_path) -> Any:
@@ -1395,7 +1398,7 @@ def test_artifacts_belong_to_attempt_and_review_records_outcomes(manager, tmp_pa
     )
     call(manager, org, "control", state="running")
     manager.dispatch()
-    wait_idle(manager)
+    wait_runs_finished(manager)
     current = call(manager, org, "read")
     attempt = next(iter(current["runtime"]["attempts"].values()))
     assert attempt["workspacePath"] == str(tmp_path)

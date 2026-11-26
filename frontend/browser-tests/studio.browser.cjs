@@ -179,7 +179,6 @@ async function run() {
   await waitFor(() => evaluate(() => window.innerWidth >= 1000));
   await exerciseCreateDialog();
   await exerciseDesignRegressions();
-  await exerciseKeyboardGraphAndResizers();
   await exerciseMonacoEditor();
   await exercisePackagedMonacoWorker(baseUrl);
   await exerciseSourceControl();
@@ -1090,182 +1089,6 @@ async function exerciseDesignRegressions() {
     .find((button) => button.textContent.trim() === "Outline").click());
   await evaluate(() => document.querySelector("button[title='Map']").click());
 
-  await evaluate(() => document.querySelector("summary[title='More graph actions']").click());
-  await waitFor(() => evaluate(() => Boolean(
-    document.querySelector("details[open] summary[title='More graph actions']"),
-  )));
-  await evaluate(() => [...document.querySelectorAll("details[open] button")]
-    .find((button) => button.textContent.trim() === "Workflow settings").click());
-  await waitFor(() => evaluate(() => Boolean(
-    document.querySelector("[aria-label='Workflow settings sections']"),
-  )), 25, "Workflow settings sections to open");
-  assert.deepEqual(
-    await evaluate(() => [...document.querySelectorAll("[aria-label='Workflow settings sections'] [role='tab']")]
-      .map((tab) => tab.textContent.trim())),
-    ["General", "Triggers", "Variables", "Access"],
-  );
-  await evaluate(() => document.querySelector("button[title='Hide workflow settings and node inspector']").click());
-}
-
-async function exerciseKeyboardGraphAndResizers() {
-  await evaluate(() => document.querySelector("button[title='Map']").click());
-  const initialOutline = await evaluate(() => {
-    const outline = document.querySelector("[aria-label='Graph outline']");
-    const nodeButtons = [...outline.querySelectorAll("button[aria-label*=', status '")];
-    return {
-      nodeCount: nodeButtons.length,
-      firstDescription: nodeButtons[0]?.getAttribute("aria-label") || "",
-    };
-  });
-  assert.equal(initialOutline.nodeCount, 2);
-  assert.match(initialOutline.firstDescription, /incoming.*outgoing.*valid/);
-
-  await evaluate(() => {
-    const addNode = document.querySelector("[title='Add node']");
-    addNode.focus();
-  });
-  await pressFocusedKey("Enter");
-  await waitFor(() => evaluate(() => Boolean(
-    document.querySelector("[aria-label^='New Step 1,']"),
-  )));
-  assert.equal(
-    await evaluate(() => document.activeElement.matches("[aria-label^='New Step 1,']")),
-    true,
-  );
-  await pressFocusedKey("Enter");
-  await waitFor(() => evaluate(() => document.activeElement.id === "workflow-inspector"));
-  assert.equal(
-    await evaluate(() => document.activeElement.id),
-    "workflow-inspector",
-  );
-  assert.deepEqual(
-    await evaluate(() => {
-      const tablist = document.querySelector("[aria-label='Node inspector sections']");
-      return [...tablist.querySelectorAll("[role='tab']")].map((tab) => ({
-        label: tab.textContent.trim(),
-        selected: tab.getAttribute("aria-selected"),
-        tabIndex: tab.getAttribute("tabindex"),
-      }));
-    }),
-    [
-      { label: "General", selected: "true", tabIndex: "0" },
-      { label: "Action", selected: "false", tabIndex: "-1" },
-      { label: "Inputs", selected: "false", tabIndex: "-1" },
-      { label: "Run", selected: "false", tabIndex: "-1" },
-      { label: "Edges", selected: "false", tabIndex: "-1" },
-    ],
-  );
-  await evaluate(() => {
-    document.querySelector("#node-tab-general").focus();
-  });
-  await pressFocusedKey("ArrowRight");
-  await waitFor(() => evaluate(() =>
-    document.querySelector("#node-tab-action").getAttribute("aria-selected") === "true",
-  ));
-  assert.equal(
-    await evaluate(() => document.querySelector("#node-tabpanel-general").hidden),
-    true,
-  );
-  await evaluate(() => document.querySelector("#node-tab-general").click());
-  await evaluate(() => {
-    const labelControl = [...document.querySelectorAll("#workflow-inspector label")]
-      .find((label) => label.querySelector("span")?.textContent === "Label")
-      ?.querySelector("input");
-    labelControl.focus();
-    labelControl.select();
-  });
-  await windowRef.webContents.insertText("Keyboard step");
-  await waitFor(() => evaluate(() => Boolean(
-    document.querySelector("[aria-label^='Keyboard step,']"),
-  )));
-
-  await evaluate(() => {
-    document.querySelector("[aria-label^='Run command,']").focus();
-  });
-  await pressFocusedKey("C");
-  assert.match(
-    await evaluate(() => document.querySelector("[aria-label='Graph outline']").textContent),
-    /Connecting from Run command/,
-  );
-  await evaluate(() => {
-    document.querySelector("[aria-label^='Review output,']").focus();
-  });
-  await pressFocusedKey("Enter");
-  await waitFor(() => evaluate(() => Boolean(
-    document.querySelector("[aria-label^='Run command to Review output, condition always']"),
-  )));
-  assert.equal(
-    await evaluate(() => document.activeElement.matches(
-      "[aria-label^='Run command to Review output, condition always']",
-    )),
-    true,
-  );
-  await pressFocusedKey("Enter");
-  await waitFor(() => evaluate(() => document.activeElement.id === "workflow-inspector"));
-  assert.equal(await evaluate(() => document.activeElement.id), "workflow-inspector");
-  await evaluate(() => {
-    const typeControl = [...document.querySelectorAll("#workflow-inspector label")]
-      .find((label) => label.querySelector("span")?.textContent === "Type")
-      ?.querySelector("select");
-    typeControl.focus();
-  });
-  await pressNativeKey("DOWN");
-  await pressNativeKey("DOWN");
-  await waitFor(() => evaluate(() => Boolean(
-    document.querySelector("[aria-label^='Run command to Review output, condition on failure']"),
-  )));
-  await evaluate(() => {
-    document.querySelector("[aria-label^='Run command to Review output, condition on failure']").focus();
-  });
-  await pressFocusedKey("Delete");
-  await waitFor(() => evaluate(() => !document.querySelector(
-    "[aria-label^='Run command to Review output, condition on failure']",
-  )));
-  assert.equal(
-    await evaluate(() => document.activeElement.matches("[aria-label^='Run command,']")),
-    true,
-  );
-  await pressFocusedKey("D", ["control"]);
-  await waitFor(() => evaluate(() => Boolean(
-    document.querySelector("[aria-label^='Run command copy,']"),
-  )));
-  assert.equal(
-    await evaluate(() => document.activeElement.matches("[aria-label^='Run command copy,']")),
-    true,
-  );
-  await pressFocusedKey("Delete");
-  await waitFor(() => evaluate(() => !document.querySelector("[aria-label^='Run command copy,']")));
-  assert.equal(
-    await evaluate(() => document.activeElement.matches("[aria-label^='Keyboard step,']")),
-    true,
-  );
-
-  assert.deepEqual(
-    await evaluate(() => {
-      const separator = document.querySelector("[aria-label='Resize workflow settings and node inspector']");
-      return {
-        max: separator.getAttribute("aria-valuemax"),
-        min: separator.getAttribute("aria-valuemin"),
-        now: separator.getAttribute("aria-valuenow"),
-        orientation: separator.getAttribute("aria-orientation"),
-        role: separator.getAttribute("role"),
-      };
-    }),
-    { max: "520", min: "280", now: "340", orientation: "vertical", role: "separator" },
-  );
-  await evaluate(() => {
-    document.querySelector("[aria-label='Resize workflow settings and node inspector']").focus();
-  });
-  await pressFocusedKey("ArrowRight");
-  await waitFor(() => evaluate(() =>
-    document.querySelector("[aria-label='Resize workflow settings and node inspector']")
-      .getAttribute("aria-valuenow") === "350",
-  ));
-  await pressFocusedKey("Enter");
-  await waitFor(() => evaluate(() =>
-    document.querySelector("[aria-label='Resize workflow settings and node inspector']")
-      .getAttribute("aria-valuenow") === "340",
-  ));
 }
 
 async function exerciseCreateDialog() {
@@ -1333,18 +1156,6 @@ async function sendKey(keyCode) {
     `document.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: ${JSON.stringify(keyCode)} }))`,
   );
   await wait(40);
-}
-
-async function pressFocusedKey(keyCode, modifiers = []) {
-  await windowRef.webContents.executeJavaScript(`document.activeElement.dispatchEvent(new KeyboardEvent("keydown", {
-    bubbles: true,
-    cancelable: true,
-    ctrlKey: ${modifiers.includes("control")},
-    key: ${JSON.stringify(keyCode)},
-    metaKey: ${modifiers.includes("meta")},
-    shiftKey: ${modifiers.includes("shift")}
-  }))`);
-  await wait(60);
 }
 
 async function pressNativeKey(keyCode, modifiers = []) {
@@ -1856,12 +1667,6 @@ async function startServer() {
         });
         return;
       }
-      if (request.method === "PUT" && url.pathname === "/api/workflows/demo") {
-        let body = "";
-        request.on("data", (chunk) => { body += chunk; });
-        request.on("end", () => json(response, { workflow: { ...workflowFixture(), ...JSON.parse(body) } }));
-        return;
-      }
       if (remPerf && url.pathname.startsWith("/api/rem/")) { routeRemPerf(url, response); return; }
       if (busyLoad && require("./busy-load-perf.cjs").routeBusyLoad(busyLoad, url, response, json, request)) return;
       routeApi(url.pathname, response);
@@ -2076,10 +1881,6 @@ function routeApi(pathname, response) {
         }],
       }],
     });
-    return;
-  }
-  if (pathname === "/api/workflow-templates") {
-    json(response, { templates: [] });
     return;
   }
   if (pathname === "/api/workflows/rattish-editor/document") {

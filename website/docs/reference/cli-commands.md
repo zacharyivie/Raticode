@@ -14,7 +14,6 @@ Each command is labelled with its kind:
 
 - **Backend** commands send requests to a running backend. See [Headless CLI](./cli-headless.md), [Rem and tickets from the CLI](./cli-rem.md) and [talking to a running backend](./cli.md#talk-to-a-running-backend).
 - **Offline** commands work on files and local stores without a backend.
-- **Legacy** commands work only with older TOML workflows. For Rattish workflows use `Raticode rattish`.
 
 The [CLI reference](./cli.md) explains how the commands fit together.
 
@@ -51,7 +50,6 @@ The [CLI reference](./cli.md) explains how the commands fit together.
 
 *Offline: works without a backend.* Inspect local Raticode readiness without making network calls.
 
-- `--workflow` / `-w` `STR`: Workflow ID, file stem, or TOML path to include in diagnostics.
 - `--format` `STR`: Output format: text or json.
 - `--json`: Same as --format json.
 - `--secrets-dir` `PATH`: Check this headless secrets folder. Defaults to $CREDENTIALS_DIRECTORY, then the folder a running headless backend reads.
@@ -67,10 +65,6 @@ The [CLI reference](./cli.md) explains how the commands fit together.
 *Offline: works without a backend.* Print where the machine-readable Rattish language contracts are installed.
 
 - `--format` `STR`: Output format: json.
-- `--legacy-toml`: Print the legacy TOML authoring contract instead of the Rattish pointers.
-- `--operation` `STR`: Legacy TOML: the contract for one operation type.
-- `--capability` `STR`: Legacy TOML: one model capability schema.
-- `--command` `STR`: Legacy TOML: structured help for a mutation command, e.g. workflow.add-node.
 
 ### Raticode serve
 
@@ -78,7 +72,7 @@ The [CLI reference](./cli.md) explains how the commands fit together.
 
 - `--host` `STR`: API bind host. Headless mode accepts only loopback addresses.
 - `--port` `INT`: API bind port. Use 0 to let the OS choose a free port.
-- `--data-dir` `PATH`: Raticode app data directory for global settings, schedules, registries, and app state. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard data folder.
+- `--data-dir` `PATH`: Raticode data folder for global settings, schedules, registries, and app state. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard location.
 - `--headless`: Run with no desktop window: listen on loopback only, write the owner token and endpoint to owner-only files in &#60;data&#62;/headless/, and load Rem's settings from a file.
 - `--token-file` `PATH`: Headless: read the owner token from this owner-only file (mode 600) instead.
 - `--rem-settings` `PATH`: Headless: Rem settings JSON. Defaults to &#60;data&#62;/headless/rem-settings.json.
@@ -100,60 +94,6 @@ The [CLI reference](./cli.md) explains how the commands fit together.
 - `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
 - `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
 - `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
-
-## Raticode agent
-
-&#91;Legacy TOML&#93; Manage and run agents in TOML workflows. Rattish declares agents as nodes.
-
-### Raticode agent create
-
-*Legacy: older TOML workflows.* Create a new agent and save it to the data directory.
-
-- `--name` `STR`: Human-readable agent name
-- `--subscription` `STR`: Subscription (claude_code, codex, cursor, copilot, opencode, antigravity, grok, openai_api, anthropic_api)
-- `--profile` `STR`: Provider profile name
-- `--model` `STR`: Provider model override
-- `--working-dir` `PATH`: Agent working directory
-- `--prompt` `STR`: Prompt text or path to a prompt file
-- `--tools` `STR`: Comma-separated tool names
-- `--mcp-servers` `STR`: Comma-separated MCP server names
-- `--extra-path` `PATH` (repeatable): Additional path to grant the provider sandbox (repeatable)
-- `--env` `STR` (repeatable): Environment variables as KEY=VALUE (repeatable). Credentials are refused; use a provider profile
-
-### Raticode agent edit
-
-*Legacy: older TOML workflows.* Edit an existing agent's configuration.
-
-- `AGENT_ID` (required): Agent ID to edit
-- `--subscription` `STR`: Subscription (claude_code, codex, cursor, copilot, opencode, antigravity, grok, openai_api, anthropic_api)
-- `--profile` `STR`: Provider profile name
-- `--model` `STR`: Provider model override
-- `--working-dir` `PATH`: Agent working directory
-- `--prompt` `STR`: Prompt text or path to a prompt file
-- `--tools` `STR`: Comma-separated tool names
-- `--mcp-servers` `STR`: Comma-separated MCP server names
-- `--extra-path` `PATH` (repeatable): Replace additional provider sandbox paths (repeatable)
-- `--env` `STR` (repeatable): Environment variables as KEY=VALUE (repeatable). Credentials are refused; use a provider profile
-
-### Raticode agent list
-
-*Legacy: older TOML workflows.* List agents. Without --workflow, lists all agents in the data directory.
-
-- `--workflow` `STR`: Filter by workflow ID
-- `--format` `STR`: Output format: text or json.
-
-### Raticode agent rm
-
-*Legacy: older TOML workflows.* Remove an agent from its workflow.
-
-- `AGENT_ID` (required): Agent ID to remove
-- `--yes` / `-y`: Skip confirmation
-
-### Raticode agent run
-
-*Legacy: older TOML workflows.* Run a named agent.
-
-- `AGENT_ID` (required): Agent ID (e.g. TradeAgent)
 
 ## Raticode brain
 
@@ -899,7 +839,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `SOURCE` (optional): Path to a .rattish workflow file. Or name the workflow with --workflow-id.
 - `--workflow-id` `STR`: The workflow's ID, instead of a source path.
 - `--all`: Clear every workflow's result cache.
-- `--data-dir` `PATH`: Override the app data directory that holds the cache.
+- `--data-dir` `PATH`: Override the data folder that holds the cache.
 - `--format` `STR`: Output format: text or json.
 
 ### Raticode rattish cache show
@@ -908,7 +848,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 
 - `SOURCE` (optional): Path to a .rattish workflow file. Or name the workflow with --workflow-id.
 - `--workflow-id` `STR`: The workflow's ID, instead of a source path.
-- `--data-dir` `PATH`: Override the app data directory that holds the cache.
+- `--data-dir` `PATH`: Override the data folder that holds the cache.
 - `--format` `STR`: Output format: text or json.
 
 ### Raticode rattish check
@@ -917,7 +857,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 
 - `SOURCE` (required): Path to a .rattish workflow file.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory used for internal artifacts.
+- `--data-dir` `PATH`: Override the data folder used for internal artifacts.
 
 ### Raticode rattish compile
 
@@ -925,7 +865,19 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 
 - `SOURCE` (required): Path to a .rattish workflow file.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory used for internal artifacts.
+- `--data-dir` `PATH`: Override the data folder used for internal artifacts.
+
+### Raticode rattish convert
+
+*Offline: works without a backend.* Convert an old TOML workflow to Rattish. The TOML file is never changed.
+
+- `TOML_FILE` (required): An old TOML workflow file, such as ~/.local/share/gofer/demo.toml.
+- `--project` `PATH`: Register the converted workflow in this project folder.
+- `--output` `PATH`: Write workflow.rattish here instead of registering it.
+- `--name` `STR`: Workflow name. Defaults to the TOML name.
+- `--allow-partial`: Convert even when some parts must be finished by hand.
+- `--format` `STR`: Output format: text or json.
+- `--registry-dir` `PATH`: Override the app directory used for workflow registration.
 
 ### Raticode rattish create
 
@@ -991,7 +943,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 
 - `SOURCE` (required): Path to a .rattish workflow file.
 - `--pretty`: Indent the emitted JSON.
-- `--data-dir` `PATH`: Override the app data directory used for internal artifacts.
+- `--data-dir` `PATH`: Override the data folder used for internal artifacts.
 
 ### Raticode rattish list
 
@@ -1019,7 +971,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 
 - `SOURCE` (required): Path to a .rattish workflow file.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory used for internal artifacts.
+- `--data-dir` `PATH`: Override the data folder used for internal artifacts.
 
 ### Raticode rattish prune
 
@@ -1031,7 +983,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `--keep-failed-days` `INT RANGE`: Keep failed runs started in the last N days.
 - `--apply`: Delete the listed runs instead of previewing them.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory used for runs and artifacts.
+- `--data-dir` `PATH`: Override the data folder used for runs and artifacts.
 
 ### Raticode rattish reject
 
@@ -1071,7 +1023,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `SOURCE` (required): Path to a .rattish workflow file.
 - `--input` `STR` (repeatable): Workflow input as NAME=JSON. Repeat for multiple inputs. A file input takes a path, such as doc="report.pdf", relative to this folder. With --from, only the password inputs the reused run didn't save.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory used for runs and artifacts.
+- `--data-dir` `PATH`: Override the data folder used for runs and artifacts.
 - `--from` `STR`: Run from this node: reuse an earlier run's results for the unchanged nodes upstream of it, then run it and everything after it.
 - `--reuse` `STR`: With --from, the run whose results to reuse. Default: the newest run that fits.
 
@@ -1158,7 +1110,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 *Offline: works without a backend.* List saved workflow secret names. Values are never shown.
 
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish secrets remove
 
@@ -1166,7 +1118,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 
 - `NAME` (required): The saved secret's name.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish secrets set
 
@@ -1175,7 +1127,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `NAME` (required): The name workflows use in secret&#91;"NAME"&#93;.
 - `--stdin`: Read the value from standard input (all of it, so it can span lines) instead of a hidden prompt.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish shortcuts approve
 
@@ -1185,14 +1137,14 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `--yes` / `-y`: Approve without asking after the diff.
 - `--unseen`: Also approve files whose change can't be shown in full (a diff cut short, or a binary or very large file) and MCP servers whose package has no exact version. Without it you're asked again, or --yes alone refuses.
 - `--fingerprint` `STR`: Approve only this version, as shown by `approve --format json`.
-- `--data-dir` `PATH`: Override the app data directory that holds the shortcuts.
+- `--data-dir` `PATH`: Override the data folder that holds the shortcuts.
 - `--format` `STR`: Output format: text or json.
 
 ### Raticode rattish shortcuts list
 
 *Offline: works without a backend.* List workflow shortcuts with their key and what pressing it does.
 
-- `--data-dir` `PATH`: Override the app data directory that holds the shortcuts.
+- `--data-dir` `PATH`: Override the data folder that holds the shortcuts.
 - `--format` `STR`: Output format: text or json.
 
 ### Raticode rattish shortcuts remove
@@ -1200,7 +1152,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 *Offline: works without a backend.* Remove a workflow shortcut. The workflow itself is kept.
 
 - `SHORTCUT_ID` (required): The shortcut's ID, from `shortcuts list`.
-- `--data-dir` `PATH`: Override the app data directory that holds the shortcuts.
+- `--data-dir` `PATH`: Override the data folder that holds the shortcuts.
 - `--format` `STR`: Output format: text or json.
 
 ### Raticode rattish show
@@ -1264,7 +1216,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `--model` `STR` (repeatable): Try another model on a node: NODE=PROVIDER:MODEL. Runs the cases with it beside the current model, for this test run only; the source is not changed.
 - `--use-model` `STR` (repeatable): Write NODE=PROVIDER:MODEL into the workflow and run nothing. Triggers ask for approval again.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory used for runs and results.
+- `--data-dir` `PATH`: Override the data folder used for runs and results.
 
 ### Raticode rattish triggers add cron
 
@@ -1282,7 +1234,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `--max-run-time` `STR`: Time limit: stop a triggered run after this long, such as 30m, 2h or 1h30m, or none for no limit. The workflow's own timeout still applies if it's shorter.
 - `--usage-limit` `STR`: When an agent step hits its provider's usage limit: wait for the limit to reset and resume the run (wait), or end it failed (fail).
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish triggers add file
 
@@ -1301,7 +1253,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `--max-run-time` `STR`: Time limit: stop a triggered run after this long, such as 30m, 2h or 1h30m, or none for no limit. The workflow's own timeout still applies if it's shorter.
 - `--usage-limit` `STR`: When an agent step hits its provider's usage limit: wait for the limit to reset and resume the run (wait), or end it failed (fail).
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish triggers add webhook
 
@@ -1316,7 +1268,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `--max-run-time` `STR`: Time limit: stop a triggered run after this long, such as 30m, 2h or 1h30m, or none for no limit. The workflow's own timeout still applies if it's shorter.
 - `--usage-limit` `STR`: When an agent step hits its provider's usage limit: wait for the limit to reset and resume the run (wait), or end it failed (fail).
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish triggers apply
 
@@ -1339,7 +1291,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `--unseen`: Also approve files whose change can't be shown in full (a diff cut short, or a binary or very large file) and MCP servers whose package has no exact version. Without it you're asked again, or --yes alone refuses.
 - `--fingerprint` `STR`: Approve only this version, as shown by `changes --format json`.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish triggers budget
 
@@ -1348,7 +1300,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `--max-cost-usd` `FLOAT`: Most estimated cost in US dollars all triggered runs may use each day. 0 removes it.
 - `--max-tokens` `INT`: Most tokens all triggered runs may use each day. 0 removes it.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish triggers changes
 
@@ -1356,7 +1308,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 
 - `TRIGGER_ID` (required): Trigger ID.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish triggers disable
 
@@ -1364,7 +1316,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 
 - `TRIGGER_ID` (required): Trigger ID.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish triggers enable
 
@@ -1374,7 +1326,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `--yes` / `-y`: Approve changes waiting for review without asking.
 - `--unseen`: Also approve files whose change can't be shown in full (a diff cut short, or a binary or very large file) and MCP servers whose package has no exact version. Without it you're asked again, or --yes alone refuses.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish triggers export
 
@@ -1395,7 +1347,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `--limit` `INT RANGE`: How many entries to show.
 - `--problems`: Only failed, missed, skipped or interrupted runs.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish triggers list
 
@@ -1403,7 +1355,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 
 - `SOURCE` (optional): Only this workflow.rattish file.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish triggers login
 
@@ -1411,7 +1363,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 
 - `STATE` (optional): on, off, or status.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish triggers pause
 
@@ -1419,7 +1371,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 
 - `--all`: Every trigger on this computer.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish triggers remove
 
@@ -1427,7 +1379,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 
 - `TRIGGER_ID` (required): Trigger ID.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish triggers resume
 
@@ -1435,7 +1387,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 
 - `--all`: Every trigger on this computer.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish triggers rotate-token
 
@@ -1443,20 +1395,20 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 
 - `TRIGGER_ID` (required): Webhook trigger ID.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish triggers start
 
 *Offline: works without a backend.* Run triggers in this process until it's stopped.
 
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish triggers status
 
 *Offline: works without a backend.* Show whether anything is running triggers on this computer.
 
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish triggers update
 
@@ -1481,7 +1433,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `--yes` / `-y`: Approve changes waiting for review without asking.
 - `--unseen`: Also approve files whose change can't be shown in full (a diff cut short, or a binary or very large file) and MCP servers whose package has no exact version. Without it you're asked again, or --yes alone refuses.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish triggers webhook-port
 
@@ -1489,7 +1441,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 
 - `PORT` (optional): New port. Leave out to show the current one.
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Override the app data directory.
+- `--data-dir` `PATH`: Override the data folder.
 
 ### Raticode rattish wait
 
@@ -2243,97 +2195,6 @@ Rem from the command line. Chat, tasks, memories, alerts and settings go through
 - `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
 - `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
 
-## Raticode runner
-
-&#91;Legacy TOML&#93; Manage remote runners and queued workflow runs. The queue loads TOML workflows only.
-
-### Raticode runner cancel
-
-*Legacy: older TOML workflows.* Cancel queued or running work.
-
-- `RUN_ID` (required): Queued run ID
-
-### Raticode runner list
-
-*Legacy: older TOML workflows.* List known runners.
-
-- `--format` `STR`: Output format: text or json.
-
-### Raticode runner queue
-
-*Legacy: older TOML workflows.* Queue a workflow run for a separate runner process.
-
-- `WORKFLOW` (required): Workflow ID or TOML path
-- `--priority` `INT`: Higher priority runs first
-- `--trigger` `STR`: Requested trigger name
-- `--label` `STR` (repeatable): Target runner label
-- `--param` `STR` (repeatable): Run parameter as KEY=JSON_VALUE or KEY=VALUE
-
-### Raticode runner register
-
-*Legacy: older TOML workflows.* Register or update a local runner record.
-
-- `--name` `STR`: Runner display name
-- `--id` `STR`: Stable runner ID
-- `--label` `STR` (repeatable): Runner label
-- `--provider-cli` `STR` (repeatable): Available provider CLI name
-- `--workspace-root` `PATH` (repeatable): Workspace root available to the runner
-
-### Raticode runner start
-
-*Legacy: older TOML workflows.* Start a local runner process that executes queued workflows.
-
-- `--name` `STR`: Runner display name
-- `--id` `STR`: Stable runner ID
-- `--label` `STR` (repeatable): Runner label
-- `--provider-cli` `STR` (repeatable): Available provider CLI name
-- `--once`: Process at most one queued run
-- `--poll-seconds` `FLOAT RANGE`
-
-### Raticode runner status
-
-*Legacy: older TOML workflows.* Inspect queued and running work. One run always prints as JSON.
-
-- `RUN_ID` (optional): Queued run ID
-- `--limit` `INT RANGE`: Maximum runs to list
-- `--format` `STR`: Output format: text or json.
-
-## Raticode schedule
-
-&#91;Legacy TOML&#93; Manage workflow schedules. For Rattish, use Raticode rattish triggers add cron.
-
-### Raticode schedule add
-
-*Legacy: older TOML workflows.* Add a workflow to the schedule.
-
-- `WORKFLOW_FILE` (required): Workflow TOML file
-- `--db` `PATH`
-
-### Raticode schedule list
-
-*Legacy: older TOML workflows.* List all scheduled workflows.
-
-- `--db` `PATH`
-- `--format` `STR`: Output format: text or json.
-
-### Raticode schedule remove
-
-*Legacy: older TOML workflows.* Remove a workflow from the schedule.
-
-- `WORKFLOW_ID` (required)
-- `--db` `PATH`
-
-### Raticode schedule start
-
-*Legacy: older TOML workflows.* Start the scheduler (background by default).
-
-- `--foreground` / `-f`: Run in the foreground
-- `--db` `PATH`
-
-### Raticode schedule stop
-
-*Legacy: older TOML workflows.* Stop the background scheduler.
-
 ## Raticode selfwork
 
 Rem's self-work: status, report and settings. Needs a running backend.
@@ -2362,12 +2223,13 @@ Rem's self-work: status, report and settings. Needs a running backend.
 
 *Backend: needs a running Raticode backend.* Show or change the self-work objectives: the goals that guide a whole session.
 
-- `ACTION` (optional): list, add, edit, remove, move, check or uncheck
+- `ACTION` (optional): list, add, edit, remove, check or uncheck
 - `--text` `STR`: The objective, for add or edit
 - `--done-when` `STR`: Its doneness criteria; leave out for an open-ended one
 - `--id` `STR`: The objective's ID from `list`
-- `--index` `INT`: New position for move, from 0
 - `--evidence` `STR`: How it was met, for check
+- `--limit` `INT RANGE`: How many to list
+- `--offset` `INT RANGE`: How many to skip, for list
 - `--expected-revision` `INT`: The list's revision from `list`
 - `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
 - `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
@@ -2420,6 +2282,15 @@ Rem's self-work: status, report and settings. Needs a running backend.
 - `--auto-approve` / `--no-auto-approve`: Let self-work approve the backlog tickets its research finds, until self-work ends, instead of waiting for you; turning it on needs --confirm-auto-approve
 - `--confirm-auto-approve`: Confirm you want self-work to approve its own tickets without asking you
 - `--account` `STR` (repeatable): PROVIDER=ACCOUNT: the account runs self-work starts use with that provider. ACCOUNT is an account name, auto (choose by usage), @default (the default sign-in) or empty for Rem's setting (Settings &#62; Rem &#62; Accounts); repeat for several providers
+- `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
+- `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
+- `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
+- `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+
+### Raticode selfwork start
+
+*Backend: needs a running Raticode backend.* Start self-work now, without waiting for 15 quiet minutes; turns it on if it is off.
+
 - `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
 - `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
 - `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
@@ -2827,21 +2698,21 @@ Manage agent tokens: limited API tokens for scripts and agents. They can't appro
 - `--output` / `-o` `PATH` (required): New file that receives the token, readable only by you (mode 600).
 - `--expires-days` `INT RANGE`: Stop accepting the token after this many days.
 - `--private-brains`: Let the token read Second Brains with Allow cloud processing off. Only for scripts that keep what they read on this computer.
-- `--data-dir` `PATH`: Raticode data directory. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+- `--data-dir` `PATH`: Raticode data folder. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
 
 ### Raticode tokens list
 
 *Offline: works without a backend.* List agent tokens by name. Token values are never stored or shown.
 
 - `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Raticode data directory. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+- `--data-dir` `PATH`: Raticode data folder. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
 
 ### Raticode tokens revoke
 
 *Offline: works without a backend.* Revoke an agent token. A running backend stops accepting it immediately.
 
 - `NAME` (required): Token name
-- `--data-dir` `PATH`: Raticode data directory. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+- `--data-dir` `PATH`: Raticode data folder. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
 
 ## Raticode ui
 
@@ -2853,7 +2724,7 @@ Run the workflow studio API
 
 - `--host` `STR`: API bind host. Headless mode accepts only loopback addresses.
 - `--port` `INT`: API bind port. Use 0 to let the OS choose a free port.
-- `--data-dir` `PATH`: Raticode app data directory for global settings, schedules, registries, and app state. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard data folder.
+- `--data-dir` `PATH`: Raticode data folder for global settings, schedules, registries, and app state. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard location.
 - `--headless`: Run with no desktop window: listen on loopback only, write the owner token and endpoint to owner-only files in &#60;data&#62;/headless/, and load Rem's settings from a file.
 - `--token-file` `PATH`: Headless: read the owner token from this owner-only file (mode 600) instead.
 - `--rem-settings` `PATH`: Headless: Rem settings JSON. Defaults to &#60;data&#62;/headless/rem-settings.json.
@@ -2914,163 +2785,13 @@ Provider usage and limits the backend has recorded.
 - `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
 - `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
 
-## Raticode watch
-
-&#91;Legacy TOML&#93; Run workflow file/folder watchers. For Rattish, use Raticode rattish triggers add file.
-
-### Raticode watch list
-
-*Legacy: older TOML workflows.* List workflows in the data directory that have file/folder watchers.
-
-- `--format` `STR`: Output format: text or json.
-- `--data-dir` `PATH`: Raticode data directory
-
-### Raticode watch start
-
-*Legacy: older TOML workflows.* Run file/folder watchers in the foreground.
-
-- `--data-dir` `PATH`: Raticode data directory
-- `--poll-interval` `FLOAT RANGE`: Seconds between filesystem scans.
-
 ## Raticode workflow
 
-Run and inspect workflows. run, resume, list, plan, validate, logs, usage, export, import, rm, rename and duplicate accept Rattish workflows; commands marked &#91;Legacy TOML&#93; work only with TOML workflows. Author Rattish with Raticode rattish.
-
-### Raticode workflow add-agent
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; Add or replace an agent config in a workflow.
-
-- `WORKFLOW` (required): Workflow ID or path to TOML file
-- `--id` `STR` (required): Agent ID
-- `--subscription` `STR` (required): codex, claude_code, openai_api, or anthropic_api
-- `--working-dir` `PATH` (required): Agent working directory
-- `--prompt-path` `PATH` (required): Prompt markdown path
-- `--tool` `STR` (repeatable): Allowed tool name
-- `--mcp-server` `STR` (repeatable): MCP server name
-- `--extra-path` `PATH` (repeatable): Additional path to grant the provider sandbox (repeatable)
-- `--env` `STR` (repeatable): Environment KEY=VALUE
-
-### Raticode workflow add-edge
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; Add or replace a workflow edge.
-
-- `WORKFLOW` (required): Workflow ID or path to TOML file
-- `--from` `STR` (required): Source node ID
-- `--to` `STR` (required): Target node ID
-- `--condition` `STR`: Edge condition
-- `--output-pattern` `STR`: Regex for output_matches condition
-- `--field` `STR`: Structured result field for output_field condition
-- `--operator` `STR`: Typed predicate operator for output_field condition
-- `--value` `STR`: JSON comparison value for output_field condition
-
-### Raticode workflow add-node
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; Add or replace a workflow node.
-
-- `WORKFLOW` (required): Workflow ID or path to TOML file
-- `--id` `STR` (required): Node ID
-- `--type` `STR` (required): Node operation type
-- `--command` `STR`: Command for command nodes
-- `--script-path` `PATH`: Script path for script nodes
-- `--path` `PATH`: Path for read/write/delete/file/folder nodes
-- `--source-path` `PATH`: Source path for copy/move nodes
-- `--destination-path` `PATH`: Destination path for copy/move nodes
-- `--target` `STR`: Target for open_resource
-- `--resource-type` `STR`: auto, file, folder, url, or app
-- `--content` `STR`: Content for write_file nodes
-- `--message` `STR`: Message for pass/fail nodes
-- `--template` `STR`: Inline prompt template
-- `--template-path` `PATH`: Prompt template file path
-- `--output-path` `PATH`: Output path for prompt/index nodes
-- `--working-dir` `PATH`: Working directory for command/agent nodes
-- `--agent-id` `STR`: Agent ID for agent nodes
-- `--prompt-path` `PATH`: Prompt path for agent nodes
-- `--skill-name` `STR`: Skill name for agent skill invocation
-- `--profile` `STR`: Provider profile for agent/common LLM nodes
-- `--model` `STR`: Provider model override for agent/common LLM nodes
-- `--provider-timeout` `FLOAT RANGE`: Provider CLI timeout override for agent/common LLM nodes
-- `--task` `STR`: Common LLM task preset
-- `--task-target` / `--query` `STR`: Task target text or search query
-- `--instructions` `STR`: Task instructions
-- `--index-path` `PATH`: Local vector index path
-- `--vector-mode` `STR`: local_vectorize mode: incremental, full, validate, or compact
-- `--top-k` `INT RANGE`: local_search result count
-- `--score-threshold` `FLOAT`: Minimum local_search score to include
-- `--include-snippets` / `--no-include-snippets`: Include snippets in local_search results
-- `--include-file-metadata` / `--no-include-file-metadata`: Include file metadata in local_search results
-- `--dynamic-count` `STR`: Agent dynamic count
-- `--memory` `STR`: Agent memory mode: none, run, or all
-- `--input-map` `STR` (repeatable): Agent input mapping KEY=CTX_PATH
-- `--input` `STR` (repeatable): Common node input KEY=CTX_PATH. Use stdin=SOURCE or env.NAME=SOURCE for command nodes.
-- `--input-mapping-json` `STR`: Agent input mapping JSON object
-- `--output-schema` `STR`: Named output schema or inline JSON Schema object for agent/common LLM nodes
-- `--repair-attempts` `INT RANGE`: Structured-output repair attempts for agent/common LLM nodes
-- `--variable` `STR` (repeatable): Prompt template variable KEY=CTX_PATH_OR_VALUE
-- `--env` `STR` (repeatable): Environment KEY=VALUE
-- `--arg` `STR` (repeatable): Script/open-resource arg
-- `--create-dirs` / `--no-create-dirs`
-- `--overwrite` / `--no-overwrite`: Override file overwrite behavior for write/copy/move nodes
-- `--append`: Append in write_file nodes
-- `--trash` / `--no-trash`
-- `--recursive`
-- `--missing-ok`
-- `--encoding` `STR`
-- `--errors` `STR`
-- `--pipe-output`
-- `--allow-failure`: Allow this node to fail without failing the overall workflow
-- `--await-all-inputs` / `--no-await-all-inputs`: Wait for all upstream nodes before this node runs
-- `--retry-count` `INT RANGE`
-- `--retry-delay-seconds` `FLOAT RANGE`
-- `--timeout-seconds` `FLOAT RANGE`
-- `--fan-source` `STR`: loop source: count, tabular, directory, trigger-events, or infinite
-- `--fan-count` `STR`
-- `--fan-path` `PATH`
-- `--fan-glob` `STR`
-- `--fan-include-content`
-- `--fan-max-concurrency` `INT RANGE`
-- `--fan-fail-fast`
-- `--method` `STR`: HTTP method for http_request
-- `--url` `STR`: URL for http_request
-- `--header` `STR` (repeatable): HTTP header KEY=VALUE
-- `--param` `STR` (repeatable): HTTP query parameter KEY=VALUE
-- `--json-body` `STR`: HTTP JSON request body
-- `--body` `STR`: HTTP raw request body
-- `--http-timeout` `FLOAT RANGE`
-- `--http-retry-attempts` `INT RANGE`
-- `--http-retry-backoff` `FLOAT RANGE`
-- `--http-retry-status` `INT` (repeatable): HTTP status that should be retried
-- `--expected-status` `INT` (repeatable): Expected successful HTTP status
-- `--response-mode` `STR`: auto, json, text, or none
-- `--output-map` `STR` (repeatable): HTTP output mapping KEY=response.path
-- `--secret-field` `STR` (repeatable): HTTP field/path to mask in logs and UI
-- `--approval-timeout` `FLOAT`: Seconds before an approval gate times out
-- `--timeout-decision` `STR`: Approval timeout output: timeout or reject
-- `--approver` `STR` (repeatable): Allowed approver identity for approval_gate
-- `--notify`: Send a desktop notification for approval_gate
-- `--title` `STR`: Notification or approval title
-- `--notification-body` `STR`: Notification body
-- `--channel` `STR`: Notification channel
-- `--urgency` `STR`: Notification urgency
-- `--notification-webhook-url` `STR`: Slack, Teams, or generic webhook URL
-- `--notification-header` `STR` (repeatable): Notification webhook header KEY=VALUE
-- `--notification-payload-json` `STR`: Generic webhook JSON payload
-- `--notification-email-from` `STR`: Email sender address
-- `--notification-email-to` `STR` (repeatable): Email recipient address
-- `--notification-smtp-host` `STR`: SMTP host for email notifications
-- `--notification-smtp-port` `INT`: SMTP port for email notifications
-- `--notification-smtp-username` `STR`: SMTP username or secret ref
-- `--notification-smtp-password` `STR`: SMTP password as a secret reference such as &#123;&#123;secret.SMTP_PASSWORD&#125;&#125;, never the password itself
-- `--notification-smtp-starttls` / `--no-notification-smtp-starttls`
-- `--notification-timeout` `FLOAT`: Notification delivery timeout in seconds
-- `--notification-retry-attempts` `INT`: Notification delivery attempts
-- `--notification-retry-backoff` `FLOAT`: Seconds between notification retries
-- `--notification-retry-status` `INT` (repeatable): Webhook HTTP status that should be retried
-- `--notification-expected-status` `INT` (repeatable): Expected webhook success status
-- `--notification-network-allowlist` `STR` (repeatable): Allowed webhook host or CIDR
+Run and inspect Rattish workflows: run, resume, plan, validate, list, logs, usage, approvals, export, import, rm, rename and duplicate. Author workflows with Raticode rattish.
 
 ### Raticode workflow approvals
 
-*Legacy: older TOML workflows.* List approval gates.
+*Offline: works without a backend.* List approval gates.
 
 - `--workflow` / `-w` `STR`: Only show pending approvals for this workflow ID
 - `--all`: Show pending and completed approval decisions
@@ -3078,7 +2799,7 @@ Run and inspect workflows. run, resume, list, plan, validate, logs, usage, expor
 
 ### Raticode workflow approve
 
-*Legacy: older TOML workflows.* Approve a pending approval gate. Refused inside Rem and worker turns (exit 5).
+*Offline: works without a backend.* Approve a pending approval gate. Refused inside Rem and worker turns (exit 5).
 
 - `RUN_ID` (required): Run ID from the pending approval
 - `NODE_ID` (required): Approval node ID
@@ -3088,101 +2809,46 @@ Run and inspect workflows. run, resume, list, plan, validate, logs, usage, expor
 - `--reply` `STR`: Typed reply, for a gate that asks for one
 - `--notes` `STR`: Decision notes
 
-### Raticode workflow build
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; Interactively build a workflow via a guided wizard.
-
-- `--output` `PATH`: Output path for workflow TOML
-
-### Raticode workflow clear-schedule
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; Remove a workflow cron schedule.
-
-- `WORKFLOW` (required): Workflow ID or path to TOML file
-
-### Raticode workflow clear-watch
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; Remove workflow file/folder watcher settings.
-
-- `WORKFLOW` (required): Workflow ID or path to TOML file
-
-### Raticode workflow create
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; Create a new workflow scaffold in the data directory.
-
-- `--name` `STR`: Workflow name
-- `--template` `STR`: Create from a built-in workflow template
-- `--list-templates`: List built-in workflow templates
-- `--preview-template`: Preview the selected template without creating files
-- `--output` `PATH`: Output directory (default: data dir)
-
-### Raticode workflow diff
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; Show a revision diff against the current workflow.
-
-- `WORKFLOW` (required): Workflow ID
-- `REVISION_ID` (required): Revision ID to compare with current
-- `--format` `STR`: Output format: text or json.
-- `--json`: Same as --format json.
-
 ### Raticode workflow duplicate
 
-*Legacy: older TOML workflows.* Duplicate a workflow with a new ID and name.
+*Offline: works without a backend.* Duplicate a workflow with a new ID and name.
 
 - `WORKFLOW` (required): Workflow ID
 - `--name` `STR`: Name for duplicate
 
-### Raticode workflow edit
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; Interactively edit a workflow's fields in the terminal.
-
-- `WORKFLOW` (required): Workflow ID or path to TOML file
-
 ### Raticode workflow export
 
-*Legacy: older TOML workflows.* Export a workflow and related local files into a portable bundle.
+*Offline: works without a backend.* Export a registered workflow and its project files into a .raticode archive.
 
-- `WORKFLOW` (required): Workflow ID or path to TOML file
-- `--output` / `-o` `PATH` (required): Bundle archive to create
-- `--notes` `STR`: Optional bundle notes
-
-### Raticode workflow history
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; List workflow revisions.
-
-- `WORKFLOW` (required): Workflow ID
-- `--limit` `INT RANGE`: Maximum revisions to show
-- `--format` `STR`: Output format: text or json.
-- `--json`: Same as --format json.
+- `WORKFLOW` (required): Workflow ID, .rattish file or workflow folder
+- `--output` / `-o` `PATH` (required): The .raticode archive to create
 
 ### Raticode workflow import
 
-*Legacy: older TOML workflows.* Import a workflow TOML file, a legacy bundle, or a Rattish .raticode archive.
+*Offline: works without a backend.* Install a Rattish .raticode archive into a project folder.
 
-- `SOURCE` (required): Workflow TOML file, legacy workflow bundle, or Rattish .raticode archive
-- `--project` `PATH`: Project folder that receives a .raticode archive
-- `--replace`: Replace an existing workflow
-- `--dry-run`: Preview a bundle import without writing files
+- `SOURCE` (required): A .raticode archive
+- `--project` `PATH` (required): Project folder that receives the workflow
 
 ### Raticode workflow list
 
-*Legacy: older TOML workflows.* List all workflows in the data directory.
+*Offline: works without a backend.* List all workflows in the data folder.
 
 - `--format` `STR`: Output format: text or json.
 - `--json`: Same as --format json.
 
 ### Raticode workflow logs latest
 
-*Legacy: older TOML workflows.* Print the latest run log for a workflow.
+*Offline: works without a backend.* Print the latest run log for a workflow.
 
-- `WORKFLOW` (required): Workflow ID or path to TOML file
+- `WORKFLOW` (required): Workflow ID, .rattish file or workflow folder
 - `--path-only`: Print only the log path
 
 ### Raticode workflow logs list
 
-*Legacy: older TOML workflows.* List run logs for a workflow.
+*Offline: works without a backend.* List run logs for a workflow.
 
-- `WORKFLOW` (required): Workflow ID or path to TOML file
+- `WORKFLOW` (required): Workflow ID, .rattish file or workflow folder
 - `--offset` `INT RANGE`: Number of runs to skip
 - `--limit` `INT RANGE`: Maximum runs to list
 - `--status` `STR`: Filter by status
@@ -3193,9 +2859,9 @@ Run and inspect workflows. run, resume, list, plan, validate, logs, usage, expor
 
 ### Raticode workflow logs prune
 
-*Legacy: older TOML workflows.* Preview or prune old workflow run logs and sidecar files.
+*Offline: works without a backend.* Preview or prune old workflow run logs and sidecar files.
 
-- `WORKFLOW` (required): Workflow ID or path to TOML file
+- `WORKFLOW` (required): Workflow ID, .rattish file or workflow folder
 - `--keep-last` `INT RANGE`: Always keep newest N runs
 - `--keep-days` `INT RANGE`: Keep runs newer than N days
 - `--keep-failed-days` `INT RANGE`: Keep failed runs newer than N days
@@ -3205,9 +2871,9 @@ Run and inspect workflows. run, resume, list, plan, validate, logs, usage, expor
 
 ### Raticode workflow logs show
 
-*Legacy: older TOML workflows.* Print a specific workflow run log.
+*Offline: works without a backend.* Print a specific workflow run log.
 
-- `WORKFLOW` (required): Workflow ID or path to TOML file
+- `WORKFLOW` (required): Workflow ID, .rattish file or workflow folder
 - `RUN_ID` (required): Run log file name from workflow logs list
 - `--offset` `INT RANGE`: Read from byte offset
 - `--limit` `INT RANGE`: Maximum bytes to read
@@ -3215,42 +2881,15 @@ Run and inspect workflows. run, resume, list, plan, validate, logs, usage, expor
 
 ### Raticode workflow plan
 
-*Legacy: older TOML workflows.* Preview execution order, fan-out, provider calls, and side effects.
+*Offline: works without a backend.* Check a workflow compiles and this computer can run it (rattish preflight).
 
-- `WORKFLOW` (required): Workflow ID or path to TOML file
+- `WORKFLOW` (required): Workflow ID, .rattish file or workflow folder
 - `--format` `STR`: Output format: text or json.
 - `--json`: Same as --format json.
-- `--trigger-json` `STR`: Trigger context JSON object for trigger-event fan-out estimates
-- `--param` `STR` (repeatable): Workflow parameter as KEY=VALUE. May be repeated.
-- `--params-json` `STR`: Workflow parameters as a JSON object
-- `--input` `STR` (repeatable): Workflow input as KEY=VALUE. May be repeated.
-- `--inputs-json` `STR`: Workflow inputs as a JSON object
-
-### Raticode workflow preview-import
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; Preview a workflow bundle import without writing files.
-
-- `SOURCE` (required): Workflow bundle to preview
-
-### Raticode workflow recipe watch-folder-summarize
-
-*Legacy: older TOML workflows.* Create a folder watcher workflow that fans changed files into an agent summarizer.
-
-- `--name` `STR` (required): Workflow name
-- `--watch-path` `PATH` (required): Folder to watch
-- `--glob` `STR`: Changed file glob
-- `--recursive`: Watch subdirectories
-- `--provider` `STR`: codex, claude_code, openai_api, or anthropic_api
-- `--working-dir` `PATH`: Agent working dir
-- `--max-concurrency` `INT RANGE`: Agent fan-out concurrency
-- `--debounce-seconds` `FLOAT RANGE`: Watcher debounce seconds
-- `--output` `PATH`: Workflow TOML output path
-- `--prompt-path` `PATH`: Prompt markdown path to create or reuse
-- `--overwrite`: Overwrite existing files
 
 ### Raticode workflow reject
 
-*Legacy: older TOML workflows.* Reject a pending approval gate. Refused inside Rem and worker turns (exit 5).
+*Offline: works without a backend.* Reject a pending approval gate. Refused inside Rem and worker turns (exit 5).
 
 - `RUN_ID` (required): Run ID from the pending approval
 - `NODE_ID` (required): Approval node ID
@@ -3261,142 +2900,49 @@ Run and inspect workflows. run, resume, list, plan, validate, logs, usage, expor
 
 ### Raticode workflow rename
 
-*Legacy: older TOML workflows.* Rename a workflow and update its ID to match the new name.
+*Offline: works without a backend.* Rename a workflow and update its ID to match the new name.
 
 - `WORKFLOW` (required): Workflow ID
 - `--name` `STR` (required): New workflow name
 
-### Raticode workflow restore
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; Restore a workflow revision, validating before replacement.
-
-- `WORKFLOW` (required): Workflow ID
-- `REVISION_ID` (required): Revision ID to restore
-- `--as-copy`: Restore as a new workflow
-
 ### Raticode workflow resume
 
-*Legacy: older TOML workflows.* Resume a failed or stopped workflow run.
+*Offline: works without a backend.* Resume a failed or stopped run where it stopped, as a new run.
 
-- `WORKFLOW` (required): Workflow ID or path to TOML file
-- `--run-id` `STR` (required): Run log file name to resume from
-- `--from-node` `STR`: Rerun this node and downstream nodes, reusing successful upstream outputs
-- `--only-node` `STR`: Rerun only this node after restoring successful dependency outputs
-- `--skip-cache`: Ignore reusable node cache entries while resuming
-- `--force`: Ignore saved outputs and run from the beginning
-- `--verbose` / `-v`: Show each node's output
+- `WORKFLOW` (required): Workflow ID, .rattish file or workflow folder
+- `--run-id` `STR` (required): The run to resume
 
 ### Raticode workflow rm
 
-*Legacy: older TOML workflows.* Delete a workflow. A Rattish workflow is unregistered and its folder removed.
+*Offline: works without a backend.* Delete a workflow: unregister it and remove its folder.
 
-- `WORKFLOW` (required): Workflow ID or path to TOML file
+- `WORKFLOW` (required): Workflow ID, .rattish file or workflow folder
 - `--yes` / `-y`: Skip confirmation
-
-### Raticode workflow rm-edge
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; Remove a workflow edge.
-
-- `WORKFLOW` (required): Workflow ID or path to TOML file
-- `--from` `STR` (required): Source node ID
-- `--to` `STR` (required): Target node ID
-
-### Raticode workflow rm-node
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; Remove a workflow node and its edges.
-
-- `WORKFLOW` (required): Workflow ID or path to TOML file
-- `--id` `STR` (required): Node ID
 
 ### Raticode workflow run
 
-*Legacy: older TOML workflows.* Execute a workflow by name or file path.
+*Offline: works without a backend.* Run a Rattish workflow by ID, file or folder.
 
-- `WORKFLOW` (required): Workflow ID, .rattish file, workflow folder, or TOML file
-- `--dry-run`: Simulate without executing
-- `--verbose` / `-v`: Show each node's output
-- `--trigger-json` `STR`: Trigger context JSON object used for dry-run planning
-- `--param` `STR` (repeatable): Workflow parameter as KEY=VALUE. May be repeated.
-- `--params-json` `STR`: Workflow parameters as a JSON object
+- `WORKFLOW` (required): Workflow ID, .rattish file or workflow folder
+- `--dry-run`: Check the workflow with rattish preflight instead of running it
+- `--param` `STR` (repeatable): Workflow input as KEY=VALUE, the same as --input. May be repeated.
+- `--params-json` `STR`: Workflow inputs as a JSON object, the same as --inputs-json
 - `--input` `STR` (repeatable): Workflow input as KEY=VALUE. May be repeated.
 - `--inputs-json` `STR`: Workflow inputs as a JSON object
 
-### Raticode workflow secrets
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; Show required workflow secrets and whether they are available locally.
-
-- `WORKFLOW` (required): Workflow ID or path to TOML file
-- `--format` `STR`: Output format: text or json.
-- `--json`: Same as --format json.
-
-### Raticode workflow set-info
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; Update top-level workflow settings without opening an editor.
-
-- `WORKFLOW` (required): Workflow ID or path to TOML file
-- `--name` `STR`: Workflow display name
-- `--max-total-node-runs` `INT RANGE`: Maximum node executions allowed in one workflow run
-- `--run-continuously` / `--no-run-continuously`: Keep one workflow run active and ignore schedule/watch starts
-
-### Raticode workflow set-schedule
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; Add or replace a workflow cron schedule.
-
-- `WORKFLOW` (required): Workflow ID or path to TOML file
-- `--cron` `STR` (required): Cron expression
-- `--timezone` `STR`: Schedule timezone
-
-### Raticode workflow set-watch
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; Add or replace workflow file/folder watcher settings.
-
-- `WORKFLOW` (required): Workflow ID or path to TOML file
-- `--path` `PATH` (required): File or folder to watch
-- `--glob` `STR`: Glob pattern for watched paths
-- `--recursive`: Watch subdirectories
-- `--debounce-seconds` `FLOAT RANGE`: Seconds to debounce filesystem events
-- `--mode` `STR`: batch, queue, or fanout
-- `--max-concurrency` `INT RANGE`: Maximum concurrent queued watcher runs
-
-### Raticode workflow show
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; Display the graph structure of a workflow.
-
-- `WORKFLOW` (required): Workflow ID or path to TOML file
-
-### Raticode workflow stop
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; Request that a running legacy TOML workflow stop.
-
-- `WORKFLOW` (required): Workflow ID or path to TOML file
-
-### Raticode workflow trigger
-
-*Legacy: older TOML workflows.* &#91;Legacy TOML&#93; Trigger a workflow through its configured webhook/API trigger.
-
-- `WORKFLOW` (required): Workflow ID to trigger
-- `--trigger-id` `STR`: Webhook trigger ID
-- `--payload-json` `STR`: JSON payload to pass as trigger.payload
-- `--payload-file` `PATH`: File containing JSON payload to pass as trigger.payload
-- `--header` / `-H` `STR` (repeatable): Trigger header as 'Name: value'; may be repeated
-- `--source` `STR`: Trigger source metadata
-- `--token-file` `PATH`: File holding the webhook token (mode 600), for workflows that require one. Without it, RATICODE_WEBHOOK_TOKEN is used.
-- `--replay-run-id` `STR`: Replay the saved trigger payload from a prior run log id
-
 ### Raticode workflow usage
 
-*Legacy: older TOML workflows.* Show LLM usage summaries for recent workflow runs.
+*Offline: works without a backend.* Show LLM usage summaries for recent workflow runs.
 
-- `WORKFLOW` (required): Workflow ID or path to TOML file
+- `WORKFLOW` (required): Workflow ID, .rattish file or workflow folder
 - `--format` `STR`: Output format: text or json.
 - `--json`: Same as --format json.
 - `--limit` `INT RANGE`: Number of recent runs to inspect
 
 ### Raticode workflow validate
 
-*Legacy: older TOML workflows.* Validate a workflow by name or file path.
+*Offline: works without a backend.* Check a workflow (rattish check).
 
-- `WORKFLOW` (required): Workflow ID or path to TOML file
+- `WORKFLOW` (required): Workflow ID, .rattish file or workflow folder
 - `--format` `STR`: Output format: text or json.
 - `--json`: Same as --format json.
-- `--explain-bindings`: Explain reference producers, types, coercion, and resolution phases

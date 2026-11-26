@@ -42,7 +42,7 @@ Fields for this node only. The [shared node fields](./index.md#shared-node-field
 | --- | --- | --- | --- |
 | `script-path` | string | Required | Readable script source path. |
 | `args` | list of string | `[]` | Ordered argument strings. |
-| `env` | object | `{}` | Additional string environment values. |
+| `env` | object | `{}` | Additional string environment values. Unquoted names are read lowercased, so quote a name whose case matters: `"DEBUG": "1"`, not `DEBUG: "1"`. |
 | `shell` | `auto`, `bash` or `powershell` | `auto` | The program that runs the script. See below. |
 
 ## Which shell runs the script

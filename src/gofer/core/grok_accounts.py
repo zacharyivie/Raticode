@@ -22,12 +22,7 @@ the files in it that start programs read-only. See the website's Providers page
 
 from __future__ import annotations
 
-import json
-import os
-import queue
-import subprocess
-import threading
-import time
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +45,8 @@ OTHER_AUTH_ENV = ("XAI_API_KEY", "GROK_CODE_XAI_API_KEY", "GROK_AUTH", "GROK_AUT
 ACP_ARGS = ("agent", "--no-leader", "stdio")
 # Grok's JSON-RPC error for a request that needs a sign-in ("Authentication required").
 AUTH_REQUIRED_CODE = -32000
+# Most output the sign-in check reads from Grok's ACP agent.
+STATUS_OUTPUT_BYTES = 4 * 1024 * 1024
 # Shown when xAI refuses the device sign-in ("Device-code login is not available for
 # this deployment"); a phone can't turn it on, so it points to the computer's sign-in.
 DEVICE_SIGN_IN_HELP = (
@@ -101,94 +98,22 @@ def parse_billing_answer(answer: Any) -> dict[str, Any]:
     return {"state": UNKNOWN, "reason": "Grok gave no sign-in status."}
 
 
-def _billing_answer(
+async def _billing_answer(
     command: list[str], env: dict[str, str], folder: Path, *, timeout: float
 ) -> dict[str, Any] | None:
-    """Start Grok's ACP agent, ask ``_x.ai/billing`` and return its JSON-RPC answer, or None."""
-    process = subprocess.Popen(
-        command,
-        env=env,
-        cwd=str(folder),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        start_new_session=os.name == "posix",
-    )
-    lines: queue.Queue[bytes | None] = queue.Queue()
-
-    def read() -> None:
-        assert process.stdout is not None
-        for line in iter(process.stdout.readline, b""):
-            if len(line) > 4 * 1024 * 1024:
-                continue
-            lines.put(line)
-        lines.put(None)
-
-    threading.Thread(target=read, daemon=True).start()
-    deadline = time.monotonic() + timeout
-
-    def send(payload: dict[str, Any]) -> None:
-        assert process.stdin is not None
-        process.stdin.write((json.dumps({"jsonrpc": "2.0", **payload}) + "\n").encode())
-        process.stdin.flush()
-
-    def answer(request_id: int) -> dict[str, Any] | None:
-        while True:
-            left = deadline - time.monotonic()
-            if left <= 0:
-                return None
-            try:
-                line = lines.get(timeout=left)
-            except queue.Empty:
-                return None
-            if line is None:
-                return None
-            try:
-                message = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(message, dict):
-                continue
-            if message.get("id") == request_id and "method" not in message:
-                return message
-            if "method" in message and message.get("id") is not None:
-                # Grok asked the client something; this check offers nothing.
-                send(
-                    {
-                        "id": message["id"],
-                        "error": {"code": -32601, "message": "Not supported"},
-                    }
-                )
+    """Ask Grok's ACP agent for ``_x.ai/billing``: its result or error as JSON-RPC, or None."""
+    from gofer.core.provider_usage import grok_billing
+    from gofer.subscriptions.acp_transport import AcpRpcError, AcpTransportError
 
     try:
-        send(
-            {
-                "id": 1,
-                "method": "initialize",
-                "params": {"protocolVersion": 1, "clientCapabilities": {}},
-            }
+        result = await grok_billing(
+            command, env, folder, timeout=timeout, max_output_bytes=STATUS_OUTPUT_BYTES
         )
-        if answer(1) is None:
-            return None
-        send({"id": 2, "method": "_x.ai/billing", "params": {}})
-        return answer(2)
-    except (OSError, ValueError):
+    except AcpRpcError as exc:
+        return {"error": {"code": exc.code, "message": exc.detail}}
+    except AcpTransportError:
         return None
-    finally:
-        try:
-            if process.stdin is not None:
-                process.stdin.close()
-        except OSError:
-            pass
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-        if process.stdout is not None:
-            process.stdout.close()
+    return {"result": result}
 
 
 def read_grok_status(
@@ -198,11 +123,16 @@ def read_grok_status(
 
     The check runs inside the credential mask like a turn, keeping only this account's
     folder, so whatever Grok starts from the folder can't read the other accounts.
+    Every caller is sync code outside an event loop (request threads, the CLI, device
+    threads, quick_status's thread and asyncio.to_thread), so this runs its own loop.
     """
     from gofer.core.credential_mask import masked_command
 
     command = masked_command([executable, *ACP_ARGS], data_dir=folder.parent.parent, keep=[folder])
-    return parse_billing_answer(_billing_answer(command, env, folder, timeout=timeout))
+    # The transport starts from Raticode's own environment; naming the other sign-ins
+    # again keeps XAI_API_KEY and the rest out of it.
+    env = {**env, **ADAPTER.folder_overrides(folder)}
+    return parse_billing_answer(asyncio.run(_billing_answer(command, env, folder, timeout=timeout)))
 
 
 def _read_status(output: str) -> dict[str, Any]:

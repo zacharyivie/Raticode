@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
+import json
 import sqlite3
 import time
 from collections.abc import AsyncIterator
@@ -20,6 +22,7 @@ from typing import Any
 
 import pytest
 
+from gofer.cli.commands.second_brain import fast_main
 from gofer.ui import second_brain
 from gofer.ui import server as server_module
 from gofer.ui.brain_library import BrainLibrary
@@ -28,17 +31,10 @@ from gofer.ui.organization_store import OrganizationConfig
 from gofer.ui.organizations import second_brain_widened
 from gofer.ui.second_brain import SecondBrain, library_brain_config, with_second_brain
 from gofer.ui.server import DesktopPathGrantStore, GoferUiRequestHandler, GoferUiServer
+from tests.helpers.brain_library import wait_idle
 
 CLI = Path("/trusted/Raticode")
-
-
-def wait_idle(library: BrainLibrary) -> None:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if all(task["state"] != "running" for task in library.snapshot()["tasks"]):
-            return
-        time.sleep(0.02)
-    pytest.fail("Second Brain tasks did not finish")
+SERVE_STDIO = second_brain.serve_stdio
 
 
 @pytest.fixture
@@ -75,8 +71,8 @@ def setup(tmp_path: Path):
     library.close()
 
 
-def mcp_args(workflow: dict[str, Any]) -> list[str]:
-    configured = with_second_brain(workflow, CLI, {"threadId": "t1"})
+def mcp_args(workflow: dict[str, Any], data_dir: Path | None = None) -> list[str]:
+    configured = with_second_brain(workflow, CLI, {"threadId": "t1"}, data_dir)
     assert configured is not None
     servers = configured["remResources"]["mcpServers"]
     return list(next(item for item in servers if item["name"] == "second_brain")["args"])
@@ -262,6 +258,82 @@ def test_unregistered_folder_falls_back_to_the_folder_index(setup, tmp_path) -> 
         library_brain_config(workflow["remSecondBrain"], [], setup.data)
         == workflow["remSecondBrain"]
     )
+
+
+def serve_folder_turn(
+    monkeypatch: pytest.MonkeyPatch, args: list[str], calls: list[tuple[str, dict[str, Any]]]
+) -> list[dict[str, Any]]:
+    """Run the turn's second_brain server from its arguments and return each tool result."""
+    requests = "".join(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": number,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            }
+        )
+        + "\n"
+        for number, (name, arguments) in enumerate(calls)
+    )
+    output = io.StringIO()
+
+    def captured(*serve_args: Any, **_: Any) -> None:
+        SERVE_STDIO(*serve_args, input_stream=io.StringIO(requests), output_stream=output)
+
+    monkeypatch.setattr(second_brain, "serve_stdio", captured)
+    assert args[:2] == ["ui", "second-brain"]
+    assert fast_main(args[2:]) == 0
+    return [json.loads(line)["result"] for line in output.getvalue().splitlines()]
+
+
+def test_memory_folder_index_leaves_out_private_brains_inside_it(
+    setup, tmp_path, monkeypatch
+) -> None:
+    memory = (tmp_path / "memory").resolve()
+    (memory / "Private").mkdir(parents=True)
+    (memory / "open.md").write_text("Open note about lighthouses.\n", encoding="utf-8")
+    secret = memory / "Private" / "secret.md"
+    secret.write_text("Private note about lighthouses and the vault code.\n", encoding="utf-8")
+    workflow = {"remSecondBrain": {"enabled": True, "root": str(memory)}}
+    calls = [
+        ("search", {"query": "lighthouses"}),
+        ("read_note", {"path": "Private/secret.md"}),
+    ]
+
+    # Before Private is a brain, the folder index holds its note.
+    args = mcp_args(workflow, setup.data)
+    assert "--library-data-dir" not in args
+    found, read = serve_folder_turn(monkeypatch, args, calls)
+    assert {hit["path"] for hit in json.loads(found["content"][0]["text"])} == {
+        "open.md",
+        "Private/secret.md",
+    }
+    assert "vault code" in read["content"][0]["text"]
+
+    # Registered with Allow cloud processing off, it is left out at the next turn.
+    inner = setup.library.open({"root": str(memory / "Private")})
+    wait_idle(setup.library)
+    assert setup.library.brain(inner["id"])["settings"]["allowCloud"] is False
+    args = mcp_args(workflow, setup.data)
+    assert args[args.index("--private-brain-folder") + 1] == str(memory / "Private")
+    found, read = serve_folder_turn(monkeypatch, args, calls)
+    assert [hit["path"] for hit in json.loads(found["content"][0]["text"])] == ["open.md"]
+    assert read["isError"] is True
+    assert "Allow cloud processing" in read["content"][0]["text"]
+    assert "vault code" not in read["content"][0]["text"]
+    # The row stored before registration is gone from the folder's index, too.
+    database = memory / ".raticode" / "second-brain.sqlite3"
+    with contextlib.closing(sqlite3.connect(database)) as connection:
+        paths = [row[0] for row in connection.execute("SELECT path FROM notes")]
+    assert paths == ["open.md"]
+
+    # With Allow cloud processing on, the brain's notes are the folder's again.
+    setup.library.update_brain({"id": inner["id"], "patch": {"settings": {"allowCloud": True}}})
+    args = mcp_args(workflow, setup.data)
+    assert "--private-brain-folder" not in args
+    found, _read = serve_folder_turn(monkeypatch, args, calls)
+    assert "Private/secret.md" in {hit["path"] for hit in json.loads(found["content"][0]["text"])}
 
 
 def test_fallback_search_reads_extracted_text_not_css(tmp_path: Path) -> None:

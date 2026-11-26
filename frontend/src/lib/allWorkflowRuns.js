@@ -1,4 +1,4 @@
-import { apiUrl } from "./api.js";
+import { apiJson } from "./api.js";
 
 // Runs from every registered workflow, newest first: the Workflow runs view and the
 // workflow line in Rem's "While you were away" card. The backend reads only small run
@@ -57,11 +57,8 @@ export function workflowRunsQuery({ status = "", workflow = "", since = "", limi
   return `/rattish/runs?${params}`;
 }
 
-export async function fetchAllWorkflowRuns(filters = {}, { fetchImpl = globalThis.fetch } = {}) {
-  const response = await fetchImpl(apiUrl(workflowRunsQuery(filters)));
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `Workflow runs returned ${response.status}`);
-  return payload;
+export function fetchAllWorkflowRuns(filters = {}, { fetchImpl } = {}) {
+  return apiJson(workflowRunsQuery(filters), { fetchImpl, failure: status => `Workflow runs returned ${status}` });
 }
 
 // Opens the Workflow runs view, optionally from a moment such as "while you were away".

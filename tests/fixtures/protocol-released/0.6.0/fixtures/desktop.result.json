@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000142",
+  "id": "10000000-0000-4000-8000-000000000143",
+  "sequence": 143,
+  "type": "desktop.result",
+  "payload": {
+    "op": "rem.task.create",
+    "ok": true,
+    "part": 0,
+    "parts": 1,
+    "body": "{\"turn_state\":\"idle\",\"messages\":[],\"tasks\":[]}"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000212",
+  "id": "10000000-0000-4000-8000-000000000212",
+  "sequence": 212,
+  "type": "desktop.action",
+  "payload": {
+    "op": "organizations.backlog_pull",
+    "params": {
+      "organization_id": "org1",
+      "expected_revision": 5,
+      "enabled": false
+    }
+  }
+}

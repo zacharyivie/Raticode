@@ -238,8 +238,7 @@ caller.
 constrains the public interface version. The compiler records the exact resolved workflow
 ID, source or registry fingerprint, interface version, and interface schemas in IR.
 
-Rattish has no `subflow` node. The TOML exporter maps legacy workflow and subflow calls to
-this contract.
+Rattish has no `subflow` node; call another workflow with a `workflow` node.
 
 ## Rattish Schema Profile 1
 

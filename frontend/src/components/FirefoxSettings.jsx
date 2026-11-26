@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ipcErrorMessage } from "../lib/ipcError.js";
+import { useRovingChoice } from "../lib/useRovingChoice.js";
 
 // Settings > Browser > Firefox: Firefox's settings, its extensions and
 // importing from an everyday Firefox. The desktop app does the work and
 // confirms installs, removals and imports in its own dialogs.
 
 const TABS = [["settings", "Settings"], ["extensions", "Extensions"], ["import", "Import"]];
+const TAB_KEYS = TABS.map(([id]) => id);
 const IMPORT_CHOICES = [
   ["settings", "Settings", "Preferences such as privacy, fonts, languages and network."],
   ["bookmarks", "Bookmarks and history", ""],
@@ -26,6 +29,7 @@ function library(action, options) {
 
 export default function FirefoxSettings() {
   const [tab, setTab] = useState("settings");
+  const section = useRovingChoice({ keys: TAB_KEYS, selected: tab, onSelect: setTab, orientation: "horizontal" });
   return (
     <div className="grid gap-3" data-testid="firefox-settings">
       <div aria-label="Firefox" className="flex gap-1" role="tablist">
@@ -37,6 +41,7 @@ export default function FirefoxSettings() {
             role="tab"
             type="button"
             onClick={() => setTab(id)}
+            {...section(id)}
           >{label}</button>
         ))}
       </div>
@@ -59,7 +64,7 @@ function useAction() {
     setBusy(label);
     setError("");
     try { return await task(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "") : String(cause)); return null; }
+    catch (cause) { setError(ipcErrorMessage(cause)); return null; }
     finally { setBusy(""); }
   }
   return { busy, error, run };

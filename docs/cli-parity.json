@@ -2,7 +2,7 @@
   "description": "Every backend HTTP route, phone operation, phone protocol message and desktop window request (Electron `gofer:*` IPC), mapped to the CLI command that covers it or a named exclusion. tests/unit/test_cli_parity.py fails when one has neither. `api` means only the generic `Raticode api` command reaches it.",
   "exclusions": {
     "window-ui": "Serves the desktop window's own screens: attachments, media and link previews, voice input, the studio editor, generation jobs, themes, its terminal, clipboard, logs and developer tools. Scripts edit workflow.rattish and use `Raticode rattish` instead.",
-    "desktop-auth": "Desktop security handshakes (path grants, trusted roots, the window's session token). A CLI that could call them could grant itself folder access.",
+    "desktop-auth": "Desktop security handshakes (path grants, the window's session token). A CLI that could call them could grant itself folder access.",
     "folder-approval": "Registers or opens a folder, which the backend only accepts with a folder approval from the desktop. Do it in the app; the CLI then works with the result.",
     "pairing": "Pairing and device actions require the Settings UI by design.",
     "provider-sign-in": "Provider sign-in opens an interactive browser login. Sign in on the machine itself with the provider's own CLI.",
@@ -78,9 +78,6 @@
     "DELETE /api/workflows/*": {
       "cli": "workflow rm"
     },
-    "DELETE /api/workflows/*/chat": {
-      "excluded": "window-ui"
-    },
     "GET /api/chat/attachments/locate": {
       "excluded": "window-ui"
     },
@@ -108,9 +105,6 @@
     "GET /api/computers/placement": {
       "cli": "computers placement"
     },
-    "GET /api/desktop/trusted-roots": {
-      "excluded": "desktop-auth"
-    },
     "GET /api/devices": {
       "cli": "devices list"
     },
@@ -121,6 +115,9 @@
       "excluded": "window-ui"
     },
     "GET /api/health": {
+      "cli": "api"
+    },
+    "GET /api/instance/proof": {
       "cli": "api"
     },
     "GET /api/link-preview": {
@@ -155,9 +152,6 @@
     },
     "GET /api/provider/voice-tidy": {
       "excluded": "window-settings"
-    },
-    "GET /api/queue": {
-      "cli": "runner list"
     },
     "GET /api/rattish/cache": {
       "cli": "rattish cache show"
@@ -268,12 +262,6 @@
     "GET /api/retention": {
       "cli": "api"
     },
-    "GET /api/runners": {
-      "cli": "runner list"
-    },
-    "GET /api/session": {
-      "excluded": "desktop-auth"
-    },
     "GET /api/swarms": {
       "cli": "swarm list"
     },
@@ -310,12 +298,6 @@
     "GET /api/workflow-shortcuts/target": {
       "excluded": "window-ui"
     },
-    "GET /api/workflow-templates": {
-      "excluded": "window-ui"
-    },
-    "GET /api/workflow-templates/*": {
-      "excluded": "window-ui"
-    },
     "GET /api/workflows": {
       "cli": [
         "rattish list",
@@ -326,20 +308,11 @@
     "GET /api/workflows/*/approvals": {
       "cli": "rattish approvals"
     },
-    "GET /api/workflows/*/doctor": {
-      "cli": "doctor"
-    },
     "GET /api/workflows/*/document": {
       "cli": "rattish show"
     },
     "GET /api/workflows/*/events": {
       "cli": "rattish events"
-    },
-    "GET /api/workflows/*/history": {
-      "cli": "api"
-    },
-    "GET /api/workflows/*/history/*/diff": {
-      "cli": "api"
     },
     "GET /api/workflows/*/logs": {
       "cli": [
@@ -365,9 +338,6 @@
     "GET /api/workflows/*/tests/results/*": {
       "cli": "rattish test"
     },
-    "GET /api/workflows/*/validate": {
-      "cli": "rattish check"
-    },
     "GET /api/worktree-setup": {
       "cli": [
         "projects setup"
@@ -377,12 +347,6 @@
       "cli": [
         "projects setup"
       ]
-    },
-    "GET /workflows/*/logs/*": {
-      "excluded": "window-ui"
-    },
-    "GET /workflows/*/usage": {
-      "excluded": "window-ui"
     },
     "PATCH /api/rem/memories/*": {
       "cli": "rem memories edit"
@@ -861,9 +825,6 @@
     "POST /api/provider/voice-tidy": {
       "excluded": "window-settings"
     },
-    "POST /api/queue/*/cancel": {
-      "cli": "runner cancel"
-    },
     "POST /api/rattish/runs/*/discard": {
       "cli": "rattish runs discard"
     },
@@ -1115,6 +1076,9 @@
     "POST /api/second-brains#original": {
       "cli": "brain read"
     },
+    "POST /api/second-brains#passages": {
+      "cli": "api"
+    },
     "POST /api/second-brains#preferences": {
       "excluded": "window-ui"
     },
@@ -1229,6 +1193,9 @@
     "POST /api/workflows": {
       "cli": "rattish create"
     },
+    "POST /api/workflows/convert-toml": {
+      "cli": "rattish convert"
+    },
     "POST /api/workflows/*/approvals/*/approve": {
       "cli": "rattish approve"
     },
@@ -1247,12 +1214,6 @@
     "POST /api/workflows/*/duplicate": {
       "cli": "workflow duplicate"
     },
-    "POST /api/workflows/*/export": {
-      "cli": "workflow export"
-    },
-    "POST /api/workflows/*/history/*/restore": {
-      "cli": "api"
-    },
     "POST /api/workflows/*/logs/prune": {
       "cli": "rattish prune"
     },
@@ -1261,9 +1222,6 @@
     },
     "POST /api/workflows/*/plan": {
       "cli": "rattish start"
-    },
-    "POST /api/workflows/*/queue": {
-      "cli": "runner queue"
     },
     "POST /api/workflows/*/rename": {
       "cli": "workflow rename"
@@ -1295,24 +1253,6 @@
     "POST /api/workflows/*/tests/run": {
       "cli": "rattish test"
     },
-    "POST /api/workflows/*/validate": {
-      "cli": "rattish check"
-    },
-    "POST /api/workflows/*/validate/fix": {
-      "excluded": "window-ui"
-    },
-    "POST /api/workflows/*/webhooks/*/replay": {
-      "excluded": "webhook-ingress"
-    },
-    "POST /api/workflows/*/webhooks/*/trigger": {
-      "excluded": "webhook-ingress"
-    },
-    "POST /api/workflows/import": {
-      "cli": "workflow import"
-    },
-    "POST /api/workflows/import/preview": {
-      "cli": "workflow preview-import"
-    },
     "POST /api/worktree-setup/approve": {
       "excluded": "setup-approval"
     },
@@ -1324,7 +1264,8 @@
         "selfwork set",
         "selfwork apply",
         "selfwork on",
-        "selfwork off"
+        "selfwork off",
+        "selfwork start"
       ]
     },
     "PUT /api/rem/memory-mode": {
@@ -1332,9 +1273,6 @@
     },
     "PUT /api/swarms/*": {
       "cli": "swarm apply"
-    },
-    "PUT /api/workflows/*": {
-      "excluded": "window-ui"
     }
   },
   "phoneOperations": {
@@ -1877,9 +1815,6 @@
     "gofer:dictation-overlay-action": {
       "excluded": "window-ui"
     },
-    "gofer:dismiss-update-reminder": {
-      "excluded": "app-updates"
-    },
     "gofer:download-and-install-update": {
       "excluded": "app-updates"
     },
@@ -1988,9 +1923,6 @@
     "gofer:open-path": {
       "excluded": "file-explorer"
     },
-    "gofer:open-update-release": {
-      "excluded": "app-updates"
-    },
     "gofer:path-info": {
       "excluded": "file-explorer"
     },
@@ -2072,6 +2004,9 @@
     "gofer:terminal-write": {
       "excluded": "window-ui"
     },
+    "gofer:undo-replace": {
+      "excluded": "file-explorer"
+    },
     "gofer:workflow-run-sheet-action": {
       "excluded": "window-ui"
     },
@@ -2086,11 +2021,6 @@
     }
   },
   "commands": {
-    "agent create": "legacy",
-    "agent edit": "legacy",
-    "agent list": "legacy",
-    "agent rm": "legacy",
-    "agent run": "legacy",
     "api": "backend",
     "brain documents": "backend",
     "brain list": "backend",
@@ -2165,6 +2095,7 @@
     "rattish check": "offline",
     "rattish compile": "offline",
     "rattish create": "offline",
+    "rattish convert": "offline",
     "rattish docs": "offline",
     "rattish events": "backend",
     "rattish export": "backend",
@@ -2282,17 +2213,6 @@
     "rem tasks wake": "backend",
     "rem thread send": "backend",
     "rem thread show": "backend",
-    "runner cancel": "legacy",
-    "runner list": "legacy",
-    "runner queue": "legacy",
-    "runner register": "legacy",
-    "runner start": "legacy",
-    "runner status": "legacy",
-    "schedule add": "legacy",
-    "schedule list": "legacy",
-    "schedule remove": "legacy",
-    "schedule start": "legacy",
-    "schedule stop": "legacy",
     "schema": "offline",
     "selfwork apply": "backend",
     "selfwork export": "backend",
@@ -2301,6 +2221,7 @@
     "selfwork on": "backend",
     "selfwork report": "backend",
     "selfwork set": "backend",
+    "selfwork start": "backend",
     "selfwork status": "backend",
     "selfwork stop-when": "backend",
     "selfwork window": "backend",
@@ -2344,47 +2265,23 @@
     "usage show": "backend",
     "usage verified": "backend",
     "wait": "backend",
-    "watch list": "legacy",
-    "watch start": "legacy",
-    "workflow add-agent": "legacy",
-    "workflow add-edge": "legacy",
-    "workflow add-node": "legacy",
-    "workflow approvals": "legacy",
-    "workflow approve": "legacy",
-    "workflow build": "legacy",
-    "workflow clear-schedule": "legacy",
-    "workflow clear-watch": "legacy",
-    "workflow create": "legacy",
-    "workflow diff": "legacy",
-    "workflow duplicate": "legacy",
-    "workflow edit": "legacy",
-    "workflow export": "legacy",
-    "workflow history": "legacy",
-    "workflow import": "legacy",
-    "workflow list": "legacy",
-    "workflow logs latest": "legacy",
-    "workflow logs list": "legacy",
-    "workflow logs prune": "legacy",
-    "workflow logs show": "legacy",
-    "workflow plan": "legacy",
-    "workflow preview-import": "legacy",
-    "workflow recipe watch-folder-summarize": "legacy",
-    "workflow reject": "legacy",
-    "workflow rename": "legacy",
-    "workflow restore": "legacy",
-    "workflow resume": "legacy",
-    "workflow rm": "legacy",
-    "workflow rm-edge": "legacy",
-    "workflow rm-node": "legacy",
-    "workflow run": "legacy",
-    "workflow secrets": "legacy",
-    "workflow set-info": "legacy",
-    "workflow set-schedule": "legacy",
-    "workflow set-watch": "legacy",
-    "workflow show": "legacy",
-    "workflow stop": "legacy",
-    "workflow trigger": "legacy",
-    "workflow usage": "legacy",
-    "workflow validate": "legacy"
+    "workflow approvals": "offline",
+    "workflow approve": "offline",
+    "workflow duplicate": "offline",
+    "workflow export": "offline",
+    "workflow import": "offline",
+    "workflow list": "offline",
+    "workflow logs latest": "offline",
+    "workflow logs list": "offline",
+    "workflow logs prune": "offline",
+    "workflow logs show": "offline",
+    "workflow plan": "offline",
+    "workflow reject": "offline",
+    "workflow rename": "offline",
+    "workflow resume": "offline",
+    "workflow rm": "offline",
+    "workflow run": "offline",
+    "workflow usage": "offline",
+    "workflow validate": "offline"
   }
 }

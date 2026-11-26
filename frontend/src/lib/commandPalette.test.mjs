@@ -24,6 +24,7 @@ import {
   updateSetting,
 } from "./settings.js";
 import { SETTINGS_SECTIONS } from "./settingsSections.js";
+import { SIDEBAR_PLUGINS, pluginAvailable } from "./plugins.js";
 
 function memoryStorage(initial = {}) {
   const values = new Map(Object.entries(initial));
@@ -78,6 +79,27 @@ test("actions without keys cover settings sections, workflows, triggers and plug
   assert.equal(new Set(items.map((item) => item.id)).size, items.length, "ids are unique");
   assert.equal(items.find((item) => item.label === "Go to Posts").description, "Experimental");
   assert.equal(items.find((item) => item.label === "Go to Organizations").description, undefined);
+});
+
+test("the palette can go to every plugin in the activity rail, and the obvious words find them", () => {
+  const goTo = actionPaletteItems().filter((item) => item.group === "Go to");
+  const byPlugin = new Map(goTo.map((item) => [item.pluginId, item]));
+  for (const id of ["rem", "workflows", "files", "search", "source-control", "kanban", "swarms"]) {
+    assert.equal(byPlugin.get(id)?.actionId, `open.${id}`, `missing Go to for ${id}`);
+  }
+  // Every rail plugin has one, named as the rail names it.
+  for (const plugin of SIDEBAR_PLUGINS) {
+    assert.ok(byPlugin.has(plugin.id), `missing Go to for ${plugin.id}`);
+    if (plugin.id !== "browser") assert.equal(byPlugin.get(plugin.id).label, `Go to ${plugin.label}`);
+  }
+  assert.equal(byPlugin.get("kanban").label, "Go to Kanban");
+  // App.jsx drops plugins that aren't available: Swarms waits for Feature Preview.
+  const shown = (plugins) => goTo.filter((item) => pluginAvailable(plugins, item.pluginId)).map((item) => item.pluginId);
+  assert.ok(!shown(DEFAULT_APP_SETTINGS.plugins).includes("swarms"));
+  assert.ok(shown({ ...DEFAULT_APP_SETTINGS.plugins, preview: { swarms: true } }).includes("swarms"));
+  for (const [query, label] of [["git", "Go to Source control"], ["tickets", "Go to Kanban"], ["kanban", "Go to Kanban"], ["explorer", "Go to File explorer"], ["find", "Go to Search"]]) {
+    assert.equal(rankItems(goTo, query)[0]?.label, label, `"${query}" finds ${label}`);
+  }
 });
 
 test("fuzzy matching finds letters in order, across words, and prefers word starts", () => {

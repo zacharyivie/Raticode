@@ -6,6 +6,7 @@ import {
   remainingPercent, usageDashboardUrl, usageProviderName, usageSignIn, usageStatus,
 } from "../lib/usage.js";
 import { customRangeError, loadUsageRange, localDateString, saveUsageRange, USAGE_RANGES, usageRangeLabel, usageRangeQuery } from "../lib/usageHistory.js";
+import { useRovingChoice } from "../lib/useRovingChoice.js";
 import "./UsageDashboard.css";
 import TokenUsageChart from "./TokenUsageChart.jsx";
 import UsageCredentials from "./UsageCredentials.jsx";
@@ -17,6 +18,9 @@ import { StandingParts } from "./ContextSent.jsx";
 
 const USAGE_POLL_MS = 60_000;
 
+const USAGE_VIEWS = [["allowance", "Remaining allowance"], ["tokens", "Tokens in Raticode"]];
+const USAGE_VIEW_KEYS = USAGE_VIEWS.map(([key]) => key);
+
 export default function UsageDashboard() {
   const [overview, setOverview] = useState(null);
   const [range, setRange] = useState(() => loadUsageRange());
@@ -26,7 +30,7 @@ export default function UsageDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const request = useRef(null);
-  const tabs = useRef([]);
+  const usageView = useRovingChoice({ keys: USAGE_VIEW_KEYS, selected: view, onSelect: setView, orientation: "horizontal" });
   const id = useId();
   const load = useCallback(async (refresh = false, checkAccounts = false, quiet = false) => {
     request.current?.abort();
@@ -89,13 +93,6 @@ export default function UsageDashboard() {
     setOverview(null);
     setRange(next);
   }
-  function tabKey(event, index) {
-    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-    event.preventDefault();
-    const next = event.key === "Home" ? 0 : event.key === "End" ? 1 : 1 - index;
-    setView(next ? "tokens" : "allowance");
-    tabs.current[next]?.focus();
-  }
   return <div className="usage-dashboard">
     <div className="usage-title">
       <p>Check your allowance and see what Raticode has used.</p>
@@ -104,10 +101,10 @@ export default function UsageDashboard() {
       </button>
     </div>
     <div role="tablist" aria-label="Usage view" className="usage-tabs">
-      {[["allowance", "Remaining allowance"], ["tokens", "Tokens in Raticode"]].map(([key, label], index) => <button
-        key={key} ref={element => { tabs.current[index] = element; }} type="button" role="tab"
+      {USAGE_VIEWS.map(([key, label]) => <button
+        key={key} type="button" role="tab"
         id={`${id}-${key}-tab`} aria-selected={view === key} aria-controls={`${id}-${key}-panel`}
-        tabIndex={view === key ? 0 : -1} onClick={() => setView(key)} onKeyDown={event => tabKey(event, index)}
+        onClick={() => setView(key)} {...usageView(key)}
       >{label}</button>)}
     </div>
     {error ? <p role="alert" className="usage-error">{error}{overview ? " Showing the last loaded results." : ""}</p> : null}
@@ -177,6 +174,8 @@ function AllowanceBar({ window }) {
   return <span className={`usage-meter${percent <= 10 ? " usage-meter-low" : ""}`} role="meter" aria-label={`${window.label} remaining`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} aria-valuetext={`${formatUsageNumber(percent)}% remaining`}><span style={{ width: `${percent}%` }} /></span>;
 }
 
+const USAGE_RANGE_KEYS = USAGE_RANGES.map(option => option.key);
+
 function UsageRangePicker({ range, onChange }) {
   const [custom, setCustom] = useState(range.key === "custom");
   const today = localDateString();
@@ -185,6 +184,7 @@ function UsageRangePicker({ range, onChange }) {
   const [error, setError] = useState("");
   const id = useId();
   const selected = custom ? "custom" : range.key;
+  const period = useRovingChoice({ keys: USAGE_RANGE_KEYS, selected, onSelect: pick });
   function pick(key) {
     if (key === "custom") {
       setCustom(true);
@@ -205,16 +205,7 @@ function UsageRangePicker({ range, onChange }) {
       {USAGE_RANGES.map(option => <button
         key={option.key} type="button" role="radio" aria-checked={selected === option.key}
         aria-label={option.label} title={option.label} onClick={() => pick(option.key)}
-        tabIndex={selected === option.key ? 0 : -1}
-        onKeyDown={event => {
-          const index = USAGE_RANGES.findIndex(item => item.key === option.key);
-          const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
-          if (!step) return;
-          event.preventDefault();
-          const next = USAGE_RANGES[(index + step + USAGE_RANGES.length) % USAGE_RANGES.length];
-          pick(next.key);
-          event.currentTarget.parentElement.querySelectorAll("[role=radio]")[USAGE_RANGES.indexOf(next)]?.focus();
-        }}
+        {...period(option.key)}
       >{option.short}</button>)}
     </div>
     {custom ? <form className="usage-range-custom" onSubmit={apply} noValidate aria-label="Custom range">

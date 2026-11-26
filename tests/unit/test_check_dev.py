@@ -3,16 +3,20 @@ from __future__ import annotations
 import ast
 import importlib.util
 import re
+import shlex
+import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 TESTS = ROOT / "tests"
 HELPERS = TESTS / "helpers"
+CONTRACT_WORKFLOW = ROOT / ".github/workflows/contract-check.yml"
 
 # Signs that a test reads the whole repository: the tracked file list (git ls-files,
 # or git grep, which searches the same files) or the CLI parity manifest.
@@ -103,6 +107,72 @@ def test_the_list_keeps_the_repo_wide_checks_found_by_nightly_failures(check_dev
     } <= set(check_dev.REPO_WIDE_TESTS)
 
 
+def _contract_workflow_python() -> tuple[set[str], set[str]]:
+    """Scripts run with python and test files run with pytest by the contract workflow.
+
+    Paths are relative to the repository root, like check-dev's commands.
+    """
+    scripts: set[str] = set()
+    tests: set[str] = set()
+    workflow = yaml.safe_load(CONTRACT_WORKFLOW.read_text(encoding="utf-8"))
+    for job in workflow["jobs"].values():
+        for step in job["steps"]:
+            folder = step.get("working-directory", ".")
+            for line in str(step.get("run", "")).splitlines():
+                words = shlex.split(line)
+                for runner, found in (("python", scripts), ("pytest", tests)):
+                    if runner in words:
+                        after = words[words.index(runner) + 1 :]
+                        found.update(
+                            (Path(folder) / word).as_posix().removeprefix("./")
+                            for word in after
+                            if word.endswith(".py")
+                        )
+    return scripts, tests
+
+
+def test_check_dev_runs_the_python_checks_of_the_contract_workflow(check_dev: Any) -> None:
+    scripts, tests = _contract_workflow_python()
+    checks = check_dev.build_checks("py", "dev", parallel_tests=False)
+    run_scripts = {word for check in checks for word in check.command if word.endswith(".py")}
+    missing = sorted((scripts - run_scripts) | (tests - _listed_files(check_dev)))
+    assert not missing, (
+        f"{CONTRACT_WORKFLOW.relative_to(ROOT)} runs these, so scripts/check-dev.py must run "
+        f"them too (scripts in build_checks, test files in REPO_WIDE_TESTS): {missing}"
+    )
+
+
+def test_the_contract_workflow_scan_finds_its_python_steps() -> None:
+    # Guards the guard: if the parsing stops matching, the test above passes vacuously.
+    scripts, tests = _contract_workflow_python()
+    assert {
+        "mobile/android/scripts/check-contract.py",
+        "scripts/check-protocol-compat.py",
+    } <= scripts
+    assert {"tests/unit/test_device_protocol.py", "tests/unit/test_mobile_contract.py"} <= tests
+
+
+def test_protocol_compat_skips_with_a_reason_when_no_tag_exists(tmp_path: Path) -> None:
+    script = ROOT / "scripts/check-protocol-compat.py"
+    copy = tmp_path / "scripts/check-protocol-compat.py"
+    copy.parent.mkdir()
+    copy.write_text(script.read_text(encoding="utf-8"), encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+
+    def run(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(copy), *args], capture_output=True, text=True, check=False
+        )
+
+    skipped = run("--skip-without-tags")
+    assert skipped.returncode == 0, skipped.stderr
+    assert skipped.stdout.startswith("Skipped: No v* tags found")
+    strict = run()
+    assert strict.returncode == 1
+    assert "No v* tags found" in strict.stderr
+    assert "Traceback" not in strict.stderr + skipped.stderr
+
+
 def test_checks_cover_lint_types_tests_and_website_docs(check_dev: Any) -> None:
     checks = check_dev.build_checks("py", "main", parallel_tests=True)
     commands = [check.command for check in checks]
@@ -110,6 +180,9 @@ def test_checks_cover_lint_types_tests_and_website_docs(check_dev: Any) -> None:
     assert ["py", "-m", "mypy", "src", "tests"] in commands
     assert ["py", "scripts/check-website-docs.py", "--base", "main"] in commands
     assert ["py", "scripts/check-commit-messages.py", "--base", "main"] in commands
+    assert ["py", "scripts/check-dead-code.py"] in commands
+    assert ["py", "mobile/android/scripts/check-contract.py"] in commands
+    assert ["py", "scripts/check-protocol-compat.py", "--skip-without-tags"] in commands
     pytest_command = next(c for c in commands if c[1:3] == ["-m", "pytest"])
     assert pytest_command[-len(check_dev.REPO_WIDE_TESTS) :] == list(check_dev.REPO_WIDE_TESTS)
     assert "-n" in pytest_command
@@ -142,6 +215,18 @@ def test_prints_one_line_per_check_and_the_output_of_failures(check_dev: Any) ->
     passing: list[str] = []
     assert check_dev.run_all(checks[:1], runner, passing.append) == 0
     assert passing[-1] == "check-dev: 1 passed, 0 failed"
+
+
+def test_a_skipped_check_says_skip_and_why(check_dev: Any) -> None:
+    check = check_dev.Check("compat", ["c"])
+    reason = "Skipped: No v* tags found."
+    result = check_dev.Result(check, True, 0.5, f"{reason}\n")
+    lines: list[str] = []
+    assert check_dev.run_all([check], lambda _: result, lines.append) == 0
+    assert lines[0].split()[:2] == ["SKIP", "compat"]
+    assert f"compat: {reason}" in lines
+    failing = check_dev.Result(check, False, 0.5, reason)
+    assert check_dev.summary_line(failing).startswith("FAIL")
 
 
 def test_run_check_reports_a_missing_program(check_dev: Any, tmp_path: Path) -> None:

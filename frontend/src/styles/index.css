@@ -372,29 +372,6 @@ select:not([multiple], [size]) {
   scrollbar-width: thin;
 }
 
-.node-inspector-panel > section {
-  border: 0;
-  border-radius: 0;
-  padding: 0;
-}
-
-.node-inspector-panel > section + section {
-  border-top: 1px solid rgb(var(--color-line));
-  padding-top: 16px;
-}
-
-.node-inspector-panel > section:only-child > h3 {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
-}
-
 /* Keep legacy surface utilities aligned with the light palette, including opacity variants. */
 :root:not(.dark) .bg-white,
 :root:not(.dark) [class~="bg-white/70"],
@@ -659,67 +636,51 @@ already carries an authored dark: variant for the same property.
 .dark :is(.text-indigo-600, .text-indigo-700, .text-indigo-800, .text-indigo-900, .text-indigo-950, .enabled\:text-indigo-600:enabled):not([class*="dark:text-"]) { color: #a5b4fc; }
 .dark :is(.hover\:text-indigo-600, .hover\:text-indigo-700, .hover\:text-indigo-800, .hover\:text-indigo-900, .hover\:text-indigo-950):hover:not([class*="dark:hover:text-"]) { color: #c7d2fe; }
 .dark :is(.border-blue-200, .border-blue-300):not([class*="dark:border-"]), .dark :is(.hover\:border-blue-200, .hover\:border-blue-300, .enabled\:hover\:border-blue-200):hover:not([class*="dark:hover:border-"]) { border-color: #223658; }
-.dark :is(.bg-blue-200):not([class*="dark:bg-"]), .dark .hover\:bg-blue-200:hover:not([class*="dark:hover:bg-"]) { background-color: #213453; }
 .dark :is(.text-blue-600, .text-blue-700, .text-blue-800, .text-blue-900, .text-blue-950, .enabled\:text-blue-600:enabled):not([class*="dark:text-"]) { color: #93c5fd; }
 .dark :is(.hover\:text-blue-600, .hover\:text-blue-700, .hover\:text-blue-800, .hover\:text-blue-900, .hover\:text-blue-950):hover:not([class*="dark:hover:text-"]) { color: #bfdbfe; }
 .dark :is(.border-sky-200, .border-sky-300):not([class*="dark:border-"]), .dark :is(.hover\:border-sky-200, .hover\:border-sky-300, .enabled\:hover\:border-sky-200):hover:not([class*="dark:hover:border-"]) { border-color: #153f54; }
-.dark :is(.bg-sky-200):not([class*="dark:bg-"]), .dark .hover\:bg-sky-200:hover:not([class*="dark:hover:bg-"]) { background-color: #153d50; }
 .dark :is(.text-sky-600, .text-sky-700, .text-sky-800, .text-sky-900, .text-sky-950, .enabled\:text-sky-600:enabled):not([class*="dark:text-"]) { color: #7dd3fc; }
 .dark :is(.hover\:text-sky-600, .hover\:text-sky-700, .hover\:text-sky-800, .hover\:text-sky-900, .hover\:text-sky-950):hover:not([class*="dark:hover:text-"]) { color: #bae6fd; }
 .dark :is(.border-cyan-200, .border-cyan-300):not([class*="dark:border-"]), .dark :is(.hover\:border-cyan-200, .hover\:border-cyan-300, .enabled\:hover\:border-cyan-200):hover:not([class*="dark:hover:border-"]) { border-color: #13444e; }
-.dark :is(.bg-cyan-200):not([class*="dark:bg-"]), .dark .hover\:bg-cyan-200:hover:not([class*="dark:hover:bg-"]) { background-color: #13414a; }
 .dark :is(.text-cyan-600, .text-cyan-700, .text-cyan-800, .text-cyan-900, .text-cyan-950, .enabled\:text-cyan-600:enabled):not([class*="dark:text-"]) { color: #67e8f9; }
 .dark :is(.hover\:text-cyan-600, .hover\:text-cyan-700, .hover\:text-cyan-800, .hover\:text-cyan-900, .hover\:text-cyan-950):hover:not([class*="dark:hover:text-"]) { color: #a5f3fc; }
 .dark :is(.border-teal-200, .border-teal-300):not([class*="dark:border-"]), .dark :is(.hover\:border-teal-200, .hover\:border-teal-300, .enabled\:hover\:border-teal-200):hover:not([class*="dark:hover:border-"]) { border-color: #174541; }
-.dark :is(.bg-teal-200):not([class*="dark:bg-"]), .dark .hover\:bg-teal-200:hover:not([class*="dark:hover:bg-"]) { background-color: #17423e; }
 .dark :is(.text-teal-600, .text-teal-700, .text-teal-800, .text-teal-900, .text-teal-950, .enabled\:text-teal-600:enabled):not([class*="dark:text-"]) { color: #5eead4; }
 .dark :is(.hover\:text-teal-600, .hover\:text-teal-700, .hover\:text-teal-800, .hover\:text-teal-900, .hover\:text-teal-950):hover:not([class*="dark:hover:text-"]) { color: #99f6e4; }
 .dark :is(.border-emerald-200, .border-emerald-300):not([class*="dark:border-"]), .dark :is(.hover\:border-emerald-200, .hover\:border-emerald-300, .enabled\:hover\:border-emerald-200):hover:not([class*="dark:hover:border-"]) { border-color: #164537; }
-.dark :is(.bg-emerald-200):not([class*="dark:bg-"]), .dark .hover\:bg-emerald-200:hover:not([class*="dark:hover:bg-"]) { background-color: #164235; }
 .dark :is(.text-emerald-600, .text-emerald-700, .text-emerald-800, .text-emerald-900, .text-emerald-950, .enabled\:text-emerald-600:enabled):not([class*="dark:text-"]) { color: #6ee7b7; }
 .dark :is(.hover\:text-emerald-600, .hover\:text-emerald-700, .hover\:text-emerald-800, .hover\:text-emerald-900, .hover\:text-emerald-950):hover:not([class*="dark:hover:text-"]) { color: #a7f3d0; }
 .dark :is(.border-green-200, .border-green-300):not([class*="dark:border-"]), .dark :is(.hover\:border-green-200, .hover\:border-green-300, .enabled\:hover\:border-green-200):hover:not([class*="dark:hover:border-"]) { border-color: #1b482d; }
-.dark :is(.bg-green-200):not([class*="dark:bg-"]), .dark .hover\:bg-green-200:hover:not([class*="dark:hover:bg-"]) { background-color: #1b452c; }
 .dark :is(.text-green-600, .text-green-700, .text-green-800, .text-green-900, .text-green-950, .enabled\:text-green-600:enabled):not([class*="dark:text-"]) { color: #86efac; }
 .dark :is(.hover\:text-green-600, .hover\:text-green-700, .hover\:text-green-800, .hover\:text-green-900, .hover\:text-green-950):hover:not([class*="dark:hover:text-"]) { color: #bbf7d0; }
 .dark :is(.border-lime-200, .border-lime-300):not([class*="dark:border-"]), .dark :is(.hover\:border-lime-200, .hover\:border-lime-300, .enabled\:hover\:border-lime-200):hover:not([class*="dark:hover:border-"]) { border-color: #364a19; }
-.dark :is(.bg-lime-200):not([class*="dark:bg-"]), .dark .hover\:bg-lime-200:hover:not([class*="dark:hover:bg-"]) { background-color: #344719; }
 .dark :is(.text-lime-600, .text-lime-700, .text-lime-800, .text-lime-900, .text-lime-950, .enabled\:text-lime-600:enabled):not([class*="dark:text-"]) { color: #bef264; }
 .dark :is(.hover\:text-lime-600, .hover\:text-lime-700, .hover\:text-lime-800, .hover\:text-lime-900, .hover\:text-lime-950):hover:not([class*="dark:hover:text-"]) { color: #d9f99d; }
 .dark :is(.border-amber-200, .border-amber-300):not([class*="dark:border-"]), .dark :is(.hover\:border-amber-200, .hover\:border-amber-300, .enabled\:hover\:border-amber-200):hover:not([class*="dark:hover:border-"]) { border-color: #563e16; }
-.dark :is(.bg-amber-200):not([class*="dark:bg-"]), .dark .hover\:bg-amber-200:hover:not([class*="dark:hover:bg-"]) { background-color: #513b16; }
 .dark :is(.text-amber-600, .text-amber-700, .text-amber-800, .text-amber-900, .text-amber-950, .enabled\:text-amber-600:enabled):not([class*="dark:text-"]) { color: #fcd34d; }
 .dark :is(.hover\:text-amber-600, .hover\:text-amber-700, .hover\:text-amber-800, .hover\:text-amber-900, .hover\:text-amber-950):hover:not([class*="dark:hover:text-"]) { color: #fde68a; }
 .dark :is(.border-yellow-200, .border-yellow-300):not([class*="dark:border-"]), .dark :is(.hover\:border-yellow-200, .hover\:border-yellow-300, .enabled\:hover\:border-yellow-200):hover:not([class*="dark:hover:border-"]) { border-color: #534315; }
-.dark :is(.bg-yellow-200):not([class*="dark:bg-"]), .dark .hover\:bg-yellow-200:hover:not([class*="dark:hover:bg-"]) { background-color: #4f4015; }
 .dark :is(.text-yellow-600, .text-yellow-700, .text-yellow-800, .text-yellow-900, .text-yellow-950, .enabled\:text-yellow-600:enabled):not([class*="dark:text-"]) { color: #fde047; }
 .dark :is(.hover\:text-yellow-600, .hover\:text-yellow-700, .hover\:text-yellow-800, .hover\:text-yellow-900, .hover\:text-yellow-950):hover:not([class*="dark:hover:text-"]) { color: #fef08a; }
 .dark :is(.border-orange-200, .border-orange-300):not([class*="dark:border-"]), .dark :is(.hover\:border-orange-200, .hover\:border-orange-300, .enabled\:hover\:border-orange-200):hover:not([class*="dark:hover:border-"]) { border-color: #573119; }
-.dark :is(.bg-orange-200):not([class*="dark:bg-"]), .dark .hover\:bg-orange-200:hover:not([class*="dark:hover:bg-"]) { background-color: #523019; }
 .dark :is(.text-orange-600, .text-orange-700, .text-orange-800, .text-orange-900, .text-orange-950, .enabled\:text-orange-600:enabled):not([class*="dark:text-"]) { color: #fdba74; }
 .dark :is(.hover\:text-orange-600, .hover\:text-orange-700, .hover\:text-orange-800, .hover\:text-orange-900, .hover\:text-orange-950):hover:not([class*="dark:hover:text-"]) { color: #fed7aa; }
 .dark :is(.border-red-200, .border-red-300):not([class*="dark:border-"]), .dark :is(.hover\:border-red-200, .hover\:border-red-300, .enabled\:hover\:border-red-200):hover:not([class*="dark:hover:border-"]) { border-color: #542426; }
-.dark :is(.bg-red-200):not([class*="dark:bg-"]), .dark .hover\:bg-red-200:hover:not([class*="dark:hover:bg-"]) { background-color: #502325; }
 .dark :is(.text-red-600, .text-red-700, .text-red-800, .text-red-900, .text-red-950, .enabled\:text-red-600:enabled):not([class*="dark:text-"]) { color: #fca5a5; }
 .dark :is(.hover\:text-red-600, .hover\:text-red-700, .hover\:text-red-800, .hover\:text-red-900, .hover\:text-red-950):hover:not([class*="dark:hover:text-"]) { color: #fecaca; }
 .dark :is(.border-rose-200, .border-rose-300):not([class*="dark:border-"]), .dark :is(.hover\:border-rose-200, .hover\:border-rose-300, .enabled\:hover\:border-rose-200):hover:not([class*="dark:hover:border-"]) { border-color: #56232d; }
-.dark :is(.bg-rose-200):not([class*="dark:bg-"]), .dark .hover\:bg-rose-200:hover:not([class*="dark:hover:bg-"]) { background-color: #51222c; }
 .dark :is(.text-rose-600, .text-rose-700, .text-rose-800, .text-rose-900, .text-rose-950, .enabled\:text-rose-600:enabled):not([class*="dark:text-"]) { color: #fda4af; }
 .dark :is(.hover\:text-rose-600, .hover\:text-rose-700, .hover\:text-rose-800, .hover\:text-rose-900, .hover\:text-rose-950):hover:not([class*="dark:hover:text-"]) { color: #fecdd3; }
 .dark :is(.border-pink-200, .border-pink-300):not([class*="dark:border-"]), .dark :is(.hover\:border-pink-200, .hover\:border-pink-300, .enabled\:hover\:border-pink-200):hover:not([class*="dark:hover:border-"]) { border-color: #53253e; }
-.dark :is(.bg-pink-200):not([class*="dark:bg-"]), .dark .hover\:bg-pink-200:hover:not([class*="dark:hover:bg-"]) { background-color: #4f243b; }
 .dark :is(.text-pink-600, .text-pink-700, .text-pink-800, .text-pink-900, .text-pink-950, .enabled\:text-pink-600:enabled):not([class*="dark:text-"]) { color: #f9a8d4; }
 .dark :is(.hover\:text-pink-600, .hover\:text-pink-700, .hover\:text-pink-800, .hover\:text-pink-900, .hover\:text-pink-950):hover:not([class*="dark:hover:text-"]) { color: #fbcfe8; }
 .dark :is(.border-fuchsia-200, .border-fuchsia-300):not([class*="dark:border-"]), .dark :is(.hover\:border-fuchsia-200, .hover\:border-fuchsia-300, .enabled\:hover\:border-fuchsia-200):hover:not([class*="dark:hover:border-"]) { border-color: #4e2556; }
-.dark :is(.bg-fuchsia-200):not([class*="dark:bg-"]), .dark .hover\:bg-fuchsia-200:hover:not([class*="dark:hover:bg-"]) { background-color: #4a2451; }
 .dark :is(.text-fuchsia-600, .text-fuchsia-700, .text-fuchsia-800, .text-fuchsia-900, .text-fuchsia-950, .enabled\:text-fuchsia-600:enabled):not([class*="dark:text-"]) { color: #f0abfc; }
 .dark :is(.hover\:text-fuchsia-600, .hover\:text-fuchsia-700, .hover\:text-fuchsia-800, .hover\:text-fuchsia-900, .hover\:text-fuchsia-950):hover:not([class*="dark:hover:text-"]) { color: #f5d0fe; }
 .dark :is(.border-purple-200, .border-purple-300):not([class*="dark:border-"]), .dark :is(.hover\:border-purple-200, .hover\:border-purple-300, .enabled\:hover\:border-purple-200):hover:not([class*="dark:hover:border-"]) { border-color: #402958; }
-.dark :is(.bg-purple-200):not([class*="dark:bg-"]), .dark .hover\:bg-purple-200:hover:not([class*="dark:hover:bg-"]) { background-color: #3d2853; }
 .dark :is(.text-purple-600, .text-purple-700, .text-purple-800, .text-purple-900, .text-purple-950, .enabled\:text-purple-600:enabled):not([class*="dark:text-"]) { color: #d8b4fe; }
 .dark :is(.hover\:text-purple-600, .hover\:text-purple-700, .hover\:text-purple-800, .hover\:text-purple-900, .hover\:text-purple-950):hover:not([class*="dark:hover:text-"]) { color: #e9d5ff; }
 .dark :is(.border-violet-200, .border-violet-300):not([class*="dark:border-"]), .dark :is(.hover\:border-violet-200, .hover\:border-violet-300, .enabled\:hover\:border-violet-200):hover:not([class*="dark:hover:border-"]) { border-color: #382b58; }
-.dark :is(.bg-violet-200):not([class*="dark:bg-"]), .dark .hover\:bg-violet-200:hover:not([class*="dark:hover:bg-"]) { background-color: #362a53; }
 .dark :is(.text-violet-600, .text-violet-700, .text-violet-800, .text-violet-900, .text-violet-950, .enabled\:text-violet-600:enabled):not([class*="dark:text-"]) { color: #c4b5fd; }
 .dark :is(.hover\:text-violet-600, .hover\:text-violet-700, .hover\:text-violet-800, .hover\:text-violet-900, .hover\:text-violet-950):hover:not([class*="dark:hover:text-"]) { color: #ddd6fe; }
 
@@ -762,13 +723,6 @@ already carries an authored dark: variant for the same property.
 .dark textarea,
 .dark select {
   color: rgb(var(--color-ink));
-}
-
-.text-clamp-2 {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
 }
 
 .studio-sidebar {

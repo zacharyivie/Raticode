@@ -154,7 +154,32 @@ if (scene === "attachments") {
     return new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } });
   };
 } else {
-  window.fetch = async (input, options) => String(input).includes("/api/rem/") ? new Response(JSON.stringify({ detail: "Not Found" }), { status: 404, headers: { "Content-Type": "application/json" } }) : nativeFetch(input, options);
+  // Self-work's switch for the side pane's Start/Stop button: working in the busy scenes, off
+  // in the empty one, and on but waiting for quiet minutes in the waiting one. A PUT flips it,
+  // and start_now ends the wait, as Rem's backend does.
+  const selfWork = on => ({ version: on ? "on-" + window.__selfWorkWaits : "off", board: { tickets: [], participants: [], projects: [] }, self_work: {
+    settings: { enabled: on, saved_enabled: on, idle_minutes: 15, max_threads: 3, auto_pull_backlog: false, revision: on ? 5 : 4 },
+    limits: { max_threads_min: 1, max_threads_max: 16 },
+    state: on && window.__selfWorkWaits ? { mode: "waiting", starts_at: "2026-11-24T18:15:00Z", detail: "Starts after 15 minutes without a prompt.", activity: [], board_enabled: true }
+      : { mode: on ? "working" : "off", detail: on ? "Working on 2 tasks, 3 more in To do." : "Self-work is off.", activity: [], board_enabled: true },
+    stop: on && !window.__selfWorkWaits ? { active: true, revision: 1, label: "Stops when “REM-205 to REM-212 are done”, or at 12:00 AM tomorrow (America/New_York) at the latest" } : null,
+    report: { unseen: false, summary: "", notes: [], work_done: [], tickets_added: [], duplicates_merged: [] } } });
+  window.__selfWork = scene !== "empty";
+  window.__selfWorkWaits = scene === "waiting";
+  window.__selfWorkSaves = [];
+  window.fetch = async (input, options = {}) => {
+    const url = String(input);
+    if (scene !== "offline" && url.includes("/api/rem/kanban")) {
+      if (url.includes("/api/rem/kanban/settings") && options.method === "PUT") {
+        const change = JSON.parse(options.body);
+        window.__selfWorkSaves.push(change);
+        window.__selfWork = change.start_now === true || change.enabled === true;
+        if (change.start_now) window.__selfWorkWaits = false;
+      }
+      return new Response(JSON.stringify(selfWork(window.__selfWork)), { headers: { "Content-Type": "application/json" } });
+    }
+    return url.includes("/api/rem/") ? new Response(JSON.stringify({ detail: "Not Found" }), { status: 404, headers: { "Content-Type": "application/json" } }) : nativeFetch(input, options);
+  };
   if (scene !== "offline") await store.loadRemHomeFixture(["empty", "replying", "waiting"].includes(scene) ? scene : "busy");
 }
 
@@ -229,6 +254,16 @@ async function main() {
     ["BUTTON", "REM-5", "Open ticket REM-5: Fix the sync conflict on reconnect (In progress)", true, true],
     ["BUTTON", "ENG-18", "Open ticket ENG-18: Agent evaluation harness (Done), Eng", true, true],
   ];
+  // The side pane's Start/Stop self-work button: its state, words and place under Rem's name.
+  const selfWorkButton = `(() => {
+    const box = document.querySelector('.rem-side [data-testid=rem-self-work]');
+    if (!box) return null;
+    const button = box.querySelector('button'), side = document.querySelector('.rem-side').getBoundingClientRect(), r = button.getBoundingClientRect();
+    const heading = document.querySelector('.rem-side-heading'), scroll = document.querySelector('.rem-side-scroll');
+    return { on: box.dataset.on === 'true', mode: box.dataset.mode, label: button.textContent, line: box.querySelector('.rem-self-work-line')?.textContent || '',
+      inside: r.left >= side.left && r.right <= side.right + .5, height: Math.round(r.height),
+      placed: Boolean(heading.compareDocumentPosition(box) & Node.DOCUMENT_POSITION_FOLLOWING) && Boolean(box.compareDocumentPosition(scroll) & Node.DOCUMENT_POSITION_FOLLOWING) };
+  })()`;
   const scenes = (process.env.CAPTURE_SCENES || "busy,running,blocked,new,menu,empty,offline,replying,history,reply,tickets,waiting").split(",");
   for (const theme of (process.env.CAPTURE_THEMES || "light,dark").split(",")) {
     for (const width of (process.env.CAPTURE_WIDTHS || "1440,980").split(",").map(Number)) {
@@ -278,6 +313,10 @@ async function main() {
           assert.deepEqual(await evaluate("window.__opened"), [], "Fixture threads must not dispatch open requests");
           assert.match(await evaluate("document.querySelector('.rem-home-notice')?.textContent || ''"), /Preview threads/);
           await click("Dismiss");
+          // Self-work is on: the button under Rem's name stops it and says what it's doing.
+          const working = await evaluate(selfWorkButton);
+          assert.deepEqual({ ...working, line: undefined }, { on: true, mode: "working", label: "Stop self-workWorking", line: undefined, inside: true, height: 30, placed: true }, `Self-work button in ${tag}`);
+          assert.match(working.line, /^Working on 2 tasks, 3 more in To do\. Stops when “REM-205 to REM-212 are done”/, `Self-work line in ${tag}`);
           await shot(tag);
           // Every message carries its time; back-to-back Rem replies are split by a faint rule.
           assert.equal(await evaluate("[...document.querySelectorAll('[data-message-id]')].every(el => el.querySelector('time.rem-msg-time')?.textContent.trim())"), true, `Time stamp missing in ${tag}`);
@@ -287,8 +326,23 @@ async function main() {
           assert.equal(await evaluate("getComputedStyle(document.querySelector('[data-follows] .rem-msg-body')).borderTopStyle"), "solid");
           await evaluate("document.querySelector('.rem-stream').scrollTop = 0");
           await shot(`${tag}-earlier`);
+          // Stop sends only the switch, and the button turns into Start.
+          await click("Stop self-workWorking", ".rem-self-work-toggle");
+          await sleep(300);
+          assert.deepEqual(await evaluate("window.__selfWorkSaves"), [{ enabled: false, expected_revision: 5 }]);
+          assert.equal((await evaluate(selfWorkButton)).label, "Start self-work", `Stopped self-work in ${tag}`);
         }
         if (scene === "waiting") {
+          // Self-work is on but waits for quiet minutes: Start now starts it without the wait.
+          const waits = await evaluate(selfWorkButton);
+          assert.equal(waits.label, "Stop self-workWaiting", `Waiting self-work in ${tag}`);
+          assert.match(waits.line, /^Starts after 15 quiet minutes Start now$/, `Start now offered in ${tag}`);
+          assert.equal(await evaluate("(() => { const b = document.querySelector('.rem-self-work-now'), side = document.querySelector('.rem-side').getBoundingClientRect(), r = b.getBoundingClientRect(); return r.width > 0 && r.right <= side.right + .5; })()"), true, `Start now fits the side pane in ${tag}`);
+          await shot(`${tag}-self-work-waits`);
+          await click("Start now", ".rem-self-work-now");
+          await sleep(300);
+          assert.deepEqual(await evaluate("window.__selfWorkSaves"), [{ start_now: true, expected_revision: 5 }]);
+          assert.equal(await evaluate("document.querySelector('.rem-self-work-now')"), null, `Start now gone once asked in ${tag}`);
           // A task waiting for another sits in Coming up and says what it waits for.
           const row = title => `[...document.querySelectorAll('.rem-task-row')].find(row => row.querySelector('strong')?.textContent === ${JSON.stringify(title)})`;
           assert.equal(await evaluate(`${row("Fix the CLI gaps the audit finds")}?.dataset.kind`), "waiting");
@@ -427,6 +481,12 @@ async function main() {
           assert.equal(await evaluate("document.querySelector('.rem-clear-confirm')"), null);
           assert.equal(await evaluate("__rem.getState().tasks.length + __rem.getState().messages.length"), 0);
           assert.equal(await evaluate("Boolean(document.querySelector('.rem-welcome'))"), true);
+        }
+        if (scene === "empty") {
+          // Self-work is off: the button offers to start it now, without the quiet-minutes wait.
+          const off = await evaluate(selfWorkButton);
+          assert.deepEqual({ ...off, line: undefined }, { on: false, mode: "off", label: "Start self-work", line: undefined, inside: true, height: 30, placed: true }, `Self-work button in ${tag}`);
+          assert.equal(off.line, "Rem starts on its objectives now and keeps going until you stop it.");
         }
         if (scene === "empty") { await shot(tag); assert.equal(await evaluate("Boolean(document.querySelector('.rem-welcome .rem-avatar'))"), true, "Rem's sprite greets on the welcome screen"); await click("What's running right now?"); assert.equal(await evaluate("document.querySelector('.rem-composer textarea').value"), "What's running right now?"); }
         if (scene === "offline") {

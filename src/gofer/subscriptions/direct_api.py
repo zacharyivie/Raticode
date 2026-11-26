@@ -369,28 +369,6 @@ def _anthropic_message(payload: dict[str, Any]) -> str:
     return "\n".join(texts)
 
 
-def _usage_metadata(usage: dict[str, Any]) -> dict[str, object]:
-    metadata: dict[str, object] = {}
-    for source, target in (
-        ("input_tokens", "input_tokens"),
-        ("prompt_tokens", "input_tokens"),
-        ("output_tokens", "output_tokens"),
-        ("completion_tokens", "output_tokens"),
-        ("total_tokens", "total_tokens"),
-        ("cost_usd", "cost_usd"),
-    ):
-        if source in usage:
-            metadata[target] = usage[source]
-    if "input_tokens" in metadata and "output_tokens" in metadata:
-        input_tokens = int(cast(int | float | str, metadata["input_tokens"]))
-        output_tokens = int(cast(int | float | str, metadata["output_tokens"]))
-        metadata.setdefault(
-            "total_tokens",
-            input_tokens + output_tokens,
-        )
-    return metadata
-
-
 def _normalized_error(status: int, payload: dict[str, Any]) -> str:
     raw_error = payload.get("error")
     error = cast(dict[str, Any], raw_error) if isinstance(raw_error, dict) else {}

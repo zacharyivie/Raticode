@@ -27,6 +27,7 @@ from gofer.cli import client_options as opts
 from gofer.cli.client import (
     AGENT_SESSION_ENVS,
     ApiClient,
+    ApiError,
     CliError,
     Endpoint,
     ExitCode,
@@ -414,10 +415,6 @@ SECRET_OPTION = re.compile(
 
 # Each exception says why its value is not a credential on the command line.
 SECRET_OPTION_EXCEPTIONS = {
-    # Deprecated and hidden; prints a warning. Use --token-file or RATICODE_WEBHOOK_TOKEN.
-    ("workflow trigger", "--token"),
-    # Takes a secret reference such as {{secret.SMTP_PASSWORD}}; warns on a literal value.
-    ("workflow add-node", "--notification-smtp-password"),
     # The name of a stored secret, not its value.
     ("provider profile create", "--api-key-secret"),
     ("provider profile edit", "--api-key-secret"),
@@ -438,7 +435,7 @@ def test_the_option_walker_reaches_nested_commands() -> None:
     commands = {where for where, _ in _all_params(get_command(app))}
     assert {
         "api",
-        "workflow trigger",
+        "workflow logs list",
         "provider profile create",
         "rattish triggers add cron",
     } <= commands
@@ -455,9 +452,6 @@ def test_no_command_accepts_a_credential_on_the_command_line() -> None:
     assert found - SECRET_OPTION_EXCEPTIONS == set()
     # Every exception still exists, so the list can't silently go stale.
     assert SECRET_OPTION_EXCEPTIONS <= found
-    trigger = get_command(app).commands["workflow"].commands["trigger"]  # type: ignore[attr-defined]
-    deprecated = next(p for p in trigger.params if "--token" in p.opts)
-    assert deprecated.hidden is True
 
 
 # --- Waiting -------------------------------------------------------------------------
@@ -628,7 +622,7 @@ def backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[st
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     port = int(server.server_address[1])
-    write_api_files(data_dir, url=f"http://127.0.0.1:{port}", token="test-token-1")
+    write_api_files(data_dir, url=f"http://127.0.0.1:{port}", token="test-token-1", proof=True)
     monkeypatch.setenv("RATICODE_DATA_DIR", str(data_dir))
     try:
         yield {"server": server, "data_dir": data_dir, "port": port}
@@ -688,9 +682,18 @@ def test_api_wrong_token_is_rejected(backend: dict[str, Any], tmp_path: Path) ->
     token_file = tmp_path / "wrong"
     token_file.write_text("not-the-token")
     token_file.chmod(0o600)
-    result = _invoke("api", "GET", "/rem/kanban", "--token-file", str(token_file))
+    # Given the address directly, the backend gets the token and rejects it.
+    url = f"http://127.0.0.1:{backend['port']}"
+    args = ("api", "GET", "/rem/kanban", "--token-file", str(token_file))
+    result = _invoke(*args, "--endpoint", url)
     assert result.exit_code == ExitCode.AUTH
     assert "rejected" in result.stderr
+    # Found through endpoint.json, the backend can't prove it holds that token, so the
+    # token is never sent and the message names both possible causes.
+    unproven = _invoke(*args)
+    assert unproven.exit_code == ExitCode.UNREACHABLE
+    message = _envelope(unproven)["error"]["message"]
+    assert "--token-file" in message and "isn't this backend's" in message
 
 
 def test_api_not_found_and_invalid_input(backend: dict[str, Any]) -> None:
@@ -705,12 +708,6 @@ def test_api_not_found_and_invalid_input(backend: dict[str, Any]) -> None:
     assert _envelope(bad_json)["error"]["code"] == "invalid_json"
     method = _invoke("api", "TRACE", "/health")
     assert method.exit_code == ExitCode.USAGE
-
-
-def test_import_preview_without_a_bundle_is_a_bad_request(backend: dict[str, Any]) -> None:
-    result = _invoke("api", "POST", "/workflows/import/preview", "--data", "{}")
-    assert result.exit_code == ExitCode.USAGE, result.stdout
-    assert _envelope(result)["error"]["http"] == 400
 
 
 def test_api_refuses_remote_endpoints_before_connecting(backend: dict[str, Any]) -> None:
@@ -756,13 +753,84 @@ def test_a_stale_endpoint_file_never_sends_the_token_to_whatever_holds_the_port(
         assert result.exit_code == ExitCode.UNREACHABLE, result.stdout
         assert "no longer running" in _envelope(result)["error"]["message"]
         assert seen == []
-        # The same file with a live backend's pid still connects.
+        # The same file with a live backend's pid still connects when it predates the
+        # instance proof.
         write_api_files(tmp_path, url=f"http://127.0.0.1:{port}", token="owner-secret")
         assert _invoke("api", "GET", "/health", "--data-dir", str(tmp_path)).exit_code == 0
         assert seen == ["Bearer owner-secret"]
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_a_squatter_with_a_live_pid_never_gets_the_owner_token_when_proof_is_published(
+    tmp_path: Path,
+) -> None:
+    # The recorded pid is alive (this test process), so only the proof stops the token.
+    # The squatter answers the proof route with an earlier valid answer it captured.
+    from gofer.ui.headless import instance_proof
+
+    stale_nonce = "ab" * 32
+    replayed = instance_proof("owner-secret", stale_nonce)
+    seen: list[tuple[str, str | None]] = []
+
+    class Squatter(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            seen.append((self.path, self.headers.get("Authorization")))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": True, "proof": replayed}).encode())
+
+        def log_message(self, *args: Any) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Squatter)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        port = server.server_address[1]
+        files = write_api_files(
+            tmp_path, url=f"http://127.0.0.1:{port}", token="owner-secret", proof=True
+        )
+        published = json.loads(files.endpoint_file.read_text(encoding="utf-8"))
+        assert published["proof"] == 1 and published["pid"] == os.getpid()
+        result = _invoke("api", "GET", "/health", "--data-dir", str(tmp_path))
+        assert result.exit_code == ExitCode.UNREACHABLE, result.stdout
+        error = _envelope(result)["error"]
+        assert error["code"] == "unreachable"
+        assert str(files.endpoint_file) in error["message"]
+        assert seen, "the proof request should have reached the squatter"
+        assert all(auth is None for _path, auth in seen)
+        assert all(path.startswith("/api/instance/proof?nonce=") for path, _auth in seen)
+        assert stale_nonce not in seen[0][0]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_real_backend_proves_it_holds_the_owner_token(
+    backend: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gofer.ui.headless import instance_proof
+
+    endpoint = discover_endpoint(data_dir=backend["data_dir"])
+    assert endpoint.proof is True
+    client = ApiClient(endpoint)
+    nonce = "0f" * 32
+    answer = client.request("GET", "/instance/proof", query={"nonce": nonce}).data
+    assert answer == {"proof": instance_proof("test-token-1", nonce)}
+    assert client._proven is True
+    # The owner token then works for an authenticated route, and the same client
+    # doesn't ask for the proof again.
+    monkeypatch.setattr(client, "_prove_instance", lambda _timeout: pytest.fail("asked twice"))
+    assert "board" in client.get("/rem/kanban")
+    # A bad nonce is refused without an answer.
+    for bad in ("", "0F" * 32, "ab" * 31, "zz" * 32):
+        with pytest.raises(ApiError) as caught:
+            client.request("GET", "/instance/proof", query={"nonce": bad})
+        assert caught.value.http_status == 400
+    result = _invoke("api", "GET", "/rem/kanban")
+    assert result.exit_code == 0, result.stderr
 
 
 def test_an_agent_turn_reaches_a_live_backend_whose_pid_it_cant_see(
@@ -1085,19 +1153,6 @@ def test_typer_exit_codes_pass_through_run_command() -> None:
     with pytest.raises(typer.Exit) as caught:
         opts.run_command("demo", OutputFormat.json, body)
     assert caught.value.exit_code == ExitCode.NEEDS_USER
-
-
-def test_smtp_password_option_warns_on_a_literal_password(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    from gofer.cli.commands.workflow import _warn_literal_secret
-
-    _warn_literal_secret("{{secret.SMTP_PASSWORD}}", "--notification-smtp-password")
-    _warn_literal_secret("secret:SMTP_PASSWORD", "--notification-smtp-password")
-    _warn_literal_secret(None, "--notification-smtp-password")
-    assert capsys.readouterr().err == ""
-    _warn_literal_secret("hunter2", "--notification-smtp-password")
-    assert "looks like a literal secret" in capsys.readouterr().err
 
 
 # --- Resending only what is safe to resend ---------------------------------------------

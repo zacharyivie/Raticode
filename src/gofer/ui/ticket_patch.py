@@ -29,9 +29,8 @@ from typing import Any
 
 from gofer.core.commit_attribution import clean_commit_message
 from gofer.utils.process import (
-    NO_REPOSITORY_PROGRAMS,
     build_subprocess_env,
-    untrusted_repository_git_env,
+    run_repository_git,
 )
 
 GIT_TIMEOUT_SECONDS = 60
@@ -63,13 +62,12 @@ class LandConflict(PatchError):
 
 def _run(cwd: Path | str, *args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
     try:
-        env = untrusted_repository_git_env(cwd, build_subprocess_env())
-        result = subprocess.run(
-            ["git", *NO_REPOSITORY_PROGRAMS, "-C", str(cwd), *args],
-            capture_output=True,
+        result = run_repository_git(
+            cwd,
+            *args,
             timeout=GIT_TIMEOUT_SECONDS,
-            check=False,
-            env={**env, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"},
+            env={**build_subprocess_env(), "LC_ALL": "C"},
+            text=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise PatchError(str(exc)) from exc

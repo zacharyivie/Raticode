@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 from gofer.core.network_policy import allowlist_match, is_global_address
 from gofer.utils.http_read import read_before
+from gofer.utils.images import sniff_image_type
 
 PAGE_LIMIT = 512 * 1024
 IMAGE_LIMIT = 400 * 1024
@@ -296,22 +297,11 @@ def build_preview(url: str, *, resolver: Resolver = socket.getaddrinfo) -> dict[
 
 # Inline chat images, for the phone and for the desktop renderer alike.
 CHAT_IMAGE_LIMIT = 768 * 1024
-IMAGE_SIGNATURES = (
-    (b"\xff\xd8\xff", "image/jpeg"),
-    (b"\x89PNG\r\n\x1a\n", "image/png"),
-    (b"GIF87a", "image/gif"),
-    (b"GIF89a", "image/gif"),
-)
 
 
 def image_mime(data: bytes) -> str | None:
     """The image type named by the file's own bytes, never by the server."""
-    for signature, mime in IMAGE_SIGNATURES:
-        if data.startswith(signature):
-            return mime
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    return None
+    return sniff_image_type(data)
 
 
 def chat_image(url: str, *, resolver: Resolver = socket.getaddrinfo) -> dict[str, Any]:

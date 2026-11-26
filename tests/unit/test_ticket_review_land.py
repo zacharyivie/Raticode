@@ -10,7 +10,8 @@ import pytest
 
 from gofer.ui.organization_store import OrganizationConflict
 from gofer.ui.rem_kanban import KanbanRefused, get_ticket, put_ticket
-from tests.unit.test_organization_plans import _repo, act, company, read, settle, start
+from tests.helpers.organizations import act
+from tests.unit.test_organization_plans import _repo, company, read, settle, start
 from tests.unit.test_rem_kanban import add
 from tests.unit.test_rem_kanban import board as board
 

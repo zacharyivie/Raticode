@@ -136,8 +136,6 @@ object Computers {
         return params
     }
 
-    fun strategyText(strategy: String) = STRATEGIES.firstOrNull { it.first == strategy }?.second ?: strategy
-
     /** The assigned computers in words, such as "Laptop (shared), Unpaired computer 0000abcd (missing)". */
     fun assignedText(placement: Placement, view: PlacementView): String = when {
         placement.strategy != "manual" -> if (placement.saved) "Any of your computers" else "Any of your computers (default)"

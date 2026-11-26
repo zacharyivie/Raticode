@@ -11,7 +11,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.platform.app.InstrumentationRegistry
 import dev.raticode.mobile.browser.BrowserRules
 import dev.raticode.mobile.browser.BrowserRuntime
-import dev.raticode.mobile.browser.FirefoxApps
+import dev.raticode.mobile.browser.Firefox
 import dev.raticode.mobile.browser.GeckoBrowser
 import dev.raticode.mobile.browser.GeckoImport
 import dev.raticode.mobile.live.LiveClient
@@ -75,7 +75,7 @@ class GeckoPhoneFirefoxImportTest {
     }
 
     @Test fun takesTheExtensionListFromFirefoxOnThisPhone() {
-        val firefox = FirefoxApps.find(app)
+        val firefox = Firefox.APP.find(app)
         assumeTrue("Requires Firefox for Android on the emulator", firefox?.usable == true)
         lateinit var gecko: GeckoBrowser
         compose.runOnUiThread {
@@ -92,7 +92,7 @@ class GeckoPhoneFirefoxImportTest {
             compose.waitUntil(10000) { shown("geckoMenuSheet") }
             compose.onNodeWithText("Import from Firefox").performScrollTo().performClick()
             compose.waitUntil(10000) { shown("geckoImportFound") }
-            compose.onNodeWithText("${firefox!!.build.name} ${firefox.version} is on this phone").assertExists()
+            compose.onNodeWithText("${firefox!!.edition.name} ${firefox.version} is on this phone").assertExists()
             assertFalse("The computer steps are out of the way", shown("geckoImportFiles"))
             assertFalse("Nothing to import yet", shown("geckoImportRun"))
             screenshot("found")

@@ -14,11 +14,11 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
-import shutil
+import os
 import sqlite3
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -46,6 +46,8 @@ from gofer.social.models import (
 )
 from gofer.social.policy import clean_text, content_hash, flags_for
 from gofer.social.templates import STARTERS, TemplateError
+from gofer.utils.atomic_output import open_binary_input
+from gofer.utils.images import sniff_image_type
 from gofer.utils.paths import get_data_dir
 
 SOCIAL_FOLDER = "social"
@@ -53,6 +55,7 @@ DB_FILE = "posts.db"
 MEDIA_FOLDER = "media"
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_VIDEO_BYTES = 256 * 1024 * 1024
+_COPY_CHUNK = 1024 * 1024
 MEDIA_TYPES = {
     "image/jpeg",
     "image/png",
@@ -62,13 +65,8 @@ MEDIA_TYPES = {
     "video/quicktime",
     "video/webm",
 }
-_MAGIC = (
-    (b"\xff\xd8\xff", "image/jpeg"),
-    (b"\x89PNG\r\n\x1a\n", "image/png"),
-    (b"GIF87a", "image/gif"),
-    (b"GIF89a", "image/gif"),
-    (b"\x1aE\xdf\xa3", "video/webm"),
-)
+# Video signatures; images are told apart by sniff_image_type.
+_VIDEO_MAGIC = ((b"\x1aE\xdf\xa3", "video/webm"),)
 USER = "user"
 
 
@@ -708,27 +706,23 @@ class SocialService:
             path = item.get("path") if isinstance(item, Mapping) else None
             if not isinstance(path, str):
                 raise SocialError("Each media item needs a file path.")
-            if is_proposer(actor):
-                self._check_proposer_media(Path(path))
-            result.append(self.import_media(Path(path)))
+            result.append(self.import_media(Path(path), proposer=is_proposer(actor)))
         return result
 
-    def _check_proposer_media(self, path: Path) -> None:
+    def _check_proposer_media(self, path: Path) -> tuple[Path, os.stat_result]:
         """Refuse a proposer's file outside the projects open in Raticode.
 
         The review card shows a file's name, type and size, not the picture, so a
         proposer must not reach the user's other files, such as a photo in ~/Pictures.
-        Every refusal reads the same, so it can't tell whether a file exists.
+        Every refusal reads the same, so it can't tell whether a file exists. Returns the
+        resolved path that passed and its stat, so the copy can make sure it opened
+        that same file.
         """
-        refused = SocialError(
-            "Rem, tasks and workflows can attach files only from a project open in Raticode.",
-            "forbidden",
-        )
         roots = list(self.media_roots()) if self.media_roots is not None else []
         try:
             source = path.expanduser().resolve(strict=False)
         except (OSError, RuntimeError):
-            raise refused from None
+            raise _outside_projects() from None
         for root in roots:
             try:
                 base = Path(root).resolve(strict=True)
@@ -737,8 +731,11 @@ class SocialService:
             if source.is_relative_to(base) and not any(
                 part.startswith(".") for part in source.relative_to(base).parts
             ):
-                return
-        raise refused
+                try:
+                    return source, source.stat()
+                except OSError:
+                    raise SocialError(f"Can't read {path.name}.") from None
+        raise _outside_projects()
 
     def media_path(self, sha256: str) -> Path | None:
         if len(sha256) != 64 or not all(char in "0123456789abcdef" for char in sha256):
@@ -748,38 +745,67 @@ class SocialService:
             return candidate
         return None
 
-    def import_media(self, path: Path) -> dict[str, Any]:
-        """Copy a file into the data folder by its SHA-256 so it can't change after review."""
-        try:
-            source = path.expanduser().resolve(strict=True)
-        except OSError:
-            raise SocialError(f"Can't read {path.name}.") from None
+    def import_media(self, path: Path, *, proposer: bool = False) -> dict[str, Any]:
+        """Copy a file into the data folder by its SHA-256 so it can't change after review.
+
+        The file is opened once, without following links, and its type, size and bytes
+        all come from that one handle. A proposer's handle must be the very file that
+        passed the project check, so a swap between the check and the copy is refused.
+        """
+        checked: os.stat_result | None = None
+        if proposer:
+            source, checked = self._check_proposer_media(path)
+        else:
+            try:
+                source = path.expanduser().resolve(strict=True)
+            except OSError:
+                raise SocialError(f"Can't read {path.name}.") from None
         if not source.is_file():
             raise SocialError(f"{path.name} isn't a file.")
-        with source.open("rb") as handle:
-            head = handle.read(16)
-        # Only the file's own bytes decide its type, never its name.
-        mime = _sniff(head) or ""
-        if mime not in MEDIA_TYPES:
-            raise SocialError("Media can be JPEG, PNG, GIF, WebP, MP4, MOV or WebM.")
-        size = source.stat().st_size
-        limit = MAX_VIDEO_BYTES if mime.startswith("video/") else MAX_IMAGE_BYTES
-        if size > limit:
-            raise SocialError(f"{source.name} is larger than {limit // (1024 * 1024)} MB.")
-        folder = self.root / MEDIA_FOLDER
-        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-        temporary = folder / f".{uuid4().hex}.tmp"
-        try:
-            shutil.copyfile(source, temporary)
-            if mime in {"image/jpeg", "image/png", "image/webp"}:
-                _strip_exif(temporary, mime)
-            digest = hashlib.sha256(temporary.read_bytes()).hexdigest()
-            extension = mimetypes.guess_extension(mime) or ".bin"
-            target = folder / f"{digest}{extension}"
-            if not target.exists():
-                temporary.replace(target)
-        finally:
-            temporary.unlink(missing_ok=True)
+        with ExitStack() as held:
+            try:
+                handle = held.enter_context(open_binary_input(source))
+                info = os.fstat(handle.fileno())
+            except OSError:
+                if checked is not None:
+                    raise _outside_projects() from None
+                raise SocialError(f"Can't read {path.name}.") from None
+            if checked is not None and (info.st_dev, info.st_ino) != (
+                checked.st_dev,
+                checked.st_ino,
+            ):
+                raise _outside_projects()
+            # Only the file's own bytes decide its type, never its name.
+            mime = _sniff(handle.read(16)) or ""
+            if mime not in MEDIA_TYPES:
+                raise SocialError("Media can be JPEG, PNG, GIF, WebP, MP4, MOV or WebM.")
+            limit = MAX_VIDEO_BYTES if mime.startswith("video/") else MAX_IMAGE_BYTES
+            too_large = SocialError(f"{source.name} is larger than {limit // (1024 * 1024)} MB.")
+            if info.st_size > limit:
+                raise too_large
+            folder = self.root / MEDIA_FOLDER
+            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+            temporary = folder / f".{uuid4().hex}.tmp"
+            try:
+                handle.seek(0)
+                with temporary.open("xb") as copy:
+                    copied = 0
+                    # Read at most one byte past the limit, so a file that grew after
+                    # its size was read is refused rather than copied in full.
+                    while chunk := handle.read(min(_COPY_CHUNK, limit + 1 - copied)):
+                        copied += len(chunk)
+                        if copied > limit:
+                            raise too_large
+                        copy.write(chunk)
+                if mime in {"image/jpeg", "image/png", "image/webp"}:
+                    _strip_exif(temporary, mime)
+                digest = hashlib.sha256(temporary.read_bytes()).hexdigest()
+                extension = mimetypes.guess_extension(mime) or ".bin"
+                target = folder / f"{digest}{extension}"
+                if not target.exists():
+                    temporary.replace(target)
+            finally:
+                temporary.unlink(missing_ok=True)
         return _media_record(target, source.name)
 
     def _targets(self, post: Mapping[str, Any]) -> list[str]:
@@ -1233,12 +1259,20 @@ def _options(platform: str, value: Any) -> dict[str, Any]:
     return options
 
 
+def _outside_projects() -> SocialError:
+    return SocialError(
+        "Rem, tasks and workflows can attach files only from a project open in Raticode.",
+        "forbidden",
+    )
+
+
 def _sniff(head: bytes) -> str | None:
-    for magic, mime in _MAGIC:
+    image = sniff_image_type(head)
+    if image:
+        return image
+    for magic, mime in _VIDEO_MAGIC:
         if head.startswith(magic):
             return mime
-    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
-        return "image/webp"
     if head[4:8] == b"ftyp":
         return "video/quicktime" if head[8:10] == b"qt" else "video/mp4"
     return None

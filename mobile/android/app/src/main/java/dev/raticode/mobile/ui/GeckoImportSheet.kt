@@ -18,7 +18,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import dev.raticode.mobile.browser.FirefoxApps
+import dev.raticode.mobile.browser.BrowserApp
+import dev.raticode.mobile.browser.Firefox
 import dev.raticode.mobile.browser.GeckoBrowser
 import dev.raticode.mobile.browser.GeckoImport
 import dev.raticode.mobile.browser.GeckoImporter
@@ -45,9 +46,9 @@ internal fun GeckoImportSheet(gecko: GeckoBrowser, onDismiss: () -> Unit) {
                     Text("Import from Firefox", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
                     when {
                         importer.waitingForFirefox -> WaitingForFirefox(importer, context)
-                        fromPhone -> Text("From ${firefox?.build?.name ?: "Firefox"} on this phone. Untick anything you don't want, then tap Import.", style = MaterialTheme.typography.bodySmall, color = muted)
+                        fromPhone -> Text("From ${firefox?.edition?.name ?: "Firefox"} on this phone. Untick anything you don't want, then tap Import.", style = MaterialTheme.typography.bodySmall, color = muted)
                         usable -> FoundFirefox(firefox, onStart = { importer.startFromFirefox(context) })
-                        else -> Text(FirefoxApps.problem(firefox) ?: FirefoxApps.MISSING, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("geckoImportNoFirefox"))
+                        else -> Text(Firefox.APP.problem(firefox) ?: Firefox.APP.missing, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("geckoImportNoFirefox"))
                     }
                     if (importer.busy > 0) LinearProgressIndicator(Modifier.fillMaxWidth().testTag("geckoImportBusy"))
                     importer.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("geckoImportError")) }
@@ -129,8 +130,8 @@ private fun PickUpOnReturn(importer: GeckoImporter) {
 }
 
 @Composable
-private fun FoundFirefox(firefox: FirefoxApps.Found?, onStart: () -> Unit) {
-    Text("${firefox?.build?.name} ${firefox?.version} is on this phone", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, modifier = Modifier.testTag("geckoImportFound"))
+private fun FoundFirefox(firefox: BrowserApp.Found?, onStart: () -> Unit) {
+    Text("${firefox?.edition?.name} ${firefox?.version} is on this phone", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, modifier = Modifier.testTag("geckoImportFound"))
     Text("Android keeps each app's data private, so Raticode can't read Firefox on its own. In Firefox, you can paste an address and tap Copy raw data to try handing over its list of extensions.",
         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     Text("This replaces what's on your clipboard with the address ${GeckoImport.SUPPORT_PAGE}.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("geckoImportClipboardNote"))

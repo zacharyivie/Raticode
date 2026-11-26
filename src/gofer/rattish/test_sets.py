@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import difflib
 import hashlib
-import inspect
 import json
 import math
 import os
@@ -65,7 +64,6 @@ from gofer.subscriptions.base import Subscription
 from gofer.utils.atomic_output import atomic_binary_output, mkdir_without_links
 from gofer.utils.paths import get_data_dir
 
-TEST_SET_VERSION = 1
 TEST_RESULT_VERSION = 1
 TEST_SET_SUFFIX = ".tests.json"
 TARGET_ROOTS = ("status", "error", "outputs", "nodes")
@@ -106,10 +104,6 @@ def workflow_tests_file(source_path: Path) -> Path:
     """Where the test set of a workflow source lives: beside it, named after it."""
     source = source_path.expanduser().resolve()
     return source.with_name(f"{source.stem}{TEST_SET_SUFFIX}")
-
-
-def empty_test_set() -> dict[str, Any]:
-    return {"testSetVersion": TEST_SET_VERSION, "cases": []}
 
 
 def read_test_set(path: Path) -> dict[str, Any] | None:
@@ -309,10 +303,9 @@ class MeteredSubscription(Subscription):
     def __init__(self, underlying: Subscription, meter: UsageMeter) -> None:
         self.underlying = underlying
         self.meter = meter
-        self._accepted = inspect.signature(underlying.execute).parameters
 
     def __getattr__(self, name: str) -> Any:
-        if name in {"underlying", "meter", "_accepted"}:
+        if name in {"underlying", "meter"}:
             raise AttributeError(name)
         return getattr(self.underlying, name)
 
@@ -323,8 +316,6 @@ class MeteredSubscription(Subscription):
         return self.underlying._build_command(*args, **kwargs)
 
     async def execute(self, *args: Any, **kwargs: Any) -> Any:
-        if not any(item.kind == inspect.Parameter.VAR_KEYWORD for item in self._accepted.values()):
-            kwargs = {key: value for key, value in kwargs.items() if key in self._accepted}
         self.meter.calls += 1
         result = await self.underlying.execute(*args, **kwargs)
         self.meter.items.append(dict(getattr(result, "usage_metadata", None) or {}))

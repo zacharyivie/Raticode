@@ -6,7 +6,7 @@ import ChatSources from "./ChatSources.jsx";
 import MarkdownContent from "./MarkdownContent.jsx";
 import { openRemThread, retryRemReview, runRemTaskNow, suggestMessage } from "../lib/remHomeStore.js";
 import { replyToRemMessage } from "../lib/remComposer.js";
-import { artifactLine, collapseLimits, resultActions, checksSummary, elapsedLabel, messageCopyText, referenceLines, replyMeta, replyTarget, runSteps, stepText } from "../lib/remRich.js";
+import { artifactLine, collapseLimits, resultActions, checksSummary, elapsedLabel, messageCopyText, referenceLines, replyMeta, replyTarget, runSteps, shouldCollapse, stepText } from "../lib/remRich.js";
 import "./RemRich.css";
 
 // Messages you opened or folded stay that way while this window is open.
@@ -48,7 +48,7 @@ export function FoldableText({ id, startOpen = false, children }) {
     const measure = () => {
       const next = collapseLimits(window.innerHeight);
       setLimits(current => current.preview === next.preview ? current : next);
-      setLong(content.offsetHeight > next.threshold);
+      setLong(shouldCollapse(content.offsetHeight, window.innerHeight));
     };
     measure();
     const observer = typeof ResizeObserver === "function" ? new ResizeObserver(measure) : null;

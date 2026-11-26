@@ -36,6 +36,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from gofer.ui import rem_verified_work as verified
 from gofer.ui.rem_home_models import ACTIVE, ClockTime, SelfWorkRequest
+from gofer.utils.instants import stored_instant
 
 SCHEDULE_KEY = "self_work_schedule"
 MAX_SPAN = timedelta(days=7)
@@ -73,16 +74,6 @@ def zone(name: str | None) -> ZoneInfo:
         raise WindowRefused(
             f"“{name}” isn't a time zone I know. Use a name like Asia/Irkutsk or Europe/Berlin."
         ) from exc
-
-
-def instant(value: Any) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def clock_label(moment: datetime) -> str:
@@ -208,7 +199,7 @@ def write(db: sqlite3.Connection, schedule: dict[str, Any]) -> None:
 
 
 def _ends(window: dict[str, Any]) -> datetime | None:
-    return instant(window.get("end_at"))
+    return stored_instant(window.get("end_at"))
 
 
 def active(
@@ -222,7 +213,7 @@ def active(
     never lets self-work start more.
     """
     for window in schedule.get("windows") or []:
-        start = instant(window["start_at"])
+        start = stored_instant(window["start_at"])
         end = _ends(window)
         if start and start <= clock and (end is None or clock < end):
             if db is not None and _condition_met(db, window):
@@ -243,7 +234,7 @@ def upcoming(schedule: dict[str, Any], clock: datetime) -> list[dict[str, Any]]:
         (
             dict(w)
             for w in schedule.get("windows") or []
-            if (instant(w["start_at"]) or clock) > clock
+            if (stored_instant(w["start_at"]) or clock) > clock
         ),
         key=lambda w: str(w["start_at"]),
     )
@@ -297,7 +288,7 @@ def describe(
     """A window as every client shows it: the stored fields plus labels in its zone."""
     name = str(window.get("timezone") or "UTC")
     end = _ends(window)
-    start = instant(window["start_at"]) or clock
+    start = stored_instant(window["start_at"]) or clock
     waiting = len(window.get("until_runs") or [])
     if db is not None and window.get("until") == "running_done":
         waiting = len(_still_running(db, list(window.get("until_runs") or [])))
@@ -366,7 +357,7 @@ def _new_window(
 
 
 def _overlaps(window: dict[str, Any], start: datetime, end: datetime | None) -> bool:
-    other_start = instant(window["start_at"])
+    other_start = stored_instant(window["start_at"])
     other_end = _ends(window)
     if other_start is None:
         return False
@@ -565,7 +556,7 @@ def advance(
     events: list[tuple[str, dict[str, Any]]] = []
     changed = False
     for window in sorted(schedule["windows"], key=lambda w: str(w["start_at"])):
-        start = instant(window["start_at"]) or clock
+        start = stored_instant(window["start_at"]) or clock
         end = _ends(window)
         done = bool(end and clock >= end)
         if start <= clock:
@@ -621,7 +612,7 @@ def build_report(
     it and changed state in it. Tickets and proposals come from the running report's rows
     written in the period.
     """
-    started_at = instant(period["started_at"]) or ended_at
+    started_at = stored_instant(period["started_at"]) or ended_at
     items: list[dict[str, Any]] = []
     counts = dict.fromkeys(("started", "finished", "paused", "blocked", "running", "stopped"), 0)
     for (body,) in db.execute(
@@ -631,9 +622,9 @@ def build_report(
         run = json.loads(body)
         if not _self_started(run):
             continue
-        created = instant(run.get("created_at")) or started_at
-        finished = instant(run.get("finished_at"))
-        paused_at = instant((run.get("paused") or {}).get("at"))
+        created = stored_instant(run.get("created_at")) or started_at
+        finished = stored_instant(run.get("finished_at"))
+        paused_at = stored_instant((run.get("paused") or {}).get("at"))
         new = started_at <= created <= ended_at
         moved = any(
             moment is not None and started_at <= moment <= ended_at
@@ -676,7 +667,7 @@ def build_report(
             (int(period.get("from_seq") or 0),),
         )
     ]
-    rows = [r for r in rows if (instant(r.get("at")) or ended_at) <= ended_at]
+    rows = [r for r in rows if (stored_instant(r.get("at")) or ended_at) <= ended_at]
     numbers = {
         row[0]: row[1]
         for row in db.execute(
@@ -824,8 +815,8 @@ ENDED_BY = {
 def report_text(report: dict[str, Any], clock: datetime, ended_by: str) -> str:
     """The chat message: a lead line, then one line per task, with ticket keys as pills."""
     name = report["timezone"]
-    start = instant(report["started_at"]) or clock
-    end = instant(report["ended_at"]) or clock
+    start = stored_instant(report["started_at"]) or clock
+    end = stored_instant(report["ended_at"]) or clock
     lines = [
         f"**Self-work report**: {when_label(start, name, clock)} to "
         f"{when_label(end, name, clock)}, {ENDED_BY.get(ended_by, 'it stopped')}.",

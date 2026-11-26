@@ -558,27 +558,8 @@ function SwarmAgentActivity({ run, agents, selectedAgentId, compact = false }) {
   </div></div>;
 }
 
-
 // A running run whose next turn waits for a free worker on this computer.
 export function RunWaiting({ run }) {
   if (run?.state !== "running" || !run.waitReason) return null;
   return <p role="status" className="mt-3 text-xs leading-5 text-muted">{run.waitReason}</p>;
-}
-
-export function SwarmDigest({ run, agents }) {
-  if (!run) return null;
-  const summaries = new Map((run.digest?.agents || []).map(item => [item.agentId, item.summary]));
-  const milestones = (run.objectives || []).flatMap(objective => objective.milestones || []);
-  return <aside aria-label="Team status" className="swarm-digest">
-    <div className="swarm-section-heading"><h2>Team status</h2>{run.digest?.updatedAt ? <time dateTime={run.digest.updatedAt} title={new Date(run.digest.updatedAt).toLocaleString()}>Orchestrator update · {new Date(run.digest.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time> : <span>Current assignments</span>}</div>
-    <ul>{agents.map(agent => {
-      const state = run.agentStates?.[agent.id] || {};
-      const assigned = milestones.find(item => item.id === state.milestoneId && !["accepted", "cancelled"].includes(item.status));
-      const pending = (run.messages || []).some(message => message.deliveries?.some(item => item.agentId === agent.id && item.state === "queued"));
-      const status = state.state === "idle" && pending && run.state === "running" ? "queued" : state.state || "idle";
-      const summary = summaries.get(agent.id) || assigned?.title || (status === "working" ? "Reviewing the task and board" : status === "retry_wait" ? "Waiting to retry after a provider error" : "No active assignment");
-      return <li key={agent.id}><strong>{agent.name}</strong><span title={summary}>{summary.length > 160 ? `${summary.slice(0, 157)}...` : summary}</span><small>{status.replaceAll("_", " ")}</small></li>;
-    })}</ul>
-    {run.idleDiagnosis?.body ? <p className="swarm-digest-diagnosis">{run.idleDiagnosis.body}</p> : run.idleDiagnosis?.state === "working" ? <p role="status">Orchestrator is explaining why the run became idle.</p> : null}
-  </aside>;
 }

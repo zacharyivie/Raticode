@@ -76,6 +76,17 @@ Node next:
     assert snapshot["edges"][0]["to"] == "next"
     assert snapshot["edges"][0]["mode"] == "when"
     assert snapshot["edges"][0]["predicate"] == original_nodes["start"]["routes"][0]["predicate"]
+    # Only Rattish fields: no TOML node settings or route condition.
+    assert "settings" not in snapshot_nodes["start"]
+    assert set(snapshot["edges"][0]) == {
+        "id",
+        "from",
+        "to",
+        "mode",
+        "predicate",
+        "predicateSource",
+        "status",
+    }
     # Inspection also succeeds when the original source is removed entirely.
     source.unlink()
     assert (

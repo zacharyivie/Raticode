@@ -47,7 +47,7 @@ export default function OrganizationChart({ config, onEmployee, onCollection }) 
     return <li key={employee.id} className="org-chart-branch">
       <div className="org-chart-node">
         <button className="org-chart-person" type="button" onClick={() => onEmployee(employee.id)}>
-          <span className="org-initial">{initials(employee.name)}</span><span><strong>{employee.name}</strong><small>{employee.title || employee.role || "Rem employee"}</small><small>Reports to {config.employees.find(person => person.id === employee.reportsTo)?.name || "Organization owner"}</small></span><ChevronRight size={14} aria-hidden="true" />
+          <span className="org-initial">{initials(employee.name)}</span><span><strong>{employee.name}</strong><small>{employee.title || employee.role || "Rem worker"}</small><small>Reports to {config.employees.find(person => person.id === employee.reportsTo)?.name || "Organization owner"}</small></span><ChevronRight size={14} aria-hidden="true" />
         </button>
         {links(employee.id)}
       </div>
@@ -55,7 +55,7 @@ export default function OrganizationChart({ config, onEmployee, onCollection }) 
     </li>;
   }
   return <section aria-label="Organization chart">
-    <div className="org-section-heading"><div><h3>Org chart</h3><p className="org-note">Drag to explore. Select an employee, team, or initiative to see its details.</p></div><div className="org-chart-view" role="group" aria-label="Chart view">{["people", "teams"].map(option => <button key={option} type="button" aria-pressed={view === option} onClick={() => setView(option)}>{option === "people" ? "People" : "Teams"}</button>)}</div></div>
+    <div className="org-section-heading"><div><h3>Org chart</h3><p className="org-note">Drag to explore. Select a worker, team, or initiative to see its details.</p></div><div className="org-chart-view" role="group" aria-label="Chart view">{["people", "teams"].map(option => <button key={option} type="button" aria-pressed={view === option} onClick={() => setView(option)}>{option === "people" ? "People" : "Teams"}</button>)}</div></div>
     <nav className="org-chart-navigation" aria-label="Organization directories">
       <button type="button" onClick={() => onCollection("owned-projects")}><Folder size={18} /><span>Projects<small>{plural(config.projectRoots?.length || 0, "project")}</small></span><ChevronRight size={16} /></button>
       <button type="button" onClick={() => onCollection("teams")}><Users size={18} /><span>Teams<small>{plural(config.teams.length, "team")}</small></span><ChevronRight size={16} /></button>
@@ -67,10 +67,10 @@ export default function OrganizationChart({ config, onEmployee, onCollection }) 
       onClickCapture={event => { if (suppressClick.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation(); suppressClick.current = false; } }}>
       <div className="org-chart-root org-chart-node"><div className="org-chart-person"><Building2 size={22} /><span><strong>{config.name}</strong><small>Organization owner · You and Rem</small></span></div>{links(null)}</div>
       {view === "people" ? <ul className="org-chart-branches" aria-label="Reports to organization owner">{reportingHierarchy(config.employees).map(branch)}</ul> : <div className="org-chart-groups">{groups.map(({ team, employees }) => <section className="org-chart-team" key={team ? `team:${team.id}` : "unassigned"} aria-label={team ? `Team: ${team.name || team.id}` : "No team"}>
-        <h4>{team ? <button type="button" aria-label={`Team: ${team.name || team.id}`} onClick={() => onCollection("teams", team.id)}><Users size={17} /><span>{team.name || team.id}</span><ChevronRight size={14} /></button> : "No team"}<small>{plural(employees.length, "employee")}</small></h4>
+        <h4>{team ? <button type="button" aria-label={`Team: ${team.name || team.id}`} onClick={() => onCollection("teams", team.id)}><Users size={17} /><span>{team.name || team.id}</span><ChevronRight size={14} /></button> : "No team"}<small>{plural(employees.length, "worker")}</small></h4>
         {employees.length ? <ul className="org-chart-branches" aria-label={team ? `${team.name || team.id} reporting lines` : "Reports to organization owner"}>{reportingHierarchy(employees).map(branch)}</ul> : <p className="org-note">Choose a team manager to include their reporting chain.</p>}
       </section>)}</div>}
-      {!config.employees.length && <p className="org-note">Add employees in the Employees tab, then choose who each reports to.</p>}
+      {!config.employees.length && <p className="org-note">Add workers in the Workers tab, then choose who each reports to.</p>}
     </div>
   </section>;
 }

@@ -28,20 +28,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from gofer.ui.rem_kanban import task_ticket_keys
+from gofer.utils.instants import stored_instant
 
 # How long a list stays good while a label or cost in it reads the clock or outside
 # files: waits for a time or the self-work window, and a finished workflow draft's costs.
 CLOCK_LABELS_FOR = timedelta(seconds=60)
-
-
-def _instant(value: Any) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def next_due(tasks: list[dict[str, Any]], clock: datetime) -> datetime | None:
@@ -57,19 +48,19 @@ def next_due(tasks: list[dict[str, Any]], clock: datetime) -> datetime | None:
     moments: list[datetime | None] = []
     for task in tasks:
         if task.get("enabled", True):
-            moments.append(_instant(task.get("next_occurrence_at")))
+            moments.append(stored_instant(task.get("next_occurrence_at")))
         run = task.get("active_run") or {}
-        moments.append(_instant(run.get("not_before")))
+        moments.append(stored_instant(run.get("not_before")))
         sleep = run.get("sleep")
         if isinstance(sleep, dict):
-            moments.append(_instant(sleep.get("until")))
+            moments.append(stored_instant(sleep.get("until")))
         for item in (task.get("dependency") or {}).get("prerequisites") or []:
             if item.get("kind") not in {"time", "self_work"}:
                 continue
             # "Waiting until 7:00 PM today": the state and the day's name read the clock.
             moments.append(clock + CLOCK_LABELS_FOR)
             if item.get("state") == "waiting" and item.get("kind") == "time":
-                moments.append(_instant((task.get("schedule") or {}).get("at")))
+                moments.append(stored_instant((task.get("schedule") or {}).get("at")))
         draft = task.get("workflow_draft_result") or {}
         if "task_cost" in draft or "test_cost" in draft:
             # Read from the usage ledger and test results, which no trigger counts.

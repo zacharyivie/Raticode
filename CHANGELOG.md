@@ -3,6 +3,174 @@
 This file records the major user-facing changes in Raticode. Releases through
 version 0.1.3 used an earlier product name.
 
+## 0.6.1 - 2026-11-26
+
+Changes since the `v0.6.0` tag. Raticode Mobile 0.37.0 ships alongside it from
+its own `mobile-v0.37.0` tag.
+
+### Added
+
+- Unsent messages in threads, a new thread and Rem's chat survive a restart,
+  an update or a reload. Drafts stay on this computer, up to 20,000
+  characters each and the 50 newest; attachments and screenshots don't.
+- A desktop notification when a thread replies or fails, Rem replies, or Rem
+  waits on your approval in a browser tab while the window isn't focused.
+  Clicking it opens that thread, Rem's chat or the tab.
+- Undo: the global board says what a move, cancel, resume or decline did and
+  offers **Undo** where it can; project search shows each match next to its
+  replacement and **Replace all** can be undone; the workflow graph undoes
+  and redoes up to 50 edits (Mod+Z, Mod+Shift+Z), refusing when
+  `workflow.rattish` changed since; and deleting a Second Brain collection,
+  saved search, research job or workflow test case can be undone from the
+  notice that follows. Notices with a button stay while you hover or focus
+  them.
+- **Start self-work** and **Stop self-work** in one button in Rem's side pane.
+  Objectives list newest first with open ones on top, load 30 at a time, fold
+  what earlier sessions finished into a **Stale** group, and open in place to
+  show their **Done when**, how they were met and their full text.
+- Tickets show their **Done when** finish line on the board and the phone,
+  and ticket sheets show Rem's text formatted like chat, with a long
+  description folded under **Show all**.
+- A decision record read from the repository says which commit added it and
+  who wrote it, instead of "You decided".
+- Rem's tasks, chat and self-work use each app's default model and effort
+  unless **Settings › Rem** names one, and Settings › Rem shows the app Rem
+  really uses, marked "(not installed)" or "(turned off)" when it can't run.
+  Rem's welcome says so too, with a button to that setting.
+- Workflows: list and name/value fields such as headers, env, args and
+  approvers are edited as rows, with an **Edit as JSON** switch; a node's run
+  output reads as plain text with **Copy**, and each past activation opens its
+  own output and error; failed runs show **Failed** and why they stopped in
+  **Workflow runs** and the Studio's run lists; and Rattish warns when an
+  environment variable or URL parameter name would be lowercased, and refuses
+  a key repeated in one map.
+- `Raticode rattish convert` and a **Convert to Rattish** notice for old TOML
+  workflows left in the data folder.
+- The command palette can go to every plugin in the activity rail.
+- Every tab row and pick-one choice moves with the arrow keys and is a single
+  Tab stop; the terminal, editor tab, project, Rem scope and Second Brain
+  menus start on their first item and move with the arrow keys; and an opened
+  ticket on the global board takes keyboard focus and gives it back.
+- A brain whose folder is gone can be restored from its backup in place,
+  keeping its settings, backups and Rem threads.
+- The website asks for support with a Buy me a coffee banner on the home page
+  and beside every docs page.
+
+### Changed
+
+- Raticode runs only Rattish workflows. The old TOML workflow engine, its
+  `agent`, `runner`, `schedule` and `watch` command groups, its TOML-only
+  workflow commands and its screens are removed; convert old files with
+  `Raticode rattish convert`.
+- Raticode asks before risky actions in its own dialog, with a button that
+  names the action and **Keep as is** focused first, instead of the browser's
+  confirm box.
+- The toolbar's **Update** button is the only update prompt on the desktop;
+  the separate yellow once-a-day update banner is gone.
+- Organizations say "worker" instead of "employee", and "runs" instead of
+  "executions", on the desktop, the phone and the website.
+- Settings, Developer settings and the CLI's help say "data folder".
+- A task another desktop hands over waits behind your own work here, one
+  desktop can queue at most 10, and handed-over tasks and organization work a
+  paired desktop sends run under self-work's unattended limits, without this
+  computer's Second Brain.
+- Self-work proposals that come back from a paired desktop always wait for
+  your approval and name that desktop.
+- Rem's own self-work objectives always have a finish line, and self-work
+  shares its threads among all open objectives. An edited ticket or reworded
+  objective has its objective link checked again before self-work starts it.
+- A plan's answers go only to the work that rests on them, and to Rem's chat
+  while the plan is open.
+- The Second Brain view downloads only the passages that changed instead of
+  the whole library after every change, and re-indexing writes only the
+  documents that changed.
+- An organization's **Block git push** setting also stops pushes from the
+  swarms its workers delegate to, and organization workers on Codex can
+  change Raticode's data folder only where their run needs to.
+
+### Fixed
+
+- A worker can no longer fake Raticode's own proving test: a proving test
+  counts as passing only when the named test itself ran and passed, and a
+  same-named test in another file can't pass for it. Organization exports are
+  readable only by you. (These three fixes were left out of 0.6.0.)
+- A replaced commit can no longer pass Raticode's check, and the project
+  check tests the commit that lands, read from the project's repository,
+  failing instead of running in the worker's folder.
+- Every Rem chat request gets the private Second Brain and project checks;
+  one-shot Codex and Claude Code chat requests used an older path that missed
+  them.
+- The CLI sends the owner token only to a backend that proves it holds it,
+  and agent token commands refuse every agent turn the rest of the CLI
+  refuses.
+- Agent tokens can't ask for the Second Brain snapshot with every document's
+  text, and files left out of search stay out of their document reads and
+  report citations. A Memory folder that isn't a registered brain keeps the
+  private brains inside it out of Rem's search and reads.
+- Agent turns can lower a trigger's own cost, token and time limits but can
+  no longer raise or remove them.
+- A triggered run waiting for a usage limit resumes only if its saved record
+  and inputs are unchanged.
+- Files on a network share are refused before Raticode touches the disk when
+  opened from another app or through desktop file actions.
+- Post media is checked and copied from the same opened file, so it can't be
+  swapped or grow in between, and report theme files are used only when their
+  contents match their name.
+- Custom cron schedules on Rem tasks and organization routines read weekdays
+  the crontab way, schedules saved earlier keep their days, old weekend
+  schedules such as `sat-sun` keep running, and one unreadable schedule no
+  longer stops every other Rem task.
+- A cached workflow step reuses its saved answer when a run gets a new copy
+  of the same file or a new worktree of the same project.
+- Checking, planning, running and bundling a workflow find a subflow's
+  component the same way.
+- A lone `=` or `!` in a workflow route condition and an empty `-` list item
+  show an error instead of freezing or crashing the editor; graph route
+  labels show the condition exactly as written; the workflow list shows real
+  node and route counts; and a binding that can't find its value says which
+  part missed, without showing any values.
+- Loops over spreadsheet exports read Excel CSV files and say which file and
+  line is wrong.
+- `Raticode rattish start --wait` and `--follow` wait for a run that hasn't
+  reached the run list yet, where they could report the run they had just
+  started as not found.
+- Related-meaning search no longer lets ONNX Runtime or Hugging Face send
+  usage telemetry, even when the environment Raticode starts in turns it on.
+  The privacy page now names Hugging Face as where its model downloads from.
+- **Run preview**'s close button now has a name screen readers announce, and
+  the dialog says **Run order** where it said "Execution order". A run
+  setting left from the removed runner queue no longer applies.
+- A workflow inspector field that can't be saved keeps what you typed and says
+  why right under it, where it used to switch back to the saved value with only
+  a passing notice in the toolbar. Escape or **Use saved value** puts the saved
+  value back.
+- A click outside **New ticket**, the post editor or a Second Brain dialog no
+  longer throws away what you typed, and the New workflow dialog puts focus
+  on **Name** again after **Import** was chosen.
+- Edit > Undo with the graph showing undoes typing in the field you were in,
+  not a graph edit.
+- Alt+Left and Alt+Right go back and forward in a focused web page.
+- "Start self-work now" starts self-work right away instead of only turning on
+  the switch that waits 15 quiet minutes.
+- Text sent to a managed task or put in by **Ask Rem** no longer comes back
+  wrong after switching threads.
+- An action that can't reach the backend says so in plain words instead of
+  "Failed to fetch".
+- The chat pane's confirm dialog keeps its see-through backdrop in the light
+  theme, and the token chart's tooltip marks the piece under the pointer.
+- Trigger, secret, worktree setup and shortcut requests with no handler get
+  404 instead of a server error.
+- Second Brain indexing and Library health match links through lookup tables
+  instead of scanning every document per link, ignoring several health issues
+  saves the brain once, and each archived thread's word list is kept in its own
+  file so the archive index stays small.
+- Document ZIP exports write one file at a time and name a file that is too
+  big before reading anything.
+- Raticode clears workers' leftover test files from memory-backed `/tmp` by
+  itself, and test runs in a sandbox clean up after themselves.
+- The phone bridge takes an organization worker only when another desktop's
+  job is waiting.
+
 ## 0.6.0 - 2026-11-24
 
 Changes since the `v0.5.5` tag. Raticode Mobile 0.36.0 ships alongside it from

@@ -4,25 +4,16 @@ import hashlib
 import json
 import sys
 import threading
-import time
 import zipfile
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from gofer.ui import brain_library as library_module
 from gofer.ui.brain_documents import checked_archive, extract, source_path
 from gofer.ui.brain_library import BrainLibrary
-
-
-def wait_task(library: BrainLibrary, task: dict[str, Any]) -> dict[str, Any]:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        receipt = library.task(task["id"])
-        if receipt["state"] != "running":
-            return receipt
-        time.sleep(0.02)
-    pytest.fail("Second Brain task did not finish")
+from tests.helpers.brain_library import wait_task
 
 
 @pytest.fixture
@@ -153,6 +144,86 @@ def test_export_import_roundtrip_remaps_citations_and_keeps_hashes(library, tmp_
     assert copy_doc["id"] != doc["id"]
     assert copy_doc["version"] == doc["version"]
     assert library.entities("citations", imported["brainId"])[0]["docId"] == copy_doc["id"]
+
+
+def test_ignoring_several_health_issues_writes_brain_json_once(library, tmp_path, monkeypatch):
+    root = tmp_path / "brain"
+    root.mkdir()
+    for name in ("one", "two", "three"):
+        (root / f"{name}.md").write_text(f"# {name}\n\nSee [gone](gone-{name}.md).\n", "utf-8")
+    brain = library.open({"root": str(root)})
+    for task in library.snapshot()["tasks"]:
+        assert wait_task(library, task)["state"] == "done"
+    issues = [issue for issue in library.snapshot()["health"] if issue["kind"] == "link"]
+    assert len({issue["docId"] for issue in issues}) == 3
+
+    metadata = root / ".raticode" / "brain.json"
+    writes: list[Path] = []
+    write_json = library_module.write_json
+
+    def counted(path: Path, value: Any) -> None:
+        writes.append(path)
+        write_json(path, value)
+
+    monkeypatch.setattr(library_module, "write_json", counted)
+    library.request("ignore_health", {"ids": [issue["id"] for issue in issues]})
+
+    assert writes == [source_path(root, ".raticode/brain.json")]
+    assert not [issue for issue in library.snapshot()["health"] if issue["kind"] == "link"]
+    portable = json.loads(metadata.read_text())
+    ignored = {i for doc in portable["library"]["documents"] for i in doc.get("ignoredIssues", [])}
+    assert ignored == {issue["id"] for issue in issues}
+    assert brain["id"] == portable["brain"]["id"]
+
+
+def test_brain_json_loads_only_cited_documents_from_other_brains(
+    library: BrainLibrary, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    brains = []
+    for name in ("home", "other"):
+        root = tmp_path / name
+        root.mkdir()
+        (root / f"{name}.md").write_text(f"# {name}\n\nText for {name}.\n", "utf-8")
+        brains.append(library.open({"root": str(root)}))
+    for task in library.snapshot()["tasks"]:
+        assert wait_task(library, task)["state"] == "done"
+    home, other = brains
+    cited = library.entities("documents", other["id"])[0]
+    entities = library.entities
+
+    def export() -> list[dict[str, Any]]:
+        unfiltered: list[str] = []
+
+        def watched(kind: str, brain_id: str | None = None) -> list[dict[str, Any]]:
+            if kind == "documents" and brain_id is None:
+                unfiltered.append(kind)
+            return entities(kind, brain_id)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(library, "entities", watched)
+            library._portable(home["id"])
+        assert unfiltered == []
+        metadata = Path(home["root"]) / ".raticode" / "brain.json"
+        return list(json.loads(metadata.read_text())["externalSources"])
+
+    item = {"docId": cited["id"], "version": cited["version"]}
+    collection = {
+        "id": "reading",
+        "brainId": home["id"],
+        "name": "Reading",
+        "sections": [{"id": "s", "title": "Cited", "items": [item]}],
+    }
+    library.put("collections", collection)
+    external = export()
+    assert [doc["id"] for doc in external] == [cited["id"]]
+    assert "fingerprint" not in external[0]
+
+    # The stored copy stays exportable after the cited document is gone.
+    library.request("remove", {"id": other["id"]})
+    assert [doc["id"] for doc in export()] == [cited["id"]]
+
+    library.put("collections", {**collection, "sections": []})
+    assert export() == []
 
 
 @pytest.mark.parametrize(
@@ -293,10 +364,10 @@ def allow_research(library: BrainLibrary, brain: dict[str, Any]) -> None:
 
 def test_provider_generation_uses_valid_tool_restricted_adapter_settings(library, monkeypatch):
     from gofer.core.agent import AgentResult
-    from gofer.core.runner import _SUBSCRIPTIONS
+    from gofer.subscriptions.registry import shared_subscriptions
 
     for name in ("codex", "claude_code"):
-        subscription = _SUBSCRIPTIONS[name]
+        subscription = shared_subscriptions()[name]
         calls = []
         envs = []
 
@@ -537,9 +608,9 @@ def test_automatic_cross_brain_selection_keeps_cloud_permission_checks(library, 
 
 @pytest.mark.parametrize("provider", ["codex", "claude_code"])
 def test_tool_free_research_delivers_large_evidence_via_stdin(library, monkeypatch, provider):
-    from gofer.core.runner import _SUBSCRIPTIONS
+    from gofer.subscriptions.registry import shared_subscriptions
 
-    subscription = _SUBSCRIPTIONS[provider]
+    subscription = shared_subscriptions()[provider]
     shared_transport = subscription.prompt_via_stdin
     adapter = type(subscription)
     build_command = adapter._build_command
@@ -585,14 +656,14 @@ def test_tool_free_research_delivers_large_evidence_via_stdin(library, monkeypat
 )
 def test_research_invalid_response_has_actionable_error(library, monkeypatch, response):
     from gofer.core.agent import AgentResult
-    from gofer.core.runner import _SUBSCRIPTIONS
+    from gofer.subscriptions.registry import shared_subscriptions
 
     async def execute(*args, **kwargs):
         return AgentResult(
             agent_id="Rem", success=True, output=response, exit_code=0, duration_seconds=0
         )
 
-    monkeypatch.setattr(type(_SUBSCRIPTIONS["codex"]), "execute", execute)
+    monkeypatch.setattr(type(shared_subscriptions()["codex"]), "execute", execute)
     with pytest.raises(ValueError, match="provider .*codex.*valid report JSON") as error:
         library._provider_generate("Evidence only", {"id": "codex"}, threading.Event())
     assert "Try again or choose another provider" in str(error.value)
@@ -1337,6 +1408,63 @@ def test_document_export_is_plain_zip_and_html_preview_blocks_navigation(library
     )
     assert "http-equiv" not in html and "onload" not in html and "<script" not in html
     assert 'href="https' not in html and "color:teal" in html and "Report" in html
+
+
+def test_document_export_names_an_oversized_file_before_reading_any(library, tmp_path, monkeypatch):
+    brain, _ = opened(library, tmp_path)
+    (Path(brain["root"]) / "attachment.bin").write_bytes(b"x" * 4096)
+    monkeypatch.setattr(library_module, "MAX_FILE", 1024)
+    reads: list[str] = []
+    real_read = library_module.read_source
+
+    def counted(root: Path, relative: str, *args: Any) -> bytes:
+        reads.append(relative)
+        return real_read(root, relative, *args)
+
+    monkeypatch.setattr(library_module, "read_source", counted)
+    destination = tmp_path / "documents.zip"
+    with pytest.raises(ValueError, match=r"^attachment\.bin is .* limit for one file"):
+        library.export_package(
+            {"brainId": brain["id"], "destination": str(destination), "purpose": "documents"},
+            threading.Event(),
+            lambda _: None,
+        )
+    assert reads == []
+    assert not destination.exists()
+    assert not [name for name in tmp_path.iterdir() if name.name.startswith(".raticode-export-")]
+
+
+def test_document_export_holds_one_file_in_memory_at_a_time(library, tmp_path):
+    import os
+    import tracemalloc
+
+    brain, _ = opened(library, tmp_path)
+    root = Path(brain["root"])
+    # Random bytes don't compress, the worst case for a second copy while zipping.
+    contents = {f"files/part-{size}.bin": os.urandom(size * 1024 * 1024) for size in (1, 2, 3)}
+    for name, data in contents.items():
+        (root / name.removeprefix("files/")).write_bytes(data)
+    largest = max(len(data) for data in contents.values())
+    destination = tmp_path / "documents.zip"
+    tracemalloc.start()
+    try:
+        result = library.export_package(
+            {"brainId": brain["id"], "destination": str(destination), "purpose": "documents"},
+            threading.Event(),
+            lambda _: None,
+        )
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert result["verified"] is True
+    assert peak < 2 * largest, f"peak {peak} bytes for a largest file of {largest}"
+    with zipfile.ZipFile(destination) as archive:
+        assert set(archive.namelist()) == {"notes.md", "part-1.bin", "part-2.bin", "part-3.bin"}
+        for name, data in contents.items():
+            assert archive.read(name.removeprefix("files/")) == data
+        info = archive.getinfo("part-3.bin")
+        assert info.compress_type == zipfile.ZIP_DEFLATED
+        assert info.external_attr == 0o600 << 16
 
 
 def test_saved_job_search_keeps_location_dates_and_annotations(library, tmp_path):

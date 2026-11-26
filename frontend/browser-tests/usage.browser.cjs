@@ -161,6 +161,22 @@ async function main() {
     const deadline = Date.now() + 5000;
     while (!(await evaluate(source))) { if (Date.now() > deadline) throw new Error(`Missing UI condition: ${source}`); await new Promise(resolve => setTimeout(resolve, 25)); }
   }
+  // Where to put the pointer to hover an element: its center, read once two reads in
+  // a row agree and the element itself is what that point hits. Scrolling and late
+  // layout can still move it after scrollIntoView returns.
+  async function settledCenter(selector) {
+    await evaluate("delete window.__usageSettledCenter");
+    const read = `(() => {
+      const target = ${selector};
+      const r = target.getBoundingClientRect();
+      const point = { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+      const last = window.__usageSettledCenter;
+      window.__usageSettledCenter = point;
+      return last?.x === point.x && last?.y === point.y && document.elementFromPoint(point.x, point.y) === target;
+    })()`;
+    await wait(read);
+    return evaluate("window.__usageSettledCenter");
+  }
   async function click(text) {
     await wait(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === ${JSON.stringify(text)})?.disabled === false`);
     await evaluate(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === ${JSON.stringify(text)}).click()`);
@@ -406,22 +422,28 @@ async function main() {
   // Hovering a segment shows the week, its total and each provider's tokens and share.
   // The cost section above may have scrolled the chart away; bring it back first.
   await evaluate("document.querySelector('.usage-chart').scrollIntoView({ block: 'center' })");
-  await new Promise(resolve => setTimeout(resolve, 100));
-  const point = await evaluate("(() => { const r = document.querySelectorAll('.usage-chart-column')[0].querySelector('.usage-chart-segment').getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()");
+  const point = await settledCenter("document.querySelectorAll('.usage-chart-column')[0].querySelector('.usage-chart-segment')");
   win.webContents.sendInputEvent({ type: "mouseMove", x: point.x, y: point.y });
-  await wait("document.querySelector('.usage-chart-tooltip') !== null");
+  // The tooltip and its hovered row show in the same update.
+  await wait("document.querySelector('.usage-chart-tooltip li[data-hovered]') !== null");
+  assert.equal(await evaluate("document.querySelector('.usage-chart-tooltip li[data-hovered]').textContent.startsWith('Claude Code')"), true);
   const tip = await evaluate("document.querySelector('.usage-chart-tooltip').textContent");
   assert.match(tip, /Week of Aug 31, 2026/);
   assert.match(tip, /400 tokens/);
   assert.match(tip, /Claude Code300/);
   assert.match(tip, /75%/);
   assert.match(tip, /25%/);
-  // The column's tooltip and the hovered segment's row come from two mouse-enter
-  // handlers, so the hovered row can show a moment after the tooltip.
-  await wait("document.querySelector('.usage-chart-tooltip li[data-hovered]') !== null");
-  assert.equal(await evaluate("document.querySelector('.usage-chart-tooltip li[data-hovered]')?.textContent.startsWith('Claude Code')"), true);
   await screenshot("tokens-chart-tooltip");
+  // Above the stack the pointer is on the bar but on none of its pieces, so the
+  // tooltip stays and no row is marked.
+  const above = await evaluate("(() => { const r = document.querySelectorAll('.usage-chart-column')[0].getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + 4) }; })()");
+  assert.equal(await evaluate(`document.elementFromPoint(${above.x}, ${above.y}) === document.querySelectorAll('.usage-chart-column')[0]`), true);
+  win.webContents.sendInputEvent({ type: "mouseMove", x: above.x, y: above.y });
+  await wait("document.querySelector('.usage-chart-tooltip') !== null && document.querySelector('.usage-chart-tooltip li[data-hovered]') === null");
+  assert.equal(await evaluate("document.querySelector('.usage-chart-column[data-active]') === document.querySelectorAll('.usage-chart-column')[0]"), true);
   win.webContents.sendInputEvent({ type: "mouseMove", x: 5, y: 5 });
+  // Focus starts on the last bar only when the pointer has let go of the chart.
+  await wait("document.querySelector('.usage-chart-tooltip') === null");
   // The keyboard reads each bar aloud through a live region.
   win.webContents.focus();
   await evaluate("document.querySelector('.usage-chart-bars').focus()");
@@ -451,12 +473,12 @@ async function main() {
   await wait("document.querySelector('.usage-chart [aria-live]').textContent.includes('Claude Code · Default sign-in 200 (50%)')");
   await evaluate("document.querySelector('.usage-chart-bars').blur()");
   await evaluate("document.querySelector('.usage-chart').scrollIntoView({ block: 'center' })");
-  await new Promise(resolve => setTimeout(resolve, 100));
-  const accountPoint = await evaluate("(() => { const r = document.querySelectorAll('.usage-chart-column')[3].querySelector('.usage-chart-segment').getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()");
+  const accountPoint = await settledCenter("document.querySelectorAll('.usage-chart-column')[3].querySelector('.usage-chart-segment')");
   win.webContents.sendInputEvent({ type: "mouseMove", x: accountPoint.x, y: accountPoint.y });
   await wait("document.querySelector('.usage-chart-tooltip li[data-hovered]')?.textContent.startsWith('Claude Code · work')");
   await screenshot("tokens-chart-by-account");
   win.webContents.sendInputEvent({ type: "mouseMove", x: 5, y: 5 });
+  await wait("document.querySelector('.usage-chart-tooltip') === null");
   await evaluate("document.querySelector('.usage-chart-table').open = true");
   const heads = await evaluate("[...document.querySelectorAll('.usage-bucket-table thead th')].map(th => th.textContent)");
   assert.deepEqual(heads, ["Week", "Claude Code · work", "Claude Code · Default sign-in", "Codex · Default account", "Cursor · Default account", "Total"]);

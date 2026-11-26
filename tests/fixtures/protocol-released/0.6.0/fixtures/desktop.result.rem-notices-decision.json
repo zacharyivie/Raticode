@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000288",
+  "id": "10000000-0000-4000-8000-000000000288",
+  "sequence": 288,
+  "type": "desktop.result",
+  "payload": {
+    "op": "rem.notices",
+    "ok": true,
+    "part": 0,
+    "parts": 1,
+    "body": "{\"cursor\":512,\"notices\":[{\"id\":\"decision-D-12\",\"kind\":\"decision\",\"body\":\"Rem has a question: Which branch does finished work in Raticode land on?\",\"created_at\":\"2026-11-22T09:30:00+00:00\",\"title\":\"Which branch does finished work in Raticode land on?\",\"needs_user\":true,\"reason\":\"needs_you\",\"project_name\":\"Raticode\",\"decision\":{\"id\":\"D-12\",\"question\":\"Which branch does finished work in Raticode land on?\",\"recommended\":\"dev\",\"fallback\":false}}],\"skipped\":0,\"more\":false,\"mark\":\"n1.40.-.31\",\"dropped\":0}"
+  }
+}

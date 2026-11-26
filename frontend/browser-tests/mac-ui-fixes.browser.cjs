@@ -162,19 +162,22 @@ app.whenReady().then(async () => {
     root.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true })); await new Promise(resolve => setTimeout(resolve, 50));
     return document.activeElement.dataset.path === "/fixture/folder" && tree.querySelectorAll('[role="treeitem"][tabindex="0"]').length === 1;
   }));
+  // Deleting asks in Raticode's own dialog; Keep as is changes nothing.
   await evaluate(() => {
-    window.fixtureConfirmCount = 0;
-    window.confirm = () => { window.fixtureConfirmCount++; return false; };
+    window.fixtureConfirmButton = label => [...document.querySelectorAll('[data-testid="confirm-dialog"] button')].find(button => button.textContent.trim() === label);
     const item = document.querySelector('[data-path="/fixture/folder"]');
     item.dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true, cancelable: true }));
   });
-  await waitFor(() => window.fixtureConfirmCount === 1);
+  await waitFor(() => window.fixtureConfirmButton("Move to trash"));
+  await evaluate(() => window.fixtureConfirmButton("Keep as is").click());
+  await waitFor(() => !document.querySelector('[data-testid="confirm-dialog"]'));
   assert.deepEqual(deleted, []);
   await evaluate(() => {
-    window.confirm = () => true;
     const item = document.querySelector('[data-path="/fixture/folder"]');
     item.dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true, cancelable: true }));
   });
+  await waitFor(() => window.fixtureConfirmButton("Move to trash"));
+  await evaluate(() => window.fixtureConfirmButton("Move to trash").click());
   for (let i = 0; i < 50 && !deleted.length; i++) await new Promise(resolve => setTimeout(resolve, 20));
   assert.deepEqual(deleted, ["/fixture/folder"]);
   // A recovered draft must not silently replace external disk edits through autosave.

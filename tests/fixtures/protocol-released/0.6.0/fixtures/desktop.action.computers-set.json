@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000286",
+  "id": "10000000-0000-4000-8000-000000000286",
+  "sequence": 286,
+  "type": "desktop.action",
+  "payload": {
+    "op": "computers.set",
+    "params": {
+      "computer_id": "00000000-0000-4000-8000-000000000004",
+      "max_threads": 6
+    }
+  }
+}

@@ -17,6 +17,7 @@ from gofer.ui.brain_series import (
     parse_edition,
     series_index,
 )
+from tests.helpers.brain_library import wait_idle
 
 
 def header(doc_id: str, path: str, modified: str = "2026-11-01T00:00:00+00:00", **extra: Any):
@@ -143,15 +144,6 @@ def write(path: Path, title: str, paragraphs: list[str], age_days: float) -> Non
     )
     moment = time.time() - 86400 * age_days
     os.utime(path, (moment, moment))
-
-
-def wait_idle(library: BrainLibrary) -> None:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if all(task["state"] != "running" for task in library.snapshot()["tasks"]):
-            return
-        time.sleep(0.02)
-    pytest.fail("Second Brain tasks did not finish")
 
 
 @pytest.fixture

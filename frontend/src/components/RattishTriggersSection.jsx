@@ -38,12 +38,14 @@ import {
   widenedSteps,
 } from "../lib/rattishTriggers.js";
 import { SourceDiff } from "./SourceDiff.jsx";
+import { useRovingChoice } from "../lib/useRovingChoice.js";
 
 const KIND_CHOICES = [
   ["cron", "Schedule", CalendarClock],
   ["file", "File change", FileSearch],
   ["webhook", "Webhook", Webhook],
 ];
+const KIND_KEYS = KIND_CHOICES.map(([kind]) => kind);
 const KIND_ICONS = Object.fromEntries(KIND_CHOICES.map(([kind, , Icon]) => [kind, Icon]));
 const INPUT_CLASS =
   "mt-1 h-9 w-full rounded-lg border border-line bg-white px-2.5 text-[13px] text-ink outline-none transition focus:border-indigo-500";
@@ -241,6 +243,7 @@ function TriggerForm({ defaultTimezone, editing, showInputs, unsandboxed = [], w
   const confirmText = triggerConfirmText(unsandboxed, widened);
   const needsConfirmation = !editing && Boolean(confirmText);
   const update = (patch) => setDraft((current) => ({ ...current, ...patch }));
+  const kindChoice = useRovingChoice({ keys: KIND_KEYS, selected: draft.kind, onSelect: (kind) => update({ kind }) });
   const timezones = useMemo(() => Intl.supportedValuesOf?.("timeZone") ?? [], []);
 
   const save = async () => {
@@ -280,6 +283,7 @@ function TriggerForm({ defaultTimezone, editing, showInputs, unsandboxed = [], w
               role="radio"
               type="button"
               onClick={() => update({ kind })}
+              {...kindChoice(kind)}
             >
               <Icon size={15} />
               {label}

@@ -23,6 +23,7 @@ from gofer.ui.organization_consent import approve_all
 from gofer.ui.organization_store import OrganizationConflict
 from gofer.ui.organizations import RESTART_REVIEW_REASON, OrganizationManager
 from gofer.ui.rem_ticket_activity import PAUSED_REASON
+from tests.helpers.organizations import act, company
 
 
 def start(tmp_path: Path, stream: Any) -> OrganizationManager:
@@ -31,40 +32,6 @@ def start(tmp_path: Path, stream: Any) -> OrganizationManager:
 
 async def quick(**options: Any) -> Any:
     yield {"type": "final", "message": {"body": "Done."}}
-
-
-def company(manager: OrganizationManager, root: Path, **config: Any) -> Any:
-    return manager.call(
-        str(root),
-        "user",
-        {
-            "action": "create",
-            "params": {
-                "config": {
-                    "name": "Studio",
-                    "slug": "studio",
-                    "employees": [
-                        {"id": "lead", "name": "Avery Lane"},
-                        {"id": "mira", "name": "Mira Santos", "reportsTo": "lead"},
-                    ],
-                    "projects": [{"id": "desktop", "name": "Desktop"}],
-                    **config,
-                }
-            },
-        },
-    )
-
-
-def act(
-    manager: OrganizationManager,
-    org: dict[str, Any],
-    action: str,
-    actor: str = "user",
-    **params: Any,
-) -> Any:
-    return manager.call(
-        org["projectRoot"], actor, {"organizationId": org["id"], "action": action, "params": params}
-    )
 
 
 def state(manager: OrganizationManager, org: dict[str, Any]) -> Any:

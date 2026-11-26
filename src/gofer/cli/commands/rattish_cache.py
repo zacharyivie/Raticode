@@ -12,6 +12,8 @@ from typing import Any
 
 import typer
 
+from gofer.cli.output import fail
+
 app = typer.Typer(
     help=(
         "Show or clear the result cache: saved answers of common-llm-task and jev nodes "
@@ -27,7 +29,7 @@ _WORKFLOW_ID_OPTION = typer.Option(
     None, "--workflow-id", help="The workflow's ID, instead of a source path."
 )
 _DATA_DIR_OPTION = typer.Option(
-    None, "--data-dir", help="Override the app data directory that holds the cache."
+    None, "--data-dir", help="Override the data folder that holds the cache."
 )
 _FORMAT_OPTION = typer.Option("text", "--format", help="Output format: text or json.")
 
@@ -38,21 +40,13 @@ def _require_format(output_format: str) -> None:
         raise typer.Exit(2)
 
 
-def _fail(message: str, output_format: str, code: int = 1) -> typer.Exit:
-    if output_format == "json":
-        typer.echo(json.dumps({"ok": False, "error": message}, sort_keys=True))
-    else:
-        typer.echo(message, err=True)
-    return typer.Exit(code)
-
-
 def _resolve_workflow_id(
     source: Path | None, workflow_id: str | None, data_dir: Path, output_format: str
 ) -> str:
     from gofer.rattish.result_cache import is_cacheable_workflow_id
 
     if (source is None) == (workflow_id is None):
-        raise _fail("Give a .rattish source path or --workflow-id, not both.", output_format, 2)
+        raise fail("Give a .rattish source path or --workflow-id, not both.", output_format, 2)
     if workflow_id is None:
         from gofer.rattish.artifacts import RattishArtifactError, compile_rattish_file
         from gofer.rattish.diagnostics import RattishError
@@ -61,13 +55,13 @@ def _resolve_workflow_id(
         try:
             workflow_id = str(compile_rattish_file(source, data_dir=data_dir).ir["workflow"]["id"])
         except (RattishError, RattishArtifactError, OSError) as exc:
-            raise _fail(
+            raise fail(
                 f"Could not compile {source} to find its workflow ID: {exc}. "
                 "Use --workflow-id instead.",
                 output_format,
             ) from exc
     if not is_cacheable_workflow_id(workflow_id):
-        raise _fail(f"Invalid workflow ID {workflow_id!r}.", output_format, 2)
+        raise fail(f"Invalid workflow ID {workflow_id!r}.", output_format, 2)
     return workflow_id
 
 
@@ -133,7 +127,7 @@ def clear(
     try:
         if all_workflows:
             if source is not None or workflow_id is not None:
-                raise _fail(
+                raise fail(
                     "--all clears every workflow; leave out the source and ID.", output_format, 2
                 )
             removed = cache.clear_all()
@@ -146,7 +140,7 @@ def clear(
         safe_id = _resolve_workflow_id(source, workflow_id, base, output_format)
         removed = cache.clear(safe_id)
     except OSError as exc:
-        raise _fail(f"Could not clear the result cache: {exc}", output_format) from exc
+        raise fail(f"Could not clear the result cache: {exc}", output_format) from exc
     _emit(
         {"ok": True, "workflowId": safe_id, "removed": removed},
         output_format,

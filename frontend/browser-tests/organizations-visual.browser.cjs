@@ -67,7 +67,7 @@ async function main() {
   let current = await api("read", id);
   await api("configure", id, { config: { ...current.config, instructions: current.config.instructions + " Record decisions in the task conversation." }, expectedRevision: current.revision, reason: "Clarified where decisions are recorded" });
   current = await api("read", id);
-  await api("configure", id, { config: { ...current.config, maxConcurrency: 3 }, expectedRevision: current.revision, reason: "Allow three employees to work at once" });
+  await api("configure", id, { config: { ...current.config, maxConcurrency: 3 }, expectedRevision: current.revision, reason: "Allow three workers to work at once" });
   const tasks = [
     { title: "Verify the Linux AppImage signature before publishing", description: "Check the detached signature against the release key and attach the command output.", assignee: "mira", priority: "high", project: "desktop" },
     { title: "Draft the 0.9 release notes", description: "Summarise user-facing changes since 0.8 in plain language.", assignee: "juno", priority: "medium", status: "backlog" },
@@ -101,12 +101,12 @@ async function main() {
           await evaluate(`document.querySelectorAll('.org-chart-navigation button')[${scene === "teams" ? 1 : 2}].click()`);
           await shot(`${tag}-${scene}`);
           await evaluate("document.querySelector('.org-directory button').click()");
-          if (scene === "projects") assert.deepEqual(await evaluate("[...document.querySelectorAll('.org-collection-people button')].map(button => button.getAttribute('aria-label'))"), ["Edit employee: Kai Lindqvist", "Edit employee: Mira Santos", "Edit employee: Theo Brandt-Nakamura"]);
+          if (scene === "projects") assert.deepEqual(await evaluate("[...document.querySelectorAll('.org-collection-people button')].map(button => button.getAttribute('aria-label'))"), ["Edit worker: Kai Lindqvist", "Edit worker: Mira Santos", "Edit worker: Theo Brandt-Nakamura"]);
           await shot(`${tag}-${scene}-detail`);
         }
         if (scene === "people") await shot(`${tag}-people`);
         if (scene === "employee-edit") {
-          await clickText("Mira Santos", ".org-person"); await clickText("Edit employee"); await shot(`${tag}-employee-edit`);
+          await clickText("Mira Santos", ".org-person"); await clickText("Edit worker"); await shot(`${tag}-employee-edit`);
           await evaluate("document.querySelector('.org-provider-fields').scrollIntoView({block:'start'})");
           await shot(`${tag}-employee-provider`);
           await clickText("Tools, skills and MCP servers", "summary");

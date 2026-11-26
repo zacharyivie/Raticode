@@ -15,8 +15,6 @@ from urllib.parse import quote
 import pytest
 
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS, ResourceLimits
-from gofer.core.scheduler import WorkflowScheduler
-from gofer.core.watcher import WorkflowWatcher
 from gofer.rattish.trigger_service import TriggerRun
 from gofer.rattish.triggers import TriggerStore
 from gofer.rattish.workspaces import create_registered_workflow, find_registered_workflow
@@ -31,14 +29,9 @@ from gofer.ui.server import (
     WorkflowBundleError,
     create_server,
     ready_payload,
-    render_usage_summary_html,
-    render_workflow_usage_html,
-    sync_workflow_schedules,
-    sync_workflow_watchers,
-    ui_session_payload,
-    workflow_usage_page_payload,
 )
-from gofer.utils.run_state import workflow_run_stop_path
+from tests.helpers.time_limit import finishes_within
+from tests.unit.test_rattish_parser_bad_symbols import BAD_SOURCES as BAD_RATTISH_SOURCES
 
 
 class HandlerResult:
@@ -85,27 +78,8 @@ def _fake_server(
     server.allowed_origins = {"http://127.0.0.1:5173"}
     server.path_grant_secret = "test-secret"
     server.path_grants = DesktopPathGrantStore()
-    server.trusted_project_roots = tuple(
-        sorted(
-            {
-                str(workflow.project_root.resolve())
-                for workflow in server_module.list_registered_workflows(registry_dir=tmp_path)
-            }
-        )
-    )
     server.gofer_cli_path = None
     server.server_address = ("127.0.0.1", 8765)
-    server.sync_calls = 0
-    server.continuous_sync_calls = 0
-
-    def sync_schedules() -> None:
-        server.sync_calls += 1
-
-    def ensure_continuous_runs() -> None:
-        server.continuous_sync_calls += 1
-
-    setattr(server, "sync_schedules", sync_schedules)
-    setattr(server, "ensure_continuous_runs", ensure_continuous_runs)
     return server
 
 
@@ -366,145 +340,6 @@ def _sockets_available() -> bool:
         return True
 
 
-def test_ui_server_syncs_workflow_schedules(tmp_path) -> None:
-    workflow_path = tmp_path / "scheduled.toml"
-    workflow_path.write_text(
-        """
-[workflow]
-id = "scheduled"
-name = "Scheduled"
-
-[workflow.schedule]
-cron_expression = "43 * * * *"
-timezone = "America/New_York"
-
-[[nodes]]
-id = "hello"
-type = "bash_command"
-command = "echo hello"
-""".strip()
-    )
-
-    scheduler = WorkflowScheduler(db_path=tmp_path / "schedules.db")
-
-    sync_workflow_schedules(tmp_path, scheduler)
-    assert [job["id"] for job in scheduler.list_workflows()] == ["scheduled"]
-
-    workflow_path.write_text(
-        """
-[workflow]
-id = "scheduled"
-name = "Scheduled"
-
-[[nodes]]
-id = "hello"
-type = "bash_command"
-command = "echo hello"
-""".strip()
-    )
-    sync_workflow_schedules(tmp_path, scheduler)
-    assert scheduler.list_workflows() == []
-
-
-def test_ui_server_sync_skips_invalid_schedule_timezone(tmp_path) -> None:
-    (tmp_path / "invalid-timezone.toml").write_text(
-        """
-[workflow]
-id = "invalid-timezone"
-name = "Invalid Timezone"
-
-[workflow.schedule]
-cron_expression = "43 * * * *"
-timezone = "ETC"
-
-[[nodes]]
-id = "hello"
-type = "bash_command"
-command = "echo hello"
-""".strip()
-    )
-    scheduler = WorkflowScheduler(db_path=tmp_path / "schedules.db")
-
-    sync_workflow_schedules(tmp_path, scheduler)
-
-    assert scheduler.list_workflows() == []
-
-
-def test_ui_server_sync_skips_schedule_when_run_continuously(tmp_path) -> None:
-    (tmp_path / "continuous.toml").write_text(
-        """
-[workflow]
-id = "continuous"
-name = "Continuous"
-run_continuously = true
-
-[workflow.schedule]
-cron_expression = "43 * * * *"
-timezone = "America/New_York"
-
-[[nodes]]
-id = "hello"
-type = "bash_command"
-command = "echo hello"
-""".strip()
-    )
-    scheduler = WorkflowScheduler(db_path=tmp_path / "schedules.db")
-
-    sync_workflow_schedules(tmp_path, scheduler)
-
-    assert scheduler.list_workflows() == []
-
-
-def test_ui_server_syncs_workflow_watchers(tmp_path) -> None:
-    workflow_path = tmp_path / "watched.toml"
-    workflow_path.write_text(
-        """
-[workflow]
-id = "watched"
-name = "Watched"
-
-[workflow.watch]
-path = "inputs"
-glob = "*.txt"
-
-[[nodes]]
-id = "hello"
-type = "bash_command"
-command = "echo hello"
-""".strip()
-    )
-    watcher = WorkflowWatcher()
-
-    sync_workflow_watchers(tmp_path, watcher)
-
-    assert [item["id"] for item in watcher.list_workflows()] == ["watched"]
-
-
-def test_ui_server_sync_skips_watcher_when_run_continuously(tmp_path) -> None:
-    (tmp_path / "continuous.toml").write_text(
-        """
-[workflow]
-id = "continuous"
-name = "Continuous"
-run_continuously = true
-
-[workflow.watch]
-path = "inputs"
-glob = "*.txt"
-
-[[nodes]]
-id = "hello"
-type = "bash_command"
-command = "echo hello"
-""".strip()
-    )
-    watcher = WorkflowWatcher()
-
-    sync_workflow_watchers(tmp_path, watcher)
-
-    assert watcher.list_workflows() == []
-
-
 def test_ui_server_dynamic_port_reports_bound_port(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("GOFER_UI_EMIT_READY_TOKEN", raising=False)
     if not _sockets_available():
@@ -549,23 +384,6 @@ def test_ready_payload_exposes_cli_availability_without_helper_path(tmp_path) ->
         "apiToken": "ready-token",
     }
     assert "goferCliPath" not in payload
-
-
-def test_ui_server_creates_missing_data_dir_before_scheduler_start(tmp_path) -> None:
-    if not _sockets_available():
-        pytest.skip("local sockets are unavailable in this environment")
-    data_dir = tmp_path / "missing" / "gofer"
-    server = create_server(host="127.0.0.1", port=0, data_dir=data_dir)
-
-    try:
-        server.scheduler.start(paused=True)
-
-        assert data_dir.is_dir()
-        assert (data_dir / "schedules.db").exists()
-    finally:
-        if server.scheduler.is_running():
-            server.scheduler.shutdown(wait=False)
-        server.server_close()
 
 
 def test_link_previews_need_the_ui_token_and_refuse_local_pages(tmp_path: Path) -> None:
@@ -630,42 +448,30 @@ def test_ui_server_health_check_works_on_dynamic_port(tmp_path) -> None:
     assert response.header("Access-Control-Allow-Origin") is None
 
 
-def test_ui_server_session_payload_requires_existing_bootstrap_token(tmp_path) -> None:
+@pytest.mark.parametrize("path", ["/api/session", "/api/desktop/trusted-roots"])
+def test_ui_server_has_no_session_or_trusted_roots_route(tmp_path, path) -> None:
+    # The window gets its token over Electron IPC and nothing read the trusted roots.
     response = _request(
         tmp_path,
         "GET",
-        "/api/session",
-        headers={"Origin": "http://127.0.0.1:5173"},
+        path,
+        headers={"Origin": "http://127.0.0.1:5173", "X-Gofer-Desktop-Grant-Secret": "test-secret"},
     )
 
-    assert response.status == 200
-    assert response.json() == {
-        "apiBaseUrl": "http://127.0.0.1:8765/api",
-        "apiToken": "test-ui-token",
-    }
-    assert response.header("Access-Control-Allow-Origin") == "http://127.0.0.1:5173"
+    assert response.status == 404
+    assert "test-ui-token" not in response.text()
 
 
-def test_ui_server_session_payload_is_origin_gated(tmp_path) -> None:
+def test_ui_server_authenticated_read_is_origin_gated(tmp_path) -> None:
     response = _request(
         tmp_path,
         "GET",
-        "/api/session",
+        "/api/doctor",
         headers={"Origin": "https://attacker.example"},
     )
 
     assert response.status == 403
     assert response.json() == {"error": "Origin is not allowed"}
-
-
-def test_ui_session_payload_uses_bound_server_address(tmp_path) -> None:
-    fake_server = _fake_server(tmp_path)
-    fake_server.server_address = ("127.0.0.1", 0)
-
-    assert ui_session_payload(fake_server) == {
-        "apiBaseUrl": "http://127.0.0.1:0/api",
-        "apiToken": "test-ui-token",
-    }
 
 
 def test_ui_server_reflects_trusted_origin_without_wildcard_cors(tmp_path) -> None:
@@ -747,7 +553,7 @@ def test_ui_server_rejects_non_ascii_api_credentials(tmp_path: Path, header: str
     response = _request(
         tmp_path,
         "GET",
-        "/api/session",
+        "/api/doctor",
         headers={
             header: "Bearer invalid-\u00e9" if header == "Authorization" else "invalid-\u00e9"
         },
@@ -757,15 +563,30 @@ def test_ui_server_rejects_non_ascii_api_credentials(tmp_path: Path, header: str
     assert response.status == 401
 
 
-def test_ui_server_rejects_non_ascii_desktop_credentials(tmp_path: Path) -> None:
-    response = _request(
-        tmp_path,
-        "GET",
-        "/api/desktop/trusted-roots",
-        headers={"X-Gofer-Desktop-Grant-Secret": "invalid-\u00e9"},
-    )
+@pytest.mark.parametrize("case", sorted(BAD_RATTISH_SOURCES))
+def test_document_analyze_reports_lone_symbols_and_empty_list_items(
+    tmp_path: Path, case: str
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    create_registered_workflow(project, "Route Editor", registry_dir=tmp_path)
+    source, line, column, message, _suggestions = BAD_RATTISH_SOURCES[case]
 
-    assert response.status == 403
+    with finishes_within(2):
+        response = _request(
+            tmp_path,
+            "POST",
+            "/api/workflows/route-editor/document/analyze",
+            body={"source": source},
+        )
+
+    assert response.status == 200
+    diagnostics = cast(dict[str, Any], response.json())["document"]["diagnostics"]
+    assert [
+        (item["span"]["start"]["line"], item["span"]["start"]["column"])
+        for item in diagnostics
+        if message in item["message"]
+    ] == [(line, column)]
 
 
 def test_ui_server_exposes_revisioned_rattish_document_routes(tmp_path: Path) -> None:
@@ -890,241 +711,6 @@ Node prepare:
     assert run["workflowId"] == "runnable-rattish"
     assert run["nodeOutputs"]["prepare"]["data"]["stdout"] == "ready"
     assert Path(run["logPath"]).is_file()
-
-
-def test_ui_server_renders_llm_usage_summary() -> None:
-    html = render_usage_summary_html(
-        {
-            "totals": {
-                "agent_calls": 2,
-                "total_tokens": 42,
-                "estimated_cost": 0.125,
-                "agent_time_seconds": 3.5,
-            },
-            "most_expensive_nodes": [
-                {
-                    "node_id": "expensive",
-                    "model": "gpt-test",
-                    "total_tokens": 30,
-                    "estimated_cost": 0.1,
-                    "duration_seconds": 1.0,
-                }
-            ],
-            "slowest_nodes": [
-                {
-                    "node_id": "slow",
-                    "provider": "codex",
-                    "total_tokens": 12,
-                    "estimated_cost": 0.025,
-                    "duration_seconds": 2.5,
-                }
-            ],
-        }
-    )
-
-    assert "LLM run usage" in html
-    assert "Most expensive nodes" in html
-    assert "Slowest nodes" in html
-    assert "expensive" in html
-
-
-def test_ui_server_workflow_usage_page_reads_recent_sidecars(tmp_path: Path) -> None:
-    workflow_dir = tmp_path / "logs" / "usage-ui"
-    workflow_dir.mkdir(parents=True)
-    log_path = workflow_dir / "run.log"
-    log_path.write_text("done\n", encoding="utf-8")
-    log_path.with_suffix(".outputs.json").write_text(
-        json.dumps(
-            {
-                "workflowId": "usage-ui",
-                "runId": "run.log",
-                "nodeOutputs": {},
-                "usageSummary": {
-                    "totals": {
-                        "agent_calls": 1,
-                        "input_tokens": 4,
-                        "output_tokens": 6,
-                        "total_tokens": 10,
-                        "estimated_cost": 0.01,
-                        "agent_time_seconds": 2.0,
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    payload = workflow_usage_page_payload("usage-ui", tmp_path)
-    rendered = render_workflow_usage_html(payload)
-
-    assert payload["totals"]["agent_calls"] == 1
-    assert payload["totals"]["total_tokens"] == 10
-    assert "LLM usage for usage-ui" in rendered
-    assert "run.log" in rendered
-
-
-def test_ui_server_workflow_plan_route_uses_trigger_context_and_base_path(tmp_path) -> None:
-    workflow_path = tmp_path / "watched-plan.toml"
-    inputs = tmp_path / "inputs"
-    inputs.mkdir()
-    event_file = inputs / "one.txt"
-    event_file.write_text("one")
-    workflow_path.write_text(
-        """
-[workflow]
-id = "watched-plan"
-name = "Watched Plan"
-
-[workflow.watch]
-path = "inputs"
-glob = "*.txt"
-mode = "fanout"
-
-[[nodes]]
-id = "trigger"
-type = "loop"
-
-[nodes.source]
-type = "trigger_events"
-include_content = true
-""".strip()
-    )
-    body = json.dumps(
-        {"triggerContext": {"events": [{"path": str(event_file), "kind": "modified"}]}}
-    ).encode()
-    server = GoferUiServer.__new__(GoferUiServer)
-    server.data_dir = tmp_path
-    server.resource_limits = DEFAULT_RESOURCE_LIMITS
-    server.api_token = "test-ui-token"
-    handler = GoferUiRequestHandler.__new__(GoferUiRequestHandler)
-    handler.server = server
-    server.server_address = ("127.0.0.1", 8765)
-    handler.path = "/api/workflows/watched-plan/plan"
-    handler.headers = Message()
-    handler.headers["Content-Length"] = str(len(body))
-    handler.headers["Authorization"] = "Bearer test-ui-token"
-    handler.headers["Host"] = "127.0.0.1:8765"
-    handler.rfile = BytesIO(body)
-    handler.wfile = BytesIO()
-    status: dict[str, int] = {}
-
-    def send_response(code: int, message: str | None = None) -> None:
-        status["code"] = code
-
-    def send_header(_keyword: str, _value: str) -> None:
-        return None
-
-    def end_headers() -> None:
-        return None
-
-    setattr(handler, "send_response", send_response)
-    setattr(handler, "send_header", send_header)
-    setattr(handler, "end_headers", end_headers)
-
-    handler.do_POST()
-
-    handler.wfile.seek(0)
-    payload = json.loads(handler.wfile.read().decode("utf-8"))
-    assert status["code"] == 200
-    plan = payload["plan"]
-    assert plan["pathResolutionBase"] == str(tmp_path)
-    assert plan["triggerContext"]["watch"]["path"] == str(inputs)
-    fan_out = plan["generations"][0]["nodes"][0]["fanOut"]
-    assert fan_out["count"] == 1
-    assert fan_out["sampleItems"][0]["path"] == str(event_file)
-    assert "content" not in fan_out["sampleItems"][0]
-
-
-def test_ui_server_webhook_trigger_endpoint_runs_workflow(tmp_path: Path) -> None:
-    (tmp_path / "hooked.toml").write_text(
-        """
-[workflow]
-id = "hooked"
-name = "Hooked"
-
-[workflow.webhooks.default]
-enabled = true
-allow_unauthenticated = true
-
-[[nodes]]
-id = "echo"
-type = "bash_command"
-command = 'printf "%s" "$SOURCE"'
-
-[nodes.inputs]
-"env.SOURCE" = "{{trigger.source}}"
-""".strip(),
-        encoding="utf-8",
-    )
-
-    response = _request(
-        tmp_path,
-        "POST",
-        "/api/workflows/hooked/webhooks/default/trigger",
-        body={"ok": True},
-    )
-
-    payload = cast(dict[str, object], response.json())
-    trigger = cast(dict[str, object], payload["trigger"])
-    run = cast(dict[str, object], trigger["run"])
-    node_outputs = cast(dict[str, object], run["nodeOutputs"])
-    echo = cast(dict[str, object], node_outputs["echo"])
-    assert response.status == 202
-    assert trigger["triggerId"] == "default"
-    assert echo["output"] == "http"
-
-
-def test_ui_server_webhook_replay_requires_token(tmp_path: Path) -> None:
-    (tmp_path / "hooked.toml").write_text(
-        """
-[workflow]
-id = "hooked"
-name = "Hooked"
-
-[workflow.webhooks.default]
-enabled = true
-token = "secret-token"
-
-[[nodes]]
-id = "echo"
-type = "bash_command"
-command = 'printf "%s" "$VALUE"'
-
-[nodes.inputs]
-"env.VALUE" = "{{trigger.payload.value}}"
-""".strip(),
-        encoding="utf-8",
-    )
-
-    trigger_response = _request(
-        tmp_path,
-        "POST",
-        "/api/workflows/hooked/webhooks/default/trigger",
-        body={"value": "original"},
-        headers={"X-Gofer-Webhook-Token": "secret-token"},
-    )
-    trigger_payload = cast(dict[str, object], trigger_response.json())["trigger"]
-    run_id = cast(dict[str, object], trigger_payload)["runId"]
-
-    unauthorized = _request(
-        tmp_path,
-        "POST",
-        "/api/workflows/hooked/webhooks/default/replay",
-        body={"runId": str(run_id)},
-    )
-
-    assert unauthorized.status == 400
-    assert "Unauthorized" in unauthorized.text()
-
-    authorized = _request(
-        tmp_path,
-        "POST",
-        "/api/workflows/hooked/webhooks/default/replay",
-        body={"runId": str(run_id)},
-        headers={"Authorization": "Bearer secret-token"},
-    )
-
-    assert authorized.status == 202
 
 
 def test_ui_server_ignores_data_dir_query_override(tmp_path) -> None:
@@ -1456,7 +1042,7 @@ def test_ui_server_get_routes_forward_to_api_payloads(monkeypatch, tmp_path) -> 
     )
 
 
-def test_ui_server_post_workflow_routes_and_syncs(monkeypatch, tmp_path) -> None:
+def test_ui_server_post_workflow_routes(monkeypatch, tmp_path) -> None:
     calls: dict[str, object] = {}
 
     def fake_create(name, project_root, *, registry_dir):
@@ -1466,10 +1052,6 @@ def test_ui_server_post_workflow_routes_and_syncs(monkeypatch, tmp_path) -> None
     def fake_open_project(project_root, *, registry_dir, check_cancelled):
         calls["open_project"] = (project_root, registry_dir)
         return {"projectRoot": str(project_root), "workflows": [{"id": "existing"}]}
-
-    def fake_import(content, data_dir):
-        calls["import"] = (content, data_dir)
-        return {"id": "imported"}
 
     def fake_rename(workflow_id, name, data_dir):
         calls["rename"] = (workflow_id, name, data_dir)
@@ -1481,7 +1063,6 @@ def test_ui_server_post_workflow_routes_and_syncs(monkeypatch, tmp_path) -> None
 
     monkeypatch.setattr(server_module, "create_registered_workflow_payload", fake_create)
     monkeypatch.setattr(server_module, "open_project_payload", fake_open_project)
-    monkeypatch.setattr(server_module, "import_workflow_payload", fake_import)
     monkeypatch.setattr(server_module, "rename_workflow_payload", fake_rename)
     monkeypatch.setattr(server_module, "duplicate_workflow_payload", fake_duplicate)
 
@@ -1499,330 +1080,24 @@ def test_ui_server_post_workflow_routes_and_syncs(monkeypatch, tmp_path) -> None
         "/api/projects/open",
         body={"projectRoot": str(project_root)},
     )
-    imported = _request(tmp_path, "POST", "/api/workflows/import", body={"content": "toml"})
     renamed = _request(tmp_path, "POST", "/api/workflows/wf/rename", body={"name": "Renamed"})
     duplicate = _request(tmp_path, "POST", "/api/workflows/wf/duplicate", body={"name": "Copy"})
 
     assert create.status == 201
     assert create.json() == {"workflow": {"id": "created"}}
-    assert create.server.sync_calls == 1
     assert open_project.status == 200
     assert open_project.json() == {
         "projectRoot": str(project_root),
         "workflows": [{"id": "existing"}],
     }
-    assert open_project.server.sync_calls == 1
-    assert imported.status == 201
     assert renamed.status == 200
-    assert renamed.server.sync_calls == 1
-    assert renamed.server.continuous_sync_calls == 1
     assert duplicate.status == 201
     assert calls == {
         "create": ("Created", project_root, tmp_path),
         "open_project": (project_root, tmp_path),
-        "import": ("toml", tmp_path),
         "rename": ("wf", "Renamed", tmp_path),
         "duplicate": ("wf", "Copy", tmp_path),
     }
-
-
-def test_ui_server_update_delete_run_and_stop_routes(monkeypatch, tmp_path) -> None:
-    async def fake_run(workflow_id, data_dir, *, dry_run, trigger_context=None, started_by=None):
-        # The app's own Run button records the run as started by hand.
-        assert started_by == "manual"
-        return {
-            "workflowId": workflow_id,
-            "dataDir": str(data_dir),
-            "dryRun": dry_run,
-            "triggerContext": trigger_context,
-        }
-
-    monkeypatch.setattr(
-        server_module,
-        "update_workflow_payload",
-        lambda workflow_id, payload, data_dir: {
-            "id": workflow_id,
-            "name": payload["name"],
-            "dataDir": str(data_dir),
-        },
-    )
-    monkeypatch.setattr(
-        server_module,
-        "delete_workflow_payload",
-        lambda workflow_id, data_dir, **_kwargs: {
-            "workflowId": workflow_id,
-            "deleted": True,
-        },
-    )
-    monkeypatch.setattr(
-        server_module,
-        "stop_workflow_run_payload",
-        lambda workflow_id, data_dir, run_id=None: {
-            "workflowId": workflow_id,
-            "runId": run_id,
-            "stopped": True,
-        },
-    )
-    monkeypatch.setattr(server_module, "run_workflow_payload", fake_run)
-
-    updated = _request(tmp_path, "PUT", "/api/workflows/wf", body={"name": "Updated"})
-    deleted = _request(tmp_path, "DELETE", "/api/workflows/wf")
-    stopped = _request(tmp_path, "POST", "/api/workflows/wf/stop")
-    stopped_run = _request(tmp_path, "POST", "/api/workflows/wf/runs/run.log/stop")
-    dry_run = _request(
-        tmp_path,
-        "POST",
-        "/api/workflows/wf/run",
-        body={"dryRun": True, "triggerContext": {"source": "test"}},
-    )
-
-    assert updated.status == 200
-    assert updated.json() == {"workflow": {"id": "wf", "name": "Updated", "dataDir": str(tmp_path)}}
-    assert updated.server.sync_calls == 1
-    assert deleted.json() == {"workflowId": "wf", "deleted": True}
-    assert deleted.server.sync_calls == 1
-    assert stopped.json() == {"workflowId": "wf", "runId": None, "stopped": True}
-    assert stopped_run.json() == {"workflowId": "wf", "runId": "run.log", "stopped": True}
-    assert dry_run.json() == {
-        "plan": {
-            "workflowId": "wf",
-            "dataDir": str(tmp_path),
-            "dryRun": True,
-            "triggerContext": {"source": "test"},
-        }
-    }
-
-
-def test_ui_server_retention_queue_and_approval_routes(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(
-        server_module,
-        "retention_settings_payload",
-        lambda data_dir, workflow_id=None: {"workflowId": workflow_id, "settings": {}},
-    )
-    monkeypatch.setattr(
-        server_module,
-        "update_retention_settings_payload",
-        lambda data_dir, settings, workflow_id=None: {
-            "workflowId": workflow_id,
-            "settings": settings,
-        },
-    )
-    monkeypatch.setattr(
-        server_module,
-        "queue_workflow_run_payload",
-        lambda workflow_id, data_dir, **kwargs: {"workflowId": workflow_id, **kwargs},
-    )
-    monkeypatch.setattr(
-        server_module,
-        "cancel_queued_run_payload",
-        lambda run_id, data_dir: {"runId": run_id, "cancelled": True},
-    )
-    monkeypatch.setattr(
-        server_module,
-        "list_workflow_approvals_payload",
-        lambda workflow_id, data_dir, include_decided: {
-            "workflowId": workflow_id,
-            "includeDecided": include_decided,
-        },
-    )
-    monkeypatch.setattr(
-        server_module,
-        "decide_workflow_approval_payload",
-        lambda workflow_id, run_id, node_id, decision, data_dir, decided_by, notes, choice, reply: {
-            "workflowId": workflow_id,
-            "runId": run_id,
-            "nodeId": node_id,
-            "decision": decision,
-            "decidedBy": decided_by,
-            "notes": notes,
-            **({"choice": choice} if choice is not None else {}),
-            **({"reply": reply} if reply else {}),
-        },
-    )
-
-    assert _request(tmp_path, "GET", "/api/retention").json() == {
-        "workflowId": None,
-        "settings": {},
-    }
-    assert _request(tmp_path, "GET", "/api/workflows/wf/retention").json() == {
-        "workflowId": "wf",
-        "settings": {},
-    }
-    assert _request(
-        tmp_path,
-        "POST",
-        "/api/workflows/wf/retention",
-        body={"keepLast": 5},
-    ).json() == {"workflowId": "wf", "settings": {"keepLast": 5}}
-    assert _request(
-        tmp_path,
-        "POST",
-        "/api/workflows/wf/queue",
-        body={"priority": 7, "trigger": "manual", "parameters": {}, "targetLabels": ["a"]},
-    ).json() == {
-        "workflowId": "wf",
-        "priority": 7,
-        "trigger": "manual",
-        "parameters": {},
-        "target_labels": ["a"],
-    }
-    assert _request(tmp_path, "POST", "/api/queue/run-1/cancel").json() == {
-        "runId": "run-1",
-        "cancelled": True,
-    }
-    assert _request(tmp_path, "GET", "/api/workflows/wf/approvals?all=0").json() == {
-        "workflowId": "wf",
-        "includeDecided": False,
-    }
-    assert _request(
-        tmp_path,
-        "POST",
-        "/api/workflows/wf/approvals/run-1/node-1/reject",
-        body={"by": "tester", "notes": "no"},
-    ).json() == {
-        "workflowId": "wf",
-        "runId": "run-1",
-        "nodeId": "node-1",
-        "decision": "rejected",
-        "decidedBy": "tester",
-        "notes": "no",
-    }
-    # A gate with options is answered on the approve route with a choice and a reply.
-    assert _request(
-        tmp_path,
-        "POST",
-        "/api/workflows/wf/approvals/run-1/node-1/approve",
-        body={"by": "tester", "choice": "Beta", "reply": "Testers only"},
-    ).json() == {
-        "workflowId": "wf",
-        "runId": "run-1",
-        "nodeId": "node-1",
-        "decision": "approved",
-        "decidedBy": "tester",
-        "notes": "",
-        "choice": "Beta",
-        "reply": "Testers only",
-    }
-
-
-def test_ui_server_provider_profile_runner_prune_and_resume_routes(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    async def fake_resume(workflow_id, data_dir, **kwargs):
-        return {"workflowId": workflow_id, "dataDir": str(data_dir), **kwargs}
-
-    monkeypatch.setattr(
-        server_module,
-        "provider_profiles_payload",
-        lambda data_dir: {"profiles": [{"name": "default"}], "dataDir": str(data_dir)},
-    )
-    monkeypatch.setattr(
-        server_module,
-        "upsert_provider_profile_payload",
-        lambda payload, data_dir: {"profile": payload, "dataDir": str(data_dir)},
-    )
-    monkeypatch.setattr(
-        server_module,
-        "delete_provider_profile_payload",
-        lambda profile_name, data_dir: {"name": profile_name, "deleted": True},
-    )
-    monkeypatch.setattr(
-        server_module,
-        "runner_queue_payload",
-        lambda data_dir: {"runs": [], "dataDir": str(data_dir)},
-    )
-    monkeypatch.setattr(
-        server_module,
-        "prune_workflow_run_logs_payload",
-        lambda workflow_id, data_dir, **kwargs: {
-            "workflowId": workflow_id,
-            "dataDir": str(data_dir),
-            **kwargs,
-        },
-    )
-    monkeypatch.setattr(server_module, "resume_workflow_payload", fake_resume)
-
-    assert _request(tmp_path, "GET", "/api/provider/profiles").json() == {
-        "profiles": [{"name": "default"}],
-        "dataDir": str(tmp_path),
-    }
-    assert _request(
-        tmp_path,
-        "POST",
-        "/api/provider/profiles",
-        body={"name": "default", "provider": "codex"},
-    ).json() == {
-        "profile": {"name": "default", "provider": "codex"},
-        "dataDir": str(tmp_path),
-    }
-    assert _request(tmp_path, "DELETE", "/api/provider/profiles/default").json() == {
-        "name": "default",
-        "deleted": True,
-    }
-    assert _request(tmp_path, "GET", "/api/runners").json() == {
-        "runs": [],
-        "dataDir": str(tmp_path),
-    }
-    assert _request(
-        tmp_path,
-        "POST",
-        "/api/workflows/wf/logs/prune",
-        body={
-            "keepLast": "5",
-            "keepDays": "10",
-            "keepFailedDays": "",
-            "dryRun": False,
-        },
-    ).json() == {
-        "workflowId": "wf",
-        "dataDir": str(tmp_path),
-        "keep_last": 5,
-        "keep_days": 10,
-        "keep_failed_days": None,
-        "dry_run": False,
-    }
-    assert _request(
-        tmp_path,
-        "POST",
-        "/api/workflows/wf/runs/run.log/resume",
-        body={
-            "fromNode": "a",
-            "skipCache": True,
-            "force": True,
-            "triggerContext": {"reason": "test"},
-        },
-    ).json() == {
-        "run": {
-            "workflowId": "wf",
-            "dataDir": str(tmp_path),
-            "run_id": "run.log",
-            "from_node": "a",
-            "only_node": None,
-            "skip_cache": True,
-            "force": True,
-            "trigger_context": {"reason": "test"},
-            "background": False,
-            "started_by": "manual",
-            "inputs": None,
-        }
-    }
-    # A Rattish resume can give again the password inputs its run didn't save.
-    resumed = cast(
-        dict[str, Any],
-        _request(
-            tmp_path,
-            "POST",
-            "/api/workflows/wf/runs/r1/resume",
-            body={"background": True, "inputs": {"token": "pw"}},
-        ).json(),
-    )
-    assert resumed["run"]["inputs"] == {"token": "pw"} and resumed["run"]["background"] is True
-    refused = _request(
-        tmp_path, "POST", "/api/workflows/wf/runs/r1/resume", body={"inputs": ["pw"]}
-    )
-    assert refused.status == 400
-    assert "inputs must be an object" in cast(dict[str, Any], refused.json())["error"]
 
 
 def test_ui_server_rerun_route_passes_the_run_and_given_inputs(monkeypatch, tmp_path) -> None:
@@ -2206,88 +1481,6 @@ def test_ui_server_chat_stream_provider_error_is_ndjson(monkeypatch, tmp_path) -
     assert response.text().splitlines() == ['{"type": "error", "error": "stream unavailable"}']
 
 
-@pytest.mark.parametrize(
-    ("method", "path", "body", "patch_name", "error", "expected_status"),
-    [
-        (
-            "POST",
-            "/api/workflows",
-            {"name": "Taken", "projectRoot": "."},
-            "create_registered_workflow_payload",
-            server_module.WorkflowAlreadyExistsError("taken"),
-            409,
-        ),
-        (
-            "POST",
-            "/api/workflows/import",
-            {"content": "bad"},
-            "import_workflow_payload",
-            server_module.WorkflowCreateError("bad import"),
-            400,
-        ),
-        (
-            "PUT",
-            "/api/workflows/wf",
-            {"id": "wf"},
-            "update_workflow_payload",
-            server_module.WorkflowUpdateError("bad update"),
-            400,
-        ),
-        (
-            "POST",
-            "/api/workflows/wf/run",
-            {},
-            "run_workflow_payload",
-            server_module.WorkflowRunError("bad run"),
-            400,
-        ),
-        (
-            "GET",
-            "/api/workflows/wf/logs/latest",
-            None,
-            "latest_workflow_log_payload",
-            server_module.WorkflowLogError("bad log"),
-            400,
-        ),
-        (
-            "POST",
-            "/api/chat",
-            {"messages": []},
-            "run_workflow_chat",
-            server_module.ChatProviderError("bad provider"),
-            400,
-        ),
-    ],
-)
-def test_ui_server_error_status_mappings(
-    monkeypatch,
-    tmp_path,
-    method,
-    path,
-    body,
-    patch_name,
-    error,
-    expected_status,
-) -> None:
-    async def async_raise(*_args, **_kwargs):
-        raise error
-
-    def sync_raise(*_args, **_kwargs):
-        raise error
-
-    replacement = (
-        async_raise if patch_name in {"run_workflow_payload", "run_workflow_chat"} else sync_raise
-    )
-    monkeypatch.setattr(server_module, patch_name, replacement)
-    if patch_name == "create_registered_workflow_payload":
-        body = {**body, "projectRoot": str(tmp_path)}
-
-    response = _request(tmp_path, method, path, body=body)
-
-    assert response.status == expected_status
-    assert response.json() == {"error": str(error)}
-
-
 def test_ui_server_unknown_invalid_json_and_options(tmp_path) -> None:
     missing = _request(tmp_path, "GET", "/api/not-found")
     invalid = _request(tmp_path, "POST", "/api/workflows", body=b"{")
@@ -2357,137 +1550,7 @@ def test_ui_server_rejects_invalid_optional_string(tmp_path, value) -> None:
     assert "effort must be a string" in response.text()
 
 
-def test_ui_server_continuous_monitor_starts_one_thread_and_cleans_inactive(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    class FakeThread:
-        created: list[FakeThread] = []
-
-        def __init__(self, *args, **kwargs) -> None:
-            self.target = kwargs.get("target")
-            self.args = kwargs.get("args", ())
-            self.name = kwargs.get("name")
-            self.daemon = kwargs.get("daemon", False)
-            self.alive = False
-            self.started = 0
-            FakeThread.created.append(self)
-
-        def start(self) -> None:
-            self.started += 1
-            self.alive = True
-
-        def is_alive(self) -> bool:
-            return self.alive
-
-        def join(self, timeout: float | None = None) -> None:
-            self.alive = False
-
-    (tmp_path / "continuous.toml").write_text(
-        """
-[workflow]
-id = "continuous"
-name = "Continuous"
-run_continuously = true
-
-[[nodes]]
-id = "hello"
-type = "bash_command"
-command = "echo hello"
-""".strip(),
-        encoding="utf-8",
-    )
-    (tmp_path / "invalid.toml").write_text("not = [valid", encoding="utf-8")
-    monkeypatch.setattr(server_module.threading, "Thread", FakeThread)
-    server = GoferUiServer.__new__(GoferUiServer)
-    server.data_dir = tmp_path
-    server.resource_limits = ResourceLimits(max_watcher_concurrency=5)
-    server._continuous_runs = {}
-    server._continuous_lock = threading.Lock()
-
-    server.ensure_continuous_runs()
-    server.ensure_continuous_runs()
-
-    assert list(server._continuous_runs) == ["continuous"]
-    assert len(FakeThread.created) == 1
-    assert FakeThread.created[0].started == 1
-
-    (tmp_path / "continuous.toml").write_text(
-        """
-[workflow]
-id = "continuous"
-name = "Continuous"
-
-[[nodes]]
-id = "hello"
-type = "bash_command"
-command = "echo hello"
-""".strip(),
-        encoding="utf-8",
-    )
-    server.ensure_continuous_runs()
-
-    assert server._continuous_runs == {}
-
-
-def test_ui_server_start_stop_continuous_monitor_uses_single_monitor_thread(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    class FakeThread:
-        def __init__(self, *args, **kwargs) -> None:
-            self.target = kwargs.get("target")
-            self.name = kwargs.get("name")
-            self.daemon = kwargs.get("daemon", False)
-            self.alive = False
-            self.started = 0
-            self.joined = False
-
-        def start(self) -> None:
-            self.started += 1
-            self.alive = True
-
-        def is_alive(self) -> bool:
-            return self.alive
-
-        def join(self, timeout: float | None = None) -> None:
-            self.joined = True
-            self.alive = False
-
-    monkeypatch.setattr(server_module.threading, "Thread", FakeThread)
-    server = GoferUiServer.__new__(GoferUiServer)
-    server.data_dir = tmp_path
-    server.resource_limits = DEFAULT_RESOURCE_LIMITS
-    server._continuous_runs = {}
-    server._continuous_lock = threading.Lock()
-    server._continuous_stop = threading.Event()
-    server._continuous_thread = None
-
-    server.start_continuous_monitor()
-    first_thread = server._continuous_thread
-    server.start_continuous_monitor()
-    server.stop_continuous_monitor()
-
-    assert first_thread is server._continuous_thread
-    assert first_thread.started == 1
-    assert first_thread.joined is True
-    assert server._continuous_stop.is_set()
-
-
 def test_ui_server_serve_shutdown_cleans_up(monkeypatch, tmp_path, capsys) -> None:
-    class FakeLifecycle:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, object | None]] = []
-
-        def start(self, paused: bool = False) -> None:
-            self.calls.append(("start", paused))
-
-        def resume(self) -> None:
-            self.calls.append(("resume", None))
-
-        def shutdown(self, wait: bool = True) -> None:
-            self.calls.append(("shutdown", wait))
-
     class FakeServer:
         def __init__(self) -> None:
             self.server_address = ("127.0.0.1", 4321)
@@ -2495,18 +1558,7 @@ def test_ui_server_serve_shutdown_cleans_up(monkeypatch, tmp_path, capsys) -> No
             self.gofer_cli_path = None
             self.api_token = "ready-token"
             self.emit_ready_token = False
-            self.scheduler = FakeLifecycle()
-            self.watcher = FakeLifecycle()
             self.calls: list[str] = []
-
-        def sync_schedules(self) -> None:
-            self.calls.append("sync_schedules")
-
-        def start_continuous_monitor(self) -> None:
-            self.calls.append("start_continuous_monitor")
-
-        def stop_continuous_monitor(self) -> None:
-            self.calls.append("stop_continuous_monitor")
 
         def serve_forever(self) -> None:
             self.calls.append("serve_forever")
@@ -2534,6 +1586,7 @@ def test_ui_server_serve_shutdown_cleans_up(monkeypatch, tmp_path, capsys) -> No
         return lambda: usage_refresh.append("stop")
 
     monkeypatch.setattr(server_module, "start_background_refresh", start_background_refresh)
+    monkeypatch.setattr(server_module, "start_temp_cleanup", lambda _data_dir: lambda: None)
 
     server_module.serve(host="127.0.0.1", port=9999, data_dir=tmp_path)
     assert usage_refresh == [tmp_path, "stop"]
@@ -2544,19 +1597,7 @@ def test_ui_server_serve_shutdown_cleans_up(monkeypatch, tmp_path, capsys) -> No
     assert "GOFER_UI_READY" in output.out
     assert "ready-token" not in output.out
     assert "GOFER_UI_STOPPED" in output.err
-    assert fake_server.scheduler.calls == [
-        ("start", True),
-        ("resume", None),
-        ("shutdown", False),
-    ]
-    assert fake_server.watcher.calls == [("start", False), ("shutdown", False)]
-    assert fake_server.calls == [
-        "sync_schedules",
-        "start_continuous_monitor",
-        "serve_forever",
-        "stop_continuous_monitor",
-        "server_close",
-    ]
+    assert fake_server.calls == ["serve_forever", "server_close"]
 
 
 def test_ui_server_chat_unhandled_error_returns_json(monkeypatch, tmp_path) -> None:
@@ -2650,23 +1691,6 @@ def test_ui_server_rejects_incomplete_body_before_json_parse() -> None:
         assert "Incomplete request body" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("Expected JSONDecodeError")
-
-
-def test_ui_server_stops_specific_running_workflow_log(tmp_path) -> None:
-    log_dir = tmp_path / "logs" / "stop-me"
-    log_dir.mkdir(parents=True)
-    run_id = "2026-06-17T12-00-00-0400.log"
-    (log_dir / run_id).write_text(
-        "2026-06-17T12:00:00-04:00 - stop-me started successfully\n",
-        encoding="utf-8",
-    )
-    response = _request(tmp_path, "POST", f"/api/workflows/stop-me/runs/{run_id}/stop")
-
-    payload = response.json()
-    assert response.status == 200
-    assert isinstance(payload, dict)
-    assert payload["stopped"] is True
-    assert workflow_run_stop_path("stop-me", run_id, tmp_path).exists()
 
 
 def test_ui_server_delete_global_chat_prompt(tmp_path) -> None:
@@ -2781,7 +1805,7 @@ def test_second_brain_expired_grant_recovers_after_registration(
 
 
 @pytest.mark.parametrize(
-    "path", ["/api/session", "/api/workflows", "/api/doctor", "/workflows/demo/usage"]
+    "path", ["/api/provider/accounts", "/api/workflows", "/api/doctor", "/workflows/demo/usage"]
 )
 @pytest.mark.parametrize(
     "origin", [None, "null", "https://attacker.example", "http://127.0.0.1:5173"]
@@ -2806,19 +1830,19 @@ def test_sensitive_reads_never_disclose_data_without_credentials(tmp_path, path,
     ],
 )
 def test_api_rejects_arbitrary_host_even_with_credentials(tmp_path, host):
-    response = _request(tmp_path, "GET", "/api/session", headers={"Host": host})
+    response = _request(tmp_path, "GET", "/api/doctor", headers={"Host": host})
     assert response.status == 403
     assert "test-ui-token" not in response.text()
 
 
 def test_opaque_origin_desktop_requires_token_and_narrow_preflight(tmp_path):
-    authenticated = _request(tmp_path, "GET", "/api/session", headers={"Origin": "null"})
+    authenticated = _request(tmp_path, "GET", "/api/workflows", headers={"Origin": "null"})
     assert authenticated.status == 200
     assert authenticated.header("Access-Control-Allow-Origin") == "null"
     preflight = _request(
         tmp_path,
         "OPTIONS",
-        "/api/session",
+        "/api/workflows",
         authenticated=False,
         headers={
             "Origin": "null",
@@ -2830,54 +1854,10 @@ def test_opaque_origin_desktop_requires_token_and_narrow_preflight(tmp_path):
     assert preflight.body == b""
     assert preflight.header("Access-Control-Allow-Origin") == "null"
     rejected = _request(
-        tmp_path, "OPTIONS", "/api/session", authenticated=False, headers={"Origin": "null"}
+        tmp_path, "OPTIONS", "/api/workflows", authenticated=False, headers={"Origin": "null"}
     )
     assert rejected.status == 403
     assert "null" not in server_module._default_allowed_origins()
-
-
-@pytest.mark.parametrize(
-    "method,path,required",
-    [
-        ("GET", "/api/health", False),
-        ("GET", "/api/session", True),
-        ("GET", "/workflows/w/usage", True),
-        ("PUT", "/api/workflows/w", True),
-        ("DELETE", "/api/workflows/w", True),
-        ("OPTIONS", "/api/workflows", False),
-        ("POST", "/api/workflows/w/webhooks/default/trigger", False),
-        ("POST", "/api/workflows/w/webhooks/default/replay", False),
-        ("GET", "/api/workflows/w/webhooks/default/trigger", True),
-        ("POST", "/api/other/webhooks/default/trigger", True),
-    ],
-)
-def test_request_policy_covers_methods_and_webhook_exceptions(method, path, required):
-    assert server_module._requires_ui_api_auth(method, path) is required
-
-
-def test_workflow_poll_does_not_reconcile_schedules(tmp_path):
-    response = _request(tmp_path, "GET", "/api/workflows")
-    assert response.status == 200
-    assert response.server.sync_calls == 0
-
-
-def test_schedule_reconciliation_only_runs_when_configuration_changes(tmp_path, monkeypatch):
-    server = _fake_server(tmp_path)
-    server._schedule_lock = threading.Lock()
-    server._schedule_signature = None
-    server.scheduler = cast(Any, object())
-    server.watcher = cast(Any, object())
-    calls = []
-    monkeypatch.setattr(
-        server_module, "sync_workflow_schedules", lambda *_: calls.append("schedule")
-    )
-    monkeypatch.setattr(server_module, "sync_workflow_watchers", lambda *_: calls.append("watch"))
-    GoferUiServer.sync_schedules(server)
-    GoferUiServer.sync_schedules(server)
-    assert calls == ["schedule", "watch"]
-    (tmp_path / "external.toml").write_text("# external change")
-    GoferUiServer.sync_schedules(server)
-    assert calls == ["schedule", "watch", "schedule", "watch"]
 
 
 _PATH_CASES = json.loads(
@@ -2917,22 +1897,6 @@ def test_commit_message_body_is_rejected_before_reading_large_payload(tmp_path):
     )
     assert response.status == 400
     assert "exceeds limit" in response.text()
-
-
-def test_desktop_trusted_roots_requires_desktop_secret(tmp_path):
-    denied = _request(tmp_path, "GET", "/api/desktop/trusted-roots")
-    assert denied.status == 403
-    project = tmp_path / "project"
-    project.mkdir()
-    create_registered_workflow(project, "Trusted", registry_dir=tmp_path)
-    allowed = _request(
-        tmp_path,
-        "GET",
-        "/api/desktop/trusted-roots",
-        headers={"X-Gofer-Desktop-Grant-Secret": "test-secret"},
-    )
-    assert allowed.status == 200
-    assert allowed.json() == {"roots": [str(project)]}
 
 
 @pytest.mark.skipif(not _sockets_available(), reason="Loopback sockets unavailable")
@@ -3239,6 +2203,24 @@ def test_rem_swarm_access_requires_project_grant(
     assert "outside the approved" in result.text()
 
 
+@pytest.mark.parametrize("endpoint", ["/api/chat", "/api/chat/stream"])
+def test_both_chat_routes_check_rem_thread_projects(monkeypatch, tmp_path, endpoint) -> None:
+    monkeypatch.setattr(
+        server_module, "run_workflow_chat", lambda **kwargs: pytest.fail("Must not start")
+    )
+    monkeypatch.setattr(
+        server_module, "stream_workflow_chat", lambda **kwargs: pytest.fail("Must not start")
+    )
+    result = _request(
+        tmp_path,
+        "POST",
+        endpoint,
+        body={"workflow": {"remThreads": {"projects": [{"root": "relative/project"}]}}},
+    )
+    assert result.status == 400
+    assert "Rem projects must be existing absolute directories" in result.text()
+
+
 @pytest.mark.parametrize(
     "workflow",
     [
@@ -3530,12 +2512,11 @@ def test_discovery_cancellation_sends_no_error_response(
         raise DiscoveryCancelled()
 
     def unexpected(*args: Any, **kwargs: Any) -> Any:
-        pytest.fail("Cancelled discovery must not send an error or reconcile schedules")
+        pytest.fail("Cancelled discovery must not send an error")
 
     monkeypatch.setattr(server_module, "list_workflow_payloads", cancelled)
     monkeypatch.setattr(server_module, "open_project_payload", cancelled)
     monkeypatch.setattr(handler, "_send_json", unexpected)
-    monkeypatch.setattr(handler, "_sync_schedules", unexpected)
     getattr(handler, f"_dispatch_{method}")()
 
 
@@ -4123,7 +3104,7 @@ def test_deleting_a_workflow_removes_its_triggers(tmp_path: Path) -> None:
         body={"workflowId": workflow_id, "kind": "webhook"},
     )
     assert created.status == 201
-    api_module.delete_workflow_payload(workflow_id, tmp_path, source_format="rattish")
+    api_module.delete_workflow_payload(workflow_id, tmp_path)
     assert TriggerStore(tmp_path).list_triggers() == []
 
 

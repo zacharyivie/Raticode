@@ -342,7 +342,13 @@ At run time, after bindings resolve and configuration renders, a node with `cach
 secret-derived binding computes a key: SHA-256 of the canonical JSON of the provider, profile,
 model and effort of the provider choice about to run, the rendered prompt (for `jev`, the
 question and state), the bound locals, the node's output schema, the project root, and the
-compiled node without `source_span`, `routes`, `readiness` and `configuration.cache`. An entry
+compiled node without `source_span`, `routes`, `readiness` and `configuration.cache`. Paths
+that are new on every run don't enter the key: each mention of a file input's run copy
+(`<run_id>.files/<input>/<name>`) becomes `file:<input>/<name>#sha256:<digest>` of the
+copied bytes, and in a `workspace: worktree` run the project root is the folder the worktree
+was made from, an absolute `working_dir` inside the worktree is written relative to the
+worktree's project folder, and any other mention of the worktree folder becomes the matching
+path in the project's repository. An entry
 younger than both its saved expiry and the node's current `cache` duration is used as the
 node's output: no handler runs, the output is still validated against the output schema, the
 node run record carries `cached_at`, its `node_completed` event carries `cached: true`, and its
@@ -371,6 +377,18 @@ Directory and tabular sources are opened when the loop activates, so upstream no
 may create them. An empty directory or a glob with no matching files succeeds with
 zero iterations and no body activations. Missing or unreadable directories fail at
 activation with a filesystem error.
+
+A tabular source reads `.csv`, `.tsv`, `.jsonl` or `.xlsx` files, one item per row. CSV
+and JSONL are decoded as UTF-8 with an optional leading byte-order mark. `.tsv` is
+tab-separated. A `.csv` file is comma-separated unless its first line contains semicolons
+or tabs and neither of the other two characters; then that character is the delimiter.
+The first CSV, TSV or `.xlsx` row is the header. Trailing blank header cells are
+dropped, and a blank or repeated header name fails. A row shorter than the header maps
+missing cells to `null`. A row with a non-empty value past the last header fails. Each
+JSONL line that is not blank must be a JSON object. These failures, invalid JSON and
+non-UTF-8 text fail with `RATTISH_RUNTIME_CONFIGURATION_ERROR`, and the message names the
+file and its line (or `.xlsx` row) number. A directory or trigger-events source with
+`include-content: true` fails the same way when a file is not UTF-8, naming the file.
 
 The `break` node requires `loop: NodeID` and has `message: String = ""`. It cannot have
 `to`. The target must name a loop whose activation lineage can reach the Break node.

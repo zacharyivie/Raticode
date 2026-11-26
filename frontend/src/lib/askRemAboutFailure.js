@@ -1,4 +1,4 @@
-import { apiUrl } from "./api.js";
+import { apiJson } from "./api.js";
 import { askRemAboutText } from "./fileAttachments.js";
 
 // "Ask Rem about this failure" and "Ask Rem about selection": compact text put in Rem's
@@ -24,10 +24,9 @@ export async function fetchRunFailure({ runId, workflowId = "", nodeId = "" }, f
   if (workflowId) query.set("workflowId", workflowId);
   if (nodeId) query.set("nodeId", nodeId);
   const suffix = query.toString() ? `?${query}` : "";
-  const response = await fetcher(apiUrl(`/rattish/runs/${encodeURIComponent(runId)}/failure${suffix}`));
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `Could not read this run (${response.status}).`);
-  return payload;
+  return apiJson(`/rattish/runs/${encodeURIComponent(runId)}/failure${suffix}`, {
+    fetchImpl: fetcher, failure: status => `Could not read this run (${status}).`,
+  });
 }
 
 // Reads the run's summary and puts it in Rem's message box. Throws with a sentence to show.

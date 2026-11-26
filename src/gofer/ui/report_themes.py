@@ -132,20 +132,34 @@ def write_theme_file(data_dir: Path, config: dict[str, Any]) -> Path:
 
     A custom theme is up to 12,000 characters, too long for a server's command line, which
     some providers copy into their own. Files are named by their content, so a turn reuses
-    the file an earlier turn wrote for the same setting.
+    the file an earlier turn wrote for the same setting. A file under that name with other
+    contents is replaced, so the turn always reads Raticode's own setting.
     """
     payload = json.dumps(
         {key: config[key] for key in THEME_FIELDS if key in config}, sort_keys=True
     ).encode("utf-8")
     folder = data_dir.resolve() / "report-themes"
     mkdir_without_links(folder)
-    target = folder / f"{hashlib.sha256(payload).hexdigest()[:32]}.json"
+    target = folder / f"{_content_name(payload)}.json"
     try:
         with atomic_binary_output(target, exclusive=True) as output:
             output.write(payload)
+        return target
     except FileExistsError:
         pass
+    try:
+        with open_binary_input(target) as handle:
+            if handle.read(MAX_THEME_FILE_BYTES + 1) == payload:
+                return target
+    except OSError:
+        pass
+    with atomic_binary_output(target) as output:
+        output.write(payload)
     return target
+
+
+def _content_name(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()[:32]
 
 
 def write_rules_file(folder: Path, config: dict[str, Any] | None) -> Path | None:
@@ -182,6 +196,8 @@ def read_theme_file(path: Path) -> dict[str, Any]:
         config = json.loads(data) if len(data) <= MAX_THEME_FILE_BYTES else None
     except (OSError, ValueError) as exc:
         raise ValueError("The report theme file can't be read.") from exc
+    if _content_name(data) != path.stem:
+        raise ValueError("The report theme file changed after Raticode wrote it.")
     if not isinstance(config, dict) or set(config) - set(THEME_FIELDS):
         raise ValueError("The report theme file isn't a report theme setting.")
     if not all(

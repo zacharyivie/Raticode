@@ -72,6 +72,19 @@ class OpenTypesTest {
         assertTrue(OpenTypes.readableFrom("content", "0@com.android.providers.downloads.documents", "dev.raticode.mobile"))
     }
 
+    @Test fun aCopyRaticodeHandedOutIsRefusedWhileALockIsOn() {
+        val own = "dev.raticode.mobile.opened"
+        assertTrue(OpenTypes.readableFrom("content", own, "dev.raticode.mobile", handedOut = true, locked = false))
+        // App lock or child lock on: Raticode's own report must not show on this screen.
+        assertFalse(OpenTypes.readableFrom("content", own, "dev.raticode.mobile", handedOut = true, locked = true))
+        assertFalse(OpenTypes.readableFrom("content", "0@$own", "dev.raticode.mobile", handedOut = true, locked = true))
+        // Not handed out stays refused, locked or not, and a handed-out flag never lets a file:// path through.
+        assertFalse(OpenTypes.readableFrom("content", own, "dev.raticode.mobile", handedOut = false, locked = false))
+        assertFalse(OpenTypes.readableFrom("file", own, "dev.raticode.mobile", handedOut = true, locked = false))
+        // Another app's file is the user's to show, as before, whether or not Raticode is locked.
+        assertTrue(OpenTypes.readableFrom("content", "com.android.providers.downloads.documents", "dev.raticode.mobile", locked = true))
+    }
+
     @Test fun releasePolicyListsBothNewExportedScreens() {
         val policy = listOf("scripts/release-policy.json", "../scripts/release-policy.json").map(::File).first { it.exists() }.readText()
         assertTrue(policy.contains("\"dev.raticode.mobile.open.OpenFileActivity\": null"))
@@ -113,7 +126,7 @@ class OpenTypesTest {
 
     @Test fun linksFromOtherAppsOpenInChromiumUnlessGeckoIsChosenAndTheChoiceIsSaved() {
         assertEquals(BrowserRules.ENGINE_RATICODE, OpenTypes.linkEngine(null))
-        assertEquals(BrowserRules.ENGINE_RATICODE, OpenTypes.linkEngine(BrowserRules.ENGINE_FIREFOX))
+        assertEquals(BrowserRules.ENGINE_RATICODE, OpenTypes.linkEngine(dev.raticode.mobile.browser.Firefox.ENGINE))
         assertEquals(BrowserRules.ENGINE_GECKO, OpenTypes.linkEngine(BrowserRules.ENGINE_GECKO))
         assertEquals(BrowserRules.ENGINE_RATICODE, BrowserRules.Saved().externalEngine)
         val saved = BrowserRules.Saved(externalEngine = BrowserRules.ENGINE_GECKO)

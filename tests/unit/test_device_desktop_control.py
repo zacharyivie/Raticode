@@ -852,7 +852,7 @@ def test_phone_usage_asks_for_its_period_and_gets_the_token_chart(phone, tmp_pat
 def test_phone_usage_shows_api_cost_without_plan_prices(phone, tmp_path):
     from gofer.core.usage_ledger import record_invocation
     from gofer.core.usage_service import usage_overview
-    from gofer.devices.desktop_control import ACTION_OPS
+    from tests.helpers.cli_parity import phone_operations
 
     app, peer, _, send = phone
     app.desktop.enable(peer, True)
@@ -878,7 +878,7 @@ def test_phone_usage_shows_api_cost_without_plan_prices(phone, tmp_path):
     assert codex["cost_usd"] is None and codex["unpriced_models"] == ["cli-default"]
     # Saved vs API and the phone's plan-price action were removed.
     assert not {"savings", "plans", "plan_providers"} & cost.keys()
-    assert "usage.plans.save" not in ACTION_OPS
+    assert "usage.plans.save" not in phone_operations()
 
 
 def test_phone_usage_cards_carry_sign_in_state_and_rems_next_account(phone):
@@ -2080,6 +2080,7 @@ def test_phone_looks_again_in_a_decisions_project_and_sees_raticodes_check(phone
     )["value"]
     assert used["decisions"][0]["last_check"] is None
     assert used["decisions"][0]["carried_over"] is False
+    assert used["decisions"][0]["read_from"] is None
     with home.store.connect() as db:
         rem_decisions.note_check(
             db,
@@ -4006,3 +4007,22 @@ def test_phone_decisions_carry_who_asked_without_local_paths():
     assert sent["waiting"] == asked["waiting"] and sent["went_on"] == []
     assert "/home/user" not in sent["task_title"]
     assert module._decision_item({**item, "status": "confirmed", "asked": None})["asked"] is None
+
+
+def test_phone_decisions_say_which_commit_added_a_record_read_from_the_repository():
+    item = {
+        "id": "D-2",
+        "topic": "adr:tabs",
+        "question": "Indentation?",
+        "status": "confirmed",
+        "decided_by": "user",
+        "source": {"via": "repository", "commit": "1a2b3c4d5e6f", "author": "Other Person"},
+        "history": [{"at": "2026-11-24T10:00:00+00:00", "actor": "raticode", "action": "read"}],
+    }
+    sent = module._decision_item(item)
+    assert sent["read_from"] == {"commit": "1a2b3c4d5e6f", "author": "Other Person"}
+    assert sent["decided_by"] == "user"
+    # Once the user confirms or changes it in Raticode, it's their decision.
+    later = {**item, "history": [*item["history"], {"actor": "user", "action": "changed"}]}
+    assert module._decision_item(later)["read_from"] is None
+    assert module._decision_item({**item, "source": {"via": "chat"}})["read_from"] is None

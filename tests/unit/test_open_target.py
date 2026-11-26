@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import sys
-
 import pytest
 
-from gofer.core.executor import open_resource_args
 from gofer.utils.open_target import checked_open_target
 
 
@@ -38,11 +35,3 @@ def test_unsafe_targets_are_refused(target, kind):
 )
 def test_ordinary_targets_still_open(target, kind):
     assert checked_open_target(target, kind) == target
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX opener")
-def test_the_opener_never_gets_an_option_and_never_goes_through_cmd():
-    assert open_resource_args("/tmp/a b.txt", "file")[-1] == "/tmp/a b.txt"
-    assert "cmd" not in open_resource_args("https://example.com", "url")
-    with pytest.raises(ValueError):
-        open_resource_args("-n", "file")

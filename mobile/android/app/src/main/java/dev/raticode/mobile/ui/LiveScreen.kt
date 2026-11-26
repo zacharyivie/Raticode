@@ -351,20 +351,14 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
     // Web links in chats open in Raticode's browser unless the user chose the phone's own browser there.
     val links = rememberChatLinks(client) { url ->
         val browser = dev.raticode.mobile.browser.BrowserRuntime.get(context)
-        val firefox = if (browser.saved.engine == dev.raticode.mobile.browser.BrowserRules.ENGINE_FIREFOX)
-            dev.raticode.mobile.browser.FirefoxApps.find(context) else null
         val other = dev.raticode.mobile.browser.BrowserApps.byEngine(browser.saved.engine)?.find(context)
         when {
             !browser.saved.linksInApp -> false
             browser.saved.engine == dev.raticode.mobile.browser.BrowserRules.ENGINE_GECKO ->
                 dev.raticode.mobile.browser.GeckoBrowser.get(context).newTab(url) != null &&
                     run { browser.show(dev.raticode.mobile.browser.BrowserRules.ENGINE_GECKO); page = "Browser"; true }
-            // Firefox chosen and on the phone: the page opens there. Without it, Raticode's browser takes the link.
-            firefox != null && dev.raticode.mobile.browser.FirefoxApps.open(context, firefox, url, browser.saved.firefoxMode) -> true
-            // Edge chosen and on the phone, likewise.
-            browser.saved.engine == dev.raticode.mobile.browser.BrowserRules.ENGINE_EDGE &&
-                dev.raticode.mobile.browser.EdgeApps.find(context)?.let { dev.raticode.mobile.browser.EdgeApps.open(context, it, url, browser.saved.edgeMode) } == true -> true
-            // The same for Chrome or another of BrowserApps, when it is installed and its maker signed it.
+            // Firefox, Chrome, Edge or another of BrowserApps chosen, installed and signed by its maker: the page opens
+            // there. Without it, Raticode's browser takes the link.
             other != null && other.app.open(context, other, url, dev.raticode.mobile.browser.BrowserRules.appMode(browser.saved, other.app.engine)) -> true
             // The Browser page shows the new tab even while it was showing a Raticode (gecko) tab.
             else -> browser.newTab(url) != null && run { browser.show(dev.raticode.mobile.browser.BrowserRules.ENGINE_RATICODE); page = "Browser"; true }

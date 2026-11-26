@@ -227,8 +227,20 @@ def _old_candidates(
     registered: RegisteredWorkflow, data_dir: Path, **limits: int | None
 ) -> list[str]:
     """The runs clean-up picked before: every record read, then selected."""
-    records, _ = run_retention.load_run_records(_logs(registered))
-    protected = run_retention.protected_run_ids(records, data_dir, registered.workflow_id)
+    records = []
+    paths = _logs(registered).glob("*.json")
+    for _, path in sorted(((path.stat().st_mtime_ns, path) for path in paths), reverse=True):
+        try:
+            records.append(run_retention.read_run_record(path))
+        except run_retention.RunRecordError:
+            pass
+    workflow_id = registered.workflow_id
+    protected = run_retention._protected_by_status_and_approvals(records, data_dir, workflow_id)
+    protected.update(
+        record.run_id
+        for record in records
+        if run_service.is_rattish_run_being_resumed(data_dir, workflow_id, record.run_id)
+    )
     return [
         record.run_id
         for record in run_retention.select_prune_candidates(records, protected=protected, **limits)
@@ -473,3 +485,18 @@ def test_a_summary_naming_a_run_with_a_nul_byte_doesnt_break_the_runs_list(
     monkeypatch.setattr(workflow_runs, "_WorkflowSummaries", Summaries)
     found = workflow_runs.missed_records(tmp_path, "wf", folder, [])
     assert [Path(location).name for location, _ in found] == ["good.json"]
+
+
+def test_list_shows_why_a_run_failed(workflow) -> None:
+    registered, data_dir = workflow
+    reason = "Node test exited with code 1\n" + "x" * 400
+    failed = _record(registered, 1, status="failed", hours_ago=1, error={"message": reason})
+    passed = _record(registered, 2, status="passed", hours_ago=2)
+    runs = {
+        run["id"]: run
+        for run in list_workflow_run_logs_payload(registered.workflow_id, data_dir)["runs"]
+    }
+    assert runs[failed]["status"] == "error"
+    # Capped like the Workflow runs view's list, so one long error can't bloat the list.
+    assert runs[failed]["error"] == reason[:300]
+    assert runs[passed]["error"] == ""

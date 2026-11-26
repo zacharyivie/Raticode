@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "profile": "raticode-tls13-v2",
+  "invitation_id": "00000000-0000-4000-8000-000000000001",
+  "responder_id": "00000000-0000-4000-8000-000000000002",
+  "responder_name": "Public test desktop",
+  "responder_role": "desktop",
+  "responder_spki_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "secret": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "expires_at": 1900000000,
+  "relay": "https://ntfy.sh",
+  "pair_initiator_topic": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "pair_responder_topic": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+  "lan_endpoint": null
+}

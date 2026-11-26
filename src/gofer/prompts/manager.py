@@ -13,12 +13,6 @@ class PromptManager:
         text = resolved.read_text(encoding="utf-8")
         return self._interpolate(text, context)
 
-    def list_prompts(self) -> list[Path]:
-        found: list[Path] = []
-        for d in self._search_dirs:
-            found.extend(sorted(d.rglob("*.md")))
-        return found
-
     def _resolve_path(self, path: Path) -> Path:
         if path.is_absolute():
             return path

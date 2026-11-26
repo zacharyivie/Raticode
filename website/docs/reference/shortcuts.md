@@ -43,7 +43,7 @@ Run starts executable work. Check which workflow is active before using its shor
 Press **Mod+Shift+P** for the command palette. It lists every command in **Settings > Keybindings** with the key it has now, plus commands that have no key:
 
 - **New workflow**, **All workflow runs** and **Pause all triggers** (it reads **Resume all triggers** while they're paused).
-- **Go to Browser tabs**, **Go to Posts**, **Go to Organizations** and **Go to Second Brain**. Posts, Organizations and Second Brain appear only once they're on in **Settings > Developer > Feature Preview**.
+- A **Go to** entry for every plugin in the activity rail: **Go to Rem**, **Go to Workflows**, **Go to File explorer**, **Go to Browser tabs**, **Go to Search**, **Go to Source control**, **Go to Kanban**, **Go to Posts**, **Go to Swarms**, **Go to Organizations** and **Go to Second Brain**. Each opens the plugin as its rail button does, and Go to Rem opens Rem's home. Common words find them too, such as `git` for Source control, `tickets` for Kanban and `find` for Search. Posts, Swarms, Organizations and Second Brain appear only once they're on in **Settings > Developer > Feature Preview**. A plugin you hid from the rail stays in the list, greyed out, until you show it again in **Settings > Plugins**.
 - **Settings:** followed by a section name, such as **Settings: Devices**, opens Settings at that section.
 
 Press **Mod+P** for quick open. It searches the open project's files, its workflows, the titles of your Rem threads on this computer and the Settings sections. Files come from git: tracked files and new files git doesn't ignore. A folder outside git is read directly, skipping `node_modules`, `.venv`, `dist` and `build`. Quick open shows at most 20,000 files and says so when a project has more.
@@ -61,6 +61,26 @@ Both keys give way when a terminal or the code editor has focus: the terminal se
 Change either key in **Settings > Keybindings**, under **Show all commands** and **Quick open**. They accept a two-key sequence, like **Open project folder**.
 
 The palette is for you at the keyboard. It gives Rem no new actions.
+
+## Menus
+
+Pop-up menus work the same way with the keyboard. These include the right-click menus for terminal groups, terminals, editor tabs and project folders in the **Workflows** list, Rem's **Scoped to** project menu, and Second Brain's menus, such as a document's **⋯** menu:
+
+- On a row that has a right-click menu, focus a button in the row and press the Menu key or Shift+F10 to open it.
+- The first item you can choose has focus when the menu opens. Up and Down move and wrap around, and Home and End jump to the first and last items. Items that are dimmed are skipped.
+- Enter or Space chooses an item. Escape closes the menu and puts focus back on what opened it.
+
+New in 0.6.1.
+
+## Tabs and choices
+
+A row of tabs, or a set of buttons where you pick one, is a single Tab stop. Tab lands on the one that's chosen. Examples are the bottom panel's views, a task's **Kind of work** and **How often**, and Settings choices such as **Allowance use**:
+
+- Left and Right move to the next or previous one and wrap around. In a set of choices, Up and Down work too.
+- Home and End jump to the first and last.
+- The one you move to is chosen at once. A setting saves straight away, as it does when you click it.
+
+New in 0.6.1.
 
 ## Run a workflow from any app
 
@@ -147,6 +167,8 @@ Editor-only commands require a relevant editor to be focused. The in-app **File*
 | Add node, from a searchable picker | Tab ([details](../studio/editors.md#add-a-node)) |
 | Select all nodes | Mod+A |
 | Delete selection | Delete |
+| [Undo the last graph edit](../studio/editors.md#undo-and-redo-graph-edits) | Mod+Z |
+| [Redo a graph edit](../studio/editors.md#undo-and-redo-graph-edits) | Mod+Shift+Z, or Ctrl+Y on Windows |
 | Zoom in | = |
 | Zoom out | - |
 | Fit workflow | F |
@@ -169,6 +191,7 @@ These work only while the browser has focus, so they don't clash with app shortc
 | Action | Default |
 | --- | --- |
 | Focus the address bar | Mod+L |
+| Back / Forward on macOS | Cmd+[ / Cmd+] |
 | Reload / hard reload | F5 / Mod+Shift+R |
 | Developer tools | F12 |
 | Print | Mod+P |

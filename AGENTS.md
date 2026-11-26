@@ -45,9 +45,51 @@ npm run test:serial   # everything in one process
   the repository-wide test files in its `REPO_WIDE_TESTS` list (CLI parity, the
   scripting contract, the website address and mobile download, the phone
   protocol, no credential on the command line),
-  `scripts/check-website-docs.py` and `scripts/check-commit-messages.py`, and
-  prints one PASS or FAIL line for each. Don't land while any line says FAIL. It
-  takes about a minute.
+  `scripts/check-website-docs.py`, `scripts/check-commit-messages.py`,
+  `scripts/check-dead-code.py`, `mobile/android/scripts/check-contract.py` and
+  `scripts/check-protocol-compat.py`, and prints one PASS or FAIL line for each
+  (SKIP for the protocol compat check in a clone without `v*` tags). Don't land
+  while any line says FAIL. It takes about a minute. The phone's Gradle interop
+  tests in `contract-check.yml` stay CI-only.
+- `scripts/check-dead-code.py` fails when a function, class, method or UPPER_CASE
+  module constant in `src/gofer`, an export in `frontend/src` or `frontend/electron`, or a frontend
+  module has no callers anywhere in the repository (tests and browser tests
+  count). Delete the unused code. Only when it's kept on purpose, add a line to
+  `scripts/dead-code-allowlist.txt` with the reason.
+- It also fails on production code only tests call: a `src/gofer` definition or a
+  frontend export whose name appears outside its own definition only in `tests/`,
+  `*.test.*`, browser tests or `frontend/electron/tests` (printed with
+  `(only tests use it)`). Point the tests at the production path, make the app
+  call the helper it copies inline, or delete it with its tests. A helper kept
+  for tests needs an allowlist reason that starts with `test seam:`.
+- It also fails on a dependency nothing uses: a package in `pyproject.toml`'s
+  `[project].dependencies` or its `devices` or `xlsx` extra that no file under
+  `src/gofer`, `scripts` or `packaging` imports and `raticode.spec` doesn't name
+  (imports in `tests/` don't count; move such a package to the dev extra), or a
+  package in `frontend/package.json` that no frontend file names as a module and
+  no `package.json` script runs. Remove it and relock (`uv lock`, `npm install`),
+  and drop its entry from `packaging/licenses/reviewed.json`. One kept on purpose
+  gets an allowlist line such as `pyproject.toml:name  # reason`.
+- It also reads the phone's Kotlin: a `fun`, `class` or `object` in
+  `mobile/android/app/src/main` whose name no other Kotlin, XML, Gradle or R8
+  rules file under `mobile/android` mentions fails the check, and one only the
+  phone's test source sets (`src/test`, `src/androidTest`, `src/testShared`)
+  mention prints with `(only tests use it)`. An `override` or `operator` fun, an
+  `@Preview` function and a name `AndroidManifest.xml` uses are skipped. The same
+  allowlist and `test seam:` rule apply.
+- It also reads the Electron bridge: a key of an object a
+  `frontend/electron/*preload*.cjs` file passes to `contextBridge.exposeInMainWorld`
+  fails the check when no non-test file under `frontend/src` and no `.html` page
+  under `frontend/electron` names it (a test listing the bridge's keys doesn't
+  count), and so does a channel in the `ipc-handlers.cjs` table no preload file
+  names. Remove the key, its IPC row and the handler wiring together.
+- It also reads the stylesheets: a class selector in a `.css` file under
+  `frontend/src` or `frontend/electron` fails the check (printed with
+  `(CSS class nothing uses)`) when no non-test, non-CSS file there or
+  `frontend/index.html` names it as a word and none builds it from a template
+  (`st-${state}` covers `.st-running`). Delete the rule, or the dead class's part
+  of a shared selector. A class a library adds, such as `.xterm-*`, gets an
+  allowlist line; CSS lines may use `*` patterns.
 - Commit messages carry no `Co-Authored-By` line for an AI tool and no
   "Generated with ..." line, even when your tool adds one by default.
   `scripts/check-commit-messages.py` fails on them; amend or reword those
@@ -120,8 +162,9 @@ npm run test:serial   # everything in one process
 
 Layer structure:
 
-- `src/gofer/cli/` - Typer CLI; routes commands to workflow, agent, schedule, and builder command modules. Every CLI call imports every command module, so import the workflow engine, scheduler, agent core, Rattish runtime and other heavy modules inside the command functions that use them. Typer reads each command's option types when the CLI starts, so those types must stay cheap to import. `tests/unit/test_cli_startup_imports.py` fails if SQLAlchemy, APScheduler or NetworkX load at startup.
-- `src/gofer/core/` - Domain logic: operations, graph, workflow, executor, and scheduler.
+- `src/gofer/cli/` - Typer CLI; routes commands to the workflow, rattish, provider, rem and other command modules. Every CLI call imports every command module, so import the Rattish runtime, trigger scheduler, agent core and other heavy modules inside the command functions that use them. Typer reads each command's option types when the CLI starts, so those types must stay cheap to import. `tests/unit/test_cli_startup_imports.py` fails if SQLAlchemy, APScheduler or NetworkX load at startup.
+- `src/gofer/core/` - Shared domain logic: agents, approvals, providers, usage, resources and structured output.
+- `src/gofer/rattish/` - The Rattish language and its runtime: parser, compiler, preflight, runs, triggers and `toml_convert.py`, which converts old TOML workflows. Raticode no longer loads or runs TOML workflows.
 - `src/gofer/subscriptions/` - ABC for LLM CLI backends such as Claude Code and Codex. Subclasses primarily override `_build_command()`.
 - `src/gofer/prompts/` - Markdown prompt templates with `{{var}}` interpolation.
 - `src/gofer/utils/` - Subprocess runner, XDG paths, name-based registry, and logging.
@@ -138,7 +181,7 @@ Key patterns:
 
 - Built-in node behavior must agree with the Rattish machine contract, compiler, preflight, runtime handler, and conformance fixtures.
 - Loop nodes provide runtime fan-out with explicit concurrency and failure behavior.
-- `WorkflowScheduler` wraps APScheduler with a SQLite job store persisted at `~/.local/share/gofer/schedules.db`.
+- Rattish triggers (`rattish/triggers.py`, `rattish/trigger_service.py`) run cron, file and webhook triggers on each computer; there is no other workflow scheduler.
 - Tests use `FakeSubscription` from `tests/conftest.py` to avoid requiring real `claude` or `codex` CLIs.
 
 ## Rattish workflow format
@@ -166,7 +209,7 @@ Node step-2:
 - Shared words: read [GLOSSARY.md](GLOSSARY.md) before naming anything users see or anything new in code.
 - Prefer the existing module boundaries and patterns before adding new abstractions.
 - Keep CLI behavior covered by tests when changing command behavior.
-- Keep workflow parsing and execution behavior covered by unit or regression tests when changing operation, graph, executor, or scheduler logic.
+- Keep workflow parsing and execution behavior covered by unit or regression tests when changing the Rattish compiler, runtime or trigger logic.
 - Do not require real LLM provider CLIs in tests; use `FakeSubscription` or another test double.
 - Frontend controlled inputs: do not transform or normalize a user-editable value
   on every keystroke when the displayed value is derived from the stored value,

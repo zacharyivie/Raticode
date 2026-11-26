@@ -30,6 +30,7 @@ def manager_for(tmp_path: Path) -> OrganizationManager:
     return OrganizationManager(tmp_path / "data", stream=no_runs, start_runtime=False)
 
 
+# Not the shared company: the lead alone.
 def company(manager: OrganizationManager, root: Path) -> Any:
     return manager.call(
         str(root),

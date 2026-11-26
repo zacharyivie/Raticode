@@ -13,6 +13,8 @@ import pytest
 from gofer.ui.rem_home import RemHome
 from gofer.ui.rem_home_landing import (
     branch_tips,
+    checked_head_feedback,
+    contains,
     landing_feedback,
     landing_opted_out,
     unlanded_branches,
@@ -271,6 +273,43 @@ def test_rem_sends_an_unlanded_branch_back_and_succeeds_once_it_lands(
     repair = turns[1]["messages"][-1]["body"]
     assert "hasn't landed on local dev" in repair and "fix/rem-change" in repair
     assert git(project, "merge-base", "--is-ancestor", "fix/rem-change", "dev") == ""
+
+
+def test_a_landing_branch_without_the_checked_commit_gets_a_repair_naming_both(
+    home: RemHome,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Raticode's check proved one commit; the landing branch must contain it, or the work
+    that landed isn't the work that was checked."""
+    project = repository(tmp_path)
+    stray = git(project, "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "never landed")
+    assert not contains(project, "dev", stray)
+    checks_seen: list[bool] = []
+
+    def checked(self, run, traces, cancel, *, after_review=False):  # noqa: ANN001
+        checks_seen.append(after_review)
+        if not after_review:
+            return None
+        return {"passed": True, "head": stray, "command": "make check", "decision_id": "D-9"}
+
+    monkeypatch.setattr(RemHome, "_project_check", checked)
+    home.configure({"provider": "claude_code", "resources": thread_defaults(tmp_path)})
+    decide_branch(home, project)
+    source, turns = worker_source(project, tmp_path, land_on_repair=True)
+    home.source = source
+    task = home.create_task({"request_id": "checked-head", **recipe(project)})["task"]
+    run = wait_run(home, task["id"], {"succeeded", "blocked"}, timeout=30)
+    assert run["state"] == "blocked", run
+    # Turn 2 landed the branch, so turn 3's repair is about the checked commit alone.
+    assert len(turns) >= 3 and True in checks_seen
+    tip = git(project, "rev-parse", "dev")
+    repair = turns[2]["messages"][-1]["body"]
+    assert repair.endswith(checked_head_feedback(stray, "dev", tip))
+    assert stray[:12] in repair and tip[:12] in repair
+    assert "dev doesn't contain the commit the check ran on" in json.dumps(run["criteria"])
+    # The commit that did land passes the same test.
+    assert contains(project, "dev", tip) and not contains(project, "dev", "not-a-commit")
 
 
 def test_rem_never_reports_success_for_work_that_stays_off_dev(

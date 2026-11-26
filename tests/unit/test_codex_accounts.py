@@ -294,6 +294,41 @@ def test_sign_in_runs_codex_login_in_the_folder_and_status_comes_from_account_re
     assert [c["home"] for c in _calls(tmp_path) if c["args"] == ["logout"]] == [str(work)]
 
 
+def test_the_sign_in_check_reads_account_over_the_shared_transport_in_the_folder(
+    data_dir: Path, codex: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gofer.subscriptions import acp_transport
+
+    opened: list[tuple[list[str], dict[str, Any]]] = []
+    real = acp_transport.open_acp_transport
+
+    def spy(command: list[str], **options: Any) -> Any:
+        opened.append((command, options))
+        return real(command, **options)
+
+    monkeypatch.setattr(acp_transport, "open_acp_transport", spy)
+    work = accounts.create_account("work", provider="codex", data_dir=data_dir)
+    folder = accounts.account_config_dir(work, data_dir)
+
+    status = accounts.account_status(work, data_dir=data_dir, refresh=True)
+    assert status["state"] == "needs_sign_in" and status["reason"] == "Not signed in yet."
+    command, options = opened[-1]
+    assert command[-2:] == [str(codex), "app-server"]
+    assert options["cwd"] == folder
+    assert options["timeout"] == accounts.STATUS_TIMEOUT_SECONDS
+    assert options["max_output_bytes"] == 1024 * 1024
+    assert options["env"]["CODEX_HOME"] == str(folder)
+
+    (folder / "who.json").write_text(json.dumps({"email": "a@example.com", "plan": "pro"}))
+    (folder / "auth.json").write_text(json.dumps({"email": "a@example.com", "plan": "pro"}))
+    signed_in = accounts.account_status(work, data_dir=data_dir, refresh=True)
+    assert signed_in["state"] == "signed_in" and signed_in["plan"] == "pro"
+    # The transport starts from Raticode's own environment; the parent's keys stay out.
+    checks = [c for c in _calls(tmp_path) if c["args"] == ["app-server"]]
+    assert len(checks) == 2 and all(c["home"] == str(folder) for c in checks)
+    assert not any(c["openai_key"] or c["access_token"] or c["marker"] for c in checks)
+
+
 def test_a_refused_sign_in_shows_codexs_own_message(
     data_dir: Path, codex: Path, tmp_path: Path
 ) -> None:

@@ -18,6 +18,9 @@ from gofer.devices import files as files_module
 from gofer.devices.files import DeviceFiles
 from gofer.devices.registry import DeviceRegistry, PairingError
 
+# A limit far above the 10 MiB default, for the store's explicit ``limit`` argument.
+LARGE_LIMIT = 2_000_000_000
+
 
 class Secrets:
     def __init__(self) -> None:
@@ -203,9 +206,9 @@ def sized(files: DeviceFiles, size: int) -> dict[str, Any]:
         (files_module.MAX_FILE, files_module.MAX_FILE + 1, False),
         (64 * 1024 * 1024, 64 * 1024 * 1024 - 1, True),
         (64 * 1024 * 1024, 64 * 1024 * 1024 + 1, False),
-        (files_module.MAX_FILE_LARGE, files_module.MAX_FILE_LARGE - 1, True),
-        (files_module.MAX_FILE_LARGE, files_module.MAX_FILE_LARGE, True),
-        (files_module.MAX_FILE_LARGE, files_module.MAX_FILE_LARGE + 1, False),
+        (LARGE_LIMIT, LARGE_LIMIT - 1, True),
+        (LARGE_LIMIT, LARGE_LIMIT, True),
+        (LARGE_LIMIT, LARGE_LIMIT + 1, False),
     ],
 )
 def test_offer_size_boundaries(files, monkeypatch, limit, size, accepted):
@@ -231,19 +234,17 @@ def test_snapshot_size_boundaries_use_sparse_files(files, tmp_path, monkeypatch)
     root.mkdir()
     for name, size in (
         ("over-legacy", files_module.MAX_FILE + 1),
-        ("over-max", files_module.MAX_FILE_LARGE + 1),
+        ("over-max", LARGE_LIMIT + 1),
     ):
         with open(root / name, "wb") as handle:
             handle.truncate(size)
     with pytest.raises(PairingError, match="scoped"), files.registry.transaction():
         files.snapshot("peer", "thread", root, root / "over-legacy")
     with pytest.raises(PairingError, match="scoped"), files.registry.transaction():
-        files.snapshot("peer", "thread", root, root / "over-max", limit=files_module.MAX_FILE_LARGE)
+        files.snapshot("peer", "thread", root, root / "over-max", limit=LARGE_LIMIT)
     assert list(files.directory.iterdir()) == []
     with files.registry.transaction():
-        value = files.snapshot(
-            "peer", "thread", root, root / "over-legacy", limit=files_module.MAX_FILE_LARGE
-        )
+        value = files.snapshot("peer", "thread", root, root / "over-legacy", limit=LARGE_LIMIT)
     assert value["size"] == files_module.MAX_FILE + 1
     assert value["sha256"] == hashlib.sha256(bytes(files_module.MAX_FILE + 1)).hexdigest()
 
@@ -265,9 +266,7 @@ def test_large_snapshot_and_chunks_keep_memory_bounded(files, tmp_path, monkeypa
         digest.update(b"!")
     tracemalloc.start()
     with files.registry.transaction():
-        value = files.snapshot(
-            "peer", "thread", root, root / "big.bin", limit=files_module.MAX_FILE_LARGE
-        )
+        value = files.snapshot("peer", "thread", root, root / "big.bin", limit=LARGE_LIMIT)
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.reset_peak()
     assert value["sha256"] == digest.hexdigest()

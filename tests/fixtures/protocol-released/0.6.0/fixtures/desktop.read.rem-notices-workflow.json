@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000165",
+  "id": "10000000-0000-4000-8000-000000000165",
+  "sequence": 165,
+  "type": "desktop.read",
+  "payload": {
+    "op": "rem.notices",
+    "params": {
+      "after": 512,
+      "include": [
+        "needs_you",
+        "workflow"
+      ],
+      "mark": "n1.40.-.7"
+    }
+  }
+}

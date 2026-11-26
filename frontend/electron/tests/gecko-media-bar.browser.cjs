@@ -9,7 +9,6 @@ const fs = require("node:fs");
 const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
-const { pathToFileURL } = require("node:url");
 const { BrowserWindow, app, ipcMain } = require("electron");
 const { findFirefox } = require("../firefox-engine.cjs");
 const { createGeckoWindow } = require("../gecko-window.cjs");
@@ -121,7 +120,6 @@ async function run() {
   ipcMain.handle("gofer:gecko", (_event, options = {}) => gecko.handle(String(options.action || ""), options));
   ipcMain.handle("gofer:browser-library", () => ({ sessions: [] }));
 
-  const preload = path.join(__dirname, "..", "browser-preload.cjs");
   window = new BrowserWindow({
     width: 900,
     height: 500,
@@ -130,7 +128,6 @@ async function run() {
       contextIsolation: true,
       preload: path.join(__dirname, "..", "preload.cjs"),
       sandbox: true,
-      additionalArguments: [`--gofer-browser-preload=${pathToFileURL(preload)}`],
     },
   });
   await window.loadURL(`${base}/host`);

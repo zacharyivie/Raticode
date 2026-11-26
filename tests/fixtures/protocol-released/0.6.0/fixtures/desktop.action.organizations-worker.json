@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000170",
+  "id": "10000000-0000-4000-8000-000000000170",
+  "sequence": 170,
+  "type": "desktop.action",
+  "payload": {
+    "op": "organizations.worker",
+    "params": {
+      "organization_id": "org1",
+      "employee_id": "lead",
+      "paused": true
+    }
+  }
+}

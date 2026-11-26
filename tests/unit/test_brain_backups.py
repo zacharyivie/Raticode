@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import shutil
 import threading
 import time
 import zipfile
@@ -30,16 +31,7 @@ from gofer.ui.brain_backups import (
 )
 from gofer.ui.brain_library import BrainLibrary
 from gofer.utils import drive_format as drive_format_module
-
-
-def wait_task(library: BrainLibrary, task: dict[str, Any]) -> dict[str, Any]:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        receipt = library.task(task["id"])
-        if receipt["state"] != "running":
-            return receipt
-        time.sleep(0.02)
-    pytest.fail("Second Brain task did not finish")
+from tests.helpers.brain_library import wait_task
 
 
 def settle(library: BrainLibrary) -> None:
@@ -371,6 +363,105 @@ def test_backup_restores_with_the_same_identity(library, tmp_path):
         )
         assert restored["brainId"] == brain["id"]
         assert (tmp_path / "restored/Rem Conversations/threads/big.jsonl").stat().st_size == 4096
+    finally:
+        other.close()
+
+
+def backup_then_lose_folder(
+    library: BrainLibrary, tmp_path: Path
+) -> tuple[dict[str, Any], Path, dict[str, Any]]:
+    """A backed-up brain whose folder is then deleted, as after a lost disk."""
+    brain = archived_brain(library, tmp_path)
+    configure(library, brain, folder=str(tmp_path / "backups"), enabled=True, keep=3)
+    receipt = wait_task(library, library.start_task("backup", {"brainId": brain["id"]}))
+    assert receipt["state"] == "done", receipt.get("error")
+    registered = library.brain(brain["id"])
+    shutil.rmtree(registered["root"])
+    return registered, Path(receipt["result"]["path"]), receipt
+
+
+def restore_here(library: BrainLibrary, package: Path, destination: Path) -> dict[str, Any]:
+    return library.import_package(
+        {"path": str(package), "destination": str(destination), "identity": "restore-here"},
+        threading.Event(),
+        lambda _: None,
+    )
+
+
+def test_backup_restores_over_a_brain_whose_folder_is_gone(library, tmp_path):
+    before, package, _ = backup_then_lose_folder(library, tmp_path)
+    old_notes = doc_at(library, before, "notes.md")
+    assert library.snapshot()["brains"][0]["state"] == "unavailable"
+    preview = library.request("import_preview", {"path": str(package)})
+    assert preview["registered"] == {
+        "name": before["name"],
+        "root": before["root"],
+        "available": False,
+    }
+    # Restoring as a new registration still can't take the registered ID, and says why.
+    with pytest.raises(ValueError, match="Restore this brain here"):
+        library.import_package(
+            {"path": str(package), "destination": str(tmp_path / "x"), "identity": "restore"},
+            threading.Event(),
+            lambda _: None,
+        )
+    assert not (tmp_path / "x").exists()
+
+    restored = restore_here(library, package, tmp_path / "restored")
+    settle(library)
+    assert restored["brainId"] == before["id"] and restored["restoredHere"] is True
+    after = library.brain(before["id"])
+    assert after["root"] == str((tmp_path / "restored").resolve())
+    # Same registration: backup settings and status stay, and no second brain appears.
+    assert after["backup"] == before["backup"]
+    assert after["backupStatus"] == before["backupStatus"]
+    assert after["settings"] == before["settings"]
+    assert [brain["id"] for brain in library.brains()] == [before["id"]]
+    snapshot = library.snapshot()
+    assert snapshot["brains"][0]["state"] == "available"
+    notes = doc_at(library, after, "notes.md")
+    assert not notes.get("missing")
+    # Re-scanned: the same record now describes the restored file.
+    assert notes["id"] == old_notes["id"]
+    assert notes["fileIdentity"] != old_notes["fileIdentity"]
+    assert (tmp_path / "restored/notes.md").read_text().startswith("# Notes")
+
+
+def test_restore_here_can_use_the_folder_that_went_missing(library, tmp_path):
+    before, package, _ = backup_then_lose_folder(library, tmp_path)
+    restored = restore_here(library, package, Path(before["root"]))
+    settle(library)
+    assert restored["brainId"] == before["id"]
+    assert [brain["id"] for brain in library.brains()] == [before["id"]]
+    assert library.brain(before["id"])["root"] == before["root"]
+    assert library.snapshot()["brains"][0]["state"] == "available"
+    assert not doc_at(library, before, "notes.md").get("missing")
+
+
+def test_restore_here_refuses_while_the_original_folder_exists(library, tmp_path):
+    brain = archived_brain(library, tmp_path)
+    configure(library, brain, folder=str(tmp_path / "backups"))
+    receipt = wait_task(library, library.start_task("backup", {"brainId": brain["id"]}))
+    package = Path(receipt["result"]["path"])
+    assert library.request("import_preview", {"path": str(package)})["registered"]["available"]
+    for identity, message in [
+        ("restore-here", "still has its folder"),
+        ("restore", "already registered"),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            library.import_package(
+                {"path": str(package), "destination": str(tmp_path / "x"), "identity": identity},
+                threading.Event(),
+                lambda _: None,
+            )
+    assert not (tmp_path / "x").exists()
+    assert library.brain(brain["id"])["root"] == brain["root"]
+    # A brain that isn't registered here has nothing to restore over.
+    other = BrainLibrary(tmp_path / "other-computer", start=False)
+    try:
+        assert other.request("import_preview", {"path": str(package)})["registered"] is None
+        with pytest.raises(ValueError, match="isn't registered"):
+            restore_here(other, package, tmp_path / "y")
     finally:
         other.close()
 
