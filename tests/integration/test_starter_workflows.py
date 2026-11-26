@@ -437,7 +437,8 @@ def test_workflow_list_shows_node_and_route_counts(tmp_path: Path) -> None:
     # FORCE_COLOR in the environment makes Rich style the cells even here.
     lines = click.unstyle(result.output).splitlines()
     header = next(line for line in lines if "Name" in line)
-    assert [cell.strip() for cell in header.strip("┃│ ").split("┃")] == [
+    # Windows consoles draw the header with light lines instead of heavy ones.
+    assert [cell.strip() for cell in re.split("[┃│]", header.strip("┃│ "))] == [
         "ID",
         "Name",
         "Nodes",
