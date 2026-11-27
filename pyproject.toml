@@ -22,7 +22,7 @@ dependencies = [
     "referencing>=0.35",
     "tzdata>=2026.4",
     "watchdog>=7.1.0",
-    "pypdf>=7.0.1",
+    "pypdf>=7.1.1",
     "fastembed>=0.7",
     "bibtexparser>=2.1.0,<3",
     # Offline dictation. Pinned: re-run the dictation benchmark before each upgrade.
