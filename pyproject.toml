@@ -26,7 +26,7 @@ dependencies = [
     "fastembed>=0.7",
     "bibtexparser>=2.1.0,<3",
     # Offline dictation. Pinned: re-run the dictation benchmark before each upgrade.
-    "sherpa-onnx==2.0.1",
+    "sherpa-onnx==2.0.3",
 ]
 
 [project.urls]
