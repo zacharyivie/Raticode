@@ -256,9 +256,14 @@ def request_temp_cleanup() -> None:
 
 # Every folder below is reached through an open handle, never by its path again: a
 # worker that can write a root could otherwise swap a folder for a link to the user's
-# home between the check and the delete, and the delete would follow it.
+# home between the check and the delete, and the delete would follow it. Windows has
+# none of these flags but O_RDONLY; the server imports this module there too, and the
+# sweep itself runs only on Linux (sweeps_worker_temp).
 _FOLDER_FLAGS = (
-    os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
 )
 
 
