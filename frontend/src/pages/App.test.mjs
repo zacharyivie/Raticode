@@ -25246,7 +25246,8 @@ test("dismissing the update notice stores the running version, and Help › What
 
 test("What's new for a version the CHANGELOG has no section for says so and links its release page", async () => {
   const opened = [];
-  const dom = await mountRunningVersion("99.0.0", { [LAST_RUN_VERSION_KEY]: "0.6.1" });
+  // The last version is above every CHANGELOG section, so no other version's notes show.
+  const dom = await mountRunningVersion("99.0.0", { [LAST_RUN_VERSION_KEY]: "98.0.0" });
   try {
     window.open = (...args) => opened.push(args);
     await dom.click(allElements(updatedNotices(dom)[0]).find((node) => node.tagName === "BUTTON" && textOf(node).trim() === "What's new"));
