@@ -6,7 +6,7 @@ import { WEB_BROWSER_OPTIONS, newTabEngine, webBrowserEngine } from "./browserEn
 // Firefox's real window placed over the tab, with its own tabs inside, so the
 // tab bar holds at most one Gecko tab.
 
-export const GECKO_VIEWED = "gecko";
+const GECKO_VIEWED = "gecko";
 
 // The browser a tab runs in. Tabs saved before tabs had their own browser ran
 // in the one chosen in Settings > Browser, so they keep it. Rem's tabs and

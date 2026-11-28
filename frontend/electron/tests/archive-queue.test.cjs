@@ -237,8 +237,9 @@ function archiveWithFixedClock() {
   class FixedDate extends Date {
     constructor(...args) { super(...(args.length ? args : ["2026-09-10T12:00:00.000Z"])); }
   }
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../conversation-archive.cjs"), "utf8"), {
-    module, require, Date: FixedDate,
+  const file = path.join(__dirname, "../conversation-archive.cjs");
+  vm.runInNewContext(fs.readFileSync(file, "utf8"), {
+    module, require: require("node:module").createRequire(file), Date: FixedDate,
   });
   return module.exports.archiveConversation;
 }

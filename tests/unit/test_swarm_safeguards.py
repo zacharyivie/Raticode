@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import threading
 import time
@@ -16,6 +17,7 @@ from gofer.devices.remote_control import swarm_status
 from gofer.ui import swarm_workspaces
 from gofer.ui.chat import _build_chat_command
 from gofer.ui.rem_swarms import RemSwarmAccess
+from gofer.ui.swarm_tools import SwarmToolServer
 from gofer.ui.swarms import RUN_LIMITS, SwarmError, SwarmManager
 
 
@@ -378,6 +380,60 @@ async def test_swarm_turns_ask_for_no_data_folder_access(manager, tmp_path):
     assert seen[0]["trust_data_dir"] is False
     # Shell pushes are blocked unless the team allows remote Git.
     assert seen[0]["workflow"]["remBlockGitPush"] is True
+
+
+async def test_organization_block_git_push_wins_over_the_swarms_remote_permission(
+    manager, tmp_path
+):
+    seen: list[dict[str, Any]] = []
+
+    async def stream(**kwargs):
+        seen.append(kwargs["workflow"])
+        yield {"type": "final", "message": {"body": "Done"}}
+
+    manager._stream = stream
+    organization = {"turnLimit": 10, "blockGitPush": True}
+    for name, scope in (("swarm-only", None), ("organization", organization)):
+        root = tmp_path / name
+        sid = team(manager, root, gitPermissions={"local": True, "remote": True})
+        manager.start(root, sid, "Build")
+        if scope:
+            with manager._lock:
+                swarm = manager._get(str(root), sid)
+                swarm["run"]["organization"] = scope
+                manager._save(swarm)
+        await manager._turn(str(root), sid, "lead", threading.Event())
+    assert len(seen) == 2
+    # The swarm alone allows remote Git; its organization's Block git push turns it off.
+    assert seen[0]["remBlockGitPush"] is False and "organizationRun" not in seen[0]
+    assert seen[1]["remBlockGitPush"] is True
+    assert seen[1]["organizationRun"] == organization
+
+
+@pytest.mark.parametrize("failure", ["event", "exception"])
+async def test_a_failed_turn_never_shows_its_tool_url(manager, tmp_path, failure):
+    root = tmp_path / "project"
+    sid = team(manager, root)
+    manager.start(root, sid, "Build")
+    manager._http = SwarmToolServer()
+    urls: list[str] = []
+
+    async def stream(**kwargs):
+        url = kwargs["trusted_swarm_url"]
+        urls.append(url)
+        if failure == "exception":
+            raise RuntimeError(f"Could not reach {url}")
+        yield {"type": "error", "error": f"MCP server {url} refused the call"}
+
+    manager._stream = stream
+    await manager._turn(str(root), sid, "lead", threading.Event())
+    run = manager.get(root, sid)["run"]
+    error = run["agentStates"]["lead"]["error"]
+    assert urls and urls[0].startswith("http://")
+    assert "[swarm tool]" in error and urls[0] not in error
+    assert urls[0].rsplit("/", 1)[-1] not in json.dumps(run)
+    # The turn's tool URL stops working when the turn ends.
+    assert manager._http._grants == {}
 
 
 def test_start_snapshot_leaves_out_secret_files(tmp_path):

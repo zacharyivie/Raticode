@@ -222,6 +222,67 @@ async def test_profile_missing_never_falls_back_to_default_account(monkeypatch, 
     assert not launches
 
 
+async def test_account_usage_comes_only_from_its_adapter(monkeypatch, tmp_path):
+    from gofer.core import provider_accounts as accounts
+
+    state = {"value": accounts.SIGNED_IN}
+    reports: list[list[dict[str, Any]] | None] = [
+        [{"id": "seven_day", "label": "Weekly", "unit": "percent", "used": 42}],
+        None,
+    ]
+    seen: list[tuple[str, str | None]] = []
+
+    async def read_usage(executable, env, data_dir):
+        seen.append((executable, env.get("STAND_IN_HOME")))
+        return reports.pop(0)
+
+    real = accounts.account_adapter("codex")
+    accounts.register_adapter(
+        accounts.AccountAdapter(
+            provider="codex",
+            label="Stand-in Codex",
+            cli_name="codex",
+            folder_env="STAND_IN_HOME",
+            sign_in_args=("login",),
+            status_args=("login", "status"),
+            read_status=lambda output: {"state": state["value"]},
+            status_check=lambda profile, **_: {"state": state["value"]},
+            read_usage=read_usage,
+            usage_source="Stand-in usage",
+            executable=lambda: "/bin/stand-in",
+            browser_shim=False,
+        )
+    )
+    try:
+        account = accounts.create_account("work", provider="codex", data_dir=tmp_path)
+        folder = str(accounts.account_config_dir(account, tmp_path))
+        launches = patch_rpc(monkeypatch, FakeRpc())
+
+        row = await usage.refresh_provider_usage("codex", "work", data_dir=tmp_path)
+        assert row["status"] == "available" and row["observed_at"]
+        assert row["source"] == "Stand-in usage"
+        assert {w["id"]: w["used"] for w in row["windows"]} == {"seven_day": 42}
+
+        row = await usage.refresh_provider_usage("codex", "work", data_dir=tmp_path)
+        assert row["status"] == "auth_required" and not row["windows"]
+        assert row["retry_after_seconds"] == usage.CLAUDE_FAILURE_BACKOFF_SECONDS
+        assert "could not report this account's usage" in row["reason"]
+
+        state["value"] = accounts.NEEDS_SIGN_IN
+        row = await usage.refresh_provider_usage("codex", "work", data_dir=tmp_path)
+        assert row["status"] == "auth_required" and row["needs_sign_in"] is True
+        assert "Stand-in Codex accounts" in row["reason"]
+
+        # Only the adapter's own usage command ran, in the account's folder; the
+        # shared Codex sign-in's RPC lookup never started.
+        assert seen == [("/bin/stand-in", folder)] * 2
+        assert not launches
+    finally:
+        accounts.unregister_adapter("codex")
+        if real is not None:
+            accounts.register_adapter(real)
+
+
 @pytest.mark.parametrize(
     "error,status",
     [

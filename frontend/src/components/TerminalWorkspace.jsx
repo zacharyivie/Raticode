@@ -1,19 +1,22 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import * as fitAddonPackage from "@xterm/addon-fit";
+import * as searchAddonPackage from "@xterm/addon-search";
 import * as xtermPackage from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { ChevronDown, FolderPlus, FolderOpen, Pencil, Plus, Terminal as TerminalIcon, Trash2, X } from "lucide-react";
+import { CaseSensitive, ChevronDown, ChevronUp, FolderPlus, FolderOpen, Pencil, Plus, Terminal as TerminalIcon, Trash2, X } from "lucide-react";
 
 
 import { askRemAboutTerminalSelection } from "../lib/askRemAboutFailure.js";
 import { formatKeybinding, settingBinding } from "../lib/settings.js";
+import { createFileExistenceCheck, createTerminalHyperlinkHandler, createTerminalLinkProvider, TERMINAL_OPEN_FILE_EVENT } from "../lib/terminalLinks.js";
 import { useReducedMotion } from "../lib/useReducedMotion.js";
 import { menuTrigger, PopupMenu } from "./PopupMenu.jsx";
 
 const { FitAddon } = fitAddonPackage;
+const { SearchAddon } = searchAddonPackage;
 const { Terminal: XTerm } = xtermPackage;
 
-import { projectFolderName, terminalDirectoryFromOsc, terminalProjectGroupId, terminalGroupName, terminalTabGroupId, moveTerminalTabToGroup, terminalTabsAfterDeletingGroup, upsertTerminalGroupDefinition, groupTerminalTabsByProject, shouldCreateInitialTerminal, copyTerminalSelection, handleTerminalClipboardShortcut, terminalWordEraseInput, createDisposableTerminalSession, terminalWorkspaceShortcutAction } from "../lib/terminalWorkspace.js";
+import { projectFolderName, terminalDirectoryFromOsc, terminalProjectGroupId, terminalGroupName, terminalTabGroupId, moveTerminalTabToGroup, terminalTabsAfterDeletingGroup, upsertTerminalGroupDefinition, groupTerminalTabsByProject, shouldCreateInitialTerminal, copyTerminalSelection, handleTerminalClipboardShortcut, terminalWordEraseInput, createDisposableTerminalSession, terminalWorkspaceShortcutAction, terminalFindCountText, terminalFindInitialTerm, TERMINAL_FIND_HIGHLIGHT_LIMIT } from "../lib/terminalWorkspace.js";
 export default function TerminalWorkspace({ active, projectRoot, settings, theme, newTerminalRequest = 0 }) {
   const reduceMotion = useReducedMotion();
   const nextTabRef = useRef(1);
@@ -40,6 +43,8 @@ export default function TerminalWorkspace({ active, projectRoot, settings, theme
   const [tabMenu, setTabMenu] = useState(null);
   const [renamingKey, setRenamingKey] = useState(null);
   const [renameDraft, setRenameDraft] = useState("");
+  // Each press of Find counts up, so pressing it again refocuses an open find bar.
+  const [findRequest, setFindRequest] = useState({ key: null, count: 0 });
 
   const applyShellLabel = useCallback((key, label) => {
     setTabs((current) => current.map((item) => (
@@ -334,6 +339,10 @@ export default function TerminalWorkspace({ active, projectRoot, settings, theme
       addTerminal();
       return;
     }
+    if (action === "find") {
+      setFindRequest((current) => ({ key: activeKey, count: current.count + 1 }));
+      return;
+    }
     closeTab(activeKey);
   }
 
@@ -344,6 +353,7 @@ export default function TerminalWorkspace({ active, projectRoot, settings, theme
           <TerminalSession
             key={tab.key}
             active={active && activeKey === tab.key}
+            findRequest={findRequest.key === tab.key ? findRequest.count : 0}
             projectRoot={tab.cwd}
             settings={settings}
             tabKey={tab.key}
@@ -599,13 +609,24 @@ export default function TerminalWorkspace({ active, projectRoot, settings, theme
   );
 }
 
-function TerminalSession({ active, onCwdChange, onLabelChange, projectRoot, settings, tabKey, theme }) {
+function TerminalSession({ active, findRequest = 0, onCwdChange, onLabelChange, projectRoot, settings, tabKey, theme }) {
   const reduced = useReducedMotion();
   const reducedRef = useRef(reduced);
   reducedRef.current = reduced;
   const containerRef = useRef(null);
   const terminalRef = useRef(null);
   const fitAddonRef = useRef(null);
+  const searchAddonRef = useRef(null);
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
+  const findInputRef = useRef(null);
+  // The find bar: null while closed, otherwise its text and Match case.
+  const [find, setFind] = useState(null);
+  const findRef = useRef(find);
+  findRef.current = find;
+  // The addon's last count, { resultIndex, resultCount }, or null before a search.
+  const [findResults, setFindResults] = useState(null);
+  const [findFocusRequest, setFindFocusRequest] = useState(0);
   const sessionIdRef = useRef("");
   const activeRef = useRef(active);
   const initialThemeRef = useRef(theme);
@@ -615,6 +636,12 @@ function TerminalSession({ active, onCwdChange, onLabelChange, projectRoot, sett
   const contextMenuRef = useRef(null);
   // Right-click menu: where it opens and the text that was selected then.
   const [contextMenu, setContextMenu] = useState(null);
+  // The target of the link under the pointer, shown next to it.
+  const [linkTip, setLinkTip] = useState(null);
+
+  useEffect(() => {
+    if (!active) setLinkTip(null);
+  }, [active]);
 
   useEffect(() => {
     if (!contextMenu) return undefined;
@@ -636,7 +663,7 @@ function TerminalSession({ active, onCwdChange, onLabelChange, projectRoot, sett
     if (!terminal) return;
     event.preventDefault();
     const width = 208;
-    const height = 112;
+    const height = 140;
     setContextMenu({
       left: Math.max(4, Math.min(event.clientX, window.innerWidth - width - 4)),
       top: Math.max(4, Math.min(event.clientY, window.innerHeight - height - 4)),
@@ -654,8 +681,69 @@ function TerminalSession({ active, onCwdChange, onLabelChange, projectRoot, sett
     if (action === "select-all") terminal.selectAll();
     // Attaches the selection to Rem's message box; the person writes the question and sends it.
     if (action === "ask") askRemAboutTerminalSelection(selection, placeRef.current);
-    if (action !== "ask") terminal.focus();
+    if (action === "find") openFind(selection);
+    else if (action !== "ask") terminal.focus();
   }
+
+  // Runs the addon on the find bar's text. "type" keeps the current match while the text
+  // grows, so each letter doesn't jump to the next one.
+  function runFind(direction, state = findRef.current) {
+    const addon = searchAddonRef.current;
+    if (!addon || !state) return;
+    if (!state.term) {
+      addon.clearDecorations();
+      terminalRef.current?.clearSelection();
+      setFindResults(null);
+      return;
+    }
+    const options = { caseSensitive: state.caseSensitive, decorations: terminalFindDecorations(themeRef.current) };
+    if (direction === "previous") addon.findPrevious(state.term, options);
+    else addon.findNext(state.term, { ...options, incremental: direction === "type" });
+  }
+
+  function updateFind(changes) {
+    const next = { ...findRef.current, ...changes };
+    // The addon saves new options before comparing them with the last ones, so only
+    // clearing its cached search makes it recount after Match case changes.
+    if (next.caseSensitive !== findRef.current?.caseSensitive) searchAddonRef.current?.clearDecorations();
+    findRef.current = next;
+    setFind(next);
+    runFind("type", next);
+  }
+
+  // Opens the bar, or focuses it again when it's open, starting from a one-line selection.
+  function openFind(selection) {
+    const initial = terminalFindInitialTerm(selection);
+    const next = { caseSensitive: false, term: "", ...findRef.current, ...(initial ? { term: initial } : {}) };
+    findRef.current = next;
+    setFind(next);
+    setFindFocusRequest((value) => value + 1);
+    if (initial) runFind("type", next);
+  }
+
+  function closeFind() {
+    findRef.current = null;
+    setFind(null);
+    setFindResults(null);
+    searchAddonRef.current?.clearDecorations();
+    terminalRef.current?.focus();
+  }
+
+  const openFindRef = useRef(openFind);
+  openFindRef.current = openFind;
+  const runFindRef = useRef(runFind);
+  runFindRef.current = runFind;
+  useEffect(() => {
+    if (!findRequest) return;
+    const terminal = terminalRef.current;
+    openFindRef.current(terminal?.hasSelection() ? terminal.getSelection() : "");
+  }, [findRequest]);
+
+  useEffect(() => {
+    if (!findFocusRequest) return;
+    findInputRef.current?.focus();
+    findInputRef.current?.select();
+  }, [findFocusRequest]);
 
   useEffect(() => {
     activeRef.current = active;
@@ -670,6 +758,10 @@ function TerminalSession({ active, onCwdChange, onLabelChange, projectRoot, sett
     const terminal = terminalRef.current;
     if (!terminal) return;
     terminal.options.theme = terminalTheme(theme);
+    // Redraw open find highlights in the new theme's colors.
+    if (!findRef.current?.term) return;
+    searchAddonRef.current?.clearDecorations();
+    runFindRef.current("type");
   }, [theme]);
 
   useEffect(() => {
@@ -688,22 +780,44 @@ function TerminalSession({ active, onCwdChange, onLabelChange, projectRoot, sett
     if (!container) return undefined;
 
     const terminalSettings = initialSettingsRef.current;
+    const platform = globalThis.navigator?.platform ?? "";
+    // Opened the same way as a link in Rem's chat.
+    const openUrl = (url) => { window.open(url, "_blank", "noopener,noreferrer"); };
+    const showLinkTip = (event, text) => setLinkTip({ left: event.clientX, top: event.clientY, text });
+    const hideLinkTip = () => setLinkTip(null);
     const terminal = new XTerm({
-      allowProposedApi: false,
+      // Find's highlights and match count use xterm's decorations, which it still marks
+      // as proposed. Nothing the shell prints can call the API; only this code does.
+      allowProposedApi: true,
       convertEol: true,
       cursorBlink: terminalSettings.cursorBlink && !reducedRef.current,
       cursorStyle: "block",
       fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
       fontSize: terminalSettings.fontSize,
       lineHeight: terminalSettings.lineHeight,
+      linkHandler: createTerminalHyperlinkHandler({ onHover: showLinkTip, onLeave: hideLinkTip, openUrl, platform }),
       scrollback: terminalSettings.scrollback,
       theme: terminalTheme(initialThemeRef.current),
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
+    const searchAddon = new SearchAddon({ highlightLimit: TERMINAL_FIND_HIGHLIGHT_LIMIT });
+    terminal.loadAddon(searchAddon);
+    const findResultsDisposable = searchAddon.onDidChangeResults((results) => setFindResults(results));
     terminal.open(container);
+    const missingFiles = window.goferDesktop?.workspace?.missingRecentFiles;
+    const linkDisposable = terminal.registerLinkProvider(createTerminalLinkProvider(terminal, {
+      existingFiles: missingFiles ? createFileExistenceCheck(missingFiles) : null,
+      onHover: showLinkTip,
+      onLeave: hideLinkTip,
+      openFile: (target) => window.dispatchEvent(new CustomEvent(TERMINAL_OPEN_FILE_EVENT, { detail: target })),
+      openUrl,
+      place: () => ({ cwd: placeRef.current.cwd, projectRoot }),
+      platform,
+    }));
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
+    searchAddonRef.current = searchAddon;
     fitAddon.fit();
     const cwdDisposable = terminal.parser.registerOscHandler(633, (data) => {
       const currentDirectory = terminalDirectoryFromOsc(data);
@@ -718,7 +832,10 @@ function TerminalSession({ active, onCwdChange, onLabelChange, projectRoot, sett
       terminal.options.disableStdin = true;
       return () => {
         cwdDisposable.dispose();
+        findResultsDisposable.dispose();
+        linkDisposable.dispose();
         terminal.dispose();
+        searchAddonRef.current = null;
       };
     }
 
@@ -801,15 +918,20 @@ function TerminalSession({ active, onCwdChange, onLabelChange, projectRoot, sett
       unsubscribeData();
       unsubscribeExit();
       cwdDisposable.dispose();
+      findResultsDisposable.dispose();
+      linkDisposable.dispose();
       terminal.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
+      searchAddonRef.current = null;
       sessionLifecycle.dispose();
     };
   }, [onCwdChange, onLabelChange, projectRoot, tabKey]);
 
   const hasSelection = Boolean(contextMenu?.selection?.trim());
   const menuItem = "flex h-7 w-full items-center rounded px-2 text-left hover:bg-slate-100 focus-visible:bg-slate-100 focus-visible:outline-none disabled:cursor-default disabled:text-muted disabled:hover:bg-transparent";
+  const findButton = "grid h-6 w-6 shrink-0 place-items-center rounded text-muted transition hover:bg-slate-100 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent";
+  const findShortcut = formatKeybinding(settingBinding(settings, "terminal.find"));
   return (
     <>
       <div
@@ -818,6 +940,66 @@ function TerminalSession({ active, onCwdChange, onLabelChange, projectRoot, sett
         onContextMenu={openContextMenu}
         onPointerDown={(event) => { if (event.button === 0) terminalRef.current?.focus(); }}
       />
+      {find && active ? (
+        <div
+          aria-label="Find in terminal"
+          className="absolute right-3 top-1.5 z-10 flex items-center gap-0.5 rounded-md border border-line bg-white p-1 text-[11px] text-ink shadow-md"
+          role="search"
+          onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            event.stopPropagation();
+            closeFind();
+          }}
+        >
+          <input
+            ref={findInputRef}
+            aria-label="Find in terminal"
+            className="h-6 w-44 rounded border border-line bg-white px-1.5 text-[11px] text-ink outline-none focus:border-brand focus:ring-1 focus:ring-brand/20"
+            placeholder="Find"
+            spellCheck={false}
+            type="text"
+            value={find.term}
+            onChange={(event) => updateFind({ term: event.target.value })}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              runFind(event.shiftKey ? "previous" : "next");
+            }}
+          />
+          <button
+            aria-label="Match case"
+            aria-pressed={find.caseSensitive}
+            className={`${findButton} ${find.caseSensitive ? "bg-indigo-50 text-indigo-700 ring-1 ring-indigo-300 hover:bg-indigo-50 hover:text-indigo-700" : ""}`}
+            title="Match case"
+            type="button"
+            onClick={() => updateFind({ caseSensitive: !find.caseSensitive })}
+          >
+            <CaseSensitive aria-hidden="true" size={15} />
+          </button>
+          <span aria-live="polite" className="min-w-[4.75rem] px-1 text-center text-[10px] tabular-nums text-muted">
+            {terminalFindCountText(findResults, find.term)}
+          </span>
+          <button aria-label="Previous match" className={findButton} disabled={!find.term} title="Previous match (Shift+Enter)" type="button" onClick={() => runFind("previous")}>
+            <ChevronUp aria-hidden="true" size={14} />
+          </button>
+          <button aria-label="Next match" className={findButton} disabled={!find.term} title="Next match (Enter)" type="button" onClick={() => runFind("next")}>
+            <ChevronDown aria-hidden="true" size={14} />
+          </button>
+          <button aria-label="Close find" className={findButton} title="Close (Escape)" type="button" onClick={closeFind}>
+            <X aria-hidden="true" size={13} />
+          </button>
+        </div>
+      ) : null}
+      {linkTip && active ? (
+        <div
+          className="pointer-events-none fixed z-[100] max-w-md whitespace-pre-line break-all rounded-md border border-line bg-white px-2 py-1 text-[11px] text-ink shadow-lg"
+          role="tooltip"
+          style={{ left: Math.max(4, Math.min(linkTip.left + 12, window.innerWidth - 320)), top: Math.max(4, Math.min(linkTip.top + 16, window.innerHeight - 56)) }}
+        >
+          {linkTip.text}
+        </div>
+      ) : null}
       {contextMenu && active ? (
         <div
           ref={contextMenuRef}
@@ -835,12 +1017,24 @@ function TerminalSession({ active, onCwdChange, onLabelChange, projectRoot, sett
         >
           <button className={menuItem} disabled={!hasSelection} role="menuitem" type="button" onClick={() => runMenuAction("copy")}>Copy</button>
           <button className={menuItem} role="menuitem" type="button" onClick={() => runMenuAction("select-all")}>Select all</button>
+          <button className={`${menuItem} justify-between gap-3`} role="menuitem" type="button" onClick={() => runMenuAction("find")}>
+            <span>Find</span>
+            <span className="text-[10px] text-muted">{findShortcut}</span>
+          </button>
           <div className="my-1 border-t border-line" role="separator" />
           <button className={menuItem} disabled={!hasSelection} role="menuitem" title={hasSelection ? "Attach the selected text to Rem's message box. Nothing is sent until you send it." : "Select text in the terminal first"} type="button" onClick={() => runMenuAction("ask")}>Ask Rem about selection</button>
         </div>
       ) : null}
     </>
   );
+}
+
+// The addon takes only #RRGGBB colors. Matches are amber so they stand apart from the
+// blue selection that marks the current match.
+function terminalFindDecorations(theme) {
+  return theme === "dark"
+    ? { activeMatchBackground: "#a16207", activeMatchColorOverviewRuler: "#facc15", matchBackground: "#4d3b12", matchOverviewRuler: "#a16207" }
+    : { activeMatchBackground: "#e9b949", activeMatchColorOverviewRuler: "#b7791f", matchBackground: "#f3e2b0", matchOverviewRuler: "#d6a93a" };
 }
 
 function terminalTheme(theme) {

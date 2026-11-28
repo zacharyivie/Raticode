@@ -37,7 +37,7 @@ async function main() {
   };
   await app.whenReady();
   const { createServer } = await import("vite");
-  vite = await createServer({ root: path.join(root, "frontend"), cacheDir: testViteCacheDir("organization-approve-all"), server: { host: "127.0.0.1", port: 0 }, plugins: [{
+  vite = await createServer({ configLoader: "runner", root: path.join(root, "frontend"), cacheDir: testViteCacheDir("organization-approve-all"), server: { host: "127.0.0.1", port: 0 }, plugins: [{
     name: "organization-approve-all-test",
     resolveId(id) { if (id === "/organization-approve-all-entry.jsx") return id; },
     load(id) {

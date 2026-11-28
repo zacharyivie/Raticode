@@ -2,7 +2,7 @@
 // The JSON is data only. Anything invalid falls back to showing the code block.
 // The phone reads the same format (RemChart.kt).
 
-export const CHART_LIMITS = { points: 50, series: 4, label: 40, title: 120 };
+const CHART_LIMITS = { points: 50, series: 4, label: 40, title: 120 };
 
 export function parseRemChart(source) {
   let raw;

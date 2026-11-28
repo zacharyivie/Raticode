@@ -3,13 +3,14 @@ import { ArrowLeft, ChevronRight, Hourglass, MessageSquare, Plus, ShieldCheck, S
 import { OutcomeGlyph, TaskGlyph, TaskTypeIcon, taskActions, typeLabel } from "./RemHomeParts.jsx";
 import {
   CREATABLE_TYPES, TASK_TYPES, WEEKDAYS, afterChoices, afterEditable, changesActiveWork, criteriaSummary, describeSchedule,
-  PAUSED_FOR_YOU, draftTitle, draftToRequest, formatWhen, newTaskDraft, plainMarkdown, pausedBy, prerequisites, projectLabel, runState, scheduleIsEditable,
+  PAUSED_FOR_YOU, draftTitle, draftToRequest, relativeWhen, newTaskDraft, plainMarkdown, pausedBy, prerequisites, projectLabel, runState, scheduleIsEditable,
   runSleep, sleepBudget, startsWhen, taskActivity, taskMessages, taskRecap, taskToDraft, validateDraft, weekdayShort,
 } from "../lib/remHome.js";
 import TaskChecks from "./RemTaskChecks.jsx";
 import { WorkflowDraftCard } from "./RemWorkflowDraft.jsx";
 import { WorktreeSetupNotice } from "./WorktreeSetup.jsx";
 import { ThreadContextSent } from "./ContextSent.jsx";
+import { CronPreview } from "./CronPreview.jsx";
 import { TicketPills } from "./TicketPill.jsx";
 import { taskTickets } from "../lib/ticketMentions.js";
 import { useRovingChoice } from "../lib/useRovingChoice.js";
@@ -197,7 +198,7 @@ function TaskUpdates({ messages, onShowMessage, now }) {
   return <details className="rem-task-updates">
     <summary>Conversation · {messages.length} {messages.length === 1 ? "update" : "updates"}</summary>
     <ol>{messages.map(message => <li key={message.id}>
-      <time dateTime={message.created_at}>{formatWhen(message.created_at, now, { past: true })}</time>
+      <time dateTime={message.created_at}>{relativeWhen(message.created_at, now, { past: true })}</time>
       <button type="button" className="rem-update-message" title="View in conversation" onClick={() => onShowMessage(message.id)}>{taskRecap(message.body)}</button>
       {message.work?.thread_id ? <button type="button" className="rem-quiet-button" onClick={() => openRemThread(message.work.thread_id)}><MessageSquare size={13} aria-hidden="true" />Open thread</button> : null}
     </li>)}</ol>
@@ -247,6 +248,7 @@ const SCHEDULE_KIND_KEYS = SCHEDULE_KINDS.map(([value]) => value);
 function ScheduleFields({ schedule, onChange, isNew, note }) {
   const kind = schedule.kind === "now" ? "once" : schedule.kind;
   const often = useRovingChoice({ keys: SCHEDULE_KIND_KEYS, selected: kind, onSelect: value => onChange({ kind: value }) });
+  const withZone = text => `${text}${schedule.timezone ? ` · ${schedule.timezone.replace(/_/g, " ")}` : ""}`;
   return <div className="rem-schedule">
     <div className="rem-segments" role="radiogroup" aria-label="How often">
       {SCHEDULE_KINDS.map(([value, label]) => <button key={value} type="button" role="radio" aria-checked={kind === value} onClick={() => onChange({ kind: value })} {...often(value)}>{label}</button>)}
@@ -259,7 +261,9 @@ function ScheduleFields({ schedule, onChange, isNew, note }) {
     </div> : null}
     {kind === "daily" || kind === "weekly" ? <label className="rem-inline-field"><span>At</span><input type="time" value={schedule.local_time} onChange={event => onChange({ local_time: event.target.value })} /></label> : null}
     {kind === "cron" ? <label className="rem-inline-field"><span>Cron</span><input className="rem-mono" value={schedule.cron} placeholder="0 9 * * 1" spellCheck={false} onChange={event => onChange({ cron: event.target.value })} /></label> : null}
-    <p className="rem-field-note">{kind === "once" ? note || (isNew ? "Starts as soon as you save." : "Runs once. Run it again any time.") : `${describeSchedule({ ...schedule, kind })}${schedule.timezone ? ` · ${schedule.timezone.replace(/_/g, " ")}` : ""}`}</p>
+    {kind === "cron"
+      ? <CronPreview expression={schedule.cron} timezone={schedule.timezone} describe={summary => withZone(describeSchedule({ ...schedule, kind }, summary))} className="rem-field-note" errorClassName="rem-field-error" />
+      : <p className="rem-field-note">{kind === "once" ? note || (isNew ? "Starts as soon as you save." : "Runs once. Run it again any time.") : withZone(describeSchedule({ ...schedule, kind }))}</p>}
   </div>;
 }
 
@@ -304,7 +308,7 @@ function TaskStatus({ task, activity, now }) {
   if (run) {
     const current = stepIndex(run.state);
     return <section className="rem-status" aria-label="Current run" data-tone={activity.tone}>
-      <div className="rem-status-line"><TaskGlyph activity={activity} type={task.type} size={16} /><strong>{activity.label}</strong>{run.started_at ? <small>started {formatWhen(run.started_at, now, { past: true })}</small> : null}</div>
+      <div className="rem-status-line"><TaskGlyph activity={activity} type={task.type} size={16} /><strong>{activity.label}</strong>{run.started_at ? <small>started {relativeWhen(run.started_at, now, { past: true })}</small> : null}</div>
       {run.state !== "queued" && run.state !== "cancelling" ? <ol className="rem-steps" aria-label="Progress">
         {STEPS.map(([key, label], index) => <li key={key} data-state={index < current ? "done" : index === current ? "current" : "next"} aria-current={index === current ? "step" : undefined}>{index === 1 && run.state === "repairing" ? "Fixing" : label}</li>)}
       </ol> : null}
@@ -325,7 +329,7 @@ function TaskStatus({ task, activity, now }) {
   if (last.state === "paused") {
     const by = pausedBy(last);
     return <section className="rem-status" aria-label="Paused run" data-tone="neutral">
-      <div className="rem-status-line"><TaskGlyph activity={activity} type={task.type} size={16} /><strong>{by === "priority" ? PAUSED_FOR_YOU : "Paused"}</strong>{last.paused?.at ? <small>{formatWhen(last.paused.at, now, { past: true })}</small> : null}</div>
+      <div className="rem-status-line"><TaskGlyph activity={activity} type={task.type} size={16} /><strong>{by === "priority" ? PAUSED_FOR_YOU : "Paused"}</strong>{last.paused?.at ? <small>{relativeWhen(last.paused.at, now, { past: true })}</small> : null}</div>
       <p className="rem-status-note">{by === "priority"
         ? "Rem paused this self-work so your own work could run first. It picks up in the same thread as soon as a thread is free again."
         : "Its thread and any worktree are kept. Resume continues in the same thread, where the worker checks what it already did."}</p>
@@ -335,12 +339,12 @@ function TaskStatus({ task, activity, now }) {
   const info = runState(last.state, last.needs_user);
   const tone = activity.kind === "attention" ? info.tone : activity.kind === "paused" ? "neutral" : info.tone === "attention" ? "neutral" : info.tone;
   return <section className="rem-status" aria-label="Last run" data-tone={tone}>
-    <div className="rem-status-line"><OutcomeGlyph status={{ ...info, tone, state: last.state, type: task.type }} /><strong>{last.state === "succeeded" ? taskRecap(last.summary_short || info.label) : plainMarkdown(last.summary_short) || info.label}</strong>{last.finished_at ? <small>{formatWhen(last.finished_at, now, { past: true })}</small> : null}</div>
+    <div className="rem-status-line"><OutcomeGlyph status={{ ...info, tone, state: last.state, type: task.type }} /><strong>{last.state === "succeeded" ? taskRecap(last.summary_short || info.label) : plainMarkdown(last.summary_short) || info.label}</strong>{last.finished_at ? <small>{relativeWhen(last.finished_at, now, { past: true })}</small> : null}</div>
     {criteriaSummary(last.criteria) ? <p className="rem-status-note">{criteriaSummary(last.criteria)}</p> : null}
     <TaskChecks criteria={last.criteria} notes={last.review_notes} label="Checks from the last run" />
     <WorkflowDraftCard task={task} />
     <WorktreeSetupNotice setup={last.worktree_setup} />
-    {task.state === "paused" ? <p className="rem-status-note">Schedule paused</p> : task.next_occurrence_at ? <p className="rem-status-note">Next run {formatWhen(task.next_occurrence_at, now)}</p> : null}
+    {task.state === "paused" ? <p className="rem-status-note">Schedule paused</p> : task.next_occurrence_at ? <p className="rem-status-note">Next run {relativeWhen(task.next_occurrence_at, now)}</p> : null}
     <StatusActions run={last} controls={controls} />
   </section>;
 }

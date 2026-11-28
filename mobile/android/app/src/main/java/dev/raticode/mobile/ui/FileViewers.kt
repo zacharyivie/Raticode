@@ -226,6 +226,9 @@ internal fun WebPreview(html: String, label: String, modifier: Modifier = Modifi
         }
         return
     }
+    // The web view leaves a gradient page background unpainted and shows its own color there, so it takes the page's
+    // base color (white when the page names none, as before). Read once per page, not on every update.
+    val backdrop = remember(html) { PageBackdrop.color(html) ?: android.graphics.Color.WHITE }
     AndroidView(factory = { context ->
         WebView(context).apply {
             settings.javaScriptEnabled = false
@@ -252,7 +255,10 @@ internal fun WebPreview(html: String, label: String, modifier: Modifier = Modifi
             contentDescription = label
         }
     // Base64, so characters such as # and % in the page reach the web view unchanged.
-    }, update = { it.loadData(java.util.Base64.getEncoder().encodeToString(html.toByteArray()), "text/html; charset=utf-8", "base64") },
+    }, update = {
+        it.setBackgroundColor(backdrop)
+        it.loadData(java.util.Base64.getEncoder().encodeToString(html.toByteArray()), "text/html; charset=utf-8", "base64")
+    },
         onRelease = { it.stopLoading(); it.destroy() }, modifier = modifier.fillMaxSize().testTag("webPreview"))
 }
 

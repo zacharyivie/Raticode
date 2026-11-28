@@ -24,6 +24,7 @@ import json
 import os
 import sys
 import threading
+import tomllib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -384,6 +385,7 @@ def test_codex_starts_when_several_home_secret_files_exist(
     )
     assert decision == ANSWER
     call = only_call(wire)
-    profile = next(a for a in call["args"] if a.startswith("permissions.raticode.filesystem="))
-    assert str(home / ".codex" / "auth.json") in profile
-    assert str(home / ".claude.json") not in profile
+    setting = next(a for a in call["args"] if a.startswith("permissions.raticode.filesystem="))
+    profile = tomllib.loads(setting.replace("permissions.raticode.filesystem", "profile", 1))
+    assert profile["profile"][str(home / ".codex" / "auth.json")] == "deny"
+    assert str(home / ".claude.json") not in profile["profile"]

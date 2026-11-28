@@ -5,9 +5,10 @@ import {
 } from "lucide-react";
 import {
   LANES, accountNotice, approvePost, audienceLabel, bulkApprovable, cancelPost, charCounter, createPost, declinePost, deleteTemplate, duplicateDraft, editPost,
-  foldText, formatWhen, groupPosts, lineDiff, linkParts, loadSocial, markPosted, optionLines, publishVariant, requestChanges, saveTemplate, setPaused, sourceLabel,
-  variantActions, weekStrip,
+  foldText, groupPosts, lineDiff, linkParts, loadSocial, markCopyDeleted, markPosted, optionLines, postTime, publishVariant, requestChanges, retryCopy, saveTemplate,
+  setPaused, sourceLabel, undeletedCopies, variantActions, weekStrip,
 } from "../lib/socialApi.js";
+import { clockTime, dateTime, weekdayName } from "../lib/timeText.js";
 import SocialAccounts from "./SocialAccounts.jsx";
 import SocialPostEditor, { CharMeter } from "./SocialPostEditor.jsx";
 import { PlatformIcon } from "./SocialPostsParts.jsx";
@@ -192,7 +193,7 @@ function Board({ data, run, busy, onEdit, onDuplicate, onNew, onConnect, onTempl
       {confirming ? <>
         <div className="sp-bulk-text">
           <strong>Approve {approvable.length} {approvable.length === 1 ? "post" : "posts"}?</strong> Each goes out exactly as shown, at its own time:
-          <ul>{approvable.map(post => <li key={post.id}>{post.title || "Untitled post"} · {formatWhen(post.scheduled_at, { timeZone: post.timezone || undefined })} · {audienceLabel(post)}</li>)}</ul>
+          <ul>{approvable.map(post => <li key={post.id}>{post.title || "Untitled post"} · {postTime(post.scheduled_at, { timeZone: post.timezone || undefined })} · {audienceLabel(post)}</li>)}</ul>
         </div>
         <button type="button" className="oh-btn small primary" disabled={busy} onClick={approveChosen}><Check size={13} aria-hidden="true" />Yes, approve {approvable.length}</button>
         <button type="button" className="oh-btn small ghost" onClick={() => setConfirming(false)}>Go back</button>
@@ -267,9 +268,9 @@ function WeekStrip({ posts }) {
     <h2 className="sp-week-h">Next 7 days <span>{total ? `${total} ${total === 1 ? "post" : "posts"} planned` : "Nothing planned yet"}</span></h2>
     <ol className="sp-week">
       {days.map(({ date, items }, index) => <li key={date.toISOString()} className={`${items.length ? "has" : ""} ${index === 0 ? "today" : ""}`}>
-        <span className="d">{index === 0 ? "Today" : new Intl.DateTimeFormat(undefined, { weekday: "short" }).format(date)} <b>{date.getDate()}</b></span>
+        <span className="d">{index === 0 ? "Today" : weekdayName(date)} <b>{date.getDate()}</b></span>
         {items.length ? items.slice(0, 3).map(post => <span key={post.id} className="t" title={post.title}>
-          <span className="tm">{new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(post.scheduled_at))}</span> {post.title || "Untitled"}</span>)
+          <span className="tm">{clockTime(post.scheduled_at)}</span> {post.title || "Untitled"}</span>)
           : <span className="c">Free</span>}
         {items.length > 3 ? <span className="c">+{items.length - 3} more</span> : null}
       </li>)}
@@ -299,7 +300,7 @@ function PostCard({ post, data, run, busy, onEdit, onDuplicate, selected, toggle
       <h3>{title}</h3>
       <span className={`sp-state st-${post.state}`}>{stateLabel(post.state)}</span>
     </div>
-    <p className="sp-meta"><CalendarClock size={12} aria-hidden="true" /><span>{formatWhen(post.scheduled_at, { timeZone: post.timezone || undefined })}</span>
+    <p className="sp-meta"><CalendarClock size={12} aria-hidden="true" /><span>{postTime(post.scheduled_at, { timeZone: post.timezone || undefined })}</span>
       <span className="sp-meta-src"><Users size={11} aria-hidden="true" />{sourceLabel(post.created_by)}</span></p>
     {post.filled_in ? <p className="sp-filled"><Sparkles size={12} aria-hidden="true" />Filled in by {sourceLabel(post.created_by)}. You can edit any of it before approving.</p> : null}
     {post.flags?.length ? <ul className="sp-flags" aria-label="Check before approving">
@@ -313,6 +314,7 @@ function PostCard({ post, data, run, busy, onEdit, onDuplicate, selected, toggle
         onClick={() => setTab(item.id)} {...platformTab(item.id)}><PlatformIcon platform={item.platform} size={14} />{item.account_name || item.platform_label || item.platform}</button>)}
     </div> : null}
     {variant ? <VariantPreview post={post} variant={variant} platform={platform} previous={previous} run={run} busy={busy} /> : null}
+    <UndeletedCopies post={post} run={run} busy={busy} />
     {post.rationale ? <p className="sp-rationale"><strong>Why: </strong>{post.rationale}</p> : null}
     {post.sources?.length ? <details className="sp-sources"><summary>Sources ({post.sources.length})</summary>
       <ul>{post.sources.map(source => <li key={source.url}><a href={source.url} onClick={event => { event.preventDefault(); openLink(source.url); }}>{source.title || source.url}</a></li>)}</ul>
@@ -376,9 +378,9 @@ function VariantPreview({ post, variant, platform, previous, run, busy }) {
     </dl> : null}
     {variant.media?.length ? <ul className="sp-media">{variant.media.map(item => <li key={item.sha256}>{item.name} · {item.mime} · {Math.ceil((item.size || 0) / 1024)} KB</li>)}</ul> : null}
     <CharMeter counter={counter} platform={variant.platform} />
-    {linkedInWaits ? <p className="sp-hint">You'll be asked to tap Publish at {formatWhen(post.scheduled_at)}.</p> : null}
+    {linkedInWaits ? <p className="sp-hint">You'll be asked to tap Publish at {postTime(post.scheduled_at)}.</p> : null}
     {variant.message ? <p className="sp-message"><TriangleAlert size={12} aria-hidden="true" />{variant.message}</p> : null}
-    {variant.next_retry_at ? <p className="sp-hint">Next try {formatWhen(variant.next_retry_at)}.</p> : null}
+    {variant.next_retry_at ? <p className="sp-hint">Next try {dateTime(variant.next_retry_at, { weekday: true })}.</p> : null}
     {variant.url ? <p className="sp-hint"><a href={variant.url} onClick={event => { event.preventDefault(); openLink(variant.url); }}><ExternalLink size={11} aria-hidden="true" /> View the post</a></p> : null}
     {actions.length ? <div className="sp-actions">
       {actions.includes("publish") ? <button type="button" className="oh-btn primary sp-publish" disabled={busy} onClick={() => run(() => publishVariant(post, variant.id))}><Send size={15} aria-hidden="true" />Publish</button> : null}
@@ -396,6 +398,27 @@ function VariantPreview({ post, variant, platform, previous, run, busy }) {
       <button type="button" className="oh-btn small ghost" onClick={() => setAskLink(false)}>Cancel</button>
     </div> : null}
   </div>;
+}
+
+// Copies a platform still holds from before an edit or cancel that Raticode couldn't delete.
+// Until one is deleted, the post doesn't go to that account again, so two copies can't go out.
+function UndeletedCopies({ post, run, busy }) {
+  const copies = undeletedCopies(post);
+  if (!copies.length) return null;
+  return <section className="sp-copies" aria-label="Copies not deleted">
+    {copies.map(copy => <div key={copy.id} className="sp-copy">
+      <p className="sp-copy-head"><PlatformIcon platform={copy.platform} size={14} /><strong>An earlier copy on {copy.platform_label} wasn't deleted</strong>
+        <span className="sp-copy-who">{copy.account_name}</span></p>
+      <p className="sp-message"><TriangleAlert size={12} aria-hidden="true" />{copy.platform_label}: {copy.error}</p>
+      <p className="sp-hint">{copy.waiting ? `Raticode stopped trying. Fix the problem and choose Try again, or delete the copy on ${copy.platform_label} yourself and choose I deleted it.`
+        : `Raticode tries again ${copy.next_try_at ? dateTime(copy.next_try_at, { weekday: true }) : "shortly"}.`}</p>
+      <div className="sp-actions">
+        {copy.url ? <button type="button" className="oh-btn small ghost" onClick={() => openLink(copy.url)}><ExternalLink size={13} aria-hidden="true" />View the copy</button> : null}
+        <button type="button" className="oh-btn small" disabled={busy} onClick={() => run(() => retryCopy(post, copy.id))}>Try again</button>
+        <button type="button" className="oh-btn small" disabled={busy} onClick={() => run(() => markCopyDeleted(post, copy.id))}><Check size={13} aria-hidden="true" />I deleted it</button>
+      </div>
+    </div>)}
+  </section>;
 }
 
 // The card's text with a marker where the platform's feed cuts it with "see more".

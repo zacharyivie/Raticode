@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { changesActiveWork, checkGroups, dismissibleUpdates, conversationMessages, criteriaSummary, finishedRunNotifications, latestWorkMessageIds, describeSchedule, draftTitle, draftToRequest, formatClock, formatWhen, groupTasks, messageStamp, messagesByDay, newTaskDraft, plainMarkdown, statusLine, taskActivity, taskMessages, taskRecap, taskToDraft, validateDraft, workStatus, prerequisites, afterChoices, afterEditable, startsWhen, runSleep, sleepBudget, canRetryPrerequisite, selfWorkReportItems, usdText, workflowDraftSummary, reviewNotes } from "./remHome.js";
+import { changesActiveWork, checkGroups, dismissibleUpdates, conversationMessages, criteriaSummary, finishedRunNotifications, latestWorkMessageIds, describeSchedule, draftTitle, draftToRequest, formatClock, relativeWhen, groupTasks, messageStamp, messagesByDay, newTaskDraft, plainMarkdown, statusLine, taskActivity, taskMessages, taskRecap, taskToDraft, validateDraft, workStatus, prerequisites, afterChoices, afterEditable, startsWhen, runSleep, sleepBudget, canRetryPrerequisite, selfWorkReportItems, usdText, workflowDraftSummary, reviewNotes } from "./remHome.js";
 
 const NOW = new Date(2026, 9, 7, 10, 0); // Wednesday, 7 October 2026, 10:00 local
 const at = (days, hour, minute = 0) => new Date(2026, 9, 7 + days, hour, minute).toISOString();
@@ -13,18 +13,21 @@ test("schedules read as plain language", () => {
   assert.equal(describeSchedule({ kind: "weekly", weekdays: ["wednesday", "monday", "friday"], local_time: "12:00" }), "Mon, Wed and Fri at 12 PM");
   assert.equal(describeSchedule({ kind: "interval", every_minutes: 120 }), "Every 2 hours");
   assert.equal(describeSchedule({ kind: "cron", cron: "0 9 * * 1" }), "Custom (0 9 * * 1)");
+  assert.equal(describeSchedule({ kind: "cron", cron: "0 9 * * 1" }, "Every Monday at 9:00"), "Every Monday at 9:00");
   assert.equal(formatClock("00:05"), "12:05 AM");
   assert.equal(formatClock("nope"), "");
 });
 
 test("relative times stay short and human", () => {
-  assert.equal(formatWhen(at(0, 10, 20), NOW), "in 20 min");
-  assert.equal(formatWhen(at(0, 15), NOW), "today 3 PM");
-  assert.equal(formatWhen(at(1, 8, 30), NOW), "tomorrow 8:30 AM");
-  assert.equal(formatWhen(at(5, 9), NOW), "Mon 9 AM");
-  assert.equal(formatWhen(at(0, 9, 55), NOW, { past: true }), "5 min ago");
-  assert.equal(formatWhen(at(-1, 9), NOW, { past: true }), "yesterday 9 AM");
-  assert.equal(formatWhen("not a date", NOW), "");
+  assert.equal(relativeWhen(at(0, 10, 20), NOW), "in 20 min");
+  assert.equal(relativeWhen(at(0, 15), NOW), "today 3:00 PM");
+  assert.equal(relativeWhen(at(1, 8, 30), NOW), "tomorrow 8:30 AM");
+  assert.equal(relativeWhen(at(5, 9), NOW), "Mon 9:00 AM");
+  assert.equal(relativeWhen(at(0, 9, 55), NOW, { past: true }), "5 min ago");
+  assert.equal(relativeWhen(at(-1, 9), NOW, { past: true }), "yesterday 9:00 AM");
+  assert.equal(relativeWhen(at(30, 9), NOW), "Nov 6");
+  assert.equal(relativeWhen(new Date(2027, 0, 4, 9).toISOString(), NOW), "Jan 4, 2027");
+  assert.equal(relativeWhen("not a date", NOW), "");
 });
 
 test("a sleeping worker reads as sleeping with its next check, and only while parked", () => {
@@ -56,7 +59,7 @@ test("running, verifying and repairing spin; queued and blocked do not", () => {
   assert.deepEqual([blocked.kind, blocked.spinning, blocked.label], ["attention", false, "Needs a test database"]);
   assert.equal(taskActivity({ last_run: { state: "blocked", acknowledged: true } }, NOW).kind, "done");
   assert.equal(taskActivity({ state: "paused", next_occurrence_at: at(1, 9) }, NOW).kind, "paused");
-  assert.equal(taskActivity({ next_occurrence_at: at(1, 9) }, NOW).label, "Next tomorrow 9 AM");
+  assert.equal(taskActivity({ next_occurrence_at: at(1, 9) }, NOW).label, "Next tomorrow 9:00 AM");
   // An unknown state is reported honestly instead of animating forever.
   assert.deepEqual([taskActivity({ active_run: { state: "mystery" } }, NOW).spinning, taskActivity({ active_run: { state: "mystery" } }, NOW).label], [false, "Not scheduled"]);
 });

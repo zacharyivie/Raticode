@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
-import os
 import re
-import tempfile
 import threading
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -20,6 +18,7 @@ from typing import Any
 from gofer.core.prompt_envelope import AgentResources
 from gofer.core.provider_capabilities import IMAGE_ATTACHMENT_PROVIDERS, image_attachment_refusal
 from gofer.ui.chat_media import CHAT_ATTACHMENT_MAX_COUNT, resolve_chat_attachment
+from gofer.utils.atomic_output import replace_file
 
 
 class ChatSteeringConflict(ValueError):
@@ -74,19 +73,11 @@ class ChatSteering:
 
     def _save(self, conversation_id: str, records: dict[str, dict[str, Any]]) -> None:
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd, filename = tempfile.mkstemp(dir=self.directory, prefix=".receipt-")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(
-                    {"receipts": records, "turnIds": sorted(self._turn_ids[conversation_id])},
-                    handle,
-                )
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(filename, self.directory / f"{conversation_id}.json")
-            self._records[conversation_id] = records
-        finally:
-            Path(filename).unlink(missing_ok=True)
+        document = {"receipts": records, "turnIds": sorted(self._turn_ids[conversation_id])}
+        replace_file(
+            self.directory / f"{conversation_id}.json", json.dumps(document).encode("utf-8")
+        )
+        self._records[conversation_id] = records
 
     def receipts(self, conversation_id: str) -> list[dict[str, Any]]:
         conversation_id = _identifier(conversation_id, "conversationId")

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { FileKey, KeyRound, Plus, Trash2 } from "lucide-react";
 import { apiJson } from "../lib/api";
+import { dateTime } from "../lib/timeText.js";
 
 // Values go to the backend once and live in the system keychain. No response returns
 // one, so the value field always starts empty and is cleared after saving.
@@ -18,7 +19,7 @@ const STATUS = {
 const request = (path, options) =>
   apiJson(`/rattish/secrets${path}`, { ...options, failure: status => `Request failed (${status}).` });
 
-export const secretsApi = {
+const secretsApi = {
   load: (workflowId) => request(workflowId ? `?workflowId=${encodeURIComponent(workflowId)}` : ""),
   save: (workflowId, name, value) =>
     request(workflowId ? `?workflowId=${encodeURIComponent(workflowId)}` : "", {
@@ -33,9 +34,8 @@ export const secretsApi = {
 };
 
 function formatSaved(value) {
-  if (!value) return "";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "" : `Saved ${date.toLocaleString()}`;
+  const saved = dateTime(value);
+  return saved && `Saved ${saved}`;
 }
 
 function StatusPill({ status }) {

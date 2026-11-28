@@ -43,7 +43,15 @@ function backgroundLaunch(command, args, env = process.env, platform = process.p
   // Even on Xvfb, Electron reaches the desktop over the session bus: the app's
   // tray icon lands in the real panel and Chromium asks the real wallet for keys.
   delete childEnv.DBUS_SESSION_BUS_PID;
-  const xvfb = ["xvfb-run", "-a", "-s", "-screen 0 1920x1080x24", command, "--ozone-platform=x11", "--password-store=basic", ...args];
+  // Chromium's headless platform draws no window at all, so it needs no X server.
+  // It still gets the private environment, and works where Xvfb can't open its
+  // socket, such as inside an agent's sandbox.
+  if (args.includes("--ozone-platform=headless")) {
+    delete childEnv.DISPLAY;
+    delete childEnv.XDG_SESSION_TYPE;
+    return { command, args, env: childEnv };
+  }
+  const xvfb =["xvfb-run", "-a", "-s", "-screen 0 1920x1080x24", command, "--ozone-platform=x11", "--password-store=basic", ...args];
   // Without xvfb-run, launch it bare so the caller gets ENOENT and MISSING_XVFB.
   if (which("xvfb-run", env) && which("dbus-run-session", env)) {
     return { command: "dbus-run-session", args: [`--config-file=${BUS_CONFIG}`, "--", ...xvfb], env: childEnv };

@@ -12,19 +12,9 @@ const os = require("node:os");
 const path = require("node:path");
 const { CHROME, createChromiumEngine, findBrowser } = require("../chromium-engine.cjs");
 const { ChromiumContents } = require("../chromium-contents.cjs");
+const { chromiumForTesting } = require("./test-wait.cjs");
 
-function chromeForTesting() {
-  const root = path.join(os.homedir(), ".cache", "ms-playwright");
-  try {
-    for (const entry of fs.readdirSync(root).filter((name) => /^chromium-\d+$/.test(name)).sort().reverse()) {
-      const candidate = path.join(root, entry, "chrome-linux64", "chrome");
-      if (fs.existsSync(candidate)) return candidate;
-    }
-  } catch { /* No Playwright downloads. */ }
-  return "";
-}
-
-const CHROME_PATH = process.env.RATICODE_SKIP_CHROME_TESTS === "1" ? "" : (findBrowser(CHROME) || (process.platform === "linux" ? chromeForTesting() : ""));
+const CHROME_PATH = process.env.RATICODE_SKIP_CHROME_TESTS === "1" ? "" : (findBrowser(CHROME) || (process.platform === "linux" ? chromiumForTesting() : ""));
 const XVFB = process.platform === "linux" && spawnSync("which", ["Xvfb"]).status === 0;
 const realWindow = { skip: CHROME_PATH && XVFB ? false : "Needs Chrome and Xvfb" };
 

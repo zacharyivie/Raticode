@@ -156,6 +156,7 @@ class ScriptedSubscription(Subscription):
         )
 
 
+# Writes a workflow and its test set, unlike the shared write.
 def write(tmp_path: Path, source: str, tests: dict[str, Any] | None) -> Path:
     path = tmp_path / "project" / "workflow.rattish"
     path.parent.mkdir(parents=True, exist_ok=True)

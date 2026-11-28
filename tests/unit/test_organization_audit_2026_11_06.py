@@ -559,7 +559,7 @@ def test_a_removed_workers_tickets_can_still_be_reassigned_or_cancelled(tmp_path
         changes={"assignee": "lead"},
     )
     assert moved["assignee"] == "lead"
-    with pytest.raises(ValueError, match="Unknown employee"):
+    with pytest.raises(ValueError, match="Unknown worker"):
         act(
             manager,
             org,

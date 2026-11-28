@@ -22,7 +22,7 @@ Starter workflows are new in Raticode 0.5.5.
 | [Jev demo](./jev-demo.md) | Asks Jev a yes/no and a multiple-choice question about a message and branches on each answer | Up to two Jev calls | None |
 | [Summarize a link](./summarize-a-link.md) | Reads the page behind a link shared from your phone or copied on the desktop and sends a summary to your phone | One per page | Phone share or desktop shortcut |
 
-The starters that call a model use the `claude-code` provider. Change `provider` on the agent or common-llm-task node to use another one. **Jev demo** calls the [Jev classifier](../workflows/jev.md) instead and needs a Jev key.
+The starters that call a model use the `claude-code` provider. If Claude Code isn't on your computer, pick another app when you create the copy (see [Pick the app a starter calls](#pick-the-app-a-starter-calls)), or change `provider` on the agent or common-llm-task node later. **Jev demo** calls the [Jev classifier](../workflows/jev.md) instead and needs a Jev key.
 
 ## Start from a starter
 
@@ -34,9 +34,22 @@ From the command line:
 Raticode rattish starters                                   # list them
 Raticode rattish create --from daily-report --project .     # copy one
 Raticode rattish create "Morning summary" --from daily-report --project .
+Raticode rattish create --from daily-report --provider codex --project .
 ```
 
 `rattish starters` lists each starter with a **Needs** line: the provider it calls and any secret it reads, or `nothing beyond Raticode`. The Studio shows the same line under **Start from** when you pick one. The **Needs** line is new in Raticode 0.6.0.
+
+### Pick the app a starter calls
+
+New in 0.6.2. When a starter calls a model with an app that isn't installed on this computer, or that you turned off in **Settings > Providers**, the dialog says so under the **Needs** line, for example **Claude Code isn't installed on this computer.** A **Provider** list then appears with the installed apps that can run agent and common-llm-task steps. It starts on Rem's provider when that app is installed, and on the first installed one otherwise. **Create** writes the app you pick into `provider` on each of the starter's model steps, then checks the copy like any new workflow. If the starter's own app is installed, the dialog shows no **Provider** list and copies the starter unchanged.
+
+From the command line, `--provider` does the same:
+
+```bash
+Raticode rattish create --from daily-report --provider codex --project .
+```
+
+`--provider` takes the app's Rattish name (`claude-code`, `codex`, `cursor`, `copilot`, `opencode`, `antigravity`, `grok`, `anthropic-api`, `openai-api`) or the app ID the app's settings use (`claude_code`). It replaces `provider:` only on the steps that call the provider `rattish starters` lists for that starter; a step's `fallback` list stays as it was. An unknown name, or a starter that calls no model, stops with an error and copies nothing. `--provider` needs `--from`.
 
 ## Starters on Windows
 
@@ -44,7 +57,7 @@ Every starter's shell steps say `shell: bash`, and so do the command checks in t
 
 Without Git for Windows, **Start from** lists those starters as **Name (Needs Git for Windows)** and links to the download, and the **Needs** line from `rattish starters` starts with `Git for Windows`. You can still create one, but preflight stops each run until bash is installed. This is new in Raticode 0.6.0.
 
-`create --from` prints the provider the starter uses, any secret it reads, the trigger command to add, and the guide's address. `--format json` returns the same as a `starter` object.
+`create --from` prints the provider the copy calls, any secret it reads, the trigger command to add, and the guide's address. `--format json` returns the same as a `starter` object.
 
 ## What gets copied
 

@@ -93,11 +93,40 @@ REPORT_THEME_PROMPTS = {
 }
 
 
+# Every theme, built in or custom, gets these. Reports are read in the desktop app, in
+# narrow side panes and in the phone app, whose web view enlarges text by the phone's
+# font size setting and shows white under a page background that is only a gradient.
+SCREEN_RULES = (
+    "Every report must read well on a 360px-wide phone with its text enlarged up to "
+    "200% by the phone's font size setting, in a narrow desktop pane and on a wide "
+    "desktop window. These screen rules win over the theme where they conflict. Put "
+    '<meta name="viewport" content="width=device-width, initial-scale=1"> in the head. '
+    "Declare the palette's color scheme on :root (color-scheme: dark for a dark design, "
+    "light for a light one, light dark when it follows prefers-color-scheme) so a phone "
+    "in dark mode doesn't recolor the page. Give html a solid background-color in the "
+    "palette's base color and put any page gradient on body, not html: Android's web "
+    "view doesn't paint a gradient page background and shows white instead. Text never sits "
+    "on decoration it can collide with: keep hero art, banners and suns in their own "
+    "block, and below 760px put the title and its kicker in normal flow after the art, "
+    "with no absolute positioning, transforms or negative margins pulling text over it. "
+    "Size headings with clamp() in rem, keep uppercase letter-spacing at .04em or less "
+    "for headings and .1em or less for kickers and labels below 600px, and let long "
+    "words wrap with overflow-wrap: anywhere. Body text is at least 1rem. Text keeps at "
+    "least 4.5:1 contrast on every surface it can sit on, including the plain page "
+    "background when a gradient or image doesn't load. Never set a width wider than the "
+    "screen: tables, diagrams and code scroll inside their own container. Leave at least "
+    "48px of space after the last content so it clears a phone's navigation bar."
+)
+
+
 def report_theme_rules(config: dict[str, Any] | None) -> str:
     if not config:
         return ""
     output = report_format_rules(config["format"]) if config.get("format") else ""
     if config.get("enabled") is False:
+        # No design direction, but an HTML report still has to fit a phone.
+        if config.get("format") in {"html", "slides"}:
+            return output + " " + SCREEN_RULES
         return output
     direction = config.get("instructions") or REPORT_THEME_PROMPTS.get(
         config.get("theme", "auto"), REPORT_THEME_PROMPTS["auto"]
@@ -113,7 +142,7 @@ def report_theme_rules(config: dict[str, Any] | None) -> str:
         "responsive layout, accessible contrast, semantic structure, and readable print styles. "
         "Do not depend on remote fonts or scripts. Preserve each report's authored styling. "
         "This preference applies wherever a report is saved. It does not require Second Brain "
-        "or change the user's requested output format."
+        "or change the user's requested output format. " + SCREEN_RULES
     )
 
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { AlarmClock, AlertCircle, BellRing, Check, CheckCircle2, Clock3, Hammer, Hourglass, Loader2, Moon, MousePointerClick, Pause, PauseCircle, PencilLine, Play, RotateCw, StopCircle, Telescope, Trash2, Workflow, Wrench, XCircle } from "lucide-react";
+import { AlarmClock, AlertCircle, BellRing, Check, CheckCircle2, Clock3, Hammer, Hourglass, Moon, MousePointerClick, Pause, PauseCircle, PencilLine, Play, RotateCw, StopCircle, Telescope, Trash2, Workflow, Wrench, XCircle } from "lucide-react";
 import { TASK_TYPES, canRetryPrerequisite, runControls } from "../lib/remHome.js";
+import SteadySpinner from "./SteadySpinner.jsx";
 import { acknowledgeRemRun, cancelRemRun, draftRemWorkflow, pauseRemRun, pauseRemTask, resumeRemRun, resumeRemTask, runRemTaskNow, wakeRemRun } from "../lib/remHomeStore.js";
 
 const TYPE_ICONS = { research: Telescope, maintain: Wrench, develop: Hammer, operations: MousePointerClick, reminder: BellRing };
@@ -12,7 +13,7 @@ export const typeLabel = type => TASK_TYPES[type]?.label || "Task";
 
 // A task's leading glyph: a spinner while work is running, otherwise its outcome or type.
 export function TaskGlyph({ activity, type, size = 15 }) {
-  if (activity.spinning) return <Loader2 size={size} className="rem-spin" aria-label={activity.label} role="img" />;
+  if (activity.spinning) return <SteadySpinner size={size} className="rem-spin" aria-label={activity.label} role="img" />;
   if (activity.sleeping) return <Moon size={size} aria-hidden="true" strokeWidth={1.75} />;
   if (activity.kind === "queued") return <Clock3 size={size} aria-hidden="true" strokeWidth={1.75} />;
   if (activity.kind === "attention") return <AlertCircle size={size} aria-hidden="true" strokeWidth={1.75} />;
@@ -23,7 +24,7 @@ export function TaskGlyph({ activity, type, size = 15 }) {
 
 const OUTCOME_ICONS = { success: CheckCircle2, attention: AlertCircle, danger: XCircle };
 export function OutcomeGlyph({ status, size = 16 }) {
-  if (status.spinning) return <Loader2 size={size} className="rem-spin" aria-hidden="true" />;
+  if (status.spinning) return <SteadySpinner size={size} className="rem-spin" aria-hidden="true" />;
   if (status.state === "queued") return <Clock3 size={size} aria-hidden="true" />;
   if (status.state === "paused") return <PauseCircle size={size} aria-hidden="true" />;
   const Icon = OUTCOME_ICONS[status.tone];

@@ -122,3 +122,31 @@ def test_replay_after_crash_preserves_committed_records(tmp_path, tail):
     assert "Backend stopped" in events[1]["error"]
     assert jobs.snapshot("thread", "turn") == events[:1]
     assert list(jobs.events("thread", "turn", after=1)) == events[1:]
+
+
+def test_task_turns_have_their_own_room_and_a_full_pool_says_so(tmp_path):
+    from gofer.ui.chat_jobs import TASK_POOL, TurnsFull
+
+    jobs = ChatJobs(tmp_path, max_active=1)
+    release = threading.Event()
+    try:
+        jobs.start("chat", "turn", lambda emit: release.wait(3))
+        # Chat turns fill only their own pool; Rem's tasks count against the limit given.
+        assert not jobs.has_room()
+        assert jobs.has_room(TASK_POOL, 2)
+        jobs.start("task-a", "turn", lambda emit: release.wait(3), pool=TASK_POOL, limit=2)
+        jobs.start("task-b", "turn", lambda emit: release.wait(3), pool=TASK_POOL, limit=2)
+        assert not jobs.has_room(TASK_POOL, 2)
+        with pytest.raises(TurnsFull, match="Too many active Rem turns"):
+            jobs.start("task-c", "turn", lambda emit: None, pool=TASK_POOL, limit=2)
+        # A refusal starts nothing, so the same turn may start later.
+        assert not (tmp_path / "chat-jobs" / "task-c" / "turn.jsonl").exists()
+        assert len(jobs.active_snapshot()) == 3
+    finally:
+        release.set()
+        for thread in ("chat", "task-a", "task-b"):
+            list(jobs.events(thread, "turn"))
+    assert jobs.has_room() and jobs.has_room(TASK_POOL, 2)
+    jobs.close()
+    with pytest.raises(ValueError, match="stopping"):
+        jobs.start("late", "turn", lambda emit: None)

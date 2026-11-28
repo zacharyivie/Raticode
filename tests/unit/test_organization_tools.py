@@ -212,6 +212,18 @@ async def test_open_project_grants_do_not_depend_on_swarm_switch(manager, tmp_pa
     assert events == [{"type": "final"}]
 
 
+def test_every_listed_action_has_exactly_one_handler(manager, tmp_path):
+    from gofer.ui.organizations import ORGANIZATION_ACTIONS
+
+    # call() dispatches through ORGANIZATION_ACTIONS; Rem's tool offers ACTION_HELP.
+    assert set(ORGANIZATION_ACTIONS) == set(ACTION_HELP), {
+        "listed without a handler": sorted(set(ACTION_HELP) - set(ORGANIZATION_ACTIONS)),
+        "handled but not listed": sorted(set(ORGANIZATION_ACTIONS) - set(ACTION_HELP)),
+    }
+    with pytest.raises(ValueError, match="Unknown organization action; call help"):
+        manager.call(str(tmp_path), "user", {"action": "no_such_action", "params": {}})
+
+
 def test_catalog_covers_tab_operations_and_editable_configuration(manager, tmp_path):
     components = Path(__file__).parents[2] / "frontend" / "src" / "components"
     used = set()

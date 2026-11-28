@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { Activity, AlertCircle, AlertTriangle, ChevronDown, FlaskConical, GitBranch, History, Info, Terminal as TerminalIcon } from "lucide-react";
+import { Activity, AlertCircle, AlertTriangle, ChevronDown, FlaskConical, GitBranch, History, Info, Terminal as TerminalIcon, Wand2 } from "lucide-react";
 
 const RunTimelinePanel = lazy(() => import("./RunTimelinePanel.jsx").then(module => ({ default: module.RunTimelinePanel })));
 import { DEFAULT_APP_SETTINGS, formatKeybinding, matchesCommand, settingBinding } from "../lib/settings.js";
@@ -7,6 +7,7 @@ import { DEFAULT_APP_SETTINGS, formatKeybinding, matchesCommand, settingBinding 
 import RunSummary from "./RunSummary.jsx";
 import AskRemButton from "./AskRemButton.jsx";
 import { workflowRunSummary } from "../lib/workflowRuns.js";
+import { diagnosticFixes } from "../lib/rattishQuickFixes.js";
 
 const TerminalWorkspace = lazy(() => import("./TerminalWorkspace.jsx"));
 const WorkflowTestsPanel = lazy(() => import("./WorkflowTestsPanel.jsx"));
@@ -22,6 +23,9 @@ const PANEL_MAX_HEIGHT = 480;
 
 export default function UnifiedBottomPanel({
   diagnostics = [],
+  // The Rattish text the problems were found in, so a fix can name what it changes.
+  diagnosticSource,
+  onApplyReplacement,
   onAskRemAboutDiagnostic,
   onRevealDiagnostic,
   onSettingChange,
@@ -306,7 +310,7 @@ export default function UnifiedBottomPanel({
 
       <div className="h-[calc(100%-36px)] min-h-0">
         <div className={activeTab === "problems" ? "h-full" : "hidden"} role="tabpanel">
-          <ProblemsPanel diagnostics={diagnostics} onAskRem={onAskRemAboutDiagnostic} onRevealDiagnostic={onRevealDiagnostic} />
+          <ProblemsPanel diagnostics={diagnostics} onApplyReplacement={onApplyReplacement} onAskRem={onAskRemAboutDiagnostic} onRevealDiagnostic={onRevealDiagnostic} source={diagnosticSource} />
         </div>
         <div className={activeTab === "timeline" ? "h-full" : "hidden"} role="tabpanel">
           {timelineMounted ? <Suspense fallback={<p role="status" className="p-3 text-xs">Loading run history...</p>}><RunTimelinePanel {...timelineProps} collapsed={false} embedded height={height - 36} /></Suspense> : null}
@@ -362,7 +366,7 @@ function PanelTab({ active, children, icon: Icon, label, onClick, roving }) {
   );
 }
 
-function ProblemsPanel({ diagnostics, onAskRem, onRevealDiagnostic }) {
+function ProblemsPanel({ diagnostics, onApplyReplacement, onAskRem, onRevealDiagnostic, source }) {
   if (!diagnostics.length) {
     return (
       <div className="grid h-full place-items-center px-6 text-xs text-muted">
@@ -380,6 +384,7 @@ function ProblemsPanel({ diagnostics, onAskRem, onRevealDiagnostic }) {
         const Icon = info ? Info : warning ? AlertTriangle : AlertCircle;
         const iconColor = info ? "text-sky-700" : warning ? "text-amber-600" : "text-red-600";
         const line = diagnostic.span?.start?.line ?? 1;
+        const fixes = onApplyReplacement ? diagnosticFixes(diagnostic, source) : [];
         return (
           <div
             key={`${diagnostic.code}-${diagnostic.span?.start?.offset ?? 0}-${index}`}
@@ -397,6 +402,18 @@ function ProblemsPanel({ diagnostics, onAskRem, onRevealDiagnostic }) {
               </span>
               <span className="shrink-0 font-mono text-[10px] text-muted">{diagnostic.runtime ? "Run failure" : `workflow.rattish:${line}`}</span>
             </button>
+            {fixes.map(({ current, replacement, title }) => (
+              <button
+                key={replacement}
+                className="my-1.5 inline-flex min-w-0 max-w-[16rem] shrink-0 items-center gap-1 rounded-md border border-line px-1.5 py-0.5 font-sans text-[11px] font-medium text-ink transition hover:border-brand/50 hover:text-brand focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand"
+                title={`${title}: one undoable edit in the workflow file`}
+                type="button"
+                onClick={() => onApplyReplacement(diagnostic, replacement, current)}
+              >
+                <Wand2 aria-hidden="true" className="shrink-0" size={12} />
+                <span className="truncate">{title}</span>
+              </button>
+            ))}
             {onAskRem ? <AskRemButton className="my-1.5" label={`Ask Rem about this failure: ${diagnostic.runtime ? `${diagnostic.nodeId}: ` : ""}${diagnostic.code || diagnostic.message}`} onAsk={() => onAskRem(diagnostic)} /> : null}
           </div>
         );

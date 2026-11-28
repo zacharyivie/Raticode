@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000294",
+  "id": "10000000-0000-4000-8000-000000000294",
+  "sequence": 294,
+  "type": "desktop.action",
+  "payload": {
+    "op": "selfwork.settings",
+    "params": {
+      "project_effort": {
+        "6f1c2a8e-3b4d-5e6f-8a9b-0c1d2e3f4a5b": 30
+      },
+      "expected_revision": 5
+    }
+  }
+}

@@ -229,12 +229,12 @@ test("working hours read plainly, and the header says when they open or close", 
   const at = hours => buildModel({ ...base, diagnostics: { taskReasons: { t5: "Off hours until 2026-11-16T14:00:00+00:00" }, hours } });
   assert.equal(hoursStatus(at({ mode: "always", open: true })), null);
   const closed = at({ mode: "scheduled", timezone: "America/New_York", open: false, opensAt: "2026-11-16T14:00:00+00:00" });
-  assert.deepEqual(hoursStatus(closed), { open: false, text: "Off hours until Mon, 09:00 EST" });
+  assert.deepEqual(hoursStatus(closed), { open: false, text: "Off hours until Mon 9:00 AM EST" });
   const open = at({ mode: "scheduled", timezone: "UTC", open: true, closesAt: "2026-11-16T17:00:00+00:00" });
-  assert.deepEqual(hoursStatus(open), { open: true, text: "Working hours until Mon, 17:00 UTC" });
+  assert.deepEqual(hoursStatus(open), { open: true, text: "Working hours until Mon 5:00 PM UTC" });
   const todo = { ...base, runtime: { ...base.runtime, tasks: [...base.runtime.tasks, task("t6", "todo", { assignee: "mira" })] } };
   const model = buildModel({ ...todo, diagnostics: { taskReasons: { t6: "Off hours until 2026-11-16T14:00:00+00:00" }, hours: { mode: "scheduled", timezone: "America/New_York" } } });
-  assert.deepEqual(startHint(model, model.tickets.t6), { tone: "wait", text: "Outside working hours. It starts when they resume, Mon, 09:00 EST." });
+  assert.deepEqual(startHint(model, model.tickets.t6), { tone: "wait", text: "Outside working hours. It starts when they resume, Mon 9:00 AM EST." });
 });
 
 test("stalled check-ins wait on you with the reason", () => {
@@ -305,4 +305,14 @@ test("an organization whose workers have no projects offers to give them its fol
   // A user's own narrower pick, even of no folders, is left alone.
   ran.runtime.selfWorkProjects = { mira: { projects: [], revision: 2, follows: false } };
   assert.deepEqual(unassignedWorkers(ran.config, ran.runtime), []);
+});
+
+test("a ticket blocked at its run limit reads ticket on the board, even with the reason an earlier version saved", () => {
+  const saved = "Run limit for this task reached. Reopen it to allow more runs.";
+  const org = organization();
+  org.runtime.tasks.push(task("t9", "blocked", { project: "desktop", assignee: "mira", turns: 20, blockReason: saved }));
+  org.diagnostics = { taskReasons: { t9: saved } };
+  const model = buildModel(org);
+  assert.equal(model.tickets.t9.flag, "Run limit for this ticket reached. Reopen it to allow more runs.");
+  assert.deepEqual(startHint(model, model.tickets.t9), { tone: "you", text: "Run limit for this ticket reached. Reopen it to allow more runs." });
 });

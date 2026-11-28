@@ -637,6 +637,290 @@ def test_facebook_hands_far_posts_to_facebook_and_cancels_them(
     assert http.requests[1].url.endswith("/12345_678")
 
 
+def test_a_cancel_that_crashes_keeps_its_copy_and_other_posts_still_send(
+    service: SocialService, publisher: Publisher, http: FakeHttp
+) -> None:
+    page = service.accounts.connect(
+        {"platform": "facebook", "secrets": {"page_access_token": "t"}, "options": {"page_id": "1"}}
+    )
+    held = approve(
+        service,
+        propose(
+            service,
+            page,
+            scheduled_at=at(2 * 24 * 60),
+            variants=[{"account_id": page["id"], "text": "Hello Page"}],
+        ),
+    )
+    due = approve(service, propose(service, discord(service)))
+    http.reply(200, {"id": "1_678"})
+    publisher.tick(START)
+    service.decide("user", held["id"], "cancel")
+    http.fail(KeyError("id"))  # the Facebook adapter trips over its own bug
+    http.reply(200, {"id": "999", "channel_id": "5", "guild_id": "7"})
+    publisher.tick(START + timedelta(minutes=60))
+    assert [r.method for r in http.requests] == ["POST", "DELETE", "POST"]
+    assert service.get(due["id"])["state"] == "published"
+
+    # An adapter bug is never taken as cancelled: the copy stays on the list to try again.
+    def left() -> list[str]:
+        (saved,) = [p for p in service.posts_in(("cancelled",)) if p["id"] == held["id"]]
+        return [item["remote_id"] for item in saved["_cancel_native"]]
+
+    assert left() == ["1_678"]
+    http.reply(200, {"success": True})
+    publisher.tick(START + timedelta(minutes=61))
+    assert http.requests[-1].method == "DELETE"
+    assert left() == []
+
+
+def test_a_post_that_keeps_crashing_says_so_once_and_recovers(
+    service: SocialService,
+    http: FakeHttp,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from gofer.social import publisher as publisher_module
+
+    notes: list[tuple[str, Any]] = []
+    publisher = Publisher(
+        service, http=http, notify=lambda kind, detail: notes.append((kind, detail))
+    )
+    post = approve(service, propose(service, discord(service)))
+    real_adapter_for = publisher_module.adapter_for
+    broken = True
+
+    def adapter_for(platform: str) -> Any:
+        if broken:
+            raise KeyError(platform)
+        return real_adapter_for(platform)
+
+    monkeypatch.setattr(publisher_module, "adapter_for", adapter_for)
+    caplog.set_level("DEBUG", logger="gofer.social.publisher")
+    for minute in range(5):
+        publisher.tick(START + timedelta(minutes=60 + minute))
+    variant = service.get(post["id"])["variants"][0]
+    assert variant["state"] == "scheduled"
+    assert variant["message"] == (
+        "Raticode hit an error with this post (KeyError) and will try again."
+    )
+    assert notes == [("problem", {"post": post["id"]})]
+    logged = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(logged) == 1 and logged[0].exc_info is not None
+    assert http.requests == []
+    broken = False
+    http.reply(200, {"id": "999", "channel_id": "5", "guild_id": "7"})
+    publisher.tick(START + timedelta(minutes=65))
+    done = service.get(post["id"])
+    assert done["state"] == "published"
+    assert done["variants"][0]["message"] == ""
+
+
+def test_a_crashing_post_never_touches_a_variant_being_sent(
+    service: SocialService, publisher: Publisher, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, second = discord(service), discord(service, name="Second channel")
+    post = approve(
+        service,
+        propose(
+            service,
+            first,
+            variants=[
+                {"account_id": first["id"], "text": "One"},
+                {"account_id": second["id"], "text": "Two"},
+            ],
+        ),
+    )
+    sending = post["variants"][0]["id"]
+    publisher._in_flight.add(sending)  # another pass is sending this one right now
+
+    def mark(p: dict[str, Any]) -> None:
+        p["variants"][0]["state"] = "publishing"
+
+    service.update_post(post["id"], mark, "publisher", "test", {})
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(publisher, "_variant", boom)
+    publisher.tick(START + timedelta(minutes=60))
+    one, two = service.get(post["id"])["variants"]
+    assert one["state"] == "publishing" and not one.get("message")
+    assert two["message"].startswith("Raticode hit an error with this post (RuntimeError)")
+
+
+def test_a_crashing_post_keeps_the_messages_of_variants_waiting_for_the_user(
+    service: SocialService, http: FakeHttp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gofer.social import publisher as publisher_module
+
+    publisher = Publisher(service, http=http)
+    accounts = [discord(service, name=f"Channel {n}") for n in range(3)]
+    post = approve(
+        service,
+        propose(
+            service,
+            accounts[0],
+            variants=[{"account_id": a["id"], "text": f"Text {n}"} for n, a in enumerate(accounts)],
+        ),
+    )
+    unknown = "Raticode stopped while sending this, so it may have posted."
+    refused = "Discord refused the post: the text is too long."
+
+    def settle(p: dict[str, Any]) -> None:
+        p["variants"][0].update(state="outcome_unknown", message=unknown)
+        p["variants"][1].update(state="failed", message=refused)
+
+    service.update_post(post["id"], settle, "publisher", "test", {})
+    real_adapter_for = publisher_module.adapter_for
+    broken = True
+
+    def adapter_for(platform: str) -> Any:
+        if broken:
+            raise KeyError(platform)
+        return real_adapter_for(platform)
+
+    monkeypatch.setattr(publisher_module, "adapter_for", adapter_for)
+    publisher.tick(START + timedelta(minutes=60))
+    first, second, third = service.get(post["id"])["variants"]
+    assert (first["state"], first["message"]) == ("outcome_unknown", unknown)
+    assert (second["state"], second["message"]) == ("failed", refused)
+    assert third["message"].startswith("Raticode hit an error with this post (KeyError)")
+    broken = False
+    http.reply(200, {"id": "999", "channel_id": "5", "guild_id": "7"})
+    publisher.tick(START + timedelta(minutes=61))
+    first, second, third = service.get(post["id"])["variants"]
+    assert (first["state"], first["message"]) == ("outcome_unknown", unknown)
+    assert (second["state"], second["message"]) == ("failed", refused)
+    assert (third["state"], third["message"]) == ("published", "")
+    assert len(http.requests) == 1
+
+
+def _held_on_facebook(
+    service: SocialService, publisher: Publisher, http: FakeHttp
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """A Facebook post approved two days out and handed to Facebook to hold."""
+    account = service.accounts.connect(
+        {
+            "platform": "facebook",
+            "name": "Page",
+            "secrets": {"page_access_token": "fake-page-token"},
+            "options": {"page_id": "12345"},
+        }
+    )
+    post = approve(
+        service,
+        propose(
+            service,
+            account,
+            scheduled_at=at(2 * 24 * 60),
+            variants=[{"account_id": account["id"], "text": "Hello Page"}],
+        ),
+    )
+    http.reply(200, {"id": "12345_678"})
+    publisher.tick(START)
+    assert service.get(post["id"])["variants"][0]["state"] == "held_by_platform"
+    return account, post
+
+
+def _deletes(http: FakeHttp) -> int:
+    return sum(1 for request in http.requests if request.method == "DELETE")
+
+
+def test_a_copy_facebook_refuses_to_delete_stops_and_shows_on_the_post(
+    service: SocialService, publisher: Publisher, http: FakeHttp
+) -> None:
+    _account, post = _held_on_facebook(service, publisher, http)
+    service.decide("user", post["id"], "cancel")
+    refusal = {"error": {"message": "Permissions error", "code": 200}}
+    for _ in range(40):
+        http.reply(403, refusal)
+    for index in range(40):
+        publisher.tick(START + timedelta(seconds=15 * (index + 1)))
+    assert _deletes(http) <= 2
+    shown = service.get(post["id"], events=True)
+    (copy,) = shown["platform_copies"]
+    assert copy["error"] == "Permissions error" and copy["waiting"] is True
+    assert copy["url"] == "https://www.facebook.com/12345_678"
+    assert copy["platform_label"] == "Facebook Page" and copy["account_name"] == "Page"
+    logged = [e["kind"] for e in shown["events"] if e["kind"].startswith("platform_copy")]
+    assert logged == ["platform_copy_not_deleted"]
+    # Try again sends one more DELETE; I deleted it drops the copy.
+    service.platform_copy("user", post["id"], copy["id"], "retry")
+    http.replies = [HttpResponse(200, {}, b'{"success": true}')]
+    publisher.tick(START + timedelta(minutes=30))
+    assert _deletes(http) == 2 and service.get(post["id"])["platform_copies"] == []
+    with pytest.raises(SocialError):
+        service.platform_copy("rem", post["id"], copy["id"], "deleted")
+
+
+def test_transient_delete_errors_back_off_on_the_retry_minutes(
+    service: SocialService, publisher: Publisher, http: FakeHttp
+) -> None:
+    _account, post = _held_on_facebook(service, publisher, http)
+    service.decide("user", post["id"], "cancel")
+    for _ in range(10):
+        http.reply(503, {"error": {"message": "Try later"}})
+    tried_at = []
+    for second in range(0, 2 * 60 * 60, 15):
+        before = _deletes(http)
+        publisher.tick(START + timedelta(seconds=second))
+        if _deletes(http) > before:
+            tried_at.append(second // 60)
+    assert tried_at == [0, 1, 6, 21, 81]
+    (copy,) = service.get(post["id"])["platform_copies"]
+    assert copy["waiting"] is False and copy["attempts"] == 5 and copy["error"] == "Try later"
+
+
+def test_an_edited_post_waits_for_its_old_copy_before_going_to_facebook_again(
+    service: SocialService, publisher: Publisher, http: FakeHttp
+) -> None:
+    from gofer.devices.phone_posts import PhonePosts
+
+    account, post = _held_on_facebook(service, publisher, http)
+    edited = service.edit(
+        "user",
+        post["id"],
+        {"variants": [{"account_id": account["id"], "text": "Hello Page, again"}]},
+    )
+    approve(service, edited)
+    http.reply(403, {"error": {"message": "Permissions error", "code": 200}})
+    for index in range(20):
+        publisher.tick(START + timedelta(seconds=15 * (index + 1)))
+    posts = [r for r in http.requests if r.method == "POST" and r.url.endswith("/feed")]
+    assert len(posts) == 1, "a second copy was handed to Facebook"
+    shown = service.get(post["id"])
+    (copy,) = shown["platform_copies"]
+    assert copy["url"] == "https://www.facebook.com/12345_678" and copy["waiting"] is True
+    variant = shown["variants"][0]
+    assert variant["state"] == "scheduled" and "earlier copy" in variant["message"]
+    phone = PhonePosts()._post(shown)
+    assert phone["lane"] == "problems"
+    assert phone["copies"][0]["url"] == copy["url"]
+    assert phone["copies"][0]["message"] == "Permissions error"
+    # Once the user deleted it themselves, the new version goes to Facebook.
+    service.platform_copy("user", post["id"], copy["id"], "deleted")
+    http.reply(200, {"id": "12345_999"})
+    publisher.tick(START + timedelta(minutes=10))
+    shown = service.get(post["id"])
+    assert shown["variants"][0]["state"] == "held_by_platform"
+    assert shown["variants"][0]["message"] == ""
+
+
+def test_a_removed_account_keeps_its_undeleted_copy(
+    service: SocialService, publisher: Publisher, http: FakeHttp
+) -> None:
+    account, post = _held_on_facebook(service, publisher, http)
+    service.decide("user", post["id"], "cancel")
+    service.accounts.disconnect(account["id"])
+    publisher.tick(START + timedelta(minutes=1))
+    publisher.tick(START + timedelta(minutes=2))
+    (copy,) = service.get(post["id"])["platform_copies"]
+    assert copy["waiting"] is True and "account was removed" in copy["error"]
+    assert _deletes(http) == 0
+    assert service.get(post["id"])["state"] == "cancelled"
+
+
 def test_facebook_token_error_needs_reconnect(
     service: SocialService, publisher: Publisher, http: FakeHttp
 ) -> None:

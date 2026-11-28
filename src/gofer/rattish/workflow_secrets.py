@@ -40,6 +40,7 @@ from gofer.core.secrets_folder import (
     workflow_secret_file,
 )
 from gofer.core.secrets_folder import WORKFLOW_SECRET_PREFIX as FOLDER_FILE_PREFIX
+from gofer.utils.atomic_output import replace_file
 from gofer.utils.paths import get_data_dir
 
 KEYCHAIN_SERVICE = "Raticode workflow secrets"
@@ -173,16 +174,8 @@ def _load(data_dir: Path | None) -> dict[str, dict[str, str]]:
 
 
 def _save(data_dir: Path | None, secrets: dict[str, dict[str, str]]) -> None:
-    path = _index_path(data_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     body = {"version": 1, "secrets": dict(sorted(secrets.items()))}
-    try:
-        temporary.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    replace_file(_index_path(data_dir), (json.dumps(body, indent=2) + "\n").encode("utf-8"))
 
 
 @contextmanager

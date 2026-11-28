@@ -23,6 +23,9 @@ Raticode serve --headless
 - It listens only on this computer, over TCP. It refuses `--host 0.0.0.0` or any other non-loopback address, and it can't listen on a Unix socket.
 - To reach it from another machine, forward the port over SSH, for example `ssh -L 8765:127.0.0.1:8765 box`. Raticode has no remote listener or TLS yet.
 - `Raticode serve` without `--headless` is the same as `Raticode ui serve`, the backend the desktop app starts.
+- Only one backend runs per data folder. Each takes the folder's lock (`headless/.backend.lock`) and records whether it's the desktop app or a headless backend, with its process ID, in `headless/backend.json` (mode 600, no token or address). A second start on the same folder stops with an error naming what holds it. With the desktop app open, it says: `The Raticode desktop app is using the data folder PATH. Quit it first, or give this backend its own --data-dir.` New in 0.6.2.
+- The desktop app's backend waits a few seconds for the lock when it restarts, while the old backend stops. If a headless backend holds the folder, the app doesn't start its backend and asks you to stop the headless one or choose another **Data folder** in **Settings > General**. New in 0.6.2.
+- On a data folder whose file system can't lock files, such as some NFS or SMB network mounts, the backend still starts and logs a warning that it can't stop a second backend from using the folder. Run only one there yourself. New in 0.6.2.
 
 ## Find the endpoint and token
 
@@ -267,9 +270,10 @@ The choice is stored with the token's hash, and `Raticode tokens list` shows it.
 
 It can read workflows, runs, triggers, swarms, tickets, organizations and other state. The exceptions are Rem's context, Rem's MCP server list (`/api/rem-resources`), whose addresses and arguments can hold keys, your provider accounts with their emails, plans and any phone sign-in's link and code (`/api/provider/accounts`), and usage-reporting credentials (`/api/usage/credentials`). Beyond reads, an agent token can only:
 
-- Check a workflow without saving it: validate a draft, analyze a document, preview a bundle import or a trigger.
+- Check a workflow without saving it: analyze a draft of its source, preview a bundle import or a trigger.
 - Read a ticket's timeline and search or read Second Brains that allow cloud processing.
 - Use Organizations as Rem would. Changes that need your consent become consent requests you approve in the Organizations tab.
+- Propose [social posts](../advanced/posts.md) and revise its own proposals before you decide. Approving and publishing stay yours.
 
 Any other change, including endpoints added in later versions, is refused with HTTP 403 (`agent_token_forbidden`) until Raticode allows it for agent tokens on purpose.
 

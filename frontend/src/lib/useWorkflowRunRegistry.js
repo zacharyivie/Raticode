@@ -3,7 +3,7 @@ import { apiUrl } from "./api.js";
 import { startPolling } from "./refresh.js";
 import { disconnectWorkflowRunRecords, exactWorkflowRunStopPath, markWorkflowRunReviewed, mergeWorkflowRunRecords, pruneUnlistedWorkflowRuns, readWorkflowRunRecords, watchesWorkflowRun, writeWorkflowRunRecords } from "./workflowRuns.js";
 
-export function workflowRunContext(workflow) {
+function workflowRunContext(workflow) {
   return { workflowId: workflow.id, workflowName: workflow.name, projectPath: workflow.projectRoot || "", worktreePath: workflow.projectRoot || "", sourcePath: workflow.sourcePath || "" };
 }
 
@@ -11,7 +11,7 @@ export function workflowRunContext(workflow) {
 // backend look the workflow up and read every run it saved. Doing that for every
 // workflow on every poll kept the backend above a full CPU core with dozens of
 // workflows. Between full scans, only workflows that can have changed are read.
-export const FULL_SCAN_MS = 30_000;
+const FULL_SCAN_MS = 30_000;
 
 const latestRunOf = workflow => JSON.stringify(workflow.latestRun ?? null);
 

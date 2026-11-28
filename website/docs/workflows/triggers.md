@@ -80,13 +80,21 @@ A schedule can keep firing long after you last looked at a workflow, so the Trig
 - Set a day of the month or a weekday, not both.
 - A schedule no date can match, such as `0 9 31 2 *` (February 31), is refused.
 - The schedule follows the time zone you choose, including daylight saving changes.
+- On the day clocks go back, a scheduled time that happens twice runs once, at the first, so `30 1 * * *` runs once that night. A schedule with `*` or `*/N` in its minute or hour, such as `*/30 * * * *`, runs in both real hours. Rem's Daily, Weekly and Custom cron tasks and organization routines do the same.
+- While you type, the form shows the schedule in words, such as **Weekdays at 9:00**, with its next three times, or why the expression isn't valid, before you save.
+- A schedule card reads in words with its time zone, such as **Weekdays at 9:00 · Europe/London**, and the expression in small type under it. The phone's **Triggers** tab uses the same words, and `Raticode rattish triggers list` prints them followed by `cron="0 9 * * 1-5"`.
+- Words cover the common shapes: every N minutes (when N divides the hour), every hour at :MM, every day, weekdays, weekends or named days at a time, and day 1 to 28 of every month at a time. Any other expression, such as `0 9-17 * * 1-5`, shows by itself rather than words that might not match it. `list --format json` carries the words as `summary`, empty for those.
 
 ### File changes
 
 - Point a trigger at a file or a folder. Relative paths start at the workflow's project.
+- A pattern (`--glob`, `*` by default) picks which files count. A pattern without a `/`, such as `*.csv`, matches the file name at any depth, so it also matches `sub/a.csv`.
+- A pattern with a `/` matches the path from the watched folder one folder at a time, the way a [loop's `directory` source](../nodes/loop.md) reads it. `*` stays within one folder name, and a `**` part matches zero or more folders: `**/*.md` matches `a.md` and `x/y/a.md`, and `docs/**/*.md` matches `docs/a.md` and `docs/x/a.md`. From 0.6.2, `docs/*.md` matches `docs/a.md` but no longer `docs/x/a.md`; use `docs/**/*.md` for that.
 - The workflow starts once the files stay quiet for the debounce time.
 - A folder that never goes quiet still gets a run after 60 seconds or ten debounce periods, whichever is longer.
 - Raticode ignores changes inside `.git`, `.raticode`, `.venv`, `__pycache__` and `node_modules`.
+- If the watched folder is deleted, replaced by another folder, moved away or remounted, the trigger stops reporting changes from the old folder. A file written into a folder moved somewhere else doesn't start a run. While nothing is at the path, the trigger shows **Nothing to watch at …**, and its history gets one failed entry with the same words: **Can't start: Nothing to watch at /path.** (from 0.6.2). Once a folder is there again, Raticode watches it within 15 seconds and adds a history entry: "The watched folder was replaced, so changes made just before it was watched again weren't seen." For a trigger on one file, this applies to the folder that holds the file.
+- On Linux, a burst of changes can come faster than the system reports them. Once more than `fs.inotify.max_queued_events` changes (16,384 by default) are waiting, Linux drops the rest. Raticode then looks through the watched folder again with the same pattern and folder rules, and adds each matching file changed since the burst began as `modified`. The trigger's history says so, for example: "Files changed faster than this computer could report them, so Raticode looked through the folder again and found 41 changed files. Files deleted during that burst weren't seen." To make this rarer on a folder with many changes at once, raise the limit, for example `sudo sysctl fs.inotify.max_queued_events=65536` (from 0.6.2).
 
 A workflow that writes into its own watched folder would start itself forever. After 10 runs in a row started by changes made during a run, Raticode turns the trigger off and records why.
 
@@ -96,11 +104,13 @@ Bind events with the `trigger.events` reference. A `loop` with a `trigger-events
 
 | Trigger | Items per run | Fields |
 | --- | --- | --- |
-| File | One per changed file, up to 256 | `type`, `kind` (`created`, `modified`, `deleted` or `moved`), `path`, `name`, `directory`, `trigger_id` |
+| File | One per changed file, up to 256. Past 256, the run gets the first 256 in the order they changed, and the rest start the next run as soon as it ends, whatever the overlap policy. | `type`, `kind` (`created`, `modified`, `deleted` or `moved`), `path`, `name`, `directory`, `trigger_id` |
 | Webhook | One | `type`, `trigger_id`, `received_at`, and the JSON `payload` (bodies up to 1 MiB) |
 | Cron | None | |
 
 The loop also provides `index` and `event_json`, plus `file_content` when the loop sets `include-content`.
+
+When a file trigger's batch holds more than 256 changed files, the first run's history line says so, for example **Started with 256 of 300 changed files. The other 44 start the next run.** Those follow-on runs start without waiting for quiet and don't count toward the 10-run self-trigger limit. With `skip` or `queue` they wait for any other run of the workflow to end. Up to 5,000 changed files wait to run; the history line counts any past that as not kept, each file once however many times it changes. Past 50,000 such files it says **More than 50,000 changed files weren't kept**.
 
 Each run saves its trigger events in its run folder, readable only by your user account (from 0.5.5). That lets you [resume a triggered run or run it again](../studio/runs.md#resume-and-run-again) with the same changed files or webhook body, on the computer, on the phone or with `Raticode rattish runs rerun RUN_ID`. The saved events are deleted with the run.
 
@@ -118,6 +128,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -d '{"ref":"main"}' http://127.0.
 - The body must be strict JSON in UTF-8, or empty (the payload is then `null`). A body the run record couldn't store gets `400` with the reason and starts nothing: `NaN` or `Infinity`, whole numbers beyond 9,007,199,254,740,991 (send those as strings), text with a lone surrogate escape, or nesting thousands of levels deep.
 - On a computer with other user accounts, keep the token off the command line, where other accounts can read it. `curl -H @header-file` reads the header from a private file.
 - The listener opens only while an enabled webhook trigger exists. If port 8767 is taken, the Triggers section says so, and `Raticode rattish triggers webhook-port PORT` changes it.
+- When the port is taken, each webhook trigger that is on also gets one failed history entry, such as **Can't start: Couldn't listen on 127.0.0.1:8767: Address already in use.**, followed by a hint to choose another port (from 0.6.2).
 
 ## Approved versions
 
@@ -215,10 +226,12 @@ Each trigger has an overlap policy, set in the Triggers section or with `--overl
 | Policy | CLI value | What happens |
 | --- | --- | --- |
 | Skip this run | `skip` | The start is dropped and recorded as skipped. This is the default. |
-| Run once after it finishes | `queue` | One run waits. Later starts fold into it: a file trigger's waiting run gets every file that changed while it waited (up to 256), and a webhook's gets the latest call's body. |
+| Run once after it finishes | `queue` | One run waits. Later starts fold into it: a file trigger's waiting run gets every file that changed while it waited (past 256, the rest start the next run), and a webhook's gets the latest call's body. |
 | Run at the same time | `parallel` | Another run starts, up to 16 triggered runs at once. |
 
 From 0.6.0, the history line says which run was in the way and how long it had been going, for example **Skipped because run 20261123T101500123456Z-3f2a91c0b7d4 has been running for 7 h 12 min.** A waiting `queue` start says **Waiting for run … to finish. It has run for 12 min.** A long time there usually means a run is stuck: open it under Runs, or stop it with `Raticode rattish stop WORKFLOW --run RUN_ID`. A [Time limit](#time-limit) on the trigger stops its own stuck runs for you.
+
+A queued run outlasts a restart. When Raticode or its scheduler stops while a `queue` start waits, the entry stays queued and says **The scheduler stopped, so this queued run starts when the scheduler runs again.** The next scheduler, after a restart or a crash, takes it over (**Queued before the scheduler restarted.**) and starts it with the same webhook body or changed files, once no other run of the workflow is going. It still goes through the usual checks first: [approved version](#approved-versions), [daily limit](#daily-limit) and worktree limits. If the trigger was turned off or removed, or [all triggers are paused](#pause-all-triggers), it doesn't start and closes as interrupted instead. A file trigger's queued run keeps at most 256 changed files across a restart, the same as a run's saved values, and its history line counts the rest as not kept. New in 0.6.2.
 
 ## Time limit
 
@@ -273,14 +286,25 @@ When a triggered run fails because one of its agent steps hit the provider's usa
 
 The Triggers section and `Raticode rattish triggers history` list every occurrence. `--problems` shows only failed, missed, skipped and interrupted ones. A failed run shows the reason, and its full record is under Runs as usual.
 
+- **Step failed.** A run that failed at a step names the step and its exit code before the error, such as **Step build failed (exit 3): cannot reach the database**. The exit code is left out when the step had none, such as a failed agent step's provider error. New in 0.6.2.
 - **Time limit reached.** A run the scheduler stopped at the trigger's [Time limit](#time-limit) is a failed entry that says so, such as **Stopped after 6 h, this trigger's time limit.** Its run record shows **Stopped**.
 - **Waiting for usage limit.** A run that hit its provider's usage limit waits for the reset and resumes. See [Usage limits](#usage-limits).
+- **Can't start.** A trigger that is on but can't fire gets a failed entry that starts with **Can't start:** and gives the reason: its watched folder is missing, the webhook port is taken, or its saved schedule can't be read. The entry is written once, not every 15 seconds when Raticode checks again. If the same reason comes back with nothing else in the history since, that entry's count goes up instead. When the trigger can fire again, its next run follows, or for a replaced folder the rewatch entry. Nothing is written while [all triggers are paused](#pause-all-triggers). The phone's **Triggers** tab shows a trigger's latest entry, so it shows this too. New in 0.6.2.
 - **Skipped while busy.** A start dropped because the workflow was already running names that run and how long it had been running. See [If the workflow is already running](#if-the-workflow-is-already-running).
 
 - **Cron.** A scheduled time more than a minute old when the scheduler reaches it counts as missed, whether the computer was asleep or nothing was running. By default Raticode only records it. Choose **Show as missed and run once** (`--missed run_once`) to also run once to catch up.
 - **File and webhook.** These can't be replayed. When the scheduler comes back after more than two minutes away, they record a missed entry with the length of the gap.
 - **Paused.** Times that fall while [all triggers are paused](#pause-all-triggers) are recorded as skipped, not missed, and never caught up.
-- **Interrupted runs.** A queued run that never started and a run cut off by a crash are recorded too. A run whose process ended without saving its result, for example when the computer restarted, shows as disconnected rather than still running, so it doesn't make `skip` or `queue` triggers wait. On Linux and Windows this holds even when another program has since been given the old process ID. On macOS Raticode checks the process ID alone, so in the rare case another program has taken it, the run keeps showing as running until you stop it or that program ends.
+- **Interrupted runs.** A run cut off by a crash is recorded as interrupted with **The scheduler stopped before this run finished.** A queued run starts after a restart instead (see [If the workflow is already running](#if-the-workflow-is-already-running)). One that can't, because its trigger is off, removed or paused, or because it was queued before Raticode kept queued runs across restarts, closes as interrupted with **The scheduler stopped before this queued run started.** A run whose process ended without saving its result, for example when the computer restarted, shows as disconnected rather than still running, so it doesn't make `skip` or `queue` triggers wait. On Linux and Windows this holds even when another program has since been given the old process ID. On macOS Raticode checks the process ID alone, so in the rare case another program has taken it, the run keeps showing as running until you stop it or that program ends.
+
+  A start that hits an error, for example when the trigger store is busy or the disk is full, is tried again instead of lost:
+
+  - A scheduled time keeps its place and starts on a later try while it is under a minute late. After that it counts as missed: **1 scheduled run did not happen because its start kept failing.**
+  - Changed files wait, together with any that change after them. A queued run stays queued, and a run waiting for a usage limit keeps waiting. Other triggers start as usual meanwhile.
+  - The first try again comes a second later, then each one waits longer, up to a minute apart.
+  - If the entry already showed as running, it becomes a failed entry, such as **Couldn't start the run: database is locked**. The run it never became doesn't make `skip` or `queue` triggers wait.
+  - A webhook call that can't start gets status 503, so the caller can send it again.
+  - When a run finishes but its result can't be saved, the scheduler keeps the result and saves it as soon as it can, so the entry doesn't stay running.
 
 ## Pause all triggers
 

@@ -55,6 +55,26 @@ class PostsTest {
         assertTrue(Posts.DECIDE in DesktopViews.ACTIONS && Posts.LIST in DesktopViews.READS)
     }
 
+    @Test fun aCopyTheComputerCouldntDeleteParsesWithItsMessageLinkAndChoices() {
+        val copy = JSONObject().put("id", "copy-1").put("platform", "facebook").put("platform_label", "Facebook Page")
+            .put("account_name", "Raticode Page").put("message", "Permissions error").put("url", "https://www.facebook.com/12345_678")
+            .put("next_try_at", JSONObject.NULL).put("waiting", true).put("actions", org.json.JSONArray().put("retry_copy").put("copy_deleted"))
+        val json = JSONObject().put("posts", org.json.JSONArray().put(JSONObject().put("id", "p").put("lane", "problems")
+            .put("content_hash", "h").put("copies", org.json.JSONArray().put(copy).put(JSONObject(copy.toString()).put("id", "copy-2").put("url", "javascript:alert(1)")))))
+        val post = Posts.parse(json).posts.single()
+        val (first, second) = post.copies
+        assertEquals("Permissions error", first.message)
+        assertEquals("https://www.facebook.com/12345_678", first.url)
+        assertTrue(first.waiting && first.nextTryAt == null)
+        assertEquals(listOf("retry_copy", "copy_deleted"), first.actions)
+        assertEquals("", second.url)
+        val decision = Posts.copyDecision("copy_deleted", post, first)
+        assertEquals("copy-1", decision.getString("copy_id"))
+        assertEquals("p", decision.getString("post_id"))
+        // A computer from before copies were shared sends none.
+        assertTrue(DesktopViews.parse(Posts.LIST, read("posts-list.json")).let { it as PostsView }.posts.all { it.copies.isEmpty() })
+    }
+
     @Test fun theOverviewSaysWhetherTheDesktopSharesPosts() {
         val old = DesktopViews.parse("overview", JSONObject().put("projects", org.json.JSONArray())) as DesktopOverview
         assertFalse(old.posts)

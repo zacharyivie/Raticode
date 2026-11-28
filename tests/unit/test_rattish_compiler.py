@@ -489,6 +489,75 @@ Node finish:
     assert "RATTISH_INVALID_REGEX" in codes
 
 
+def http_fetch_source(condition: str) -> str:
+    return f"""Rattish: 1
+Workflow:
+  name: Untyped route
+Node fetch:
+  type: http-request
+  method: get
+  url: https://example.com/issue
+  to: label when {condition}
+Node label:
+  type: bash-command
+  command: echo label
+  needs: fetch
+"""
+
+
+def http_compiler() -> RattishCompiler:
+    return RattishCompiler.from_paths(
+        schema_root=SCHEMA_ROOT,
+        contract_paths=[BASH_CONTRACT, RATTISH_ROOT / "contracts" / "http-request.json"],
+    )
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        'node.fetch.output.json.state == "open"',
+        'node.fetch.output.json.state != "open"',
+        'node.fetch.output.json.labels contains "bug"',
+        'node.fetch.output.json.title matches "^Bug"',
+        "node.fetch.output.json.count > 5",
+        'node.fetch.output.json.name < "m"',
+        "node.fetch.output.json.count == node.fetch.output.status",
+        "node.fetch.output.body contains node.fetch.output.method",
+        "node.fetch.output.json.labels contains node.fetch.output.status",
+    ],
+)
+def test_untyped_operands_compile_for_every_operator(condition: str) -> None:
+    result = http_compiler().compile(
+        http_fetch_source(condition), CompileContext("untyped-route", Path("/tmp"))
+    )
+
+    assert not [item for item in result.diagnostics if item.severity == "error"]
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        'node.fetch.output.status == "200"',
+        'node.fetch.output.status > "200"',
+        'node.fetch.output.status matches "^2"',
+        'node.fetch.output.status contains "2"',
+        "node.fetch.output.json.title matches node.fetch.output.status",
+        "node.fetch.output.json.count > true",
+        "node.fetch.output.body contains node.fetch.output.status",
+        "node.fetch.output.headers contains node.fetch.output.attempts",
+    ],
+)
+def test_known_operand_types_still_fail_to_compile(condition: str) -> None:
+    with pytest.raises(RattishCompileError) as caught:
+        http_compiler().compile(
+            http_fetch_source(condition), CompileContext("typed-route", Path("/tmp"))
+        )
+
+    assert "RATTISH_PREDICATE_TYPE_MISMATCH" in {
+        diagnostic.code for diagnostic in caught.value.diagnostics
+    }
+
+
 def test_negated_status_predicates_preserve_failure_meaning() -> None:
     valid = """Rattish: 1
 Workflow:

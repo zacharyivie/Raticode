@@ -264,7 +264,7 @@ def test_runs_record_how_they_started(tmp_path) -> None:
     )
 
     async def handler(node, run_context, bindings):
-        return HandlerResult(True, {"stdout": "", "stderr": "", "exit_code": 0})
+        return HandlerResult(True, {"stdout": "", "stderr": "", "exit_code": 0, "truncated": False})
 
     handlers = NodeHandlerRegistry({"raticode.bash_command": handler})
 

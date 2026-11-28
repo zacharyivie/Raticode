@@ -252,7 +252,8 @@ with binding environment
 
 Later entries replace earlier values. Ambient variables do not affect compilation.
 
-The successful output schema has required `stdout`, `stderr`, and `exit_code` fields.
+The successful output schema has required `stdout`, `stderr`, `exit_code` and `truncated`
+fields.
 
 `python-script` and `shell-script` use the same binding delivery and environment
 precedence. Their explicit `args` retain author order. The runtime invokes the resolved

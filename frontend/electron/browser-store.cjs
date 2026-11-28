@@ -5,6 +5,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const { writeFileAtomicSync } = require("./atomic-file.cjs");
 
 const LIMITS = { history: 10000, bookmarks: 5000, downloads: 200, sites: 5000, previewRemote: 2000 };
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -372,19 +373,17 @@ function readJson(file, fallback) {
 const writeFailures = new Map();
 
 function writeJson(file, value) {
-  const temporary = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(temporary, JSON.stringify(value), { mode: 0o600 });
-    fs.renameSync(temporary, file);
+    // Not fsynced: a crash loses at most the last few hundred milliseconds of browsing data.
+    writeFileAtomicSync(file, JSON.stringify(value), { durable: false });
     writeFailures.delete(file);
   } catch (error) {
     // A full disk or locked profile must not break browsing; the next write retries.
-    try { fs.unlinkSync(temporary); } catch { /* Never created. */ }
     const reason = error.code || error.name;
     if (writeFailures.get(file) !== reason) {
       writeFailures.set(file, reason);
-      console.warn(`Could not save browser data ${path.basename(file)} (${error.code || error.name}); retrying with the next change.`);
+      console.warn(`Could not save browser data ${path.basename(file)} (${reason}); retrying with the next change.`);
     }
   }
 }

@@ -65,16 +65,7 @@ object DesktopBrowser {
 
     /** A desktop downgraded since the last connection would close the session on the unknown read. */
     fun dropQueuedReads(state: JSONObject): Boolean {
-        val outbox = state.optJSONArray("outbox") ?: return false
-        val kept = JSONArray()
-        for (i in 0 until outbox.length()) {
-            val event = JSONObject(outbox.getString(i))
-            val op = event.optJSONObject("payload")?.optString("op").orEmpty()
-            if (event.optString("type") != "desktop.read" || op != TABS) kept.put(outbox.getString(i))
-        }
-        if (kept.length() == outbox.length()) return false
-        state.put("outbox", kept)
-        return true
+        return Outbox.drop(state) { it.optString("type") == "desktop.read" && it.optJSONObject("payload")?.optString("op") == TABS }
     }
 }
 

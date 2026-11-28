@@ -18,6 +18,7 @@ from gofer.ui.brain_families import (
     report_families,
 )
 from gofer.ui.brain_library import BrainLibrary
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 from tests.helpers.brain_library import wait_idle
 
 
@@ -26,6 +27,7 @@ def paragraph(topic: str, index: int) -> str:
     return f"Finding {index} about {topic} rollout planning: {words}."
 
 
+# Takes several paragraphs and adds an h1, unlike the shared html.
 def html(title: str, paragraphs: list[str]) -> str:
     body = "".join(f"<p>{text}</p>" for text in paragraphs)
     return f"<html><head><title>{title}</title></head><body><h1>{title}</h1>{body}</body></html>"
@@ -45,13 +47,6 @@ def doc(
         "blocks": [{"id": f"{doc_id}-{n}", "text": text} for n, text in enumerate(texts)],
         **extra,
     }
-
-
-@pytest.fixture
-def library(tmp_path: Path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
 
 
 def test_families_need_most_long_passages_and_skip_boilerplate_and_copies():

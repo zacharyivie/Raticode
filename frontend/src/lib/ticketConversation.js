@@ -7,7 +7,7 @@
 // comment within REPEAT_WINDOW_MS is left out; the same words said later, by someone else, or
 // with a different review decision are kept.
 
-export const REPEAT_WINDOW_MS = 120_000;
+const REPEAT_WINDOW_MS = 120_000;
 
 export function repeats(body = "", said = "") {
   const text = String(body).trim().replace(/…$/, "").trimEnd();

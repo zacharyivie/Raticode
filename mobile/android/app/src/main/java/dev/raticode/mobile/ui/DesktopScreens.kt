@@ -114,9 +114,17 @@ internal fun scheduleText(schedule: RemSchedule): String {
             }
         }
         "interval" -> if (schedule.everyMinutes % 60 == 0) "Every ${schedule.everyMinutes / 60} h" else "Every ${schedule.everyMinutes} min"
-        "cron" -> "Custom schedule"
+        // The desktop's words for the expression, else the expression itself; an older desktop sends neither.
+        "cron" -> schedule.summary.trim().ifBlank { schedule.cron.trim().takeIf { it.isNotBlank() }?.let { "Custom ($it)" } ?: "Custom schedule" }
         else -> if (schedule.at.isNotBlank()) "Once, ${whenText(schedule.at)}" else "Once, right away"
     }
+}
+
+/** [scheduleText] with the time zone a repeating schedule runs in, as the desktop's task sheet shows it. */
+internal fun scheduleWithZone(schedule: RemSchedule): String {
+    val text = scheduleText(schedule)
+    val zone = schedule.timezone.trim().replace('_', ' ')
+    return if (schedule.kind == "once" || zone.isBlank()) text else "$text · $zone"
 }
 
 @Composable
@@ -374,7 +382,7 @@ private fun RemTaskView(client: LiveClient, id: String, onBack: () -> Unit, onTh
                 // What, where and how, as tiles instead of lines of text.
                 FactGrid(buildList {
                     add(Fact(ThreadIcons.Tag, "Kind", task.type.replaceFirstChar { it.uppercase() }, tag = "remFactKind"))
-                    add(Fact(ThreadIcons.Recent, "Schedule", scheduleText(task.schedule), tag = "remFactSchedule"))
+                    add(Fact(ThreadIcons.Recent, "Schedule", scheduleWithZone(task.schedule), tag = "remFactSchedule"))
                     if (task.project.isNotBlank()) add(Fact(ThreadIcons.Folder, "Project", task.project, tag = "remFactProject"))
                     if (task.model.isNotBlank()) add(Fact(ThreadIcons.Computer, "Model", listOf(task.provider, task.model).filter { it.isNotBlank() }.joinToString(" · "), tag = "remFactModel"))
                 })
@@ -945,6 +953,7 @@ internal fun MorePage(client: LiveClient, bar: List<String> = LiveNavigation.DEF
             ConversationRow("Bottom bar", "", "Choose which destinations the bar shows") { onOpen(LiveNavigation.NAV_BAR) }
             ConversationRow("Open with Raticode", "", "Make Raticode the default browser, or open web pages, PDFs and other files from other apps") { onOpen(LiveNavigation.OPEN_WITH) }
             ConversationRow("People Rem can reach", "", "Who “brother” or “Mom” means on call and text cards. Kept on this phone") { onOpen(LiveNavigation.PEOPLE) }
+            HelpRow()
             // Google Play requires the privacy policy to be reachable from inside the app as well as from its listing.
             ConversationRow("Privacy policy", "", "What Raticode keeps on this phone and what it sends. Opens in your browser") {
                 openInBrowser(context, PRIVACY_POLICY_URL)
@@ -954,6 +963,34 @@ internal fun MorePage(client: LiveClient, bar: List<String> = LiveNavigation.DEF
                 else DESKTOP_OFF)
         }
     }
+}
+
+/** This app's version for a problem report. AppUpdates needs Android 10; Help shows on every version the app runs on. */
+private fun installedVersionName(context: android.content.Context): String {
+    val name = runCatching {
+        val manager = context.packageManager
+        if (android.os.Build.VERSION.SDK_INT >= 33) manager.getPackageInfo(context.packageName, android.content.pm.PackageManager.PackageInfoFlags.of(0))
+        else @Suppress("DEPRECATION") manager.getPackageInfo(context.packageName, 0)
+    }.getOrNull()?.versionName
+    return dev.raticode.mobile.update.AppUpdateRules.Version.installed(name)?.toString() ?: "unknown"
+}
+
+/** The phone's guides on the website, and a GitHub issue that says which app and Android version it came from. */
+@Composable
+private fun HelpRow() {
+    val context = LocalContext.current
+    val links = remember {
+        PhoneHelp.links(installedVersionName(context), android.os.Build.VERSION.RELEASE.orEmpty(), android.os.Build.VERSION.SDK_INT)
+    }
+    Column(Modifier.fillMaxWidth().padding(vertical = 18.dp).testTag("moreHelp"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Help", style = MaterialTheme.typography.titleMedium)
+        Text("Guides for Raticode Mobile, or report a problem on GitHub. Opens in your browser",
+            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            links.forEach { link -> OutlinedButton(onClick = { openInBrowser(context, link.url) }) { Text(link.label) } }
+        }
+    }
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 }
 
 @RequiresApi(29)

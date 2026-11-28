@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Fail when a function, class, constant, export, module, dependency or CSS class has no users.
+"""Fail when a function, class, constant, export, module, dependency, CSS class or script is unused.
 
-The check looks for ten kinds of unused code:
+The check looks for twelve kinds of unused code:
 
 - module-level functions, classes and methods in ``src/gofer`` whose names appear
   nowhere except on the line that defines them
@@ -11,6 +11,10 @@ The check looks for ten kinds of unused code:
 - names exported from ``frontend/src`` and ``frontend/electron`` (test files left
   out) with ``export function``, ``export const`` or ``export class`` whose names
   appear nowhere except in that declaration
+- frontend exports only their own file uses: an export in ``frontend/src`` or
+  ``frontend/electron`` (test files left out) whose name appears as a word in no other
+  file under ``SEARCH_PATHS``. Nothing imports it, so it needs no ``export``. These
+  print with ``(export only its own file uses)``.
 - modules in ``frontend/src`` and ``frontend/electron`` that no other file imports
 - production code only tests call: a ``src/gofer`` definition or constant, or a frontend export
   whose name appears outside its own definition only in test files (``tests/``,
@@ -59,6 +63,16 @@ The check looks for ten kinds of unused code:
   non-CSS file under those folders or in ``frontend/index.html``, or be built from
   a template there: some prefix of the name followed by ``${``, as ``st-`` is in
   ``st-${state}``. These print as ``path:line .name (CSS class nothing uses)``.
+- scripts and browser tests nothing runs. Each file directly under ``scripts/``
+  must be named by file name in another file under ``SEARCH_PATHS``, ``docs``,
+  ``benchmarks`` or the root Markdown. Each ``*.browser.cjs`` and ``run-*.cjs``
+  file under ``frontend/browser-tests`` and ``frontend/electron/tests`` must be
+  named in a file that isn't a test (``frontend/package.json``, a runner, a
+  workflow), by its file name or by its short name (the file name without
+  ``.browser.cjs`` or ``.cjs``) as a quoted string, so the names a runner's loop
+  lists count; another browser test that requires it counts too. ``*.test.cjs``
+  files are skipped, since ``run-tests.cjs`` runs every file with that ending.
+  These print with ``(script nothing runs)``.
 
 A name counts as used when it appears as a word in any file under ``SEARCH_PATHS``:
 code, tests (including ``frontend/browser-tests`` and ``frontend/electron/tests``),
@@ -82,6 +96,12 @@ A line excuses code only tests call when its reason starts with ``test seam:``, 
 each helper kept for tests says so::
 
     reset_for_tests  # test seam: tests reset the module's state between cases
+
+A line that matches nothing fails the check too, printed with
+``(allowlist line matches nothing)``: a ``path:name`` line whose file is gone or no
+longer names ``name``, a ``docs/cli-parity.json:KEY`` line whose route isn't in the
+manifest, or a CSS line whose pattern matches no class selector. A bare ``name``
+line isn't checked.
 
 Each finding prints as ``path:line name``. The script needs only the standard library.
 
@@ -111,6 +131,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ALLOWLIST = "scripts/dead-code-allowlist.txt"
+ALLOWLIST_STALE = "(allowlist line matches nothing)"
 
 # Where a name counts as used. Missing paths are skipped.
 SEARCH_PATHS = (
@@ -154,6 +175,7 @@ MODULE_SUFFIXES = frozenset({".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"})
 TEST_DIRS = frozenset({"tests", "browser-tests", "__tests__"})
 TEST_SEAM = "test seam:"
 ONLY_TESTS = "(only tests use it)"
+OWN_FILE_EXPORT = "(export only its own file uses)"
 
 WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # A module constant's name: capitals, digits and underscores, with at least one capital.
@@ -245,6 +267,16 @@ CSS_STRING = re.compile(r""""(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'""")
 # An attribute selector; an escaped bracket belongs to a class name such as `.bg-\[\#fff\]`.
 CSS_ATTRIBUTE = re.compile(r"(?<!\\)\[[^\]\n]*\]")
 CSS_CLASS = re.compile(r"\.(-?[A-Za-z_](?:[\w-]|\\.)*)")
+# The unrun file pass. Each file directly under SCRIPTS_DIR must be named by another
+# file in the corpus, SCRIPT_NAME_PATHS or the root Markdown. Each entry file under
+# ENTRY_DIRS (a *.browser.cjs test or a run-*.cjs runner) must be named by a file that
+# isn't a test, by its file name or by its short name as a quoted string, or be
+# required by another browser test, as studio.browser.cjs runs its parts.
+SCRIPTS_DIR = "scripts"
+SCRIPT_NAME_PATHS = ("docs", "benchmarks")
+ENTRY_DIRS = ("frontend/browser-tests", "frontend/electron/tests")
+BROWSER_TEST_SUFFIX = ".browser.cjs"
+UNRUN = "(script nothing runs)"
 # A class name as code writes it: a run of word characters and hyphens, or a whole
 # space- or quote-delimited token for a utility such as `hover:bg-sky-200` or `bg-white/70`.
 CLASS_WORD = re.compile(r"[\w-]+")
@@ -593,11 +625,11 @@ def _word_counts(texts: Iterable[str]) -> Counter[str]:
     return counts
 
 
-def read_allowlist(path: Path) -> dict[str, str]:
-    """Allowlisted ``name`` and ``path:name`` keys and their reasons; each needs one."""
+def allowlist_entries(path: Path) -> list[tuple[int, str, str]]:
+    """Each allowlist line's number, key and reason; each line needs a reason."""
     if not path.is_file():
-        return {}
-    keys: dict[str, str] = {}
+        return []
+    entries = []
     for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -606,8 +638,71 @@ def read_allowlist(path: Path) -> dict[str, str]:
         key, _, reason = re.sub(r"\s+#", " #", line).partition(" #")
         if not key.strip() or not reason.strip():
             raise AllowlistError(f"{path.name}:{number} needs a name and '# reason': {raw!r}")
-        keys[key.strip()] = reason.strip()
-    return keys
+        entries.append((number, key.strip(), reason.strip()))
+    return entries
+
+
+def read_allowlist(path: Path) -> dict[str, str]:
+    """Allowlisted ``name`` and ``path:name`` keys and their reasons; each needs one."""
+    return {key: reason for _, key, reason in allowlist_entries(path)}
+
+
+def _css_pattern_matches(pattern: str, stylesheets: Iterable[str]) -> bool:
+    """Whether a CSS allowlist pattern such as ``.xterm-*`` names a class selector."""
+    return any(
+        fnmatch.fnmatchcase(f".{name}", pattern)
+        for text in stylesheets
+        for name, _ in css_class_selectors(text)
+    )
+
+
+def _file_text(root: Path, relative: str, files: Mapping[str, str]) -> str | None:
+    if relative in files:
+        return files[relative]
+    path = root / relative
+    if not path.is_file():
+        return None
+    return path.read_bytes().decode("utf-8", "replace")
+
+
+def stale_allowlist_lines(root: Path, files: Mapping[str, str]) -> list[Finding]:
+    """Allowlist lines that no longer match anything, so they can't excuse anything.
+
+    A ``path:name`` line is stale when the file is gone or no longer names ``name``; a
+    ``docs/cli-parity.json:KEY`` line when the manifest has no route ``KEY``; a CSS line
+    (one whose name starts with ``.``) when its pattern matches no class selector, in
+    its stylesheet for a path-scoped line or in any ``FRONTEND_DIRS`` stylesheet for a
+    bare one. A bare ``name`` line isn't checked.
+    """
+    stylesheets = [
+        text
+        for path, text in files.items()
+        if path.endswith(".css") and path.startswith(tuple(f"{d}/" for d in FRONTEND_DIRS))
+    ]
+    routes: dict[str, object] | None = None
+    found = []
+    for number, key, _ in allowlist_entries(root / ALLOWLIST):
+        if key.startswith("."):
+            matches = _css_pattern_matches(key, stylesheets)
+        elif ":" in key:
+            relative, _, name = key.partition(":")
+            text = _file_text(root, relative, files)
+            if text is None:
+                matches = False
+            elif relative == PARITY_MANIFEST:
+                if routes is None:
+                    routes = json.loads(text).get("routes", {})
+                matches = name in routes
+            elif name.startswith("."):
+                matches = _css_pattern_matches(name, [text])
+            else:
+                mention = rf"(?<![\w-]){re.escape(name)}(?![\w-])"
+                matches = re.search(mention, text) is not None
+        else:
+            continue
+        if not matches:
+            found.append(Finding(ALLOWLIST, number, key, ALLOWLIST_STALE))
+    return found
 
 
 def _own_uses(definition: Finding, files: Mapping[str, str]) -> int:
@@ -633,6 +728,22 @@ def only_tests_use(definitions: Sequence[Finding], files: Mapping[str, str]) -> 
         Finding(d.path, d.line, d.name, ONLY_TESTS if tests[d.name] else "")
         for d in definitions
         if production[d.name] <= own[d.name]
+    ]
+
+
+def exports_only_their_file_uses(
+    exports: Sequence[Finding], files: Mapping[str, str]
+) -> list[Finding]:
+    """Exports whose name appears as a word in no file but the one that declares them."""
+    names = {export.name for export in exports}
+    users: dict[str, set[str]] = {}
+    for path, text in files.items():
+        for name in names.intersection(WORD.findall(text)):
+            users.setdefault(name, set()).add(path)
+    return [
+        Finding(export.path, export.line, export.name, OWN_FILE_EXPORT)
+        for export in exports
+        if not users.get(export.name, set()) - {export.path}
     ]
 
 
@@ -1028,6 +1139,101 @@ def unused_css_classes(files: Mapping[str, str]) -> list[Finding]:
     return found
 
 
+# A file name as text writes it: a run of word characters, '.' and '-' (a sentence's
+# full stop after it is stripped), or a quoted string of those, as a runner's list has.
+FILE_NAME_WORD = re.compile(r"[\w.-]+")
+QUOTED_NAME = re.compile(r"""(?=["'`]([\w.-]+)["'`])""")
+
+
+def _names_in(texts: Mapping[str, str], *, quoted: bool = False) -> dict[str, set[str]]:
+    """Map each file name written in ``texts`` (or, with ``quoted``, each quoted name) to its files.
+
+    ``scripts/check-dev.py.`` names ``check-dev.py``; ``check-dev.py.bak`` and
+    ``old-check-dev.py`` don't.
+    """
+    names: dict[str, set[str]] = {}
+    for path, text in texts.items():
+        words = QUOTED_NAME.findall(text) if quoted else FILE_NAME_WORD.findall(text)
+        for word in {word.rstrip(".") for word in words}:
+            names.setdefault(word, set()).add(path)
+    return names
+
+
+def _entry_short_name(name: str) -> str:
+    """``usage`` for ``usage.browser.cjs``, ``run-usage`` for ``run-usage.cjs``."""
+    suffix = BROWSER_TEST_SUFFIX if name.endswith(BROWSER_TEST_SUFFIX) else ".cjs"
+    return name[: -len(suffix)]
+
+
+def is_entry_file(relative: str) -> bool:
+    """A browser test or runner someone has to start: ``*.browser.cjs`` or ``run-*.cjs``.
+
+    ``*.test.cjs`` files are left out: ``run-tests.cjs`` runs every file with that ending.
+    """
+    if not relative.startswith(tuple(f"{folder}/" for folder in ENTRY_DIRS)):
+        return False
+    name = relative.rpartition("/")[2]
+    if name.endswith(".test.cjs"):
+        return False
+    return name.endswith(BROWSER_TEST_SUFFIX) or (name.startswith("run-") and name.endswith(".cjs"))
+
+
+def _starts_entries(relative: str) -> bool:
+    """Files that count as running an entry file: not ``tests/``, ``*.test.*`` or a browser test."""
+    name = relative.rpartition("/")[2]
+    return not (relative.startswith("tests/") or ".test." in name or ".browser." in name)
+
+
+def unrun_files(root: Path, files: Mapping[str, str]) -> list[Finding]:
+    """Scripts and browser test entry files that no other file names.
+
+    A file directly under ``scripts/`` must be named by file name in another file in
+    the corpus, ``docs`` or the root Markdown. A ``*.browser.cjs`` or ``run-*.cjs`` file
+    under ``ENTRY_DIRS`` must be named in a file that isn't a test (``package.json``, a
+    runner, a workflow), either by file name or by its short name as a quoted string,
+    as a runner's loop over ``["usage", "report-themes"]`` names them.
+    """
+    texts = dict(files)
+    extra = sorted(root.glob("*.md"))
+    for folder in SCRIPT_NAME_PATHS:
+        if (root / folder).is_dir():
+            extra += list(_walk(root / folder))
+    for path in extra:
+        relative = path.relative_to(root).as_posix()
+        if relative in texts or not path.is_file():
+            continue
+        data = path.read_bytes()
+        if _is_text(path, data):
+            texts[relative] = data.decode("utf-8", "replace")
+    found = []
+    named = _names_in(texts)
+    scripts = root / SCRIPTS_DIR
+    if scripts.is_dir():
+        for path in sorted(scripts.iterdir()):
+            relative = path.relative_to(root).as_posix()
+            # The allowlist is this check's own input.
+            if (
+                path.is_file()
+                and relative != ALLOWLIST
+                and not named.get(path.name, set()) - {relative}
+            ):
+                found.append(Finding(relative, 1, path.name, UNRUN))
+    callers = {path: text for path, text in files.items() if _starts_entries(path)}
+    by_name, by_short = _names_in(callers), _names_in(callers, quoted=True)
+    required = {
+        target.rstrip("/").rsplit("/", 1)[-1]
+        for path, text in files.items()
+        if is_entry_file(path)
+        for target in IMPORT_PATH.findall(text)
+    }
+    for relative in sorted(path for path in files if is_entry_file(path)):
+        name = relative.rpartition("/")[2]
+        users = by_name.get(name, set()) | by_short.get(_entry_short_name(name), set())
+        if name not in required and not users - {relative}:
+            found.append(Finding(relative, 1, name, UNRUN))
+    return found
+
+
 def _allowed(finding: Finding, allowed: Mapping[str, str]) -> bool:
     keys = (f"{finding.path}:{finding.name}", finding.name)
     reason = allowed.get(keys[0], allowed.get(keys[1]))
@@ -1049,7 +1255,8 @@ def find_unused(root: Path) -> list[Finding]:
     counts = _word_counts(files.values())
 
     modules = frontend_modules(files)
-    definitions = python_definitions(root) + frontend_exports(files, modules)
+    exports = frontend_exports(files, modules)
+    definitions = python_definitions(root) + exports
     # Each definition writes its name once; any further mention is a use.
     defined = Counter(finding.name for finding in definitions)
     unused = [d for d in definitions if counts[d.name] <= defined[d.name]]
@@ -1057,6 +1264,12 @@ def find_unused(root: Path) -> list[Finding]:
     unused += [
         finding
         for finding in only_tests_use(definitions, files)
+        if (finding.path, finding.name) not in unreported
+    ]
+    unreported |= {(finding.path, finding.name) for finding in unused}
+    unused += [
+        finding
+        for finding in exports_only_their_file_uses(exports, files)
         if (finding.path, finding.name) not in unreported
     ]
     unused += unimported_modules(files, modules)
@@ -1067,8 +1280,10 @@ def find_unused(root: Path) -> list[Finding]:
     unused += unused_bridge(files)
     unused += unused_routes(root, files, kotlin)
     unused += unused_css_classes(files)
+    unused += unrun_files(root, files)
 
-    return sorted(finding for finding in set(unused) if not _allowed(finding, allowed))
+    kept = [finding for finding in set(unused) if not _allowed(finding, allowed)]
+    return sorted(kept + stale_allowlist_lines(root, files))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1087,9 +1302,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"\ncheck-dead-code: {len(findings)} unused. Remove them, or add a line with "
             f"a reason to {ALLOWLIST} when one is kept on purpose. Code {ONLY_TESTS} "
             f"needs a reason that starts with '{TEST_SEAM}', or its tests rewritten "
-            "against the production path. Take an unused dependency out of "
+            f"against the production path. Drop the export keyword from an "
+            f"{OWN_FILE_EXPORT}. Take an unused dependency out of "
             "pyproject.toml or frontend/package.json and relock; move one only tests "
-            "import to the dev extra."
+            f"import to the dev extra. Delete an allowlist line {ALLOWLIST_STALE}."
         )
         return 1
     print("check-dead-code: nothing unused")

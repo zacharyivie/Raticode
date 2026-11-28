@@ -10,7 +10,7 @@ let active = 0;
 
 // The backend fetches previews so the chat never loads arbitrary pages itself.
 // A few run at once; each URL is asked for once per session.
-export function loadLinkPreview(url, fetchImpl = fetch) {
+function loadLinkPreview(url, fetchImpl = fetch) {
   if (!previews.has(url)) {
     previews.set(url, new Promise(resolve => { waiting.push({ url, resolve, fetchImpl }); pump(); }));
   }

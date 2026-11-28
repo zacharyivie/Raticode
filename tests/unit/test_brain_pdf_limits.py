@@ -14,6 +14,7 @@ import pytest
 from gofer.ui import brain_pdf
 from gofer.ui.brain_documents import extract
 from gofer.ui.brain_library import BrainLibrary, disk_fingerprint
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 from tests.helpers.brain_library import wait_task
 
 # Reading PDFs in a separate, limited process takes longer than other library tasks.
@@ -88,13 +89,6 @@ def gone(pid: int) -> bool:
             pass
         time.sleep(0.05)
     return False
-
-
-@pytest.fixture
-def library(tmp_path: Path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
 
 
 @POSIX

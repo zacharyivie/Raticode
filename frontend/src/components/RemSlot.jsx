@@ -15,13 +15,13 @@ export function createRemHost() {
 
 // A node out of the document loses its scroll offset, so the stream's position
 // is kept across the move. A stream following the newest message keeps following.
-export function rememberRemScroll(host) {
+function rememberRemScroll(host) {
   const stream = host.querySelector(".rem-stream");
   if (!stream) return;
   host.remScroll = { top: stream.scrollTop, pinned: stream.scrollHeight - stream.scrollTop - stream.clientHeight < 80 };
 }
 
-export function restoreRemScroll(host) {
+function restoreRemScroll(host) {
   const stream = host.querySelector(".rem-stream");
   const saved = host.remScroll;
   if (!stream || !saved) return;

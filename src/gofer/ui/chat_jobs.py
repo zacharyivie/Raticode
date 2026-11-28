@@ -14,14 +14,35 @@ from gofer.utils.logging import get_logger
 
 log = get_logger(__name__)
 
+# Turns started for chat threads and phone chats, as opposed to Rem's task workers.
+CHAT_POOL = "chat"
+# Turns of Rem's tasks. The tick admits at most the computer's worker limit of
+# them, so they get that many turns of their own instead of sharing the chat threads'.
+TASK_POOL = "tasks"
+
+
+class TurnsFull(ValueError):
+    """Every turn of a pool is taken. Nothing started; trying again later is safe."""
+
 
 class ChatJobs:
     def __init__(self, data_dir: Path, max_active: int = 8) -> None:
         self.directory = data_dir / "chat-jobs"
         self._condition = threading.Condition()
         self._active: set[tuple[str, str]] = set()
+        # Which pool each active turn counts against.
+        self._pools: dict[tuple[str, str], str] = {}
         self._closed = False
         self.max_active = max_active
+
+    def _room(self, pool: str, limit: int | None) -> bool:
+        cap = self.max_active if limit is None else max(1, limit)
+        return sum(1 for item in self._pools.values() if item == pool) < cap
+
+    def has_room(self, pool: str = CHAT_POOL, limit: int | None = None) -> bool:
+        """Whether a turn in ``pool`` would start now, under ``limit`` or ``max_active``."""
+        with self._condition:
+            return not self._closed and self._room(pool, limit)
 
     def _path(self, conversation_id: str, turn_id: str) -> Path:
         conversation_id = _identifier(conversation_id, "conversationId")
@@ -33,18 +54,28 @@ class ChatJobs:
         conversation_id: str,
         turn_id: str,
         run: Callable[[Callable[[dict[str, Any]], None]], None],
+        *,
+        pool: str = CHAT_POOL,
+        limit: int | None = None,
     ) -> None:
+        """Start a turn counted against ``pool``: at most ``limit`` (else ``max_active``).
+
+        Raises TurnsFull when the pool has no room, before anything starts.
+        """
         path = self._path(conversation_id, turn_id)
         key = (conversation_id, turn_id)
         with self._condition:
-            if self._closed or len(self._active) >= self.max_active:
-                raise ValueError("Too many active Rem turns, or backend is stopping")
+            if self._closed:
+                raise ValueError("The backend is stopping")
+            if not self._room(pool, limit):
+                raise TurnsFull("Too many active Rem turns")
             if any(item[0] == conversation_id for item in self._active):
                 raise ValueError("This conversation already has an active turn")
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             # Exclusive creation prevents retries from launching provider work twice.
             handle = path.open("x", encoding="utf-8")
             self._active.add(key)
+            self._pools[key] = pool
 
         def worker() -> None:
             sequence = 0
@@ -69,6 +100,7 @@ class ChatJobs:
                 finally:
                     with self._condition:
                         self._active.discard(key)
+                        self._pools.pop(key, None)
                         self._condition.notify_all()
 
         try:
@@ -87,6 +119,7 @@ class ChatJobs:
                         handle.close()
                     finally:
                         self._active.discard(key)
+                        self._pools.pop(key, None)
                         self._condition.notify_all()
             raise ValueError(TURN_START_FAILED) from exc
 

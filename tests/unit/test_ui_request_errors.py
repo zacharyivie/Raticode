@@ -8,17 +8,20 @@ from pathlib import Path
 
 import pytest
 
+from gofer.ui.routes import RouteRequest
 from gofer.ui.server import GoferUiRequestHandler
 from tests.unit.test_ui_server import _request
 
 
 def _break(monkeypatch: pytest.MonkeyPatch, error: BaseException, *, after_response: bool = False):
-    def dispatch(self: GoferUiRequestHandler) -> None:
+    # GET /api/workflows is a route-table handler; errors its route doesn't map reach
+    # the central handler, as they did from the old if-chain.
+    def handler(self: GoferUiRequestHandler, _request: RouteRequest) -> None:
         if after_response:
             self._send_json({"partial": True})
         raise error
 
-    monkeypatch.setattr(GoferUiRequestHandler, "_dispatch_GET", dispatch)
+    monkeypatch.setattr(GoferUiRequestHandler, "_workflows_list", handler)
 
 
 def test_an_unexpected_error_gets_a_500_and_a_logged_traceback(

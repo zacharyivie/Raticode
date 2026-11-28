@@ -11,6 +11,7 @@ Every check here is a plain text rule, so the same evidence always gives the sam
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Iterable
 from pathlib import Path
@@ -106,7 +107,16 @@ SENTENCE = re.compile(r"(?<=[.!?])\s+|\n+")
 OUTPUT_PARTS = frozenset({"reports", "notes", "chat-attachments"})
 OUTPUT_SUFFIXES = frozenset({".html", ".pdf", ".htm"})
 
-ABSOLUTE_PATH = re.compile(r"(?<![\w.~])(/(?:[\w.@+-]+/)*[\w.@+-]+)")
+# Assigned project roots are found literally in the text (see _mentions), so a root with a
+# space in it, or a Windows root with no leading /, still counts. These are what may come
+# right after a root: a separator and more path, which is a path below it, or the end of
+# the path, perhaps after a trailing separator or a sentence's punctuation.
+SEPARATORS = "".join(dict.fromkeys("/" + os.sep))
+_SEP = f"[{re.escape(SEPARATORS)}]"
+BELOW_ROOT = re.compile(rf"{_SEP}((?:[\w.@+-]+{_SEP})*[\w.@+-]+)")
+ROOT_END = re.compile(rf"{_SEP}?(?:$|[\s\"'`)\]>]|[.,;:!?]+(?:$|[\s\"'`)\]>]))")
+# A character before a root that makes it part of a longer name or path.
+NOT_ROOT_START = frozenset("._-~@+" + SEPARATORS)
 # Paths inside a project, such as src/gofer/ui/server.py or website/docs/rem/board.md,
 # including one that ends a sentence.
 RELATIVE_PATH = re.compile(
@@ -179,6 +189,38 @@ def _clean(text: str) -> str:
     return LINK.sub("]", text or "")
 
 
+def _mentions(text: str, roots: Iterable[str]) -> list[tuple[str, Path]]:
+    """Each distinct path the text writes at or below one of these roots, as (root, path).
+
+    A root counts only with a path boundary on both sides: alone, or followed by a
+    separator and more path, which is the path below it. So ``/x/code`` isn't found in
+    ``/x/codebase`` or ``/y/x/code``. Matching uses os.path.normcase, so a Windows build
+    ignores case and treats / and \\ alike.
+    """
+    haystack = os.path.normcase(text or "")
+    found: list[tuple[str, Path]] = []
+    for root in dict.fromkeys(roots):
+        needle = os.path.normcase(root or "").rstrip(SEPARATORS)
+        if not needle:
+            continue
+        seen: set[Path] = set()
+        start = haystack.find(needle)
+        while start >= 0 and len(seen) < MAX_PATHS:
+            end = start + len(needle)
+            before = haystack[start - 1] if start else ""
+            path: Path | None = None
+            if not (before.isalnum() or before in NOT_ROOT_START):
+                if below := BELOW_ROOT.match(haystack, end):
+                    path = Path(root) / below.group(1).rstrip(".,:;")
+                elif ROOT_END.match(haystack, end):
+                    path = Path(root)
+            if path is not None and path not in seen:
+                seen.add(path)
+                found.append((root, path))
+            start = haystack.find(needle, start + 1)
+    return found
+
+
 def landed(text: str) -> bool:
     """Whether a result reports work that landed on dev ("nothing landed" doesn't count)."""
     for match in LANDED.finditer(text or ""):
@@ -211,11 +253,10 @@ def misrooted_target(text: str, current: str | None, projects: Iterable[str]) ->
     for sentence in SENTENCE.split(clean):
         if not WRITE_FAILURE.search(sentence):
             continue
-        for raw in ABSOLUTE_PATH.findall(sentence)[:MAX_PATHS]:
-            path = Path(raw.rstrip(".,:;'\"`"))
+        for root, path in _mentions(sentence, roots):
             if _output(path) or (current and _inside(path, Path(current))):
                 continue
-            refused.update(r for r in roots if _inside(path, Path(r)))
+            refused.add(root)
     if len(refused) == 1:
         target = refused.pop()
         # A result that did some work must also point at the other project's files more
@@ -228,12 +269,11 @@ def misrooted_target(text: str, current: str | None, projects: Iterable[str]) ->
     # Nothing was built for a wrong-root reason: the folder the worker or reviewer says the
     # rerun needs decides, when they name exactly one; otherwise the files named do.
     named = {
-        r
+        root
         for sentence in SENTENCE.split(clean)
         if NAMES_ROOT.search(sentence)
-        for raw in ABSOLUTE_PATH.findall(sentence)[:MAX_PATHS]
-        for r in roots
-        if Path(raw.rstrip(".,:;'\"`")) == Path(r)
+        for root, path in _mentions(sentence, roots)
+        if path == Path(root)
     }
     if len(named) == 1:
         return named.pop()
@@ -244,13 +284,12 @@ def _score(text: str, root: str) -> tuple[int, int, int]:
     """(absolute paths below root, mentions of root itself, project paths that exist in root)."""
     base = Path(root)
     deep = bare = relative = 0
-    for raw in list(dict.fromkeys(ABSOLUTE_PATH.findall(_clean(text))))[:MAX_PATHS]:
-        path = Path(raw.rstrip(".,:;"))
+    for _, path in _mentions(_clean(text), [root]):
         if _output(path):
             continue
         if path == base:
             bare += 1
-        elif base in path.parents:
+        else:
             deep += 1
     for raw in list(dict.fromkeys(RELATIVE_PATH.findall(text)))[:MAX_PATHS]:
         name = raw.split(":", 1)[0]

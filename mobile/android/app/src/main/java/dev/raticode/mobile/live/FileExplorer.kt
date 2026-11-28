@@ -233,16 +233,7 @@ object FileExplorer {
      * screen asks again. Returns whether any were dropped.
      */
     fun dropQueued(state: JSONObject): Boolean {
-        val outbox = state.optJSONArray("outbox") ?: return false
-        val kept = org.json.JSONArray()
-        for (i in 0 until outbox.length()) {
-            val event = JSONObject(outbox.getString(i))
-            val op = event.optJSONObject("payload")?.optString("op").orEmpty()
-            if (event.optString("type") !in setOf("desktop.read", "desktop.action") || !isOp(op)) kept.put(outbox.getString(i))
-        }
-        if (kept.length() == outbox.length()) return false
-        state.put("outbox", kept)
-        return true
+        return Outbox.drop(state) { it.optString("type") in setOf("desktop.read", "desktop.action") && isOp(it.optJSONObject("payload")?.optString("op").orEmpty()) }
     }
 
     /** What opening a file is doing: waiting for the desktop, then the download it offered, or why it can't. */

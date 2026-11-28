@@ -1,10 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AlertTriangle, BookOpen, Check, CircleHelp, Clock, LoaderCircle, Play, HeartPulse, Flag, Folder, FolderPlus, Maximize2, Minus, Pencil, Plus, ShieldCheck, SquareKanban, X } from "lucide-react";
 import {
-  COLUMNS, COLUMN_LABELS, activityFeed, claimSummary, describeHours, entity, epicProgress, epicState, epicsOfMilestone, formatDate,
+  COLUMNS, COLUMN_LABELS, activityFeed, claimSummary, describeHours, entity, epicProgress, epicState, epicsOfMilestone,
   initialsOf, milestoneProgress, milestonesOfProject, milestonesServing, moveRule, needsYou, openTickets,
-  orgMilestoneProgress, projectProgress, setupSteps, startHint, zoneTime, ticketsOfEpic, ago, timeAgo, workerStatus,
+  orgMilestoneProgress, projectProgress, setupSteps, startHint, zoneTime, ticketsOfEpic,  workerStatus,
 } from "../lib/organizationModel.js";
+import { compactAge, monthName, shortDate, timeAgo } from "../lib/timeText.js";
 import { approveAllSummary, monthUsage, organizationRequest, plural } from "../lib/organizations.js";
 import { ORGANIZATION_BOARD_FILTERS, ORGANIZATION_FILTER_KEYS, activeFilterCount, resetFilters } from "../lib/boardFilters.js";
 import ApproveAllRequests from "./OrganizationApproveAll.jsx";
@@ -15,7 +16,7 @@ const pct = value => Math.round(value * 100);
 
 // Click and drag a scroll area to move around it. Starting on an element that matches `skip`
 // leaves that element alone; a drag that moved suppresses the click it would end with.
-export function useDragScroll(ref, skip = "input, select, textarea") {
+function useDragScroll(ref, skip = "input, select, textarea") {
   useEffect(() => {
     const element = ref.current;
     if (!element) return undefined;
@@ -52,7 +53,7 @@ const ZOOM_MIN = 0.4, ZOOM_MAX = 2;
 const clampZoom = value => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(value * 100) / 100));
 
 // Ctrl and the mouse wheel, or Ctrl with + - 0, zoom around the pointer or the middle.
-export function useZoom(ref) {
+function useZoom(ref) {
   const [scale, setScale] = useState(1);
   const anchor = useRef(null);
   const zoomAt = (next, clientX, clientY) => {
@@ -117,7 +118,7 @@ export function Chip({ model, refId, onOpen, extra = null }) {
   </button>;
 }
 
-export function EvidenceBadges({ claims }) {
+function EvidenceBadges({ claims }) {
   const summary = claimSummary(claims);
   // Each count has an icon and, for screen readers, its words; the tooltip says the same.
   const badge = (key, count, Icon, words) => count > 0 && <span className={`oh-ev ${key}`} title={`${count} ${words}`}><Icon size={12} aria-hidden="true" />{count}<span className="oh-sr"> {words}</span></span>;
@@ -148,14 +149,14 @@ function Timeline({ model, onOpen }) {
     <div className="oh-section-head"><h2 id="oh-ms">Milestones</h2><span className="oh-muted">Progress counts accepted tickets only</span><span className="grow" /><button className="oh-btn small ghost" type="button" onClick={() => onOpen("new:orgms")}><Plus size={14} />Milestone</button></div>
     {milestones.length ? <>
       <div className="oh-track" aria-hidden="true"><div className="line" />
-        {months.map(month => <span key={month.toISOString()} className="month" style={{ left: `${at(month)}%` }}>{month.toLocaleDateString(undefined, { month: "short" })}</span>)}
+        {months.map(month => <span key={month.toISOString()} className="month" style={{ left: `${at(month)}%` }}>{monthName(month)}</span>)}
         <div className="today" style={{ left: `${at(today)}%` }}><span>Today</span></div>
         {dated.map(m => <div key={m.id} className="pin" style={{ left: `${at(new Date(`${m.dueAt}T12:00:00`))}%` }}><span>{m.short || m.title}</span><i /></div>)}
       </div>
       <div className="oh-ms-rows">{milestones.map(m => {
         const progress = orgMilestoneProgress(model, m.id);
         return <button key={m.id} className="oh-ms-row" type="button" onClick={() => onOpen(`orgms:${m.id}`)}>
-          <b>{m.title}</b><span className="oh-muted">{m.dueAt ? formatDate(m.dueAt) : "No date"}</span>
+          <b>{m.title}</b><span className="oh-muted">{m.dueAt ? shortDate(m.dueAt) : "No date"}</span>
           <span className="oh-inline"><Bar value={progress} /><span className="oh-muted oh-num">{pct(progress)}%</span></span>
           <span className="oh-chips">{milestonesServing(model, m.id).map(pm => <span className="oh-chip static" key={pm.id}><i className="k" style={{ background: model.projects[pm.projectId]?.color }} /><span>{pm.title}</span></span>)}</span>
         </button>;
@@ -174,7 +175,7 @@ function NeedsYou({ model, busy, onOpen, onAct, onBoard }) {
     <ApproveAllRequests requests={requests} busy={busy} onApprove={requestIds => onAct("request_approve_all", { requestIds }, data => approveAllSummary(data?.results))} />
     {items.length ? items.map(item => {
       if (item.type === "request") return <div className="oh-need" key={item.request.id}><span className="oh-icon-badge st-review"><ShieldCheck size={16} /></span>
-        <span className="what"><b>Rem asks to: {item.request.summary}</b><small>Asked {ago(item.request.at)}. Nothing changes until you approve. Requests expire after a day.</small></span>
+        <span className="what"><b>Rem asks to: {item.request.summary}</b><small>Asked {timeAgo(item.request.at)}. Nothing changes until you approve. Requests expire after a day.</small></span>
         <span className="acts"><button className="oh-btn small primary" type="button" disabled={busy} onClick={() => onAct("request_decide", { requestId: item.request.id, decision: "approve" }, "Approved Rem's request")}>Approve</button><button className="oh-btn small" type="button" disabled={busy} onClick={() => onAct("request_decide", { requestId: item.request.id, decision: "decline" }, "Declined. Rem will see it was declined.")}>Decline</button></span></div>;
       if (item.type === "heartbeat") {
         const worker = model.workers[item.worker];
@@ -199,7 +200,7 @@ function Feed({ model, events, onOpen, onBoard }) {
     <div className="oh-section-head"><h2 id="oh-feed">Recent activity</h2><span className="grow" /><button className="oh-btn small ghost" type="button" onClick={onBoard}>Open board</button></div>
     {items.length ? <ul>{items.map(item => <li key={item.key}><Avatar model={model} id={item.who} />
       <span><b>{name(item.who)}</b> {item.text} {item.ref && <Chip model={model} refId={item.ref} onOpen={onOpen} />}{item.bad && <span className="oh-ev bad"><X size={12} />check failed</span>}</span>
-      <time dateTime={item.at}>{timeAgo(item.at)}</time></li>)}</ul> : <p className="oh-empty">Runs, reviews and new notes will show up here.</p>}
+      <time dateTime={item.at}>{compactAge(item.at)}</time></li>)}</ul> : <p className="oh-empty">Runs, reviews and new notes will show up here.</p>}
   </section>;
 }
 
@@ -279,7 +280,7 @@ export function OverviewView({ model, events, busy, onOpen, onAct, go, onStart }
 }
 
 // When workers may work, in words, with what that means right now.
-export function WorkingHours({ model, onOpen }) {
+function WorkingHours({ model, onOpen }) {
   const hours = model.config.operatingHours;
   const state = model.organization.diagnostics?.hours;
   const scheduled = hours?.mode === "scheduled";
@@ -295,7 +296,7 @@ export function WorkingHours({ model, onOpen }) {
 }
 
 // Whether workers pull accepted Backlog tickets into To do when they run out of work.
-export function BacklogPulls({ model, busy, onAct }) {
+function BacklogPulls({ model, busy, onAct }) {
   const enabled = model.config.pullBacklog !== false;
   const turn = on => onAct("plan_save", { kind: "operations", item: { pullBacklog: on }, expectedRevision: model.organization.revision },
     on ? "Workers pull Backlog tickets when they need work." : "Workers leave Backlog tickets for you to move.");
@@ -354,7 +355,7 @@ export function WorkSchedule({ model, onOpen }) {
 }
 
 // The organization's shared Git repository: off, or where it is and what changed lately.
-export function SharedRepository({ model, busy, onAct }) {
+function SharedRepository({ model, busy, onAct }) {
   const [state, setState] = useState(null);
   const [copied, setCopied] = useState(false);
   const oid = model.organization.id, version = model.organization.version;
@@ -373,7 +374,7 @@ export function SharedRepository({ model, busy, onAct }) {
       <div className="path"><Folder size={14} /><code>{state.path}</code><button className="oh-btn small ghost" type="button" onClick={async () => { try { await navigator.clipboard.writeText(state.path); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* clipboard unavailable */ } }}>{copied ? "Copied" : "Copy path"}</button></div>
       <div className="oh-chips">{state.files.map(name => <span className="oh-chip static" key={name}><span>{name}</span></span>)}</div>
       {state.openBranches.length > 0 && <small className="oh-faint">{plural(state.openBranches.length, "ticket branch", "ticket branches")} with shared changes not merged yet</small>}
-      <ul aria-label="Recent changes">{state.commits.slice(0, 5).map(([sha, at, author, subject]) => <li key={sha} title={`${sha.slice(0, 10)} by ${author}`}><span>{subject}</span><time dateTime={at}>{timeAgo(at)}</time></li>)}</ul>
+      <ul aria-label="Recent changes">{state.commits.slice(0, 5).map(([sha, at, author, subject]) => <li key={sha} title={`${sha.slice(0, 10)} by ${author}`}><span>{subject}</span><time dateTime={at}>{compactAge(at)}</time></li>)}</ul>
     </> : <p className="oh-muted" style={{ margin: 0 }}>Setting up the repository…</p>}
   </section>;
 }
@@ -383,7 +384,7 @@ export function SharedRepository({ model, busy, onAct }) {
 const folderName = value => value.split(/[\\/]/).filter(Boolean).at(-1) || value;
 
 // The folders the organization owns. Workers can only work inside these and their worktrees.
-export function FoldersPanel({ model, onAct, busy }) {
+function FoldersPanel({ model, onAct, busy }) {
   const roots = model.config.projectRoots || [];
   const [typing, setTyping] = useState(false);
   const [path, setPath] = useState("");
@@ -443,7 +444,7 @@ export function ProjectsView({ model, projectId, onProject, onOpen, onBoard, onA
         const progress = milestoneProgress(model, milestone.id);
         return <section className="oh-panel oh-milestone" key={milestone.id}>
           <header><h3><Flag size={15} /><button type="button" onClick={() => onOpen(`ms:${milestone.id}`)}>{milestone.title}</button></h3>
-            <span className="sub">{milestone.dueAt ? `Due ${formatDate(milestone.dueAt)}` : "No date"}</span>
+            <span className="sub">{milestone.dueAt ? `Due ${shortDate(milestone.dueAt)}` : "No date"}</span>
             <span className="sub">{milestone.parentId && model.orgMilestones[milestone.parentId] ? <>Serves <Chip model={model} refId={`orgms:${milestone.parentId}`} onOpen={onOpen} /></> : "Serves no organization milestone"}</span>
             <span className="sub end"><Bar value={progress} /><span className="oh-num">{pct(progress)}%</span></span>
           </header>

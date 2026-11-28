@@ -8,6 +8,7 @@ import { SwitchControl } from "./SettingControls.jsx";
 import { apiUrl } from "../lib/api";
 import { menuModels } from "../lib/providerModels.js";
 import { checkedLabel } from "../lib/usage.js";
+import { useMinuteClock } from "../lib/timeText.js";
 import { providerAccountUses, changeLinkTarget } from "../lib/providerAccountUses.js";
 import { request as remRequest } from "../lib/remHomeStore.js";
 import { providersCheckedAt } from "../lib/useProviderSettingsCapabilities.js";
@@ -74,6 +75,7 @@ export default function ProviderSettings({ providerState, remAccounts, onOpenSet
   // An app with a saved override keeps its row even when nothing runs there, so App location can say so.
   const installed = capabilities.filter(provider => provider.discoveryStatus !== "missing" || overrideNotFound(provider));
   const missing = capabilities.filter(provider => provider.discoveryStatus === "missing" && !overrideNotFound(provider));
+  // Re-renders once a minute so "Checked 3 min ago" keeps counting while Settings stays open.
   const now = useMinuteClock();
   return <div className="space-y-5 py-3">
     <p className="max-w-[60ch] text-xs text-muted">Choose the coding apps Rem and Organizations use, and set up model sources that only workflows use.</p>
@@ -156,16 +158,6 @@ function WorkflowSource({ id, title, summary, children }) {
     </h4>
     {open ? <div id={`${id}-form`} className="ml-[22px] mt-3 border-t border-line pt-3">{children(titleId)}</div> : null}
   </section>;
-}
-
-// Re-renders once a minute so "Checked 3 min ago" keeps counting while Settings stays open.
-function useMinuteClock() {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 60000);
-    return () => window.clearInterval(timer);
-  }, []);
-  return now;
 }
 
 /** Saves one provider's settings and tells every provider picker to reload. */

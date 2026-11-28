@@ -229,3 +229,43 @@ test('a backend stopped by the terminal Ctrl+C is logged, not shown as a crash',
     assert.equal(context.backendStoppedDuringQuit, true);
   });
 });
+
+test('a restart starts the new backend only after the old one exits and frees the data folder', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const old = new EventEmitter();
+  old.exitCode = null; old.signalCode = null;
+  const signals = [];
+  old.kill = signal => { signals.push(signal); old.killed = true; };
+  const events = [];
+  const context = {
+    backendProcess: old, backendPathGrants: { reset() {} }, loggedPathGrants: new Set(),
+    agentBrowserCapabilities: { revokeAll() {} }, expectedBackendStops: new WeakSet(),
+    closeBackendLogStream() {}, setTimeout, Promise, BACKEND_STOP_WAIT_MS: 5000,
+    removeLegacyAgentBrowserConnection() {}, getGoferDataDir: () => '/data',
+    startBackend: async () => { events.push('start'); return { apiBaseUrl: 'http://127.0.0.1:1', apiToken: '' }; },
+    workflowShortcuts: { sync: async () => ({}) }, backendErrorWindow: null, mainWindow: null,
+    createWindow: () => events.push('window'), createBackendErrorWindow: error => { throw error; },
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function stopBackend()'), source.indexOf('function createBackendLogStream()')), context);
+  vm.runInContext(source.slice(source.indexOf('async function replaceBackendWindow()'), source.indexOf('function openLogsFolder()')), context);
+  const replaced = context.replaceBackendWindow();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(signals, ['SIGTERM']);
+  assert.deepEqual(events, []);
+  old.emit('exit', 0, null);
+  await replaced;
+  assert.deepEqual(events, ['start', 'window']);
+
+  // A backend that never reports its exit doesn't hold the restart forever.
+  const stuck = new EventEmitter();
+  stuck.exitCode = null; stuck.signalCode = null; stuck.kill = () => {};
+  context.backendProcess = stuck;
+  events.length = 0;
+  const later = context.replaceBackendWindow();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, []);
+  t.mock.timers.tick(5000);
+  await later;
+  assert.deepEqual(events, ['start', 'window']);
+});

@@ -9,17 +9,19 @@
     "type": "object",
     "properties": {
       "workflow_id": {
+        "description": "Registered child workflow ID; excludes workflow-path.",
         "type": "string",
         "minLength": 1,
         "x-rattish-allow-absence": true
       },
       "workflow_path": {
+        "description": "Child source path; excludes workflow-id.",
         "type": "string",
         "minLength": 1,
         "x-rattish-type": "Path",
         "x-rattish-allow-absence": true
       },
-      "version": {"type": ["integer", "null"], "minimum": 1}
+      "version": {"description": "Requested child interface version.", "type": ["integer", "null"], "minimum": 1}
     },
     "oneOf": [
       {"required": ["workflow_id"]},

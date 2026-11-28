@@ -1,4 +1,4 @@
-export const BUILTIN_THEME_IDS = ["auto", "light", "dark", "sepia", "vaporwave", "steam", "carbon", "botanical", "blueprint", "arcade", "sakura", "deep-sea", "solarpunk", "noir", "candy-lab", "cosmic"];
+const BUILTIN_THEME_IDS = ["auto", "light", "dark", "sepia", "vaporwave", "steam", "carbon", "botanical", "blueprint", "arcade", "sakura", "deep-sea", "solarpunk", "noir", "candy-lab", "cosmic"];
 export const DEFAULT_REPORT_THEMES = { enabled: true, selected: "auto", custom: [], generation: { provider: "", model: "", effort: "" } };
 export const REPORT_FORMATS = ["md", "html", "slides", "pdf"];
 export function reportOutputFormat(memory = {}) {

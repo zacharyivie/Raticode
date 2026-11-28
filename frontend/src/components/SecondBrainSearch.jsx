@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownToLine, BookmarkPlus, ChevronDown, Copy, EyeOff, FilePlus2, FolderCog, FolderOpen, Library, ListFilter, MessageSquareQuote, PanelLeft, Plus, Search, SearchX, Sparkles, Star, TriangleAlert, Upload, X, Scale, ScrollText } from "lucide-react";
-import { DATE_FIELDS, DOCUMENT_TYPES, EMPTY_FILTERS, MATCH_LABELS, MATCH_MODES, ORIGINS, READING_STATES, EXTRACTION_STATES, CITATION_FILTERS, SEARCH_IN, SEARCH_MODES, SORTS, activeFilterCount, describeQuery, facetCounts, formatDay, parseQuery, queryText, searchLibrary, typeLabel, dateFieldLabel, readingLabel, originLabel, extractionLabel, citationFilterLabel, parseDateBound, matchesFilters, highlightSegments, demoteReplaced, checkByDue, FOLDER_RULES, folderRuleLabel, ruleForFolder, leftOutBy, loweredBy } from "../lib/secondBrain.js";
+import { DATE_FIELDS, DOCUMENT_TYPES, EMPTY_FILTERS, MATCH_LABELS, MATCH_MODES, ORIGINS, READING_STATES, EXTRACTION_STATES, CITATION_FILTERS, SEARCH_IN, SEARCH_MODES, SORTS, activeFilterCount, describeQuery, facetCounts, libraryDay, parseQuery, queryText, searchLibrary, typeLabel, dateFieldLabel, readingLabel, originLabel, extractionLabel, citationFilterLabel, parseDateBound, matchesFilters, highlightSegments, demoteReplaced, checkByDue, FOLDER_RULES, folderRuleLabel, ruleForFolder, leftOutBy, loweredBy } from "../lib/secondBrain.js";
 import { useSecondBrain, viewFor, libraryFor, updateSearch, resetSearch, openDocument, toggleSelection, clearSelection, openDialog, addToCollection, evidenceItem, notify, createCollection, navigate, isSampleLibrary, documentById, setFolderRule } from "../lib/secondBrainStore.js";
 import { fuseResults } from "../lib/secondBrainGraph.js";
 import { Chip, DraftInput, Empty, Menu, Pill, Popover, Segmented, TypeIcon, Highlight, BrainMark, askRem } from "./SecondBrainParts.jsx";
 import { brainRequest } from "../lib/secondBrainApi.js";
 import SecondBrainReader from "./SecondBrainReader.jsx";
 import { useRovingChoice } from "../lib/useRovingChoice.js";
+import { clockTime } from "../lib/timeText.js";
 
 const toggle = (list = [], value) => list.includes(value) ? list.filter(item => item !== value) : [...list, value];
 
@@ -207,8 +208,8 @@ function ResultItem({ result, active, selected, multiBrain, brainOf, collections
         <span>{typeLabel(doc.type)}</span>
         {doc.author ? <span>{doc.author}</span> : null}
         {doc.source?.domain ? <span>{doc.source.domain}</span> : null}
-        <span>Modified {formatDay(doc.dates.modified, { relative: true })}</span>
-        {doc.dates.published ? <span>Published {formatDay(doc.dates.published)}</span> : null}
+        <span>Modified {libraryDay(doc.dates.modified, { relative: true })}</span>
+        {doc.dates.published ? <span>Published {libraryDay(doc.dates.published)}</span> : null}
         {doc.extraction !== "ready" ? <Pill tone={doc.extraction === "failed" ? "danger" : "warning"}>{extractionLabel(doc.extraction)}</Pill> : null}
         {doc.origin && doc.origin !== "authored" ? <span data-origin={doc.origin}>{originLabel(doc.origin)}</span> : null}
         {doc.replacedBy?.docId ? <Pill tone="warning">Replaced by {newerTitle || "a newer report"}</Pill> : null}
@@ -331,7 +332,7 @@ export default function SearchView({ brain }) {
     <div className="sb-split" data-results-hidden={resultsHidden || undefined}>
       <section className="sb-results" aria-label="Search results">
         <div className="sb-results-head">
-          <p><strong>{results.length} document{results.length === 1 ? "" : "s"}</strong>{passageTotal ? ` · ${passageTotal} passage${passageTotal === 1 ? "" : "s"}` : ""}{store.passagesLoading && search.text.trim() ? <span className="sb-asof" role="status"> · Loading passages…</span> : null}{brain.index.state === "updating" ? <span className="sb-asof" title={`Index updating. ${brain.index.pending} documents are waiting for extraction.`}> · as of {new Date(brain.index.asOf).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span> : null}</p>
+          <p><strong>{results.length} document{results.length === 1 ? "" : "s"}</strong>{passageTotal ? ` · ${passageTotal} passage${passageTotal === 1 ? "" : "s"}` : ""}{store.passagesLoading && search.text.trim() ? <span className="sb-asof" role="status"> · Loading passages…</span> : null}{brain.index.state === "updating" ? <span className="sb-asof" title={`Index updating. ${brain.index.pending} documents are waiting for extraction.`}> · as of {clockTime(brain.index.asOf)}</span> : null}</p>
           <label className="sb-sort"><ListFilter size={13} aria-hidden="true" /><span className="sb-sr-only">Sort by</span><select aria-label="Sort results" value={search.sort} onChange={event => updateSearch({ sort: event.target.value })}>{SORTS.map(([id, text]) => <option key={id} value={id}>{text}</option>)}</select></label>
           <button type="button" className="sb-icon-button sb-hide-results" aria-label="Hide results" title="Hide results" onClick={() => setResultsHidden(true)}><PanelLeft size={15} /></button>
         </div>
@@ -345,7 +346,7 @@ export default function SearchView({ brain }) {
             { label: "New collection…", icon: Plus, onSelect: () => openDialog("new-collection", { items: selection.map(id => evidenceItem(id)) }) },
           ]} />
           <button type="button" className="sb-mini-button" onClick={() => openDialog("summarize", { docIds: selection })}><Sparkles size={13} />Summarize</button>
-          <button type="button" className="sb-mini-button" disabled={selection.length < 2} title={selection.length < 2 ? "Select at least two documents" : undefined} onClick={() => { const collection = createCollection(`Comparison · ${formatDay(new Date().toISOString())}`, selection.map(id => evidenceItem(id))); clearSelection(); navigate("collections", { collectionId: collection.id, collectionTab: "compare" }); }}><Scale size={13} />Compare</button>
+          <button type="button" className="sb-mini-button" disabled={selection.length < 2} title={selection.length < 2 ? "Select at least two documents" : undefined} onClick={() => { const collection = createCollection(`Comparison · ${libraryDay(new Date().toISOString())}`, selection.map(id => evidenceItem(id))); clearSelection(); navigate("collections", { collectionId: collection.id, collectionTab: "compare" }); }}><Scale size={13} />Compare</button>
           <button type="button" className="sb-mini-button" onClick={() => openDialog("report-builder", { sources: selection.map(id => ({ docId: id })) })}><ScrollText size={13} />Cited report</button>
           <button type="button" className="sb-mini-button" onClick={() => askRem({ brain, doc: selectedDocs[0], passages: selectedDocs.map(doc => ({ doc })), draft: "", title: `${selectedDocs.length} documents from ${brain.name}` })}><MessageSquareQuote size={13} />Ask Rem</button>
           <button type="button" className="sb-icon-button" aria-label="Clear selection" title="Clear selection" onClick={clearSelection}><X size={14} /></button>

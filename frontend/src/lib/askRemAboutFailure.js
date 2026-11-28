@@ -9,7 +9,7 @@ import { askRemAboutText } from "./fileAttachments.js";
 // marked as untrusted, inside BEGIN/END lines with a random tag the quoted text can't
 // know, so it can't close the block early.
 
-export const MAX_QUOTED_LINES = 200;
+const MAX_QUOTED_LINES = 200;
 export const MAX_QUOTED_BYTES = 8 * 1024;
 
 // Run statuses and timeline rows that offer the action.
@@ -86,7 +86,7 @@ export function diagnosticForRem(diagnostic, { workflowName = "", workflowPath =
   return untrusted("Raticode workflow problem from the Problems panel, attached with Ask Rem about this failure.", "WORKFLOW TEXT", lines, tag);
 }
 
-export function diagnosticAttachmentName(diagnostic) {
+function diagnosticAttachmentName(diagnostic) {
   const code = String(diagnostic?.code || "problem").replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 60);
   return `workflow-problem-${code}.txt`;
 }

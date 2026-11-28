@@ -23,6 +23,13 @@ have it.
 When a start is skipped or queued because the workflow is busy, its history line names
 the live run and how long it has run, so a hung run shows up in the history.
 
+A trigger that is on but can't fire (its folder is missing, the webhook port is taken,
+its schedule can't be read) gets one failed history entry with the reason, "Can't
+start: Nothing to watch at /path.", once per distinct reason rather than on every
+resync. The same reason again with nothing else in between counts on that entry. Each
+webhook trigger that is on gets its own entry for a taken port. Nothing is written
+while all triggers are paused.
+
 All triggers can be paused at once (``TriggerStore.set_paused``). While paused,
 nothing starts: cron times are recorded as skipped and never caught up, file
 changes aren't watched, and webhook calls are refused. Each trigger keeps its own
@@ -60,6 +67,39 @@ or unreadable file, or a wait saved before the hashes were kept, fails the entry
 ``RECORD_CHANGED_MESSAGE`` instead of starting. Resume from the Runs list is the user's
 own start and doesn't check.
 
+A file trigger's run gets at most ``MAX_FILE_CHANGES_PER_RUN`` changed files, the first
+in the order they arrived. The rest start the next run as soon as that one ends,
+whatever the overlap policy, and that run doesn't count toward ``SELF_TRIGGER_LIMIT``.
+Up to ``MAX_PENDING_FILE_CHANGES`` files wait; the history counts each file past that
+once, however many events it sends, up to ``MAX_DROPPED_FILES_REMEMBERED`` files.
+
+On Linux a burst of changes can fill the kernel's inotify queue
+(``fs.inotify.max_queued_events``), which drops events and sends one IN_Q_OVERFLOW.
+The observer here passes that on (``_OverflowObserver``), and the next tick looks
+through each affected trigger's folder for matching files changed since the watcher
+last had nothing left to read, or since its watch began if later, minus
+``OVERFLOW_LOOK_BACK_SECONDS``. Each goes in as a modified file, and the trigger's
+history says how many were found and that deletions in the burst weren't seen.
+
+A start that hits an error, such as a busy or full trigger store, is tried again
+instead of lost. A cron time keeps its place and the next tick tries it while it is
+within ``LATE_GRACE_SECONDS``; after that it is missed as usual. A file batch goes back
+with the changes that came since, a queued start back in the queue and a resume back to
+waiting, while the other triggers start as normal. A start that fails after its history
+entry turned running undoes everything it set up, so no run that never existed keeps the
+workflow busy, and the entry fails with "Couldn't start the run: <error>". Retries of
+one trigger wait a little longer each time, up to ``MAX_START_RETRY_SECONDS``. A run's
+result that can't be written stays in memory and is written on later ticks.
+
+A queued start outlasts its scheduler. Its history entry keeps the start's scheduled
+time, trigger events and count of changed files not kept (``_occurrence_json``), held to
+the limits of a run's saved values, and each start folded in updates it. When the
+scheduler stops, the entry stays queued; the next owner puts it back in the queue while
+its trigger is still there and on and triggers aren't paused, and it starts through the
+same approval, daily limit, worktree and overlap checks. Any other queued entry, such as
+one saved before this was kept, closes with "The scheduler stopped before this queued run
+started."
+
 Every run goes through ``run_rattish_file``, the same path as ``Raticode rattish run``;
 a resumed one through ``resume_rattish_run``.
 """
@@ -75,11 +115,12 @@ import os
 import sqlite3
 import sys
 import threading
-from collections.abc import Callable, Mapping
+import time
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -94,6 +135,7 @@ from gofer.rattish.approved_files import ApprovedFiles
 from gofer.rattish.artifacts import RattishArtifactError, compile_rattish_file
 from gofer.rattish.contracts import canonical_json_bytes
 from gofer.rattish.diagnostics import RattishError
+from gofer.rattish.path_globs import match_path_parts
 from gofer.rattish.run_service import (
     RattishResumeRefused,
     RattishRunResult,
@@ -105,9 +147,11 @@ from gofer.rattish.run_service import (
     run_rattish_file,
 )
 from gofer.rattish.run_values import (
+    MAX_SAVED_EVENTS,
     SavedValuesUnavailable,
     parse_saved_values,
     saved_values_path,
+    trigger_events_refusal,
 )
 from gofer.rattish.trigger_approval import (
     APPROVAL_SKIP_MESSAGE,
@@ -121,6 +165,7 @@ from gofer.rattish.triggers import (
     PAUSED_SKIP_MESSAGE,
     RUNS_ONLY_WHILE_RUNNING_NOTICE,
     Approval,
+    DailyAllowance,
     DailyLimitState,
     TriggerError,
     TriggerNotFound,
@@ -151,17 +196,48 @@ log = get_logger(__name__)
 RECORD_CHANGED_MESSAGE = (
     "The run's saved record changed while it waited, so Raticode didn't resume it. Start it again."
 )
+# What the next scheduler says about a run the last one left unfinished.
+INTERRUPTED_MESSAGE = "The scheduler stopped before this run finished."
+QUEUED_NEVER_STARTED_MESSAGE = "The scheduler stopped before this queued run started."
+# A queued start whose history entry keeps it, while no scheduler runs.
+QUEUED_ACROSS_STOP_MESSAGE = (
+    "The scheduler stopped, so this queued run starts when the scheduler runs again."
+)
+# A queued start the next scheduler took over, until it starts.
+QUEUED_RESTORED_MESSAGE = (
+    "Queued before the scheduler restarted. Starts when no other run of this workflow is going."
+)
+# The layout of a queued start saved on its history entry (``_occurrence_json``).
+_OCCURRENCE_VERSION = 1
 
 # How late a scheduled time may be noticed and still count as on time. Anything
 # later means the computer slept or nothing was running.
 LATE_GRACE_SECONDS = 60
+# A failed start is tried again on the next tick, then after 2, 4, 8 ... seconds, so a
+# store that stays broken doesn't add a failed entry every second.
+MAX_START_RETRY_SECONDS = 60
 STANDBY_RETRY_SECONDS = 5.0
 HEARTBEAT_SECONDS = 15
 HEARTBEAT_STALE_SECONDS = 45
 RESYNC_SECONDS = 15
+REWATCH_MESSAGE = (
+    "The watched folder was replaced, so changes made just before it was watched again "
+    "weren't seen."
+)
+# A second look after lost events reaches this much further back, for file systems
+# that store modification times coarsely.
+OVERFLOW_LOOK_BACK_SECONDS = 2.0
+CANT_START_PREFIX = "Can't start: "
 DOWNTIME_NOTICE_SECONDS = 120
 MAX_ACTIVE_RUNS = 16
 MAX_FILE_CHANGES_PER_RUN = min(256, DEFAULT_RESOURCE_LIMITS.max_fanout_items)
+# A batch past MAX_FILE_CHANGES_PER_RUN starts more runs, one after another, with the
+# rest. Changed files waiting to run stop at the scanned-path limit; later ones are
+# counted as dropped in the history.
+MAX_PENDING_FILE_CHANGES = max(MAX_FILE_CHANGES_PER_RUN, DEFAULT_RESOURCE_LIMITS.max_files_scanned)
+# Dropped files are remembered as short hashes so each counts once; past this many the
+# history says "More than" instead of a count.
+MAX_DROPPED_FILES_REMEMBERED = 50_000
 # A file trigger keeps waiting for quiet, but never longer than this, so a folder
 # that changes constantly still gets a run.
 MIN_DEBOUNCE_LIMIT_SECONDS = 60.0
@@ -217,6 +293,18 @@ def held_files_if_unchanged(wait: UsageWait) -> HeldRunFiles | None:
     ):
         return None
     return held
+
+
+def start_failed_message(error: BaseException) -> str:
+    """The history line of a start that hit an error."""
+    detail = (str(error) or type(error).__name__).strip()
+    return f"Couldn't start the run: {detail[:500]}"
+
+
+def start_retry_message(error: BaseException, at: str = "") -> str:
+    """The history line of a queued or waiting start that hit an error and waits to retry."""
+    when = f" at {at}" if at else ""
+    return f"{start_failed_message(error).rstrip('.')}. Trying again{when}."
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,12 +449,71 @@ def usage_wait_message(provider: str, until: datetime, named: bool, now: datetim
     )
 
 
+def _dropped_key(path: str) -> int:
+    return int.from_bytes(
+        hashlib.blake2b(path.encode("utf-8", "surrogatepass"), digest_size=8).digest(), "big"
+    )
+
+
+@dataclass(slots=True)
+class _DroppedFiles:
+    """Changed files that came past MAX_PENDING_FILE_CHANGES and weren't kept.
+
+    Each path counts once, however many events it sends, by a short hash in ``keys``.
+    Past MAX_DROPPED_FILES_REMEMBERED paths a new one can't be told from one already
+    counted, so ``more`` is set and the keys are let go. ``unnamed`` counts files
+    without a known path: a queued start read back from its history entry, or the
+    events past what that entry could keep.
+    """
+
+    keys: set[int] = field(default_factory=set)
+    unnamed: int = 0
+    more: bool = False
+
+    @property
+    def count(self) -> int:
+        return len(self.keys) + self.unnamed
+
+    def __bool__(self) -> bool:
+        return self.more or self.count > 0
+
+    def add(self, path: str) -> None:
+        if self.more:
+            return
+        key = _dropped_key(path)
+        if key in self.keys:
+            return
+        if len(self.keys) >= MAX_DROPPED_FILES_REMEMBERED:
+            self._overflow()
+            return
+        self.keys.add(key)
+
+    def merged(self, other: _DroppedFiles, kept: Iterable[str]) -> _DroppedFiles:
+        """Both counts as one, without files counted in both or kept after all."""
+        merged = _DroppedFiles(unnamed=self.unnamed + other.unnamed, more=self.more or other.more)
+        if merged.more:
+            return merged
+        merged.keys = self.keys | other.keys
+        if len(merged.keys) > MAX_DROPPED_FILES_REMEMBERED:
+            merged._overflow()
+            return merged
+        if merged.keys:
+            for path in kept:
+                merged.keys.discard(_dropped_key(path))
+        return merged
+
+    def _overflow(self) -> None:
+        self.more = True
+        self.keys = set()
+
+
 @dataclass(slots=True)
 class _Occurrence:
     trigger: TriggerRecord
     scheduled_for: datetime | None = None
     events: list[Mapping[str, Any]] = field(default_factory=list)
     catching_up: bool = False
+    dropped: _DroppedFiles = field(default_factory=_DroppedFiles)
 
 
 @dataclass(slots=True)
@@ -374,6 +521,8 @@ class _Waiting:
     occurrence: _Occurrence
     event_id: int
     folded: int = 0
+    # Whether its history entry holds the occurrence, so it outlasts this scheduler.
+    saved: bool = False
 
 
 @dataclass(slots=True)
@@ -382,6 +531,7 @@ class _FileChanges:
     last_at: datetime
     paths: dict[str, dict[str, Any]] = field(default_factory=dict)
     during_run: bool = False
+    dropped: _DroppedFiles = field(default_factory=_DroppedFiles)
 
 
 @dataclass(frozen=True, slots=True)
@@ -430,6 +580,20 @@ class _ChangeHandler(FileSystemEventHandler):
         self.root = Path(trigger.config["path"])
         self.glob = str(trigger.config["glob"])
         self.single_file = self.root.is_file()
+        # The folder the watch is on, and which folder it was when the watch began.
+        self.directory = self.root.parent if self.single_file else self.root
+        self.identity = _folder_identity(self.directory)
+        # Set once that folder is gone or another folder took its path: the watch
+        # follows the old folder, so its events no longer say anything about the path.
+        self.replaced = False
+        # When the watch began (wall-clock seconds, like a file's mtime). A second look
+        # after an overflow never reaches back past it.
+        self.watching_since = time.time()
+
+    def folder_replaced(self) -> bool:
+        if not self.replaced and _folder_identity(self.directory) != self.identity:
+            self.replaced = True
+        return self.replaced
 
     def _matches(self, path: Path) -> bool:
         if self.single_file:
@@ -440,17 +604,184 @@ class _ChangeHandler(FileSystemEventHandler):
             return False
         if _NEVER_WATCH_DIRECTORIES.intersection(relative.parts):
             return False
-        return fnmatch.fnmatch(relative.as_posix(), self.glob) or fnmatch.fnmatch(
-            relative.name, self.glob
-        )
+        if "/" not in self.glob:
+            return fnmatch.fnmatch(relative.name, self.glob)
+        return match_path_parts(relative.parts, PurePosixPath(self.glob).parts)
 
     def on_any_event(self, event: FileSystemEvent) -> None:
+        # watchdog's dispatcher thread ends on any exception, which would silently stop
+        # every file trigger on this computer, so one bad event is logged and skipped.
+        try:
+            self._handle(event)
+        except Exception:  # noqa: BLE001
+            log.warning("A file trigger skipped an event it couldn't handle", exc_info=True)
+
+    def _handle(self, event: FileSystemEvent) -> None:
+        if self.replaced:
+            return
+        if event.is_directory and event.event_type in {"deleted", "moved"}:
+            if Path(os.fsdecode(event.src_path)) == self.directory:
+                self.replaced = True
+                return
         if event.is_directory or event.event_type not in _RUN_FILE_EVENTS:
             return
         moved_to = os.fsdecode(event.dest_path) if event.event_type == "moved" else ""
         path = Path(moved_to or os.fsdecode(event.src_path))
-        if self._matches(path):
+        # A folder moved away keeps sending its events under the old path, so check
+        # the path still holds the watched folder before reporting the file.
+        if self._matches(path) and not self.folder_replaced():
             self.engine.note_file_change(self.trigger_id, event.event_type, path)
+
+    def changed_since(self, since: float, *, recursive: bool, limit: int) -> list[Path]:
+        """The matching files changed at or after ``since``, oldest first, at most ``limit``.
+
+        A file counts by the later of its mtime and ctime, so one moved in counts too.
+        Folders are read the same way events are matched: the glob, the recursive flag,
+        and never inside ``_NEVER_WATCH_DIRECTORIES``. Symlinked folders aren't followed.
+        """
+        found: list[tuple[float, str]] = []
+        if self.single_file:
+            changed = _changed_at(self.root)
+            return [self.root] if changed is not None and changed >= since else []
+        folders = [self.root]
+        while folders and len(found) < limit:
+            try:
+                entries = os.scandir(folders.pop())
+            except OSError:
+                continue
+            with entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if recursive and entry.name not in _NEVER_WATCH_DIRECTORIES:
+                                folders.append(Path(entry.path))
+                            continue
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    changed = max(info.st_mtime, info.st_ctime)
+                    if changed >= since and self._matches(Path(entry.path)):
+                        found.append((changed, entry.path))
+                        if len(found) >= limit:
+                            break
+        return [Path(path) for _, path in sorted(found)]
+
+
+def _changed_at(path: Path) -> float | None:
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return max(info.st_mtime, info.st_ctime)
+
+
+# Linux tells a watcher that fills its event queue (``fs.inotify.max_queued_events``)
+# only with one IN_Q_OVERFLOW, and watchdog just logs it. These classes pass it on to
+# the trigger engine with how far back changes may have gone unreported. Mac and
+# Windows use watchdog's own observer.
+OverflowCallback = Callable[[ObservedWatch, float], None]
+
+if sys.platform.startswith("linux"):
+    import termios
+    from array import array
+
+    from watchdog.observers.api import DEFAULT_OBSERVER_TIMEOUT, EventQueue
+    from watchdog.observers.inotify import InotifyEmitter, InotifyWatchGroup
+    from watchdog.observers.inotify_c import DEFAULT_EVENT_BUFFER_SIZE, InotifyEvent, InotifyFD
+
+    class _CatchUpInotifyFD(InotifyFD):
+        """An inotify reader that remembers when it last had nothing left to read.
+
+        Every event lost to an overflow came after that moment: the reader had read
+        everything before it. The last event a trigger saw is no such bound, because
+        a reader that falls behind hands events over long after they happened.
+        """
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.caught_up_at = time.time()
+
+        def read_events(
+            self, *, event_buffer_size: int = DEFAULT_EVENT_BUFFER_SIZE
+        ) -> list[InotifyEvent]:
+            if self._nothing_waiting():
+                self.caught_up_at = time.time()
+            return super().read_events(event_buffer_size=event_buffer_size)
+
+        def _nothing_waiting(self) -> bool:
+            with self._lock:
+                if self._closed:
+                    return False
+                waiting = array("i", [0])
+                try:
+                    fcntl.ioctl(self._inotify_fd, termios.FIONREAD, waiting)
+                except OSError:
+                    return False
+            return waiting[0] == 0
+
+    @dataclass
+    class _OverflowWatchGroup(InotifyWatchGroup):
+        overflowed: Callable[[], None] | None = field(default=None, kw_only=True)
+
+        def on_queue_overflow(self) -> None:
+            super().on_queue_overflow()
+            # This runs on the inotify reader's thread, which an exception would end.
+            try:
+                if self.is_active and self.overflowed is not None:
+                    self.overflowed()
+            except Exception:  # noqa: BLE001
+                log.exception("Couldn't pass on a file watch's lost events")
+
+    class _OverflowEmitter(InotifyEmitter):
+        def __init__(
+            self,
+            event_queue: EventQueue,
+            watch: ObservedWatch,
+            *,
+            on_overflow: OverflowCallback,
+            **options: Any,
+        ) -> None:
+            super().__init__(event_queue, watch, **options)
+            self._on_overflow = on_overflow
+
+        def on_thread_start(self) -> None:
+            # InotifyEmitter.on_thread_start, with a watch group that reports overflows.
+            self._inotify = _OverflowWatchGroup(
+                self._inotify_fd,
+                os.fsencode(self.watch.path),
+                is_recursive=self.watch.is_recursive,
+                event_mask=self.get_event_mask_from_filter(),
+                follow_symlink=self.watch.follow_symlink,
+                overflowed=self._overflowed,
+            )
+
+        def _overflowed(self) -> None:
+            caught_up_at = getattr(self._inotify_fd, "caught_up_at", 0.0)
+            self._on_overflow(self.watch, float(caught_up_at))
+
+    class _OverflowObserver(BaseObserver):
+        """watchdog's InotifyObserver, with emitters that report overflows."""
+
+        def __init__(self, on_overflow: OverflowCallback) -> None:
+            self._inotify_fd = _CatchUpInotifyFD()
+            self._inotify_fd.start()
+            super().__init__(
+                _OverflowEmitter,
+                timeout=DEFAULT_OBSERVER_TIMEOUT,
+                inotify_fd=self._inotify_fd,
+                on_overflow=on_overflow,
+            )
+
+        def on_thread_stop(self) -> None:
+            super().on_thread_stop()
+            self._inotify_fd.stop()
+            self._inotify_fd.join()
+
+
+def _new_observer(on_overflow: OverflowCallback) -> BaseObserver:
+    if sys.platform.startswith("linux"):
+        return _OverflowObserver(on_overflow)
+    return Observer()
 
 
 class _WebhookServer(ThreadingHTTPServer):
@@ -536,7 +867,12 @@ class _WebhookHandler(BaseHTTPRequestHandler):
         except WebhookBodyError as exc:
             self._reply(400, {"error": str(exc)})
             return
-        outcome = self.server.engine.receive_webhook(trigger, payload)
+        try:
+            outcome = self.server.engine.receive_webhook(trigger, payload)
+        except Exception:  # noqa: BLE001 - the caller can send it again; nothing else can
+            log.exception("Couldn't start a run for webhook trigger %s", trigger.id)
+            self._reply(503, {"error": "Couldn't start the run. Send the call again."})
+            return
         self._reply(
             202,
             {
@@ -680,9 +1016,24 @@ class TriggerEngine:
         self._waiting: dict[str, _Waiting] = {}
         self._changes: dict[str, _FileChanges] = {}
         self._self_triggered: dict[str, int] = {}
+        # The changed files past a run's first MAX_FILE_CHANGES_PER_RUN, by that run's ID,
+        # then by trigger once the run ends, ready to start the next run.
+        self._carried_after: dict[str, _Occurrence] = {}
+        self._carried: dict[str, list[_Occurrence]] = {}
+        # Triggers whose last start hit an error: failures in a row, and when to try again.
+        self._start_retries: dict[str, tuple[int, datetime]] = {}
+        # Results of finished runs the store couldn't take yet, by history entry.
+        self._unsaved_results: dict[int, tuple[str, str | None]] = {}
         self._observer: BaseObserver | None = None
         self._watches: dict[str, tuple[str, ObservedWatch, _ChangeHandler]] = {}
         self._watch_errors: dict[str, str] = {}
+        # The "Can't start" history message last written for each trigger that can't fire.
+        self._cant_start: dict[str, str] = {}
+        # File triggers whose folder was replaced, until the new folder is watched.
+        self._rewatch: set[str] = set()
+        # File triggers whose watch lost events to an overflow, each with the wall-clock
+        # time its second look starts from. The next tick looks through the folder.
+        self._overflowed: dict[str, float] = {}
         self._webhook_server: _WebhookServer | None = None
         self._webhook_thread: threading.Thread | None = None
         self._webhook_port: int | None = None
@@ -734,9 +1085,11 @@ class TriggerEngine:
         self._is_owner = True
         self._started_at = now
         self._stopping = False
+        self._cant_start.clear()  # Another owner may have written history meanwhile.
         self._start_social_publisher()
+        restored = self._restore_queued()
         interrupted = self.store.close_open_events(
-            "The scheduler stopped before this run finished."
+            INTERRUPTED_MESSAGE, queued_message=QUEUED_NEVER_STARTED_MESSAGE, keep=restored
         )
         if interrupted:
             log.warning("Marked %d unfinished trigger run(s) as interrupted", interrupted)
@@ -744,6 +1097,37 @@ class TriggerEngine:
         self._reload(now)
         self._record_downtime(previous, now)
         self._heartbeat(now)
+
+    def _restore_queued(self) -> set[int]:
+        """Queue again the starts the last scheduler left queued. Returns their entry IDs.
+
+        Only an entry that saved its occurrence comes back, and only while its trigger
+        is still there and on and triggers aren't paused. It then starts through
+        ``_drain_waiting``, so approval, daily limits, worktrees and overlap still apply.
+        A trigger with more than one such entry keeps the newest.
+        """
+        try:
+            if self.store.pause_state().paused:
+                return set()
+            triggers = {item.id: item for item in self.store.list_triggers()}
+            saved = self.store.queued_occurrences()
+        except sqlite3.Error:
+            log.exception("Could not read the queued trigger runs; they close as not started")
+            return set()
+        with self._lock:
+            for event_id, trigger_id, raw, count in saved:
+                trigger = triggers.get(trigger_id)
+                if trigger is None or not trigger.enabled:
+                    continue
+                occurrence = _saved_occurrence(trigger, raw)
+                if occurrence is not None:
+                    self._waiting[trigger_id] = _Waiting(
+                        occurrence, event_id, max(0, count - 1), saved=True
+                    )
+            restored = {waiting.event_id for waiting in self._waiting.values()}
+        for event_id in restored:
+            self.store.update_event(event_id, message=QUEUED_RESTORED_MESSAGE)
+        return restored
 
     def _record_downtime(self, previous: Mapping[str, Any], now: datetime) -> None:
         """File changes and webhooks can't be replayed, so say a gap happened."""
@@ -775,9 +1159,17 @@ class TriggerEngine:
     def tick(self, now: datetime | None = None) -> None:
         moment = now or self._clock()
         revision = self.store.revision()
-        if revision != self._revision or self._next_resync is None or moment >= self._next_resync:
+        if (
+            revision != self._revision
+            or self._next_resync is None
+            or moment >= self._next_resync
+            or self._a_watched_folder_went_away()
+        ):
             self._reload(moment, revision=revision)
+        self._save_unsaved_results()
         self._evaluate_cron(moment)
+        self._start_carried(moment)
+        self._look_again_after_overflow(moment)
         self._flush_file_changes(moment)
         self._resume_due(moment)
         self._drain_waiting(moment)
@@ -809,6 +1201,8 @@ class TriggerEngine:
                     self._watch_errors[trigger.id] = str(exc)
         for trigger_id in set(self._cursors) - set(self._triggers):
             del self._cursors[trigger_id]
+        for trigger_id in set(self._start_retries) - set(self._triggers):
+            del self._start_retries[trigger_id]
         for trigger_id in set(self._waiting) - set(self._triggers):
             self.store.update_event(
                 self._waiting.pop(trigger_id).event_id,
@@ -819,8 +1213,41 @@ class TriggerEngine:
             self._sync_watchers()
         if self._enable_webhooks:
             self._sync_webhook()
+        self._record_cant_start(now)
         if self._is_owner:
             self._publish(now, running=True)
+
+    def _record_cant_start(self, now: datetime) -> None:
+        """Give each trigger that is on but can't fire one failed entry per distinct reason.
+
+        The reason is checked on every resync but written only when it is new. When the
+        trigger could fire for a while, or the scheduler restarted, and the same reason
+        comes back with nothing else in the history since, its count goes up instead.
+        """
+        if self._pause.paused:
+            return  # Nothing would fire anyway; the pause says so.
+        errors = dict(self._watch_errors)
+        if self._webhook_error:
+            for record in self._triggers.values():
+                if record.kind == "webhook":
+                    errors[record.id] = self._webhook_error
+        for trigger_id in set(self._cant_start) - set(errors):
+            del self._cant_start[trigger_id]  # It can fire again.
+        for trigger_id, error in errors.items():
+            trigger = self._triggers.get(trigger_id)
+            if trigger is None or not trigger.enabled:
+                self._cant_start.pop(trigger_id, None)
+                continue
+            message = f"{CANT_START_PREFIX}{error}"
+            if self._cant_start.get(trigger_id) == message:
+                continue
+            latest = self.store.latest_event(trigger_id)
+            if latest is not None and latest.status == "failed" and latest.message == message:
+                # Nothing happened since the last time: count it on that entry.
+                self.store.update_event(latest.id, count=latest.count + 1, at=now)
+            else:
+                self.store.add_event(trigger, status="failed", at=now, message=message)
+            self._cant_start[trigger_id] = message
 
     def _heartbeat(self, now: datetime) -> None:
         self._next_heartbeat = now + timedelta(seconds=HEARTBEAT_SECONDS)
@@ -846,54 +1273,111 @@ class TriggerEngine:
         baseline = parse_iso(trigger.baseline_at)
         return max(known, baseline) if known else baseline
 
+    def _may_try(self, trigger_id: str, now: datetime) -> bool:
+        """Whether a trigger whose start hit an error has waited long enough to try again."""
+        found = self._start_retries.get(trigger_id)
+        return found is None or now >= found[1]
+
+    def _start_failed(self, trigger_id: str, now: datetime) -> datetime:
+        """Note a start that hit an error. Returns when to try that trigger again."""
+        failures = self._start_retries.get(trigger_id, (0, now))[0] + 1
+        delay = 0 if failures == 1 else min(2 ** (failures - 1), MAX_START_RETRY_SECONDS)
+        retry_at = now + timedelta(seconds=delay)
+        self._start_retries[trigger_id] = (failures, retry_at)
+        return retry_at
+
+    def _start_worked(self, trigger_id: str) -> None:
+        self._start_retries.pop(trigger_id, None)
+
     def _evaluate_cron(self, now: datetime) -> None:
         for trigger_id, schedule in self._schedules.items():
-            trigger = self._triggers[trigger_id]
-            cursor = self._cursor(trigger)
-            if cursor >= now:
-                self._cursors[trigger_id] = cursor
+            if not self._may_try(trigger_id, now):
                 continue
-            due = occurrences_between(schedule, cursor, now)
+            try:
+                started = self._fire_cron(self._triggers[trigger_id], schedule, now)
+            except Exception:  # noqa: BLE001 - one trigger's error must not stop the others
+                log.exception("Couldn't start scheduled trigger %s; trying again", trigger_id)
+                self._start_failed(trigger_id, now)
+                continue
+            if started:
+                self._start_worked(trigger_id)
+
+    def _fire_cron(self, trigger: TriggerRecord, schedule: CronTrigger, now: datetime) -> bool:
+        """Start or record the trigger's due times. Returns whether any were due.
+
+        The cursor moves past a due time only once dispatch has recorded what happened
+        to it. When the start raises, the cursor stays at that time so the next tick
+        tries it again; once it is more than ``LATE_GRACE_SECONDS`` late it is missed.
+        """
+        trigger_id = trigger.id
+        cursor = self._cursor(trigger)
+        if cursor >= now:
+            self._cursors[trigger_id] = cursor
+            return False
+        due = occurrences_between(schedule, cursor, now)
+        if not due:
             self._cursors[trigger_id] = now
+            return False
+        # Read fresh: a pause or resume may have landed since this tick began.
+        pause = self.store.pause_state()
+        paused = [item for item in due if pause.covers(item)]
+        if paused:
+            # Times that fell in a pause are skipped on purpose: never caught up.
+            self.store.add_event(
+                trigger,
+                status="skipped",
+                at=now,
+                scheduled_for=paused[0],
+                count=len(paused),
+                message=PAUSED_SKIP_MESSAGE
+                if len(paused) == 1
+                else f"{len(paused)} scheduled runs skipped because all triggers were paused.",
+            )
+            due = [item for item in due if item not in paused]
             if not due:
-                continue
-            self.store.set_cursors({trigger_id: now})
-            # Read fresh: a pause or resume may have landed since this tick began.
-            pause = self.store.pause_state()
-            paused = [item for item in due if pause.covers(item)]
-            if paused:
-                # Times that fell in a pause are skipped on purpose: never caught up.
-                self.store.add_event(
-                    trigger,
-                    status="skipped",
-                    at=now,
-                    scheduled_for=paused[0],
-                    count=len(paused),
-                    message=PAUSED_SKIP_MESSAGE
-                    if len(paused) == 1
-                    else f"{len(paused)} scheduled runs skipped because all triggers were paused.",
-                )
-                due = [item for item in due if item not in paused]
-                if not due:
-                    continue
-            late = [item for item in due if (now - item).total_seconds() > LATE_GRACE_SECONDS]
-            on_time = [item for item in due if item not in late]
-            if late:
-                plural = "" if len(late) == 1 else "s"
-                amount = f"At least {len(late)}" if len(due) >= MAX_MISSED_COUNTED else len(late)
-                self.store.add_event(
-                    trigger,
-                    status="missed",
-                    at=now,
-                    scheduled_for=late[0],
-                    count=len(late),
-                    message=f"{amount} scheduled run{plural} did not happen because "
-                    "Raticode and its scheduler weren't running.",
-                )
-            if on_time:
+                self._save_cursor(trigger_id, now)
+                return True
+        late = [item for item in due if (now - item).total_seconds() > LATE_GRACE_SECONDS]
+        on_time = [item for item in due if item not in late]
+        if late:
+            plural = "" if len(late) == 1 else "s"
+            amount = f"At least {len(late)}" if len(due) >= MAX_MISSED_COUNTED else len(late)
+            reason = (
+                "its start kept failing."
+                if trigger_id in self._start_retries
+                else "Raticode and its scheduler weren't running."
+            )
+            self.store.add_event(
+                trigger,
+                status="missed",
+                at=now,
+                scheduled_for=late[0],
+                count=len(late),
+                message=f"{amount} scheduled run{plural} did not happen because {reason}",
+            )
+        if on_time:
+            try:
                 self.dispatch(_Occurrence(trigger, on_time[-1]), now=now)
-            elif trigger.missed == "run_once":
+            except Exception:
+                # Everything before this time is recorded; the next tick tries this one.
+                self._save_cursor(trigger_id, on_time[-1] - timedelta(microseconds=1))
+                raise
+        elif trigger.missed == "run_once":
+            try:
                 self.dispatch(_Occurrence(trigger, late[-1], catching_up=True), now=now)
+            except Exception:
+                # Already late and recorded as missed, so the missed rule has applied.
+                self._save_cursor(trigger_id, now)
+                raise
+        self._save_cursor(trigger_id, now)
+        return True
+
+    def _save_cursor(self, trigger_id: str, cursor: datetime) -> None:
+        self._cursors[trigger_id] = cursor
+        try:
+            self.store.set_cursors({trigger_id: cursor})
+        except Exception:  # noqa: BLE001 - the next heartbeat saves it
+            log.exception("Could not save the schedule position of trigger %s", trigger_id)
 
     def note_file_change(self, trigger_id: str, change: str, path: Path) -> None:
         now = self._clock()
@@ -907,7 +1391,9 @@ class TriggerEngine:
                 self._changes[trigger_id] = pending
             pending.last_at = now
             pending.during_run = pending.during_run or self._active.get(trigger.source_path, 0) > 0
-            if str(path) in pending.paths or len(pending.paths) < MAX_FILE_CHANGES_PER_RUN:
+            if str(path) not in pending.paths and len(pending.paths) >= MAX_PENDING_FILE_CHANGES:
+                pending.dropped.add(str(path))
+            else:
                 pending.paths[str(path)] = {
                     "type": "file",
                     "kind": change,
@@ -925,6 +1411,8 @@ class TriggerEngine:
                 if trigger is None or not trigger.enabled:
                     self._changes.pop(trigger_id, None)
                     continue
+                if not self._may_try(trigger_id, now):
+                    continue
                 debounce = float(trigger.config["debounceSeconds"])
                 limit = max(MIN_DEBOUNCE_LIMIT_SECONDS, debounce * DEBOUNCE_LIMIT_FACTOR)
                 quiet = (now - pending.last_at).total_seconds() >= debounce
@@ -933,9 +1421,169 @@ class TriggerEngine:
                     self._changes.pop(trigger_id, None)
                     ready.append((trigger, pending))
         for trigger, pending in ready:
-            if self._stops_self_triggering(trigger, pending, now):
+            self_count = self._self_triggered.get(trigger.id)
+            try:
+                if self._stops_self_triggering(trigger, pending, now):
+                    continue
+                occurrence = _Occurrence(
+                    trigger, events=list(pending.paths.values()), dropped=pending.dropped
+                )
+                self.dispatch(occurrence, now=now)
+            except Exception:  # noqa: BLE001 - the batch waits; other triggers still start
+                log.exception(
+                    "Couldn't start file trigger %s; its %d changed file(s) wait to try again",
+                    trigger.id,
+                    len(pending.paths),
+                )
+                # The batch didn't start, so it doesn't count as a run that started itself.
+                if self_count is None:
+                    self._self_triggered.pop(trigger.id, None)
+                else:
+                    self._self_triggered[trigger.id] = self_count
+                self._start_failed(trigger.id, now)
+                self._put_back_changes(trigger.id, pending)
                 continue
-            self.dispatch(_Occurrence(trigger, events=list(pending.paths.values())), now=now)
+            self._start_worked(trigger.id)
+
+    def _put_back_changes(self, trigger_id: str, failed: _FileChanges) -> None:
+        """Return a batch that didn't start, merged with the changes that came since.
+
+        Its files keep their place ahead of the newer ones, and a file in both keeps
+        its latest change, the same as two batches folded into one queued run.
+        """
+        with self._lock:
+            newer = self._changes.get(trigger_id)
+            if newer is None:
+                self._changes[trigger_id] = failed
+                return
+            merged = _FileChanges(
+                first_at=min(failed.first_at, newer.first_at),
+                last_at=max(failed.last_at, newer.last_at),
+                paths=dict(failed.paths),
+                during_run=failed.during_run or newer.during_run,
+            )
+            left_out: list[str] = []
+            for path, event in newer.paths.items():
+                if path in merged.paths or len(merged.paths) < MAX_PENDING_FILE_CHANGES:
+                    merged.paths[path] = event
+                else:
+                    left_out.append(path)
+            merged.dropped = failed.dropped.merged(newer.dropped, kept=merged.paths)
+            for path in left_out:
+                merged.dropped.add(path)
+            self._changes[trigger_id] = merged
+
+    def _note_overflow(self, watch: ObservedWatch, caught_up_at: float) -> None:
+        """Mark each file trigger on ``watch`` for a second look: it lost events.
+
+        Runs on the inotify reader's thread. The look starts at the later of when the
+        watch began and when the reader last had nothing left to read, minus
+        ``OVERFLOW_LOOK_BACK_SECONDS`` for timestamp precision.
+        """
+        with self._lock:
+            for trigger_id, (_, other, handler) in list(self._watches.items()):
+                if other != watch:
+                    continue
+                since = max(handler.watching_since, caught_up_at) - OVERFLOW_LOOK_BACK_SECONDS
+                earlier = self._overflowed.get(trigger_id)
+                self._overflowed[trigger_id] = since if earlier is None else min(earlier, since)
+
+    def _look_again_after_overflow(self, now: datetime) -> None:
+        """Look through each overflowed trigger's folder and note the files changed since.
+
+        Each found file goes through ``note_file_change`` as modified, so it joins the
+        pending batch like any other change. One history entry per trigger says how many
+        were found and that deletions in the burst went unseen.
+        """
+        with self._lock:
+            marked, self._overflowed = self._overflowed, {}
+            if self._pause.paused:
+                return
+        for trigger_id, since in marked.items():
+            trigger = self._triggers.get(trigger_id)
+            watched = self._watches.get(trigger_id)
+            if trigger is None or not trigger.enabled or watched is None:
+                continue
+            handler = watched[2]
+            if handler.folder_replaced():
+                continue  # The next resync watches the new folder and says so.
+            try:
+                found = handler.changed_since(
+                    since,
+                    recursive=bool(trigger.config["recursive"]),
+                    limit=MAX_PENDING_FILE_CHANGES,
+                )
+                for path in found:
+                    self.note_file_change(trigger_id, "modified", path)
+                self.store.add_event(
+                    trigger,
+                    status="missed",
+                    at=now,
+                    count=0,
+                    message=overflow_message(len(found), single_file=handler.single_file),
+                )
+            except Exception:  # noqa: BLE001 - one trigger's folder must not stop the others
+                log.exception("Couldn't look through file trigger %s's folder again", trigger_id)
+
+    def _start_carried(self, now: datetime) -> None:
+        """Start the run for each batch's changed files that didn't fit in the last run.
+
+        They don't wait for quiet, count toward the self-trigger limit or go through the
+        overlap policy: the rest of a batch starts once the run before it ends, and,
+        unless the policy is parallel, once no other run of the workflow is going.
+        """
+        with self._lock:
+            if self._stopping:
+                return
+            for trigger_id in list(self._carried):
+                trigger = self._triggers.get(trigger_id)
+                if trigger is None or not trigger.enabled:
+                    del self._carried[trigger_id]
+                    continue
+                if not self._may_try(trigger_id, now):
+                    continue
+                try:
+                    if trigger.overlap != "parallel" and self._workflow_busy(
+                        trigger.source_path, count_waits=False
+                    ):
+                        continue
+                except Exception:  # noqa: BLE001 - try again on a later tick
+                    log.exception("Couldn't check whether trigger %s's workflow runs", trigger_id)
+                    self._start_failed(trigger_id, now)
+                    continue
+                carried = self._carried.pop(trigger_id)
+                for index, occurrence in enumerate(carried):
+                    occurrence = replace(occurrence, trigger=trigger)
+                    try:
+                        if self._pause.paused:
+                            self.store.add_event(
+                                trigger, status="skipped", at=now, message=PAUSED_SKIP_MESSAGE
+                            )
+                        else:
+                            self._start(occurrence, now)
+                    except Exception:  # noqa: BLE001 - these files wait for the next try
+                        log.exception(
+                            "Couldn't start the rest of trigger %s's changed files; trying again",
+                            trigger_id,
+                        )
+                        self._start_failed(trigger_id, now)
+                        self._carried[trigger_id] = carried[index:] + self._carried.get(
+                            trigger_id, []
+                        )
+                        break
+                else:
+                    self._start_worked(trigger_id)
+
+    def _missed_carried(self, occurrence: _Occurrence, now: datetime) -> None:
+        count = len(occurrence.events)
+        files = "changed file" if count == 1 else "changed files"
+        self.store.add_event(
+            occurrence.trigger,
+            status="missed",
+            at=now,
+            message=f"The scheduler stopped before the other {count:,} {files} could "
+            "start their run.",
+        )
 
     def _stops_self_triggering(
         self, trigger: TriggerRecord, pending: _FileChanges, now: datetime
@@ -1107,25 +1755,53 @@ class TriggerEngine:
                 count=waiting.folded + 1,
                 message=f"{waiting_for} {waiting.folded + 1} starts folded into this one.",
             )
+            saved = _occurrence_json(waiting.occurrence)
+            self.store.save_queued_occurrence(waiting.event_id, saved)
+            waiting.saved = saved is not None
             return DispatchOutcome("queued", waiting.event_id)
+        saved = _occurrence_json(occurrence)
         event_id = self.store.add_event(
             trigger,
             status="queued",
             at=now,
             scheduled_for=occurrence.scheduled_for,
             message=waiting_for,
+            occurrence=saved,
         )
-        self._waiting[trigger.id] = _Waiting(occurrence, event_id)
+        self._waiting[trigger.id] = _Waiting(occurrence, event_id, saved=saved is not None)
         return DispatchOutcome("queued", event_id)
 
     def _drain_waiting(self, now: datetime) -> None:
         with self._lock:
             for trigger_id in list(self._waiting):
                 waiting = self._waiting[trigger_id]
-                if self._workflow_busy(waiting.occurrence.trigger.source_path):
+                if not self._may_try(trigger_id, now):
                     continue
-                del self._waiting[trigger_id]
-                self._start(waiting.occurrence, now, event_id=waiting.event_id)
+                try:
+                    if self._workflow_busy(waiting.occurrence.trigger.source_path):
+                        continue
+                    del self._waiting[trigger_id]
+                    self._start(waiting.occurrence, now, event_id=waiting.event_id)
+                except Exception as exc:  # noqa: BLE001 - it stays queued for the next try
+                    log.exception("Couldn't start trigger %s's queued run; retrying", trigger_id)
+                    self._start_failed(trigger_id, now)
+                    self._waiting.setdefault(trigger_id, waiting)
+                    try:
+                        self.store.update_event(
+                            waiting.event_id,
+                            status="queued",
+                            message=start_retry_message(exc),
+                        )
+                        # Turning running cleared the saved occurrence; keep it again, so
+                        # the start still outlasts this scheduler.
+                        saved = _occurrence_json(waiting.occurrence)
+                        self.store.save_queued_occurrence(waiting.event_id, saved)
+                        waiting.saved = saved is not None
+                    except Exception:  # noqa: BLE001 - the queue in memory still holds it
+                        waiting.saved = False
+                        log.exception("Could not record the retry of event %d", waiting.event_id)
+                    continue
+                self._start_worked(trigger_id)
 
     def _resume_due(self, now: datetime) -> None:
         """Resume each run whose usage limit has had time to reset.
@@ -1140,37 +1816,62 @@ class TriggerEngine:
             log.exception("Could not read the runs waiting for a usage limit")
             return
         for wait in waits:
-            if parse_iso(wait.resume_at) > now:
+            if parse_iso(wait.resume_at) > now or not self._may_try(wait.trigger_id, now):
                 continue
-            with self._lock:
-                if self._stopping:
-                    return
-                trigger = self._triggers.get(wait.trigger_id)
-                if trigger is None or not trigger.enabled or self._pause.paused:
-                    if trigger is None:
-                        skipped = "The trigger was removed before this run could resume."
-                    elif not trigger.enabled:
-                        skipped = f"Run {wait.run_id} wasn't resumed because its trigger was off."
-                    else:
-                        skipped = PAUSED_SKIP_MESSAGE
-                    if self.store.take_usage_wait(wait.event_id) is not None:
-                        self.store.update_event(wait.event_id, status="skipped", message=skipped)
-                    continue
-                if trigger.overlap != "parallel" and self._workflow_busy(
-                    trigger.source_path, count_waits=False
-                ):
-                    continue  # Resumes once the run in the way ends.
-                if self.store.take_usage_wait(wait.event_id) is None:
-                    continue
-                held = held_files_if_unchanged(wait)
-                if held is None:
-                    self.store.update_event(
-                        wait.event_id, status="failed", message=RECORD_CHANGED_MESSAGE
+            taken = False
+            try:
+                with self._lock:
+                    if self._stopping:
+                        return
+                    trigger = self._triggers.get(wait.trigger_id)
+                    if trigger is None or not trigger.enabled or self._pause.paused:
+                        if trigger is None:
+                            skipped = "The trigger was removed before this run could resume."
+                        elif not trigger.enabled:
+                            skipped = (
+                                f"Run {wait.run_id} wasn't resumed because its trigger was off."
+                            )
+                        else:
+                            skipped = PAUSED_SKIP_MESSAGE
+                        if self.store.take_usage_wait(wait.event_id) is not None:
+                            self.store.update_event(
+                                wait.event_id, status="skipped", message=skipped
+                            )
+                        continue
+                    if trigger.overlap != "parallel" and self._workflow_busy(
+                        trigger.source_path, count_waits=False
+                    ):
+                        continue  # Resumes once the run in the way ends.
+                    if self.store.take_usage_wait(wait.event_id) is None:
+                        continue
+                    taken = True
+                    held = held_files_if_unchanged(wait)
+                    if held is None:
+                        self.store.update_event(
+                            wait.event_id, status="failed", message=RECORD_CHANGED_MESSAGE
+                        )
+                        continue
+                    self._start(
+                        _Occurrence(trigger), now, event_id=wait.event_id, resume=wait, held=held
                     )
-                    continue
-                self._start(
-                    _Occurrence(trigger), now, event_id=wait.event_id, resume=wait, held=held
-                )
+            except Exception as exc:  # noqa: BLE001 - the other waiting runs still resume
+                log.exception("Couldn't resume run %s; trying again", wait.run_id)
+                retry_at = self._start_failed(wait.trigger_id, now)
+                if taken:
+                    self._wait_again(wait, exc, retry_at, now)
+                continue
+            if taken:
+                self._start_worked(wait.trigger_id)
+
+    def _wait_again(
+        self, wait: UsageWait, error: BaseException, retry_at: datetime, now: datetime
+    ) -> None:
+        """Save a resume that hit an error back as waiting, to try again at ``retry_at``."""
+        message = start_retry_message(error, usage_limits.clock_text(retry_at, now))
+        try:
+            self.store.add_usage_wait(replace(wait, resume_at=iso(retry_at)), message=message)
+        except Exception:  # noqa: BLE001 - the failed entry, if saved, says what happened
+            log.exception("Could not save run %s's wait again, so it won't resume", wait.run_id)
 
     def _start(
         self,
@@ -1233,6 +1934,11 @@ class TriggerEngine:
         message = "Started to catch up on a missed run." if occurrence.catching_up else ""
         if resume is not None:
             message = f"Resumed run {resume.run_id} after {resume.provider}'s usage limit reset."
+        occurrence, rest = _split_batch(occurrence)
+        if rest is not None:
+            message = _split_message(len(occurrence.events), len(rest.events))
+        if occurrence.dropped:
+            message = f"{message} {_dropped_message(occurrence.dropped)}".strip()
         if event_id is None:
             event_id = self.store.add_event(
                 trigger,
@@ -1246,9 +1952,47 @@ class TriggerEngine:
             self.store.update_event(event_id, status="running", run_id=run_id, message=message)
         cancel_event = threading.Event()
         self._active[trigger.source_path] = self._active.get(trigger.source_path, 0) + 1
+        try:
+            self._launch(
+                trigger,
+                occurrence,
+                rest,
+                run_id,
+                event_id,
+                cancel_event,
+                now,
+                allowance=allowance,
+                approved=approved,
+                resume=resume,
+                held=held,
+            )
+        except Exception as exc:
+            self._undo_start(trigger, run_id, event_id, exc)
+            raise
+        return DispatchOutcome("started", event_id, run_id)
+
+    def _launch(
+        self,
+        trigger: TriggerRecord,
+        occurrence: _Occurrence,
+        rest: _Occurrence | None,
+        run_id: str,
+        event_id: int,
+        cancel_event: threading.Event,
+        now: datetime,
+        *,
+        allowance: DailyAllowance,
+        approved: Snapshot | None,
+        resume: UsageWait | None,
+        held: HeldRunFiles | None,
+    ) -> None:
+        """Set up and start a run whose history entry is running. ``_undo_start`` reverses it."""
+        if rest is not None:
+            self._carried_after[run_id] = rest
         self._cancels[run_id] = cancel_event
         self._started[run_id] = (trigger.source_path, now)
         limit = trigger.max_run_seconds
+        timer: threading.Timer | None = None
         if limit:
             timer = threading.Timer(limit, self._time_limit_reached, args=(run_id, limit))
             timer.daemon = True
@@ -1288,11 +2032,40 @@ class TriggerEngine:
             daemon=True,
         )
         self._threads[run_id] = thread
+        # The timer first: once the run's thread is going, nothing here can fail.
+        if timer is not None:
+            timer.start()
         thread.start()
-        limit_timer = self._time_limits.get(run_id)
-        if limit_timer is not None:
-            limit_timer.start()
-        return DispatchOutcome("started", event_id, run_id)
+
+    def _undo_start(
+        self, trigger: TriggerRecord, run_id: str, event_id: int, error: BaseException
+    ) -> None:
+        """Forget a run that never started, so it doesn't keep its workflow busy.
+
+        Its spend reservation closes at nothing and its history entry fails with the
+        error. The caller logs the error and keeps the start to try again.
+        """
+        remaining = self._active.get(trigger.source_path, 0) - 1
+        if remaining > 0:
+            self._active[trigger.source_path] = remaining
+        else:
+            self._active.pop(trigger.source_path, None)
+        self._cancels.pop(run_id, None)
+        self._started.pop(run_id, None)
+        self._threads.pop(run_id, None)
+        self._carried_after.pop(run_id, None)
+        self._timed_out.pop(run_id, None)
+        timer = self._time_limits.pop(run_id, None)
+        if timer is not None:
+            timer.cancel()
+        try:
+            self.store.finish_spend(run_id, cost_usd=0, tokens=0)
+        except Exception:  # noqa: BLE001 - the next scheduler start closes it
+            log.exception("Could not close the spend reservation of run %s", run_id)
+        try:
+            self.store.update_event(event_id, status="failed", message=start_failed_message(error))
+        except Exception:  # noqa: BLE001 - the retry still keeps the start
+            log.exception("Could not record that run %s didn't start", run_id)
 
     def _time_limit_reached(self, run_id: str, limit: int) -> None:
         """Stop a triggered run at its trigger's Time limit, the same way as Stop."""
@@ -1495,8 +2268,12 @@ class TriggerEngine:
                 )
             try:
                 self.store.update_event(event_id, status=status, message=message or None)
-            except Exception:  # noqa: BLE001
-                log.exception("Could not record the result of triggered run %s", run.run_id)
+            except Exception:  # noqa: BLE001 - kept, and written again on later ticks
+                log.exception(
+                    "Could not record the result of triggered run %s; trying again", run.run_id
+                )
+                with self._lock:
+                    self._unsaved_results[event_id] = (status, message or None)
             self._record_spend(trigger, run, usage)
             with self._lock:
                 remaining = self._active.get(trigger.source_path, 0) - 1
@@ -1507,6 +2284,28 @@ class TriggerEngine:
                 self._cancels.pop(run.run_id, None)
                 self._threads.pop(run.run_id, None)
                 self._started.pop(run.run_id, None)
+                rest = self._carried_after.pop(run.run_id, None)
+                if rest is not None and not self._stopping:
+                    self._carried.setdefault(trigger.id, []).append(rest)
+            if rest is not None and self._stopping:
+                self._missed_carried(rest, self._clock())
+
+    def _save_unsaved_results(self) -> None:
+        """Write the results of finished runs the store couldn't take when they ended."""
+        with self._lock:
+            pending = list(self._unsaved_results.items())
+        for event_id, (status, message) in pending:
+            try:
+                self.store.update_event(event_id, status=status, message=message)
+            except Exception as exc:  # noqa: BLE001 - kept for the next tick
+                log.warning(
+                    "Still couldn't record %d triggered run result(s): %s", len(pending), exc
+                )
+                return
+            with self._lock:
+                if self._unsaved_results.get(event_id) == (status, message):
+                    del self._unsaved_results[event_id]
+            log.info("Recorded the result of trigger history entry %d on a later try", event_id)
 
     def _after_usage_limit(
         self,
@@ -1636,26 +2435,26 @@ class TriggerEngine:
             if trigger.kind == "file" and trigger.enabled and not self._pause.paused
         }
         if self._observer is None and wanted:
-            started = Observer()
+            started = _new_observer(self._note_overflow)
             started.daemon = True
             started.start()
             self._observer = started
         observer = self._observer
         if observer is None:
             return
+        self._rewatch &= set(wanted)
         for trigger_id, (signature, watch, handler) in list(self._watches.items()):
+            if trigger_id not in self._watches:
+                continue  # Its folder was replaced and went with another trigger's watch.
             trigger = wanted.get(trigger_id)
-            if (
+            if handler.folder_replaced():
+                self._drop_replaced_watch(observer, watch, wanted)
+            elif (
                 trigger is None
                 or _watch_signature(trigger) != signature
                 or not Path(trigger.config["path"]).exists()
             ):
-                # Two triggers on one folder share a watch, so only remove this handler.
-                try:
-                    observer.remove_handler_for_watch(handler, watch)
-                except (KeyError, OSError, ValueError):
-                    pass
-                del self._watches[trigger_id]
+                self._drop_watch(observer, trigger_id)
         for trigger_id, trigger in wanted.items():
             if trigger_id in self._watches:
                 continue
@@ -1675,6 +2474,45 @@ class TriggerEngine:
                 self._watch_errors[trigger_id] = f"Couldn't watch {root}: {exc}"
                 continue
             self._watches[trigger_id] = (_watch_signature(trigger), watch, handler)
+            if trigger_id in self._rewatch:
+                self._rewatch.discard(trigger_id)
+                self.store.add_event(
+                    trigger, status="missed", at=self._clock(), count=0, message=REWATCH_MESSAGE
+                )
+
+    def _a_watched_folder_went_away(self) -> bool:
+        """Whether a watch saw its folder deleted or moved, so it needs replacing now."""
+        return any(handler.replaced for _, _, handler in list(self._watches.values()))
+
+    def _drop_watch(self, observer: BaseObserver, trigger_id: str) -> None:
+        _, watch, handler = self._watches.pop(trigger_id)
+        # Two triggers on one folder share a watch, so only the last one ends it.
+        shared = any(other == watch for _, other, _ in self._watches.values())
+        try:
+            if shared:
+                observer.remove_handler_for_watch(handler, watch)
+            else:
+                observer.unschedule(watch)
+        except (KeyError, OSError, ValueError):
+            pass
+
+    def _drop_replaced_watch(
+        self, observer: BaseObserver, watch: ObservedWatch, wanted: Mapping[str, TriggerRecord]
+    ) -> None:
+        """End a watch that follows a folder no longer at its path, for every trigger on it.
+
+        The observer keeps one watch per path, so a new watch on the same path would reuse
+        this one unless it is ended first.
+        """
+        for trigger_id, (_, other, _) in list(self._watches.items()):
+            if other == watch:
+                del self._watches[trigger_id]
+                if trigger_id in wanted:
+                    self._rewatch.add(trigger_id)
+        try:
+            observer.unschedule(watch)
+        except (KeyError, OSError, ValueError):
+            pass
 
     def _sync_webhook(self) -> None:
         needed = any(
@@ -1727,28 +2565,40 @@ class TriggerEngine:
             waiting = list(self._waiting.values())
             self._waiting.clear()
             self._changes.clear()
+            carried = [item for items in self._carried.values() for item in items]
+            self._carried.clear()
             cancels = list(self._cancels.values())
             threads = list(self._threads.values())
             timers = list(self._time_limits.values())
         for timer in timers:
             timer.cancel()
         for item in waiting:
+            if item.saved:
+                # It stays queued, and the next scheduler starts it (``_restore_queued``).
+                self.store.update_event(item.event_id, message=QUEUED_ACROSS_STOP_MESSAGE)
+                continue
             self.store.update_event(
                 item.event_id,
                 status="missed",
                 message="The scheduler stopped before this run could start.",
             )
+        for occurrence in carried:
+            self._missed_carried(occurrence, now)
         for cancel in cancels:
             cancel.set()
         deadline = now.timestamp() + wait_seconds
         for thread in threads:
             thread.join(timeout=max(0.0, deadline - self._clock().timestamp()))
+        self._save_unsaved_results()
         self._close_webhook()
         if self._observer is not None:
             self._observer.stop()
             self._observer.join(timeout=2)
             self._observer = None
             self._watches.clear()
+            self._rewatch.clear()
+            with self._lock:
+                self._overflowed.clear()
         publisher, self._social_publisher = self._social_publisher, None
         if publisher is not None:
             publisher.stop(wait_seconds=wait_seconds)
@@ -1802,17 +2652,141 @@ def _fold_occurrences(waiting: _Occurrence, later: _Occurrence) -> _Occurrence:
     """One queued run standing for both starts.
 
     Changed files add up, so the run still sees a file that changed before the
-    later batch; a file named in both keeps its latest change. Webhook calls and
-    schedules carry no such set: the queued run takes the latest one.
+    later batch; a file named in both keeps its place and its latest change. Past
+    MAX_FILE_CHANGES_PER_RUN the run starts more runs with the rest, the same as a
+    single batch. Webhook calls and schedules carry no such set: the queued run takes
+    the latest one.
     """
     if later.trigger.kind != "file":
         return later
     paths: dict[str, Mapping[str, Any]] = {}
+    left_out: list[str] = []
     for event in [*waiting.events, *later.events]:
         path = str(event.get("path"))
-        if path in paths or len(paths) < MAX_FILE_CHANGES_PER_RUN:
+        if path in paths or len(paths) < MAX_PENDING_FILE_CHANGES:
             paths[path] = event
-    return _Occurrence(later.trigger, later.scheduled_for, list(paths.values()), later.catching_up)
+        else:
+            left_out.append(path)
+    dropped = waiting.dropped.merged(later.dropped, kept=paths)
+    for path in left_out:
+        dropped.add(path)
+    return _Occurrence(
+        later.trigger, later.scheduled_for, list(paths.values()), later.catching_up, dropped
+    )
+
+
+def _occurrence_json(occurrence: _Occurrence) -> str | None:
+    """A queued start as its history entry keeps it, or None when it can't be kept.
+
+    The events are held to a run's saved values limits (``run_values``): a file batch
+    keeps its first ``MAX_SAVED_EVENTS`` changes and counts the rest as not kept, and
+    events too large to save, or not JSON, keep nothing, so that start doesn't outlast
+    the scheduler. Like a run's saved values, it sits in an owner-only file and never
+    holds the trigger's inputs, which come from the trigger when the run starts.
+    """
+    events = [dict(event) for event in occurrence.events]
+    dropped = occurrence.dropped.count
+    if len(events) > MAX_SAVED_EVENTS:
+        dropped += len(events) - MAX_SAVED_EVENTS
+        events = events[:MAX_SAVED_EVENTS]
+    try:
+        if trigger_events_refusal(events):
+            return None
+        return canonical_json_bytes(
+            {
+                "version": _OCCURRENCE_VERSION,
+                "scheduled_for": (
+                    iso(occurrence.scheduled_for) if occurrence.scheduled_for else None
+                ),
+                "events": events,
+                "dropped": dropped,
+                "more_dropped": occurrence.dropped.more,
+                "catching_up": occurrence.catching_up,
+            }
+        ).decode("utf-8")
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        return None
+
+
+def _saved_occurrence(trigger: TriggerRecord, raw: str) -> _Occurrence | None:
+    """The queued start ``_occurrence_json`` saved, or None when it can't be read."""
+    try:
+        saved = json.loads(raw)
+        if not isinstance(saved, dict) or saved.get("version") != _OCCURRENCE_VERSION:
+            return None
+        events = saved.get("events")
+        dropped = saved.get("dropped")
+        scheduled_for = saved.get("scheduled_for")
+        if (
+            not isinstance(events, list)
+            or not all(isinstance(event, dict) for event in events)
+            or not isinstance(dropped, int)
+            or isinstance(dropped, bool)
+            or dropped < 0
+            or not (scheduled_for is None or isinstance(scheduled_for, str))
+        ):
+            return None
+        return _Occurrence(
+            trigger,
+            parse_iso(scheduled_for) if scheduled_for else None,
+            events,
+            saved.get("catching_up") is True,
+            _DroppedFiles(unnamed=dropped, more=saved.get("more_dropped") is True),
+        )
+    except (TypeError, ValueError, RecursionError):
+        return None
+
+
+def _split_batch(occurrence: _Occurrence) -> tuple[_Occurrence, _Occurrence | None]:
+    """The first MAX_FILE_CHANGES_PER_RUN changed files, in the order they arrived, and the rest."""
+    if occurrence.trigger.kind != "file" or len(occurrence.events) <= MAX_FILE_CHANGES_PER_RUN:
+        return occurrence, None
+    first = replace(occurrence, events=list(occurrence.events[:MAX_FILE_CHANGES_PER_RUN]))
+    rest = _Occurrence(
+        occurrence.trigger, events=list(occurrence.events[MAX_FILE_CHANGES_PER_RUN:])
+    )
+    return first, rest
+
+
+def _split_message(started: int, rest: int) -> str:
+    other = "The other changed file starts" if rest == 1 else f"The other {rest:,} start"
+    return f"Started with {started:,} of {started + rest:,} changed files. {other} the next run."
+
+
+def _dropped_message(dropped: _DroppedFiles) -> str:
+    wait = f"at most {MAX_PENDING_FILE_CHANGES:,} wait to run."
+    if dropped.more:
+        return f"More than {MAX_DROPPED_FILES_REMEMBERED:,} changed files weren't kept: {wait}"
+    files = "changed file" if dropped.count == 1 else "changed files"
+    return f"{dropped.count:,} more {files} weren't kept: {wait}"
+
+
+def overflow_message(found: int, *, single_file: bool = False) -> str:
+    """The history line for a second look after the watcher lost events."""
+    if single_file:
+        looked = (
+            "looked at the file again and found it changed"
+            if found
+            else ("looked at the file again and found no change")
+        )
+    else:
+        files = "changed file" if found == 1 else "changed files"
+        at_least = "at least " if found >= MAX_PENDING_FILE_CHANGES else ""
+        count = f"{at_least}{found:,}" if found else "no"
+        looked = f"looked through the folder again and found {count} {files}"
+    return (
+        f"Files changed faster than this computer could report them, so Raticode {looked}. "
+        "Files deleted during that burst weren't seen."
+    )
+
+
+def _folder_identity(path: Path) -> tuple[int, int] | None:
+    """Which folder is at ``path`` now, or None when nothing is there."""
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino)
 
 
 def _watch_signature(trigger: TriggerRecord) -> str:
@@ -1840,8 +2814,9 @@ def _summarize_result(result: RattishRunResult) -> tuple[str, str]:
         return "passed", ""
     if status == "stopped":
         return "stopped", "The run was stopped."
-    error = document.get("error") or {}
-    message = str(error.get("message") or "") if isinstance(error, Mapping) else ""
+    from gofer.ui.workflow_runs import run_failure_line
+
+    message = run_failure_line(document)
     if not message:
         for diagnostic in document.get("diagnostics") or []:
             if isinstance(diagnostic, Mapping) and diagnostic.get("severity") == "error":

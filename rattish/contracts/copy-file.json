@@ -8,10 +8,10 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
-      "source_path": {"type": "string", "minLength": 1, "x-rattish-type": "Path"},
-      "destination_path": {"type": "string", "minLength": 1, "x-rattish-type": "Path"},
-      "create_dirs": {"type": "boolean"},
-      "overwrite": {"type": "boolean"}
+      "source_path": {"description": "Source resource path.", "type": "string", "minLength": 1, "x-rattish-type": "Path"},
+      "destination_path": {"description": "Destination resource path.", "type": "string", "minLength": 1, "x-rattish-type": "Path"},
+      "create_dirs": {"description": "Allow creation of missing destination parents.", "type": "boolean"},
+      "overwrite": {"description": "Allow replacing an existing destination.", "type": "boolean"}
     },
     "required": ["source_path", "destination_path"],
     "additionalProperties": false

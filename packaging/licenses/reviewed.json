@@ -48,6 +48,10 @@
       "license": "MIT",
       "version": "0.11.0"
     },
+    "@xterm/addon-search@0.16.0": {
+      "license": "MIT",
+      "version": "0.16.0"
+    },
     "@xterm/xterm@6.0.0": {
       "license": "MIT",
       "version": "6.0.0"
@@ -120,9 +124,9 @@
       "license": "MIT",
       "version": "6.8.9"
     },
-    "electron@45.4.1": {
+    "electron@45.5.0": {
       "license": "MIT",
-      "version": "45.4.1"
+      "version": "45.5.0"
     },
     "escape-string-regexp@5.0.0": {
       "license": "MIT",
@@ -590,6 +594,10 @@
       "license": "MIT",
       "version": "26.1.0"
     },
+    "backports-tarfile": {
+      "license": "License :: OSI Approved :: MIT License",
+      "version": "1.2.0"
+    },
     "bibtexparser": {
       "license": "MIT",
       "version": "2.1.0"
@@ -625,6 +633,10 @@
     "coverage": {
       "license": "Apache-2.0",
       "version": "7.14.1"
+    },
+    "cryptography": {
+      "license": "Apache-2.0 OR BSD-3-Clause",
+      "version": "50.0.2"
     },
     "cyclonedx-python-lib": {
       "license": "Apache-2.0",
@@ -678,9 +690,29 @@
       "license": "BSD-3-Clause",
       "version": "3.18"
     },
+    "importlib-metadata": {
+      "license": "Apache-2.0",
+      "version": "9.0.1"
+    },
     "iniconfig": {
       "license": "MIT",
       "version": "2.3.0"
+    },
+    "jaraco-classes": {
+      "license": "License :: OSI Approved :: MIT License",
+      "version": "3.4.0"
+    },
+    "jaraco-context": {
+      "license": "MIT",
+      "version": "6.1.2"
+    },
+    "jaraco-functools": {
+      "license": "MIT",
+      "version": "4.6.0"
+    },
+    "jeepney": {
+      "license": "MIT",
+      "version": "0.9.0"
     },
     "jsonschema": {
       "license": "MIT",
@@ -689,6 +721,10 @@
     "jsonschema-specifications": {
       "license": "MIT",
       "version": "2025.9.1"
+    },
+    "keyring": {
+      "license": "MIT",
+      "version": "25.7.0"
     },
     "librt": {
       "license": "MIT",
@@ -717,6 +753,10 @@
     "mmh3": {
       "license": "MIT License\n\nCopyright (c) 2011-2026 Hajime Senuma\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.",
       "version": "5.3.1"
+    },
+    "more-itertools": {
+      "license": "MIT",
+      "version": "11.1.0"
     },
     "msgpack": {
       "license": "Apache-2.0",
@@ -826,6 +866,10 @@
       "license": "MIT",
       "version": "2.11"
     },
+    "pyopenssl": {
+      "license": "Apache License, Version 2.0",
+      "version": "26.4.0"
+    },
     "pyparsing": {
       "license": "MIT",
       "version": "3.3.2"
@@ -885,6 +929,14 @@
     "ruff": {
       "license": "MIT",
       "version": "0.15.17"
+    },
+    "secretstorage": {
+      "license": "BSD-3-Clause",
+      "version": "3.5.0"
+    },
+    "segno": {
+      "license": "License :: OSI Approved :: BSD License",
+      "version": "1.6.6"
     },
     "setuptools": {
       "license": "MIT",
@@ -953,6 +1005,10 @@
     "win32-setctime": {
       "license": "MIT license",
       "version": "1.2.0"
+    },
+    "zipp": {
+      "license": "MIT",
+      "version": "4.1.0"
     }
   }
 }

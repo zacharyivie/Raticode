@@ -30,6 +30,9 @@ const {
 const { createAgentBrowserController } = require("../agent-browser.cjs");
 const { remSiteAllowed, sanitizeBrowserPolicy } = require("../browser-policy.cjs");
 const { checkHiddenTextPages, pageText, serveHiddenTextPages } = require("./hidden-text-pages.cjs");
+const { stopBeforeRemoving, tempFolder } = require("./temp-folder.cjs");
+const { waitFor } = require("./test-wait.cjs");
+const WAIT = { timeout: 10_000, interval: 50 };
 
 const FIREFOX = process.env.RATICODE_SKIP_FIREFOX_TESTS === "1" ? "" : findFirefox();
 const realFirefox = { skip: FIREFOX ? false : "Firefox is not installed" };
@@ -360,16 +363,6 @@ async function startSite() {
 
 const fakeImage = { createFromBuffer: (buffer) => ({ isEmpty: () => !buffer.length, getSize: () => ({ width: 1280, height: 800 }), resize() { return this; }, toPNG: () => buffer }) };
 
-async function waitFor(check, message, timeout = 10000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const value = await check();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(message);
-}
-
 test("Rem drives Firefox with real input, keeps its site rules and asks for approval", realFirefox, async () => {
   const { server, base } = await startSite();
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "firefox-rem-test-"));
@@ -499,7 +492,7 @@ test("a streamed Firefox tab sends frames and takes the user's mouse, wheel and 
     await contents.loadURL(`${base}/`);
     assert.equal(contents.getTitle(), "Firefox test");
     contents.setView({ width: 800, height: 600, scale: 1 }, true);
-    await waitFor(() => frames.length >= 1, "no frame arrived");
+    await waitFor(() => frames.length >= 1, "no frame arrived", WAIT);
     assert.equal(frames[0].width, 800);
     assert.equal(frames[0].height, 600);
     assert.equal(frames[0].data[0], 0xff, "frames are JPEG");
@@ -509,31 +502,31 @@ test("a streamed Firefox tab sends frames and takes the user's mouse, wheel and 
     contents.handleInput([{ t: "down", x: 50, y: 25, button: 0 }, { t: "up", x: 50, y: 25, button: 0 }]);
     for (const key of ["H", "i"]) contents.handleInput([{ t: "keydown", key }, { t: "keyup", key }]);
     contents.handleInput([{ t: "text", text: " there" }]);
-    await waitFor(async () => (await read("document.getElementById('name').value")) === "Hi there", "typing did not reach the page");
+    await waitFor(async () => (await read("document.getElementById('name').value")) === "Hi there", "typing did not reach the page", WAIT);
     contents.handleInput([{ t: "keydown", key: "Backspace" }, { t: "keyup", key: "Backspace" }]);
-    await waitFor(async () => (await read("document.getElementById('name').value")) === "Hi ther", "Backspace did not reach the page");
+    await waitFor(async () => (await read("document.getElementById('name').value")) === "Hi ther", "Backspace did not reach the page", WAIT);
 
     // Select all and copy to the system clipboard.
     contents.handleInput([{ t: "keydown", key: "Control" }, { t: "keydown", key: "a" }, { t: "keyup", key: "a" }, { t: "keyup", key: "Control" }, { t: "copy" }]);
-    await waitFor(() => copied.includes("Hi ther"), "copy did not reach the clipboard");
+    await waitFor(() => copied.includes("Hi ther"), "copy did not reach the clipboard", WAIT);
 
     // A trusted click on the button.
     contents.handleInput([{ t: "move", x: 60, y: 80 }, { t: "down", x: 60, y: 80, button: 0 }, { t: "up", x: 60, y: 80, button: 0 }]);
-    await waitFor(async () => (await read("document.getElementById('out').textContent")) === "clicked:true", "click did not reach the page");
-    await waitFor(() => cursors.length, "no cursor report");
+    await waitFor(async () => (await read("document.getElementById('out').textContent")) === "clicked:true", "click did not reach the page", WAIT);
+    await waitFor(() => cursors.length, "no cursor report", WAIT);
 
     // A <select> opens the studio's list; choosing an option changes the page.
     contents.handleInput([{ t: "down", x: 50, y: 215, button: 0 }, { t: "up", x: 50, y: 215, button: 0 }]);
-    await waitFor(() => selects.length, "no option list for the select");
+    await waitFor(() => selects.length, "no option list for the select", WAIT);
     assert.deepEqual(selects[0].options.map((option) => option.label), ["one", "two", "three"]);
     contents.handleInput([{ t: "keydown", key: "Escape" }, { t: "keyup", key: "Escape" }, { t: "select-option", index: 2 }]);
-    await waitFor(async () => (await read("document.getElementById('pick').value")) === "three", "the option was not chosen");
+    await waitFor(async () => (await read("document.getElementById('pick').value")) === "three", "the option was not chosen", WAIT);
 
     // The wheel scrolls the page, and the stream follows.
     const before = frames.length;
     contents.handleInput([{ t: "wheel", x: 300, y: 300, dx: 0, dy: 400 }]);
-    await waitFor(async () => (await read("scrollY")) > 0, "the wheel did not scroll");
-    await waitFor(() => frames.length > before, "no new frame after scrolling");
+    await waitFor(async () => (await read("scrollY")) > 0, "the wheel did not scroll", WAIT);
+    await waitFor(() => frames.length > before, "no new frame after scrolling", WAIT);
 
     // Find in page counts matches and selects the first one.
     const found = new Promise((resolve) => contents.once("found-in-page", (_event, result) => resolve(result)));
@@ -549,7 +542,7 @@ test("a streamed Firefox tab sends frames and takes the user's mouse, wheel and 
 
     // Page zoom lays the page out smaller.
     contents.setPageZoom(2);
-    await waitFor(async () => (await read("innerWidth")) === 400, "page zoom did not change the layout width");
+    await waitFor(async () => (await read("innerWidth")) === 400, "page zoom did not change the layout width", WAIT);
 
     // A hidden view stops sending frames.
     contents.setView(null, false);
@@ -568,8 +561,9 @@ test("a streamed Firefox tab sends frames and takes the user's mouse, wheel and 
 
 test("Firefox's control port refuses web pages and second clients, and a dead Firefox restarts on reload", realFirefox, async () => {
   const { server, base } = await startSite();
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "firefox-port-test-"));
-  const engine = createFirefoxEngine({ dataDir });
+  const dataDir = tempFolder("firefox-port-test-");
+  // Firefox writes its profile while it shuts down, so it stops before the folder goes.
+  const engine = stopBeforeRemoving(dataDir, createFirefoxEngine({ dataDir }));
   const contents = new FirefoxContents({ engine, kind: "user" });
   try {
     await contents.loadURL(`${base}/`);
@@ -603,10 +597,9 @@ test("Firefox's control port refuses web pages and second clients, and a dead Fi
     assert.equal(contents.dead, true);
     await assert.rejects(contents.loadURL(`${base}/two`), /Firefox stopped/);
     await contents.reloadPage(false);
-    await waitFor(() => contents.getTitle() === "Firefox test" && !contents.isLoading(), "the tab did not come back after reload");
+    await waitFor(() => contents.getTitle() === "Firefox test" && !contents.isLoading(), "the tab did not come back after reload", WAIT);
   } finally {
     contents.close();
-    engine.stop();
     server.close();
   }
 });
@@ -678,5 +671,5 @@ test("Firefox does not outlive a Raticode process that dies without quitting", r
   };
   if (process.platform === "linux") assert.ok(firefoxPids().length >= 1, "Firefox should be running");
   parent.kill("SIGKILL");
-  if (process.platform === "linux") await waitFor(() => firefoxPids().length === 0, "Firefox kept running after its host died", 15000);
+  if (process.platform === "linux") await waitFor(() => firefoxPids().length === 0, "Firefox kept running after its host died", { ...WAIT, timeout: 15000 });
 });

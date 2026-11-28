@@ -86,7 +86,12 @@ Node show-mode:
     execution = await execute_node(ir, "show-mode")
 
     assert execution.outcome == "success"
-    assert execution.output == {"stdout": "release", "stderr": "", "exit_code": 0}
+    assert execution.output == {
+        "stdout": "release",
+        "stderr": "",
+        "exit_code": 0,
+        "truncated": False,
+    }
 
 
 @pytest.mark.anyio
@@ -421,6 +426,7 @@ async def test_script_contracts_compile_preflight_and_execute_with_explicit_deli
         "stderr": "",
         "exit_code": 0,
         "script_path": str(script),
+        "truncated": False,
     }
 
 

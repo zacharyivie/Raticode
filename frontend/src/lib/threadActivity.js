@@ -25,7 +25,7 @@ export function threadScopeBadge(thread) {
 
 // New activity brings an archived thread back. A finished turn is unread until
 // the user opens the thread; the window marks it read if it is already on screen.
-export function threadActivityPatch({ completed = false, now = new Date().toISOString() } = {}) {
+function threadActivityPatch({ completed = false, now = new Date().toISOString() } = {}) {
   return { archived: false, updatedAt: now, ...(completed ? { unread: true } : {}) };
 }
 
@@ -45,7 +45,7 @@ export function mergeTaskThreadMetadata(local, server, { activity = false, compl
   return activity || completed ? { ...result, ...threadActivityPatch({ completed, now }) } : result;
 }
 
-export function threadReadTime(thread) {
+function threadReadTime(thread) {
   return String(thread.readAt || "") > String(thread.updatedAt || "") ? thread.readAt : thread.updatedAt || "";
 }
 

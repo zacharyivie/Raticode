@@ -284,6 +284,23 @@ class WorkflowsTest {
         assertFalse((DesktopViews.parse("overview", JSONObject().put("workflows", true)) as DesktopOverview).workflowRuns)
     }
 
+    @Test fun aFailedRunRowSaysWhyItStopped() {
+        val json = JSONObject("""{
+            "runs": [{"run_id": "r2", "status": "failed", "workflow_id": "wf-2", "workflow_name": "Release check",
+                      "error": "\n  Node test exited with code 1\nnot ok 3 - saves the draft"},
+                     {"run_id": "r1", "status": "succeeded", "workflow_id": "wf-1", "workflow_name": "Nightly report"}]}""")
+        val runs = DesktopViews.parse(DesktopViews.key(Workflows.RUNS, Workflows.runsParams("24h", "", "")), json) as AllWorkflowRuns
+        val failed = runs.runs[0].run
+        assertTrue(failed.error, failed.error.contains("Node test exited with code 1"))
+        assertEquals("Node test exited with code 1", dev.raticode.mobile.ui.runErrorLine(failed))
+        // A succeeded run, or any run from an older computer, has no error line.
+        assertEquals("", runs.runs[1].run.error)
+        assertEquals("", dev.raticode.mobile.ui.runErrorLine(runs.runs[1].run))
+        // A workflow's own Runs list parses the same field.
+        val workflow = Workflows.parse(JSONObject().put("workflow_id", "wf-2").put("runs", json.getJSONArray("runs")))
+        assertEquals("Node test exited with code 1", dev.raticode.mobile.ui.runErrorLine(workflow.runs[0]))
+    }
+
     @Test fun reconnectDropsOnlyQueuedWorkflowReads() {
         fun event(type: String, op: String) = JSONObject().put("type", type).put("payload", JSONObject().put("op", op).put("params", JSONObject())).toString()
         val state = JSONObject().put("outbox", JSONArray().put(event("desktop.read", "workflows.list")).put(event("desktop.read", "rem.home"))

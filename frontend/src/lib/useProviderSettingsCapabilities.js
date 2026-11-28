@@ -9,10 +9,10 @@ const PROVIDERS = [
 ];
 const snapshots = new WeakMap();
 // Matches the host's CAPABILITY_CACHE_SECONDS: younger catalogs are reused as is.
-export const PROVIDER_CACHE_MS = 5 * 60 * 1000;
+const PROVIDER_CACHE_MS = 5 * 60 * 1000;
 
 /** True when the host already checked this provider less than 5 minutes ago. */
-export function providerCheckFresh(provider, now = Date.now()) {
+function providerCheckFresh(provider, now = Date.now()) {
   if (!provider?.discoveredAt || provider.discoveryStatus === "pending") return false;
   const age = now - Date.parse(provider.discoveredAt);
   return Number.isFinite(age) && age >= 0 && age < PROVIDER_CACHE_MS;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatDuration, reviewRecord, startedByLabel, usageCells, workflowRunsQuery } from "./allWorkflowRuns.js";
+import { formatDuration, lifecycleVerb, reviewRecord, startedByLabel, usageCells, workflowRunsQuery } from "./allWorkflowRuns.js";
 
 test("the run list query carries only the filters that are set", () => {
   assert.equal(workflowRunsQuery(), "/rattish/runs?limit=200");
@@ -22,4 +22,10 @@ test("a row opens in the Studio the way the Runs panel opens a run", () => {
   assert.deepEqual(reviewRecord({ workflowId: "w", workflowName: "W", id: "r", status: "error", projectRoot: "/p", startedAt: "a", finishedAt: "b" }), {
     workflowId: "w", workflowName: "W", runId: "r", status: "error", projectPath: "/p", startedAt: "a", finishedAt: "b",
   });
+});
+
+test("the lifecycle dialog's button says what Raticode is about to do", () => {
+  assert.equal(lifecycleVerb("quit Raticode"), "Quit");
+  assert.deepEqual(["install the update", "restart Raticode", "restart the backend"].map(lifecycleVerb), ["Restart", "Restart", "Restart"]);
+  assert.equal(lifecycleVerb("change the data directory"), "Continue");
 });

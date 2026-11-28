@@ -1,3 +1,5 @@
+import { dateTime, timeAgo } from "./timeText.js";
+
 const PROVIDER_NAMES = {
   codex: "Codex", claude: "Claude Code", claude_code: "Claude Code", cursor: "Cursor", copilot: "GitHub Copilot",
   opencode: "OpenCode", antigravity: "Antigravity", agy: "Antigravity", grok: "Grok",
@@ -56,7 +58,7 @@ export function usageStatus(status) {
 export function formatUsageTime(value) {
   if (!value) return "Not reported";
   const date = new Date(typeof value === "number" && value < 1e12 ? value * 1000 : value);
-  return Number.isNaN(date.getTime()) ? "Not reported" : date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  return dateTime(date) || "Not reported";
 }
 
 export function usageDashboardUrl(value) {
@@ -120,15 +122,10 @@ export function resetCountdown(resetsAt, now = Date.now()) {
   return `resets in ${rest}m`;
 }
 
-/** When an account was last checked, short and relative while it's recent. */
+/** When an account was last checked: "Checked 5 min ago", then the date once it's a week old. */
 export function checkedLabel(observedAt, now = Date.now()) {
   const date = usageDate(observedAt);
-  if (!date) return "Not checked yet";
-  const minutes = Math.floor((now - date.getTime()) / 60000);
-  if (minutes < 1) return "Checked just now";
-  if (minutes < 60) return `Checked ${minutes} min ago`;
-  if (minutes < 24 * 60) return `Checked ${Math.floor(minutes / 60)}h ago`;
-  return `Checked ${formatUsageTime(observedAt)}`;
+  return date ? `Checked ${timeAgo(date, now)}` : "Not checked yet";
 }
 
 // The windows every Claude Code card shows side by side, read or not.

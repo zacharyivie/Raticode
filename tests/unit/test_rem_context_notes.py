@@ -21,6 +21,7 @@ from gofer.ui.second_brain import (
     add_context_note,
 )
 from gofer.ui.server import GoferUiServer
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 from tests.helpers.brain_library import wait_idle
 
 THEMED_REPORT = """<!doctype html>
@@ -59,13 +60,6 @@ MARKDOWN_NOTE = (
     "## Notes\n\n" + ("Long paragraph about compost and mulch. " * 60).strip() + "\n\n"
     "## Later\n\n" + "\n\n".join(f"Week {n} chores are weeding." for n in range(200)) + "\n"
 )
-
-
-@pytest.fixture
-def library(tmp_path: Path) -> Iterator[BrainLibrary]:
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
 
 
 @pytest.fixture

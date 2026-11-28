@@ -49,15 +49,16 @@ test("explicit native menu paste edits every selection with an undo boundary and
   await assert.rejects(pasteIntoEditor(editor), /unavailable/);
 });
 
-const appSource = fs.readFileSync(new URL("../pages/App.jsx", import.meta.url), "utf8");
+const updatesSource = fs.readFileSync(new URL("./useAppUpdates.js", import.meta.url), "utf8");
+const settingsSource = fs.readFileSync(new URL("./useAppSettings.js", import.meta.url), "utf8");
 function updateCheck(response) {
   const state = { supported: true, platform: "darwin", downloaded: false, info: null };
   const notices = [];
   const context = { useCallback: fn => fn, window: { goferUpdates: { check: async () => response } }, Error,
     setUpdateState: patch => Object.assign(state, typeof patch === "function" ? patch(state) : patch), setUpdateNotice: notice => notices.push(notice) };
   vm.createContext(context);
-  const notice = appSource.slice(appSource.indexOf("export function updateCheckNotice("), appSource.indexOf("function opensMacInstaller(")).replace(/^export /, "");
-  vm.runInContext(notice + appSource.slice(appSource.indexOf("  const checkForUpdates = useCallback"), appSource.indexOf("  useEffect(() => {\n    if (!window.goferUpdates?.onState")) + "\nglobalThis.check = checkForUpdates;", context);
+  const notice = updatesSource.slice(updatesSource.indexOf("export function updateCheckNotice("), updatesSource.indexOf("function opensMacInstaller(")).replace(/^export /, "");
+  vm.runInContext(notice + updatesSource.slice(updatesSource.indexOf("  const checkForUpdates = useCallback"), updatesSource.indexOf("  useEffect(() => {\n    if (!window.goferUpdates?.onState")) + "\nglobalThis.check = checkForUpdates;", context);
   return { state, notices, check: context.check };
 }
 test("failed update responses remain errors; manual and ready states preserve their full contract", async () => {
@@ -88,7 +89,7 @@ test("graph trackpad scrolling pans both axes; explicit zoom ignores a zero vert
 test("studio reset zoom handles Command+0 and Ctrl+0 outside graph focus", () => {
   let zoom, prevented = 0;
   const context = { matchesKeybinding: (event, binding) => matchesKeybinding(event, binding, "MacIntel"), setTextZoom: value => { zoom = value; }, eventTargetsGraphVisualization: () => false, textZoomDirection: () => 0, browserChromeOwnsShortcut: () => false };
-  vm.runInNewContext(appSource.slice(appSource.indexOf("    function handleTextZoomKeydown("), appSource.indexOf("    function handleTextZoomWheel(")), context);
+  vm.runInNewContext(settingsSource.slice(settingsSource.indexOf("    function handleTextZoomKeydown("), settingsSource.indexOf("    function handleTextZoomWheel(")), context);
   for (const modifier of ["metaKey", "ctrlKey"]) {
     zoom = 140;
     context.handleTextZoomKeydown({ code: "Digit0", [modifier]: true, preventDefault: () => prevented++ });

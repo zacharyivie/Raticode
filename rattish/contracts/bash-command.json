@@ -1,6 +1,6 @@
 {
   "$schema": "../schemas/node-contract.schema.json",
-  "contract_version": 1,
+  "contract_version": 2,
   "node_type": "bash-command",
   "runtime_handler": "raticode.bash_command",
   "catalog": {"category": "code", "summary": "Run one command and capture its output", "docs_path": "/docs/nodes/bash-command"},
@@ -8,13 +8,14 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
-      "command": {"type": "string", "minLength": 1},
-      "working_dir": {"type": ["string", "null"], "x-rattish-type": "Path"},
+      "command": {"description": "Command text executed by the runtime shell.", "type": "string", "minLength": 1},
+      "working_dir": {"description": "Working directory resolved from the workflow project.", "type": ["string", "null"], "x-rattish-type": "Path"},
       "env": {
+        "description": "Additional string environment values.",
         "type": "object",
         "additionalProperties": {"type": "string"}
       },
-      "shell": {"enum": ["auto", "bash", "powershell"], "x-rattish-case-insensitive": true}
+      "shell": {"description": "The program that runs the command.", "enum": ["auto", "bash", "powershell"], "x-rattish-case-insensitive": true}
     },
     "required": ["command"],
     "additionalProperties": false
@@ -56,9 +57,10 @@
       "properties": {
         "stdout": {"type": "string"},
         "stderr": {"type": "string"},
-        "exit_code": {"type": "integer"}
+        "exit_code": {"type": "integer"},
+        "truncated": {"type": "boolean"}
       },
-      "required": ["stdout", "stderr", "exit_code"],
+      "required": ["stdout", "stderr", "exit_code", "truncated"],
       "additionalProperties": false
     }
   },

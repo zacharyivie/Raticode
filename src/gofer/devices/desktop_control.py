@@ -63,13 +63,15 @@ import mimetypes
 import os
 import re
 import stat
+import tempfile
 import time
 import unicodedata
 from collections.abc import Callable
+from contextvars import ContextVar
 from datetime import datetime
+from functools import cache
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlsplit
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from gofer.devices import app_log, organization_view
@@ -77,9 +79,10 @@ from gofer.devices.files import MAX_FILE
 from gofer.devices.registry import PairingError
 from gofer.devices.tailnet import is_tailnet_address
 from gofer.devices.wake import clean_address, hardware_address, private_ipv4
-from gofer.ui.file_mentions import file_mentions
+from gofer.ui.file_mentions import file_mentions, link_paths, message_linked_files, path_names
 from gofer.ui.rem_ticket_activity import visible_comments
 from gofer.utils.images import sniff_image_type
+from gofer.utils.paths import get_data_dir
 
 # Result bodies are JSON text split into parts. Escaping can at most double a
 # part inside the record, which stays below the 65,536-byte record limit.
@@ -299,15 +302,14 @@ _REM_NOTICE_MARK = re.compile(r"n1\.([0-9]{1,16})\.([0-9]{1,16}|-)(?:\.([0-9]{1,
 # Rem run states that end a task; a cancelled one was stopped by the person being told.
 _REM_FINISHED = {"succeeded", "failed", "blocked", "outcome_unknown"}
 _LOCAL_LINK = re.compile(r"\[([^\]]*)\]\(<?(?:file:|/|~/|[A-Za-z]:[\\/])[^)]*\)")
-_LOCAL_PATH = re.compile(
-    r"(?<![\w.:/])(?:~/|/|[A-Za-z]:[\\/])[^\s)\]>\"'`]*[/\\]([^\s)\]>\"'`/\\]+)"
+# Folders a phone alert's paths are checked against on disk while the desktop answers
+# one phone request, beyond the home, data and temporary folders (_alert_roots).
+_REQUEST_ROOTS: ContextVar[Callable[[], tuple[str, ...]] | None] = ContextVar(
+    "_REQUEST_ROOTS", default=None
 )
 # Where a tapped file link came from: Rem's chat, a Rem task thread, a shared thread.
 LINK_SOURCES = frozenset({"rem", "rem_thread", "thread"})
 LINK_LIMIT = 2048
-_LINE_SUFFIX = re.compile(r"(\.[^:/?#]+):[1-9]\d*(?::[1-9]\d*)?$")
-_SCHEME = re.compile(r"^[a-z][a-z\d+.-]*:", re.IGNORECASE)
-_WINDOWS_DRIVE = re.compile(r"^[a-z]:[\\/]", re.IGNORECASE)
 # Message images the phone fetches through the desktop, identified by their bytes.
 IMAGE_LIMIT = 768 * 1024
 # Characters the phone strips from file names; an offer must already be clean.
@@ -730,6 +732,33 @@ def _check_details(criteria: Any) -> list[dict[str, str]]:
             }
         )
     return details
+
+
+NOTE_TEXT = 1500
+NOTE_FILE = 500
+
+
+def _review_notes(notes: Any) -> list[dict[str, str]]:
+    """The review's notes on one run, bounded for phones like its checks.
+
+    Notes are findings that never sent the work back: each has a severity (note, or
+    should_fix after its one return), an axis (spec or standards), an optional file and
+    the reviewer's explanation. Notes without an explanation are left out.
+    """
+    kept = []
+    for item in [n for n in notes or [] if isinstance(n, dict)]:
+        explanation = _text(item.get("explanation"), NOTE_TEXT)
+        if not explanation.strip():
+            continue
+        kept.append(
+            {
+                "severity": _text(item.get("severity"), 20),
+                "axis": _text(item.get("axis"), 20),
+                "file": _text(item.get("file"), NOTE_FILE),
+                "explanation": explanation,
+            }
+        )
+    return kept[:CHECK_LIMIT]
 
 
 def _rich_message(message: dict[str, Any]) -> dict[str, Any]:
@@ -1227,11 +1256,12 @@ def _thought_steps(thoughts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def _thread_entries(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _thread_entries(messages: list[dict[str, Any]], data_dir: Any = None) -> list[dict[str, Any]]:
     """A work thread as the phone shows it: messages, with each run of thoughts as one group.
 
     Worker transcripts are mostly tool and thinking records. Sent one by one,
     they pushed the instruction and the final report out of the phone's window.
+    A worker's reply lists the files it links to, as Rem's chat does.
     """
     entries: list[dict[str, Any]] = []
     run: list[dict[str, Any]] = []
@@ -1258,7 +1288,7 @@ def _thread_entries(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             run.append(message)
             continue
         close()
-        entry = {
+        entry: dict[str, Any] = {
             "id": _text(message.get("id"), 128),
             "role": _text(message.get("role"), 20),
             "body": _text(message.get("body"), 16000),
@@ -1268,6 +1298,10 @@ def _thread_entries(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             # Who wrote an instruction: Rem's prompts say "rem", the human's "user".
             # Older phones ignore the field.
             entry["sender"] = "rem" if message.get("sender") == "rem" else "user"
+        else:
+            linked = _linked_files(message, data_dir)
+            if linked:
+                entry["linked_files"] = linked
         entries.append(entry)
     close()
     return entries
@@ -1364,31 +1398,6 @@ _LINK_BEFORE = frozenset(" \t\r\n([{<\"'`*_")
 _LINK_AFTER = frozenset(" \t\r\n)]}>\"'`*_,;:!?.")
 
 
-def link_paths(href: str) -> list[str]:
-    """Paths a Markdown file link may name, read the way the desktop opens links.
-
-    Web addresses and other schemes name no path. A trailing ``:line`` or
-    ``:line:column`` is dropped. The raw text comes first, then its decoded form.
-    """
-    value = href.strip()
-    if value.startswith("<") and value.endswith(">"):
-        value = value[1:-1].strip()
-    if value.lower().startswith("file:"):
-        parsed = urlsplit(value)
-        if parsed.netloc not in {"", "localhost"}:
-            return []
-        candidates = [unquote(parsed.path)]
-    elif (_SCHEME.match(value) and not _WINDOWS_DRIVE.match(value)) or value.startswith(
-        ("//", "#")
-    ):
-        return []
-    else:
-        value = re.split(r"[?#]", value, maxsplit=1)[0]
-        candidates = [value, unquote(value)]
-    paths = [_LINE_SUFFIX.sub(r"\1", c) for c in candidates]
-    return [p for p in dict.fromkeys(paths) if p and "\x00" not in p]
-
-
 def _file_mentions(message: dict[str, Any]) -> list[str]:
     """Full paths of existing files in a Rem message's text and Details, as written.
 
@@ -1404,6 +1413,19 @@ def _file_mentions(message: dict[str, Any]) -> list[str]:
     if not text:
         return []
     return [m["text"] for m in file_mentions(text) if len(m["text"]) <= 1024][:MENTIONS]
+
+
+def _linked_files(message: dict[str, Any], data_dir: Any) -> list[dict[str, Any]]:
+    """Files a Rem message or worker reply links to, as attachments: name, size and the link.
+
+    The phone opens one by sending ``href`` back through ``files.link``, the same request
+    as tapping the link, so every file check runs again and no path is granted here.
+    """
+    return [
+        {"name": _text(item["name"], 160), "size": int(item["size"]), "href": item["href"]}
+        for item in message_linked_files(message, Path(data_dir) if data_dir else None)
+        if len(item["href"]) <= LINK_LIMIT
+    ]
 
 
 def _authored(messages: list[Any], identity: str, roles: set[str]) -> str | None:
@@ -1524,7 +1546,20 @@ def _alert_text(value: Any, limit: int) -> str:
     if not isinstance(value, str):
         return ""
     without_links = _LOCAL_LINK.sub(r"\1", value)
-    return _text(_LOCAL_PATH.sub(r"\1", without_links), limit)
+    return _text(path_names(without_links, _alert_roots()), limit)
+
+
+def _alert_roots() -> tuple[str, ...]:
+    """Folders whose paths in an alert are measured on disk: see ``path_names``."""
+    request = _REQUEST_ROOTS.get()
+    if request is not None:
+        return request()
+    return _base_roots()
+
+
+def _base_roots() -> tuple[str, ...]:
+    # Rem's workers keep scratch files and evidence in the temporary folder.
+    return (str(Path.home()), str(get_data_dir()), tempfile.gettempdir())
 
 
 def _source_notice(alert: dict[str, Any]) -> dict[str, Any]:
@@ -1674,7 +1709,7 @@ def _service_error(exc: BaseException) -> Refused:
         except (IndexError, TypeError, AttributeError):
             pass
     name = type(exc).__name__
-    if name == "KanbanRefused":
+    if name in {"KanbanRefused", "ObjectiveRefused"}:
         return Refused(getattr(exc, "code", "invalid"), str(exc)[:1000])
     if name in {"RemConflict", "OrganizationConflict"}:
         return Refused("conflict", str(exc)[:1000] or "This changed on desktop. Refresh first.")
@@ -1844,11 +1879,30 @@ class DesktopControl:
         if event["type"] != "desktop.read":
             return None
         payload = event["payload"]
+        token = _REQUEST_ROOTS.set(cache(lambda: self._path_roots(projects or {})))
         try:
             return {"value": self._services(payload["op"], payload["params"], projects)}
         except Exception as exc:  # noqa: BLE001
             # Answered by handle() exactly as if the read had failed there.
             return {"error": exc}
+        finally:
+            _REQUEST_ROOTS.reset(token)
+
+    def _path_roots(self, projects: dict[str, dict[str, str]]) -> tuple[str, ...]:
+        """Folders measured on disk for alert paths: the phone's projects and Rem's."""
+        roots = [*_base_roots(), *(p["root"] for p in projects.values())]
+        rem = self.rem
+        if getattr(rem, "data_dir", None):
+            roots.append(str(rem.data_dir))
+        store = getattr(rem, "store", None)
+        if store is not None:
+            try:
+                with store.read() as db:
+                    config = store.setting(db, "config")
+            except Exception:  # noqa: BLE001 - alerts still drop paths, by their words
+                config = {}
+            roots += [p["root"] for p in config.get("projects") or [] if p.get("root")]
+        return tuple(str(root) for root in roots)
 
     def _listed_tasks(self) -> tuple[list[dict[str, Any]], int | None]:
         """Rem's tasks for lists, and the build they came from (None when not cached)."""
@@ -2098,9 +2152,18 @@ class DesktopControl:
     def handle(
         self, peer: str, event: dict[str, Any], prepared: dict[str, Any] | None = None
     ) -> list[dict[str, Any]] | None:
-        kind = event["type"]
-        if kind not in {"desktop.read", "desktop.action"}:
+        if event["type"] not in {"desktop.read", "desktop.action"}:
             return None
+        token = _REQUEST_ROOTS.set(cache(lambda: self._path_roots(self.projects(peer))))
+        try:
+            return self._handle(peer, event, prepared)
+        finally:
+            _REQUEST_ROOTS.reset(token)
+
+    def _handle(
+        self, peer: str, event: dict[str, Any], prepared: dict[str, Any] | None
+    ) -> list[dict[str, Any]]:
+        kind = event["type"]
         payload = event["payload"]
         op = payload["op"]
         try:
@@ -2396,7 +2459,7 @@ class DesktopControl:
         if op == "kanban.timeline":
             return self._kanban_timeline(data["timeline"], self.projects(peer))
         if op == "selfwork.read":
-            return data["view"]
+            return self._self_work_view(data["view"], self.projects(peer))
         if op in ("computers.list", "computers.placement"):
             return data["view"]
         if op == "browser.tabs":
@@ -2613,6 +2676,9 @@ class DesktopControl:
             mentions = _file_mentions(message)
             if mentions:
                 item["file_mentions"] = mentions
+            linked = _linked_files(message, getattr(self.rem, "data_dir", None))
+            if linked:
+                item["linked_files"] = linked
             items.append(item)
         return items
 
@@ -2858,6 +2924,28 @@ class DesktopControl:
             roots.append(config["brain"]["root"])
         return roots
 
+    def _evidence_roots(self, thread: str) -> list[str]:
+        """The evidence folders of the runs that write this work thread.
+
+        A folder counts only when it is a real folder, not a link to somewhere else.
+        """
+        from gofer.ui.scratch_cleanup import evidence_folder
+
+        data_dir = getattr(self.rem, "data_dir", None)
+        if not data_dir:
+            return []
+        data = Path(data_dir)
+        roots = []
+        for run in self._need(self.rem, "Rem").store.thread_runs(thread):
+            folder = evidence_folder(data, run)
+            try:
+                real = folder.is_dir() and folder.resolve() == evidence_folder(data.resolve(), run)
+            except (OSError, RuntimeError):
+                continue
+            if real:
+                roots.append(str(folder))
+        return roots
+
     def _refuse_sensitive_link(self, peer: str, path: Path, roots: list[str] | None) -> None:
         """A tapped link never sends a credential store, a secret-looking file or
         Raticode's own data, even inside an open folder. The user can still ask Rem for
@@ -2897,6 +2985,7 @@ class DesktopControl:
             raise Refused("invalid", "This link can't be opened from the phone.")
         base: str | None = None
         context: dict[str, Any] | None = None
+        roots: list[str] | None = None
         if source == "thread":
             context, body = self._shared_link_message(peer, thread, message_id)
             base = context["project_path"]
@@ -2904,6 +2993,8 @@ class DesktopControl:
             data = self._need(self.rem, "Rem").store.thread(thread)
             body = _authored(data.get("messages") or [], message_id, {"assistant"})
             base = (data.get("metadata") or {}).get("projectRoot") or None
+            # A worker's evidence files outlive its turn in its scratch folder.
+            roots = self._rem_roots(peer) + self._evidence_roots(thread)
         else:
             # The one message, by ID: a link in a message paged back from history opens too.
             found = self._need(self.rem, "Rem").store.find_message(message_id)
@@ -2919,7 +3010,7 @@ class DesktopControl:
         self._refuse_sensitive_link(
             peer,
             path,
-            None
+            roots
             if context is None
             else [p["root"] for p in context.get("projects") or [] if p.get("root")] + [base],
         )
@@ -2940,7 +3031,9 @@ class DesktopControl:
         else:
             # Rem's chat may send any file the desktop account can read, as its reply
             # files do; a link in a task thread stays within the open folders.
-            offer = self._offer_path(peer, path, self._rem_roots(peer), own_folder=source == "rem")
+            offer = self._offer_path(
+                peer, path, roots or self._rem_roots(peer), own_folder=source == "rem"
+            )
         # A repeated tap replaces the earlier copy unless the phone is downloading it.
         if (
             previous is not None
@@ -3197,9 +3290,11 @@ class DesktopControl:
         task: dict[str, Any],
         catalog: dict[str, dict[str, str]] | None = None,
     ) -> dict[str, Any]:
+        from gofer.rattish.triggers import describe_cron
         from gofer.ui.rem_home_store import ran_at, retention
 
         schedule = task.get("schedule") or {}
+        cron = _text(schedule.get("cron"), 120)
         # listed, finished_at and cleanup_at: whether a finished one-time task is still listed.
         kept = retention(task)
         return {
@@ -3215,6 +3310,10 @@ class DesktopControl:
                 "weekdays": [_text(day, 12) for day in (schedule.get("weekdays") or [])][:7],
                 "every_minutes": int(schedule.get("every_minutes") or 0),
                 "timezone": _text(schedule.get("timezone"), 80),
+                # A Custom schedule's cron text and the same in words, such as "Weekdays
+                # at 9:00"; the words are empty for an unusual expression.
+                "cron": cron,
+                "summary": describe_cron(cron) if schedule.get("kind") == "cron" else "",
             },
             "next_occurrence_at": _text(task.get("next_occurrence_at"), 80),
             "project_name": self._project_name(peer, task.get("project_dir"), catalog),
@@ -3239,6 +3338,7 @@ class DesktopControl:
         for key in ("active_run", "last_run"):
             if summary[key] is not None:
                 summary[key]["criteria"] = _check_details(task[key].get("criteria"))
+                summary[key]["review_notes"] = _review_notes(task[key].get("review_notes"))
         runs = [self._run(run) for run in (task.get("recent_runs") or [])[:20]]
         return {
             **summary,
@@ -3267,7 +3367,8 @@ class DesktopControl:
                 for m in thread.get("messages") or []
                 if m.get("role") in {"user", "assistant"}
                 and m.get("kind") not in {"memory", "continuation-context"}
-            ]
+            ],
+            getattr(self.rem, "data_dir", None),
         )
         shown = _newest(entries[-120:])
         return {
@@ -3610,7 +3711,40 @@ class DesktopControl:
         if op == "kanban.ticket":
             return self._kanban_ticket(peer, params, request)
         if op == "selfwork.settings":
-            return self._need(self.rem, "Rem").self_work.update_settings(dict(params))
+            catalog = self.projects(peer)
+            change = dict(params)
+            if "project_effort" in change:
+                # The phone names Rem's projects by ID; the desktop keeps them by folder.
+                change["project_effort"] = {
+                    self._project_root(catalog, key): value
+                    for key, value in dict(change["project_effort"] or {}).items()
+                }
+            view = self._need(self.rem, "Rem").self_work.update_settings(change)
+            return self._self_work_view(view, catalog)
+        if op == "selfwork.objectives":
+            # The user's change to the self-work objectives, as the side pane makes it; a
+            # project's own objectives name it by ID, and an edit moves one to the global
+            # ones with global true. The answer is the selfwork.read view.
+            catalog = self.projects(peer)
+            change = {
+                key: params[key]
+                for key in ("action", "id", "text", "done_when", "expected_revision")
+                if key in params
+            }
+            if params.get("project_id"):
+                change["project"] = self._project_root(catalog, params["project_id"])
+            elif params.get("global") is True:
+                change["project"] = ""
+            self_work = self._need(self.rem, "Rem").self_work
+            if change.get("action") == "ask":
+                # Ask Rem: Rem writes three to five objectives for the project in the
+                # background; the view's asking shows how it goes.
+                if not change.get("project"):
+                    raise Refused("invalid", "Choose one of Rem's projects to ask about.")
+                self_work.ask_objectives({"project": change["project"]})
+            else:
+                self_work.change_objectives(change)
+            return self._self_work_view(self_work.view(), catalog)
         if op == "computers.set":
             from gofer.core.computers import ComputerError
 
@@ -3635,10 +3769,16 @@ class DesktopControl:
         if op == "computers.run_there":
             return self._run_there(peer, params, request)
         if op == "selfwork.report.seen":
-            return self._need(self.rem, "Rem").self_work.mark_seen(params.get("updated_at"))
+            return self._self_work_view(
+                self._need(self.rem, "Rem").self_work.mark_seen(params.get("updated_at")),
+                self.projects(peer),
+            )
         if op == "selfwork.stop":
             # When self-work stops; a desktop whose selfwork.read view has "stop" takes it.
-            return self._need(self.rem, "Rem").self_work.change_stop(dict(params))
+            return self._self_work_view(
+                self._need(self.rem, "Rem").self_work.change_stop(dict(params)),
+                self.projects(peer),
+            )
         if op == "organizations.task":
             return self._organization_task(peer, params, request)
         if op == "organizations.knowledge":
@@ -4168,6 +4308,72 @@ class DesktopControl:
                 if project["root"] in known
             ],
         }
+
+    @staticmethod
+    def _project_root(catalog: dict[str, dict[str, str]], project_id: Any) -> str:
+        known = catalog.get(str(project_id or ""))
+        if known is None:
+            raise Refused("invalid", "That project is no longer open on desktop.")
+        return known["root"]
+
+    @staticmethod
+    def _self_work_view(view: dict[str, Any], catalog: dict[str, dict[str, str]]) -> dict[str, Any]:
+        """Self-work's view for a phone: Rem's projects by catalog ID, never a folder path.
+
+        A project the phone's catalog doesn't have is left out of the levels of effort and
+        the per-project objectives.
+        """
+        known = {project["root"]: key for key, project in catalog.items()}
+
+        def item(entry: dict[str, Any]) -> dict[str, Any]:
+            out = {k: v for k, v in entry.items() if k != "project"}
+            if entry.get("project"):
+                out["project_id"] = known.get(str(entry["project"]), "")
+            return out
+
+        result = dict(view)
+        settings = view.get("settings")
+        if isinstance(settings, dict) and isinstance(settings.get("project_effort"), dict):
+            result["settings"] = {
+                **settings,
+                "project_effort": {
+                    known[root]: value
+                    for root, value in settings["project_effort"].items()
+                    if root in known
+                },
+            }
+        if isinstance(view.get("projects"), list):
+            result["projects"] = [
+                {**{k: v for k, v in row.items() if k != "root"}, "project_id": known[row["root"]]}
+                for row in view["projects"]
+                if row.get("root") in known
+            ]
+        objectives = view.get("objectives")
+        if isinstance(objectives, dict):
+            listed = {**objectives}
+            for key in ("items", "prompt"):
+                if isinstance(objectives.get(key), list):
+                    listed[key] = [item(i) for i in objectives[key] if isinstance(i, dict)]
+            if isinstance(objectives.get("projects"), dict):
+                listed["projects"] = {
+                    known[root]: {**scope, "items": [item(i) for i in scope.get("items") or []]}
+                    for root, scope in objectives["projects"].items()
+                    if root in known and isinstance(scope, dict)
+                }
+            # An edit here may move an objective (project_id, or global true); an older
+            # desktop leaves this out and keeps each objective where it is.
+            listed["movable"] = True
+            # Each project's latest Ask Rem by project ID; askable says this desktop takes
+            # the ask action, which an older one refuses.
+            if isinstance(objectives.get("asking"), dict):
+                listed["asking"] = {
+                    known[root]: ask
+                    for root, ask in objectives["asking"].items()
+                    if root in known and isinstance(ask, dict)
+                }
+            listed["askable"] = True
+            result["objectives"] = listed
+        return result
 
     @classmethod
     def _kanban_timeline(

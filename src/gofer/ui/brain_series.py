@@ -19,10 +19,15 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import date
-from pathlib import PurePosixPath
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Any
+
+from gofer.ui.brain_library import evidence_references
+
+if TYPE_CHECKING:
+    from gofer.ui.brain_library import BrainLibrary
 
 # A trailing ISO date, then an optional version number, at the end of a file stem.
 _EDITION = re.compile(
@@ -201,3 +206,103 @@ def group_series(
         return (position, 0, position)
 
     return [hit for _, hit in sorted(enumerate(hits), key=order)]
+
+
+def library_series_index(
+    library: BrainLibrary, brain_ids: Sequence[str]
+) -> dict[str, dict[str, Any]]:
+    """Each document's place in a dated report series, remembered for one revision.
+
+    Series come from file names and modified dates in the document headers, and the
+    user's "Not a series" marks, which are all written through the library.
+    """
+    key = tuple(brain_ids)
+    revision = library.revision()
+    cached = library._series.get(key)
+    if cached and cached[0] == revision:
+        return cached[1]
+    index = series_index(detect_series(library.document_headers(brain_ids).values()))
+    library._series[key] = (revision, index)
+    return index
+
+
+def mark_series(library: BrainLibrary, series_id: str, not_series: bool) -> dict[str, Any]:
+    """Mark a detected series "Not a series", or undo that mark.
+
+    The mark is stored on every member's document record and written to the brain's
+    portable metadata. Files are not changed.
+    """
+
+    def mark(doc: dict[str, Any]) -> None:
+        if not_series:
+            doc["notSeries"] = True
+        else:
+            doc.pop("notSeries", None)
+
+    with library.lock, library.write_transaction():
+        found = detect_series(library.entities("documents"))
+        group = next((item for item in found if item["id"] == series_id), None)
+        if group is None:
+            raise ValueError("That report series is no longer in the library")
+        brain = library.brain(group["brainId"])
+        if not Path(brain["root"]).is_dir():
+            raise ValueError("Brain folder is unavailable")
+        members = library.document_ids(
+            (edition["docId"] for edition in group["editions"]), [group["brainId"]]
+        )
+        for doc_id in members:
+            library.edit_document(doc_id, mark)
+        library._portable(group["brainId"])
+        return {**group, "notSeries": not_series}
+
+
+def unused_archive(library: BrainLibrary, brain_ids: Sequence[str]) -> set[str]:
+    """``unused_archive_documents`` for every document, remembered for one revision.
+
+    Document headers are read only when a selected brain has a conversation archive.
+    Archive files reach the index only through a scan, which moves the revision.
+    """
+    key = tuple(brain_ids)
+    revision = library.revision()
+    cached = library._unused_archive.get(key)
+    if cached and cached[0] == revision:
+        return set(cached[1])
+
+    def headers() -> Iterator[dict[str, Any]]:
+        yield from library.document_headers(brain_ids).values()
+
+    archived = library.unused_archive_documents(list(brain_ids), headers())
+    library._unused_archive[key] = (revision, frozenset(archived))
+    return archived
+
+
+def unused_archive_documents(
+    library: BrainLibrary, brain_ids: list[str], documents: Iterable[dict[str, Any]]
+) -> set[str]:
+    """Files in Rem's conversation archive that no report, citation or collection uses.
+
+    Search ranks these after every other hit. Nothing leaves the index, so a reference
+    this check misses only moves a cited file down; it never hides or breaks it.
+    """
+    from gofer.ui.brain_graph import conversation_archives
+
+    folders: dict[str, set[str]] = {}
+    for brain_id in brain_ids:
+        found = {path.name for path in conversation_archives(Path(library.brain(brain_id)["root"]))}
+        if found:
+            folders[brain_id] = found
+    if not folders:
+        return set()
+    archived = {
+        doc["id"]
+        for doc in documents
+        if doc["path"].split("/", 1)[0] in folders.get(doc["brainId"], ())
+    }
+    if not archived:
+        return set()
+    evidence = {kind: library.entities(kind) for kind in ("citations", "reports", "collections")}
+    used = {ref["docId"] for ref in evidence_references(evidence)}
+    used |= {
+        item["docId"] for report in evidence["reports"] for item in report.get("sourceVersions", [])
+    }
+    return archived - used

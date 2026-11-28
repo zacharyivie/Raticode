@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -418,6 +419,90 @@ def test_failed_setup_fails_the_run_before_any_node(repo: Path, data_dir: Path) 
     assert run_worktrees.unlanded_run_ids(data_dir, "project") == []
 
 
+def test_a_crash_after_the_worktree_is_made_still_removes_it(
+    repo: Path, data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken_relocate(_ir: Any, _worktree: Any) -> Any:
+        raise RuntimeError("relocate broke")
+
+    monkeypatch.setattr(run_worktrees, "relocate", broken_relocate)
+
+    result = _run(_source(repo), data_dir)
+
+    document = result.document
+    assert document["status"] == "failed"
+    assert document["error"]["code"] == "RATTISH_RUNTIME_UNEXPECTED"
+    assert document["runs"] == []
+    assert document["worktree"]["state"] == "no_changes"
+    assert not Path(document["worktree"]["checkout"]).exists()
+    assert run_worktrees.unlanded_run_ids(data_dir, "project") == []
+
+
+def test_start_for_run_reports_a_worktree_it_cannot_create(tmp_path: Path, data_dir: Path) -> None:
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    ir = compile_rattish_file(_source(loose, QUIET), data_dir=data_dir).ir
+    created: list[dict[str, Any]] = []
+
+    run_ir, document, error = run_worktrees.start_for_run(
+        data_dir, ir, "run-1", threading.Event(), created.append
+    )
+
+    assert run_ir is None and document is None
+    assert error is not None and error.code == "RATTISH_WORKTREE_UNAVAILABLE"
+    assert error.kind == "workspace"
+    assert "isn't in a git repository" in error.message
+    assert created == []
+
+
+def test_start_for_run_reports_failed_setup_after_the_worktree_exists(
+    repo: Path, data_dir: Path
+) -> None:
+    (repo / ".raticode").mkdir()
+    (repo / ".raticode" / "worktree-setup.json").write_text(
+        json.dumps({"setup": "echo broken >&2; exit 3"})
+    )
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "setup")
+    worktree_setup.approve(data_dir, repo, worktree_setup.status(data_dir, repo)["file"]["sha256"])
+    ir = compile_rattish_file(_source(repo, QUIET), data_dir=data_dir).ir
+    seen: list[tuple[dict[str, Any], Any, bool]] = []
+
+    def on_created(document: dict[str, Any]) -> None:
+        # Told as soon as the folder exists, before setup has run.
+        seen.append((document, document["setup"], Path(document["checkout"]).is_dir()))
+
+    run_ir, document, error = run_worktrees.start_for_run(
+        data_dir, ir, "run-1", threading.Event(), on_created
+    )
+
+    assert run_ir is None and document is not None
+    assert error is not None and error.code == "RATTISH_WORKTREE_SETUP_FAILED"
+    assert error.message == document["setup"]["summary"]
+    assert [(entry[1], entry[2]) for entry in seen] == [(None, True)]
+    # The caller's copy gets the setup result too, and can still clean the worktree up.
+    assert seen[0][0] is document
+    assert document["setup"]["status"] == "failed"
+    assert document["state"] == "active"
+    assert document["branch"] == run_worktrees.branch_name(ir["workflow"]["id"], "run-1")
+
+
+def test_start_for_run_returns_the_ir_moved_into_the_worktree(repo: Path, data_dir: Path) -> None:
+    ir = compile_rattish_file(_source(repo, QUIET), data_dir=data_dir).ir
+    created: list[dict[str, Any]] = []
+
+    run_ir, document, error = run_worktrees.start_for_run(
+        data_dir, ir, "run-1", threading.Event(), created.append
+    )
+
+    assert error is None
+    assert document is not None and created == [document]
+    assert document["setup"] is None  # The project has no setup file.
+    assert run_ir["source"]["project_root"] == document["root"]
+    assert Path(document["root"]).is_dir()
+    assert ir["source"]["project_root"] != document["root"]  # The compiled IR is unchanged.
+
+
 def test_at_most_ten_unlanded_worktrees_per_workflow(repo: Path, data_dir: Path) -> None:
     folder = run_worktrees.worktrees_dir(data_dir, "project")
     for index in range(run_worktrees.MAX_UNLANDED):
@@ -688,6 +773,44 @@ def test_a_rewritten_dot_git_file_does_not_open_another_git_folder(
     assert access.admin_dir == common / "worktrees" / "run-1"
     assert all(path.is_relative_to(common) for path in access.writable())
     assert agent_sandbox.run_git_access(planned.root) is None  # No run is executing.
+
+
+def test_a_run_of_a_project_in_a_linked_worktree_writes_its_repositorys_git(
+    repo: Path, data_dir: Path, tmp_path: Path
+) -> None:
+    from gofer.rattish import agent_sandbox
+
+    common = (repo / ".git").resolve()
+    project = tmp_path / "project-wt"
+    git(repo, "worktree", "add", "-q", "-b", "feature", str(project))
+    planned = run_worktrees.plan(data_dir, project, "wf", "run-1")
+    run_worktrees.create(planned)
+
+    with agent_sandbox.run_worktree(planned.document()):
+        access = agent_sandbox.run_git_access(planned.root)
+    assert access is not None
+    assert access.common_dir == common
+    assert access.admin_dir is not None and access.admin_dir.parent == common / "worktrees"
+    assert str(common / "objects") in [str(path) for path in access.writable()]
+
+
+def test_a_run_of_a_project_whose_dot_git_names_another_repository_writes_no_git(
+    repo: Path, data_dir: Path, tmp_path: Path
+) -> None:
+    from gofer.rattish import agent_sandbox
+
+    project = tmp_path / "project-wt"
+    git(repo, "worktree", "add", "-q", "-b", "feature", str(project))
+    planned = run_worktrees.plan(data_dir, project, "wf", "run-1")
+    run_worktrees.create(planned)
+    # The project's own .git file now names the run worktree's admin folder instead.
+    other_admin = (repo / ".git" / "worktrees" / planned.checkout.name).resolve()
+    (project / ".git").write_text(f"gitdir: {other_admin}\n")
+
+    with agent_sandbox.run_worktree(planned.document()):
+        access = agent_sandbox.run_git_access(planned.root)
+    assert access is not None
+    assert access.writable() == []
 
 
 def test_a_run_step_writes_no_git_folder_it_cannot_find(tmp_path: Path) -> None:

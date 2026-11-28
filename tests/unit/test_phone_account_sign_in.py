@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from gofer.core import codex_accounts, grok_accounts
+from gofer.core import claude_accounts, codex_accounts, grok_accounts
 from gofer.core import provider_accounts as accounts
 from tests.unit.test_codex_accounts import codex as codex
 from tests.unit.test_codex_accounts import data_dir as data_dir
@@ -48,8 +48,12 @@ def _until(send: Any, name: str, done: Any) -> dict[str, Any]:
 
 
 @pytest.fixture
-def desk(phone, data_dir: Path, codex: Path):
+def desk(phone, data_dir: Path, codex: Path, monkeypatch: pytest.MonkeyPatch):
     app, peer, _, send = phone
+    # Claude Code accounts need signing in; tests never ask a real claude.
+    monkeypatch.setattr(
+        claude_accounts, "check_status", lambda *_a, **_k: {"state": accounts.NEEDS_SIGN_IN}
+    )
     app.desktop.enable(peer, True)
     app.desktop.rem.data_dir = data_dir
     app.desktop.rem._current_config = lambda: {}
@@ -74,7 +78,8 @@ def test_phone_signs_a_codex_account_in_with_codexs_link_and_code(desk, data_dir
     assert row["needs_sign_in"] is True and row["phone_sign_in"] is True
     assert "sign_in" not in row
     # Claude Code accounts aren't offered: the phone keeps "sign in on your computer".
-    assert _row(send, "laptop")["phone_sign_in"] is False
+    laptop = _row(send, "laptop")
+    assert laptop["needs_sign_in"] is True and laptop["phone_sign_in"] is False
 
     answer = send("desktop.action", "provider.account.sign_in", {"name": "work"})
     assert answer["ok"] is True, answer

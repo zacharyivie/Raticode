@@ -107,4 +107,16 @@ class DesktopScreensTest {
         assertEquals("Every 2 h", scheduleText(RemSchedule("interval", "", "", emptyList(), 120)))
         assertEquals("Once, right away", scheduleText(RemSchedule("once", "", "", emptyList(), 0)))
     }
+
+    @Test fun customSchedulesReadInWordsWithTheirTimeZone() {
+        fun cron(expr: String, summary: String, zone: String = "") = RemSchedule("cron", "", "", emptyList(), 0, expr, summary, zone)
+        assertEquals("Weekdays at 9:00", scheduleText(cron("0 9 * * 1-5", "Weekdays at 9:00")))
+        // An unusual expression has no words, so it shows by itself.
+        assertEquals("Custom (7 3 1-9/2 * *)", scheduleText(cron("7 3 1-9/2 * *", "")))
+        // An older desktop sends neither.
+        assertEquals("Custom schedule", scheduleText(RemSchedule("cron", "", "", emptyList(), 0)))
+        assertEquals("Weekdays at 9:00 · America/Argentina/Buenos Aires", scheduleWithZone(cron("0 9 * * 1-5", "Weekdays at 9:00", "America/Argentina/Buenos_Aires")))
+        assertEquals("Every day at 09:00", scheduleWithZone(RemSchedule("daily", "", "09:00", emptyList(), 0)))
+        assertEquals("Once, right away", scheduleWithZone(RemSchedule("once", "", "", emptyList(), 0, timezone = "UTC")))
+    }
 }

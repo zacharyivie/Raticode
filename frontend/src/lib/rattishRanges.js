@@ -49,10 +49,6 @@ export function diagnosticMessage(diagnostic) {
   return hints.length ? [message, ...hints].join("\n") : message;
 }
 
-export function diagnosticsToMarkers(monaco, model, source, diagnostics = []) {
-  return diagnostics.map((diagnostic) => diagnosticToMarker(monaco, model, source, diagnostic));
-}
-
 function markerSeverity(monaco, severity) {
   if (severity === "warning") return monaco.MarkerSeverity.Warning;
   if (severity === "info") return monaco.MarkerSeverity.Info;

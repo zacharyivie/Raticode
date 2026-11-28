@@ -62,7 +62,12 @@ object Posts {
                 if (v.isNull("cost_usd") || !v.has("cost_usd")) null else v.optDouble("cost_usd"),
                 v.optString("message"), webOrBlank(v.optString("url")), webOrBlank(v.optString("open_url")), v.strings("actions"))
         },
-        json.strings("actions"))
+        json.strings("actions"),
+        json.objects("copies").map { c ->
+            PlatformCopy(c.optString("id"), c.optString("platform"), c.optString("platform_label"), c.optString("account_name"),
+                c.optString("message"), webOrBlank(c.optString("url")),
+                c.optString("next_try_at").takeUnless { c.isNull("next_try_at") || it.isBlank() }, c.optBoolean("waiting"), c.strings("actions"))
+        })
 
     /** A link the computer sent for a post, kept only when it is a web address; a tap never opens any other scheme. */
     private fun webOrBlank(url: String) = ChatLinks.web(url).orEmpty()
@@ -78,6 +83,10 @@ object Posts {
         }
 
     fun pause(paused: Boolean): JSONObject = JSONObject().put("decision", if (paused) "pause" else "resume")
+
+    /** Try deleting a copy again (retry_copy), or say the user deleted it on the platform (copy_deleted). */
+    fun copyDecision(decision: String, post: PhonePost, copy: PlatformCopy): JSONObject = JSONObject().put("decision", decision)
+        .put("post_id", post.id).put("content_hash", post.contentHash).put("copy_id", copy.id)
 
     /** The text before and after the platform's "see more" cut, or the whole text and an empty rest. */
     fun fold(variant: PhonePostVariant): Pair<String, String> {
@@ -98,10 +107,17 @@ data class PhonePost(val id: String, val title: String, val state: String, val l
                      val notes: List<Pair<String, String>>,
                      /** Part of the post (long text, media or options such as a title) isn't shown on the phone, so approving asks twice. */
                      val unseen: Boolean,
-                     val variants: List<PhonePostVariant>, val actions: List<String>)
+                     val variants: List<PhonePostVariant>, val actions: List<String>,
+                     /** Copies a platform still holds from before an edit or cancel that the computer couldn't delete. */
+                     val copies: List<PlatformCopy> = emptyList())
 data class PhonePostVariant(val id: String, val platform: String, val platformLabel: String, val accountName: String,
                             val state: String, val delivery: String, val text: String, val textCut: Boolean, val link: String,
                             val mediaCount: Int, val chars: Int, val limit: Int,
                             /** Where the platform's feed cuts the text with "see more"; null shows all of it. */
                             val foldAt: Int?, val costUsd: Double?, val message: String, val url: String, val openUrl: String,
                             val actions: List<String>)
+/** A copy Facebook or YouTube still holds that the computer tried and failed to delete, with the platform's message. */
+data class PlatformCopy(val id: String, val platform: String, val platformLabel: String, val accountName: String,
+                        val message: String, val url: String, val nextTryAt: String?,
+                        /** The computer stopped trying and waits for Try again or I deleted it. */
+                        val waiting: Boolean, val actions: List<String>)

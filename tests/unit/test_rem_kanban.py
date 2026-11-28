@@ -1648,7 +1648,7 @@ def test_self_work_can_be_turned_off(board):
 
 
 def test_settings_validate_and_detect_conflicts(board):
-    home, _, _ = board
+    home, _, project = board
     view = home.self_work.view()
     assert view["settings"] == {
         "enabled": True,
@@ -1664,6 +1664,8 @@ def test_settings_validate_and_detect_conflicts(board):
         "pace_lead_hours": 3,
         "auto_approve_proposals": False,
         "provider_accounts": {},
+        # Rem's one project holds every thread.
+        "project_effort": {str(project): 100},
         "idle_minutes": 15,
         "revision": 0,
     }
@@ -1896,6 +1898,7 @@ def test_phone_reads_and_changes_self_work_and_clears_the_report(linked):
         "pace_aim_percent_min": 1,
         "pace_aim_percent_max": 100,
         "pace_lead_hours_max": 24,
+        "effort_percent_max": 100,
     }
     changed = send(
         "desktop.action",

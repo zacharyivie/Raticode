@@ -48,7 +48,13 @@ def validate_prompt_template(template: str, names: set[str]) -> tuple[PromptPlac
 
 
 def render_template_value(template: str, values: Mapping[str, Any]) -> Any:
-    """Render a Rattish template, preserving an exact placeholder's native value."""
+    """Render a Rattish template, preserving an exact placeholder's native value.
+
+    Only the author's template is checked for delimiters. Values go in as they are, in one
+    pass, and are never rendered again: a value may contain ``{{`` or ``}}``, and a value
+    such as ``{{other}}`` stays text instead of pulling in another local.
+    """
+    parse_prompt_template(template)
     canonical_values = {name.lower(): value for name, value in values.items()}
     protected = template.replace("{{{{", _OPEN_SENTINEL).replace("}}}}", _CLOSE_SENTINEL)
 
@@ -59,17 +65,20 @@ def render_template_value(template: str, values: Mapping[str, Any]) -> Any:
         placeholder = _parse_expression(matches[0].group(1).strip())
         return _placeholder_value(placeholder, canonical_values)
 
-    def replace(match: re.Match[str]) -> str:
+    # Escapes are restored in the author's text only, so a value can't turn into a delimiter.
+    parts: list[str] = []
+    cursor = 0
+    for match in matches:
+        parts.append(_unprotect(protected[cursor : match.start()]))
         placeholder = _parse_expression(match.group(1).strip())
         value = _placeholder_value(placeholder, canonical_values)
         if isinstance(value, str):
-            return value
-        return json.dumps(value, sort_keys=True, separators=(",", ":"))
-
-    rendered = _PLACEHOLDER.sub(replace, protected)
-    if "{{" in rendered or "}}" in rendered:
-        raise PromptTemplateError("Prompt contains an unmatched placeholder delimiter.")
-    return rendered.replace(_OPEN_SENTINEL, "{{").replace(_CLOSE_SENTINEL, "}}")
+            parts.append(value)
+        else:
+            parts.append(json.dumps(value, sort_keys=True, separators=(",", ":")))
+        cursor = match.end()
+    parts.append(_unprotect(protected[cursor:]))
+    return "".join(parts)
 
 
 def render_prompt_template(template: str, values: Mapping[str, Any]) -> str:
@@ -78,6 +87,10 @@ def render_prompt_template(template: str, values: Mapping[str, Any]) -> str:
     if isinstance(rendered, str):
         return rendered
     return json.dumps(rendered, sort_keys=True, separators=(",", ":"))
+
+
+def _unprotect(text: str) -> str:
+    return text.replace(_OPEN_SENTINEL, "{{").replace(_CLOSE_SENTINEL, "}}")
 
 
 def _placeholder_value(placeholder: PromptPlaceholder, canonical_values: Mapping[str, Any]) -> Any:

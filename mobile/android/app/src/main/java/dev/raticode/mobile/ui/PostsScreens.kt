@@ -18,11 +18,13 @@ import androidx.compose.ui.unit.dp
 import dev.raticode.mobile.live.LiveClient
 import dev.raticode.mobile.live.PhonePost
 import dev.raticode.mobile.live.PhonePostVariant
+import dev.raticode.mobile.live.PlatformCopy
 import dev.raticode.mobile.live.Posts
 import dev.raticode.mobile.live.PostsView
 
 /** A decision waiting for the user's second tap: the action, its post, and the variant it is for. */
-private data class PendingDecision(val decision: String, val post: PhonePost, val variant: PhonePostVariant? = null)
+private data class PendingDecision(val decision: String, val post: PhonePost, val variant: PhonePostVariant? = null,
+                                    val copy: PlatformCopy? = null)
 
 /**
  * The computer's Posts dashboard on the phone: what's waiting for review, due, scheduled or stuck, with each platform's
@@ -71,8 +73,10 @@ internal fun PostsPage(client: LiveClient, onBack: (() -> Unit)?) {
         }
     }
     pending?.let { decision -> DecisionDialog(decision, onDismiss = { pending = null }) { note, url ->
-        val params = Posts.decision(decision.decision, decision.post, decision.variant?.id, note, url,
-            unseenConfirmed = decision.post.unseen && decision.decision in setOf("approve", "approve_now"))
+        val copy = decision.copy
+        val params = if (copy != null) Posts.copyDecision(decision.decision, decision.post, copy)
+            else Posts.decision(decision.decision, decision.post, decision.variant?.id, note, url,
+                unseenConfirmed = decision.post.unseen && decision.decision in setOf("approve", "approve_now"))
         client.desktopAction(Posts.DECIDE, params); pending = null
     } }
     if (confirmResume) AlertDialog(onDismissRequest = { confirmResume = false },
@@ -156,6 +160,7 @@ private fun PostCard(post: PhonePost, busy: Boolean, startOpen: Boolean, onDecid
                 post.variants.joinToString(", ") { it.platformLabel }).joinToString(" · "))
             post.flags.forEach { Text("⚠ $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
             post.timing.forEach { Text("🕒 $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            post.copies.forEach { copy -> CopyNotDeleted(post, copy, busy, onDecide) { url -> openInBrowser(context, url) } }
             if (open) {
                 post.variants.forEach { variant -> VariantPreview(post, variant, busy, onDecide) { url -> openInBrowser(context, url) } }
                 if (post.rationale.isNotBlank() || post.sources.isNotEmpty()) {
@@ -210,6 +215,26 @@ private fun VariantPreview(post: PhonePost, variant: PhonePostVariant, busy: Boo
     }
 }
 
+/** A copy the platform still holds that the computer couldn't delete: its message, its link, Try again and I deleted it. */
+@Composable
+private fun CopyNotDeleted(post: PhonePost, copy: PlatformCopy, busy: Boolean, onDecide: (PendingDecision) -> Unit, onOpen: (String) -> Unit) {
+    Surface(tonalElevation = 2.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth().testTag("postCopy-${copy.id}")) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("An earlier copy on ${copy.platformLabel} wasn't deleted", style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.error)
+            if (copy.accountName.isNotBlank()) Note(copy.accountName)
+            if (copy.message.isNotBlank()) Text("${copy.platformLabel}: ${copy.message}", style = MaterialTheme.typography.bodySmall)
+            Note(if (copy.waiting) "Your computer stopped trying. Fix the problem and tap Try again, or delete the copy on ${copy.platformLabel} yourself and tap I deleted it."
+                else "Your computer tries again ${copy.nextTryAt?.let { whenText(it) } ?: "shortly"}.")
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (copy.url.isNotBlank()) TextButton(onClick = { onOpen(copy.url) }) { Text("View the copy") }
+                if ("retry_copy" in copy.actions) OutlinedButton(enabled = !busy, onClick = { onDecide(PendingDecision("retry_copy", post, copy = copy)) }) { Text("Try again") }
+                if ("copy_deleted" in copy.actions) OutlinedButton(enabled = !busy, onClick = { onDecide(PendingDecision("copy_deleted", post, copy = copy)) }) { Text("I deleted it") }
+            }
+        }
+    }
+}
+
 @Composable
 private fun DecisionRow(post: PhonePost, busy: Boolean, onDecide: (PendingDecision) -> Unit) {
     if (post.actions.isEmpty()) return
@@ -240,6 +265,8 @@ private fun DecisionDialog(pending: PendingDecision, onDismiss: () -> Unit, onCo
         "decline" -> Triple("Decline “${post.title}”?", "It won't be posted. You can say why.", "Decline")
         "cancel" -> Triple("Cancel “${post.title}”?", "Parts that haven't gone out yet won't. Parts already posted stay up.", "Cancel post")
         "publish" -> Triple("Publish to ${pending.variant?.platformLabel} now?", "It goes out to ${pending.variant?.accountName} right away.", "Publish")
+        "retry_copy" -> Triple("Try deleting it again?", "Your computer asks ${pending.copy?.platformLabel} to delete the earlier copy now.", "Try again")
+        "copy_deleted" -> Triple("Did you delete it?", "Only say so once the earlier copy is gone from ${pending.copy?.platformLabel}. Then this post can go out there again.", "I deleted it")
         else -> Triple("Mark as posted?", "Paste the link to the post you made on ${pending.variant?.platformLabel}, if you have it.", "Mark posted")
     }
     val approving = pending.decision in setOf("approve", "approve_now")

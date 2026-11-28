@@ -26,7 +26,7 @@ async function main() {
   });
   await app.whenReady();
   const { createServer } = await import("vite");
-  vite = await createServer({ cacheDir: testViteCacheDir(), root: path.join(root, "frontend"), logLevel: "error", server: { host: "127.0.0.1", port: 0 }, plugins: [{
+  vite = await createServer({ configLoader: "runner", cacheDir: testViteCacheDir(), root: path.join(root, "frontend"), logLevel: "error", server: { host: "127.0.0.1", port: 0 }, plugins: [{
     name: "second-brain-graph-test",
     resolveId(id) { if (id === "/brain-graph-entry.jsx") return id; },
     load(id) { if (id === "/brain-graph-entry.jsx") return `import React from "react"; import {createRoot} from "react-dom/client"; import SecondBrainWorkspace from "/src/components/SecondBrainWorkspace.jsx"; import SecondBrainSidebar from "/src/components/SecondBrainSidebar.jsx"; import * as store from "/src/lib/secondBrainStore.js"; import "/src/styles/index.css"; window.__sb=store; createRoot(document.getElementById("root")).render(<main style={{height:"100vh",display:"flex"}}><aside style={{width:260,display:"flex"}}><SecondBrainSidebar active open onOpen={()=>{}}/></aside><section style={{flex:1,minWidth:0,display:"flex"}}><SecondBrainWorkspace assistant={{provider:"codex",model:"test-model"}} onClose={()=>{}}/></section></main>);`; },

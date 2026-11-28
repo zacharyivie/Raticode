@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import socket
 import sys
 import threading
@@ -337,10 +338,12 @@ def test_the_check_cant_read_credentials_or_reach_the_network(
         socket.create_connection(("127.0.0.1", listener), timeout=3).close()
         script = "\n".join(
             [
-                f"cat {ssh / 'id_check_probe'} && echo READ-SSH",
-                f"cat {data / 'devices' / 'key'} && echo READ-DATA",
+                # Quoted: test folders hold a space and "ñ", and an unquoted path would
+                # write to a different, throwaway place.
+                f"cat {shlex.quote(str(ssh / 'id_check_probe'))} && echo READ-SSH",
+                f"cat {shlex.quote(str(data / 'devices' / 'key'))} && echo READ-DATA",
                 f"{connect} && echo NETWORK",
-                f"echo x > {outside / 'leak'} && echo WROTE-OUTSIDE",
+                f"echo x > {shlex.quote(str(outside / 'leak'))} && echo WROTE-OUTSIDE",
                 'echo inside > in-folder.txt && echo x > "$TMPDIR/t" && echo WROTE-OK',
             ]
         )
@@ -396,7 +399,9 @@ def committed_project(tmp_path: Path) -> tuple[Path, str]:
     (root / ".gitignore").write_text("ran.log\n")
     # The check runs in a fresh worktree of the commit, so it logs its runs here.
     script = (root / "check.sh").read_text()
-    (root / "check.sh").write_text(script.replace(">> ran.log", f">> {root / 'ran.log'}"))
+    (root / "check.sh").write_text(
+        script.replace(">> ran.log", f">> {shlex.quote(str(root / 'ran.log'))}")
+    )
     git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C", str(root)]
     subprocess.run([*git, "init", "-q"], check=True)
     subprocess.run([*git, "add", "."], check=True)
@@ -482,6 +487,30 @@ def test_develop_work_names_its_proving_test_and_the_reviewer_looks_for_it(
     assert "Judge a not-testable reason" in review
     # The reviewer's own instructions don't ask it to name a test.
     assert PROVING_TEST_GUIDANCE not in review
+
+
+def test_workers_and_rems_updates_must_link_their_evidence_files(
+    home: RemHome,  # noqa: F811
+    tmp_path: Path,
+):
+    """A built-in rule for every user, not a saved memory: final messages link evidence."""
+    from gofer.ui.rem_home import EVIDENCE_LINKS, TASK_UPDATE_RULES
+
+    assert "screenshots, screen recordings, reports and logs" in EVIDENCE_LINKS
+    assert "[name](</absolute/path>)" in EVIDENCE_LINKS
+    # Rem's update to the user carries the rule once.
+    assert TASK_UPDATE_RULES.count(EVIDENCE_LINKS) == 1
+    root, _ = committed_project(tmp_path)
+    home.configure({"provider": "claude_code", "resources": RESOURCES})
+    decide(home, root)
+    source, calls = source_for(root, fix_on_repair=False)
+    home.source = source
+    task = home.create_task({"request_id": "evidence", **recipe(root)})["task"]
+    wait_run(home, task["id"], {"succeeded", "blocked"}, timeout=20)
+    work = calls["work"][0]["agent_instructions"]
+    assert work.count(EVIDENCE_LINKS) == 1
+    # With no memories saved: the rule is part of the worker's own instructions.
+    assert home.memories()["memories"] == []
 
 
 def test_only_tasks_that_write_code_are_asked_for_a_proving_test():
@@ -993,7 +1022,7 @@ def test_a_file_the_failed_first_run_left_cant_decide_its_rerun(
     log = tmp_path / "ran.log"
     # Fails the first time; passes only where an earlier run left its marker.
     (root / "check.sh").write_text(
-        f"echo run >> {log}\n"
+        f"echo run >> {shlex.quote(str(log))}\n"
         'if [ -f flaked.txt ]; then echo "= 3 passed ="; exit 0; fi\n'
         "touch flaked.txt\n"
         f'echo "FAILED {FLAKY_TEST} - AssertionError"; exit 1\n'

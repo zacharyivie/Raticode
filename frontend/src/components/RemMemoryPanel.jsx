@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Brain, Check, Copy, Undo2 } from "lucide-react";
-import { formatWhen } from "../lib/remHome.js";
+import { relativeWhen } from "../lib/remHome.js";
+import { shortDate } from "../lib/timeText.js";
 import { addRemMemory, forgetRemMemory, loadRemMemories, saveRemMemory, setRemMemoryMode, undoRemMemory } from "../lib/remMemory.js";
 
 const MODES = [
@@ -8,13 +9,6 @@ const MODES = [
   { value: "paused", label: "Paused", hint: "Rem uses what it remembers but saves nothing new. Asking it to correct or forget something still works." },
   { value: "off", label: "Off", hint: "Rem neither uses nor saves memories. Nothing here is deleted." },
 ];
-
-// A memory's end date as a short day ("Dec 1", with the year when it isn't this year's).
-export function endDay(until, now = new Date()) {
-  const day = new Date(until);
-  if (Number.isNaN(day.getTime())) return "";
-  return day.toLocaleDateString(undefined, { month: "short", day: "numeric", ...(day.getFullYear() !== now.getFullYear() ? { year: "numeric" } : {}) });
-}
 
 // YYYY-MM-DD for a date input, in local time.
 const inputDay = value => {
@@ -28,7 +22,7 @@ const EVERY_PROJECT = "";
 
 // Where a memory applies: every project, or one project picked from the open ones.
 // A project that is no longer open stays listed while a memory still belongs to it.
-function ProjectPicker({ label, value, projects, disabled, onChange }) {
+export function ProjectPicker({ label, value, projects, disabled, onChange }) {
   return <label className="rem-memory-project">
     <span>{label}</span>
     <select aria-label={label} value={value} disabled={disabled} onChange={event => onChange(event.target.value)}>
@@ -141,8 +135,8 @@ export default function RemMemoryPanel({ onClose, now = new Date() }) {
           <span>{memory.text}</span>
           <small>
             {memory.project ? <span className="rem-memory-tag" title={`Rem uses this only for work in ${memory.project}`}>{memory.project_name || memory.project}</span> : null}
-            {memory.until ? <span className="rem-memory-end" title={memory.ended ? "Rem no longer uses this. Keep it to use it again." : "Rem stops using this after this day."}>{memory.ended ? `Ended ${endDay(memory.until, now)}` : `Until ${endDay(memory.until, now)}`}</span> : null}
-            {[formatWhen(memory.created_at, now, { past: true }), memory.added_by === "user" ? "added by you" : "", memory.edited_at ? "edited" : ""].filter(Boolean).join(" · ")}
+            {memory.until ? <span className="rem-memory-end" title={memory.ended ? "Rem no longer uses this. Keep it to use it again." : "Rem stops using this after this day."}>{memory.ended ? `Ended ${shortDate(memory.until, { now })}` : `Until ${shortDate(memory.until, { now })}`}</span> : null}
+            {[relativeWhen(memory.created_at, now, { past: true }), memory.added_by === "user" ? "added by you" : "", memory.edited_at ? "edited" : ""].filter(Boolean).join(" · ")}
           </small>
           <div>
             {memory.ended ? <button type="button" disabled={busy} title="Remove the end date so Rem uses this again" onClick={() => apply(() => saveRemMemory(memory.id, { until: null }))}>Keep</button> : <>
@@ -176,7 +170,7 @@ export function MemoryNote({ messageId, memory }) {
   const [error, setError] = useState("");
   if (!memory) return null;
   const lines = [
-    ...(memory.saved || []).map(entry => ({ key: `s-${entry.id}`, text: entry.until && !entry.removed ? `Saved to memory until ${endDay(entry.until)}: ${quoted(entry)}` : `Saved to memory: ${quoted(entry)}` })),
+    ...(memory.saved || []).map(entry => ({ key: `s-${entry.id}`, text: entry.until && !entry.removed ? `Saved to memory until ${shortDate(entry.until)}: ${quoted(entry)}` : `Saved to memory: ${quoted(entry)}` })),
     ...(memory.updated || []).map(entry => ({ key: `u-${entry.id}`, text: `Updated memory: ${quoted(entry)}` })),
     ...(memory.forgotten || []).map(entry => ({ key: `f-${entry.id}`, text: `Forgot: ${quoted(entry)}` })),
   ];

@@ -15,12 +15,15 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import cache, partial
 from pathlib import Path
 from typing import Any, Literal, cast
 
 import anyio
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from jsonschema.exceptions import ValidationError  # type: ignore[import-untyped]
+from referencing import Registry
+from referencing.jsonschema import DRAFT202012
 
 if sys.platform == "win32":
     import msvcrt
@@ -54,10 +57,18 @@ from gofer.rattish.model_overrides import (
     compile_variant,
     variant_record,
 )
-from gofer.rattish.preflight import PreflightRegistry, PreflightResult, run_preflight
+from gofer.rattish.preflight import PreflightResult, run_preflight
 from gofer.rattish.provider_runtime import default_provider_subscriptions
 from gofer.rattish.result_cache import ResultCache, RunPaths, stable_run_paths
 from gofer.rattish.run_from import RunFromPlan, RunFromRefused, plan_run_from, reusable_count
+from gofer.rattish.run_journal import (
+    RunJournal,
+    fold_into,
+    journal_line,
+    journal_path,
+    read_entries,
+    remove_journal,
+)
 from gofer.rattish.run_usage import USAGE_LIMIT_CODES, RunUsageMeter
 from gofer.rattish.run_values import (
     SavedRunValues,
@@ -201,6 +212,44 @@ def effective_run_status(document: Mapping[str, Any]) -> str:
     if not process_is_running(pid, document.get("runner_start")):
         return "interrupted"
     return "running"
+
+
+def fold_run_journal(record: Path) -> dict[str, Any] | None:
+    """Add an interrupted run's journal to its record; the saved record, or None.
+
+    Call it when a record reads as interrupted, before ``resume_refusal`` and
+    ``resume_rerun_nodes`` look at it. It reads the record again, folds only while
+    that record still says ``running`` and its runner is gone, saves the result and
+    deletes the journal. Returns None when there was no journal to fold. The record it
+    returns keeps its saved status; apply ``effective_run_status`` to it.
+    """
+    journal = journal_path(record)
+    if not journal.exists():
+        return None
+    try:
+        document = json.loads(record.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    if document.get("status") != "running":
+        # A finished run's journal is left only by a crash right after its final save.
+        remove_journal(journal)
+        return None
+    if effective_run_status(document) != "interrupted":
+        return None
+    # Read after the runner is known gone: a run in this process stops counting as
+    # active only after its final save deleted the journal.
+    entries = read_entries(journal)
+    if entries is None:
+        return None
+    if fold_into(document, entries):
+        try:
+            _write_json_atomic(record, document)
+        except RattishRunArtifactError:
+            return None  # Keep both as they are; the record alone still resumes.
+    remove_journal(journal)
+    return document
 
 
 # Resume semantics. A resumed run is a new run of the same saved source. It
@@ -376,9 +425,15 @@ async def resume_rattish_run(
     resolved_data_dir = data_dir or get_data_dir()
     workflow_id = str(document["workflow"]["id"])
     run_id = str(document["run_id"])
-    directory = _run_path(
+    record = _run_path(
         resolved_data_dir, workflow_id, run_id, source_path=source_path.expanduser().resolve()
-    ).parent
+    )
+    directory = record.parent
+    if document.get("status") == "interrupted":
+        # Steps its record hadn't saved yet are in its journal; resume reuses them too.
+        folded = fold_run_journal(record)
+        if folded is not None:
+            document = {**folded, "status": effective_run_status(folded)}
     key = (workflow_id, run_id)
     with _active_rattish_ids_lock:
         if key in _resuming:
@@ -522,6 +577,9 @@ def plan_rattish_run_from(
                 continue
             if isinstance(document, dict) and document.get("run_id"):
                 document["status"] = effective_run_status(document)
+                if document["status"] == "interrupted":
+                    document = fold_run_journal(path) or document
+                    document["status"] = effective_run_status(document)
                 yield document
 
     try:
@@ -659,6 +717,349 @@ def _track_rattish_run(run_id: str) -> Iterator[None]:
             _active_rattish_ids.discard(run_id)
 
 
+# A running run's record is saved at most this often, unless something needs it saved at once.
+_LIVE_SAVE_SECONDS = 1.0
+
+
+class _LiveRecord:
+    """The record of a run while it runs, saved at most once every ``_LIVE_SAVE_SECONDS``.
+
+    Saving the whole record on every step made a long loop slow down with the square of
+    its length. The first save checks the whole record; later ones save only after
+    ``add`` checked each new event and node run on its own, and the final record is
+    checked whole by the caller. So that a crash loses at most the step that was
+    running, ``add`` also appends each checked event and node run to the run's journal
+    (``run_journal``) at once; an interrupted run is found by its ``runner_pid`` and
+    ``fold_run_journal`` adds the journal's entries to its record.
+    """
+
+    def __init__(self, path: Path, document: dict[str, Any]) -> None:
+        self.path = path
+        self.document = document
+        # The worktree is saved from a worker thread while the loop may flush.
+        self._lock = threading.Lock()
+        self._pending = False
+        self._saved_at = 0.0
+        self._journal: RunJournal | None = None
+
+    def save_first(self) -> None:
+        with self._lock:
+            _write_json_atomic(self.path, self.document)
+            self._pending = False
+            self._saved_at = time.monotonic()
+        try:
+            self._journal = RunJournal(self.path)
+        except OSError:
+            self._journal = None  # The record still saves once a second.
+
+    def add(self, event: dict[str, Any], node_run: dict[str, Any] | None) -> None:
+        """Check one new event and its node run, then journal them.
+
+        Raises ``RattishRunArtifactError`` if they can't be saved.
+        """
+        _check_run_part("event", event)
+        if node_run is not None:
+            _check_run_part("node_run", node_run)
+        try:
+            # Values the schema allows but JSON can't hold, such as integers past 2**53.
+            line = journal_line(event, node_run)
+        except (TypeError, ValueError) as exc:
+            raise RattishRunArtifactError(f"Could not publish Rattish run artifact: {exc}") from exc
+        if self._journal is not None:
+            self._journal.append(line)
+
+    def publish(
+        self,
+        event: dict[str, Any],
+        record: NodeRunRecord | None,
+        *,
+        live: dict[str, Any],
+        usage: RunUsageMeter,
+        started_clock: float,
+        approval_nodes: set[str],
+    ) -> None:
+        """Add one node event, and the node run it finished, to ``live``, the record kept here.
+
+        Saves at once when a node failed, stopped or starts waiting for a person on one
+        of ``approval_nodes``. An event that can't be saved is dropped, so the final
+        record can still be saved, and raises ``_RunRecordError`` to fail the run.
+        """
+        previous = (
+            len(live["events"]),
+            len(live["runs"]),
+            dict(live["latest_node_outputs"]),
+        )
+        entry = {"sequence": len(live["events"]) + 1, **event}
+        node_run = _node_run_document(record) if record is not None else None
+        try:
+            self.add(entry, node_run)
+            live["events"].append(entry)
+            if record is not None:
+                live["runs"].append(node_run)
+                if record.result.outcome == "success":
+                    live["latest_node_outputs"][record.node_id] = record.result.output
+            live["usage"] = usage.snapshot()
+            live["duration_ms"] = round((time.monotonic() - started_clock) * 1000)
+            kind = event["type"]
+            failed = record is not None and record.result.outcome != "success"
+            waits = kind == "node_started" and event["node_id"] in approval_nodes
+            self.changed(at_once=failed or waits or kind == "node_stopped")
+        except RattishRunArtifactError as exc:
+            del live["events"][previous[0] :]
+            del live["runs"][previous[1] :]
+            live["latest_node_outputs"] = previous[2]
+            node = event.get("node_id") or "workflow"
+            raise _RunRecordError(
+                f"Node '{node}' produced output that cannot be saved to the run record: {exc}"
+            ) from exc
+
+    def finish(self) -> None:
+        """Delete the journal once the final record is saved."""
+        if self._journal is not None:
+            self._journal.finish()
+
+    def close(self) -> None:
+        """Stop journaling but keep the journal, for a run whose final record wasn't saved."""
+        if self._journal is not None:
+            self._journal.close()
+
+    def set_worktree(self, worktree: dict[str, Any]) -> None:
+        _check_run_part("worktree", worktree)
+        with self._lock:
+            self.document["worktree"] = worktree
+        self.changed(at_once=True)
+
+    def changed(self, *, at_once: bool = False) -> None:
+        """Save now if ``at_once`` or a save is due; otherwise ``keep_saved`` saves it soon."""
+        self._pending = True
+        if at_once or time.monotonic() - self._saved_at >= _LIVE_SAVE_SECONDS:
+            self.flush()
+
+    def flush(self) -> None:
+        with self._lock:
+            if not self._pending:
+                return
+            _publish_json(self.path, self.document)
+            self._pending = False
+            self._saved_at = time.monotonic()
+
+    async def keep_saved(self) -> None:
+        """Save changes no later event brought to disk, once their second is up."""
+        while True:
+            await anyio.sleep(_LIVE_SAVE_SECONDS / 10)
+            if self._pending and time.monotonic() - self._saved_at >= _LIVE_SAVE_SECONDS:
+                try:
+                    self.flush()
+                except RattishRunArtifactError as exc:
+                    raise _RunRecordError(f"The run record could not be saved: {exc}") from exc
+
+
+class _StopWatch:
+    """Whether a running run was asked to stop, by ``cancel_event`` or its stop marker.
+
+    The cancel event is this process's Stop; the marker beside ``record`` is anyone
+    else's. The first stop seen sets ``setup_cancel``, which stops a worktree's project
+    setup running in a thread, and saves the live record: the steps it stops save the
+    rest, and the final record follows.
+    """
+
+    def __init__(
+        self, cancel_event: threading.Event | None, record: Path, live_record: _LiveRecord
+    ) -> None:
+        self.stop_seen = False
+        self.cancel_event = cancel_event
+        self.record = record
+        self.setup_cancel = threading.Event()
+        self.live_record = live_record
+
+    def wanted(self, *, check_marker: bool) -> bool:
+        """True once a stop was seen; ``check_marker`` also reads the stop marker."""
+        if not self.stop_seen and (
+            (self.cancel_event is not None and self.cancel_event.is_set())
+            or (check_marker and run_stop_requested(self.record))
+        ):
+            self.stop_seen = True
+            self.setup_cancel.set()
+            self.live_record.flush()
+        return self.stop_seen
+
+    async def watch(self, scope: anyio.CancelScope) -> None:
+        """Cancel ``scope`` once a stop is seen, reading the marker every poll interval."""
+        next_marker_check = 0.0
+        while True:
+            now = time.monotonic()
+            check_marker = now >= next_marker_check
+            if check_marker:
+                next_marker_check = now + _STOP_MARKER_POLL_SECONDS
+            if self.wanted(check_marker=check_marker):
+                break
+            await anyio.sleep(0.05)
+        scope.cancel()
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedRun:
+    """What ``_prepare_run`` worked out before a run's preflight: the compile and its basis.
+
+    ``workflow_inputs``, ``trigger_events`` and ``file_inputs_from`` are the earlier
+    run's for a resume or a run from a node, and the caller's otherwise.
+    """
+
+    resolved_data_dir: Path
+    compiled: CompiledArtifact
+    model_variant: dict[str, Any] | None
+    workflow_inputs: Mapping[str, Any] | None
+    trigger_events: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...] | None
+    file_inputs_from: Path | None
+    run_from: RunFromPlan | None
+    replayed: dict[str, Any] | None
+    resumed: dict[str, Any] | None
+
+
+def _earlier_run_values(
+    compiled: CompiledArtifact,
+    data_dir: Path,
+    document: Mapping[str, Any],
+    withheld: Mapping[str, Any] | None,
+    *,
+    run_id: str,
+    saved: SavedRunValues | None = None,
+    refused: type[RattishResumeRefused],
+) -> tuple[dict[str, Any], tuple[dict[str, Any], ...] | None, Path]:
+    """The earlier run's inputs, trigger events and record, for a resume or a run from a node.
+
+    Reads the values saved beside its record unless ``saved`` already holds them, adds
+    the withheld inputs given again, and checks its file copies are still there. Raises
+    ``refused`` with the reason when any of that fails.
+    """
+    record = _run_path(
+        data_dir, compiled.ir["workflow"]["id"], run_id, source_path=compiled.source_path
+    )
+    try:
+        values = saved if saved is not None else read_saved_values(record, document)
+        inputs = merge_withheld_inputs(values, withheld)
+    except SavedValuesUnavailable as exc:
+        raise refused(str(exc)) from None
+    gone = missing_copies(compiled.ir, inputs, record)
+    if gone:
+        raise refused(missing_copies_message(gone))
+    return inputs, values.trigger_events or None, record
+
+
+def _prepare_run(
+    source_path: Path,
+    *,
+    data_dir: Path | None,
+    workflow_inputs: Mapping[str, Any] | None,
+    trigger_events: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...] | None,
+    expected_revision: str | None,
+    approved_files: ApprovedFiles | None,
+    model_overrides: Sequence[ModelOverride] | None,
+    resume_from: Mapping[str, Any] | None,
+    resume_inputs: Mapping[str, Any] | None,
+    resume_values: SavedRunValues | None,
+    rerun_of: str | None,
+    from_node: str | None,
+    reuse_run_id: str | None,
+    file_inputs_from: Path | None,
+) -> _PreparedRun:
+    """Compile ``source_path`` and plan what kind of run this is, for ``run_rattish_file``.
+
+    Checks the approved files and the expected revision, applies model overrides, and
+    plans a resume or a run from a node against this one compile. It only reads and
+    raises: nothing is written to the run folder until the run itself starts.
+    """
+    resolved_data_dir = data_dir or get_data_dir()
+    compiled = compile_rattish_file(source_path, data_dir=resolved_data_dir)
+    if approved_files is not None:
+        check_compiled(compiled.source_path, compiled.ir, "workflow", files=approved_files)
+    if expected_revision and compiled.ir["source"]["source_fingerprint"] != expected_revision:
+        raise RattishRunArtifactError(
+            "Workflow source changed after run preparation. "
+            "Review and run the saved revision again."
+        )
+    model_variant: dict[str, Any] | None = None
+    if model_overrides:
+        if (
+            resume_from is not None
+            or from_node is not None
+            or rerun_of is not None
+            or approved_files is not None
+        ):
+            raise ValueError(
+                "A run with another model can't resume, rerun, start from a node or "
+                "run from a trigger."
+            )
+        checked = check_overrides(compiled.ir, model_overrides)
+        model_variant = variant_record(compiled.ir, checked)
+        compiled = compile_variant(compiled, checked, data_dir=resolved_data_dir)
+    if resume_from is not None:
+        if workflow_inputs or trigger_events:
+            raise RattishResumeRefused("A resumed run uses the saved run's inputs only.")
+        # Checked against this compile, so the source can't change in between.
+        refusal = resume_refusal(resume_from, compiled.ir)
+        if refusal is not None:
+            raise RattishResumeRefused(refusal)
+        workflow_inputs, trigger_events, file_inputs_from = _earlier_run_values(
+            compiled,
+            resolved_data_dir,
+            resume_from,
+            resume_inputs,
+            run_id=str(resume_from["run_id"]),
+            saved=resume_values,
+            refused=RattishResumeRefused,
+        )
+    run_from: RunFromPlan | None = None
+    if from_node is not None:
+        if resume_from is not None or rerun_of is not None:
+            raise ValueError("A run from a node can't also resume or rerun a run.")
+        if workflow_inputs or trigger_events:
+            raise RattishRunFromRefused("A run from a node uses the reused run's inputs only.")
+        # Planned against this compile, so the source can't change in between.
+        run_from = plan_rattish_run_from(
+            compiled, from_node, data_dir=resolved_data_dir, reuse_run_id=reuse_run_id
+        )
+        workflow_inputs, trigger_events, file_inputs_from = _earlier_run_values(
+            compiled,
+            resolved_data_dir,
+            run_from.source,
+            resume_inputs,
+            run_id=run_from.source_run_id,
+            refused=RattishRunFromRefused,
+        )
+    elif reuse_run_id is not None:
+        raise ValueError("reuse_run_id only applies to a run from a node.")
+    if resume_inputs and resume_from is None and from_node is None:
+        raise ValueError("resume_inputs only applies to a resumed run or a run from a node.")
+    if resume_values is not None and resume_from is None:
+        raise ValueError("resume_values only applies to a resumed run.")
+    replayed: dict[str, Any] | None = (
+        {
+            "run_id": run_from.source_run_id,
+            "node_id": run_from.from_node,
+            "reused_nodes": list(run_from.reused_nodes),
+        }
+        if run_from is not None
+        else None
+    )
+    resumed: dict[str, Any] | None = (
+        {"run_id": str(resume_from["run_id"]), "rerun_nodes": resume_rerun_nodes(resume_from)}
+        if resume_from is not None
+        else None
+    )
+    return _PreparedRun(
+        resolved_data_dir=resolved_data_dir,
+        compiled=compiled,
+        model_variant=model_variant,
+        workflow_inputs=workflow_inputs,
+        trigger_events=trigger_events,
+        file_inputs_from=file_inputs_from,
+        run_from=run_from,
+        replayed=replayed,
+        resumed=resumed,
+    )
+
+
 async def run_rattish_file(
     source_path: Path,
     *,
@@ -667,7 +1068,6 @@ async def run_rattish_file(
     data_dir: Path | None = None,
     handlers: NodeHandlerRegistry | None = None,
     subscriptions: Mapping[str, Subscription] | None = None,
-    preflight_registry: PreflightRegistry | None = None,
     notification_adapter: NotificationAdapter | None = None,
     run_id: str | None = None,
     cancel_event: threading.Event | None = None,
@@ -726,116 +1126,43 @@ async def run_rattish_file(
         raise ValueError(f"Unknown run origin {origin!r}.")
     started_at = datetime.now(UTC).isoformat()
     started_clock = time.monotonic()
-    resolved_data_dir = data_dir or get_data_dir()
-    compiled = compile_rattish_file(source_path, data_dir=resolved_data_dir)
-    if approved_files is not None:
-        check_compiled(compiled.source_path, compiled.ir, "workflow", files=approved_files)
-    if expected_revision and compiled.ir["source"]["source_fingerprint"] != expected_revision:
-        raise RattishRunArtifactError(
-            "Workflow source changed after run preparation. "
-            "Review and run the saved revision again."
-        )
-    model_variant: dict[str, Any] | None = None
-    if model_overrides:
-        if (
-            resume_from is not None
-            or from_node is not None
-            or rerun_of is not None
-            or approved_files is not None
-        ):
-            raise ValueError(
-                "A run with another model can't resume, rerun, start from a node or "
-                "run from a trigger."
-            )
-        checked = check_overrides(compiled.ir, model_overrides)
-        model_variant = variant_record(compiled.ir, checked)
-        compiled = compile_variant(compiled, checked, data_dir=resolved_data_dir)
-    if resume_from is not None:
-        if workflow_inputs or trigger_events:
-            raise RattishResumeRefused("A resumed run uses the saved run's inputs only.")
-        # Checked against this compile, so the source can't change in between.
-        refusal = resume_refusal(resume_from, compiled.ir)
-        if refusal is not None:
-            raise RattishResumeRefused(refusal)
-        earlier_record = _run_path(
-            resolved_data_dir,
-            compiled.ir["workflow"]["id"],
-            str(resume_from["run_id"]),
-            source_path=compiled.source_path,
-        )
-        try:
-            saved = (
-                resume_values
-                if resume_values is not None
-                else read_saved_values(earlier_record, resume_from)
-            )
-            workflow_inputs = merge_withheld_inputs(saved, resume_inputs)
-        except SavedValuesUnavailable as exc:
-            raise RattishResumeRefused(str(exc)) from None
-        gone = missing_copies(compiled.ir, workflow_inputs, earlier_record)
-        if gone:
-            raise RattishResumeRefused(missing_copies_message(gone))
-        file_inputs_from = earlier_record
-        trigger_events = saved.trigger_events or None
-    run_from: RunFromPlan | None = None
-    if from_node is not None:
-        if resume_from is not None or rerun_of is not None:
-            raise ValueError("A run from a node can't also resume or rerun a run.")
-        if workflow_inputs or trigger_events:
-            raise RattishRunFromRefused("A run from a node uses the reused run's inputs only.")
-        # Planned against this compile, so the source can't change in between.
-        run_from = plan_rattish_run_from(
-            compiled, from_node, data_dir=resolved_data_dir, reuse_run_id=reuse_run_id
-        )
-        earlier_record = _run_path(
-            resolved_data_dir,
-            compiled.ir["workflow"]["id"],
-            run_from.source_run_id,
-            source_path=compiled.source_path,
-        )
-        try:
-            saved = read_saved_values(earlier_record, run_from.source)
-            workflow_inputs = merge_withheld_inputs(saved, resume_inputs)
-        except SavedValuesUnavailable as exc:
-            raise RattishRunFromRefused(str(exc)) from None
-        gone = missing_copies(compiled.ir, workflow_inputs, earlier_record)
-        if gone:
-            raise RattishRunFromRefused(missing_copies_message(gone))
-        file_inputs_from = earlier_record
-        trigger_events = saved.trigger_events or None
-    elif reuse_run_id is not None:
-        raise ValueError("reuse_run_id only applies to a run from a node.")
-    if resume_inputs and resume_from is None and from_node is None:
-        raise ValueError("resume_inputs only applies to a resumed run or a run from a node.")
-    if resume_values is not None and resume_from is None:
-        raise ValueError("resume_values only applies to a resumed run.")
-    replayed: dict[str, Any] | None = (
-        {
-            "run_id": run_from.source_run_id,
-            "node_id": run_from.from_node,
-            "reused_nodes": list(run_from.reused_nodes),
-        }
-        if run_from is not None
-        else None
-    )
-    resumed: dict[str, Any] | None = (
-        {"run_id": str(resume_from["run_id"]), "rerun_nodes": resume_rerun_nodes(resume_from)}
-        if resume_from is not None
-        else None
-    )
     runtime_handlers = handlers or DEFAULT_NODE_HANDLERS
     runtime_subscriptions = (
         subscriptions if subscriptions is not None else default_provider_subscriptions()
     )
+    prepared = _prepare_run(
+        source_path,
+        data_dir=data_dir,
+        workflow_inputs=workflow_inputs,
+        trigger_events=trigger_events,
+        expected_revision=expected_revision,
+        approved_files=approved_files,
+        model_overrides=model_overrides,
+        resume_from=resume_from,
+        resume_inputs=resume_inputs,
+        resume_values=resume_values,
+        rerun_of=rerun_of,
+        from_node=from_node,
+        reuse_run_id=reuse_run_id,
+        file_inputs_from=file_inputs_from,
+    )
     deployment = run_preflight(
-        compiled.ir,
-        registry=preflight_registry,
-        data_dir=resolved_data_dir,
+        prepared.compiled.ir,
+        data_dir=prepared.resolved_data_dir,
         subscriptions=runtime_subscriptions,
         handlers=runtime_handlers,
         triggered=origin == "trigger",
         worktree=use_worktree,
     )
+    resolved_data_dir = prepared.resolved_data_dir
+    compiled = prepared.compiled
+    workflow_inputs = prepared.workflow_inputs
+    trigger_events = prepared.trigger_events
+    file_inputs_from = prepared.file_inputs_from
+    run_from = prepared.run_from
+    model_variant = prepared.model_variant
+    replayed = prepared.replayed
+    resumed = prepared.resumed
     run_id = run_id or new_run_id()
     usage = RunUsageMeter.for_ir(
         compiled.ir,
@@ -849,6 +1176,20 @@ async def run_rattish_file(
         run_id,
         source_path=compiled.source_path,
     )
+    # What the live record and the final record both say about this run.
+    record_fields: dict[str, Any] = {
+        "run_id": run_id,
+        "compiled": compiled,
+        "deployment": deployment,
+        "started_at": started_at,
+        "resumed": resumed,
+        "trigger_event_count": len(trigger_events or ()),
+        "usage": usage,
+        "started_by": origin,
+        "rerun_of": rerun_of,
+        "replayed": replayed,
+        "model_variant": model_variant,
+    }
     # Exits after the final record is saved, so a stop request never outlives its run.
     with _track_rattish_run(run_id), _clearing_run_stop(path):
         supplied_inputs = dict(workflow_inputs or {})
@@ -873,6 +1214,7 @@ async def run_rattish_file(
 
         execution: WorkflowExecutionResult | None = None
         live: dict[str, Any] | None = None
+        live_record: _LiveRecord | None = None
         input_error: RuntimeErrorInfo | None = None
         stopped = False
         worktree: dict[str, Any] | None = None
@@ -901,127 +1243,57 @@ async def run_rattish_file(
                 )
                 save_values()
                 live = _run_document(
-                    run_id=run_id,
+                    **record_fields,
                     status="running",
-                    compiled=compiled,
-                    deployment=deployment,
                     execution=None,
                     input_error=None,
                     input_names=sorted(supplied_inputs),
-                    started_at=started_at,
                     finished_at=started_at,
                     duration_ms=0,
-                    resumed=resumed,
-                    trigger_event_count=len(trigger_events or ()),
-                    usage=usage,
-                    started_by=origin,
                     saved_values=values_summary,
-                    rerun_of=rerun_of,
-                    replayed=replayed,
-                    model_variant=model_variant,
                 )
                 live["events"] = live["events"][:1]
                 live["runner_pid"] = os.getpid()
                 runner_start = process_start_token(os.getpid())
                 if runner_start is not None:
                     live["runner_start"] = runner_start
-                _write_json_atomic(path, live)
+                live_record = _LiveRecord(path, live)
+                live_record.save_first()
                 if on_started is not None:
                     on_started(RattishRunResult(live, path, compiled, deployment))
+                # Starting one of these waits for a person, so the record shows it at once.
+                approval_nodes = {
+                    node["id"] for node in compiled.ir["nodes"] if "approval" in node["effects"]
+                }
 
-                def publish_node_event(event: dict[str, Any], record: NodeRunRecord | None) -> None:
-                    assert live is not None
-                    previous = (
-                        len(live["events"]),
-                        len(live["runs"]),
-                        dict(live["latest_node_outputs"]),
-                    )
-                    live["events"].append({"sequence": len(live["events"]) + 1, **event})
-                    if record is not None:
-                        live["runs"].append(_node_run_document(record))
-                        if record.result.outcome == "success":
-                            live["latest_node_outputs"][record.node_id] = record.result.output
-                    live["usage"] = usage.snapshot()
-                    live["duration_ms"] = round((time.monotonic() - started_clock) * 1000)
-                    try:
-                        _write_json_atomic(path, live)
-                    except RattishRunArtifactError as exc:
-                        # Drop the unpublishable event so the final record can still be saved.
-                        del live["events"][previous[0] :]
-                        del live["runs"][previous[1] :]
-                        live["latest_node_outputs"] = previous[2]
-                        node = event.get("node_id") or "workflow"
-                        raise _RunRecordError(
-                            f"Node '{node}' produced output that cannot be saved "
-                            f"to the run record: {exc}"
-                        ) from exc
-
-                stop_seen = False
-                # Stops a worktree's project setup, which runs in a thread.
-                setup_cancel = threading.Event()
-
-                def stop_wanted(*, check_marker: bool) -> bool:
-                    nonlocal stop_seen
-                    if (cancel_event is not None and cancel_event.is_set()) or (
-                        check_marker and run_stop_requested(path)
-                    ):
-                        stop_seen = True
-                        setup_cancel.set()
-                    return stop_seen
-
-                def make_worktree() -> tuple[Any, RuntimeErrorInfo | None]:
-                    """Create and set up the run's worktree; the IR to run, or the error."""
-                    nonlocal worktree
-                    try:
-                        planned = run_worktrees.plan(
-                            resolved_data_dir,
-                            Path(compiled.ir["source"]["project_root"]),
-                            compiled.ir["workflow"]["id"],
-                            run_id,
-                        )
-                        run_worktrees.create(planned)
-                    except run_worktrees.RunWorktreeError as exc:
-                        return None, RuntimeErrorInfo(
-                            "workspace", "RATTISH_WORKTREE_UNAVAILABLE", str(exc)
-                        )
-                    worktree = planned.document()
-                    assert live is not None
-                    live["worktree"] = worktree
-                    _write_json_atomic(path, live)
-                    setup = run_worktrees.prepare_setup(resolved_data_dir, planned, setup_cancel)
-                    worktree["setup"] = setup
-                    if setup is not None and setup.get("status") == "failed":
-                        return None, RuntimeErrorInfo(
-                            "workspace",
-                            "RATTISH_WORKTREE_SETUP_FAILED",
-                            str(setup.get("summary") or "Project setup failed."),
-                        )
-                    return run_worktrees.relocate(compiled.ir, planned), None
-
-                async def watch_stop(scope: anyio.CancelScope) -> None:
-                    # The cancel event is this process's Stop; the marker is anyone else's.
-                    next_marker_check = 0.0
-                    while True:
-                        now = time.monotonic()
-                        check_marker = now >= next_marker_check
-                        if check_marker:
-                            next_marker_check = now + _STOP_MARKER_POLL_SECONDS
-                        if stop_wanted(check_marker=check_marker):
-                            break
-                        await anyio.sleep(0.05)
-                    scope.cancel()
+                on_node_event = partial(
+                    live_record.publish,
+                    live=live,
+                    usage=usage,
+                    started_clock=started_clock,
+                    approval_nodes=approval_nodes,
+                )
+                stop = _StopWatch(cancel_event, path, live_record)
 
                 run_ir: Any = compiled.ir
                 async with anyio.create_task_group() as group:
-                    group.start_soon(watch_stop, group.cancel_scope)
-                    if in_worktree and not stop_wanted(check_marker=True):
-                        run_ir, input_error = await anyio.to_thread.run_sync(make_worktree)
-                        if stop_wanted(check_marker=True):
+                    group.start_soon(stop.watch, group.cancel_scope)
+                    group.start_soon(live_record.keep_saved)
+                    if in_worktree and not stop.wanted(check_marker=True):
+                        run_ir, worktree, input_error = await anyio.to_thread.run_sync(
+                            run_worktrees.start_for_run,
+                            resolved_data_dir,
+                            compiled.ir,
+                            run_id,
+                            stop.setup_cancel,
+                            live_record.set_worktree,
+                        )
+                        if stop.wanted(check_marker=True):
                             input_error = None  # Setup ended because the run was stopped.
                     run_files = approved_files
                     if approved_files is not None and worktree is not None:
                         run_files = run_worktrees.approved_in_worktree(approved_files, worktree)
-                    if input_error is None and not stop_wanted(check_marker=True):
+                    if input_error is None and not stop.wanted(check_marker=True):
                         executed = True
                         with (
                             triggered_run(origin == "trigger"),
@@ -1041,7 +1313,7 @@ async def run_rattish_file(
                                 data_dir=resolved_data_dir,
                                 notification_adapter=notification_adapter,
                                 run_id=run_id,
-                                on_node_event=publish_node_event,
+                                on_node_event=on_node_event,
                                 replay=(
                                     list(run_from.replay)
                                     if run_from is not None
@@ -1060,7 +1332,7 @@ async def run_rattish_file(
                                 ),
                             )
                     group.cancel_scope.cancel()
-                stopped = execution is None and stop_seen
+                stopped = execution is None and stop.stop_seen
             except (InvalidRattishWorkflowInputError, FileInputError) as exc:
                 input_error = RuntimeErrorInfo(
                     "configuration",
@@ -1080,6 +1352,9 @@ async def run_rattish_file(
                         "runtime", "RATTISH_RUNTIME_UNEXPECTED", str(exc)
                     )
 
+        if worktree is None and live_record is not None:
+            # start_for_run raised after making the worktree; the live record holds it.
+            worktree = live_record.document.get("worktree")
         if worktree is not None:
             worktree = await _finish_worktree(
                 worktree, compiled.ir["workflow"]["name"], run_id, discard=not executed
@@ -1091,25 +1366,15 @@ async def run_rattish_file(
             save_values()
         _cancel_pending_approvals(resolved_data_dir, compiled.ir["workflow"]["id"], run_id, status)
         document = _run_document(
-            run_id=run_id,
+            **record_fields,
             status=status,
-            compiled=compiled,
-            deployment=deployment,
             execution=execution,
             input_error=input_error,
             input_names=sorted(supplied_inputs),
-            started_at=started_at,
             finished_at=finished_at,
             duration_ms=round((time.monotonic() - started_clock) * 1000),
-            resumed=resumed,
-            trigger_event_count=len(trigger_events or ()),
-            usage=usage,
-            started_by=origin,
             # Invalid inputs aren't kept: there is nothing to resume or run again.
             saved_values=None if status == "invalid_inputs" else values_summary,
-            rerun_of=rerun_of,
-            replayed=replayed,
-            model_variant=model_variant,
         )
         if worktree is not None:
             document["worktree"] = worktree
@@ -1128,26 +1393,42 @@ async def run_rattish_file(
                 document["runs"] = live["runs"]
                 document["latest_node_outputs"] = live["latest_node_outputs"]
         if resumed is not None and resume_from is not None:
-            reused = sum(1 for record in document["runs"] if record.get("reused_from_run_id"))
             reusable = sum(
                 1
                 for record in resume_from.get("runs") or []
                 if record.get("outcome") in {"success", "allowed_failure"}
             )
-            document["resumed_from"].update(
-                reused_runs=reused, not_reused_runs=max(0, reusable - reused)
-            )
+            document["resumed_from"].update(_reuse_counts(document, reusable))
         if run_from is not None and "replayed_from" in document:
-            reused = sum(1 for record in document["runs"] if record.get("reused_from_run_id"))
-            document["replayed_from"].update(
-                reused_runs=reused, not_reused_runs=max(0, reusable_count(run_from) - reused)
-            )
+            document["replayed_from"].update(_reuse_counts(document, reusable_count(run_from)))
         path = _run_path(
             resolved_data_dir,
             compiled.ir["workflow"]["id"],
             run_id,
             source_path=compiled.source_path,
         )
+        document = _save_final_record(path, document, live_record)
+        await _apply_retention_after_run(
+            resolved_data_dir, compiled.ir["workflow"]["id"], path, run_id
+        )
+        # Saved inputs and files of runs deleted without delete_run_files go now.
+        remove_orphaned_values(path.parent)
+        remove_orphaned_files(path.parent)
+        sweep_uploads(resolved_data_dir)
+        return RattishRunResult(document, path, compiled, deployment)
+
+
+def _reuse_counts(document: Mapping[str, Any], reusable: int) -> dict[str, int]:
+    """How many of the ``reusable`` earlier results this run reused, and how many it didn't."""
+    reused = sum(1 for record in document["runs"] if record.get("reused_from_run_id"))
+    return {"reused_runs": reused, "not_reused_runs": max(0, reusable - reused)}
+
+
+def _save_final_record(
+    path: Path, document: dict[str, Any], live_record: _LiveRecord | None
+) -> dict[str, Any]:
+    """Save a finished run's record and delete its journal; the document as saved."""
+    try:
         try:
             _write_json_atomic(path, document)
         except RattishRunArtifactError as exc:
@@ -1163,14 +1444,14 @@ async def run_rattish_file(
                 )
             )
             _write_json_atomic(path, document)
-        await _apply_retention_after_run(
-            resolved_data_dir, compiled.ir["workflow"]["id"], path, run_id
-        )
-        # Saved inputs and files of runs deleted without delete_run_files go now.
-        remove_orphaned_values(path.parent)
-        remove_orphaned_files(path.parent)
-        sweep_uploads(resolved_data_dir)
-        return RattishRunResult(document, path, compiled, deployment)
+    except BaseException:
+        # The record still says running, so its journal is kept for whoever reads it.
+        if live_record is not None:
+            live_record.close()
+        raise
+    if live_record is not None:
+        live_record.finish()
+    return document
 
 
 async def _finish_worktree(
@@ -1486,14 +1767,49 @@ def _run_path(
     return data_dir / "radish" / "runs" / workflow_id / f"{run_id}.json"
 
 
-def _write_json_atomic(path: Path, document: dict[str, Any]) -> None:
+@dataclass(frozen=True, slots=True)
+class _RunValidators:
+    """run.schema.json's checks: the whole record and the parts a live save adds."""
+
+    record: Any
+    event: Any
+    node_run: Any
+    worktree: Any
+
+
+@cache
+def _run_validators() -> _RunValidators:
+    """Built once per process: reading and compiling the schema costs more than a check."""
+    schema = json.loads(
+        (rattish_asset_root() / "schemas" / "run.schema.json").read_text(encoding="utf-8")
+    )
+    registry = Registry().with_resource(schema["$id"], DRAFT202012.create_resource(schema))
+
+    def part(pointer: str) -> Any:
+        return Draft202012Validator({"$ref": f"{schema['$id']}#{pointer}"}, registry=registry)
+
+    return _RunValidators(
+        record=Draft202012Validator(schema),
+        event=part("/$defs/event"),
+        node_run=part("/$defs/node_run"),
+        worktree=part("/properties/worktree"),
+    )
+
+
+def _check_run_part(kind: Literal["record", "event", "node_run", "worktree"], value: Any) -> None:
+    """Check a run record, or one part of it, against run.schema.json."""
     try:
-        schema = json.loads(
-            (rattish_asset_root() / "schemas" / "run.schema.json").read_text(encoding="utf-8")
-        )
-        Draft202012Validator(schema).validate(document)
+        getattr(_run_validators(), kind).validate(value)
     except (OSError, UnicodeError, json.JSONDecodeError, ValidationError) as exc:
         raise RattishRunArtifactError(f"Invalid Rattish run artifact: {exc}") from exc
+
+
+def _write_json_atomic(path: Path, document: dict[str, Any]) -> None:
+    _check_run_part("record", document)
+    _publish_json(path, document)
+
+
+def _publish_json(path: Path, document: dict[str, Any]) -> None:
     try:
         with atomic_binary_output(path) as output:
             output.write(canonical_json_bytes(document) + b"\n")

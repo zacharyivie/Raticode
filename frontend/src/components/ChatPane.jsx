@@ -8,6 +8,7 @@ import { deleteChatDraft, getChatDraft, setChatDraft, threadDraftKey } from "../
 import { notifyThreadTurn } from "../lib/backgroundNotices.js";
 import { archiveThreadFromStorage, buildChatItems, bumpChatThread, chatStorageKeyFor, chatStreamRequestBody, chatThreadIndex, chatWorkflowContextForThread, deleteStoredChatThread, formatThreadDate, isThoughtGroupExpanded, loadAllChatThreads, loadChatMessages, loadChatThread, parseChatStreamEvent, permanentDeleteMessage, persistChatThreads, purgeThreadFromArchive, removeTrailingDuplicateOutputThought, scopeChatThreadToProject, threadReadPatch, threadTitleFromMessage, uniqueClientId, withLiveReply } from "../lib/chatThreads.js";
 import { fetchChatTurn } from "../lib/chatTransport.js";
+import { ndjsonBatches } from "../lib/ndjson.js";
 import { generateConventionalCommit } from "../lib/commitMessage.js";
 import { createConversationCache } from "../lib/conversationCache.js";
 import { conversationRepository, pageStart } from "../lib/conversationRepository.js";
@@ -35,6 +36,7 @@ import { Dialog } from "./Dialog.jsx";
 import { PopupMenu } from "./PopupMenu.jsx";
 import { ProviderModelEffortFields, useProviderCapabilities } from "./ProviderModelEffortFields.jsx";
 import RatFaceIcon from "./RatFaceIcon.jsx";
+import { NewMessagesPill } from "./RemRichParts.jsx";
 import RemToolsMenu from "./RemToolsMenu.jsx";
 import ThreadHistoryMatch from "./ThreadHistoryMatch.jsx";
 import ThreadSearch from "./ThreadSearch.jsx";
@@ -75,6 +77,13 @@ export function ChatPane({
   const prospectiveProjectRoot = String(activeProjectRoot ?? workflow?.projectRoot ?? "").trim();
   const chatScrollRef = useRef(null);
   const chatPinnedToBottomRef = useRef(true);
+  // Messages that arrived while you read further up. They are counted after the newest
+  // conversation row you saw, so pages loaded above it never count.
+  const [unseenMessages, setUnseenMessages] = useState(0);
+  const seenConversationRef = useRef({ threadId: null, keys: new Set() });
+  // Where a smooth jump to the newest message has reached: it passes through the middle
+  // of the chat, which must not count as scrolling up to read.
+  const jumpToLatestRef = useRef(null);
   const renderedConversationRef = useRef({ threadId: null, textKey: "" });
   const conversationMenuRef = useRef(null);
   const threadInfoRef = useRef(null);
@@ -478,6 +487,38 @@ export function ChatPane({
       scrollConversationToBottom(chatScrollRef.current);
     }
   }, [activeThreadId, conversationTextKey, activeSearchTarget]);
+
+  useLayoutEffect(() => {
+    if (activeSearchTarget) return;
+    const seen = seenConversationRef.current;
+    if (seen.threadId !== activeThreadId || chatPinnedToBottomRef.current) {
+      seenConversationRef.current = { threadId: activeThreadId, keys: conversationItemKeys(conversationItems) };
+      setUnseenMessages(0);
+      return;
+    }
+    const count = unseenConversationMessages(conversationItems, seen.keys);
+    if (count != null) setUnseenMessages(count);
+  }, [activeThreadId, conversationItems, activeSearchTarget]);
+
+  function markConversationSeen() {
+    seenConversationRef.current = { threadId: activeThreadId, keys: conversationItemKeys(conversationItems) };
+    setUnseenMessages(0);
+  }
+
+  function jumpToLatestMessages() {
+    const element = chatScrollRef.current;
+    chatPinnedToBottomRef.current = true;
+    markConversationSeen();
+    if (!element) return;
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    if (reduceMotion || typeof element.scrollTo !== "function") {
+      jumpToLatestRef.current = null;
+      scrollConversationToBottom(element);
+      return;
+    }
+    jumpToLatestRef.current = { top: element.scrollTop };
+    element.scrollTo({ top: element.scrollHeight, behavior: "smooth" });
+  }
 
   useEffect(() => {
     if (!activeThreadId) setHomeProjectRoot(defaultGlobalScope ? "" : prospectiveProjectRoot);
@@ -935,131 +976,121 @@ export function ChatPane({
       }
 
       let finalReceived = false;
-      const decoder = new TextDecoder();
       const reader = response.body.getReader();
-      let buffer = "";
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (value || done) {
-          buffer += value ? decoder.decode(value, { stream: !done }) : decoder.decode();
-          if (done && buffer && !buffer.endsWith("\n")) buffer += "\n";
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
-          conversationCacheRef.current.batch(() => {
-            for (const line of lines) {
-              const event = parseChatStreamEvent(line);
-              if (!event) continue;
-              if (event.turnId && event.turnId !== activeTurn.turnId) continue;
-              if (event.type === "turn") {
-                if (event.generation < activeTurn.generation) continue;
-                activeTurn.generation = event.generation;
-                activeTurn.ready = true;
-                if (activeTurn.stopRequested) void stopAssistant(targetThreadId);
-                continue;
-              }
-              if (event.type === "steering") {
-                recordSteering(targetThreadId, event.receipt);
-                continue;
-              }
-              if (event.generation != null && event.generation !== activeTurn.generation) continue;
-              if (event.type === "interrupted") {
-                activeTurn.generation += 1;
-                const transcript = Array.isArray(event.messages) ? event.messages : [];
-                const start = transcript.findLastIndex(message => message.role === "system");
-                const additions = transcript.slice(start < 0 ? transcript.length : start)
-                  .map(message => ({ ...message, id: uniqueClientId(), kind: message.role === "system" ? "continuation-context" : undefined,
-                    ...(message.role === "user" ? { remModelSelection: selection } : {}),
-                  }));
-                if (event.partial?.changes) appendAssistantMessage("", "turn-summary", {
-                  changes: event.partial.changes, completedAt: event.partial.completedAt, durationMs: event.partial.durationMs,
-                });
-                if (additions.length) {
-                  updateThreadMessages(targetThreadId, current => [...current, ...additions]);
-                  contextBoundaryId = additions.at(-1).id;
-                  void repository.checkpoint(targetThreadId, transcript, contextBoundaryId)
-                    .catch(error => reportStorageFailure(targetThreadId, error));
-                }
-                continue;
-              }
-              if (event.type === "stopped") throw new DOMException("Rem stopped", "AbortError");
-
-              if (event.type === "project-scope") {
-                setThreads(current => current.map(thread => thread.id === targetThreadId
-                  ? scopeChatThreadToProject(thread, event.projectRoot, workflows, null, event.projectName) : thread));
-                continue;
-              }
-              if (event.type === "new-thread") {
-                remContextActionsRef.current.spawnThread(event, targetThread);
-                continue;
-              }
-              if (event.type === "thought") {
-                const deltaStreamId = typeof event.deltaStreamId === "string" ? event.deltaStreamId : "";
-                const thought = deltaStreamId ? String(event.text ?? "") : String(event.text ?? "").trim();
-                if (!thought) continue;
-                appendAssistantMessage(thought, "thought", {
-                  groupId: thoughtGroupId,
-                  deltaStreamId: deltaStreamId || undefined,
-                  trace: event.trace && typeof event.trace === "object" ? event.trace : undefined,
-              });
-            } else if (event.type === "recovery") {
-              const body = event.partial?.body ?? "";
-              if (body.trim()) appendAssistantMessage(body, "final", { interrupted: true });
-              if (event.partial?.changes) appendAssistantMessage("", "turn-summary", {
-                id: uniqueClientId(), changes: event.partial.changes,
-                completedAt: event.partial.completedAt, durationMs: event.partial.durationMs,
-              });
-              appendAssistantMessage(event.message || "Rem is resuming the interrupted response.", "system", { role: "system" });
-              setChatAnnouncementByThread(current => ({ ...current, [targetThreadId]: event.message }));
-            } else if (event.type === "compaction") {
-              const compactedMessages = Array.isArray(event.messages)
-                ? event.messages
-                : null;
-              if (compactedMessages) {
-                void repository.checkpoint(targetThreadId, compactedMessages, contextBoundaryId)
-                  .catch(error => reportStorageFailure(targetThreadId, error));
-                appendAssistantMessage(event.message || "Rem context compacted. Earlier messages are saved.", "system", { role: "system" });
-              } else {
-                appendAssistantMessage(
-                  event.message || "Compacting Rem context",
-                  "system",
-                  { role: "system" },
-                );
-              }
-            } else if (event.type === "final") {
-              finalReceived = true;
-              const body = event.message?.body ?? "";
-              if (body.trim()) {
-                appendAssistantMessage(body, "final");
-                attachTurnSources(body);
-              }
-              appendTurnSummary(event);
-              setLiveTurnByThread((current) => ({ ...current, [targetThreadId]: null }));
-            } else if (event.type === "changes") {
-              setLiveTurnByThread((current) => ({
-                ...current,
-                [targetThreadId]: {
-                  ...(current[targetThreadId] ?? {}),
-                  id: turnSummaryId,
-                  role: "assistant",
-                  kind: "turn-summary",
-                  running: true,
-                  startedAt: current[targetThreadId]?.startedAt ?? clientTurnStartedAt,
-                  changes: event.changes,
-                },
-              }));
-            } else if (event.type === "error") {
-              resumeAvailable = event.resumeAvailable === true;
-              const body = event.message?.body ?? "";
-              if (body.trim()) appendAssistantMessage(body, "final", { interrupted: true });
-              appendTurnSummary(event);
-              setLiveTurnByThread((current) => ({ ...current, [targetThreadId]: null }));
-              throw new Error(event.error || "Rem failed");
+      for await (const lines of ndjsonBatches(reader)) {
+        conversationCacheRef.current.batch(() => {
+          for (const line of lines) {
+            const event = parseChatStreamEvent(line);
+            if (!event) continue;
+            if (event.turnId && event.turnId !== activeTurn.turnId) continue;
+            if (event.type === "turn") {
+              if (event.generation < activeTurn.generation) continue;
+              activeTurn.generation = event.generation;
+              activeTurn.ready = true;
+              if (activeTurn.stopRequested) void stopAssistant(targetThreadId);
+              continue;
             }
+            if (event.type === "steering") {
+              recordSteering(targetThreadId, event.receipt);
+              continue;
+            }
+            if (event.generation != null && event.generation !== activeTurn.generation) continue;
+            if (event.type === "interrupted") {
+              activeTurn.generation += 1;
+              const transcript = Array.isArray(event.messages) ? event.messages : [];
+              const start = transcript.findLastIndex(message => message.role === "system");
+              const additions = transcript.slice(start < 0 ? transcript.length : start)
+                .map(message => ({ ...message, id: uniqueClientId(), kind: message.role === "system" ? "continuation-context" : undefined,
+                  ...(message.role === "user" ? { remModelSelection: selection } : {}),
+                }));
+              if (event.partial?.changes) appendAssistantMessage("", "turn-summary", {
+                changes: event.partial.changes, completedAt: event.partial.completedAt, durationMs: event.partial.durationMs,
+              });
+              if (additions.length) {
+                updateThreadMessages(targetThreadId, current => [...current, ...additions]);
+                contextBoundaryId = additions.at(-1).id;
+                void repository.checkpoint(targetThreadId, transcript, contextBoundaryId)
+                  .catch(error => reportStorageFailure(targetThreadId, error));
+              }
+              continue;
+            }
+            if (event.type === "stopped") throw new DOMException("Rem stopped", "AbortError");
+
+            if (event.type === "project-scope") {
+              setThreads(current => current.map(thread => thread.id === targetThreadId
+                ? scopeChatThreadToProject(thread, event.projectRoot, workflows, null, event.projectName) : thread));
+              continue;
+            }
+            if (event.type === "new-thread") {
+              remContextActionsRef.current.spawnThread(event, targetThread);
+              continue;
+            }
+            if (event.type === "thought") {
+              const deltaStreamId = typeof event.deltaStreamId === "string" ? event.deltaStreamId : "";
+              const thought = deltaStreamId ? String(event.text ?? "") : String(event.text ?? "").trim();
+              if (!thought) continue;
+              appendAssistantMessage(thought, "thought", {
+                groupId: thoughtGroupId,
+                deltaStreamId: deltaStreamId || undefined,
+                trace: event.trace && typeof event.trace === "object" ? event.trace : undefined,
+            });
+          } else if (event.type === "recovery") {
+            const body = event.partial?.body ?? "";
+            if (body.trim()) appendAssistantMessage(body, "final", { interrupted: true });
+            if (event.partial?.changes) appendAssistantMessage("", "turn-summary", {
+              id: uniqueClientId(), changes: event.partial.changes,
+              completedAt: event.partial.completedAt, durationMs: event.partial.durationMs,
+            });
+            appendAssistantMessage(event.message || "Rem is resuming the interrupted response.", "system", { role: "system" });
+            setChatAnnouncementByThread(current => ({ ...current, [targetThreadId]: event.message }));
+          } else if (event.type === "compaction") {
+            const compactedMessages = Array.isArray(event.messages)
+              ? event.messages
+              : null;
+            if (compactedMessages) {
+              void repository.checkpoint(targetThreadId, compactedMessages, contextBoundaryId)
+                .catch(error => reportStorageFailure(targetThreadId, error));
+              appendAssistantMessage(event.message || "Rem context compacted. Earlier messages are saved.", "system", { role: "system" });
+            } else {
+              appendAssistantMessage(
+                event.message || "Compacting Rem context",
+                "system",
+                { role: "system" },
+              );
+            }
+          } else if (event.type === "final") {
+            finalReceived = true;
+            const body = event.message?.body ?? "";
+            if (body.trim()) {
+              appendAssistantMessage(body, "final");
+              attachTurnSources(body);
+            }
+            appendTurnSummary(event);
+            setLiveTurnByThread((current) => ({ ...current, [targetThreadId]: null }));
+          } else if (event.type === "changes") {
+            setLiveTurnByThread((current) => ({
+              ...current,
+              [targetThreadId]: {
+                ...(current[targetThreadId] ?? {}),
+                id: turnSummaryId,
+                role: "assistant",
+                kind: "turn-summary",
+                running: true,
+                startedAt: current[targetThreadId]?.startedAt ?? clientTurnStartedAt,
+                changes: event.changes,
+              },
+            }));
+          } else if (event.type === "error") {
+            resumeAvailable = event.resumeAvailable === true;
+            const body = event.message?.body ?? "";
+            if (body.trim()) appendAssistantMessage(body, "final", { interrupted: true });
+            appendTurnSummary(event);
+            setLiveTurnByThread((current) => ({ ...current, [targetThreadId]: null }));
+            throw new Error(event.error || "Rem failed");
           }
-          });
         }
-        if (done) break;
+        });
       }
 
       if (!finalReceived) {
@@ -1985,6 +2016,7 @@ export function ChatPane({
         <button type="button" className="shrink-0 rounded px-2 py-1 text-brand focus-visible:outline-brand" onClick={returnToLatestMessages}>Latest messages</button>
       </div> : null}
 
+      <div className="relative flex min-h-0 flex-1 flex-col">
       <div
         ref={chatScrollRef}
         data-chat-scroll="true"
@@ -1992,7 +2024,15 @@ export function ChatPane({
         className="workflow-scrollbar min-h-0 flex-1 space-y-4 overflow-y-auto px-3.5 py-4"
         onScroll={(event) => {
           if (activeSearchTarget) return;
-          chatPinnedToBottomRef.current = conversationIsAtBottom(event.currentTarget);
+          const atBottom = conversationIsAtBottom(event.currentTarget);
+          const jump = jumpToLatestRef.current;
+          // On the way down a jump stays pinned; scrolling back up ends it.
+          if (jump && !atBottom && event.currentTarget.scrollTop >= jump.top) jump.top = event.currentTarget.scrollTop;
+          else {
+            jumpToLatestRef.current = null;
+            chatPinnedToBottomRef.current = atBottom;
+          }
+          if (atBottom && activeThread) markConversationSeen();
           if (event.currentTarget.scrollTop < 80 && historyState.threadId === activeThreadId && historyState.hasMore && !historyState.error) void loadHistoryPage(activeThreadId, historyState.before);
         }}
       >
@@ -2072,6 +2112,12 @@ export function ChatPane({
             ) : null}
           </>
         )}
+      </div>
+      {activeThread && !activeSearchTarget ? <NewMessagesPill
+        count={unseenMessages}
+        onClick={jumpToLatestMessages}
+        className="absolute bottom-3 left-1/2 z-10 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-line bg-raised px-3 py-1.5 text-xs font-semibold text-brand shadow-md focus-visible:outline-brand"
+      /> : null}
       </div>
 
       {/* Before the composer: index.css styles the chat's last child as the composer. */}
@@ -2164,11 +2210,11 @@ export function ChatPane({
 
 // The thread list lives in its own chunk; App supplies its history helpers.
 export function ThreadSections(props) {
-  return <ThreadSectionsView threadIndex={chatThreadIndex} loadStoredThread={loadChatThread} formatDate={formatThreadDate} {...props} />;
+  return <ThreadSectionsView threadIndex={chatThreadIndex} loadStoredThread={loadChatThread} dateLabel={formatThreadDate} {...props} />;
 }
 
 export function ThreadList(props) {
-  return <ThreadListView formatDate={formatThreadDate} {...props} />;
+  return <ThreadListView dateLabel={formatThreadDate} {...props} />;
 }
 
 function ThreadRenameDialog({ thread, onClose, onRename }) {
@@ -2201,12 +2247,28 @@ function ThreadRenameDialog({ thread, onClose, onRename }) {
 }
 
 
-export function conversationIsAtBottom(element, tolerance = 4) {
+function conversationItemKey(item) {
+  return item.type === "message" ? item.message?.id : item.id;
+}
+
+function conversationItemKeys(items) {
+  return new Set(items.map(conversationItemKey));
+}
+
+// How many messages, including a live turn's, follow the newest row in seen. Thought groups
+// don't count. Null when none of the rows were seen, which leaves the count as it was.
+export function unseenConversationMessages(items, seen) {
+  const last = items.findLastIndex(item => seen.has(conversationItemKey(item)));
+  if (last < 0) return null;
+  return items.slice(last + 1).filter(item => item.type === "message").length;
+}
+
+function conversationIsAtBottom(element, tolerance = 4) {
   if (!element) return false;
   return element.scrollHeight - element.scrollTop - element.clientHeight <= tolerance;
 }
 
-export function scrollConversationToBottom(element) {
+function scrollConversationToBottom(element) {
   if (!element) return;
   element.scrollTop = element.scrollHeight;
 }

@@ -72,7 +72,7 @@ class Fake:
     async def __call__(self, node, context, bindings) -> HandlerResult:
         path = str(context.workflow_inputs.get("document"))
         self.seen.append((node["id"], path, Path(path).read_text(encoding="utf-8")))
-        result = {"stdout": node["id"], "stderr": "", "exit_code": 0}
+        result = {"stdout": node["id"], "stderr": "", "exit_code": 0, "truncated": False}
         if node["id"] in self.fail:
             self.fail.discard(node["id"])
             return HandlerResult(False, {**result, "exit_code": 1})

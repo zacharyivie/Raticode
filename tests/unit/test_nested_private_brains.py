@@ -18,6 +18,7 @@ from gofer.ui.brain_library import BrainLibrary
 from gofer.ui.brain_privacy import agent_brain_refusal, agent_brain_result
 
 
+# Keeps its data under data/, where these tests put the brains' parent folder.
 @pytest.fixture
 def library(tmp_path: Path) -> Iterator[BrainLibrary]:
     service = BrainLibrary(tmp_path / "data", start=False)

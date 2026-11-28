@@ -15,7 +15,7 @@ from typing import Any
 
 import typer
 
-from gofer.cli.output import fail
+from gofer.cli.output import fail, require_format
 from gofer.utils.paths import get_data_dir
 
 app = typer.Typer(
@@ -30,12 +30,6 @@ app = typer.Typer(
 
 _DATA_DIR_OPTION = typer.Option(None, "--data-dir", help="Override the data folder.")
 _FORMAT_OPTION = typer.Option("text", "--format", help="Output format: text or json.")
-
-
-def _require_format(output_format: str) -> None:
-    if output_format not in {"text", "json"}:
-        typer.echo("--format must be text or json.", err=True)
-        raise typer.Exit(2)
 
 
 def _refuse_agent(action: str, output_format: str) -> None:
@@ -79,7 +73,7 @@ def set_secret(
         save_workflow_secret,
     )
 
-    _require_format(output_format)
+    require_format(output_format)
     # Refuse before prompting, so an agent turn never reads a value from its input.
     _refuse_agent("save a workflow secret", output_format)
     try:
@@ -107,7 +101,7 @@ def list_secrets(
     """List saved workflow secret names. Values are never shown."""
     from gofer.rattish.workflow_secrets import list_workflow_secrets
 
-    _require_format(output_format)
+    require_format(output_format)
     secrets = list_workflow_secrets(data_dir or get_data_dir())
     if output_format == "json":
         typer.echo(json.dumps({"ok": True, "secrets": secrets}, sort_keys=True))
@@ -133,7 +127,7 @@ def remove_secret(
     """Delete a saved workflow secret from the system keychain."""
     from gofer.rattish.workflow_secrets import WorkflowSecretError, remove_workflow_secret
 
-    _require_format(output_format)
+    require_format(output_format)
     _refuse_agent("remove a workflow secret", output_format)
     try:
         result: dict[str, Any] = remove_workflow_secret(name, data_dir or get_data_dir())

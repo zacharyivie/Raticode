@@ -242,7 +242,7 @@ def test_only_the_user_can_approve_all(manager, tmp_path, actor):
 def test_employees_cannot_approve_all(manager, tmp_path):
     org = company(manager, tmp_path)
     request = rem(manager, org, "control", state="running")
-    with pytest.raises(ValueError, match="Employees cannot configure"):
+    with pytest.raises(ValueError, match="Workers cannot configure"):
         manager.call(
             "",
             "employee:lead",

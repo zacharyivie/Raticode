@@ -21,7 +21,8 @@ import {
   TriangleAlert,
   X,
 } from "lucide-react";
-import { downloadStatus, formatZoom, hostLabel, relativeTime } from "../lib/browserUi.js";
+import { downloadStatus, formatZoom, hostLabel } from "../lib/browserUi.js";
+import { shortDate, timeAgo } from "../lib/timeText.js";
 import { usePopupMenu } from "./PopupMenu.jsx";
 import { useRovingChoice } from "../lib/useRovingChoice.js";
 
@@ -224,7 +225,7 @@ export function PageOverlay({ state, showCrash = true, keepsStopping = false, on
           Attackers might be trying to steal your information from <strong>{failure.host}</strong> (for example, passwords or messages).
         </p>
         <p className="mt-2 font-mono text-[11px] text-muted">{failure.error}</p>
-        {failure.issuer ? <p className="mt-1 text-[11px] text-muted">Issued by {failure.issuer}{failure.validExpiry ? ` · expires ${new Date(failure.validExpiry * 1000).toLocaleDateString()}` : ""}</p> : null}
+        {failure.issuer ? <p className="mt-1 text-[11px] text-muted">Issued by {failure.issuer}{failure.validExpiry ? ` · expires ${shortDate(failure.validExpiry * 1000)}` : ""}</p> : null}
         <div className="mt-4 flex flex-wrap justify-center gap-2">
           <button className={PRIMARY} type="button" onClick={onBack}>Back to safety</button>
           {failure.canProceed && failure.fingerprint ? (
@@ -301,7 +302,7 @@ export function RemChip({ agent, signedIn = false, onPause, onStop, onTakeOver }
           <ol className="max-h-48 space-y-1 overflow-auto" aria-label="Recent actions">
             {(agent.log || []).length ? [...agent.log].reverse().map((entry, index) => (
               <li key={`${entry.at}-${index}`} className="flex gap-2">
-                <span className="shrink-0 text-muted">{relativeTime(entry.at)}</span>
+                <span className="shrink-0 text-muted">{timeAgo(entry.at)}</span>
                 <span className="min-w-0"><span className="font-medium">{entry.action}</span>{entry.detail ? <span className="text-muted"> · {entry.detail}</span> : null}</span>
               </li>
             )) : <li className="text-muted">No actions yet.</li>}
@@ -340,7 +341,7 @@ export function SiteInfoPopover({ info, onClose, onPermission, onClearData, onRe
       </p>
       {level === "insecure" ? <p className="mt-1 text-muted">Don&apos;t enter passwords or payment details on this site. Others on the network can read them.</p> : null}
       {info.certificate ? (
-        <p className="mt-1 text-[11px] text-muted">Certificate for {info.certificate.subject} from {info.certificate.issuer}{info.certificate.validExpiry ? `, valid until ${new Date(info.certificate.validExpiry * 1000).toLocaleDateString()}` : ""}.</p>
+        <p className="mt-1 text-[11px] text-muted">Certificate for {info.certificate.subject} from {info.certificate.issuer}{info.certificate.validExpiry ? `, valid until ${shortDate(info.certificate.validExpiry * 1000)}` : ""}.</p>
       ) : null}
       {info.profile === "rem" ? <p className="mt-2 rounded bg-slate-50 px-2 py-1 text-muted">This tab uses Rem&apos;s separate browser profile.</p> : null}
       {info.remSignIn ? <p className="mt-2 rounded bg-amber-50 px-2 py-1">Rem can use your sign-in on this site. Change this in Settings &gt; Browser.</p> : null}
@@ -457,7 +458,7 @@ function HistoryView({ bridge, onOpenUrl }) {
           <li key={item.url} className="group flex items-center gap-2 rounded px-1.5 py-1 hover:bg-slate-50">
             <button className="min-w-0 flex-1 text-left" type="button" onClick={() => onOpenUrl(item.url)}>
               <span className="block truncate text-ink">{item.title || item.url}</span>
-              <span className="block truncate text-[10px] text-muted">{hostLabel(item.url)} · {relativeTime(item.lastVisit)}{item.visitCount > 1 ? ` · ${item.visitCount} visits` : ""}</span>
+              <span className="block truncate text-[10px] text-muted">{hostLabel(item.url)} · {timeAgo(item.lastVisit)}{item.visitCount > 1 ? ` · ${item.visitCount} visits` : ""}</span>
             </button>
             <button aria-label={`Remove ${item.title || item.url} from history`} className="rounded p-1 text-muted opacity-0 hover:bg-slate-100 focus:opacity-100 group-hover:opacity-100" type="button" onClick={() => void bridge.library("history-remove", { url: item.url })}><Trash2 size={12} /></button>
           </li>

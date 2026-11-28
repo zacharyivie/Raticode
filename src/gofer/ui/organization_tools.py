@@ -101,6 +101,10 @@ ACTION_HELP = {
         "paired desktop its suggestion names (runtime.placementSuggestions). Refused without "
         "such a target, and for Rem, employees and agent tokens."
     ),
+    "self_work_projects": (
+        "User-only employeeId, projects (folders), expectedRevision. Sets which of the "
+        "organization's projects a worker may work on by itself; Rem and employees are refused."
+    ),
     "run_events": "taskId, turnId (an attempt ID). Stored transcript events of one employee run.",
     "run_input": "taskId, turnId. The stored input of one employee run and whether it matches.",
     "audit_verify": (

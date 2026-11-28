@@ -26,9 +26,6 @@
     "social-approval": "Approving, publishing or cancelling a social post, and connecting the accounts that publish, are the user's taps in the app's Posts dashboard or the phone's Posts screen, so no script, workflow or agent can put a post in public. Saving post templates is the dashboard's too. `Raticode social propose`, `list`, `show`, `accounts`, `templates` and `times` cover proposing and reading."
   },
   "routes": {
-    "* /api/rem-resources/mcp-tools": {
-      "cli": "rem mcp tools"
-    },
     "* /api/social": {
       "cli": [
         "social list",
@@ -188,6 +185,9 @@
     },
     "GET /api/rem-resources": {
       "cli": "rem resources"
+    },
+    "GET /api/rem-resources/mcp-tools": {
+      "cli": "rem mcp tools"
     },
     "GET /api/rem/calls": {
       "cli": "rem context"
@@ -435,16 +435,10 @@
     "POST /api/desktop/path-grants": {
       "excluded": "desktop-auth"
     },
-    "POST /api/devices#approve": {
-      "excluded": "pairing"
-    },
     "POST /api/devices#authorize_thread": {
       "excluded": "pairing"
     },
     "POST /api/devices#browser_exchange": {
-      "excluded": "pairing"
-    },
-    "POST /api/devices#cancel": {
       "excluded": "pairing"
     },
     "POST /api/devices#cancel_invitation": {
@@ -558,7 +552,7 @@
     "POST /api/generation-jobs/dismiss": {
       "excluded": "window-ui"
     },
-    "POST /api/organization-webhooks/*": {
+    "POST /api/organization-webhooks/*/*": {
       "excluded": "webhook-ingress"
     },
     "POST /api/organizations#approve": {
@@ -978,6 +972,9 @@
       "cli": "rem memories undo"
     },
     "POST /api/rem/objectives": {
+      "cli": "selfwork objectives"
+    },
+    "POST /api/rem/objectives/ask": {
       "cli": "selfwork objectives"
     },
     "POST /api/rem/reset": {
@@ -1509,6 +1506,9 @@
     },
     "selfwork.report.seen": {
       "cli": "selfwork report"
+    },
+    "selfwork.objectives": {
+      "cli": "selfwork objectives"
     },
     "selfwork.settings": {
       "cli": [

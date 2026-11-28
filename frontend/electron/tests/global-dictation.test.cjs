@@ -335,7 +335,7 @@ test("main.js asks a Wayland desktop for the shortcuts only in a real Wayland ru
   assert.match(read("ipc-handlers.cjs"), /\["gofer:global-dictation-retry", "retryGlobalDictation"\]/);
   assert.match(read("preload.cjs"), /retry: \(\) => invokeDesktop\("gofer:global-dictation-retry"\)/);
   // The window shows that status in Settings and never treats it as a press.
-  const app = fs.readFileSync(path.join(electronDir, "..", "src", "pages", "App.jsx"), "utf8");
+  const app = fs.readFileSync(path.join(electronDir, "..", "src", "lib", "useDevicesAndDictation.js"), "utf8");
   assert.match(app, /if \(message\?\.action === "status"\) \{\n {8}if \(message\.status && typeof message\.status === "object"\) setAnywhereStatus\(message\.status\);\n {8}return;/);
 });
 

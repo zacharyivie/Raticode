@@ -14,7 +14,7 @@ from gofer.core.command_slots import read_settings, slots_root
 from gofer.core.computers import local_room_limit
 from gofer.core.resources import ResourceLimits
 from gofer.core.worker_claims import ORGANIZATIONS, PHONE, THIS_COMPUTER, Claim, WorkerClaims
-from gofer.devices.application import incoming_job
+from gofer.devices.application import host_template, incoming_job
 from gofer.devices.registry import PairingError, device_id
 from gofer.ui.chat import _messages_with_attachment_paths, stream_workflow_chat
 from gofer.ui.chat_jobs import ChatJobs
@@ -97,10 +97,10 @@ def validate_context(context: dict[str, Any]) -> dict[str, Any]:
 def unattended_workflow(workflow: dict[str, Any], provider: str) -> dict[str, Any]:
     """The host grant's workflow under the limits of a task a paired desktop handed over.
 
-    Work another desktop's organization sends runs with nobody here watching, like a
-    handed-over Rem task (gofer.ui.rem_home): Claude Code's sandbox, Codex kept to the
-    same data folder writes, no push, no browser, subagents, swarms or MCP servers, and
-    not this computer's Second Brain, because the answer goes back to the other desktop.
+    Work another desktop sends runs with nobody here watching, like a handed-over Rem
+    task (gofer.ui.rem_home): Claude Code's sandbox, Codex kept to the same data folder
+    writes, no push, no browser, subagents, swarms or MCP servers, and not this
+    computer's Second Brain, because the answer goes back to the other desktop.
     """
     resources = {
         **(workflow.get("remResources") or {}),
@@ -127,16 +127,35 @@ def unattended_workflow(workflow: dict[str, Any], provider: str) -> dict[str, An
     }
 
 
-def _unattended_instructions(provider: str) -> str:
-    """Rem's identity and the unwatched rules for work another desktop's organization sent."""
+def sent_by_desktop(request: dict[str, Any]) -> bool:
+    """Whether a claimed turn is work another desktop sent, run under ``unattended_workflow``.
+
+    Decided by who sent it, the request kind and the grant, never by a payload field
+    the sender sets. Every ``job.submit`` from a paired desktop is such work, with or
+    without an organization mark: its Rem's fleet tools send them too. So is a
+    ``chat.submit`` on a project grant. Only a thread the desktop runs here through
+    Run threads from this desktop (the ``host_template`` grant and threads made from
+    it) keeps its grant, like a phone turn.
+    """
+    if request.get("peer_role") != "desktop":
+        return False
+    event = request["event"]
+    if event.get("type") != "chat.submit":
+        return True
+    host = host_template(request["peer"])
+    return host not in (event.get("thread_id"), (request.get("context") or {}).get("parent_thread"))
+
+
+def _unattended_instructions(provider: str, *, organization: bool) -> str:
+    """Rem's identity and the unwatched rules for work another desktop sent."""
     from gofer.ui.chat import REM_IDENTITY
     from gofer.ui.claude_sandbox import sandbox_instructions
-    from gofer.ui.rem_self_work import SENT_BY_DESKTOP
+    from gofer.ui.rem_self_work import SENT_BY_DESKTOP, SENT_BY_DESKTOP_REM
 
     sandbox = (
         sandbox_instructions(read_only=False, scratch=None) if provider == "claude_code" else ""
     )
-    return REM_IDENTITY + SENT_BY_DESKTOP + sandbox
+    return REM_IDENTITY + (SENT_BY_DESKTOP if organization else SENT_BY_DESKTOP_REM) + sandbox
 
 
 def _sender_label(request: dict[str, Any]) -> str:
@@ -373,7 +392,8 @@ class DeviceChatBridge:
                 local_workflow.setdefault("chatThreadTitle", context.get("title") or "")
                 # Phone turns and remote threads keep the host grant as it is.
                 organization_job = incoming_job(event)
-                if organization_job:
+                limited = organization_job or sent_by_desktop(request)
+                if limited:
                     local_workflow = unattended_workflow(local_workflow, provider)
                 files = request.get("attachments") or []
                 if files:
@@ -452,7 +472,7 @@ class DeviceChatBridge:
                 from gofer.ui.rem_threads import stream_with_thread_tools
 
                 async def thread_source(**options: Any) -> AsyncGenerator[dict[str, Any], None]:
-                    if organization_job:
+                    if limited:
                         # No fleet or thread tools: they reach other computers and threads.
                         async for output in provider_source(**options):
                             yield output
@@ -496,8 +516,12 @@ class DeviceChatBridge:
                     factory,
                     **({"provider_profile": account} if account else {}),
                     **(
-                        {"agent_instructions": _unattended_instructions(provider)}
-                        if organization_job
+                        {
+                            "agent_instructions": _unattended_instructions(
+                                provider, organization=organization_job
+                            )
+                        }
+                        if limited
                         else {}
                     ),
                     provider=provider,

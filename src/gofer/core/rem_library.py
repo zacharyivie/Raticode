@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import tempfile
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,6 +18,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from gofer.core.prompt_envelope import McpReference
+from gofer.utils.atomic_output import replace_file
 
 LIBRARY_FILE = "rem-resources.json"
 SKILLS_FOLDER = "skills"
@@ -125,26 +125,13 @@ def load_library(data_dir: Path) -> RemLibrary:
 
 
 def _save_library(data_dir: Path, library: RemLibrary) -> None:
-    destination = library_path(data_dir)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = ""
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=destination.parent, delete=False
-        ) as output:
-            temporary = output.name
-            data = library.model_dump(mode="json")
-            # An empty env list stays out of the file, so a Raticode version without
-            # the field can still read the library.
-            for server in data["mcpServers"]:
-                if not server.get("env"):
-                    server.pop("env", None)
-            output.write(json.dumps(data, indent=2))
-            output.write("\n")
-        os.replace(temporary, destination)
-    finally:
-        if temporary:
-            Path(temporary).unlink(missing_ok=True)
+    data = library.model_dump(mode="json")
+    # An empty env list stays out of the file, so a Raticode version without the field
+    # can still read the library.
+    for server in data["mcpServers"]:
+        if not server.get("env"):
+            server.pop("env", None)
+    replace_file(library_path(data_dir), (json.dumps(data, indent=2) + "\n").encode("utf-8"))
 
 
 def _now() -> str:

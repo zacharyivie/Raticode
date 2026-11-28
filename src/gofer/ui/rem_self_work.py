@@ -76,11 +76,13 @@ from gofer.ui import rem_decisions as decisions
 from gofer.ui import rem_design_depth as design_depth
 from gofer.ui import rem_guardrail_retro as retro
 from gofer.ui import rem_objective_fit as objective_fit
+from gofer.ui import rem_objective_ideas as objective_ideas
 from gofer.ui import rem_objectives as objectives_store
 from gofer.ui import rem_research_start as research_start
 from gofer.ui import rem_self_work_accounts as accounts
 from gofer.ui import rem_self_work_answers as answers
 from gofer.ui import rem_self_work_daily as daily
+from gofer.ui import rem_self_work_effort as effort
 from gofer.ui import rem_self_work_pace as pacing
 from gofer.ui import rem_self_work_stop as stops
 from gofer.ui import rem_self_work_windows as windows
@@ -186,11 +188,19 @@ PLANNING_SITUATIONS = {
         "each with a concrete, checkable done_when so self-work knows when to move on."
     ),
     "out_of_work": (
+        "Self-work has run out of work: nothing is left to start, research found nothing new "
+        "and no objective is open. Add one to three new high-order objectives that open up "
+        "worthwhile work and differ from the done ones, each a goal for the rest of the session "
+        "rather than a next task, each with a concrete, checkable done_when."
+    ),
+    # Out of work while objectives are open: they stay the session's goals, so Rem only checks
+    # off those it can, and adds new ones only if that leaves none open.
+    "out_of_work_open": (
         "Self-work has run out of work: nothing is left to start and research found nothing "
-        "new. Add one to three new high-order objectives that open up worthwhile work and differ "
-        "from the open ones, each a goal for the rest of the session rather than a next task, "
-        "each with a concrete, checkable done_when. Also check off any open objective whose "
-        "done_when is now fully met."
+        "new, but objectives are still open. Check off any open objective whose done_when is "
+        "now fully met. Open objectives stay the goals: add new objectives only if your done "
+        "list checks off every open objective, and otherwise return no objectives. Never add "
+        "to the user's open-ended objectives."
     ),
     "finish_lines": (
         "Self-work is starting. Some open objectives you wrote on your own earlier have no "
@@ -277,6 +287,10 @@ HANDED_OVER = "\nA paired desktop handed this task over to this computer. " + _U
 # So does work a paired desktop's organization sent (gofer.ui.device_chat).
 SENT_BY_DESKTOP = (
     "\nAn organization on a paired desktop sent this work to this computer. " + _UNWATCHED_RULES
+)
+# And any other work a paired desktop sent, such as its Rem's fleet tools.
+SENT_BY_DESKTOP_REM = (
+    "\nRem on a paired desktop sent this work to this computer. " + _UNWATCHED_RULES
 )
 
 PROPOSAL_FORMAT = """End your final message with one fenced ```json block and nothing after it:
@@ -627,8 +641,11 @@ def objective_research(goal: dict[str, Any], name: str) -> str:
 
 
 def guided(recipe: Recipe, objectives: dict[str, Any], kind: str) -> Recipe:
-    """``recipe`` with the open objectives as read just now, for a task self-work starts."""
-    text = objectives_store.brief(objectives)
+    """``recipe`` with the open objectives as read just now, for a task self-work starts.
+
+    Only the global objectives and the task's own project's are given.
+    """
+    text = objectives_store.brief(objectives_store.applying(objectives, recipe.project_dir))
     if not text:
         return recipe
     return recipe.model_copy(update={"prompt": f"{recipe.prompt}\n\n{text}\n{GUIDANCE[kind]}"})
@@ -702,14 +719,24 @@ def self_started(run: dict[str, Any]) -> bool:
     return bool(started) and started.get("origin", "self_work") == "self_work"
 
 
+def user_resumed(run: dict[str, Any]) -> bool:
+    """Whether the user resumed or followed up on this run, so it is their work now.
+
+    The user asked for it, so self-work's thread limit never holds it back or pauses it,
+    however many the user resumed at once; the computer's worker limit still applies.
+    """
+    return (run.get("resumed") or {}).get("by") == "user"
+
+
 def yields_worker(run: dict[str, Any]) -> bool:
     """Whether this run waits behind the user's own runs for a worker on this computer.
 
     True for self-work and for a task a paired desktop handed over (``remote_origin``
     names that desktop). A handed-over task isn't self-work: self-work's limits, account
     and counts leave it alone, so it gets its own field instead of ``self_work``.
+    Self-work the user resumed (``user_resumed``) is the user's and doesn't yield.
     """
-    return self_started(run) or bool(run.get("remote_origin"))
+    return (self_started(run) and not user_resumed(run)) or bool(run.get("remote_origin"))
 
 
 def runs_unwatched(run: dict[str, Any]) -> bool:
@@ -803,8 +830,13 @@ class SelfWork:
         self._judge: threading.Thread | None = None
         # When the idle check last read the records to see whether they changed.
         self._stop_probe_at: datetime | None = None
+        # Each project's room for new starts during one pass, by its level of effort.
+        self._slots: effort.Slots | None = None
+        # The user's Ask Rem presses, one project at a time, off the request's thread.
+        self.ideas = objective_ideas.ObjectiveIdeas(self)
 
     def close(self) -> None:
+        self.ideas.close()
         self._planner_stop.set()
         for worker in (self._planner, self._checker, self._judge):
             if (
@@ -883,10 +915,15 @@ class SelfWork:
     def _occupancy(
         self, runs: list[dict[str, Any]]
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Self-work runs holding a thread, and the user's runs holding one."""
+        """Self-work runs holding a thread, and the user's runs holding one.
+
+        Self-work the user resumed counts as the user's: it fills threads ahead of
+        self-work, and self-work makes way for it rather than the other way round.
+        """
         clock = self.clock()
         holding = [r for r in runs if _holds_thread(r, clock)]
-        return [r for r in holding if self_started(r)], [r for r in holding if not self_started(r)]
+        mine = [r for r in holding if self_started(r) and not user_resumed(r)]
+        return mine, [r for r in holding if r not in mine]
 
     def _yield_to_user(
         self,
@@ -924,11 +961,7 @@ class SelfWork:
         if excess <= 0 and short <= 0:
             return []
         candidates = sorted(
-            (
-                r
-                for r in mine
-                if r["state"] != "cancelling" and (r.get("resumed") or {}).get("by") != "user"
-            ),
+            (r for r in mine if r["state"] != "cancelling" and not user_resumed(r)),
             key=lambda r: _pause_order(r, priorities),
         )
         chosen = candidates[: max(0, excess)]
@@ -1676,26 +1709,84 @@ class SelfWork:
             "paused_threads": view["state"]["paused_threads"],
             # The checklist the user and Rem share; Rem changes it through decision.objectives.
             "objectives": view["objectives"]["prompt"],
+            # Rem's projects: name, level of effort and threads now/target. Read-only for Rem.
+            "projects": [
+                {k: row[k] for k in ("name", "effort_percent", "running_threads", "target_threads")}
+                for row in view["projects"]
+            ],
             # When self-work stops: the user's condition, latest time and the last judgment.
             "stop": {k: v for k, v in view["stop"].items() if k not in {"last", "revision"}},
         }
 
-    def objectives(self, limit: int = objectives_store.PAGE, offset: int = 0) -> dict[str, Any]:
-        """The objectives list as clients show it: ``limit`` of them from ``offset``."""
+    def objectives(
+        self, limit: int = objectives_store.PAGE, offset: int = 0, project: str | None = None
+    ) -> dict[str, Any]:
+        """The objectives list as clients show it: ``limit`` of them from ``offset``.
+
+        Without ``project``, the global ones with each project's own under ``projects``;
+        with one, only that project's.
+        """
         with self.store.read() as db:
-            return objectives_store.view(objectives_store.read(db, self.store), limit, offset)
+            listed = objectives_store.read(db, self.store)
+        # Each project's latest Ask Rem, by folder, so every client shows its progress.
+        return {
+            **objectives_store.view(listed, limit, offset, project),
+            "asking": self.ideas.view(),
+        }
+
+    def ask_objectives(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """The user pressed Ask Rem for one project: start it, and return the objectives view.
+
+        ``project`` names one of Rem's projects by folder or name; ``limit`` asks for as many
+        objectives back as the client has loaded.
+        """
+        project = payload.get("project")
+        if not isinstance(project, str) or not project.strip():
+            raise objectives_store.ObjectiveRefused("invalid", "Name the project to ask about.")
+        limit = payload.get("limit", objectives_store.PAGE)
+        try:
+            self.ideas.ask(project)
+        except objective_ideas.AskRefused as exc:
+            raise objectives_store.ObjectiveRefused(exc.code, str(exc)) from None
+        return self.objectives(limit if type(limit) is int else objectives_store.PAGE)
 
     def change_objectives(self, payload: dict[str, Any]) -> dict[str, Any]:
         """The user's change from the side pane, a paired client or the CLI.
 
-        ``limit`` asks for as many objectives back as the client has loaded.
+        ``limit`` asks for as many objectives back as the client has loaded. ``project``
+        adds to one of Rem's projects' own objectives, by its folder or name; with ``edit``
+        it moves the objective there, or to the global ones with "".
         """
         limit = payload.pop("limit", objectives_store.PAGE)
         if type(limit) is not int:
             limit = objectives_store.PAGE
         with self.store.connect() as db:
+            if payload.get("project"):
+                if not isinstance(payload["project"], str):
+                    raise objectives_store.ObjectiveRefused("invalid", "Name the project.")
+                payload["project"] = objectives_store.resolve_project(
+                    payload["project"], self.project_names(db, assigned=True)
+                )
             listed = objectives_store.change(db, self.store, payload, actor="user")
         return objectives_store.view(listed, limit)
+
+    def project_names(
+        self, db: sqlite3.Connection, *, assigned: bool = False
+    ) -> list[tuple[str, str]]:
+        """Rem's projects as (folder, name), in order: those it can work in now, or with
+        ``assigned`` every project chosen for it, open here or not."""
+        config = self.store.setting(db, "config")
+        assignment = rem_assignment(db, self.store)
+        if assigned:
+            roots = list(assignment["projects"])
+        else:
+            roots = self._roots(config, usable_projects(config, assignment))
+        return [(root, Path(root).name or root) for root in roots]
+
+    @staticmethod
+    def _roots(config: dict[str, Any], usable: set[str]) -> list[str]:
+        """Rem's usable projects in the order Raticode lists open projects."""
+        return [r for r in open_project_roots(config) if r in usable]
 
     def _tick(self) -> None:
         self._advance_windows()
@@ -1825,6 +1916,77 @@ class SelfWork:
         if board and self._guard_board(tickets, usable, block=True):
             with self.store.read() as db:
                 tickets = read_tickets(db, *WORKING)
+        found = self._candidates(tickets, usable, config, board)
+        if found is None:
+            # Rem's model is judging tickets against the objectives; it takes seconds.
+            return
+        tickets, startable, objectives = found
+        passes = state.get("passes") or []
+        # Every running thread counts, the user's first; paused work holds none.
+        # Pace to reset then allows only as many new starts as fit under its line, and
+        # Rem's computers only as many as they have room for.
+        slots = self._pace_room(min(spare, room))
+        running = [t for t in tickets if t.get("claim") and not t.get("paused")]
+        if resumed:
+            # Work picked back up above holds its project's threads again.
+            with self.store.read() as db:
+                mine, _ = self._occupancy(self._current_runs(db))
+        # Each project gets its level of effort's share of the threads; one with nothing it
+        # can start lends its share to the others for this pass (rem_self_work_effort).
+        _, _, goal, held = self._effort_plan(settings, config, usable, mine, theirs, limit)
+        self._slots = effort.Slots(goal, held)
+        try:
+            done = self._start_stages(
+                session,
+                slots,
+                settings,
+                config,
+                clock,
+                tickets,
+                startable,
+                usable,
+                objectives,
+                passes,
+                board=board,
+                retro=True,
+            )
+            left = slots - done["started"]
+            if left > 0 and self._slots.lend():
+                again = self._lend_pass(left, settings, config, clock, usable, board)
+                if again:
+                    for key in ("started", "unblocked", "todos", "backlog", "research"):
+                        done[key] += again[key]
+                    done["finished"] = again["finished"]
+                    done["backlog_left"] = done["backlog_left"] or again["backlog_left"]
+        finally:
+            self._slots = None
+        if fresh:
+            self._note_started(
+                done["todos"],
+                done["backlog"],
+                done["research"],
+                done["unblocked"],
+                board=board,
+                timed=not waits,
+                asked=asked,
+            )
+        if done["finished"] and not (
+            done["started"] or resumed or running or mine or passes or done["backlog_left"]
+        ):
+            self._mark_exhausted(done["finished"])
+            self._plan_when_out_of_work(session, config, usable)
+
+    def _candidates(
+        self,
+        tickets: list[dict[str, Any]],
+        usable: set[str],
+        config: dict[str, Any],
+        board: bool,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]] | None:
+        """Rem's tickets, those self-work may start, and the objectives read with them.
+
+        None while Rem's model judges tickets against the objectives.
+        """
         # Tickets outside Rem's projects stay where they are and hold nothing else back.
         # Nor are tickets marked "Violates decisions" ever picked, until the user changes
         # the ticket or a decision.
@@ -1843,14 +2005,86 @@ class SelfWork:
         # With open objectives, only tickets that advance one may start; the rest stay put.
         startable, checking = self._objective_gate(objectives, startable, config, usable, board)
         if checking:
-            # Rem's model is judging tickets against the objectives; it takes seconds.
-            return
-        passes = state.get("passes") or []
-        # Every running thread counts, the user's first; paused work holds none.
-        # Pace to reset then allows only as many new starts as fit under its line, and
-        # Rem's computers only as many as they have room for.
-        slots = self._pace_room(min(spare, room))
-        running = [t for t in tickets if t.get("claim") and not t.get("paused")]
+            return None
+        return tickets, startable, objectives
+
+    def _effort_plan(
+        self,
+        settings: dict[str, Any],
+        config: dict[str, Any],
+        usable: set[str],
+        mine: list[dict[str, Any]],
+        theirs: list[dict[str, Any]],
+        limit: int,
+    ) -> tuple[list[str], dict[str, int], dict[str, int], dict[str, int]]:
+        """Rem's projects in order, their levels of effort, target threads and threads held.
+
+        The targets split self-work's threads: the thread limit less the user's own running
+        work, which goes first.
+        """
+        roots = self._roots(config, usable)
+        shares = effort.percents(roots, settings.get(effort.SETTING))
+        goal = effort.targets(shares, max(0, limit - len(theirs)))
+        held = effort.running_by_project((self._project_of(r) for r in mine), roots)
+        return roots, shares, goal, held
+
+    def _lend_pass(
+        self,
+        slots: int,
+        settings: dict[str, Any],
+        config: dict[str, Any],
+        clock: datetime,
+        usable: set[str],
+        board: bool,
+    ) -> dict[str, Any] | None:
+        """Start work in the threads a project with nothing to start left free.
+
+        Read afresh, since the first pass just claimed tickets and started research.
+        """
+        with self.store.read() as db:
+            tickets = read_tickets(db, *WORKING)
+            state = self.store.setting(db, "self_work_state")
+        session = state.get("session")
+        if not session:
+            return None
+        found = self._candidates(tickets, usable, config, board)
+        if found is None:
+            return None
+        tickets, startable, objectives = found
+        return self._start_stages(
+            session,
+            slots,
+            settings,
+            config,
+            clock,
+            tickets,
+            startable,
+            usable,
+            objectives,
+            state.get("passes") or [],
+            board=board,
+            retro=False,
+        )
+
+    def _start_stages(
+        self,
+        session: dict[str, Any],
+        slots: int,
+        settings: dict[str, Any],
+        config: dict[str, Any],
+        clock: datetime,
+        tickets: list[dict[str, Any]],
+        startable: list[dict[str, Any]],
+        usable: set[str],
+        objectives: dict[str, Any],
+        passes: list[dict[str, Any]],
+        *,
+        board: bool,
+        retro: bool,
+    ) -> dict[str, Any]:
+        """Start new self-work in up to ``slots`` threads, in order: blocked tickets, To do,
+        the backlog, the weekly retro, then research. Returns what started."""
+        total = slots
         # Running tickets above still hold their threads, so turning the board off mid-session
         # never starts more work than the limit; only new ticket work stops.
         # Blocked tickets were already under way, so with the board on they come first.
@@ -1895,7 +2129,10 @@ class SelfWork:
             slots -= pulled + triaging
         # The weekly guardrail retro takes a thread before new research does.
         retros = int(
-            board and slots > 0 and self._begin_retro(settings, config, usable, session, clock)
+            retro
+            and board
+            and slots > 0
+            and self._begin_retro(settings, config, usable, session, clock)
         )
         slots -= retros
         researching, finished = self._research(
@@ -1909,29 +2146,45 @@ class SelfWork:
             auto=bool(settings.get(AUTO_APPROVE)),
             objectives=objectives,
         )
-        started = unblocked + todos + pulled + triaging + researching + retros
-        if fresh:
-            self._note_started(
-                todos,
-                pulled + triaging,
-                researching + retros,
-                unblocked,
-                board=board,
-                timed=not waits,
-                asked=asked,
-            )
-        if finished and not (started or resumed or running or mine or passes or backlog_left):
-            self._mark_exhausted(finished)
-            self._plan_when_out_of_work(session, config, usable)
+        slots -= researching
+        return {
+            "started": total - slots,
+            "unblocked": unblocked,
+            "todos": todos,
+            "backlog": pulled + triaging,
+            "research": researching + retros,
+            "finished": finished,
+            "backlog_left": backlog_left,
+        }
 
     def _fill(self, candidates: list[dict[str, Any]], slots: int, config: dict[str, Any]) -> int:
-        """Start tickets in order until the free threads are used; returns how many started."""
+        """Start tickets in order until the free threads are used; returns how many started.
+
+        A ticket whose project already holds its share of the threads waits (``_may_start``).
+        """
         started = 0
         for ticket in candidates:
             if started >= slots:
                 break
-            started += self._begin_ticket(ticket["id"], config)
+            project = ticket.get("project_dir")
+            if not self._may_start(project):
+                continue
+            begun = self._begin_ticket(ticket["id"], config)
+            if begun:
+                self._took(project)
+            started += begun
         return started
+
+    def _may_start(self, project: str | None) -> bool:
+        """Whether this pass may start self-work in ``project``: within its level of effort.
+
+        Outside a pass (``_slots`` is None), say a ticket the user moved, nothing is held.
+        """
+        return self._slots is None or self._slots.allows(project)
+
+    def _took(self, project: str | None) -> None:
+        if self._slots is not None:
+            self._slots.take(project)
 
     def _note_started(
         self,
@@ -2660,12 +2913,26 @@ class SelfWork:
     def _plan_when_out_of_work(
         self, session: dict[str, Any], config: dict[str, Any], usable: set[str]
     ) -> None:
-        """Out of work: Rem may add objectives, once a research round, a few times a session."""
-        plans = [p for p in session.get("objective_plans") or [] if p.get("mode") == "out_of_work"]
+        """Out of work: Rem may add objectives, once a research round, a few times a session.
+
+        Only when no objective is open. While some are, Rem may check off those whose finish
+        line is met, and add new ones only if that leaves none open; with none it could check
+        off, such as the user's open-ended ones, it asks its model nothing.
+        """
+        plans = [
+            p
+            for p in session.get("objective_plans") or []
+            if p.get("mode") in {"out_of_work", "out_of_work_open"}
+        ]
         round_number = int(session.get("round") or 0)
         if len(plans) >= OUT_OF_WORK_PLANS or any(p.get("round") == round_number for p in plans):
             return
-        self._start_planner("out_of_work", session, config, usable)
+        with self.store.read() as db:
+            open_now = objectives_store.open_items(objectives_store.read(db, self.store))
+        if not open_now:
+            self._start_planner("out_of_work", session, config, usable)
+        elif any(item.get("done_when") for item in open_now):
+            self._start_planner("out_of_work_open", session, config, usable)
 
     def _start_planner(
         self, mode: str, session: dict[str, Any], config: dict[str, Any], usable: set[str]
@@ -2775,33 +3042,7 @@ class SelfWork:
         # Giving finish lines adds nothing new: the session already has objectives.
         new = plan.objectives if mode != "finish_lines" else []
         with self.store.connect() as db:
-            for entry in new:
-                try:
-                    objectives_store.change(
-                        db,
-                        self.store,
-                        {"action": "add", "items": [entry.model_dump()]},
-                        actor="rem",
-                        source="self_work",
-                        stamp=stamp,
-                    )
-                    added.append(entry.text.strip())
-                except objectives_store.ObjectiveRefused as exc:
-                    if exc.code != "conflict":
-                        refused.append(f"“{entry.text.strip()}” ({exc})")
-            for line in plan.finish_lines:
-                try:
-                    listed = objectives_store.change(
-                        db,
-                        self.store,
-                        {"action": "edit", "id": line.id, "done_when": line.done_when},
-                        actor="rem",
-                        source="self_work",
-                    )
-                    item = next(i for i in listed["items"] if i["id"] == line.id)
-                    finished.append(f"“{item['text']}”: done when {item['done_when']}")
-                except objectives_store.ObjectiveRefused as exc:
-                    refused.append(f"a finish line for {line.id} ({exc})")
+            # Checks first: new objectives may be added only once none is left open.
             for check in plan.done:
                 try:
                     listed = objectives_store.change(
@@ -2815,13 +3056,43 @@ class SelfWork:
                     checked.append(f"“{item['text']}”: {item.get('done_evidence')}")
                 except objectives_store.ObjectiveRefused as exc:
                     refused.append(f"checking off {check.id} ({exc})")
+            for line in plan.finish_lines:
+                try:
+                    listed = objectives_store.change(
+                        db,
+                        self.store,
+                        {"action": "edit", "id": line.id, "done_when": line.done_when},
+                        actor="rem",
+                        source="self_work",
+                    )
+                    item = next(i for i in listed["items"] if i["id"] == line.id)
+                    finished.append(f"“{item['text']}”: done when {item['done_when']}")
+                except objectives_store.ObjectiveRefused as exc:
+                    refused.append(f"a finish line for {line.id} ({exc})")
+            for entry in new:
+                try:
+                    objectives_store.change(
+                        db,
+                        self.store,
+                        {"action": "add", "items": [entry.model_dump()]},
+                        actor="rem",
+                        source="self_work",
+                        stamp=stamp,
+                    )
+                    added.append(entry.text.strip())
+                except objectives_store.ObjectiveRefused as exc:
+                    # Some objective is still open (or one was added meanwhile): Rem adds
+                    # nothing to them on its own, and that is no news for the chat.
+                    if exc.code not in {"conflict", "unauthorized"}:
+                        refused.append(f"“{entry.text.strip()}” ({exc})")
             sentences: list[str] = []
             if added:
                 sentences.append(
                     (
                         "Set my own self-work objectives, since the list was empty: "
                         if mode == "empty"
-                        else "Ran out of work, so I added self-work objectives: "
+                        else "Ran out of work with every objective done, so I added self-work "
+                        "objectives: "
                     )
                     + "; ".join(f"“{t}”" for t in added)
                     + ". Edit or remove them in Objectives above my tasks."
@@ -2838,7 +3109,7 @@ class SelfWork:
                 text = " ".join(sentences)[:2000]
                 add_report(db, "note", text=text[:700])
                 self.store.message(db, text, identity=f"objectives-{uuid4().hex}")
-        if mode == "out_of_work" and added:
+        if mode in {"out_of_work", "out_of_work_open"} and added:
             # New objectives open up new work: research again now, guided by them.
             self._begin_round({"id": session_id}, why="new objectives were added")
 
@@ -2884,8 +3155,12 @@ class SelfWork:
             key, objectives, unknown, config, usable
         ):
             return running, True
+        # A ticket of a project none of whose objectives are open, with no global one open,
+        # is free: another project's objectives never hold it back.
         related = {
-            t["id"] for t in candidates if objective_fit.judge(t, objectives)[0] == "related"
+            t["id"]
+            for t in candidates
+            if objective_fit.judge(t, objectives)[0] in {"related", "free"}
         }
         left = [
             t
@@ -3105,7 +3380,12 @@ class SelfWork:
                 continue
             if action != "leave" and started >= slots:
                 break
+            # Its project holds its share of the threads: looked at again when one frees.
+            if action != "leave" and not self._may_start(ticket.get("project_dir")):
+                continue
             done = action != "leave" and self._unblock(ticket, run, action, note, config)
+            if done:
+                self._took(ticket.get("project_dir"))
             if action != "leave" and not done:
                 action, note = (
                     "leave",
@@ -3816,8 +4096,13 @@ class SelfWork:
             due = self._due_for_ranking(session, target, group)
             if due:
                 waiting = True
-                if triages < slots and self._begin_triage(target, config, due):
+                if (
+                    triages < slots
+                    and self._may_start(target)
+                    and self._begin_triage(target, config, due)
+                ):
                     triages += 1
+                    self._took(target)
                 continue
             ready.extend(t for t in group if self._ranked(t) and not t["triage"].get("skip"))
         ready.sort(key=backlog_order)
@@ -4104,7 +4389,12 @@ class SelfWork:
                 [
                     {"root": root, "goal": goal["id"]}
                     for root in ordered
-                    if goal["id"] not in scopes or root in scopes[goal["id"]]
+                    # A project's own objective is researched only in that project.
+                    if (
+                        root == objectives_store.project_of(goal)
+                        if objectives_store.project_of(goal)
+                        else goal["id"] not in scopes or root in scopes[goal["id"]]
+                    )
                 ]
                 for goal in goals
             ]
@@ -4121,6 +4411,20 @@ class SelfWork:
                     self._objective_load(objectives or {}, tickets, passes),
                 )
             ]
+            # A project no open objective applies to (no global one is open, and it has none
+            # of its own) researches its usual angles; turns alternate with the objectives'.
+            listed = objectives or {"items": []}
+            usual: list[tuple[str, int | str]] = [
+                (root, angle)
+                for angle in range(len(RESEARCH_ANGLES))
+                for root in ordered
+                if not objectives_store.open_items(objectives_store.applying(listed, root))
+            ]
+            if usual:
+                mixed: list[tuple[str, int | str]] = []
+                for depth in range(max(len(pairs), len(usual))):
+                    mixed.extend(pairs[depth : depth + 1] + usual[depth : depth + 1])
+                pairs = mixed
         recent = self._recent_ideas() if not board else set()
         # A pass still open from an earlier session, say one paused for the user's work,
         # covers its project and angle; another would repeat it.
@@ -4150,7 +4454,12 @@ class SelfWork:
         for target, angle in targets:
             if started >= slots:
                 break
-            started += self._begin_research(target, angle, config, tickets, board=board, auto=auto)
+            if not self._may_start(target):
+                continue
+            begun = self._begin_research(target, angle, config, tickets, board=board, auto=auto)
+            if begun:
+                self._took(target)
+            started += begun
         if len(targets) > started:
             return started, ""
         if goals and not pairs:
@@ -5761,6 +6070,7 @@ class SelfWork:
             *LIMIT_SETTINGS,
             *PACE_SETTINGS,
             ACCOUNTS,
+            effort.SETTING,
             "expected_revision",
         }
         if unknown:
@@ -5840,6 +6150,16 @@ class SelfWork:
                 changes.update(pacing.resolve(settings, allowance))
             except ValueError as exc:
                 raise KanbanRefused("invalid", str(exc)) from exc
+            if effort.SETTING in changes:
+                # Levels of effort for some of Rem's projects; the others share the rest.
+                config = self.store.setting(db, "config")
+                roots = self._roots(config, usable_projects(config, rem_assignment(db, self.store)))
+                try:
+                    changes[effort.SETTING] = effort.change(
+                        roots, settings.get(effort.SETTING), changes[effort.SETTING]
+                    )
+                except effort.EffortRefused as exc:
+                    raise KanbanRefused("invalid", str(exc)) from exc
             if ACCOUNTS in changes:
                 changes[ACCOUNTS] = validate_self_work_accounts(
                     {**self_work_choices(settings), **changes[ACCOUNTS]}
@@ -6079,6 +6399,14 @@ class SelfWork:
             mode, detail = "waiting", "Starts work on its next check."
         else:
             mode, detail = "waiting", "Starts after 15 minutes without a prompt."
+        # Each project's threads now against its level of effort's share.
+        mine_now, theirs_now = self._occupancy(runs_now)
+        roots, shares, goal, holding = self._effort_plan(
+            settings, config, usable, mine_now, theirs_now, self.limit(settings)
+        )
+        projects = effort.rows(roots, shares, goal, holding)
+        if mode == "working" and (split := effort.line(projects)):
+            detail += " " + split
         if timed["active"]:
             detail += f" On {timed['active']['label'][0].lower()}{timed['active']['label'][1:]}."
         if on and self.holding_for:
@@ -6112,6 +6440,8 @@ class SelfWork:
                 # The account self-started runs use, by provider; a missing provider follows
                 # Rem's setting (Settings > Rem > Accounts).
                 ACCOUNTS: self_work_choices(settings),
+                # Each of Rem's projects' level of effort, in percent of the threads.
+                effort.SETTING: shares,
                 "idle_minutes": int(IDLE_AFTER.total_seconds() / 60),
                 "revision": settings["revision"],
             },
@@ -6125,6 +6455,7 @@ class SelfWork:
                 "pace_aim_percent_min": pacing.AIM_MIN,
                 "pace_aim_percent_max": pacing.AIM_MAX,
                 "pace_lead_hours_max": pacing.LEAD_MAX,
+                "effort_percent_max": effort.PERCENT_MAX,
             },
             "state": {
                 "mode": mode,
@@ -6182,10 +6513,14 @@ class SelfWork:
             },
             "report": report,
             "schedule": timed,
+            # Rem's projects in order, each with its level of effort and threads now/target.
+            "projects": projects,
             # The phone and CLI read the list here too; "prompt" is how Rem's model reads it.
             "objectives": {
                 **objectives_store.view(listed),
                 "prompt": objectives_store.for_prompt(listed),
+                # Each project's latest Ask Rem, by folder: asking, added or failed.
+                "asking": self.ideas.view(),
             },
             # When self-work stops: the user's condition, latest time and Rem's last judgment.
             "stop": stops.view(stop_record, clock, judging=self.judging()),

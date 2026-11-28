@@ -100,7 +100,7 @@ point into a `.rattish` file.
 | `RATTISH_DUPLICATE_ROUTE` | error | Two routes have the same source, target, and condition. |
 | `RATTISH_CONTRADICTORY_ROUTE` | error | An unconditional and `otherwise` route contradict each other. |
 | `RATTISH_UNREACHABLE_FAILURE_ROUTE` | error | `when failed` appears on a node that cannot tolerate failure. |
-| `RATTISH_PREDICATE_TYPE_MISMATCH` | error | Predicate operands do not support the selected operator. |
+| `RATTISH_PREDICATE_TYPE_MISMATCH` | error | Predicate operands whose types the compiler knows do not support the selected operator. An operand with no known type is checked at run time. |
 | `RATTISH_APPROVAL_CHOICE_UNKNOWN` | error | A route compares an approval gate's `output.choice` with a String that isn't one of the gate's `options`, or the gate has no options. |
 | `RATTISH_INVALID_REGEX` | error | The right side of `matches` is not a valid regular expression. |
 | `RATTISH_INVALID_START_ASSERTION` | error | `start: true` appears with `needs`. |
@@ -158,6 +158,7 @@ point into a `.rattish` file.
 | `RATTISH_RUNTIME_CONFIGURATION_ERROR` | error | A runtime handler rejected node configuration that could not be checked statically. |
 | `RATTISH_RUNTIME_FILESYSTEM_ERROR` | error | A runtime handler could not complete a filesystem operation. |
 | `RATTISH_RUNTIME_PROVIDER_ERROR` | error | An Agent provider invocation failed after deployment preflight. |
+| `RATTISH_RUNTIME_PREDICATE_TYPE_MISMATCH` | error | A route condition, or a Boolean binding expression, compared values whose JSON types its operator can't use, such as `>` on a String and a Number. The message names the source node, the route target (or binding), the operator and both JSON types, never the values. |
 | `RATTISH_RUNTIME_OUTPUT_INVALID` | error | A handler's successful value violated the output schema embedded in IR. |
 | `RATTISH_WORKFLOW_OUTPUT_MISSING` | error | A declared public output had no value when the workflow otherwise completed. |
 | `RATTISH_WORKFLOW_OUTPUT_INVALID` | error | A resolved public output violated its declared schema. |
@@ -187,6 +188,29 @@ related span. A type mismatch points at the binding value and may relate the des
 input declaration or contract field.
 
 EOF diagnostics use an empty span whose start and end are both the EOF position.
+
+## Replacements
+
+When a diagnostic's "Did you mean" suggestion names other spellings, `details.replacements`
+lists them as plain strings, closest first, and an editor may offer each as a one-click fix
+that replaces the primary span's text. The compiler adds it only when the span covers
+exactly the misspelled name, so swapping the span's text for a replacement is the whole
+fix. A quoted value, a name written in another case, or a span covering a whole
+declaration gets the suggestion text but no `replacements`.
+
+These diagnostics can carry it:
+
+| Code | Span | Replacements |
+|---|---|---|
+| `RATTISH_INVALID_TOKEN` | A node type or field name written with underscores, such as `write_file` | The hyphenated name |
+| `RATTISH_UNKNOWN_NODE_TYPE` | The `type` value | Close node types |
+| `RATTISH_UNKNOWN_FIELD` | The field name | Close field names of the node's contract |
+| `RATTISH_UNRESOLVED_NODE` | The route target, or the `needs` item | Close node IDs |
+| `RATTISH_PROVIDER_CONTRACT_UNRESOLVED` | The `provider` value | Close provider IDs |
+| `RATTISH_INVALID_FIELD_VALUE` | The workflow `workspace` value | `project` or `worktree` |
+
+`details` stays an open object in the diagnostic schema, so this key doesn't change the
+schema ID. A tool that doesn't know it can ignore it.
 
 Runtime diagnostics without a live source buffer use the source map embedded in IR. If a
 file moved after compilation, the diagnostic still reports the compiled entry-point path

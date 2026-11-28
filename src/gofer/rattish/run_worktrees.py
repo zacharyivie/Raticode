@@ -31,12 +31,15 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from gofer.core.commit_attribution import clean_commit_message
 from gofer.rattish.project_paths import normalize_project_path
 from gofer.utils.logging import get_logger
 from gofer.utils.process import build_subprocess_env, run_repository_git
+
+if TYPE_CHECKING:
+    from gofer.rattish.runtime import RuntimeErrorInfo
 
 log = get_logger(__name__)
 
@@ -251,6 +254,44 @@ def relocate(ir: Any, worktree: RunWorktree) -> Any:
     from gofer.rattish.ir_validation import relocated_ir
 
     return relocated_ir(ir, str(worktree.root), working_dirs(ir, worktree))
+
+
+def start_for_run(
+    data_dir: Path,
+    ir: Any,
+    run_id: str,
+    setup_cancel: threading.Event,
+    on_created: Callable[[dict[str, Any]], None],
+) -> tuple[Any, dict[str, Any] | None, RuntimeErrorInfo | None]:
+    """Create and set up a run's worktree: the IR to run in it, its document, or the error.
+
+    ``on_created`` gets the document as soon as the worktree exists, before setup runs,
+    and the setup result is then stored on that same document. A worktree that couldn't
+    be created has no document. A failed setup returns the document with the error, so
+    the caller still cleans the worktree up.
+    """
+    from gofer.rattish.runtime import RuntimeErrorInfo
+
+    try:
+        planned = plan(data_dir, Path(ir["source"]["project_root"]), ir["workflow"]["id"], run_id)
+        create(planned)
+    except RunWorktreeError as exc:
+        return None, None, RuntimeErrorInfo("workspace", "RATTISH_WORKTREE_UNAVAILABLE", str(exc))
+    document = planned.document()
+    on_created(document)
+    setup = prepare_setup(data_dir, planned, setup_cancel)
+    document["setup"] = setup
+    if setup is not None and setup.get("status") == "failed":
+        return (
+            None,
+            document,
+            RuntimeErrorInfo(
+                "workspace",
+                "RATTISH_WORKTREE_SETUP_FAILED",
+                str(setup.get("summary") or "Project setup failed."),
+            ),
+        )
+    return relocate(ir, planned), document, None
 
 
 def approved_in_worktree(files: Any, record: Mapping[str, Any]) -> Any:

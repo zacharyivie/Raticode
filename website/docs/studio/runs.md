@@ -53,6 +53,8 @@ Open the bottom panel:
 
 Select a run to see each node's output and errors. The Studio's run menu and **All runs** list name each run's status, such as **Failed** or **Succeeded**, and show the first line of a failed or interrupted run's error under its date (new in 0.6.1). A failed node isn't always a failed run: with `allow-fail: true`, a failure can route to a recovery branch on purpose. Check the workflow's final outcome separately from any one node's result.
 
+While a run goes, its saved record catches up at most once a second, so a fast step can take up to a second to appear in Run Timeline, the Runs list and the phone. A failed step, an approval step that starts waiting and a stop show at once, and the finished run is saved complete. Long loops no longer slow down as they go: a 1,000-step loop of `echo hi` went from about 4.7 minutes to about 4 seconds. New in 0.6.2.
+
 <AppScreenshot name="studio-workflow-run" caption="A finished run. run-tests shows its allowed failure, which routed to fix; the other nodes succeeded, and Run Timeline lists every activation." />
 
 ### A node's output
@@ -86,7 +88,7 @@ The **Workflow runs** view lists runs from every registered workflow, newest fir
 | --- | --- |
 | Workflow | The workflow's name and its project |
 | Started by | **Manual** (the Studio or a terminal), **Trigger** (a schedule, file watch, webhook or polling trigger), **Phone** (Raticode Mobile) or **Rem** (Rem, its workers or organization agents) |
-| Status | Passed, failed, running, stopped or interrupted, whether it waits on an approval, and **switched provider** when a model step moved to a [fallback provider](../nodes/agent.md#fallback-providers) (hover for which and why). A failed or interrupted run shows the first line of its error underneath; **Show full error** opens the whole message (new in 0.6.1) |
+| Status | Passed, failed, running, stopped or interrupted, whether it waits on an approval, and **switched provider** when a model step moved to a [fallback provider](../nodes/agent.md#fallback-providers) (hover for which and why). A failed or interrupted run shows the first line of its error underneath; **Show full error** opens the whole message (new in 0.6.1). A run that failed at a step names it first, such as **Step build failed (exit 3): cannot reach the database**, here, in a workflow's Runs list and on the phone (from 0.6.2) |
 | Started | How long ago it started; hover for the exact time |
 | Duration | How long it ran, or has been running |
 | Tokens and Est. cost | The run's [model usage](#model-usage-and-cost); runs saved before usage tracking show a dash |
@@ -145,7 +147,9 @@ Pick a run in the run menu (**More graph actions › Select workflow run**):
 - **Resume** starts a new run that reuses the steps that finished and runs the failed or cut-off step again, then the steps after it. It works for failed, stopped and interrupted runs of the workflow as it was then. If the workflow changed since, start a new run instead.
 - **Run again with the same inputs** starts a new run of the workflow as it is now, with the inputs and trigger events the earlier run used. It works for a run with any outcome. The new run's record names the run it repeated (`rerun_of`).
 
-When a button is off, hover it to see why.
+If Raticode or the computer stops in the middle of a run, Resume runs again only the step that was going when it stopped (from 0.6.2). As each step finishes, the run adds it to `RUN_ID.journal` beside its record, which only your user account can read. The next time the interrupted run is opened or resumed, its record takes in those steps and the journal is deleted. A run that ends deletes its journal, and clean-up and **Prune** delete it with the run.
+
+When one of these buttons is off, a short line under it says why, such as that the run finished successfully or was already resumed. The **Resume** button in the run timeline's **All runs** list and **Run workflow** in a workflow's menu in the list do the same: Run workflow is off while the workflow has errors, and the line under it says to fix them first. An off button stays in the Tab and arrow-key order, so you can reach it from the keyboard, and screen readers read the reason with it. Choosing it does nothing. New in 0.6.2.
 
 ### Saved inputs and trigger events
 
@@ -273,6 +277,27 @@ Raticode rattish runs discard RUN_ID
 
 **Stop** on the selected run asks it to cancel. Cancelling doesn't undo a file write, command or network request that already finished, so check the workspace before you restart.
 
+### Quitting while runs are going
+
+*New in Raticode 0.6.2.*
+
+Quitting Raticode stops every workflow run that is still going. So when runs are going, **Quit** and **Restart to update** ask first. The same check runs before anything else that restarts Raticode's backend, such as changing the data directory. Closing the window doesn't quit Raticode, so it doesn't ask.
+
+The dialog lists each running run, with:
+
+- the workflow's name
+- how it was started: **Manual**, **Trigger**, **Phone** or **Rem**
+- how long it has been running
+
+It also lists any files with unsaved changes, with **Keep drafts** and **Save all** as before. Then choose:
+
+- **Cancel** keeps Raticode open and the runs going.
+- **Quit anyway**, or **Restart anyway** for an update, stops the runs and goes ahead. With unsaved files, the buttons read **Keep drafts and quit** and **Save all and quit** instead.
+
+A stopped run keeps the steps it finished. Choose **Resume** on it in [Runs](#resume-and-run-again) to start it again from the step it was on.
+
+If Raticode can't get the list of running runs within about 2 seconds, such as when the backend is down, it asks only about unsaved files, so a backend that doesn't answer never keeps you from quitting.
+
 ## Approval steps
 
 An `approval-gate` node asks you for a decision.
@@ -316,6 +341,8 @@ A clean-up never removes a run that:
 To change the settings or clean up now, choose the trash can button (**Run retention settings**) above the run log. **Preview** counts the runs that would go and deletes nothing. **Prune** deletes them. Changes apply to that workflow only.
 
 From a terminal, `Raticode rattish prune PATH` lists the runs the saved settings no longer keep, and `--apply` deletes them. `--keep-last`, `--keep-days` and `--keep-failed-days` replace the saved settings for that one command. See the [CLI command index](../reference/cli-commands.md#raticode-rattish-prune).
+
+If the saved retention settings file can't be read, automatic clean-up deletes nothing, the retention settings say *Retention settings couldn't be read, so automatic clean-up is paused. Save them again to resume.*, and `Raticode rattish prune` without a `--keep` option stops with that message. Changing any setting saves the file again and clean-up resumes.
 
 A run record that can't be read, such as a damaged file, is left alone and doesn't stop the **Runs** list from loading. The CLI and the backend's run list report how many records they skipped.
 

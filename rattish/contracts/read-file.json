@@ -8,9 +8,9 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
-      "path": {"type": "string", "minLength": 1, "x-rattish-type": "Path"},
-      "encoding": {"type": "string", "minLength": 1},
-      "errors": {"type": "string", "minLength": 1}
+      "path": {"description": "Target filesystem path.", "type": "string", "minLength": 1, "x-rattish-type": "Path"},
+      "encoding": {"description": "Text encoding.", "type": "string", "minLength": 1},
+      "errors": {"description": "Text decoding error policy.", "type": "string", "minLength": 1}
     },
     "required": ["path"],
     "additionalProperties": false

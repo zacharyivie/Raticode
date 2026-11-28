@@ -7,7 +7,6 @@ import {
   formatZoom,
   historyMenuEntries,
   pendingRemApprovals,
-  relativeTime,
   suggestionRows,
   trimHistoryForSession,
 } from "./browserUi.js";
@@ -80,12 +79,6 @@ test("back and forward menus list the nearest pages first", () => {
   const history = { index: 2, entries: [{ url: "a" }, { url: "b" }, { url: "c" }, { url: "d" }] };
   assert.deepEqual(historyMenuEntries(history, -1).map((entry) => entry.index), [1, 0]);
   assert.deepEqual(historyMenuEntries(history, 1).map((entry) => entry.index), [3]);
-});
-
-test("relative times stay short", () => {
-  assert.equal(relativeTime(1000, 1000), "just now");
-  assert.equal(relativeTime(0, 5 * 60 * 1000), "5 min ago");
-  assert.equal(relativeTime(0, 26 * 60 * 60 * 1000), "yesterday");
 });
 
 test("browser chrome takes standard keys only while focus is inside it", () => {

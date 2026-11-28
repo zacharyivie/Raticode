@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 import threading
 from pathlib import Path
 from typing import Any
@@ -13,6 +12,7 @@ from gofer.core.commit_message_format import (
     DEFAULT_COMMIT_MESSAGE_TEMPLATE,
     MAX_COMMIT_TEMPLATE_LENGTH,
 )
+from gofer.utils.atomic_output import replace_file
 from gofer.utils.paths import get_data_dir
 
 _lock = threading.RLock()
@@ -234,17 +234,5 @@ def _save_preference(key: str, changes: dict[str, Any]) -> None:
     with _lock:
         preferences = provider_preferences()
         preferences[key] = {**provider_preference(key), **changes}
-        destination = get_data_dir() / "providers.json"
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = ""
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8", dir=destination.parent, delete=False
-            ) as output:
-                temporary = output.name
-                json.dump(preferences, output, indent=2)
-                output.write("\n")
-            os.replace(temporary, destination)
-        finally:
-            if temporary:
-                Path(temporary).unlink(missing_ok=True)
+        text = json.dumps(preferences, indent=2) + "\n"
+        replace_file(get_data_dir() / "providers.json", text.encode("utf-8"))

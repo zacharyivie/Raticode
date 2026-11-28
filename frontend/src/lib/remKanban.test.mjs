@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { test } from "node:test";
 import { allowanceMode, allowancePaceLine, autoApproveHint, autoApproveWarning, hasAllowanceModes, hasAutoApprove, paceRateWarning, selfWorkAccountChange, selfWorkAccountRows, selfWorkToggle } from "./remKanban.js";
 import { activityLine, assignmentLine, formatTokens, selfWorkLimitsLine, dailyAllowanceLine, usageSentence, usageShort, autoPullHint, avatarColor, boardOn, cappedThreads, canDropOn, canUndoMove, moveNotice, checksLine, columnTickets, entryHeadline, entryTone, filterTickets, initials, modeLabel, ownerFilters, participantOf, remProjectChoices, savedSwitchNote, scopeNote, selfWorkLine, selfWorkWindows, selfWorkStop, stopJudgmentLine, lastStopLine, stopPayload, visibleEntries, windowDetail, withProject } from "./remKanban.js";
@@ -398,18 +399,39 @@ test("the side pane's self-work button starts self-work now and stops it, and of
   assert.equal(selfWorkToggle({ ...windowed, state: { mode: "paused", detail: "Waiting for Raticode to connect." } }).mode, "paused");
 });
 
-test("a move's notice names the ticket and its column, and Undo is offered only where a move can go back", () => {
+test("a move's notice names the ticket and its column", () => {
   const rem = { key: "REM-12", scope: "rem", status: "todo", paused: "" };
   assert.equal(moveNotice(rem, "cancelled"), "REM-12 cancelled.");
   assert.equal(moveNotice(rem, "backlog"), "REM-12 moved to Backlog.");
   assert.equal(moveNotice(rem, "in_progress"), "REM-12 started.");
   assert.equal(moveNotice({ ...rem, paused: "paused" }, "in_progress"), "REM-12 resumed.");
   assert.equal(moveNotice({ ...rem, key: "STU-5", scope: "organization" }, "in_progress"), "STU-5 moved to In progress.");
-  assert.ok(canUndoMove(rem, "cancelled"));
-  assert.ok(canUndoMove({ ...rem, status: "done" }, "backlog"), "Rem's done tickets can be marked done again");
-  assert.ok(!canUndoMove(rem, "in_progress"), "starting work has no Undo");
-  assert.ok(!canUndoMove({ ...rem, status: "blocked" }, "cancelled"), "nothing moves a ticket back into Blocked");
-  assert.ok(!canUndoMove({ ...rem, status: "in_review" }, "backlog"), "nor into In review");
-  assert.ok(canUndoMove({ ...rem, scope: "organization" }, "backlog"));
-  assert.ok(!canUndoMove({ ...rem, scope: "organization", status: "blocked" }, "todo"), "an organization ticket reopens instead");
+});
+
+// The phone's KanbanTest.kt reads the same table, so both apps offer Undo for the same moves.
+const undoCases = JSON.parse(fs.readFileSync(new URL("../../../mobile/android/protocol/probes/kanban-cases/undo-move.json", import.meta.url), "utf8")).cases;
+
+test("Undo is offered only where a move can go back, as the phone's shared table says", () => {
+  assert.ok(undoCases.length > 0);
+  for (const { scope, status, paused, column, undo, why } of undoCases) {
+    const ticket = { key: "REM-12", scope, status, paused };
+    assert.equal(canUndoMove(ticket, column), undo, `${scope || "no scope"} ${status}${paused ? " paused" : ""} to ${column}${why ? `: ${why}` : ""}`);
+  }
+});
+
+test("an edit form only moves onto a newer ticket when that doesn't save over someone else's change", async () => {
+  const { draftConflicts, draftConflictNotice, rebaseDraft, ticketDraft, ticketEdit } = await import("./remKanban.js");
+  const old = ticket({ revision: 3, title: "Export", description: "Old", done_when: "" });
+  const start = ticketDraft(old);
+  // The user retitles it; Rem changes the title and the description meanwhile.
+  const draft = { ...start, title: "Mine" };
+  const newer = ticketDraft(ticket({ revision: 4, title: "Theirs", description: "New", done_when: "" }));
+  assert.deepEqual(draftConflicts(start, draft, newer), ["title"]);
+  assert.match(draftConflictNotice(["title"]), /^The title changed somewhere else/);
+  // Saving stays at the revision the user started from, which the desktop refuses.
+  assert.equal(ticketEdit(old, start, draft, 3).expected_revision, 3);
+  // A change to a field the user didn't touch, or to the same text, moves the form up.
+  assert.deepEqual(draftConflicts(start, { ...start, priority: "high" }, newer), []);
+  assert.deepEqual(draftConflicts(start, { ...start, title: "Theirs " }, newer), []);
+  assert.deepEqual(rebaseDraft(start, { ...start, priority: "high" }, newer), { ...newer, priority: "high" });
 });

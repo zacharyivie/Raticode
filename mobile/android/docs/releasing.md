@@ -53,7 +53,7 @@ The rest matches the desktop: stage-only candidates, a seven-day limit before fi
 
 ## One-time setup
 
-The release key exists on the maintainer's computer (created 11 November 2026). The GitHub settings below have not been configured.
+The release key exists on the maintainer's computer (created 11 November 2026). The GitHub settings below have been configured since 12 November 2026; signed releases have shipped since 0.34.0.
 
 ### The release key
 
@@ -159,4 +159,4 @@ python3 scripts/release-candidate.py device-test --candidate /tmp/raticode-candi
 
 ## Not verified yet
 
-The candidate workflow has run on GitHub since November 2026. The release key exists on the maintainer's computer, but the GitHub signing settings aren't configured yet, so every candidate so far is unsigned: its APK is staged in a draft as build evidence, but publication refuses it and Android won't install it. 0.34.0 is planned as the first signed release, published with desktop 0.5.4. Some instrumented tests fail on GitHub's fresh emulator (a permission dialog nothing dismisses, timing, and a test that resets the assistant role from inside the app); those are recorded as non-blocking until the tests are fixed.
+The candidate workflow has run on GitHub since November 2026, and candidates have been signed since 0.34.0 (published with desktop 0.5.4); an unsigned candidate's APK is staged in a draft as build evidence only, and publication refuses it. Some instrumented tests fail on GitHub's fresh emulator (a permission dialog nothing dismisses, timing, and a test that resets the assistant role from inside the app); those are recorded as non-blocking until the tests are fixed.

@@ -710,6 +710,50 @@ def test_dismiss_all_dismisses_only_updates_and_changes_no_task(api):
     assert bad.status == 400
 
 
+def test_dismiss_all_reads_only_tasks_that_can_need_attention(api, monkeypatch):
+    """Dismiss all holds the write lock; finished work shouldn't make it slow.
+
+    With a thousand finished tasks, building every task's view took most of a second. Only
+    a task with a run that stopped, failed or ended unclear, or one waiting for others, is
+    read in full now.
+    """
+    request, service = api
+    runs = []
+    for index in range(12):
+        created = request(
+            "POST",
+            "/api/rem/tasks",
+            body={
+                "request_id": f"create-{index}",
+                "title": f"Task {index}",
+                "type": "errand",
+                "prompt": "Check",
+                "schedule": {"kind": "daily", "local_time": "09:00", "timezone": "UTC"},
+            },
+        ).json()["task"]
+        run = request(
+            "POST", f"/api/rem/tasks/{created['id']}/run", body={"request_id": f"run-{index}"}
+        ).json()["run"]
+        force_run(service, run["id"], state="succeeded" if index else "failed")
+        runs.append(run["id"])
+    store = service.store
+    built: list[str] = []
+    real_view = store.task_view
+
+    def counted(db: Any, task: dict[str, Any], **options: Any) -> dict[str, Any]:
+        built.append(task["id"])
+        view: dict[str, Any] = real_view(db, task, **options)
+        return view
+
+    monkeypatch.setattr(store, "task_view", counted)
+    response = request(
+        "POST", "/api/rem/runs/acknowledge", body={"request_id": "dismiss-few", "run_ids": runs}
+    )
+    assert response.status == 200, response.json()
+    assert [item["run_id"] for item in response.json()["dismissed"]] == [runs[0]]
+    assert len(built) == 1, f"built {len(built)} task views for one update"
+
+
 def test_attention_matches_the_apps_needs_you_group():
     from gofer.ui.rem_home_store import attention
 

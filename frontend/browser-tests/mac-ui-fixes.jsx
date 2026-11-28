@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import CodeWorkspace from "../src/components/CodeWorkspace.jsx";
 import CodeFileExplorer from "../src/components/CodeFileExplorer.jsx";
 import IntegratedBrowser from "../src/components/IntegratedBrowser.jsx";
-import { ApplicationMenus } from "../src/pages/App.jsx";
+import { ApplicationMenus } from "../src/components/AppChrome.jsx";
 import { DEFAULT_APP_SETTINGS, updateSetting } from "../src/lib/settings.js";
 import { runFocusedEdit } from "../src/lib/focusedEditing.js";
 import { flushCodeDrafts } from "../src/lib/codeEditorSessions.js";

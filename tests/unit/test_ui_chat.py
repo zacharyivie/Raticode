@@ -1019,11 +1019,14 @@ async def test_codex_large_prompt_reaches_real_child_stdin(monkeypatch, tmp_path
 @pytest.mark.parametrize("streaming", [False, True])
 async def test_claude_large_prompt_reaches_real_child_stdin(monkeypatch, tmp_path, streaming):
     # Linux rejects any single argument over 128 KB with "Argument list too long".
+    # The prompt goes on stdin; other arguments (--settings repeats the data folder's
+    # path) grow with the temp folder, so only the kernel's limit is asserted.
     script = tmp_path / "fake_claude.py"
     script.write_text(
         "import json, sys, hashlib\n"
         "assert '--print' in sys.argv and '-p' not in sys.argv\n"
-        "assert max(map(len, sys.argv)) < 8192\n"
+        "assert not any('REQUEST-END' in arg or 'START-' in arg for arg in sys.argv)\n"
+        "assert max(len(arg.encode('utf-8')) for arg in sys.argv) < 131072\n"
         "prompt = sys.stdin.buffer.read().decode('utf-8')\n"
         "assert 'REQUEST-END' in prompt and 'START-' in prompt\n"
         "assert len(prompt) > 300000\n"
@@ -2402,3 +2405,67 @@ def test_unavailable_earlier_attachments_become_notes(tmp_path):
             workflow=workflow,
             data_dir=tmp_path,
         )
+
+
+@pytest.mark.parametrize(
+    ("provider", "stream"),
+    [
+        ("antigravity", "_stream_antigravity_turn"),
+        ("grok", "_stream_acp_turn"),
+        ("cursor", "_stream_cli_provider_turn"),
+    ],
+)
+async def test_other_providers_stream_through_their_own_turn_with_the_shared_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, provider: str, stream: str
+) -> None:
+    import contextlib
+
+    assert chat._provider_turn_stream(provider) is getattr(chat, stream)
+    assert chat._provider_turn_stream("codex") is None
+    assert chat._provider_turn_stream("claude_code") is None
+    captured: dict[str, Any] = {}
+    final = {"type": "final", "message": {"role": "assistant", "body": "Ready"}, "exitCode": 0}
+    monkeypatch.setattr(chat, "resolve_provider_executable", lambda p: Path("/fake/provider"))
+    monkeypatch.setattr(chat, "ensure_local_gofer_cli", lambda p: Path("/fake/raticode"))
+    monkeypatch.setattr(chat, "provider_preference", lambda p: {})
+
+    async def native(*args: Any, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        captured.update(kwargs)
+        yield final
+
+    @contextlib.contextmanager
+    def invocation(name: str, command: list[str], resources: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs, resources=resources)
+        yield command, {}
+
+    async def cli(command: list[str], name: str, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        captured["max_output_bytes"] = kwargs["max_output_bytes"]
+        yield final
+
+    async def no_plugin_problem(*args: Any) -> None:
+        return None
+
+    monkeypatch.setattr(chat, "stream_antigravity", native)
+    monkeypatch.setattr(chat, "stream_acp", native)
+    monkeypatch.setattr(chat, "cli_invocation", invocation)
+    monkeypatch.setattr(chat, "stream_cli", cli)
+    monkeypatch.setattr(chat, "check_cursor_plugins", no_plugin_problem)
+
+    result = await chat.run_workflow_chat(
+        provider,
+        "cli-default",
+        [{"role": "user", "body": "Hello"}],
+        {"remReportTheme": {"format": "html"}},
+        working_dir=tmp_path,
+        data_dir=tmp_path / "data",
+        resource_limits=ResourceLimits(max_subprocess_output_bytes=12_345),
+        permission_mode=None if provider == "cursor" else "cli-managed",
+    )
+
+    assert result["message"]["body"] == "Ready"
+    assert (result["provider"], result["model"]) == (provider, "cli-default")
+    assert "completedAt" in result
+    assert captured["second_brain_cli_path"] == Path("/fake/raticode")
+    assert captured["max_output_bytes"] == 12_345
+    assert captured.get("session_dir") is None
+    assert captured["resources"] is not None

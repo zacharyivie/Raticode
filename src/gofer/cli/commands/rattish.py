@@ -14,6 +14,7 @@ from gofer.cli.commands import (
     rattish_shortcuts,
     rattish_triggers,
 )
+from gofer.cli.output import require_format
 
 if TYPE_CHECKING:
     from gofer.rattish.artifacts import CompiledArtifact, RattishArtifactError
@@ -42,7 +43,7 @@ def docs(
     """Print paths to the installed Rattish documentation and node contracts."""
     from gofer.rattish.artifacts import RattishArtifactError, rattish_asset_root, rattish_docs_root
 
-    _require_format(output_format)
+    require_format(output_format)
     try:
         docs_root = rattish_docs_root()
         asset_root = rattish_asset_root()
@@ -83,6 +84,14 @@ def create(
         "--from",
         help="Copy a starter workflow, its test set and sample files. See `rattish starters`.",
     ),
+    provider: str | None = typer.Option(
+        None,
+        "--provider",
+        help=(
+            "With --from, the app the starter's model steps call instead of the one it lists, "
+            "such as codex or claude-code."
+        ),
+    ),
     output_format: str = typer.Option("text", "--format", help="Output format: text or json."),
     registry_dir: Path | None = typer.Option(
         None, "--registry-dir", help="Override the app directory used for workflow registration."
@@ -93,19 +102,32 @@ def create(
     from gofer.rattish.diagnostics import RattishError
     from gofer.rattish.workspaces import RattishWorkspaceError, create_registered_workflow
 
-    _require_format(output_format)
+    require_format(output_format)
     if starter is None and not (name or "").strip():
         typer.echo("Give a workflow name, or a starter with --from.", err=True)
+        raise typer.Exit(2)
+    if provider is not None and starter is None:
+        typer.echo("--provider works with --from: it picks the app a starter calls.", err=True)
         raise typer.Exit(2)
     from_starter = None
     try:
         if starter is not None:
-            from gofer.rattish.starters import create_workflow_from_starter, find_starter
+            from gofer.rattish.starters import (
+                create_workflow_from_starter,
+                find_starter,
+                rattish_provider_id,
+            )
 
             from_starter = find_starter(starter)
             workflow = create_workflow_from_starter(
-                project, from_starter.starter_id, name, registry_dir=registry_dir
+                project,
+                from_starter.starter_id,
+                name,
+                provider=provider,
+                registry_dir=registry_dir,
             )
+            if provider is not None:
+                from_starter = from_starter.with_provider(rattish_provider_id(provider))
         else:
             workflow = create_registered_workflow(project, name or "", registry_dir=registry_dir)
     except (RattishWorkspaceError, RattishArtifactError, RattishError) as exc:
@@ -156,7 +178,7 @@ def convert(
         convert_toml_workflow,
     )
 
-    _require_format(output_format)
+    require_format(output_format)
     if project is not None and output is not None:
         typer.echo("Give --project or --output, not both.", err=True)
         raise typer.Exit(2)
@@ -225,7 +247,7 @@ def list_starters_command(
     from gofer.rattish.starters import list_starters
     from gofer.rattish.workspaces import RattishWorkspaceError
 
-    _require_format(output_format)
+    require_format(output_format)
     try:
         starters = [item.to_payload() for item in list_starters()]
     except RattishWorkspaceError as exc:
@@ -289,7 +311,7 @@ def list_workflows(
         list_registered_workflows,
     )
 
-    _require_format(output_format)
+    require_format(output_format)
     limited = False
     try:
         if project is not None:
@@ -348,7 +370,7 @@ def check(
     ),
 ) -> None:
     """Compile a Rattish file and report language errors without running it."""
-    _require_format(output_format)
+    require_format(output_format)
     artifact = _compile_or_exit(source, data_dir, output_format, "check")
     payload = _payload("check", source, artifact, list(artifact.diagnostics))
     _emit(payload, output_format)
@@ -363,7 +385,7 @@ def compile_source(
     ),
 ) -> None:
     """Compile and publish validated IR to Raticode's internal artifact cache."""
-    _require_format(output_format)
+    require_format(output_format)
     artifact = _compile_or_exit(source, data_dir, output_format, "compile")
     payload = _payload("compile", source, artifact, list(artifact.diagnostics))
     payload["ir"] = {
@@ -442,7 +464,7 @@ def preflight(
     """Compile a Rattish file and check whether this environment can run it."""
     from gofer.rattish.preflight import run_preflight
 
-    _require_format(output_format)
+    require_format(output_format)
     artifact = _compile_or_exit(source, data_dir, output_format, "preflight")
     deployment = run_preflight(artifact.ir, data_dir=data_dir)
     diagnostics = [
@@ -490,7 +512,7 @@ def run(
     reused: they ask again. It refuses when an upstream node changed, naming it, and
     when NODE is inside a loop body.
     """
-    _require_format(output_format)
+    require_format(output_format)
     if reuse is not None and from_node is None:
         typer.echo("--reuse needs --from NODE.", err=True)
         raise typer.Exit(2)
@@ -536,19 +558,41 @@ def prune(
     """Preview or delete old runs of a Rattish workflow.
 
     Without a --keep option, the workflow's saved retention settings apply, the
-    same ones Raticode uses to clean up after every run. Runs that are running,
-    waiting on an approval or being resumed are never removed.
+    same ones Raticode uses to clean up after every run; if they can't be read,
+    it stops with exit 2. Runs that are running, waiting on an approval or being
+    resumed are never removed.
     """
-    from gofer.rattish.run_retention import prune_run_records, saved_retention_settings
+    from gofer.rattish.run_retention import (
+        UNREADABLE_RETENTION_MESSAGE,
+        prune_run_records,
+        saved_retention_settings,
+    )
     from gofer.rattish.run_service import run_artifact_path
     from gofer.utils.paths import get_data_dir
 
-    _require_format(output_format)
+    require_format(output_format)
     artifact = _compile_or_exit(source, data_dir, output_format, "prune")
     workflow_id = str(artifact.ir["workflow"]["id"])
     base = data_dir or get_data_dir()
     if keep_last is None and keep_days is None and keep_failed_days is None:
         saved = saved_retention_settings(base, workflow_id)
+        if saved is None:
+            if output_format == "json":
+                _emit_json(
+                    {
+                        "command": "prune",
+                        "ok": False,
+                        "source": str(artifact.source_path),
+                        "workflowId": workflow_id,
+                        "error": {
+                            "code": "RETENTION_SETTINGS_UNREADABLE",
+                            "message": UNREADABLE_RETENTION_MESSAGE,
+                        },
+                    }
+                )
+            else:
+                typer.echo(UNREADABLE_RETENTION_MESSAGE, err=True)
+            raise typer.Exit(2)
         keep_last, keep_days, keep_failed_days = (
             saved["keepLast"],
             saved["keepDays"],
@@ -683,7 +727,7 @@ def test_workflow(
         with_comparison,
     )
 
-    _require_format(output_format)
+    require_format(output_format)
     if estimate_only and history:
         typer.echo("Use either --estimate or --history, not both.", err=True)
         raise typer.Exit(2)
@@ -1161,12 +1205,6 @@ def _compile_or_exit(
     except RattishArtifactError as exc:
         diagnostic = _artifact_diagnostic(source, exc).to_json()
         _emit(_error_payload(command, source, [diagnostic]), output_format)
-        raise typer.Exit(2)
-
-
-def _require_format(output_format: str) -> None:
-    if output_format not in {"text", "json"}:
-        typer.echo("Unsupported format. Use 'text' or 'json'.", err=True)
         raise typer.Exit(2)
 
 

@@ -151,6 +151,19 @@ Each one opens Rem's chat with the project, the file's path inside it, the lines
 
 Line numbers appear when the phone can tell which lines you picked. A word that appears on several lines is settled by where you long-pressed it. Rendered Markdown shows only the words, because it has no line numbers of its own; switch to the source to include them. HTML and SVG previews have no Ask Rem. Files whose names look like they hold secrets, such as `.env` or a private key, offer no Ask Rem and their contents stay on the computer, as before. Needs no desktop update.
 
+### Ticket editing, project objectives, Help and readable reports, 0.38.0
+
+- **Help** on the More page opens the documentation or starts a problem report that carries the app and Android versions. It works on Android 8 and 9 too. Needs no desktop update.
+- **Board**: a Rem ticket's page has **Edit** for its title, description, priority, kind and Done when. A change made on the computer while the sheet is open is kept for the fields you didn't touch; a field you changed keeps what you typed and replaces the computer's change, without the warning the desktop gives. Undo is offered for the same moves as on the desktop, from one shared table of cases. Needs no desktop update.
+- Rem's reports stay readable: dark reports no longer turn white, titles no longer sit on the banner art, and a report's last lines clear the navigation bar. An HTML file with many unclosed style tags or long dash runs no longer freezes the preview. Needs no desktop update.
+- With Raticode 0.6.2 on the computer:
+  - **Objectives** per project: add, check off, edit and remove them, move one between the global list and a project, set each project's level of effort, and ask Rem for 3 to 5 broad ones. With only one project there are no level of effort buttons.
+  - Files a Rem message or a worker's reply links show as tiles under it; a tap asks for the file the same way tapping its link does.
+  - Run lists show the first line of why a failed run stopped, with folder paths replaced by their names.
+  - The task screen reads Custom schedules in words and shows the review's Notes.
+  - Posts shows a Facebook or YouTube copy Raticode couldn't delete under Problems, with **Try again** and **I deleted it**.
+- Each feature appears only when the computer offers it, so an older computer keeps today's screens. Tested with unit tests and protocol fixtures; the emulator and a real phone are untested.
+
 ### Objectives, board Undo, Done when, delete confirmations and a Firefox 161 engine, 0.37.0
 
 - The built-in browser moves to the Firefox 161 engine (GeckoView 161.0), which fixes several high-severity security bugs. Needs no desktop update.

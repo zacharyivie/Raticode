@@ -85,6 +85,7 @@ def test_review_request_carries_the_prompt_once_and_points_to_the_theme(
     marker = f"marker-{kind}-0451"
     run, calls, files = run_task(home, tmp_path, provider, prompt)
     assert calls, "no review ran"
+    in_scratch: list[Path] = []
     # The verdict is the same: the fake reviewer passes every criterion.
     assert run["state"] == "succeeded", run
     assert [c["result"] for c in run["criteria"]] == ["pass"]
@@ -100,14 +101,16 @@ def test_review_request_carries_the_prompt_once_and_points_to_the_theme(
         assert text.count(path) == 1 and "report format and design rules" in text
         assert files[path] == report_theme_rules(THEME)
         assert_can_open(call, Path(path))
+        scratch = call.get("trusted_scratch_dir")
+        if scratch is not None and Path(path).resolve().is_relative_to(Path(scratch).resolve()):
+            in_scratch.append(Path(path))
     # The review thread still shows Rem's request with the task's prompt.
     thread = home.store.thread(run["verification_thread_id"])["messages"]
     requests = [m for m in thread if m.get("worker_role") == "verify" and m["role"] == "user"]
     assert requests and all(m["body"] == REVIEW_REQUEST + prompt for m in requests)
     # A reviewer's scratch folder goes when its turn ends, rules file included.
-    for path in files:
-        if "-scratch" in path:
-            assert not Path(path).exists(), path
+    for scratch_path in in_scratch:
+        assert not scratch_path.exists(), scratch_path
 
 
 def assert_can_open(call: dict[str, Any], path: Path) -> None:

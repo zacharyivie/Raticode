@@ -36,20 +36,10 @@ const {
 const { createAgentBrowserController } = require("../agent-browser.cjs");
 const { remSiteAllowed, sanitizeBrowserPolicy } = require("../browser-policy.cjs");
 const { checkHiddenTextPages, pageText, serveHiddenTextPages } = require("./hidden-text-pages.cjs");
+const { chromiumForTesting, waitFor } = require("./test-wait.cjs");
+const WAIT = { timeout: 10_000, interval: 50 };
 
-function chromeForTesting() {
-  const root = path.join(os.homedir(), ".cache", "ms-playwright");
-  try {
-    for (const entry of fs.readdirSync(root).filter((name) => /^chromium-\d+$/.test(name)).sort().reverse()) {
-      for (const candidate of [path.join(root, entry, "chrome-linux64", "chrome"), path.join(root, entry, "chrome-linux", "chrome")]) {
-        if (fs.existsSync(candidate)) return candidate;
-      }
-    }
-  } catch { /* No Playwright downloads. */ }
-  return "";
-}
-
-const CHROME_PATH = process.env.RATICODE_SKIP_CHROME_TESTS === "1" ? "" : (findBrowser(CHROME) || (process.platform === "linux" ? chromeForTesting() : ""));
+const CHROME_PATH = process.env.RATICODE_SKIP_CHROME_TESTS === "1" ? "" : (findBrowser(CHROME) || (process.platform === "linux" ? chromiumForTesting() : ""));
 const realChrome = { skip: CHROME_PATH ? false : "Chrome is not installed" };
 const engineOptions = (dataDir, extra = {}) => ({ dataDir, env: { ...process.env, RATICODE_CHROME_PATH: CHROME_PATH }, ...extra });
 
@@ -209,16 +199,6 @@ async function startSite() {
 
 const fakeImage = { createFromBuffer: (buffer) => ({ isEmpty: () => !buffer.length, getSize: () => ({ width: 1280, height: 800 }), resize() { return this; }, toPNG: () => buffer }) };
 
-async function waitFor(check, message, timeout = 10000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const value = await check();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(message);
-}
-
 test("Rem drives Chrome with real input, keeps its site rules and asks for approval", realChrome, async () => {
   const { server, base } = await startSite();
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "chrome-rem-test-"));
@@ -362,7 +342,7 @@ test("a streamed Chrome tab sends frames and takes the user's mouse, wheel and k
     assert.equal(contents.getTitle(), "Chrome test");
     assert.equal(contents.navigationHistory.canGoBack(), false, "the blank first page is not history");
     contents.setView({ width: 800, height: 600, scale: 1 }, true);
-    await waitFor(() => frames.length >= 1, "no frame arrived");
+    await waitFor(() => frames.length >= 1, "no frame arrived", WAIT);
     assert.equal(frames[0].width, 800);
     assert.equal(frames[0].height, 600);
     assert.equal(frames[0].data[0], 0xff, "frames are JPEG");
@@ -372,36 +352,36 @@ test("a streamed Chrome tab sends frames and takes the user's mouse, wheel and k
     contents.handleInput([{ t: "down", x: 50, y: 25, button: 0 }, { t: "up", x: 50, y: 25, button: 0 }]);
     for (const key of ["H", "i"]) contents.handleInput([{ t: "keydown", key }, { t: "keyup", key }]);
     contents.handleInput([{ t: "text", text: " there" }]);
-    await waitFor(async () => (await read("document.getElementById('name').value")) === "Hi there", "typing did not reach the page");
+    await waitFor(async () => (await read("document.getElementById('name').value")) === "Hi there", "typing did not reach the page", WAIT);
     contents.handleInput([{ t: "keydown", key: "Backspace" }, { t: "keyup", key: "Backspace" }]);
-    await waitFor(async () => (await read("document.getElementById('name').value")) === "Hi ther", "Backspace did not reach the page");
+    await waitFor(async () => (await read("document.getElementById('name').value")) === "Hi ther", "Backspace did not reach the page", WAIT);
 
     // Select all and copy to the system clipboard.
     contents.handleInput([{ t: "keydown", key: "Control" }, { t: "keydown", key: "a" }, { t: "keyup", key: "a" }, { t: "keyup", key: "Control" }, { t: "copy" }]);
-    await waitFor(() => copied.includes("Hi ther"), "copy did not reach the clipboard");
+    await waitFor(() => copied.includes("Hi ther"), "copy did not reach the clipboard", WAIT);
     // Control+A selected instead of typing an "a".
     assert.equal(await read("document.getElementById('name').value"), "Hi ther");
 
     // A trusted click on the button.
     contents.handleInput([{ t: "move", x: 60, y: 80 }, { t: "down", x: 60, y: 80, button: 0 }, { t: "up", x: 60, y: 80, button: 0 }]);
-    await waitFor(async () => (await read("document.getElementById('out').textContent")) === "clicked:true", "click did not reach the page");
-    await waitFor(() => cursors.length, "no cursor report");
+    await waitFor(async () => (await read("document.getElementById('out').textContent")) === "clicked:true", "click did not reach the page", WAIT);
+    await waitFor(() => cursors.length, "no cursor report", WAIT);
 
     // A <select> opens the studio's list; choosing an option changes the page.
     contents.handleInput([{ t: "down", x: 50, y: 215, button: 0 }, { t: "up", x: 50, y: 215, button: 0 }]);
-    await waitFor(() => selects.length, "no option list for the select");
+    await waitFor(() => selects.length, "no option list for the select", WAIT);
     assert.deepEqual(selects[0].options.map((option) => option.label), ["one", "two", "three"]);
     contents.handleInput([{ t: "select-option", index: 2 }]);
-    await waitFor(async () => (await read("document.getElementById('pick').value")) === "three", "the option was not chosen");
+    await waitFor(async () => (await read("document.getElementById('pick').value")) === "three", "the option was not chosen", WAIT);
     // The keyboard still reaches the page after the list closes.
     contents.handleInput([{ t: "down", x: 50, y: 25, button: 0 }, { t: "up", x: 50, y: 25, button: 0 }, { t: "keydown", key: "End" }, { t: "keyup", key: "End" }, { t: "keydown", key: "!" }, { t: "keyup", key: "!" }]);
-    await waitFor(async () => (await read("document.getElementById('name').value")) === "Hi ther!", "typing after the select did not reach the page");
+    await waitFor(async () => (await read("document.getElementById('name').value")) === "Hi ther!", "typing after the select did not reach the page", WAIT);
 
     // The wheel scrolls the page, and the stream follows.
     const before = frames.length;
     contents.handleInput([{ t: "wheel", x: 300, y: 300, dx: 0, dy: 400 }]);
-    await waitFor(async () => (await read("scrollY")) > 0, "the wheel did not scroll");
-    await waitFor(() => frames.length > before, "no new frame after scrolling");
+    await waitFor(async () => (await read("scrollY")) > 0, "the wheel did not scroll", WAIT);
+    await waitFor(() => frames.length > before, "no new frame after scrolling", WAIT);
     await contents.evaluateIn("test", "scrollTo(0, 0)");
 
     // Find in page counts matches and selects the first one.
@@ -416,12 +396,12 @@ test("a streamed Chrome tab sends frames and takes the user's mouse, wheel and k
 
     // A link that opens a new window becomes a Raticode tab instead.
     contents.handleInput([{ t: "down", x: 15, y: 368, button: 0 }, { t: "up", x: 15, y: 368, button: 0 }]);
-    await waitFor(() => opened.length, "the new window did not become a tab");
+    await waitFor(() => opened.length, "the new window did not become a tab", WAIT);
     assert.equal(opened[0], `${base}/two`);
 
     // Page zoom lays the page out smaller.
     contents.setPageZoom(2);
-    await waitFor(async () => (await read("innerWidth")) === 400, "page zoom did not change the layout width");
+    await waitFor(async () => (await read("innerWidth")) === 400, "page zoom did not change the layout width", WAIT);
 
     // A hidden view stops sending frames.
     contents.setView(null, false);
@@ -432,7 +412,7 @@ test("a streamed Chrome tab sends frames and takes the user's mouse, wheel and k
     assert.equal(frames.length, stopped);
     assert.equal(contents.navigationHistory.canGoBack(), true);
     contents.navigationHistory.goBack();
-    await waitFor(() => contents.getURL() === `${base}/`, "back did not return to the first page");
+    await waitFor(() => contents.getURL() === `${base}/`, "back did not return to the first page", WAIT);
     assert.equal(contents.navigationHistory.canGoForward(), true);
     const pdf = await contents.printToPDF({});
     assert.equal(pdf.subarray(0, 4).toString(), "%PDF");
@@ -522,11 +502,11 @@ test("a dead Chrome tab restarts on reload, and Chrome does not outlive a Ratico
   try {
     await contents.loadURL(`${base}/`);
     engine.stop();
-    await waitFor(() => !engine.status().running, "Chrome did not stop");
+    await waitFor(() => !engine.status().running, "Chrome did not stop", WAIT);
     contents.markDead("Chrome stopped");
     assert.equal(contents.dead, true);
     await contents.reloadPage(false);
-    await waitFor(() => contents.getTitle() === "Chrome test", "the tab did not come back");
+    await waitFor(() => contents.getTitle() === "Chrome test", "the tab did not come back", WAIT);
   } finally {
     contents.close();
     await engine.stopAndWait();
@@ -549,6 +529,6 @@ test("a dead Chrome tab restarts on reload, and Chrome does not outlive a Ratico
   });
   if (process.platform === "linux") assert.ok(running().length > 0, "Chrome should be running");
   child.kill("SIGKILL");
-  await waitFor(() => running().length === 0, "Chrome kept running after its Raticode process died", 15000);
+  await waitFor(() => running().length === 0, "Chrome kept running after its Raticode process died", { ...WAIT, timeout: 15000 });
   fs.rmSync(dataDir, { recursive: true, force: true });
 });

@@ -1,12 +1,13 @@
 """Read the app's surfaces that the CLI must keep up with, and the CLI's own commands.
 
 * Backend HTTP routes. Routes declared in the backend's route table
-  (``gofer.ui.server.ROUTES``) are read as data. The rest are still if-chains in a
-  hand-written ``BaseHTTPRequestHandler``, so this reads that dispatch code itself:
-  each ``if`` that tests the request path, the Rem path parts, or a swarm's ID and
-  action becomes one route key such as ``GET /api/workflows/*/logs``. A key found in
-  both the table and an if-chain raises ``UnreadableRoute``. A path check nested in
-  another route's body narrows that route and becomes its own key. Action APIs, where
+  (``gofer.ui.server.ROUTES``) are read as data. The dispatchers ``_dispatch_request``
+  still hands a path to (social posts, swarms and the body-action APIs) are read from
+  their code: each ``if`` in ``_dispatch_request`` that tests the request path, or a
+  swarm's ID and action, becomes one route key such as ``GET /api/swarms/*/history``.
+  A key found in both the table and an if-chain raises ``UnreadableRoute``. A path
+  check nested in another route's body narrows that route and becomes its own key.
+  Action APIs, where
   a field of the request body picks what happens (Organizations, Second Brain, the
   skill library, devices, ticket changes, swarm control), get one key per action:
   ``POST /api/organizations#read``.
@@ -23,9 +24,8 @@ parity test by being written differently.
 from __future__ import annotations
 
 import ast
-import itertools
 import json
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -35,9 +35,7 @@ from gofer.ui.routes import RouteTable
 ROOT = Path(__file__).resolve().parents[2]
 SERVER = ROOT / "src/gofer/ui/server.py"
 BRAIN_LIBRARY = ROOT / "src/gofer/ui/brain_library.py"
-ORGANIZATIONS = ROOT / "src/gofer/ui/organizations.py"
 KANBAN = ROOT / "src/gofer/ui/rem_kanban.py"
-DEVICES = ROOT / "src/gofer/devices/control.py"
 SWARMS = ROOT / "src/gofer/ui/swarms.py"
 PROTOCOL = ROOT / "src/gofer/devices/protocol/v2/event.schema.json"
 ELECTRON = ROOT / "frontend/electron"
@@ -48,7 +46,6 @@ PATH_EXPRESSIONS = {"parsed.path", "path", "urlparse(self.path).path"}
 DELEGATED = {
     "_dispatch_second_brain_request",
     "_dispatch_rem_resources_request",
-    "_dispatch_rem_home_request",
     "_dispatch_organization_request",
     "_dispatch_swarm_request",
 }
@@ -263,67 +260,7 @@ def _top_level_routes(tree: ast.Module) -> set[str]:
     ]
     if len(tries) != 1:
         raise UnreadableRoute("_dispatch_request should route inside one try block")
-    routes = _path_routes(ast.Module(body=tries[0].body, type_ignores=[]), "*")
-    for verb in ("GET", "POST", "PUT", "DELETE"):
-        routes |= _path_routes(_function(tree, f"_dispatch_{verb}", "GoferUiRequestHandler"), verb)
-    return routes
-
-
-def _parts_route(test: ast.expr, prefix: str, parts_name: str = "parts") -> list[str]:
-    method = "*"
-    length: int | None = None
-    fixed: list[str] | None = None
-    segments: dict[int, list[str]] = {}
-    for term in _conjuncts(test):
-        text = _src(term)
-        if isinstance(term, ast.Compare) and len(term.ops) == 1:
-            left, op, right = term.left, term.ops[0], term.comparators[0]
-            if _src(left) == "method" and isinstance(op, ast.Eq):
-                method = _constants(right)[0]
-                continue
-            if _src(left) == parts_name and isinstance(op, ast.Eq):
-                fixed = _constants(right)
-                continue
-            if _src(left) == f"len({parts_name})" and isinstance(op, ast.Eq):
-                assert isinstance(right, ast.Constant)
-                length = int(right.value)
-                continue
-            if (
-                isinstance(left, ast.Subscript)
-                and _src(left.value) == parts_name
-                and isinstance(op, (ast.Eq, ast.In))
-            ):
-                assert isinstance(left.slice, ast.Constant)
-                segments[int(left.slice.value)] = _constants(right)
-                continue
-        if text == f"not {parts_name}":
-            fixed = []
-            continue
-        raise UnreadableRoute(f"Unknown Rem path condition: {text}")
-    if fixed is not None:
-        return [f"{method} {prefix}" + "".join(f"/{part}" for part in fixed)]
-    if length is None:
-        length = max(segments) + 1
-    choices = [segments.get(index, ["*"]) for index in range(length)]
-    return [
-        f"{method} {prefix}/" + "/".join(combination) for combination in itertools.product(*choices)
-    ]
-
-
-def _rem_routes(tree: ast.Module) -> set[str]:
-    routes = set()
-    home = _function(tree, "_dispatch_rem_home_request", "GoferUiRequestHandler")
-    for node in _ifs(home):
-        if not _mentions(node.test, {"parts", "parts[0]"}):
-            continue
-        if _src(node.test) == "parts[0] == 'kanban'":
-            continue  # Read by _rem_kanban_request below.
-        routes.update(_parts_route(node.test, "/api/rem"))
-    kanban = _function(tree, "_rem_kanban_request", "GoferUiRequestHandler")
-    for node in _ifs(kanban):
-        if _mentions(node.test, {"parts"}):
-            routes.update(_parts_route(node.test, "/api/rem/kanban"))
-    return routes
+    return _path_routes(ast.Module(body=tries[0].body, type_ignores=[]), "*")
 
 
 def _swarm_routes(tree: ast.Module) -> set[str]:
@@ -382,26 +319,37 @@ def _compared_actions(function: ast.FunctionDef, names: set[str] | None = None) 
 
 def _action_routes(server: ast.Module) -> set[str]:
     from gofer.ui.organization_tools import ACTION_HELP
+    from gofer.ui.organizations import ORGANIZATION_ACTIONS
 
     library = ast.parse(BRAIN_LIBRARY.read_text())
-    organizations = ast.parse(ORGANIZATIONS.read_text())
     routes = {"GET /api/rem-resources"}
     resources = _function(server, "_dispatch_rem_resources_request", "GoferUiRequestHandler")
     routes |= {f"POST /api/rem-resources#{a}" for a in _compared_actions(resources)}
     brains = _compared_actions(_function(library, "request", "BrainLibrary"))
     routes |= {f"POST /api/second-brains#{action}" for action in brains}
-    org_call = _compared_actions(_function(organizations, "call", "OrganizationManager"))
-    # "import_preview" style names only; skip values that aren't action names.
-    org_actions = set(ACTION_HELP) | {a for a in org_call if a.replace("_", "").isalpha()}
+    org_actions = set(ACTION_HELP) | set(ORGANIZATION_ACTIONS)
     routes |= {f"POST /api/organizations#{action}" for action in org_actions}
     routes.add("GET /api/organizations#availability")
     return routes
 
 
+# The route table handler that prepares some device actions before handing the body over.
+DEVICE_HANDLER = "_device_action"
+
+
+def _device_actions() -> set[str]:
+    from gofer.devices.control import DEVICE_ACTIONS
+
+    server = _function(ast.parse(SERVER.read_text()), DEVICE_HANDLER, "GoferUiRequestHandler")
+    prepared = _compared_actions(server, ACTION_NAMES)
+    return set(DEVICE_ACTIONS) | {a for a in prepared if a.replace("_", "").isalpha()}
+
+
 # Routes whose request body's ``action`` field picks what happens: the route key, then
-# the file, class and method that compare that field. Each action gets its own key.
-BODY_ACTIONS: dict[str, tuple[Path, str, str]] = {
-    "POST /api/devices": (DEVICES, "DeviceControl", "action"),
+# either a reader of the handler's action table, or the file, class and method that
+# compare that field. Each action gets its own key.
+BODY_ACTIONS: dict[str, Callable[[], set[str]] | tuple[Path, str, str]] = {
+    "POST /api/devices": _device_actions,
     "POST /api/rem/kanban/ticket": (KANBAN, "RemKanban", "act"),
     "POST /api/swarms/*/control": (SWARMS, "SwarmManager", "control"),
     "POST /api/swarms/*/execution": (SWARMS, "SwarmManager", "execution"),
@@ -411,21 +359,15 @@ BODY_ACTIONS: dict[str, tuple[Path, str, str]] = {
 
 def body_actions(route: str, source: str | None = None) -> set[str]:
     """The ``action`` values the handler of ``route`` accepts in its request body."""
-    path, owner, name = BODY_ACTIONS[route]
-    tree = ast.parse(source if source is not None else path.read_text())
-    actions = _compared_actions(_function(tree, name, owner), ACTION_NAMES)
-    if route == "POST /api/devices":
-        # The HTTP handler prepares some device actions before handing the body over.
-        server = ast.parse(SERVER.read_text())
-        actions |= {
-            action
-            for action in _compared_actions(
-                _function(server, "_dispatch_POST", "GoferUiRequestHandler"), ACTION_NAMES
-            )
-            if action.replace("_", "").isalpha()
-        }
+    reader = BODY_ACTIONS[route]
+    if callable(reader):
+        actions = reader()
+    else:
+        path, owner, name = reader
+        tree = ast.parse(source if source is not None else path.read_text())
+        actions = _compared_actions(_function(tree, name, owner), ACTION_NAMES)
     if not actions:
-        raise UnreadableRoute(f"No body actions found for {route} in {path.name}:{name}")
+        raise UnreadableRoute(f"No body actions found for {route}")
     return actions
 
 
@@ -454,9 +396,7 @@ def backend_routes(server_source: str | None = None, table: RouteTable | None = 
     tests of this reader.
     """
     tree = ast.parse(server_source if server_source is not None else SERVER.read_text())
-    legacy = (
-        _top_level_routes(tree) | _rem_routes(tree) | _swarm_routes(tree) | _action_routes(tree)
-    )
+    legacy = _top_level_routes(tree) | _swarm_routes(tree) | _action_routes(tree)
     declared = table_routes(table)
     if both := sorted(declared & legacy):
         raise UnreadableRoute(f"Routes both in the route table and an if-chain: {both}")

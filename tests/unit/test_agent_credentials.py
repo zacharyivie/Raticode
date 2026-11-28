@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -58,6 +59,11 @@ def secrets_dir(tmp_path: Path) -> Iterator[Path]:
         yield folder.resolve()
     finally:
         secrets_folder.configure_secrets_dir(None)
+
+
+def q(path: object) -> str:
+    """``path`` quoted for the shell scripts below: test folders hold spaces and "ñ"."""
+    return shlex.quote(str(path))
 
 
 def expected_folders(data: Path, secrets: Path) -> list[Path]:
@@ -655,9 +661,9 @@ def test_codex_sandbox_really_keeps_commands_out(tmp_path: Path, data_dir: Path)
     settings = data_dir / "claude-accounts" / "0123456789abcdef" / "settings.json"
     auth = data_dir / "codex-accounts" / "0123456789abcdef" / "auth.json"
     script = (
-        f"cat {auth} && echo READ-AUTH; "
-        f"echo '{{\"hooks\":{{}}}}' > {settings} && echo PLANTED; "
-        f"touch {data_dir}/chat-jobs-probe && echo DATA-OK"
+        f"cat {q(auth)} && echo READ-AUTH; "
+        f"echo '{{\"hooks\":{{}}}}' > {q(settings)} && echo PLANTED; "
+        f"touch {q(data_dir / 'chat-jobs-probe')} && echo DATA-OK"
     )
     result = subprocess.run(
         [
@@ -713,12 +719,12 @@ def test_codex_sandbox_really_keeps_unwatched_turns_out_of_the_data_folder(
     )
     config_args = [arg for i, arg in enumerate(guarded) if i and guarded[i - 1] == "-c"]
     script = (
-        f"cat {ledger} && echo READ-LEDGER; "
-        f"echo planted >> {ledger} && echo WROTE-LEDGER; "
-        f"touch {data_dir}/new-file && echo WROTE-DATA; "
-        f"touch {scratch}/cache && echo SCRATCH-OK; "
-        f"touch {queue}/ticket && echo QUEUE-OK; "
-        f"touch {work}/edit && echo WORK-OK"
+        f"cat {q(ledger)} && echo READ-LEDGER; "
+        f"echo planted >> {q(ledger)} && echo WROTE-LEDGER; "
+        f"touch {q(data_dir / 'new-file')} && echo WROTE-DATA; "
+        f"touch {q(scratch / 'cache')} && echo SCRATCH-OK; "
+        f"touch {q(queue / 'ticket')} && echo QUEUE-OK; "
+        f"touch {q(work / 'edit')} && echo WORK-OK"
     )
     result = subprocess.run(
         [
@@ -750,8 +756,8 @@ def test_codex_sandbox_really_keeps_unwatched_turns_out_of_the_data_folder(
 def test_bubblewrap_mask_really_hides_the_folders(data_dir: Path, secrets_dir: Path) -> None:
     settings = data_dir / "claude-accounts" / "0123456789abcdef" / "settings.json"
     script = (
-        f"ls {data_dir}/codex-accounts; cat {secrets_dir}/jev-key && echo READ-KEY; "
-        f"echo x > {settings} && echo PLANTED; touch {data_dir}/ok && echo DATA-OK"
+        f"ls {q(data_dir / 'codex-accounts')}; cat {q(secrets_dir / 'jev-key')} && echo READ-KEY; "
+        f"echo x > {q(settings)} && echo PLANTED; touch {q(data_dir / 'ok')} && echo DATA-OK"
     )
     command = credential_mask.masked_command(["sh", "-c", script], data_dir=data_dir)
     try:
@@ -775,10 +781,10 @@ def test_a_turn_keeps_its_own_account_but_cant_plant_a_hook_in_it(data_dir: Path
     other.mkdir()
     (other / ".credentials.json").write_text("other", encoding="utf-8")
     script = (
-        f"cat {own}/.credentials.json && echo OWN-READ; "
-        f"touch {own}/session.jsonl && echo OWN-WRITE; "
-        f"echo '{{\"hooks\":{{}}}}' > {own}/settings.json && echo PLANTED; "
-        f"cat {other}/.credentials.json && echo OTHER-READ"
+        f"cat {q(own / '.credentials.json')} && echo OWN-READ; "
+        f"touch {q(own / 'session.jsonl')} && echo OWN-WRITE; "
+        f"echo '{{\"hooks\":{{}}}}' > {q(own / 'settings.json')} && echo PLANTED; "
+        f"cat {q(other / '.credentials.json')} && echo OTHER-READ"
     )
     command = credential_mask.mask_unsandboxed(
         "claude_code",
@@ -819,10 +825,10 @@ def test_a_codex_accounts_missing_program_files_are_made_read_only_placeholders(
 def test_a_full_access_codex_turn_cant_plant_config_in_its_own_account(data_dir: Path) -> None:
     own = data_dir / "codex-accounts" / "0123456789abcdef"
     script = (
-        f"cat {own}/auth.json >/dev/null && echo OWN-READ; "
-        f"echo 'notify=[\"sh\"]' > {own}/config.toml && echo PLANTED-CONFIG; "
-        f"echo 'LD_PRELOAD=/x.so' > {own}/.env && echo PLANTED-ENV; "
-        f"touch {own}/rules/allow.rules && echo PLANTED-RULES"
+        f"cat {q(own / 'auth.json')} >/dev/null && echo OWN-READ; "
+        f"echo 'notify=[\"sh\"]' > {q(own / 'config.toml')} && echo PLANTED-CONFIG; "
+        f"echo 'LD_PRELOAD=/x.so' > {q(own / '.env')} && echo PLANTED-ENV; "
+        f"touch {q(own / 'rules/allow.rules')} && echo PLANTED-RULES"
     )
     command = credential_mask.mask_unsandboxed(
         "codex", ["sh", "-c", script], env={"CODEX_HOME": str(own)}, data_dir=data_dir
@@ -1021,10 +1027,10 @@ def test_a_codex_turn_cant_loosen_its_accounts_rules(data_dir: Path) -> None:
     (home / "rules").mkdir()
     (home / "config.toml").write_text("", encoding="utf-8")
     script = (
-        f"cat {home}/auth.json && echo OWN-READ; "
+        f"cat {q(home / 'auth.json')} && echo OWN-READ; "
         f'echo \'prefix_rule(pattern=["curl"], decision="allow")\' > '
-        f"{home}/rules/default.rules && echo RULE-PLANTED; "
-        f"echo 'notify=[\"sh\"]' >> {home}/config.toml && echo CONFIG-PLANTED"
+        f"{q(home / 'rules/default.rules')} && echo RULE-PLANTED; "
+        f"echo 'notify=[\"sh\"]' >> {q(home / 'config.toml')} && echo CONFIG-PLANTED"
     )
     command = credential_mask.mask_unsandboxed(
         "codex",
@@ -1135,7 +1141,7 @@ def test_codex_really_starts_with_several_secret_files_and_cant_read_them(
     inner = credential_mask.inner_command(guarded)
     prefix = guarded[: len(guarded) - len(inner)]
     config_args = [arg for i, arg in enumerate(inner) if i and inner[i - 1] == "-c"]
-    script = "; ".join(f"cat {path}" for path in secrets) + "; echo SANDBOX-OK"
+    script = "; ".join(f"cat {q(path)}" for path in secrets) + "; echo SANDBOX-OK"
     result = subprocess.run(
         [*prefix, "codex", "sandbox", *[x for a in config_args for x in ("-c", a)], "--"]
         + ["sh", "-c", script],

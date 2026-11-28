@@ -7,6 +7,10 @@ this account (mode 0600 in a 0700 folder):
 - ``endpoint.json``: the URL, process ID and token file of the running backend.
 - ``owner-token``: the full-access API token. It is never passed on a command line.
 
+The desktop app's backend has neither file yet, but it takes the same data-folder lock
+(``.backend.lock``) and writes ``backend.json`` beside it with only its kind and
+process ID, so a headless start and the CLI can tell the desktop app is running.
+
 Agent tokens are for scripts and agents that should not act as the owner. Only a hash
 of each token is stored; the token itself is written once, to a file the owner names.
 An agent token may read most state but makes only a short list of writes
@@ -25,22 +29,28 @@ out of folders Rem's workers use.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import os
 import re
 import secrets
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from gofer.utils.atomic_output import replace_file
 from gofer.utils.private_files import private_file_problem
+
+log = logging.getLogger(__name__)
 
 HEADLESS_DIRNAME = "headless"
 OWNER_TOKEN_FILENAME = "owner-token"
@@ -99,32 +109,144 @@ def ensure_private_dir(path: Path) -> Path:
     return path
 
 
-def hold_backend_lock(data_dir: Path) -> int:
-    """Claim the data folder for this headless backend until it stops.
+BACKEND_LOCK_FILENAME = ".backend.lock"
+# Which kind of backend holds the lock: {"kind": "desktop" | "headless", "pid": N}.
+# Never a token or an address; trusted only while the lock is held.
+BACKEND_RECORD_FILENAME = "backend.json"
+BACKEND_KINDS = ("desktop", "headless")
 
-    A second backend on the same folder would overwrite the owner token and endpoint
-    file, run a second scheduler on the same stores, and leave the first one running
-    with no published way in. Returns the descriptor that holds the lock.
+
+def backend_record_path(data_dir: Path) -> Path:
+    return headless_dir(data_dir) / BACKEND_RECORD_FILENAME
+
+
+# flock's answers when another process holds the lock. Any other error, such as ENOLCK
+# or EOPNOTSUPP on some NFS and SMB mounts, means the file system can't lock at all.
+_LOCK_HELD_ERRNOS = frozenset({errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES})
+
+
+def _try_lock(descriptor: int) -> bool | None:
+    """True when this took the lock, False when another process holds it, and None
+    when the data folder's file system can't lock files."""
+    if sys.platform == "win32":
+        import msvcrt
+
+        try:
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            # Windows file systems lock; a failure means another process holds it.
+            return False
+        return True
+    import fcntl
+
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        return False if exc.errno in _LOCK_HELD_ERRNOS else None
+    return True
+
+
+def hold_backend_lock(data_dir: Path, *, kind: str = "headless", wait: float = 0.0) -> int:
+    """Claim the data folder for this backend until it stops.
+
+    The desktop app's backend and a headless one take the same lock. A second backend
+    on the same folder would overwrite the owner token and endpoint file, run a second
+    scheduler on the same stores, and leave the first one running with no published
+    way in. [wait] is how many seconds to keep trying while an old backend shuts down.
+    Returns the descriptor that holds the lock.
+
+    On a file system that can't lock files (some network mounts), the backend still
+    starts, with a warning: refusing would keep Raticode from ever running there, and
+    the lock can't tell whether another backend uses the folder.
     """
-    path = ensure_private_dir(headless_dir(data_dir)) / ".backend.lock"
+    if kind not in BACKEND_KINDS:
+        raise ValueError(f"Unknown backend kind {kind!r}")
+    path = ensure_private_dir(headless_dir(data_dir)) / BACKEND_LOCK_FILENAME
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags, 0o600)
+    deadline = time.monotonic() + max(wait, 0.0)
+    while (taken := _try_lock(descriptor)) is False:
+        if time.monotonic() >= deadline:
+            os.close(descriptor)
+            raise HeadlessError(_lock_refusal(data_dir, backend_lock_holder(data_dir), kind))
+        time.sleep(0.1)
+    if taken is None:
+        log.warning(
+            "The data folder %s can't be locked: its file system doesn't support file "
+            "locks. Raticode starts anyway, but can't stop a second backend from using "
+            "the same folder, so run only one.",
+            data_dir,
+        )
     try:
-        if sys.platform == "win32":
-            import msvcrt
-
-            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError as exc:
+        record = json.dumps({"kind": kind, "pid": os.getpid()}) + "\n"
+        write_private_file(backend_record_path(data_dir), record)
+    except BaseException:
         os.close(descriptor)
-        raise HeadlessError(
-            f"Another Raticode backend is already running with the data folder {data_dir}. "
-            "Stop it first, or give this one its own --data-dir."
-        ) from exc
+        raise
     return descriptor
+
+
+def _lock_refusal(data_dir: Path, holder: str | None, kind: str) -> str:
+    # The desktop app picks its data folder in Settings > General, not with --data-dir.
+    elsewhere = (
+        "choose another Data folder in Settings > General"
+        if kind == "desktop"
+        else "give this backend its own --data-dir"
+    )
+    if holder == "desktop":
+        return (
+            f"The Raticode desktop app is using the data folder {data_dir}. Quit it first, "
+            f"or {elsewhere}."
+        )
+    which = "A headless Raticode backend" if holder == "headless" else "Another Raticode backend"
+    return (
+        f"{which} is already running with the data folder {data_dir}. Stop it first, "
+        f"or {elsewhere}."
+    )
+
+
+def backend_lock_holder(data_dir: Path) -> str | None:
+    """Which backend holds [data_dir]'s lock: "desktop", "headless", "unknown", or None.
+
+    Only reads: a missing lock file or folder means no backend, and nothing is created.
+    Where the file system can't lock, only a record naming a live process counts.
+    """
+    path = headless_dir(data_dir) / BACKEND_LOCK_FILENAME
+    try:
+        descriptor = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    try:
+        taken = _try_lock(descriptor)
+        if taken is None:
+            kind = _recorded_kind(data_dir)
+            return kind if kind in BACKEND_KINDS else None
+        if taken:
+            if sys.platform == "win32":
+                import msvcrt
+
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            return None
+    finally:
+        os.close(descriptor)
+    return _recorded_kind(data_dir)
+
+
+def _recorded_kind(data_dir: Path) -> str:
+    path = backend_record_path(data_dir)
+    try:
+        check_private_file(path, secret=False)
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (HeadlessError, OSError, ValueError):
+        return "unknown"
+    from gofer.utils.pids import pid_alive
+
+    kind = record.get("kind") if isinstance(record, dict) else None
+    # A record left by a crashed backend names a process that is gone.
+    if kind in BACKEND_KINDS and pid_alive(record.get("pid")):
+        return str(kind)
+    return "unknown"
 
 
 def release_backend_lock(descriptor: int | None) -> None:
@@ -136,19 +258,7 @@ def release_backend_lock(descriptor: int | None) -> None:
 def write_private_file(path: Path, text: str) -> None:
     """Atomically replace [path] with [text], readable only by this account (0600)."""
     ensure_private_dir(path.parent)
-    temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(temporary, flags, 0o600)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            temporary.unlink()
-        raise
+    replace_file(path, text.encode("utf-8"))
 
 
 def create_private_file(path: Path, text: str) -> None:
@@ -495,16 +605,15 @@ _SEGMENT = r"[^/]+"
 
 # The only writes an agent token may make; everything else that changes state is
 # refused. An allow-list, so a route added later stays closed until someone decides an
-# agent may use it. Most of these are POSTs that only read or check something.
+# agent may use it. Most of these are POSTs that only read or check something. Each
+# entry must match a route (tests/unit/test_cli_agent_safety.py), so none waits for one.
 _AGENT_ALLOWED_WRITES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     (method, re.compile(pattern))
     for method, pattern in (
         # One ticket's comments and status history; a read sent with its address.
         ("POST", r"/api/rem/kanban/timeline"),
         # Check a workflow draft or document without saving it.
-        ("POST", rf"/api/workflows/{_SEGMENT}/validate"),
         ("POST", rf"/api/workflows/{_SEGMENT}/document/analyze"),
-        ("POST", r"/api/workflows/import/preview"),
         ("POST", r"/api/rattish/workflows/import/preview"),
         ("POST", r"/api/rattish/triggers/preview"),
         # Organizations act on the caller's authority: an agent token acts as Rem, so

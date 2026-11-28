@@ -28,7 +28,7 @@ const serverLink = (server) => ({ name: server.name, type: server.type || "http"
 
 // Thread selections reference Raticode's shared library. Entries that exist only
 // in this selection (older threads, or an unavailable library) remain editable.
-export function remToolRows(config, library) {
+function remToolRows(config, library) {
   const librarySkills = library.skills || [];
   const libraryServers = library.mcpServers || [];
   const skillKeys = new Set(librarySkills.map((skill) => skillKey(skill.path)));

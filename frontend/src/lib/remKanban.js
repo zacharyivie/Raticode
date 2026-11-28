@@ -37,10 +37,13 @@ export function moveNotice(ticket, column) {
 }
 
 // Undo sends a ticket back with another move, so it's offered only where that move exists:
-// never after starting work, and not back into In review or Blocked, which runs decide.
+// never after starting work (In progress, which the backend also takes as "running"), and not back
+// into In review or Blocked, which runs decide. A ticket of unknown scope has no Undo. The phone's
+// Kanban.canUndoMove follows the same rules, and both are tested against
+// mobile/android/protocol/probes/kanban-cases/undo-move.json.
 const UNDO_COLUMNS = { rem: ["backlog", "todo", "done", "cancelled"], organization: ["backlog", "todo"] };
 export function canUndoMove(ticket, column) {
-  return column !== "in_progress" && !ticket.paused && (UNDO_COLUMNS[ticket.scope] || []).includes(ticket.status);
+  return column !== "in_progress" && column !== "running" && !ticket.paused && (UNDO_COLUMNS[ticket.scope] || []).includes(ticket.status);
 }
 
 export function ownerFilters(board) {
@@ -411,7 +414,7 @@ export function openKanbanTicket(ticket) {
   if (!ticket?.ticket_id && !ticket?.key) return;
   ticketRequest = { ticket_id: ticket.ticket_id || "", key: ticket.key || "" };
   for (const listener of ticketListeners) listener();
-  globalThis.dispatchEvent?.(new CustomEvent("gofer:kanban-open", { detail: { ticket_id: ticketRequest.ticket_id } }));
+  globalThis.window?.dispatchEvent?.(new CustomEvent("gofer:kanban-open", { detail: { ticket_id: ticketRequest.ticket_id } }));
 }
 
 // The waiting request, once: the board that takes it opens that ticket.
@@ -491,6 +494,12 @@ export const saveSelfWork = change => post("/settings", "PUT", change);
 export const cancelSelfWorkWindow = windowId => post("/window", "POST", { action: "cancel", window_id: windowId });
 export const saveSelfWorkStop = change => post("/stop", "POST", change);
 export const markReportSeen = updatedAt => post("/report/seen", "POST", { updated_at: updatedAt || undefined });
+
+// The global board's tickets, read once, for quick open.
+export async function readBoardTickets() {
+  const tickets = (await remRequest("/kanban"))?.board?.tickets;
+  return Array.isArray(tickets) ? tickets : [];
+}
 
 // Keeps one view of the board and self-work current while a surface is open.
 export function useKanban(active = true, interval = 4000) {
@@ -574,3 +583,56 @@ export function waitChoices(board, ticket) {
 
 // The edit that replaces what a ticket waits for.
 export const waitsChange = (ticket, ids) => ({ action: "edit", ticket_id: ticket.ticket_id, scope: ticket.scope, organization_id: ticket.organization_id || undefined, expected_revision: ticket.revision, waits_for: ids });
+
+// Rem's own tickets change their plan (title, details, priority, kind, Done when and project)
+// while nothing runs on them, proposals included. An organization's sheet edits its tickets.
+export const canEditTicket = ticket => ticket?.scope === "rem" && !ticket.running && !ticket.paused && ["backlog", "todo", "blocked"].includes(ticket.status);
+
+// The kinds of work a Rem ticket can be, in the phone's words. An errand keeps its kind.
+const TICKET_KINDS = Object.freeze([["develop", "Build"], ["research", "Research"], ["maintain", "Maintain"]]);
+const KIND_LABELS = { ...Object.fromEntries(TICKET_KINDS), errand: "Errand" };
+export const kindLabel = kind => KIND_LABELS[kind] || (kind ? kind[0].toUpperCase() + kind.slice(1) : "Build");
+export const kindChoices = kind => TICKET_KINDS.some(([value]) => value === kind) || !kind ? TICKET_KINDS : [...TICKET_KINDS, [kind, kindLabel(kind)]];
+
+// Done when as the backend keeps it: one check per line, blank lines dropped.
+export const doneWhenText = text => String(text || "").split("\n").map(line => line.trim()).filter(Boolean).join("\n");
+
+// The board sends a description's first 4,000 characters; one that long may be cut, so the
+// edit form leaves it as it is rather than saving the cut copy over the whole text.
+const DESCRIPTION_SHOWN = 4000;
+export const descriptionCut = ticket => String(ticket?.description || "").length >= DESCRIPTION_SHOWN;
+
+// The fields the edit form starts from.
+export const ticketDraft = ticket => ({ title: ticket.title || "", description: ticket.description || "", priority: ticket.priority || "medium",
+  type: ticket.type || "develop", done_when: ticket.done_when || "" });
+
+const EDIT_FIELDS = Object.freeze({ title: value => value.trim(), description: value => value.trim(), priority: value => value, type: value => value, done_when: doneWhenText });
+
+// The edit request for what changed between `start` (ticketDraft of the ticket at `revision`)
+// and `draft`, or null when nothing did. Only the changed fields are sent.
+export function ticketEdit(ticket, start, draft, revision = ticket.revision) {
+  const changes = Object.fromEntries(Object.entries(EDIT_FIELDS)
+    .map(([field, clean]) => [field, clean(String(draft[field] ?? "")), clean(String(start[field] ?? ""))])
+    .filter(([field, now, before]) => now !== before && !(field === "description" && descriptionCut(start)))
+    .map(([field, now]) => [field, now]));
+  if (!Object.keys(changes).length) return null;
+  return { action: "edit", ticket_id: ticket.ticket_id, scope: ticket.scope, expected_revision: revision, ...changes };
+}
+
+// A draft moved onto a newer copy of its ticket: fields the user hasn't touched follow the
+// ticket, and what they typed stays.
+export const rebaseDraft = (start, draft, newer) => Object.fromEntries(Object.keys(EDIT_FIELDS)
+  .map(field => [field, draft[field] === start[field] ? newer[field] : draft[field]]));
+
+const EDIT_LABELS = Object.freeze({ title: "title", description: "description", priority: "priority", type: "kind", done_when: "Done when" });
+
+// Fields the user changed that the newer copy changed too, to something else. Moving the
+// form onto that copy would save over the other change without a word.
+export const draftConflicts = (start, draft, newer) => Object.entries(EDIT_FIELDS)
+  .filter(([field, clean]) => {
+    const [before, mine, theirs] = [start, draft, newer].map(values => clean(String(values[field] ?? "")));
+    return mine !== before && theirs !== before && mine !== theirs;
+  })
+  .map(([field]) => field);
+
+export const draftConflictNotice = fields => `The ${fields.map(field => EDIT_LABELS[field]).join(" and ")} changed somewhere else while you were editing, so Save would undo that. Copy what you typed, then Cancel to see the new version.`;

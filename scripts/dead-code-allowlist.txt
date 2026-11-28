@@ -7,7 +7,8 @@
 #
 # Delete unused code rather than listing it here. A name belongs here only when
 # something outside this repository calls it, or a framework calls it by a name
-# the check can't see.
+# the check can't see. A path:name, route or CSS line that matches nothing fails
+# the check, so delete a line with the code it excused.
 #
 # Code only tests call stays only as a test seam: a reason that starts with
 # "test seam:" says what the tests use it for. Otherwise remove it and test the
@@ -19,17 +20,12 @@ src/gofer/core/provider_accounts.py:unregister_adapter  # test seam: tests take 
 src/gofer/core/approvals.py:RecordingNotificationAdapter  # test seam: tests read the notifications a run sent
 src/gofer/ui/organizations.py:running_workers  # test seam: tests wait for organization workers to finish; the app counts worker claims
 src/gofer/ui/rem_home.py:running_workers  # test seam: tests wait for Rem's task workers to finish; the app counts worker claims
-src/gofer/ui/server.py:_dispatch_GET  # test seam: tests replace it to fake a route; the app calls it by getattr in _dispatch_request
-src/gofer/ui/server.py:_dispatch_POST  # test seam: the app calls it by getattr in _dispatch_request
-src/gofer/ui/server.py:_dispatch_PUT  # test seam: the app calls it by getattr in _dispatch_request
-src/gofer/ui/server.py:_dispatch_DELETE  # test seam: the app calls it by getattr in _dispatch_request
 src/gofer/social/service.py:verify_log  # test seam: tests check the Posts audit log's hash chain; kept because removing the chain check isn't clearly security-neutral
 frontend/src/lib/remHomeSample.js:SAMPLE_PROJECTS  # test seam: the Rem home browser test loads the sample projects
 frontend/src/lib/remComposer.js:resetRemComposer  # test seam: tests empty Rem's shared composer between cases
 frontend/src/lib/secondBrainStore.js:resetSecondBrainStore  # test seam: tests empty the Second Brain store between cases
 frontend/src/lib/secondBrainStore.js:loadSampleLibrary  # test seam: the Second Brain unit tests and visual browser test load the sample library
 src/gofer/social/providers/linkedin.py:API_VERSION_SUNSET  # test seam: a test fails 60 days before LinkedIn retires API_VERSION, so both are bumped in time
-docs/cli-parity.json:POST /api/workflows/*/webhooks/*/trigger  # outside services call a workflow's webhook; nothing in Raticode does
 docs/cli-parity.json:POST /api/chat/changes/redo  # ChatPane.jsx builds /chat/changes/${action} from the Undo or Redo button
 docs/cli-parity.json:POST /api/chat/changes/undo  # ChatPane.jsx builds /chat/changes/${action} from the Undo or Redo button
 .xterm-*  # CSS classes owned by xterm.js, which builds the terminal's DOM

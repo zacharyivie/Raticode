@@ -704,6 +704,14 @@ def forget_status(profile: ProviderProfile) -> None:
         _status_cache.pop(_status_key(profile), None)
 
 
+def status_executable(adapter: AccountAdapter, run: Callable[..., Any]) -> str | None:
+    """The CLI check_status runs with ``run``, or None when there is none.
+
+    tests/conftest.py replaces this so no test starts the provider's real CLI.
+    """
+    return adapter.find_executable()
+
+
 def check_status(
     profile: ProviderProfile,
     *,
@@ -718,7 +726,7 @@ def check_status(
         cached = _status_cache.get(key)
     if cached and not refresh and time.monotonic() - cached[0] < STATUS_TTL_SECONDS:
         return dict(cached[1])
-    executable = adapter.find_executable()
+    executable = status_executable(adapter, run)
     if executable is None:
         status: dict[str, Any] = {"state": UNAVAILABLE, "reason": adapter.missing_cli()}
     else:

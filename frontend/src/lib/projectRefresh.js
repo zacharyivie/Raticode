@@ -1,9 +1,9 @@
 import { pathKey, samePath } from "./workspacePaths.js";
 import { shareInFlight, startPolling } from "./refresh.js";
 
-export const RECENT_PROJECT_REFRESH_MS = 60_000;
-export const WORKFLOW_DISCOVERY_MS = 30_000;
-export const DOCTOR_REFRESH_MS = 60_000;
+const RECENT_PROJECT_REFRESH_MS = 60_000;
+const WORKFLOW_DISCOVERY_MS = 30_000;
+const DOCTOR_REFRESH_MS = 60_000;
 
 // Keep validation local to an App instance. Reordering recent roots should not
 // repeat filesystem and Git work for every other project.

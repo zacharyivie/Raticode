@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -456,12 +457,18 @@ internal fun TicketDetailView(ticket: KanbanTicket, board: KanbanBoard?, timelin
     var moving by remember { mutableStateOf(false) }
     var declining by remember { mutableStateOf(false) }
     var handOver by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var editing by rememberSaveable(ticket.uid) { mutableStateOf(false) }
     val column = Kanban.column(ticket)
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp).testTag("kanbanTicketPage"),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             // Title and the states that matter most, in color.
-            Text(ticket.title, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.semantics { heading() }.testTag("kanbanTicketTitle"))
+            Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(ticket.title, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f).semantics { heading() }.testTag("kanbanTicketTitle"))
+                // Rem's ticket changes its plan here while nothing runs on it, as on the desktop.
+                if (Kanban.canEdit(ticket)) TextButton(onClick = { editing = true }, enabled = !busy && connected,
+                    modifier = Modifier.heightIn(min = 48.dp).testTag("kanbanEdit").semantics { contentDescription = "Edit this ticket" }) { Text("Edit") }
+            }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 when {
                     ticket.proposed -> StatusChip("Proposed", OrgTone.WAIT, Modifier.testTag("kanbanStatusChip"), icon = ThreadIcons.Lightbulb)
@@ -557,6 +564,7 @@ internal fun TicketDetailView(ticket: KanbanTicket, board: KanbanBoard?, timelin
         }
     }
     if (moving) KanbanMoveSheet(ticket, busy, onMove) { moving = false }
+    if (editing) EditTicketSheet(ticket, enabled = !busy && connected, onDismiss = { editing = false }) { params -> onAction(params); editing = false }
     if (declining) DeclineDialog(connected, ticket, onAction) { declining = false }
     handOver?.let { (choice, label) ->
         AlertDialog(onDismissRequest = { handOver = null }, title = { Text("Hand this to $label?") },
@@ -565,6 +573,59 @@ internal fun TicketDetailView(ticket: KanbanTicket, board: KanbanBoard?, timelin
             dismissButton = { TextButton(onClick = { handOver = null }) { Text("Cancel") } })
     }
 }
+
+/**
+ * Changes a Rem ticket's title, details, priority, kind and Done when. Save sends only what changed, at the ticket's revision;
+ * the desktop refuses it if the ticket changed meanwhile or a run started, and says why.
+ */
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@Composable
+private fun EditTicketSheet(ticket: KanbanTicket, enabled: Boolean, onDismiss: () -> Unit, onSave: (org.json.JSONObject) -> Unit) {
+    // What the sheet started from and what's typed now. The page's ticket follows every poll; a newer copy carries the fields
+    // the user hasn't touched along, so Save never undoes a change made elsewhere meanwhile.
+    var start by rememberSaveable(ticket.uid, stateSaver = DRAFT_SAVER) { mutableStateOf(Kanban.draftOf(ticket)) }
+    var draft by rememberSaveable(ticket.uid, stateSaver = DRAFT_SAVER) { mutableStateOf(start) }
+    LaunchedEffect(ticket) {
+        if (ticket.revision != start.revision) {
+            val newer = Kanban.draftOf(ticket)
+            draft = Kanban.rebaseDraft(start, draft, newer); start = newer
+        }
+    }
+    val title = draft.title; val description = draft.description; val priority = draft.priority; val kind = draft.kind; val doneWhen = draft.doneWhen
+    val cut = Kanban.descriptionCut(start)
+    val params = Kanban.editParams(ticket, start, draft)
+    ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.testTag("kanbanEditSheet")) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Edit ${ticket.key.ifBlank { "ticket" }}", style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
+            OutlinedTextField(title, { draft = draft.copy(title = it.take(Kanban.TITLE_MAX)) }, Modifier.fillMaxWidth().testTag("kanbanEditTitle"), label = { Text("Title") })
+            OutlinedTextField(description, { draft = draft.copy(description = it) }, Modifier.fillMaxWidth().testTag("kanbanEditDescription"), label = { Text("Description") },
+                readOnly = cut, minLines = 3, maxLines = 8,
+                supportingText = if (cut) ({ Text("Too long to edit here, so Save leaves it as it is.") }) else null)
+            Text("Priority", style = MaterialTheme.typography.titleSmall)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Kanban.PRIORITIES.forEach { (value, label) -> FilterChip(priority == value, { draft = draft.copy(priority = value) }, label = { Text(label) }, modifier = Modifier.testTag("kanbanEditPriority-$value")) }
+            }
+            Text("Kind of work", style = MaterialTheme.typography.titleSmall)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Kanban.editKinds(ticket).forEach { (value, label) -> FilterChip(kind == value, { draft = draft.copy(kind = value) }, label = { Text(label) }, modifier = Modifier.testTag("kanbanEditKind-$value")) }
+            }
+            if (ticket.doneWhenKnown) OutlinedTextField(doneWhen, { draft = draft.copy(doneWhen = it.take(Kanban.DONE_WHEN_MAX)) }, Modifier.fillMaxWidth().testTag("kanbanEditDoneWhen"),
+                label = { Text("Done when") }, placeholder = { Text("One check per line") }, minLines = 2, maxLines = 6,
+                supportingText = { Text("One check per line. Its review checks each one.") })
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                TextButton(onClick = onDismiss, modifier = Modifier.heightIn(min = 48.dp)) { Text("Cancel") }
+                Button(onClick = { params?.let(onSave) }, enabled = enabled && params != null,
+                    modifier = Modifier.heightIn(min = 48.dp).testTag("kanbanEditSave")) { Text("Save") }
+            }
+        }
+    }
+}
+
+/** Keeps an edit sheet's start and draft across a rotation or the app going to the background. */
+private val DRAFT_SAVER = listSaver<TicketDraft, String>(
+    save = { listOf(it.title, it.description, it.priority, it.kind, it.doneWhen, it.revision.toString()) },
+    restore = { TicketDraft(it[0], it[1], it[2], it[3], it[4], it[5].toLong()) })
 
 internal const val AUTO_APPROVED_NOTE = "Approved by self-work, not by you, because auto-approval is on in Settings › Rem self-work. Edit, move or cancel it like any ticket."
 internal const val HAND_OVER_LATER = "Rem's ticket can go to an organization while it isn't running or finished."
@@ -827,6 +888,7 @@ private fun SelfWorkContent(client: LiveClient, busy: Boolean, showSettings: Boo
     SelfWorkBody(view, client.desktopViews[Kanban.BOARD] as? KanbanBoard, busy, client.connected, client.desktopErrors[Kanban.SELF_WORK],
         showSettings, onSettings, projectsEnabled, onProjects, onTicket,
         onStop = { client.desktopAction(Kanban.STOP, it) },
+        onObjectives = { client.desktopAction(Kanban.OBJECTIVES, it) },
         onSeen = { client.desktopAction(Kanban.SEEN, Kanban.seenParams(it)) }) { client.desktopAction(Kanban.SETTINGS, it) }
 }
 
@@ -864,6 +926,7 @@ private fun SelfWorkAccountRow(row: SelfWorkAccount, enabled: Boolean, onChoose:
 internal fun SelfWorkBody(view: SelfWorkView, board: KanbanBoard?, busy: Boolean, connected: Boolean, error: String?, showSettings: Boolean,
                           onSettings: () -> Unit, projectsEnabled: Boolean, onProjects: () -> Unit, onTicket: (String) -> Unit,
                           onStop: (org.json.JSONObject) -> Unit = {},
+                          onObjectives: (org.json.JSONObject) -> Unit = {},
                           onSeen: (SelfWorkReport) -> Unit, onChange: (org.json.JSONObject) -> Unit) {
     val settings = view.settings
     // Opening this page reads the report, on every device.
@@ -1091,8 +1154,14 @@ internal fun SelfWorkBody(view: SelfWorkView, board: KanbanBoard?, busy: Boolean
                 }
             }
         }
-        // Only from a desktop that sends them; Rem's chat changes them.
-        view.objectives?.let { objectives -> item { ObjectivesCard(objectives) } }
+        // Only from a desktop that sends them. A desktop with levels of effort also takes changes from here, and each of
+        // Rem's projects gets its own section with its share of the threads and its own objectives.
+        view.objectives?.let { objectives ->
+            item {
+                ObjectivesCard(objectives, view.projects.orEmpty(), Kanban.canChangeObjectives(view), Kanban.canChangeEffort(view), connected && !busy, settings.revision, error,
+                    onObjectives = onObjectives, onEffort = { id, percent -> onChange(Kanban.effortParams(settings, id, percent)) })
+            }
+        }
         item { SectionTitle("Running report") }
         if (report == null || report.isEmpty) item { Note("Nothing yet. When Rem works on its own, what it did shows here, on your computer and on this phone.") }
         else {
@@ -1140,50 +1209,248 @@ internal fun SelfWorkBody(view: SelfWorkView, board: KanbanBoard?, busy: Boolean
 }
 
 /**
- * Self-work's objectives, as Rem's side pane on the computer lists them: open ones first, newest first, each opening to its
- * finish line and who checked it off; what earlier sessions finished folds away. Read-only: Rem's chat changes them.
+ * Self-work's objectives, as Rem's side pane on the computer lists them: the global ones, then one folding section per
+ * project Rem works in, with its level of effort, its threads now against its share, and its own objectives. Open ones
+ * come first, newest first, each opening to its finish line; what earlier sessions finished folds away. With [canChange]
+ * (a desktop that sends levels of effort) the user adds, edits, checks off and removes objectives and sets each project's
+ * level of effort here; otherwise the card is read-only and Rem's chat changes them.
  */
 @Composable
-private fun ObjectivesCard(objectives: SelfWorkObjectives) {
-    var staleOpen by rememberSaveable { mutableStateOf(false) }
+private fun ObjectivesCard(objectives: SelfWorkObjectives, projects: List<SelfWorkProject>, canChange: Boolean, canChangeEffort: Boolean, enabled: Boolean,
+                           settingsRevision: Long, error: String?, onObjectives: (org.json.JSONObject) -> Unit, onEffort: (String, Int) -> Unit) {
     // One row opens at a time, as in the side pane on the computer.
     var openId by rememberSaveable { mutableStateOf("") }
-    val row: @Composable (SelfWorkObjective) -> Unit = { item -> ObjectiveRow(item, item.id == openId) { openId = if (openId == item.id) "" else item.id } }
-    val current = objectives.current
+    // The list an Add form writes to: "" for the global ones, else a project ID; null while no form is open.
+    var adding by rememberSaveable { mutableStateOf<String?>(null) }
+    // The objective the Edit sheet changes; "" while none is open.
+    var editingId by rememberSaveable { mutableStateOf("") }
+    val toggle: (SelfWorkObjective) -> Unit = { item -> openId = if (openId == item.id) "" else item.id }
+    val edit: (SelfWorkObjective) -> Unit = { item -> editingId = item.id }
     DetailCard("Objectives", Modifier.testTag("selfWorkObjectives"), icon = ThreadIcons.Target, tone = OrgTone.ACCENT, trailing = {
         Kanban.objectivesCount(objectives).takeIf { it.isNotBlank() }?.let {
             Text(it, Modifier.testTag("selfWorkObjectivesCount"), style = MaterialTheme.typography.labelLarge.copy(fontFamily = FontFamily.Monospace),
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }) {
-        Text("Goals that guide Rem's self-work for the whole session. To change them, tell Rem in chat.", style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
-        if (current.isEmpty()) Text(Kanban.objectivesEmpty(objectives), Modifier.testTag("selfWorkObjectivesEmpty"), style = MaterialTheme.typography.bodyMedium)
-        current.forEach { row(it) }
-        if (objectives.stale > 0) {
+        Text(if (canChange) "Goals that guide Rem's self-work for the whole session. The ones here apply to every project; each project's own apply only to it."
+            else "Goals that guide Rem's self-work for the whole session. To change them, tell Rem in chat.",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        ObjectiveList(objectives, objectives, openId, canChange, enabled, "", toggle, onObjectives, edit)
+        if (canChange) AddObjectiveButton("Add objective", "selfWorkObjectiveAdd", enabled) { adding = "" }
+        projects.forEach { project ->
             HorizontalDivider()
-            Surface(onClick = { staleOpen = !staleOpen }, color = Color.Transparent, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("selfWorkObjectivesStale")
-                .semantics { stateDescription = if (staleOpen) "Shown" else "Folded" }) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Icon(if (staleOpen) ThreadIcons.ChevronDown else ThreadIcons.ChevronRight, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("Stale · ${objectives.stale}", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-            if (staleOpen) {
-                Text("Done in earlier self-work sessions. They don't count toward this session's objectives.", style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                objectives.staleItems.forEach { row(it) }
-            }
+            ProjectObjectives(project, objectives, openId, canChange, canChangeEffort, enabled, settingsRevision, error, toggle, onObjectives, onEffort, edit) { adding = project.projectId }
         }
-        (objectives.total - objectives.items.size).takeIf { it > 0 }?.let {
-            Text("$it more on your computer.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    // The objective may have gone meanwhile (removed on the computer); then the sheet closes.
+    (objectives.items + objectives.projects.values.flatMap { it.items }).firstOrNull { it.id == editingId }?.let { item ->
+        EditObjectiveSheet(item, Kanban.objectiveScope(objectives, item), projects.takeIf { objectives.movable }.orEmpty(), enabled,
+            onDismiss = { editingId = "" }) { text, doneWhen, scope ->
+            editingId = ""
+            Kanban.editObjectiveParams(objectives, item, text, doneWhen, scope)?.let(onObjectives)
+        }
+    }
+    adding?.let { target ->
+        AddObjectiveDialog(projects.firstOrNull { it.projectId == target }?.name, onDismiss = { adding = null }) { text, doneWhen ->
+            adding = null
+            Kanban.addObjectiveParams(objectives, text, doneWhen, target.ifBlank { null })?.let(onObjectives)
         }
     }
 }
 
-/** One objective: its text and whether it's done; while [open], its finish line, who checked it off and the evidence. Tapping calls [onToggle]. */
+/** One list of objectives (global, or one project's), with its stale ones folded away. [all] carries the revision a change names. */
 @Composable
-private fun ObjectiveRow(item: SelfWorkObjective, open: Boolean, onToggle: () -> Unit) {
+private fun ObjectiveList(list: SelfWorkObjectives, all: SelfWorkObjectives, openId: String, canChange: Boolean, enabled: Boolean, tag: String,
+                          onToggle: (SelfWorkObjective) -> Unit, onObjectives: (org.json.JSONObject) -> Unit, onEdit: (SelfWorkObjective) -> Unit) {
+    var staleOpen by rememberSaveable(tag) { mutableStateOf(false) }
+    val row: @Composable (SelfWorkObjective) -> Unit = { item ->
+        ObjectiveRow(item, item.id == openId, { onToggle(item) },
+            actions = if (canChange) ({ ObjectiveActions(item, enabled, onCheck = { onObjectives(Kanban.toggleObjectiveParams(all, item)) },
+                onEdit = { onEdit(item) }, onRemove = { onObjectives(Kanban.removeObjectiveParams(all, item)) }) }) else null)
+    }
+    val current = list.current
+    if (current.isEmpty()) Text(if (tag.isBlank()) Kanban.objectivesEmpty(list) else "None of its own yet. The objectives above still apply.",
+        Modifier.testTag("selfWorkObjectivesEmpty$tag"), style = MaterialTheme.typography.bodyMedium)
+    current.forEach { row(it) }
+    if (list.stale > 0) {
+        Surface(onClick = { staleOpen = !staleOpen }, color = Color.Transparent, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("selfWorkObjectivesStale$tag")
+            .semantics { stateDescription = if (staleOpen) "Shown" else "Folded" }) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Icon(if (staleOpen) ThreadIcons.ChevronDown else ThreadIcons.ChevronRight, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Stale · ${list.stale}", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        if (staleOpen) {
+            Text("Done in earlier self-work sessions. They don't count toward this session's objectives.", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            list.staleItems.forEach { row(it) }
+        }
+    }
+    (list.total - list.items.size).takeIf { it > 0 }?.let {
+        Text("$it more on your computer.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/**
+ * One of Rem's projects inside Objectives: a folding section with its name, level of effort and threads now against its
+ * share, and, open, a stepper for the level of effort and its own objectives. Taps on the stepper move the number at once
+ * and go to the desktop when they stop.
+ */
+@Composable
+private fun ProjectObjectives(project: SelfWorkProject, objectives: SelfWorkObjectives, openId: String, canChange: Boolean, canChangeEffort: Boolean, enabled: Boolean,
+                              settingsRevision: Long, error: String?, onToggle: (SelfWorkObjective) -> Unit, onObjectives: (org.json.JSONObject) -> Unit,
+                              onEffort: (String, Int) -> Unit, onEdit: (SelfWorkObjective) -> Unit, onAdd: () -> Unit) {
+    var open by rememberSaveable(project.projectId) { mutableStateOf(false) }
+    var pending by remember(project.projectId) { mutableStateOf<Int?>(null) }
+    LaunchedEffect(settingsRevision, error) { pending = null }
+    LaunchedEffect(pending) {
+        val chosen = pending ?: return@LaunchedEffect
+        delay(600)
+        if (chosen != project.effortPercent) onEffort(project.projectId, chosen)
+    }
+    val own = Kanban.projectObjectives(objectives, project.projectId)
+    val shown = project.copy(effortPercent = pending ?: project.effortPercent)
+    Surface(onClick = { open = !open }, color = Color.Transparent, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).testTag("selfWorkProject:${project.projectId}")
+        .semantics { stateDescription = if (open) "Shown" else "Folded" }) {
+        Row(Modifier.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Icon(if (open) ThreadIcons.ChevronDown else ThreadIcons.ChevronRight, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Column(Modifier.weight(1f)) {
+                Text(project.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(Kanban.projectLine(shown), Modifier.testTag("selfWorkProjectLine"), style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Kanban.objectivesCount(own).takeIf { it.isNotBlank() }?.let {
+                Text(it, style = MaterialTheme.typography.labelLarge.copy(fontFamily = FontFamily.Monospace), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+    if (!open) return
+    Column(Modifier.padding(start = 20.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        // Rem's only project holds 100%, the one level of effort the desktop takes for it, so it gets no − and +.
+        if (canChangeEffort) StepRow("Level of effort", "Its share of self-work's threads. The other projects share the rest.", "${shown.effortPercent}%",
+            "selfWorkEffort", "Lower ${project.name}'s level of effort", "Raise ${project.name}'s level of effort",
+            enabled && shown.effortPercent > 0, enabled && shown.effortPercent < Kanban.EFFORT_MAX,
+            { pending = (shown.effortPercent - Kanban.EFFORT_STEP).coerceAtLeast(0) },
+            { pending = (shown.effortPercent + Kanban.EFFORT_STEP).coerceAtMost(Kanban.EFFORT_MAX) })
+        ObjectiveList(own, objectives, openId, canChange, enabled, project.projectId, onToggle, onObjectives, onEdit)
+        if (canChange) AddObjectiveButton("Add objective for ${project.name}", "selfWorkObjectiveAdd:${project.projectId}", enabled, onAdd)
+        if (canChange && objectives.askable) AskRemRow(project, objectives.asking[project.projectId], enabled, error, onObjectives)
+    }
+}
+
+/**
+ * Ask Rem for one project: the desktop has Rem read it and add three to five broad, open-ended objectives. How it goes comes
+ * back in the objectives view, so an ask started on the computer or the CLI shows here too.
+ */
+@Composable
+private fun AskRemRow(project: SelfWorkProject, ask: ObjectiveAsk?, enabled: Boolean, error: String?, onObjectives: (org.json.JSONObject) -> Unit) {
+    var sending by remember(project.projectId) { mutableStateOf(false) }
+    // The desktop answered: its view (or the error under the card) now says how it stands.
+    LaunchedEffect(ask, error) { sending = false }
+    val line = Kanban.askLine(ask, sending)
+    TextButton(onClick = { sending = true; onObjectives(Kanban.askObjectivesParams(project.projectId)) }, enabled = enabled && !line.busy,
+        modifier = Modifier.heightIn(min = 48.dp).testTag("selfWorkObjectiveAsk:${project.projectId}")
+            .semantics { contentDescription = "Ask Rem for ${project.name} objectives. ${Kanban.ASK_REM_HINT}" }) {
+        if (line.busy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp) else Icon(ThreadIcons.Sparkles, null, Modifier.size(16.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(if (line.busy) "Asking Rem…" else "Ask Rem")
+    }
+    if (line.text.isNotBlank()) {
+        Text(line.text, Modifier.testTag("selfWorkObjectiveAskLine:${project.projectId}").semantics { liveRegion = LiveRegionMode.Polite },
+            style = MaterialTheme.typography.bodySmall,
+            color = if (line.error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun AddObjectiveButton(label: String, tag: String, enabled: Boolean, onClick: () -> Unit) {
+    TextButton(onClick = onClick, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp).testTag(tag)) {
+        Icon(ThreadIcons.Plus, null, Modifier.size(16.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(label)
+    }
+}
+
+/** Writes a new objective: the goal and an optional finish line. [project] names the project it is for, or null for a global one. */
+@Composable
+private fun AddObjectiveDialog(project: String?, onDismiss: () -> Unit, onAdd: (String, String) -> Unit) {
+    var text by rememberSaveable { mutableStateOf("") }
+    var doneWhen by rememberSaveable { mutableStateOf("") }
+    AlertDialog(onDismissRequest = onDismiss, modifier = Modifier.testTag("selfWorkObjectiveForm"),
+        title = { Text(project?.let { "Objective for $it" } ?: "Objective for every project") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(text, { text = it.take(Kanban.OBJECTIVE_TEXT_MAX) }, Modifier.fillMaxWidth().testTag("selfWorkObjectiveText"),
+                    label = { Text("Objective") }, placeholder = { Text("A goal for the whole session") })
+                OutlinedTextField(doneWhen, { doneWhen = it.take(Kanban.OBJECTIVE_DONE_WHEN_MAX) }, Modifier.fillMaxWidth().testTag("selfWorkObjectiveDoneWhen"),
+                    label = { Text("Done when (optional)") }, placeholder = { Text("Leave empty for open-ended") })
+            }
+        },
+        confirmButton = { TextButton(onClick = { onAdd(text, doneWhen) }, enabled = text.isNotBlank(), modifier = Modifier.testTag("selfWorkObjectiveSave")) { Text("Add") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+}
+
+/**
+ * Changes an objective: its text, its finish line and, with [projects] (a desktop that can move objectives), where it applies:
+ * every project or one of Rem's projects. [scope] is where it is now; [onSave] gets the scope chosen, or null without [projects].
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun EditObjectiveSheet(item: SelfWorkObjective, scope: String, projects: List<SelfWorkProject>, enabled: Boolean, onDismiss: () -> Unit,
+                               onSave: (String, String, String?) -> Unit) {
+    var text by rememberSaveable(item.id) { mutableStateOf(item.text) }
+    var doneWhen by rememberSaveable(item.id) { mutableStateOf(item.doneWhen) }
+    var appliesTo by rememberSaveable(item.id) { mutableStateOf(scope) }
+    ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.testTag("selfWorkObjectiveEdit")) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Edit objective", style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
+            OutlinedTextField(text, { text = it.take(Kanban.OBJECTIVE_TEXT_MAX) }, Modifier.fillMaxWidth().testTag("selfWorkObjectiveEditText"),
+                label = { Text("Objective") })
+            OutlinedTextField(doneWhen, { doneWhen = it.take(Kanban.OBJECTIVE_DONE_WHEN_MAX) }, Modifier.fillMaxWidth().testTag("selfWorkObjectiveEditDoneWhen"),
+                label = { Text("Done when (optional)") }, placeholder = { Text("Leave empty for open-ended") })
+            if (projects.isNotEmpty()) {
+                Text("Applies to", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 4.dp).semantics { heading() })
+                (listOf(Kanban.EVERY_PROJECT to "Every project") + projects.map { it.projectId to it.name }).forEach { (value, name) ->
+                    val chosen = value == appliesTo
+                    Surface(onClick = { appliesTo = value }, color = Color.Transparent,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("selfWorkObjectiveAppliesTo:$value")
+                            .semantics { selected = chosen }) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Text(name, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (chosen) Icon(Icons.Default.Check, "Selected", tint = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                TextButton(onClick = onDismiss, modifier = Modifier.heightIn(min = 48.dp)) { Text("Cancel") }
+                Button(onClick = { onSave(text, doneWhen, appliesTo.takeIf { projects.isNotEmpty() }) }, enabled = enabled && text.isNotBlank(),
+                    modifier = Modifier.heightIn(min = 48.dp).testTag("selfWorkObjectiveEditSave")) { Text("Save") }
+            }
+        }
+    }
+}
+
+/** Check off or reopen, edit, and remove, under an open objective's details. Removing asks first. */
+@Composable
+private fun ObjectiveActions(item: SelfWorkObjective, enabled: Boolean, onCheck: () -> Unit, onEdit: () -> Unit, onRemove: () -> Unit) {
+    var confirming by remember(item.id) { mutableStateOf(false) }
+    Row(Modifier.padding(start = 20.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        TextButton(onClick = onCheck, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp).testTag("selfWorkObjectiveCheck")) {
+            Text(if (item.done) "Reopen" else "Check off")
+        }
+        TextButton(onClick = onEdit, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp).testTag("selfWorkObjectiveEditOpen")) { Text("Edit") }
+        TextButton(onClick = { confirming = true }, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp).testTag("selfWorkObjectiveRemove")) { Text("Remove") }
+    }
+    if (confirming) AlertDialog(onDismissRequest = { confirming = false }, title = { Text("Remove this objective?") }, text = { Text(item.text) },
+        confirmButton = { TextButton(onClick = { confirming = false; onRemove() }, modifier = Modifier.testTag("selfWorkObjectiveRemoveConfirm")) { Text("Remove") } },
+        dismissButton = { TextButton(onClick = { confirming = false }) { Text("Keep") } })
+}
+
+/** One objective: its text and whether it's done; while [open], its finish line, who checked it off and the evidence, then [actions]. Tapping calls [onToggle]. */
+@Composable
+private fun ObjectiveRow(item: SelfWorkObjective, open: Boolean, onToggle: () -> Unit, actions: (@Composable () -> Unit)? = null) {
     val state = if (item.done) "Done" else "Open"
     val done = orgColors(OrgTone.DONE).first
     Surface(onClick = onToggle, color = Color.Transparent, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("selfWorkObjective")
@@ -1202,6 +1469,7 @@ private fun ObjectiveRow(item: SelfWorkObjective, open: Boolean, onToggle: () ->
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
+    if (open) actions?.invoke()
 }
 
 /** The line about Rem's projects and whether it needs attention. The count is the desktop's; names come from the board if it's loaded. Null on an older desktop. */

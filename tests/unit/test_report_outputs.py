@@ -367,3 +367,71 @@ def test_artifact_rules_include_custom_theme_and_all_informational_documents(tmp
     assert "Source code, existing repository documentation" in rules
     with pytest.raises(ValueError, match="configured .html extension"):
         tools.call("save_report", {"path": "findings.md", "content": "# Findings"})
+
+
+def test_html_report_without_phone_tags_is_kept_and_warned(tmp_path):
+    from gofer.ui.report_outputs import NO_COLOR_SCHEME, NO_VIEWPORT
+
+    result = ReportTools(tmp_path, "html").call(
+        "save_report", {"path": "review.html", "content": HTML}
+    )
+    # Saved as written; the author hears what keeps it from fitting a phone.
+    assert (tmp_path / "review.html").read_text() == HTML
+    assert result["screenWarnings"] == [NO_VIEWPORT, NO_COLOR_SCHEME]
+    assert "warnings" not in result
+
+
+def test_html_report_that_fits_phones_is_kept_as_written(tmp_path):
+    content = HTML.replace(
+        "<head>",
+        '<head><meta name="viewport" content="width=device-width">'
+        "<style>:root{color-scheme:dark}</style>",
+    )
+    result = ReportTools(tmp_path, "html").call(
+        "save_report", {"path": "review.html", "content": content}
+    )
+    assert (tmp_path / "review.html").read_text() == content
+    assert "screenWarnings" not in result
+
+
+@pytest.mark.parametrize(
+    "declaration, warned",
+    [
+        # A media query for the user's appearance declares no color scheme of its own.
+        ("@media (prefers-color-scheme: dark){body{background:#000}}", True),
+        ("@media (prefers-color-scheme:light){body{background:#fff}}", True),
+        (":root{color-scheme:light dark}", False),
+        ("html{ color-scheme : dark }", False),
+    ],
+)
+def test_only_a_declared_color_scheme_counts(tmp_path, declaration, warned):
+    from gofer.ui.report_outputs import NO_COLOR_SCHEME
+
+    content = HTML.replace(
+        "<head>",
+        f'<head><meta name="viewport" content="width=device-width"><style>{declaration}</style>',
+    )
+    result = ReportTools(tmp_path, "html").call(
+        "save_report", {"path": "review.html", "content": content}
+    )
+    assert result.get("screenWarnings", []) == ([NO_COLOR_SCHEME] if warned else [])
+
+
+def test_a_color_scheme_meta_tag_counts(tmp_path):
+    content = HTML.replace(
+        "<head>",
+        '<head><meta name="viewport" content="width=device-width">'
+        '<meta name="color-scheme" content="dark">',
+    )
+    result = ReportTools(tmp_path, "html").call(
+        "save_report", {"path": "review.html", "content": content}
+    )
+    assert "screenWarnings" not in result
+
+
+def test_markdown_reports_get_no_screen_check(tmp_path):
+    result = ReportTools(tmp_path, "md").call(
+        "save_report", {"path": "review.md", "content": "# Review\n"}
+    )
+    assert (tmp_path / "review.md").read_text() == "# Review\n"
+    assert "screenWarnings" not in result

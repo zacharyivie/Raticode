@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 import typer
 
-from gofer.cli import output
+from gofer.cli import approval, output
 from gofer.cli.commands import rattish_cache, rattish_secrets, rattish_shortcuts, rattish_triggers
 
 CUT = [{"path": "prompts/ask.md", "absolutePath": "/p/prompts/ask.md", "reason": "cut"}]
@@ -16,7 +16,8 @@ CUT = [{"path": "prompts/ask.md", "absolutePath": "/p/prompts/ask.md", "reason":
 
 def test_rattish_commands_share_one_unseen_prompt_and_one_error_helper() -> None:
     assert rattish_triggers.confirm_unseen is output.confirm_unseen
-    assert rattish_shortcuts.confirm_unseen is output.confirm_unseen
+    # The shortcut approve flow asks through the shared approval helper.
+    assert approval.confirm_unseen is output.confirm_unseen
     for module in (rattish_shortcuts, rattish_secrets, rattish_cache):
         assert module.fail is output.fail
         assert not hasattr(module, "_fail")

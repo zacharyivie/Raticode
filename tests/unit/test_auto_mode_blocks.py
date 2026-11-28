@@ -149,6 +149,43 @@ def test_only_a_refused_write_elsewhere_or_nothing_built_counts_as_misrooted(
     assert auto_mode.pick_project("Change src/app/server.py.", str(vault), roots) == str(code)
 
 
+def test_project_roots_with_spaces_count_as_evidence() -> None:
+    brain, app = "/x/My Brain", "/x/Client Work/app"
+    roots = [brain, app]
+    complaint = (
+        f"I'm blocked: this thread is rooted in {brain}, and {app} is read-only here "
+        "(Read-only file system). Rerun it with that folder."
+    )
+    blocked = {"project_dir": brain, "description": "Fix the handler", "block_reason": ""}
+    assert auto_mode.reroot_target(blocked, {"worker_result": complaint}, roots) == app
+    ticket = {"description": f"Fix the bug in {app}/src/app/server.py", "project_dir": brain}
+    assert auto_mode.file_under(ticket, roots) == app
+    # Nothing built, naming the folder the rerun needs in backticks.
+    named = (
+        f"I changed nothing: this thread is rooted in `{brain}`, and the other repo is "
+        f"read-only here. The rerun needs a new thread rooted in `{app}`."
+    )
+    assert auto_mode.misrooted_target(named, brain, roots) == app
+    # A root counts alone or with a path below it, never as part of a longer name or path.
+    assert auto_mode._mentions(f"See {app}/src/a.py, then {app}.", [app]) == [
+        (app, Path(app) / "src/a.py"),
+        (app, Path(app)),
+    ]
+    for text in (f"{app}-old/src/a.py", f"/y{app}/src/a.py", f"{app}s", f"~{app}"):
+        assert auto_mode._mentions(text, [app]) == [], text
+    # A report saved below a root is an output, not where the code is.
+    saved = {"description": f"Summarise {app}/reports/r.html", "project_dir": brain}
+    assert auto_mode.file_under(saved, roots) is None
+
+
+def test_project_roots_match_by_the_platforms_path_case(monkeypatch: Any) -> None:
+    # A Windows root has no leading / and matches whatever its letters' case.
+    root = r"C:\Users\me\Client Work"
+    monkeypatch.setattr(auto_mode.os.path, "normcase", str.lower)
+    found = auto_mode._mentions(r"The code is in c:\users\ME\client work.", [root])
+    assert found == [(root, Path(root))]
+
+
 def test_a_locked_database_is_a_temporary_failure() -> None:
     assert transient(sqlite3.OperationalError("database is locked"))
     assert not transient(ValueError("can't be completed without sign-in"))

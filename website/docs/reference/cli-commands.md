@@ -886,6 +886,7 @@ Write, check, compile and run Rattish workflows. Commands marked (Backend) start
 - `NAME` (optional): Human-readable workflow name. Optional with --from.
 - `--project` `PATH`: Repository project folder that will own the workflow.
 - `--from` `STR`: Copy a starter workflow, its test set and sample files. See `rattish starters`.
+- `--provider` `STR`: With --from, the app the starter's model steps call instead of the one it lists, such as codex or claude-code.
 - `--format` `STR`: Output format: text or json.
 - `--registry-dir` `PATH`: Override the app directory used for workflow registration.
 
@@ -1467,7 +1468,7 @@ Rem from the command line. Chat, tasks, memories, alerts and settings go through
 
 - `THREAD_ID` (optional): The thread's ID. Leave it out for Rem's own model calls
 - `--turns` / `-n` `INT RANGE`: The newest N turns or calls
-- `--call` `STR`: Rem's own calls of one kind: chat_reply, worker_answer, conversation, task_update, self_work_plan, self_work_fit, self_work_stop or organization (self_work for the records from before self-work's kinds were split)
+- `--call` `STR`: Rem's own calls of one kind: chat_reply, worker_answer, conversation, task_update, self_work_plan, self_work_fit, self_work_stop, objective_ideas or organization (self_work for the records from before self-work's kinds were split)
 - `--run` `STR`: Rem's own calls about one task run
 - `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
 - `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
@@ -2223,7 +2224,7 @@ Rem's self-work: status, report and settings. Needs a running backend.
 
 *Backend: needs a running Raticode backend.* Show or change the self-work objectives: the goals that guide a whole session.
 
-- `ACTION` (optional): list, add, edit, remove, check or uncheck
+- `ACTION` (optional): list, add, edit, remove, check, uncheck, or ask (Rem writes 3-5 for --project)
 - `--text` `STR`: The objective, for add or edit
 - `--done-when` `STR`: Its doneness criteria; leave out for an open-ended one
 - `--id` `STR`: The objective's ID from `list`
@@ -2231,6 +2232,8 @@ Rem's self-work: status, report and settings. Needs a running backend.
 - `--limit` `INT RANGE`: How many to list
 - `--offset` `INT RANGE`: How many to skip, for list
 - `--expected-revision` `INT`: The list's revision from `list`
+- `--project` `STR`: One of Rem's projects, by name or folder: list or add that project's own objectives, which steer only its tickets and research, or with edit move one there
+- `--global`: With edit, move the objective to the global ones
 - `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
 - `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
 - `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
@@ -2282,6 +2285,7 @@ Rem's self-work: status, report and settings. Needs a running backend.
 - `--auto-approve` / `--no-auto-approve`: Let self-work approve the backlog tickets its research finds, until self-work ends, instead of waiting for you; turning it on needs --confirm-auto-approve
 - `--confirm-auto-approve`: Confirm you want self-work to approve its own tickets without asking you
 - `--account` `STR` (repeatable): PROVIDER=ACCOUNT: the account runs self-work starts use with that provider. ACCOUNT is an account name, auto (choose by usage), @default (the default sign-in) or empty for Rem's setting (Settings &#62; Rem &#62; Accounts); repeat for several providers
+- `--effort` `STR` (repeatable): PROJECT=PERCENT: a Rem project's level of effort, its share of self-work's threads, by name or folder. Repeat for several; the projects you leave out share the rest so all of Rem's projects total 100
 - `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
 - `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
 - `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).

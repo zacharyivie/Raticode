@@ -1,6 +1,8 @@
 package dev.raticode.mobile.live
 
 import dev.raticode.mobile.protocol.v2.MobileCapabilities
+import dev.raticode.mobile.ui.scheduleText
+import dev.raticode.mobile.ui.scheduleWithZone
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
@@ -141,6 +143,10 @@ class DesktopControlTest {
         val detail = DesktopViews.parse("rem.task:task1", desktop.getJSONObject("rem.task")) as RemTask
         assertEquals("Look for failed builds", detail.prompt); assertEquals(listOf("Report failures"), detail.criteria)
         assertEquals(2, detail.runs.size)
+        assertEquals("Weekdays at 9:00", scheduleText(detail.schedule))
+        assertEquals("Weekdays at 9:00 · America/Denver", scheduleWithZone(detail.schedule))
+        assertEquals("pass", detail.lastRun!!.details!!.single().result)
+        assertEquals(listOf("Note · standards · scripts/check.sh"), RemTaskChecks.notes(detail.lastRun!!.notes).map { it.reason })
         val thread = DesktopViews.parse("rem.thread:thread1", desktop.getJSONObject("rem.thread")) as RemThread
         assertTrue(thread.running); assertEquals(listOf("t1"), thread.messages.map { it.id })
         @Suppress("UNCHECKED_CAST")

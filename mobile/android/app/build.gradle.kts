@@ -111,6 +111,8 @@ android {
     // GeckoView's engine is large; compressed in the APK it takes about half the download.
     packaging { jniLibs { useLegacyPackaging = true } }
     sourceSets.getByName("test").resources.directories.add("../protocol/probes/public-test-identities")
+    // Board rule cases the desktop's frontend tests read too, so both apps answer them the same way.
+    sourceSets.getByName("test").resources.directories.add("../protocol/probes/kanban-cases")
     sourceSets.getByName("test").kotlin.srcDir("src/testShared/java")
     sourceSets.getByName("androidTest").kotlin.srcDir("src/testShared/java")
     sourceSets.getByName("androidTest").assets.srcDir("../protocol/probes/public-test-identities")

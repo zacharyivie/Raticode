@@ -400,6 +400,8 @@ const Message = memo(function Message({ message, first, now, tasks, tickets = nu
       <WorkflowDraftForMessage message={message} tasks={tasks} live={live} />
       <MemoryNote messageId={message.id} memory={message.memory} />
       {message.role !== "user" && Array.isArray(message.decision_edits) ? message.decision_edits.map(card => <DecisionEditCard key={card.id} card={card} />) : null}
+      {/* Files the message links to, shown like the user's attachments. They stay where they are; a tile previews or opens the file. */}
+      {message.linked_files?.length ? <div role="group" aria-label="Linked files"><MessageAttachments attachments={message.linked_files} onOpenLink={onOpenLink} /></div> : null}
       {followUps ? <FollowUps suggestions={message.suggestions} /> : null}
       {/* The time and the message's actions (Reply, Copy, model and time) share one line. */}
       <div className="rem-msg-foot">{stamp}<MessageActions message={message} /></div>

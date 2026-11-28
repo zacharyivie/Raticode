@@ -3,6 +3,7 @@
 import base64
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -39,7 +40,7 @@ def linked(phone, tmp_path):
         {
             "id": "reply-1",
             "role": "rem",
-            "body": f"The [launch plan](<{report}>) and [notes]({outside}).",
+            "body": f"The [launch plan](<{report}>) and [notes](<{outside}>).",
             "created_at": "t3",
         },
         # The user can type any path into their own message.
@@ -565,3 +566,109 @@ def test_a_piece_cut_from_a_longer_link_is_refused(linked):
         {"source": "rem", "message_id": "reply-3", "href": str(report)},
     )
     assert whole["ok"], whole
+
+
+def test_files_rem_links_show_as_attachments_the_phone_opens_by_their_link(linked, tmp_path):
+    app, _, _, send, report, outside = linked
+    rem = app.desktop.rem
+    shot = tmp_path / "evidence" / "after fix.png"
+    shot.parent.mkdir()
+    shot.write_bytes(b"png")
+    secret = tmp_path / ".env"
+    secret.write_text("KEY=1")
+    rem.store.messages.append(
+        {
+            "id": "evidence",
+            "role": "rem",
+            "body": f"Done. [Screenshot](<{shot}>), [the site](https://raticode.dev) "
+            f"and [keys](<{secret}>).",
+            "details": f"- [launch plan](<{report}>)",
+            "created_at": "t9",
+        }
+    )
+    shown = {m["id"]: m for m in send("desktop.read", "rem.home")["value"]["messages"]}
+    # Each existing file a Rem message links to, by name and size with its link as
+    # written; web addresses and secret-looking files get no attachment.
+    plan = {"name": "launch plan.html", "size": report.stat().st_size, "href": str(report)}
+    assert shown["evidence"]["linked_files"] == [
+        {"name": "after fix.png", "size": 3, "href": str(shot)},
+        plan,
+    ]
+    assert shown["reply-1"]["linked_files"] == [
+        plan,
+        {"name": "private.txt", "size": 7, "href": str(outside)},
+    ]
+    # The user's own links never become Rem attachments.
+    assert "linked_files" not in shown["typed"]
+    # Opening one is the same request as tapping its link, with the same checks.
+    result = send(
+        "desktop.action",
+        "files.link",
+        {"source": "rem", "message_id": "evidence", "href": str(shot)},
+    )
+    assert result["ok"], result
+    assert result["value"]["name"] == "after fix.png"
+
+
+def test_worker_thread_replies_list_their_linked_files_for_the_phone(linked, tmp_path, monkeypatch):
+    from tests.unit.test_rem_file_links import _worker_thread
+
+    app, _, context, send, _, _ = linked
+    root = Path(context["projects"][0]["root"])
+    messages, shot = _worker_thread(tmp_path, monkeypatch, root)
+    store = app.desktop.rem.store
+    thread = {"metadata": {"title": "Fix"}, "running": False, "messages": messages}
+    monkeypatch.setattr(store, "thread", lambda identifier: thread)
+    shown = {
+        m["id"]: m
+        for m in send("desktop.read", "rem.thread", {"thread_id": THREAD})["value"]["messages"]
+    }
+    # The reply's existing file, by name and size with its link as written; the folder,
+    # the missing file and the SSH key get no tile, nor do instructions.
+    assert shown["a1"]["linked_files"] == [{"name": "after.png", "size": 4, "href": str(shot)}]
+    assert "linked_files" not in shown["u1"] and "linked_files" not in shown["a2"]
+    # A tile opens through files.link with source rem_thread, like tapping the link.
+    result = send(
+        "desktop.action",
+        "files.link",
+        {"source": "rem_thread", "thread_id": THREAD, "message_id": "a1", "href": str(shot)},
+    )
+    assert result["ok"], result
+    assert result["value"]["name"] == "after.png"
+
+
+def test_a_work_thread_link_opens_its_runs_evidence_files(linked, tmp_path, monkeypatch):
+    app, _, _, send, _, _ = linked
+    rem = app.desktop.rem
+    rem.data_dir = tmp_path / "rem-data"
+    turns = rem.data_dir / "rem-work" / "turn-scratch"
+    shot = turns / "run1-execute" / "evidence" / "shot.png"
+    shot.parent.mkdir(parents=True)
+    shot.write_bytes(b"png")
+    above = turns / "run1-execute" / "notes.txt"
+    above.write_text("scratch")
+    other = turns / "run9-execute" / "evidence" / "other.png"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"png")
+    thread = {
+        "metadata": {"title": "Fix"},
+        "running": False,
+        "messages": [
+            {"id": "a1", "role": "assistant", "body": f"[a](<{shot}>) [b]({above}) [c]({other})"}
+        ],
+    }
+    monkeypatch.setattr(rem.store, "thread", lambda identifier: thread)
+    monkeypatch.setattr(
+        rem.store, "thread_runs", lambda identifier: ["run1"] if identifier == THREAD else []
+    )
+
+    def fetch(path: Path) -> Any:
+        params = {"source": "rem_thread", "thread_id": THREAD, "message_id": "a1"}
+        return send("desktop.action", "files.link", {**params, "href": str(path)})
+
+    result = fetch(shot)
+    assert result["ok"], result
+    assert result["value"]["name"] == "shot.png"
+    # The rest of the scratch folder and another run's evidence stay on the desktop.
+    assert fetch(above)["code"] == "unauthorized"
+    assert fetch(other)["code"] == "unauthorized"

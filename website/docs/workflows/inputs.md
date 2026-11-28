@@ -115,6 +115,7 @@ with:
 ```
 
 - Use the name in a prompt as `{{report}}`.
+- <span v-pre>The value goes into the text as it is, even when it contains `{{` or `}}`, such as an HTML page or another template. Raticode never fills placeholders inside a value, so a value of `{{other}}` stays that text. To write literal braces in your own prompt, type `{{{{` and `}}}}`.</span>
 - If the name matches one of the node's input ports, the value also goes to that port.
 - Command and script nodes get other bindings as uppercase environment variables: `build-mode` becomes `BUILD_MODE`. Structured values arrive as compact JSON.
 - Output selectors use the schema's exact field names. Those can contain underscores, even though Rattish fields use hyphens.

@@ -1,10 +1,11 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Archive, Check, CheckCheck, ChevronRight, Loader2, MoreVertical, Pin, Trash2, X } from "lucide-react";
+import { Archive, Check, CheckCheck, ChevronRight, MoreVertical, Pin, Trash2, X } from "lucide-react";
+import SteadySpinner from "./SteadySpinner.jsx";
 import { archiveRetentionDays, cachedThreadScopes, inspectThreadScopes, organizeThreads, READ_THREAD_LIMIT, threadIndexEntry, threadScopeBadge, threadScopeKey } from "../lib/threadActivity.js";
 import { emptyThreadSelection, nextThreadSelection, presentThreadSelection, selectThreadSection, threadSelectionActions } from "../lib/threadSelection.js";
 
 // Thread history helpers come from App so this chunk doesn't import it back.
-const defaultFormatDate = value => value || "No messages yet";
+const defaultDateLabel = value => value || "No messages yet";
 
 export function ThreadSections({ threads, activityByThread = {}, launchedThreadId, onLaunchAnimationEnd, onClearArchive, onThreadsAction, archiveRetention = "never", threadIndex = () => [], loadStoredThread = () => null, ...props }) {
   const [runningOpen, setRunningOpen] = useState(false);
@@ -124,7 +125,7 @@ export function ThreadSections({ threads, activityByThread = {}, launchedThreadI
     </ThreadGroup> : null}
     {groups.running.length ? <ThreadGroup label="Running" count={groups.running.length} open={runningOpen}
       launching={runningLaunch} onAnimationEnd={runningLaunch ? onLaunchAnimationEnd : undefined}
-      icon={<Loader2 aria-hidden="true" className="text-brand motion-safe:animate-spin" size={12} />}
+      icon={<SteadySpinner aria-hidden="true" className="text-brand motion-safe:animate-spin" size={12} />}
       onToggle={() => setRunningOpen(open => !open)} {...sectionProps("running", groups.running)}>
       <ThreadList {...listProps} threads={groups.running} />
     </ThreadGroup> : null}
@@ -242,7 +243,7 @@ function ThreadActions({ thread, unread, onPin, onRename, onDelete, onDeletePerm
   </div>;
 }
 
-export function ThreadList({ launchedThreadId, onLaunchAnimationEnd, activeThreadId, activityByThread = {}, onArchive, onPin, onRename, onDelete, onDeletePermanently, onOpen, onSelect, onMenu, onMarkRead, selectedIds = emptyThreadSelection.ids, formatDate = defaultFormatDate, archived = false, threads, totalCount = threads.length, onLoadOlder, pageSize = 15, loadThread = entry => entry, sort = true, emptyText = "No thread history yet." }) {
+export function ThreadList({ launchedThreadId, onLaunchAnimationEnd, activeThreadId, activityByThread = {}, onArchive, onPin, onRename, onDelete, onDeletePermanently, onOpen, onSelect, onMenu, onMarkRead, selectedIds = emptyThreadSelection.ids, dateLabel = defaultDateLabel, archived = false, threads, totalCount = threads.length, onLoadOlder, pageSize = 15, loadThread = entry => entry, sort = true, emptyText = "No thread history yet." }) {
   const [visibleCount, setVisibleCount] = useState(pageSize);
   const sortedThreads = sort ? [...threads].sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""))) : threads;
   if (threads.length) {
@@ -281,7 +282,7 @@ export function ThreadList({ launchedThreadId, onLaunchAnimationEnd, activeThrea
                     {thread.title}
                   </div>
                   <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] text-muted">
-                    <span className="shrink-0">{formatDate(thread.updatedAt)}</span>
+                    <span className="shrink-0">{dateLabel(thread.updatedAt)}</span>
                     <ThreadScopeBadge thread={thread} />
                   </div>
                 </div>
@@ -337,7 +338,7 @@ function ThreadActivityIndicator({ state, unread = false }) {
         className="grid h-4 w-4 shrink-0 place-items-center text-brand"
         title="Rem response running"
       >
-        <Loader2 aria-hidden="true" className="animate-spin" size={13} />
+        <SteadySpinner aria-hidden="true" className="animate-spin" size={13} />
         <span className="sr-only">Running</span>
       </span>
     );

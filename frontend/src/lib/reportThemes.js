@@ -1,5 +1,6 @@
 import { startGenerationJob } from "./generationJobs.js";
 import { apiUrl } from "./api.js";
+import { ndjsonBatches } from "./ndjson.js";
 
 import { normalizeReportThemes, reportOutputFormat } from "../../electron/report-themes.js";
 export { reportOutputFormat } from "../../electron/report-themes.js";
@@ -58,25 +59,17 @@ export async function generateReportTheme(request, selection) {
   });
   if (response.ok && response.headers?.get("Content-Type")?.includes("application/x-ndjson")) {
     const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
     try {
-      while (true) {
-        const { done, value } = await reader.read();
+      for await (const lines of ndjsonBatches(reader)) {
         request.signal?.throwIfAborted();
-        buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
-        if (done && buffer) buffer += "\n";
-        const lines = buffer.split("\n");
-        buffer = lines.pop();
         for (const line of lines) {
-          if (!line.trim()) continue;
           const event = JSON.parse(line);
           if (event.type === "error") throw new Error(event.error || "Rem could not generate the theme.");
           if (event.type === "progress") request.onProgress?.(event.text);
           if (event.type === "final") return event.theme;
         }
-        if (done) throw new Error("Connection to Rem ended before the theme was ready. Try again.");
       }
+      throw new Error("Connection to Rem ended before the theme was ready. Try again.");
     } finally {
       await reader.cancel().catch(() => {});
       reader.releaseLock();

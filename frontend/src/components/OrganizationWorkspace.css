@@ -121,6 +121,11 @@
 .org-form { margin-bottom: 24px; }
 .org-form-grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 0 22px; }
 .org-form-thirds { grid-template-columns: repeat(3,minmax(0,1fr)); }
+/* A routine's cron in words with its next times, or the parser's message, under both fields. */
+.org-cron-preview { grid-column: 1 / -1; margin-top: -8px; font-size: 12px; line-height: 1.6; }
+.org-cron-preview p { margin: 0; }
+.org-cron-preview:empty { display: none; }
+.org-cron-error { color: var(--org-danger); }
 .org-field { display: flex; flex-direction: column; gap: 7px; margin: 16px 0; font-size: 12px; min-width: 0; }
 .org-field > span { font-weight: 550; }
 .org-field :is(input,textarea,select) { width: 100%; min-height: 38px; border: 1px solid rgb(var(--color-line)); border-radius: 6px; padding: 9px 11px; background: var(--org-panel); color: inherit; font: inherit; }
@@ -138,6 +143,16 @@
 .org-first-worker { border: 1px solid rgb(var(--color-line)); border-radius: 6px; padding: 10px 14px 12px; margin: 0; display: grid; gap: 8px; }
 .org-first-worker legend { padding: 0 6px; font-weight: 600; }
 .org-first-worker legend small { font-weight: 400; color: rgb(var(--color-muted)); margin-left: 4px; }
+.org-duration { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; }
+.org-field .org-duration select { width: auto; }
+.org-due { display: flex; align-items: flex-end; gap: 10px; }
+.org-due .org-field { flex: 1; }
+.org-due .org-button { margin-bottom: 16px; min-height: 38px; }
+.org-dependencies { border: 0; padding: 0; }
+.org-dependencies legend { padding: 0; margin-bottom: 7px; font-weight: 550; }
+.org-dependency-list { max-height: 216px; overflow: auto; border: 1px solid rgb(var(--color-line)); border-radius: 6px; padding: 2px 11px; background: var(--org-panel); }
+.org-dependency-list .org-check { margin: 9px 0; }
+.org-dependency-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .org-banner { display: flex; align-items: center; gap: 10px; padding: 10px 24px; border-bottom: 1px solid rgb(var(--color-line)); font-size: 12px; }
 .org-banner > span { flex: 1; }
 .org-banner .org-button { border: 0; background: transparent; color: inherit; min-height: 28px; height: 28px; }

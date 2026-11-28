@@ -203,6 +203,7 @@ def test_task_approval_binds_to_plan(manager, tmp_path) -> Any:
 def test_concurrent_config_writers_only_one_wins(manager, tmp_path) -> Any:
     org = company(manager, tmp_path)
 
+    # Not the shared file writer: one concurrent configure call.
     def write(index):
         try:
             return call(
@@ -648,6 +649,7 @@ def test_rem_session_capability_expires_and_read_only_denies(manager, tmp_path) 
 @pytest.mark.parametrize("enabled", [False, True])
 def test_http_organization_routes_authorize_and_attribute(tmp_path, monkeypatch, enabled) -> Any:
     import urllib.error
+    import urllib.parse
     import urllib.request
 
     from gofer.ui import server as ui
@@ -702,7 +704,7 @@ def test_http_organization_routes_authorize_and_attribute(tmp_path, monkeypatch,
             }
         )
         history = request(
-            suffix=f"?projectRoot={tmp_path}&action=history&organizationId={org['id']}"
+            suffix=f"?projectRoot={urllib.parse.quote(str(tmp_path))}&action=history&organizationId={org['id']}"
         )
         assert history[0]["actor"] == "user"
         with pytest.raises(urllib.error.HTTPError) as conflict:

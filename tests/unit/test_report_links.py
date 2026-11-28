@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 
@@ -88,9 +89,10 @@ def test_saving_an_html_report_rewrites_inside_links_and_warns_about_others(vaul
 
 def test_saving_markdown_rewrites_links_but_not_code(vault: Path) -> None:
     chart = vault / "Assets/chart one.png"
+    other = (vault / "Reports/Topic/other.html").as_uri()
     content = (
-        f"# Notes\n\n![Chart](<{chart}>) and [other](file://{vault}/Reports/Topic/other.html)\n"
-        f"[ref]: {vault}/Assets/chart%20one.png\n\n"
+        f"# Notes\n\n![Chart](<{chart}>) and [other]({other})\n"
+        f"[ref]: {quote(str(vault))}/Assets/chart%20one.png\n\n"
         f"`[inline]({chart})`\n\n```\n[fenced]({vault}/Assets/x.png)\n```\n"
     )
     result = save_report(vault, "Reports/notes.md", content, "md")
@@ -126,8 +128,8 @@ def test_library_health_lists_dead_links_and_repairs_absolute_ones(
         note = vault / "Reports/Topic/note.md"
         note.write_text(
             "# Note\n\n"
-            f"[chart]({vault}/Assets/chart%20one.png) "
-            f"[gone]({vault}/Reports/gone.md) "
+            f"[chart](<{vault}/Assets/chart%20one.png>) "
+            f"[gone](<{vault}/Reports/gone.md>) "
             "[temp](/tmp/raticode-test/x.png) "
             f"[out]({OUTSIDE_FILE}) [exists]({Path(__file__).resolve()}) "
             "[missing](missing.md) [ok](other.html)\n"
@@ -165,8 +167,9 @@ def test_library_health_lists_dead_links_and_repairs_absolute_ones(
         assert done["state"] == "done", done
         assert done["result"]["written"] == 1
         repaired = note.read_text()
-        assert "[chart](../../Assets/chart%20one.png)" in repaired
-        assert "[gone](../gone.md)" in repaired
+        # Only the target changes; the <...> around it stays.
+        assert "[chart](<../../Assets/chart%20one.png>)" in repaired
+        assert "[gone](<../gone.md>)" in repaired
         assert "[temp](/tmp/raticode-test/x.png)" in repaired
         assert f"[out]({OUTSIDE_FILE})" in repaired
 

@@ -39,7 +39,7 @@ def run(cwd: Path, *args: str) -> str:
 def plant(repo: Path, marker: Path) -> None:
     """Name a program in every repository-scoped setting git runs on file contents."""
     script = repo.parent / "planted.sh"
-    script.write_text(f"#!/bin/sh\necho ran >> {marker}\ncat\n")
+    script.write_text(f"#!/bin/sh\necho ran >> {shlex.quote(str(marker))}\ncat\n")
     script.chmod(0o755)
     for key in (
         "filter.evil.clean",
@@ -48,9 +48,14 @@ def plant(repo: Path, marker: Path) -> None:
         "diff.evil.command",
         "merge.evil.driver",
     ):
-        run(repo, "config", key, str(script))
+        run(repo, "config", key, shlex.quote(str(script)))  # Git runs each through sh.
     run(repo, "config", "filter.evil.required", "true")
     (repo / ".gitattributes").write_text("* filter=evil diff=evil merge=evil\n")
+
+
+def git_quote(value: str) -> str:
+    """Git's own quoting for GIT_CONFIG_PARAMETERS, which can't read shlex's '"'"' form."""
+    return "'" + value.replace("'", "'\\''") + "'"
 
 
 def repository(tmp_path: Path) -> Path:
@@ -504,7 +509,7 @@ def test_hooks_from_the_command_line_still_run(tmp_path):
     # A repository command under the same name, trying to replace Raticode's.
     run(repo, "config", "hook.own.command", f"echo ran >> {shlex.quote(str(marker))}")
     command = f"echo own >> {shlex.quote(str(own))}"
-    parameters = f"'hook.own.event'='post-commit' 'hook.own.command'={shlex.quote(command)}"
+    parameters = f"'hook.own.event'='post-commit' 'hook.own.command'={git_quote(command)}"
     existing = os.environ.get("GIT_CONFIG_PARAMETERS", "").strip()
     env = {
         **os.environ,

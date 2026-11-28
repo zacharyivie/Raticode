@@ -7,10 +7,11 @@ import { test } from "node:test";
 // useRovingChoice helper (src/lib/useRovingChoice.js). A file listed here keeps its own
 // keyboard handling, for the reason given.
 const KEEPS_OWN = new Map([
-  ["components/DagCanvas.jsx", "node inspector tabs use handleInspectorTabKeyDown"],
-  ["components/CodeFileExplorer.jsx", "the vertical sidebar view rail skips locked plugins; source control tabs move by id"],
+  ["components/RattishInspector.jsx", "node inspector tabs use handleInspectorTabKeyDown"],
+  ["components/CodeFileExplorer.jsx", "the vertical sidebar view rail skips locked plugins"],
   ["components/CodeWorkspace.jsx", "editor tabs are draggable, scroll into view and carry close buttons"],
   ["components/OrganizationHome.jsx", "section tabs focus by id after the section changes"],
+  ["components/SourceControlPanel.jsx", "source control tabs move by id"],
   ["components/RemMemoryPanel.jsx", "native radio inputs, which the browser moves between"],
   ["components/SecondBrainDialogs.jsx", "native radio inputs, which the browser moves between"],
 ]);

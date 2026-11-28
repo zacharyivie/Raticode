@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Code2, Copy, Keyboard, Loader2, MoreVertical, PencilLine, Play, Square, Trash2 } from "lucide-react";
-import { formatRunAge } from "../lib/workflowRuns.js";
+import { timeAgo } from "../lib/timeText.js";
 import { workflowFolderLabel } from "../lib/workflowFolder.js";
+import { useOffReason } from "./OffReason.jsx";
 
-const WORKFLOW_MENU_SIZE = { width: 200, height: 250 };
+const WORKFLOW_MENU_SIZE = { width: 200, height: 270 };
 
 // Keeps the fixed-position menu inside the viewport.
 function menuPosition(clientX, clientY, viewportWidth = window.innerWidth, viewportHeight = window.innerHeight) {
@@ -28,9 +29,9 @@ const WORKFLOW_STATUS_DOT = {
   muted: "bg-slate-400",
 };
 
-export function workflowListSubtitle(listStatus, now = Date.now()) {
+function workflowListSubtitle(listStatus, now = Date.now()) {
   if (listStatus.detail) return listStatus.detail;
-  const age = formatRunAge(listStatus.since, now);
+  const age = timeAgo(listStatus.since, now);
   if (!age) return "";
   return listStatus.tone === "running" ? `Started ${age}` : `Last run ${age}`;
 }
@@ -57,6 +58,8 @@ export default function WorkflowListItem({
   const subtitle = workflowListSubtitle(listStatus);
   const invalid = listStatus.key === "invalid";
   const folder = workflowFolderLabel(workflow);
+  const runOff = useOffReason(onRun ? "" : invalid ? "Fix this workflow's errors before running it."
+    : listStatus.key === "submitting" ? "A run is starting." : "This workflow can't run right now.");
 
   useEffect(() => {
     if (!menu) return undefined;
@@ -77,7 +80,7 @@ export default function WorkflowListItem({
     // The menu is fixed to the viewport, so scrolling the list would strand it.
     window.addEventListener("scroll", close, true);
     window.addEventListener("resize", close);
-    menuRef.current?.querySelector("[role=menuitem]:not(:disabled)")?.focus();
+    menuRef.current?.querySelector("[role=menuitem]")?.focus();
     return () => {
       window.removeEventListener("pointerdown", handlePointerDown);
       window.removeEventListener("keydown", handleKeyDown);
@@ -129,7 +132,7 @@ export default function WorkflowListItem({
   function moveMenuFocus(event) {
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
-    const items = [...(menuRef.current?.querySelectorAll("[role=menuitem]:not(:disabled)") ?? [])];
+    const items = [...(menuRef.current?.querySelectorAll("[role=menuitem]") ?? [])];
     const index = items.indexOf(document.activeElement);
     const next = event.key === "Home" ? 0
       : event.key === "End" ? items.length - 1
@@ -137,7 +140,7 @@ export default function WorkflowListItem({
     items[next]?.focus();
   }
 
-  const itemClass = "flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50 hover:text-ink focus:bg-slate-50 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:hover:bg-[#2a2a2a] dark:focus:bg-[#2a2a2a]";
+  const itemClass = "flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50 hover:text-ink focus:bg-slate-50 focus:outline-none aria-disabled:cursor-not-allowed aria-disabled:opacity-50 aria-disabled:hover:bg-transparent dark:hover:bg-[#2a2a2a] dark:focus:bg-[#2a2a2a]";
 
   return (
     <div
@@ -264,17 +267,19 @@ export default function WorkflowListItem({
               Stop run
             </button>
           ) : (
-            <button
-              className={itemClass}
-              disabled={!onRun}
-              role="menuitem"
-              title={invalid ? "Fix this workflow's errors before running it." : undefined}
-              type="button"
-              onClick={menuAction(() => onRun?.())}
-            >
-              <Play size={15} />
-              Run workflow
-            </button>
+            <>
+              <button
+                {...runOff.props}
+                className={itemClass}
+                role="menuitem"
+                type="button"
+                onClick={runOff.guard(menuAction(() => onRun?.()))}
+              >
+                <Play size={15} />
+                Run workflow
+              </button>
+              {runOff.line ? <div className="pb-1.5 pl-[35px] pr-3" role="none">{runOff.line}</div> : null}
+            </>
           )}
           <button className={itemClass} role="menuitem" type="button" onClick={menuAction(() => setRenaming(true))}>
             <PencilLine size={15} />

@@ -1,6 +1,8 @@
 // Settings › Usage › Verified work: how often Rem's tickets passed review on their own.
 // The backend works the numbers out (gofer/ui/rem_verified_work.py); this only words them.
 
+import { monthName, shortDate } from "./timeText.js";
+
 function count(value) {
   return Number.isFinite(value) && value >= 0 ? Math.round(value) : 0;
 }
@@ -98,13 +100,11 @@ export function verifiedTrend(numbers) {
   const buckets = Array.isArray(numbers?.trend?.buckets) ? numbers.trend.buckets : [];
   if (buckets.filter(bucket => count(bucket?.accepted) || count(bucket?.blocked)).length < 2) return [];
   const most = Math.max(1, ...buckets.map(bucket => count(bucket.accepted) + count(bucket.blocked)));
-  const unit = numbers.trend.bucket === "month" ? { month: "short", year: "numeric" } : { month: "short", day: "numeric" };
   return buckets.map(bucket => {
     const accepted = count(bucket.accepted);
     const first = Math.min(count(bucket.first_pass), accepted);
     const blocked = count(bucket.blocked);
-    const date = new Date(bucket.start);
-    const label = Number.isNaN(date.getTime()) ? String(bucket.start || "") : date.toLocaleDateString(undefined, unit);
+    const label = (numbers.trend.bucket === "month" ? monthName(bucket.start) : shortDate(bucket.start)) || String(bucket.start || "");
     return {
       key: String(bucket.start),
       label,

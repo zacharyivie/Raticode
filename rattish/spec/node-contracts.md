@@ -128,10 +128,30 @@ Node test:
 Here `input.mode` supplies `BUILD_MODE` for this execution. It replaces both the authored
 `env.BUILD_MODE` value and any inherited process value.
 
-Both script nodes return a closed successful output object with `stdout`, `stderr`,
-`exit_code`, and the resolved `script_path`. Python scripts use `python` from `PATH`.
-Shell scripts use `bash`. Deployment preflight requires the selected interpreter and a
-readable script file. Missing deployment resources do not invalidate compiled IR.
+`bash-command` returns a closed output object with `stdout`, `stderr`, `exit_code` and
+`truncated`. Both script nodes return the same fields plus the resolved `script_path`.
+Python scripts use `python` from `PATH`. Shell scripts use `bash`. Deployment preflight
+requires the selected interpreter and a readable script file. Missing deployment resources
+do not invalidate compiled IR.
+
+The three types, version 2 of each contract, give `stdout` and `stderr` separate budgets of
+`max_subprocess_output_bytes` (2,000,000 bytes by default). `stdout` keeps its first
+2,000,000 bytes. `stderr` keeps its start and its last 64 KiB, so the end of a long error
+survives. No note is written into either field, so a `with: stdin:` binding receives only
+the command's own bytes. `truncated` is `true` when either stream passed the limit, and
+the run records a `node_output_truncated` event with the step, the limit in `limit_bytes`
+and the cut `streams`.
+
+A nonzero exit fails the step with `RATTISH_RUNTIME_COMMAND_FAILED`. Its message is the last
+8,192 characters of `stderr`. When `stderr` is empty it is `Command exited with status N.`
+(`Script` for the script types) followed by the first error string of a JSON `stdout`, or
+else the last 8,192 characters of `stdout`, read from the real end of the stream when
+`stdout` was cut. `open-resource` builds its failure message the same way, labelled
+`Resource opener`.
+
+Run from here reuses a step only when its node definition, including the contract version
+and fingerprint, is unchanged, so runs made before version 2 can't supply these steps until
+they run once.
 
 ## File and resource nodes
 
@@ -212,8 +232,12 @@ With `sandbox: on`, the runtime starts `claude-code` with Claude Code's sandbox 
 (the settings Rem uses for unattended turns): shell writes are limited to `working-dir`,
 `extra-paths`, a per-run scratch folder under the data folder (removed when the run ends)
 and, for a git worktree, part of the repository's shared `.git` folder; credential paths are
-hidden from the shell and denied to the Read and Edit tools; Bash is not approved
-automatically; and the shell's network allowlist is `network`. In a `workspace: worktree`
+hidden from the shell and denied to the Read and Edit tools; every registered Second
+Brain with Allow cloud processing off, other than Rem's Settings > Memory folder, is
+hidden from the shell and denied to the Read, Edit, Grep and Glob tools, wherever its folder
+is, and a step whose `working-dir` or `extra-paths` entry is, sits in or (for an
+`extra-paths` entry) holds one is refused with `RATTISH_SANDBOX_PRIVATE_BRAIN`; Bash is not
+approved automatically; and the shell's network allowlist is `network`. In a `workspace: worktree`
 run, a step whose `working-dir` is in the run's worktree may write only `objects/`, the
 run's own `worktrees/<name>/` folder, `refs/heads/raticode/run/` and
 `logs/refs/heads/raticode/run/`, and its environment adds `gc.auto=0` and
@@ -436,6 +460,22 @@ The `with` block may replace `url`, `headers`, `params`, `json`, or `body` for o
 execution. A bound `json` value suppresses authored `body`, and a bound `body` suppresses
 authored `json`. Binding both is a runtime configuration error. `json` and `body` are also
 mutually exclusive when both are authored.
+
+Header names compare case-insensitively. A bound or authored `headers` map sends each name
+once, the last spelling winning, and a `json` payload adds `Content-Type: application/json`
+only when no `Content-Type` is set in any case. Output `headers` keys are lowercase field
+names. A repeated field's values join with `", "`, except `set-cookie`, whose values join
+with `"\n"`. A reference `node.<id>.output.headers.<name>` to an `http-request` node and an
+`output-mapping` path `headers.<name>` lowercase `<name>`, so any spelling selects the field.
+
+A 429 or 503 response with a `Retry-After` header (delay-seconds or an HTTP date) sets the
+wait before the next `retry` attempt to the larger of `backoff` and that value, when the
+status is in `retry-on-statuses`. A `Retry-After` over 300 seconds stops the `retry`
+attempts. When such a response ends the node as `RATTISH_HTTP_UNEXPECTED_STATUS`, the error
+details carry `retry_after_ms`, so `retry-count` waits at least that long. Over 300 seconds,
+including a value too large to count, the error has no `retry_after_ms`, is
+`retryable: false`, and its message names the requested wait. Every
+`node_retried` event message ends with the wait before the next attempt when there is one.
 
 `read-web-page` has these operation fields:
 

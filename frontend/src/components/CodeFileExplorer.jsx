@@ -1,22 +1,13 @@
-import { filterHistory, layoutHistoryGraph } from "../lib/gitHistoryGraph.js";
-import HistoryBranchFilter from "./HistoryBranchFilter.jsx";
-import GitHistoryLane, { GitHistoryRefs, GitHistoryStats } from "./GitHistoryLane.jsx";
-import { dismissGenerationJob, latestGenerationJob, jobIsRunning } from "../lib/generationJobs.js";
-import { pathKey as normalizeWorkspacePath, samePath, pathWithin, displayPath } from "../lib/workspacePaths.js";
-import { startPolling, shareInFlight } from "../lib/refresh.js";
-import { commitDiffPath } from "../lib/commitDiff.js";
-import { cleanCommitMessage } from "../lib/commitMessage.js";
-import RemActionIcon from "./RemActionIcon.jsx";
+import { pathKey as normalizeWorkspacePath, samePath, pathWithin, displayPath, joinWorkspacePath, parentWorkspacePath, workspaceBasename } from "../lib/workspacePaths.js";
+import { useSourceControl } from "../lib/useSourceControl.js";
+import SourceControlPanel from "./SourceControlPanel.jsx";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { askRemAboutFiles, copyFilesForPaste } from "../lib/fileAttachments.js";
 import { beginFileDrag, containsFileTransfer, droppedFileEntries, getFileClipboard, setFileClipboard, subscribeFileClipboard, transferName, clipboardEntries, topLevelTransferEntries } from "../lib/fileTransfers.js";
 import {
-  ArrowDown,
-  ArrowUp,
   Check,
   ChevronDown,
   Copy,
-  Eraser,
   Scissors,
   ClipboardPaste,
   FileCode2,
@@ -27,23 +18,15 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
-  GitBranch,
-  GitMerge,
-  GitCommitHorizontal,
   Loader2,
   Lock,
   LockOpen,
   PencilLine,
   Play,
-  Plus,
-  Minus,
-  MoreHorizontal,
   RefreshCw,
   Trash2,
   X,
 } from "lucide-react";
-import GitIntegrationControls from "./GitIntegrationControls.jsx";
-import WorktreeContextMenu, { historyOperations, integrationOperations } from "./WorktreeContextMenu.jsx";
 import KanbanSidebar from "./KanbanSidebar.jsx";
 import OrganizationSidebar from "./OrganizationSidebar.jsx";
 import SwarmSidebar from "./SwarmSidebar.jsx";
@@ -54,6 +37,7 @@ const SecondBrainSidebar = lazy(() => import("./SecondBrainSidebar.jsx"));
 const RemHomeSidebar = lazy(() => import("./RemHomeSidebar.jsx"));
 import { Dialog } from "./Dialog.jsx";
 import { useConfirm } from "./ConfirmDialog.jsx";
+import RemActionIcon from "./RemActionIcon.jsx";
 import { hasUnsavedCodeChanges } from "../lib/codeEditorSessions.js";
 import { PathNameDialog } from "./PathNameDialog.jsx";
 import { formatKeybinding, DEFAULT_APP_SETTINGS, matchesCommand } from "../lib/settings.js";
@@ -96,8 +80,6 @@ export default function CodeFileExplorer({
 }) {
   const rootPath = workflow?.projectRoot ?? "";
   const [confirm, confirmDialog] = useConfirm();
-  const gitPanelsLoadingRef = useRef(null);
-  const gitStatusLoadingRef = useRef(false);
   const lastNewFileRequestRef = useRef(newFileRequest);
   const recentMenuRef = useRef(null);
   const treeRef = useRef(null);
@@ -143,94 +125,8 @@ export default function CodeFileExplorer({
   const [error, setError] = useState("");
   const [grantRequired, setGrantRequired] = useState(false);
   const [recentMenuOpen, setRecentMenuOpen] = useState(false);
-  const [sourceControl, setSourceControl] = useState({ active: false, entries: [] });
-  const [sourceControlRoot, setSourceControlRoot] = useState(null);
-  const [gitOperationBusy, setGitBusy] = useState(false);
-  const [gitStaging, setGitStaging] = useState(false);
-  const pendingStagingRef = useRef(null);
-  const gitOperationRef = useRef(false);
   const currentRootRef = useRef(rootPath);
   currentRootRef.current = rootPath;
-  const gitStatusPending = sourceControlRoot !== rootPath;
-  const gitBusy = gitOperationBusy || gitStaging || gitStatusPending;
-  const [branchRequest, setBranchRequest] = useState(null);
-  const [branchDraft, setBranchDraft] = useState("");
-  useEffect(() => { setHistoryMenu(null); setBranchRequest(null); setWorktreeStartPoint(""); setWorktreeFormOpen(false); setIntegrationRequest(null); setIntegrationSource(""); setWorktreeMenu(null); }, [rootPath]);
-  const [historyMenu, setHistoryMenu] = useState(null);
-  const [worktreeStartPoint, setWorktreeStartPoint] = useState("");
-  const [generatingMessage, setGeneratingMessage] = useState(false);
-  const generationRef = useRef(null);
-  const [commitMessage, setCommitMessage] = useState("");
-  const commitJobRef = useRef(null);
-  const draftKey = JSON.stringify([sourceControl.root || rootPath, sourceControl.branch || ""]);
-  const draftKeyRef = useRef(draftKey);
-  draftKeyRef.current = draftKey;
-  const [loadingCommitJob, setLoadingCommitJob] = useState(true);
-  useEffect(() => {
-    if (sourceControlRoot !== rootPath || !sourceControl.active) return;
-    let active = true;
-    commitJobRef.current = null; setGeneratingMessage(false); setLoadingCommitJob(true);
-    let saved;
-    try { saved = JSON.parse(window.localStorage.getItem(`rem-commit-draft:${draftKey}`) || "null"); } catch { /* No stored draft. */ }
-    setCommitMessage(saved?.message || ""); setGitNotice(""); setGitError("");
-    const stop = startPolling(async () => {
-      try {
-        const job = await latestGenerationJob("commit", sourceControl.root || rootPath, sourceControl.branch || "");
-        if (!active) return;
-        setLoadingCommitJob(false);
-        setGitError(current => current.startsWith("Could not check commit-message generation:") ? "" : current);
-        setGeneratingMessage(jobIsRunning(job));
-        if (!job) { if (!generationRef.current) setGitNotice(""); return; }
-        if (jobIsRunning(job)) setGitNotice(job.progress || "Rem is drafting your commit message.");
-        if (commitJobRef.current?.id === job.id && commitJobRef.current?.status === job.status && commitJobRef.current?.updatedAt === job.updatedAt) return;
-        commitJobRef.current = job;
-        if (job.error) {
-          setGitNotice("");
-          setGitError(job.result?.message ? job.error : `Commit-message generation failed: ${job.error}`);
-        } else setGitError("");
-        if (job.result?.commit) {
-          setGitNotice(`Auto-committed ${job.result.commit.slice(0, 8)} on ${job.branch}.`);
-          let current;
-          try { current = JSON.parse(window.localStorage.getItem(`rem-commit-draft:${draftKey}`) || "null"); } catch { /* No stored draft. */ }
-          if (current?.jobId !== job.id) {
-            const message = current?.pendingJobId === job.id && current.message !== current.generationDraft ? current.message : "";
-            setCommitMessage(message);
-            window.localStorage.setItem(`rem-commit-draft:${draftKey}`, JSON.stringify({ jobId: job.id, message }));
-          }
-        }
-        else if (job.result?.message) {
-          let current;
-          try { current = JSON.parse(window.localStorage.getItem(`rem-commit-draft:${draftKey}`) || "null"); } catch { /* No stored draft. */ }
-          if (current?.jobId !== job.id) {
-            const message = current?.pendingJobId === job.id && current.message !== current.generationDraft ? current.message : job.result.message;
-            setCommitMessage(message);
-            window.localStorage.setItem(`rem-commit-draft:${draftKey}`, JSON.stringify({ jobId: job.id, message }));
-          }
-          if (!job.error) setGitNotice("Rem's commit message is ready.");
-        }
-      } catch (cause) { if (active) { setLoadingCommitJob(false); setGitNotice(""); setGitError(`Could not check commit-message generation: ${cause.message}`); } }
-    }, { immediate: true });
-    return () => { active = false; stop(); };
-  }, [draftKey, rootPath, sourceControlRoot, sourceControl.active, sourceControl.root, sourceControl.branch]);
-  function editCommitMessage(message) {
-    setCommitMessage(message);
-    let current;
-    try { current = JSON.parse(window.localStorage.getItem(`rem-commit-draft:${draftKey}`) || "null"); } catch { /* No stored draft. */ }
-    window.localStorage.setItem(`rem-commit-draft:${draftKey}`, JSON.stringify({ ...current, message }));
-  }
-  const [gitNotice, setGitNotice] = useState("");
-  useEffect(() => {
-    if (!gitNotice.startsWith("Auto-committed ")) return;
-    const timer = window.setTimeout(() => setGitNotice(current => current === gitNotice ? "" : current), 4000);
-    return () => window.clearTimeout(timer);
-  }, [gitNotice]);
-  const [blockedBranch, setBlockedBranch] = useState("");
-  const [remote, setRemote] = useState("");
-  const [gitError, setGitError] = useState("");
-  useEffect(() => { setCommitMessage(""); setBlockedBranch(""); setGitError(""); setGitNotice(""); setRemote(""); }, [rootPath]);
-  // Source control opens to History each time it is opened; Changes and Branches are a tab away.
-  const [sourceTab, setSourceTab] = useState("history");
-  const stagedCount = sourceControl.entries.filter((entry) => entry.staged && entry.status !== "!").length;
   const pluginSettings = settings?.plugins ?? DEFAULT_APP_SETTINGS.plugins;
   const railPlugins = enabledPlugins(pluginSettings).filter((plugin) => plugin.id !== "workflows" || workflowsContent !== undefined);
   const railIds = railPlugins.map((plugin) => plugin.id);
@@ -242,12 +138,6 @@ export default function CodeFileExplorer({
   }
   const [localSidebarView, setLocalSidebarView] = useState("files");
   const sidebarView = resolvePluginActivity(pluginSettings, controlledSidebarView || localSidebarView);
-  const sourceControlShownRef = useRef(sidebarView === "source-control");
-  useEffect(() => {
-    const shown = sidebarView === "source-control";
-    if (shown && !sourceControlShownRef.current) setSourceTab("history");
-    sourceControlShownRef.current = shown;
-  }, [sidebarView]);
   // Rem's panel stays mounted once shown, so a task being edited there survives
   // switching to another plugin and back.
   const [remPanelMounted, setRemPanelMounted] = useState(false);
@@ -266,33 +156,19 @@ export default function CodeFileExplorer({
     window.addEventListener("keydown", openSearch);
     return () => window.removeEventListener("keydown", openSearch);
   }, [searchEnabled, setSidebarView]);
-  const [gitHistory, setGitHistory] = useState({ active: false, commits: [], loading: false });
-  const [historyQuery, setHistoryQuery] = useState("");
-  const [historyRefs, setHistoryRefs] = useState(null);
-  const [historyLimit, setHistoryLimit] = useState(100);
-  const historySelectionRef = useRef({ refs: historyRefs, limit: historyLimit });
-  historySelectionRef.current = { refs: historyRefs, limit: historyLimit };
-  const historyGraph = useMemo(() => layoutHistoryGraph(filterHistory(gitHistory.commits, historyQuery)), [gitHistory.commits, historyQuery]);
-  // The pinned scrollbar under the graph column mirrors the list's horizontal scroll.
-  const historyListRef = useRef(null);
-  const historyScrollbarRef = useRef(null);
-  const mirrorHistoryScroll = (from, to) => {
-    if (from.current && to.current && Math.abs(to.current.scrollLeft - from.current.scrollLeft) >= 1) to.current.scrollLeft = from.current.scrollLeft;
-  };
-  const [expandedCommits, setExpandedCommits] = useState(() => new Set());
-  const [copiedCommitHash, setCopiedCommitHash] = useState("");
-  const [worktrees, setWorktrees] = useState({ active: false, items: [], loading: false });
-  const [integrationSource, setIntegrationSource] = useState("");
-  const [integrationRequest, setIntegrationRequest] = useState(null);
-  const [worktreeMenu, setWorktreeMenu] = useState(null);
-  const [worktreeRemoval, setWorktreeRemoval] = useState(null);
-  const [worktreeRemovalError, setWorktreeRemovalError] = useState("");
-  const [branchCleanup, setBranchCleanup] = useState(null);
-  useEffect(() => { setWorktreeRemoval(null); setWorktreeRemovalError(""); setBranchCleanup(null); }, [rootPath]);
-  const [worktreeFormOpen, setWorktreeFormOpen] = useState(false);
-  const [worktreeBranch, setWorktreeBranch] = useState("");
-  const [worktreeFolder, setWorktreeFolder] = useState("");
-  const [worktreeCreateBranch, setWorktreeCreateBranch] = useState(false);
+  const treeRefreshRef = useRef(null);
+  const sourceControlState = useSourceControl({
+    rootPath,
+    sidebarView,
+    confirm,
+    refreshTree: () => treeRefreshRef.current(),
+    setExplorerError: setError,
+    onFilesystemChange,
+    onOpenFile,
+    onSelectProject,
+    onRemoveRecentProject,
+  });
+  const { sourceControl, loadSourceControlStatus, clearSourceControl, gitBusy, setGitBusy } = sourceControlState;
 
   directoriesRef.current = directories;
 
@@ -328,205 +204,13 @@ export default function CodeFileExplorer({
     }
   }, [rootPath]);
 
-  const loadSourceControlStatus = useCallback(async () => {
-    if (!rootPath || pendingStagingRef.current?.rootPath === rootPath || gitStatusLoadingRef.current?.rootPath === rootPath) return;
-    const request = { rootPath };
-    gitStatusLoadingRef.current = request;
-    try {
-      const payload = await shareInFlight(`git-status:${rootPath}`, () => window.goferDesktop?.workspace?.gitStatus?.(rootPath));
-      if (gitStatusLoadingRef.current !== request || currentRootRef.current !== rootPath) return;
-      if (payload?.error) throw new Error(payload.error);
-      const next = payload?.active
-        ? { ...payload, active: true, entries: payload.entries ?? [] }
-        : { active: false, entries: [] };
-      setSourceControl((current) => sourceControlSnapshotsEqual(current, next) ? current : next);
-      setSourceControlRoot(rootPath);
-    } catch (error) {
-      if (gitStatusLoadingRef.current !== request || currentRootRef.current !== rootPath || error?.name === "AbortError") return;
-      setGitError(error instanceof Error ? error.message : "Unable to load Git status");
-      setSourceControl({ active: false, entries: [] });
-      setSourceControlRoot(rootPath);
-    } finally {
-      if (gitStatusLoadingRef.current === request) gitStatusLoadingRef.current = null;
-    }
-  }, [rootPath]);
-
-  function openHistoryMenu(event, commit) {
-    event.preventDefault();
-    if (gitBusy) return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    setHistoryMenu({ source: commit.shortHash, hash: commit.hash, x: event.clientX ?? rect.left, y: event.clientY ?? rect.bottom, trigger: event.currentTarget.querySelector("button") });
-  }
-
-  async function historyAction(kind) {
-    const { hash } = historyMenu;
-    setHistoryMenu(null);
-    if (kind === "commit-diff") {
-      onOpenFile?.(commitDiffPath(rootPath, hash));
-      return;
-    }
-    if (kind === "worktree-commit") {
-      setWorktreeStartPoint(hash); setWorktreeCreateBranch(true); setWorktreeBranch(""); setWorktreeFolder(""); setWorktreeFormOpen(true); setSourceTab("branches"); return;
-    }
-    if (kind === "branch-commit") {
-      setBranchRequest({ hash }); setBranchDraft(""); return;
-    }
-    const short = hash.slice(0, 8);
-    const question = kind === "reset-hard"
-      ? { confirmLabel: "Hard reset", danger: true, message: `Hard reset to ${short}? This moves the current branch and permanently discards tracked staged and unstaged changes. Untracked files obstructing checkout can also be removed.` }
-      : kind === "reset-soft"
-        ? { confirmLabel: "Soft reset", message: `Soft reset to ${short}? Move the current branch while keeping the index and working files.` }
-        : { confirmLabel: "Detach HEAD", message: `Detach HEAD at ${short}? New commits will need a branch to keep them.` };
-    if (!await confirm(question)) return;
-    await changeSourceControl(kind, { hash });
-  }
-
-  async function generateCommitMessage() {
-    if (generationRef.current || generatingMessage || loadingCommitJob || gitBusy || !stagedCount) return;
-    const key = draftKey;
-    generationRef.current = key;
-    setGeneratingMessage(true); setGitError(""); setGitNotice("Rem is drafting your commit message.");
-    try {
-      const job = await new Promise((resolve, reject) => {
-        const detail = { background: true, projectRoot: rootPath, branch: sourceControl.branch, resolve, reject, handled: false };
-        window.dispatchEvent(new CustomEvent("gofer:rem-commit-message", { detail }));
-        if (!detail.handled) reject(new Error("Open Rem to generate a commit message."));
-      });
-      let current;
-      try { current = JSON.parse(window.localStorage.getItem(`rem-commit-draft:${key}`) || "null"); } catch { /* No stored draft. */ }
-      window.localStorage.setItem(`rem-commit-draft:${key}`, JSON.stringify({ ...current, message: current?.message ?? commitMessage, pendingJobId: job.id, generationDraft: commitMessage }));
-      if (draftKeyRef.current === key && !(commitJobRef.current?.id === job.id && !jobIsRunning(commitJobRef.current))) {
-        setGeneratingMessage(jobIsRunning(job));
-        setGitNotice(jobIsRunning(job) ? (job.progress || "Rem is drafting your commit message.") : "");
-      }
-    } catch (cause) { if (draftKeyRef.current === key) { setGitNotice(""); setGitError(`Commit-message generation failed: ${cause.message}`); setGeneratingMessage(false); } }
-    finally { if (generationRef.current === key) generationRef.current = null; }
-  }
-
-  async function changeSourceControl(action, value) {
-    if (action === "commit" && (generationRef.current || generatingMessage || loadingCommitJob)) return;
-    if (gitStatusPending || gitOperationRef.current || gitOperationBusy || (pendingStagingRef.current && action !== "commit") || (action === "commit" && (!value?.trim() || !stagedCount || sourceControl.entries.some(entry => entry.status === "!")))) return;
-    const changesWorkingTree = (["switch", "stash-switch", "stash-apply", "pull", "reset-soft", "reset-hard", "detach-commit", "branch-commit"].includes(action) || /^(merge|rebase)-/.test(action)) || action.startsWith("revert");
-    if ((changesWorkingTree || action === "stage") && hasUnsavedCodeChanges(rootPath)) {
-      setGitError("Save your unsaved editor changes before changing the Git working tree.");
-      return;
-    }
-    const bulk = Array.isArray(value);
-    if (bulk && !value.length) return;
-    if (action === "stage" || action === "unstage") {
-      const paths = bulk ? value : [value];
-      const selected = new Set(paths);
-      gitStatusLoadingRef.current = null;
-      setGitStaging(true);
-      setGitError("");
-      setGitNotice("");
-      setSourceControl((current) => ({ ...current, entries: current.entries.map((entry) => selected.has(entry.path)
-        ? { ...entry, staged: action === "stage", unstaged: action === "unstage" }
-        : entry) }));
-      const pending = (async () => {
-        try {
-          let result;
-          for (const filePath of paths) {
-            result = await window.goferDesktop?.workspace?.gitFileAction?.(rootPath, filePath, action);
-            if (!result) throw new Error("Restart the desktop app to enable Git actions.");
-            if (result.error) throw new Error(result.error);
-          }
-          if (currentRootRef.current === rootPath) setSourceControl(result);
-          return true;
-        } catch (cause) {
-          if (currentRootRef.current === rootPath) {
-            setGitError(cause instanceof Error ? cause.message : String(cause));
-            // A bulk operation may have partially succeeded. Read the actual index.
-            try {
-              const actual = await shareInFlight(`git-status:${rootPath}`, () => window.goferDesktop?.workspace?.gitStatus?.(rootPath));
-              if (currentRootRef.current === rootPath) setSourceControl(actual ?? { active: false, entries: [] });
-            } catch {
-              if (currentRootRef.current === rootPath) setSourceControl({ active: false, entries: [] });
-            }
-          }
-          return false;
-        }
-      })();
-      pending.rootPath = rootPath;
-      pendingStagingRef.current = pending;
-      await pending;
-      if (pendingStagingRef.current === pending) pendingStagingRef.current = null;
-      setGitStaging(false);
-      return;
-    }
-    if (bulk && action === "revert-staged" && sourceControl.entries.some((entry) => value.includes(entry.path) && entry.unstaged)) {
-      setGitError("Some staged files also have unstaged edits. Unstage those files first, or discard their unstaged edits before discarding all staged changes.");
-      return;
-    }
-    const discardTarget = bulk ? `all ${value.length} ${action === "revert-staged" ? "staged" : "unstaged"} files` : value;
-    if (action.startsWith("revert") && !await confirm({ confirmLabel: "Discard changes", danger: true, message: `Discard ${action === "revert-staged" ? "staged" : "unstaged"} changes to ${discardTarget}? New files will be moved to the trash.` })) return;
-    gitOperationRef.current = true;
-    setGitBusy(true);
-    if (changesWorkingTree) window.dispatchEvent(new CustomEvent("gofer:git-working-tree-busy", { detail: { rootPath, busy: true } }));
-    setGitError("");
-    setGitNotice("");
-    try {
-      if (pendingStagingRef.current && !await pendingStagingRef.current) return;
-      if (action === "commit") {
-        value = await cleanCommitMessage(value);
-        if (!value.trim()) throw new Error("The message had only Co-authored-by lines. Write a message before committing.");
-      }
-      const bridge = window.goferDesktop?.workspace;
-      let result;
-      if (bulk) {
-        for (const filePath of value) {
-          result = await bridge?.gitFileAction?.(rootPath, filePath, action);
-          if (!result) throw new Error("Restart the desktop app to enable Git actions.");
-          if (result.error) throw new Error(result.error);
-        }
-      } else result = action === "switch"
-        ? await bridge?.gitSwitchBranch?.(rootPath, value)
-        : (["commit", "push", "pull", "publish", "stash-switch", "stash-apply", "reset-soft", "reset-hard", "detach-commit", "branch-commit", "branch-delete"].includes(action) || /^(merge|rebase)-/.test(action))
-          ? await bridge?.gitRepoAction?.(rootPath, action, value)
-          : await bridge?.gitFileAction?.(rootPath, value, action);
-      if (!result) throw new Error("Restart the desktop app to enable Git actions.");
-      if (action === "branch-delete" && result.branchDeleteUnmerged) {
-        if (currentRootRef.current !== rootPath) return;
-        if (!await confirm({ confirmLabel: "Delete branch", danger: true, message: `Branch ${value} may have unmerged changes. Delete it anyway? Those commits may be lost.` })) return;
-        if (currentRootRef.current !== rootPath) return;
-        result = await bridge.gitRepoAction(rootPath, "branch-delete-force", value);
-        if (!result) throw new Error("Unable to delete branch.");
-      }
-      if (result.error) { if (result.active) setSourceControl(result); throw new Error(result.error); }
-      setBlockedBranch(result.switchBlocked ? result.requestedBranch : "");
-      setGitNotice(result.notice || (action === "commit" ? "Committed staged changes." : ""));
-      if (result.switchBlocked) return;
-      if (action === "commit") {
-        setCommitMessage(""); window.localStorage.removeItem(`rem-commit-draft:${draftKey}`);
-        if (commitJobRef.current) {
-          try { await dismissGenerationJob(commitJobRef.current.id); }
-          catch { setGitNotice("Committed staged changes. Could not clear the saved draft."); }
-        }
-      }
-      setSourceControl(result);
-      await Promise.all([refreshTree(), loadGitPanels()]);
-      onFilesystemChange?.({ type: "git", rootPath });
-      return true;
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setGitError(message);
-      if (action === "switch" && /would be overwritten/i.test(message)) setBlockedBranch(value);
-      if (changesWorkingTree || bulk) { await refreshTree(); onFilesystemChange?.({ type: "git", rootPath }); }
-    } finally {
-      if (changesWorkingTree) window.dispatchEvent(new CustomEvent("gofer:git-working-tree-busy", { detail: { rootPath, busy: false } }));
-      setGitBusy(false);
-      gitOperationRef.current = false;
-    }
-  }
-
   const refreshTree = useCallback(async () => {
     directoriesRef.current = {};
     setDirectories({});
     setExpanded(new Set(rootPath ? [rootPath] : []));
     // Keep the last Git snapshot visible while refreshing or switching worktrees.
     if (!rootPath) {
-      setSourceControl({ active: false, entries: [] });
-      setSourceControlRoot(null);
+      clearSourceControl();
       return;
     }
     try {
@@ -539,85 +223,13 @@ export default function CodeFileExplorer({
     }
     if (currentRootRef.current !== rootPath) return;
     await Promise.all([loadDirectory(rootPath), loadSourceControlStatus()]);
-  }, [loadDirectory, loadSourceControlStatus, rootPath]);
+  }, [clearSourceControl, loadDirectory, loadSourceControlStatus, rootPath]);
 
-  const loadGitPanels = useCallback(async ({ includeHistory = true } = {}) => {
-    if (!rootPath || (gitPanelsLoadingRef.current?.rootPath === rootPath
-      && gitPanelsLoadingRef.current?.refs === historyRefs && gitPanelsLoadingRef.current?.limit === historyLimit
-      && (!includeHistory || gitPanelsLoadingRef.current.includeHistory))) return;
-    const request = { rootPath, refs: historyRefs, limit: historyLimit, includeHistory };
-    gitPanelsLoadingRef.current = request;
-    if (includeHistory) setGitHistory((current) => ({ ...current, loading: true }));
-    if (includeHistory) setWorktrees((current) => ({ ...current, loading: true }));
-    try {
-      // Both reads start together, but history shows as soon as it arrives: Source control opens to
-      // History, and a slow worktree list must not hold the commits back.
-      const worktreeResult = Promise.resolve(window.goferDesktop?.workspace?.gitWorktrees?.(rootPath)).then(value => ({ value }), error => ({ error }));
-      const historyPayload = includeHistory ? await window.goferDesktop?.workspace?.gitHistory?.(rootPath, { refs: historyRefs, limit: historyLimit }) : null;
-      if (gitPanelsLoadingRef.current !== request || currentRootRef.current !== rootPath) return;
-      if (historyPayload?.error) throw new Error(historyPayload.error);
-      if (includeHistory && historySelectionRef.current.refs === historyRefs && historySelectionRef.current.limit === historyLimit) setGitHistory({ ...historyPayload, active: Boolean(historyPayload?.active), commits: historyPayload?.commits ?? [], loading: false });
-      const worktreeRead = await worktreeResult;
-      if (worktreeRead.error) throw worktreeRead.error;
-      const worktreePayload = worktreeRead.value;
-      if (gitPanelsLoadingRef.current !== request || currentRootRef.current !== rootPath) return;
-      if (worktreePayload?.error) throw new Error(worktreePayload.error);
-      setWorktrees({ active: Boolean(worktreePayload?.active), items: worktreePayload?.worktrees ?? [], loading: false });
-    } catch (loadError) {
-      if (gitPanelsLoadingRef.current !== request || currentRootRef.current !== rootPath || loadError?.name === "AbortError") return;
-      setGitHistory((current) => ({ ...current, loading: false }));
-      setWorktrees((current) => ({ ...current, loading: false }));
-      setGitError(loadError instanceof Error ? loadError.message : "Unable to load Git information");
-    } finally {
-      if (gitPanelsLoadingRef.current === request) gitPanelsLoadingRef.current = null;
-    }
-  }, [rootPath, historyRefs, historyLimit]);
-
-  // Git metadata events cover worktrees and commits from agents, swarms and
-  // terminals. Polling stays as a slower safety net while the watch is live.
-  const [gitWatchMode, setGitWatchMode] = useState("");
-  const gitEventRef = useRef(null);
-  gitEventRef.current = (kinds, retry = true) => {
-    // A read that started before the change may return the old state. Read once more after it.
-    if (retry && (gitStatusLoadingRef.current || gitPanelsLoadingRef.current)) {
-      window.setTimeout(() => { if (currentRootRef.current === rootPath) gitEventRef.current?.(kinds, false); }, 500);
-    }
-    void loadSourceControlStatus();
-    if (sidebarView === "source-control" && (kinds.includes("worktrees") || kinds.includes("refs"))) {
-      void loadGitPanels({ includeHistory: sourceTab === "history" && kinds.includes("refs") });
-    }
-  };
-  useEffect(() => {
-    const watchGit = window.goferDesktop?.workspace?.watchGit;
-    setGitWatchMode("");
-    if (!rootPath || !watchGit) return undefined;
-    const stop = watchGit(rootPath, {
-      onReady: (mode) => { if (currentRootRef.current === rootPath) setGitWatchMode(mode); },
-      onChange: ({ kinds }) => { if (currentRootRef.current === rootPath) gitEventRef.current?.(kinds); },
-    });
-    return () => stop?.();
-  }, [rootPath]);
+  treeRefreshRef.current = refreshTree;
 
   useEffect(() => {
-    if (sidebarView === "source-control") void loadGitPanels({ includeHistory: sourceTab === "history" });
-  }, [sidebarView, sourceTab, loadGitPanels]);
-  useEffect(() => {
-    if (sidebarView !== "source-control") return undefined;
-    return startPolling(() => loadGitPanels({ includeHistory: false }), { interval: ["watch", "poll"].includes(gitWatchMode) ? 15000 : 2000 });
-  }, [sidebarView, loadGitPanels, gitWatchMode]);
-
-  useEffect(() => {
-    setHistoryRefs(null);
-    setHistoryLimit(100);
-    setHistoryQuery("");
-    setGitHistory({ active: false, commits: [], loading: false });
     setSelectedPath(rootPath);
-    setExpandedCommits(new Set());
-    setCopiedCommitHash("");
     setContextMenu(null);
-    setWorktreeMenu(null);
-    setIntegrationSource("");
-    setIntegrationRequest(null);
     setGrantRequired(false);
     void refreshTree();
   }, [refreshTree, rootPath]);
@@ -652,11 +264,6 @@ export default function CodeFileExplorer({
       if (revealRequestRef.current === request) revealRequestRef.current += 1;
     };
   }, [activeFilePath, loadDirectory, rootPath]);
-
-  useEffect(() => {
-    if (!rootPath) return undefined;
-    return startPolling(loadSourceControlStatus);
-  }, [loadSourceControlStatus, rootPath]);
 
   useEffect(() => {
     if (!contextMenu) return undefined;
@@ -1007,16 +614,6 @@ export default function CodeFileExplorer({
     }
   }
 
-  async function copyCommitHash(commit) {
-    try {
-      await navigator.clipboard.writeText(commit.hash.slice(0, 8));
-      setCopiedCommitHash(commit.hash);
-      window.setTimeout(() => setCopiedCommitHash(""), 1400);
-    } catch (copyError) {
-      setError(copyError instanceof Error ? copyError.message : "Unable to copy commit ID");
-    }
-  }
-
   async function openInFileExplorer(entry = selectedEntry) {
     setContextMenu(null);
     const target = entry?.path ?? rootPath;
@@ -1047,163 +644,6 @@ export default function CodeFileExplorer({
       await refreshTree();
     } catch (grantError) {
       setError(grantError instanceof Error ? grantError.message : "Unable to authorize project folder");
-    }
-  }
-
-  function openBranchMenu(event, branch) {
-    event.preventDefault();
-    event.stopPropagation();
-    if (gitBusy) return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    setWorktreeMenu({ source: branch, branchMenu: true, x: event.clientX || rect.left, y: event.clientY || rect.bottom, trigger: event.currentTarget });
-  }
-
-  async function deleteBranch(branch) {
-    if (gitBusy || branch === sourceControl.branch || worktrees.items.some(item => item.branch === branch)) return;
-    await changeSourceControl("branch-delete", branch);
-  }
-
-  async function createBranchWorktree(branch) {
-    if (gitBusy || gitOperationRef.current) return;
-    gitOperationRef.current = true;
-    setGitBusy(true);
-    setGitError("");
-    try {
-      const bridge = window.goferDesktop?.workspace;
-      if (!bridge?.selectPath || !bridge?.addWorktree) throw new Error("Restart the desktop app to enable worktree creation.");
-      const targetPath = await bridge.selectPath({ currentPath: parentWorkspacePath(rootPath), directoryOnly: true });
-      if (!targetPath || currentRootRef.current !== rootPath) return;
-      const payload = await bridge.addWorktree({ projectRoot: rootPath, branch, createBranch: false, targetPath });
-      if (currentRootRef.current !== rootPath) return;
-      if (!payload || payload.error) throw new Error(payload?.error || "Unable to create worktree.");
-      setWorktrees({ active: true, items: payload.worktrees ?? [], loading: false });
-      setGitNotice(`Created worktree for ${branch}.`);
-      onSelectProject?.(payload.createdPath || targetPath, { mainProjectRoot: mainWorktreePath(payload.worktrees, rootPath) });
-    } catch (cause) {
-      if (currentRootRef.current === rootPath) setGitError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      gitOperationRef.current = false;
-      setGitBusy(false);
-    }
-  }
-
-  async function chooseWorktreeFolder() {
-    const selected = await window.goferDesktop?.workspace?.selectPath?.({
-      currentPath: parentWorkspacePath(rootPath),
-      directoryOnly: true,
-    });
-    if (selected) setWorktreeFolder(selected);
-  }
-
-  async function createWorktree(event) {
-    event.preventDefault();
-    if (gitBusy) return;
-    setError("");
-    try {
-      const payload = await window.goferDesktop?.workspace?.addWorktree?.({
-        branch: worktreeBranch,
-        createBranch: worktreeCreateBranch,
-        startPoint: worktreeStartPoint || undefined,
-        projectRoot: rootPath,
-        targetPath: worktreeFolder,
-      });
-      setWorktrees({ active: true, items: payload?.worktrees ?? [], loading: false });
-      setWorktreeFormOpen(false);
-      setWorktreeStartPoint("");
-      setWorktreeBranch("");
-      setWorktreeFolder("");
-      onSelectProject?.(payload?.createdPath || worktreeFolder, {
-        mainProjectRoot: mainWorktreePath(payload?.worktrees, rootPath),
-      });
-    } catch (worktreeError) {
-      setError(worktreeError instanceof Error ? worktreeError.message : "Unable to add worktree");
-    }
-  }
-
-  async function removeWorktree(worktree) {
-    if (gitBusy || gitOperationRef.current) return;
-    gitOperationRef.current = true;
-    setGitBusy(true);
-    setWorktreeRemovalError("");
-    try {
-      const remove = window.goferDesktop?.workspace?.removeWorktree;
-      if (!remove) throw new Error("Worktree removal is only available in the desktop app.");
-      const payload = await remove({ projectRoot: rootPath, targetPath: worktree.path, force: worktree.requiresForce === true });
-      if (currentRootRef.current !== rootPath) return;
-      if (payload?.requiresForce) {
-        setWorktreeRemoval({ ...worktree, requiresForce: true });
-        return;
-      }
-      setWorktrees({ active: true, items: payload?.worktrees ?? [], loading: false });
-      setWorktreeRemoval(null);
-      window.dispatchEvent(new CustomEvent("gofer:git-files-changed", { detail: { rootPath: worktree.path } }));
-      onRemoveRecentProject?.(worktree.path);
-    } catch (worktreeError) {
-      if (currentRootRef.current === rootPath) {
-        setWorktreeRemovalError(worktreeError instanceof Error ? worktreeError.message : "Unable to remove worktree");
-      }
-    } finally {
-      gitOperationRef.current = false;
-      setGitBusy(false);
-    }
-  }
-
-  async function previewBranchCleanup() {
-    if (gitBusy) return;
-    setBranchCleanup({ loading: true, plan: null, error: "" });
-    try {
-      const result = await window.goferDesktop?.workspace?.gitRepoAction?.(rootPath, "branch-cleanup-preview", {});
-      if (!result) throw new Error("Restart the desktop app to enable Git actions.");
-      if (result.error) throw new Error(result.error);
-      if (currentRootRef.current === rootPath) setBranchCleanup({ loading: false, plan: result, error: "" });
-    } catch (cause) {
-      if (currentRootRef.current === rootPath) setBranchCleanup({ loading: false, plan: null, error: cause instanceof Error ? cause.message : String(cause) });
-    }
-  }
-
-  async function saveCleanupKeep(scope, patterns) {
-    if (gitBusy || branchCleanup?.saving) return;
-    setBranchCleanup(current => ({ ...current, saving: true, error: "" }));
-    try {
-      const result = await window.goferDesktop?.workspace?.gitRepoAction?.(rootPath, "branch-cleanup-keep", { scope, patterns });
-      if (!result) throw new Error("Restart the desktop app to enable Git actions.");
-      if (result.error) throw new Error(result.error);
-      if (currentRootRef.current === rootPath) setBranchCleanup({ loading: false, plan: result, error: "" });
-    } catch (cause) {
-      if (currentRootRef.current === rootPath) setBranchCleanup(current => ({ ...current, saving: false, error: cause instanceof Error ? cause.message : String(cause) }));
-    }
-  }
-
-  async function runBranchCleanup() {
-    const plan = branchCleanup?.plan;
-    if (gitBusy || gitOperationRef.current || !plan?.remove.length) return;
-    if (plan.remove.some(item => item.worktree && hasUnsavedCodeChanges(item.worktree))) {
-      setBranchCleanup(current => ({ ...current, error: "Save your editor changes in these worktrees first." }));
-      return;
-    }
-    gitOperationRef.current = true;
-    setGitBusy(true);
-    setBranchCleanup(current => ({ ...current, error: "" }));
-    try {
-      const result = await window.goferDesktop?.workspace?.gitRepoAction?.(rootPath, "branch-cleanup", { items: plan.remove });
-      if (!result) throw new Error("Restart the desktop app to enable Git actions.");
-      if (currentRootRef.current !== rootPath) return;
-      if (result.active) setSourceControl(result);
-      if (result.error) throw new Error(result.error);
-      for (const item of result.cleanup.removed) {
-        if (!item.worktree) continue;
-        window.dispatchEvent(new CustomEvent("gofer:git-files-changed", { detail: { rootPath: item.worktree } }));
-        onRemoveRecentProject?.(item.worktree);
-      }
-      setGitNotice(result.notice);
-      setBranchCleanup(result.cleanup.failed.length ? { loading: false, plan: null, error: result.cleanup.failed.map(item => `${item.branch}: ${item.error}`).join("\n") } : null);
-      await loadGitPanels();
-      onFilesystemChange?.({ type: "git", rootPath });
-    } catch (cause) {
-      if (currentRootRef.current === rootPath) setBranchCleanup(current => ({ ...current, error: cause instanceof Error ? cause.message : String(cause) }));
-    } finally {
-      gitOperationRef.current = false;
-      setGitBusy(false);
     }
   }
 
@@ -1598,295 +1038,15 @@ export default function CodeFileExplorer({
       ) : null}
 
       </div>
-      <section id="sidebar-panel-source-control" role="tabpanel" aria-labelledby="sidebar-tab-source-control" hidden={sidebarView !== "source-control"} className={`scm-panel min-h-0 min-w-0 flex-1 flex-col bg-white text-ink ${sidebarView === "source-control" ? "flex" : "hidden"}`}>
-        <div className="ui-panel-header">
-          <span className="ui-section-title">Source control</span>
-          <div className="flex shrink-0 items-center gap-1">
-            {sourceControl.active && (sourceControl.ahead != null || sourceControl.remotes?.length) ? <>
-              <button aria-label="Pull" title="Pull" className="grid h-7 w-7 place-items-center rounded text-muted hover:bg-slate-100 focus-visible:outline disabled:opacity-40" disabled={gitBusy || sourceControl.ahead == null} type="button" onClick={() => void changeSourceControl("pull")}><ArrowDown aria-hidden="true" size={13} /></button>
-              {sourceControl.ahead != null ? <button aria-label="Push" title="Push" className="grid h-7 w-7 place-items-center rounded text-muted hover:bg-slate-100 focus-visible:outline disabled:opacity-40" disabled={gitBusy} type="button" onClick={() => void changeSourceControl("push")}><ArrowUp aria-hidden="true" size={13} /></button> : null}
-            </> : null}
-          <button aria-label="Refresh source control" className="grid h-7 w-7 place-items-center rounded text-muted hover:bg-slate-100" disabled={gitBusy || gitHistory.loading || worktrees.loading} type="button" onClick={() => { void loadSourceControlStatus(); void loadGitPanels(); }}><RefreshCw size={13} /></button>
-          </div>
-        </div>
-          {sourceControl.active ? <div className="shrink-0 space-y-2 border-b border-line px-3 pb-3">
-            <p className="truncate text-[11px] text-muted" title={rootPath}>{workspaceBasename(rootPath)}</p>
-                <p aria-label="Current branch" className="flex items-center gap-2 px-1 text-xs">
-                  <GitBranch aria-hidden="true" size={13} />
-                  <span className="truncate">{sourceControl.branch || "Detached HEAD"}</span>
-                </p>
-                <p className="px-1 text-[11px] text-muted">{sourceControl.ahead == null ? "Local branch" : `${sourceControl.ahead} ahead · ${sourceControl.behind} behind`}</p>
-                {sourceControl.ahead == null && sourceControl.remotes?.length ? <div className="flex flex-wrap gap-1 px-1">
-                    <select aria-label="Publish remote" className="min-w-0 flex-1 rounded border border-line bg-white text-[11px]" value={remote || sourceControl.remotes?.[0] || ""} onChange={(event) => setRemote(event.target.value)}>
-                      {!sourceControl.remotes?.length ? <option value="">No remote configured</option> : sourceControl.remotes.map((name) => <option key={name}>{name}</option>)}
-                    </select>
-                    <button type="button" className="rounded border border-line px-2 py-1 text-[11px] disabled:opacity-40" disabled={gitBusy || !sourceControl.remotes?.length} onClick={() => void changeSourceControl("publish", remote || sourceControl.remotes[0])}>Publish</button>
-                </div> : null}
-
-          </div> : null}
-          <div role="tablist" aria-label="Source control views" className="flex shrink-0 gap-3 border-b border-line px-3">
-            {["changes", "history", "branches"].map((tab, index, tabs) => <button key={tab} id={`scm-tab-${tab}`} role="tab" aria-selected={sourceTab === tab} aria-controls="scm-content" tabIndex={sourceTab === tab ? 0 : -1} className={`min-w-0 border-b-2 py-2.5 text-[11px] ${sourceTab === tab ? "border-brand font-semibold text-ink" : "border-transparent text-muted hover:text-ink"}`} type="button" onClick={() => setSourceTab(tab)} onKeyDown={(event) => {
-              const next = event.key === "ArrowRight" ? (index + 1) % tabs.length : event.key === "ArrowLeft" ? (index + tabs.length - 1) % tabs.length : event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : -1;
-              if (next < 0) return;
-              event.preventDefault(); setSourceTab(tabs[next]); document.getElementById(`scm-tab-${tabs[next]}`)?.focus();
-            }}>{tab === "changes" ? "Changes" : tab === "history" ? "History" : "Branches"}</button>)}
-          </div>
-          <div id="scm-content" role="tabpanel" aria-labelledby={`scm-tab-${sourceTab}`} tabIndex={0} className="min-h-0 flex-1 overflow-y-auto px-2 py-3">
-            {gitError || blockedBranch ? <div role="alert" className="scm-notice mb-3 rounded p-3 text-xs">
-              <div className="flex items-start gap-2"><strong className="min-w-0 flex-1">{blockedBranch ? "Changes would be overwritten" : sourceControlErrorSummary(gitError)}</strong><button aria-label="Dismiss Git error" type="button" onClick={() => { setGitError(""); setBlockedBranch(""); }}><X size={13} /></button></div>
-              {blockedBranch ? <><p className="my-2 break-words">Commit your changes or stash them before switching to {blockedBranch}.</p><div className="flex flex-wrap gap-2"><button className="rounded border border-current px-2 py-1" disabled={gitBusy} type="button" onClick={() => void changeSourceControl("stash-switch", blockedBranch)}>Stash &amp; switch</button><button type="button" disabled={gitBusy} onClick={() => { setBlockedBranch(""); setGitError(""); setGitNotice(""); }}>Stay on {sourceControl.branch || "this branch"}</button></div></> : null}
-              {gitError ? <details className="mt-2"><summary className="cursor-pointer">Technical details</summary><pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-words text-[11px]">{gitError}</pre></details> : null}
-            </div> : null}
-            {gitNotice && !blockedBranch ? <p role="status" className="mb-3 px-1 text-xs text-muted">{gitNotice}</p> : null}
-            {sourceControl.operation || sourceControl.entries.some(entry => entry.status === "!") ? <section aria-label="Merge conflicts" className="mb-4 space-y-2 rounded border border-line p-3 text-xs">
-              <strong>{sourceControl.operation ? `${sourceControl.operation === "rebase" ? "Rebase" : "Merge"} paused` : "Unresolved conflicts"}</strong>
-              <p>The ! entry in Staged is an unresolved index conflict. Rem can resolve and stage the fixes, commit them, and continue until the rebase or merge is complete.</p>
-              <div className="flex flex-wrap gap-2"><button className="rounded border border-line px-2 py-1.5" type="button" onClick={() => window.dispatchEvent(new CustomEvent("gofer:rem-context", { detail: { mode: "conflicts", projectRoot: rootPath, text: sourceControl.entries.filter(entry => entry.status === "!").map(entry => entry.path).join("\n") } }))}>Resolve conflicts with Rem</button>
-              {sourceControl.operation ? <><button className="rounded border border-line px-2 py-1.5" type="button" disabled={gitBusy || sourceControl.entries.some(entry => entry.status === "!")} onClick={() => void changeSourceControl(`${sourceControl.operation}-continue`)}>Continue {sourceControl.operation}</button><button className="rounded border border-line px-2 py-1.5" type="button" disabled={gitBusy} onClick={async () => { const operation = sourceControl.operation; if (await confirm({ confirmLabel: `Abort ${operation}`, danger: true, message: `Abort this ${operation}? Conflict resolution edits will be discarded.` })) void changeSourceControl(`${operation}-abort`); }}>Abort {sourceControl.operation}</button></> : null}</div>
-            </section> : null}
-            {!sourceControl.active ? <p className="px-2 py-6 text-xs text-muted">This project is not a Git repository.</p> : <>
-              {sourceTab === "changes" ? sourceControl.entries.length ? <>
-                {[["staged", "Staged"], ["unstaged", "Unstaged"]].map(([group, title]) => {
-                  const entries = sourceControl.entries.filter((entry) => entry[group] || (group === "staged" && entry.status === "!"));
-                  if (!entries.length) return null;
-                  return <details key={group} open aria-label={title} className="mb-5">
-                    <summary className="cursor-pointer px-1 py-1 text-[11px] font-semibold text-ink">
-                      <span className="inline-flex w-[calc(100%-1rem)] items-center gap-1 align-middle">
-                        <span className="min-w-0 flex-1">{title} · {entries.length}</span>
-                        <button aria-label={group === "staged" ? "Unstage all changes" : "Stage all changes"} title={group === "staged" ? "Unstage all changes" : "Stage all changes"} className="grid h-7 w-7 shrink-0 place-items-center rounded text-muted hover:bg-slate-100 hover:text-ink focus-visible:outline disabled:opacity-40" disabled={gitBusy || !entries.some(entry => group !== "staged" || entry.status !== "!")} type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); void changeSourceControl(group === "staged" ? "unstage" : "stage", entries.filter(entry => group !== "staged" || entry.status !== "!").map((entry) => entry.path)); }}>{group === "staged" ? <Minus size={12} /> : <Plus size={12} />}</button>
-                        <button aria-label={`Discard all ${group} changes`} title={`Discard all ${group} changes`} className="grid h-7 w-7 shrink-0 place-items-center rounded text-muted hover:bg-slate-100 hover:text-red-700 focus-visible:outline disabled:opacity-40" disabled={gitBusy || !entries.length || entries.some(entry => entry.status === "!")} type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); void changeSourceControl(group === "staged" ? "revert-staged" : "revert", entries.filter(entry => group !== "staged" || entry.status !== "!").map((entry) => entry.path)); }}><Trash2 size={12} /></button>
-                      </span>
-                    </summary>
-                    {entries.map((entry) => <div key={entry.path} className={`scm-file flex min-h-12 items-center gap-1 rounded px-2 ${samePath(activeFilePath, joinWorkspacePath(rootPath, entry.path)) ? "bg-indigo-50" : "hover:bg-slate-50"}`}>
-                      <span title={entry.status === "!" ? "Unresolved index conflict. Stage the working file to resolve." : undefined} className="w-3 shrink-0 text-[10px] text-muted">{entry.status}</span>
-                      <button className="min-w-0 flex-1 truncate text-left text-[11px] text-ink" title={entry.path} type="button" onClick={() => onOpenFile?.(joinWorkspacePath(rootPath, entry.path), { diff: true, gitGroup: entry.status === "!" ? "unstaged" : group })}><span className="block truncate text-xs font-medium">{workspaceBasename(entry.path)}</span><span className="block truncate text-[11px] text-muted">{entry.path.includes("/") ? entry.path.slice(0, entry.path.lastIndexOf("/")) : ""}</span></button>
-                      <button aria-label={`${group === "staged" ? "Unstage" : "Stage"} ${entry.path}`} title={group === "staged" ? "Unstage change" : "Stage change"} className="grid h-7 w-7 shrink-0 place-items-center rounded text-muted hover:bg-slate-100 focus-visible:outline disabled:opacity-40" disabled={gitBusy || (group === "staged" && entry.status === "!")} type="button" onClick={() => void changeSourceControl(group === "staged" ? "unstage" : "stage", entry.path)}>{group === "staged" ? <Minus size={12} /> : <Plus size={12} />}</button>
-                      <button aria-label={`Discard ${group} changes to ${entry.path}`} title="Discard changes" className="grid h-7 w-7 shrink-0 place-items-center rounded text-muted hover:bg-slate-100 hover:text-red-700 focus-visible:outline disabled:opacity-40" disabled={gitBusy || entry.status === "!"} type="button" onClick={() => void changeSourceControl(group === "staged" ? "revert-staged" : "revert", entry.path)}><Trash2 size={12} /></button>
-                    </div>)}
-                  </details>;
-                })}
-              </> : <div className="px-3 py-10 text-center"><Check className="mx-auto mb-3 text-muted" size={20} /><strong className="text-sm font-semibold">Working tree clean</strong><p className="mt-1 text-xs text-muted">No uncommitted changes.</p></div> : null}
-              {sourceTab === "branches" ? <>
-            <div className="flex h-7 items-center justify-between">
-              <span className="text-[10px] font-semibold text-ink">Worktrees</span>
-              <span className="flex items-center">
-                <button aria-label="Clean up branches" title="Delete outdated branches and their worktrees" className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-slate-100 hover:text-ink disabled:opacity-40" type="button" disabled={gitBusy} onClick={() => void previewBranchCleanup()}><Eraser size={12} /></button>
-                <button aria-label="Add worktree" className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-slate-100 hover:text-ink" type="button" onClick={() => { setWorktreeStartPoint(""); setWorktreeFormOpen((current) => !current); }}><FolderPlus size={12} /></button>
-              </span>
-            </div>
-            {worktreeFormOpen ? (
-              <form className="mb-2 space-y-1.5 rounded-md bg-slate-50 p-2" onSubmit={createWorktree}>
-                {worktreeStartPoint ? <p className="text-xs text-muted">Starting at {worktreeStartPoint.slice(0, 8)}</p> : null}
-                <input aria-label="Worktree branch" className="h-7 w-full rounded border border-line bg-white px-2 text-[11px] outline-none focus:border-indigo-500" placeholder="Branch name" required value={worktreeBranch} onChange={(event) => setWorktreeBranch(event.target.value)} />
-                <button className="flex h-7 w-full items-center gap-1.5 rounded border border-line bg-white px-2 text-left text-[11px] text-muted hover:text-ink" type="button" onClick={chooseWorktreeFolder}><FolderOpen size={12} /><span className="min-w-0 flex-1 truncate">{worktreeFolder || "Choose an empty folder"}</span></button>
-                <label className="flex items-center gap-1.5 text-[10px] text-muted"><input checked={worktreeCreateBranch} disabled={Boolean(worktreeStartPoint)} type="checkbox" onChange={(event) => setWorktreeCreateBranch(event.target.checked)} />Create a new branch</label>
-                <button className="h-7 w-full rounded bg-brand text-[11px] font-semibold text-white disabled:opacity-40" disabled={!worktreeBranch.trim() || !worktreeFolder} type="submit">Add worktree</button>
-              </form>
-            ) : null}
-            {worktrees.loading && !worktrees.items.length ? <p className="py-2 text-[11px] text-muted">Loading worktrees...</p> : null}
-            {worktrees.items.filter((worktree) => !worktree.missing && !worktree.prunable).map((worktree) => {
-              const activeWorktree = normalizeWorkspacePath(worktree.path) === normalizeWorkspacePath(rootPath);
-              return (
-                <div
-                  key={worktree.path}
-                  className="group relative flex min-h-8 items-center gap-1 rounded px-1.5 hover:bg-slate-50"
-                  onContextMenu={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    if (gitBusy || !worktree.branch) return;
-                    setWorktreeMenu({ source: worktree.branch, x: event.clientX, y: event.clientY, trigger: event.currentTarget.querySelector("button") });
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
-                    event.preventDefault();
-                    event.stopPropagation();
-                    if (gitBusy || !worktree.branch) return;
-                    const rect = event.currentTarget.getBoundingClientRect();
-                    setWorktreeMenu({ source: worktree.branch, x: rect.left, y: rect.bottom, trigger: event.target });
-                  }}
-                >
-                  {activeWorktree ? <span aria-hidden="true" className="absolute inset-y-1 left-0 w-px bg-brand" /> : null}
-                  <GitBranch className="shrink-0 text-muted" size={12} />
-                  <button
-                    aria-current={activeWorktree ? "page" : undefined}
-                    className="min-w-0 flex-1 py-1 text-left"
-                    title={worktree.path}
-                    type="button"
-                    onClick={() => onSelectProject?.(worktree.path, {
-                      mainProjectRoot: mainWorktreePath(worktrees.items, rootPath),
-                    })}
-                  >
-                    <span className="block truncate text-[11px] font-medium text-ink">{worktree.branch || "Detached HEAD"}</span>
-                    <span className="block truncate text-[11px] text-muted">
-                      {worktree.path}
-                    </span>
-                  </button>
-                  {worktree.branch ? <button aria-label={`Integrate ${worktree.branch} worktree`} title="Merge or rebase worktree" className="grid h-6 w-6 shrink-0 place-items-center rounded text-muted hover:bg-slate-100 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand disabled:opacity-40" disabled={gitBusy} type="button" onClick={() => { setIntegrationRequest(null); setIntegrationSource(worktree.branch); }}><GitMerge aria-hidden="true" size={13} /></button> : null}
-                  {activeWorktree ? <span className="text-[10px] text-muted">Current</span> : null}
-                  {!activeWorktree ? <button aria-label={`Remove ${worktree.branch || "detached"} worktree`} className="grid h-6 w-6 place-items-center rounded text-muted opacity-0 hover:bg-red-50 hover:text-red-700 focus:opacity-100 group-hover:opacity-100" type="button" disabled={gitBusy} onClick={() => { setWorktreeRemovalError(""); setWorktreeRemoval(worktree); }}><Trash2 size={11} /></button> : null}
-                </div>
-              );
-            })}
-
-            <section aria-label="Branches" className="mt-4 border-t border-line pt-3">
-              <h3 className="mb-1 text-[10px] font-semibold text-ink">Branches</h3>
-              {!sourceControl.branches?.length ? <p className="py-2 text-[11px] text-muted">No local branches yet.</p> : null}
-              {(sourceControl.branches || []).map(branch => {
-                const current = branch === sourceControl.branch;
-                const checkedOut = current || worktrees.items.some(item => item.branch === branch);
-                return <div key={branch} aria-label={`Branch ${branch}`} tabIndex={0} className="relative flex min-h-8 items-center gap-1.5 rounded px-1.5 text-[11px] hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand"
-                  onContextMenu={event => openBranchMenu(event, branch)}
-                  onKeyDown={event => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) openBranchMenu(event, branch); }}>
-                  <GitBranch aria-hidden="true" className="shrink-0 text-muted" size={12} />
-                  {current ? <span aria-hidden="true" className="absolute inset-y-1 left-0 w-px bg-brand" /> : null}
-                  <button type="button" aria-label={`Switch to branch ${branch}`} aria-current={current ? "page" : undefined} disabled={gitBusy || worktrees.loading || current} className="min-w-0 flex-1 truncate py-1 text-left text-ink focus-visible:outline disabled:cursor-default" title={branch} onClick={() => {
-                    const worktree = worktrees.items.find(item => item.branch === branch && !item.missing && !item.prunable);
-                    if (worktree) onSelectProject?.(worktree.path, { mainProjectRoot: mainWorktreePath(worktrees.items, rootPath) });
-                    else void changeSourceControl("switch", branch);
-                  }}>{branch}</button>
-                  {checkedOut ? <span className="shrink-0 text-[10px] text-muted">{current ? "Current" : "Worktree"}</span> : null}
-                  <button type="button" aria-label={`Actions for branch ${branch}`} title="Branch actions" disabled={gitBusy} className="grid h-6 w-6 shrink-0 place-items-center rounded text-muted hover:bg-slate-100 hover:text-ink focus-visible:outline disabled:opacity-40" onClick={event => openBranchMenu(event, branch)}><MoreHorizontal size={13} /></button>
-                  <button type="button" aria-label={`Delete branch ${branch}`} title={checkedOut ? "Cannot delete a checked-out branch" : `Delete branch ${branch}`} disabled={gitBusy || worktrees.loading || checkedOut} className="grid h-6 w-6 shrink-0 place-items-center rounded text-muted hover:text-red-700 focus-visible:outline disabled:opacity-40" onClick={() => void deleteBranch(branch)}><Trash2 size={12} /></button>
-                </div>;
-              })}
-            </section>
-
-                <GitIntegrationControls key={JSON.stringify([rootPath, integrationSource, integrationRequest])} rootPath={rootPath} sourceControl={sourceControl} worktrees={worktrees.items} source={integrationSource} request={integrationRequest} onSourceChange={setIntegrationSource} onBusy={(busy) => { gitOperationRef.current = busy; setGitBusy(busy); }} disabled={gitBusy} onSelectProject={onSelectProject} onChanged={async (result) => {
-                  if (currentRootRef.current !== rootPath) return;
-                  if (result.active) setSourceControl(result);
-                  setGitNotice(result.notice || "");
-                  await refreshTree(); await loadGitPanels();
-                  onFilesystemChange?.({ type: "git", rootPath });
-                  if (result.destinationRoot && result.destinationRoot !== rootPath) onFilesystemChange?.({ type: "git", rootPath: result.destinationRoot });
-                  if (result.conflicts?.length) setSourceTab("changes");
-                }} />
-              </> : null}
-              {sourceTab === "history" ? <>
-            <div className="flex h-7 items-center gap-1.5 pb-1 text-[10px] font-semibold text-ink">
-              <GitCommitHorizontal size={12} />
-              <span className="flex-1">Commit history</span>
-              <button
-                aria-label="Refresh commit history"
-                className="grid h-6 w-6 place-items-center rounded text-muted outline-none hover:bg-slate-100 hover:text-ink focus-visible:bg-slate-100 focus-visible:text-ink disabled:cursor-default disabled:opacity-70"
-                disabled={gitHistory.loading || worktrees.loading}
-                title="Refresh commit history"
-                type="button"
-                onClick={() => void loadGitPanels()}
-              >
-                <RefreshCw className={gitHistory.loading || worktrees.loading ? "animate-spin" : ""} size={12} />
-              </button>
-            </div>
-            <div className="mb-2 space-y-1.5">
-              <HistoryBranchFilter refs={gitHistory.refs || []} selection={historyRefs} onChange={selection => { if (selection === historyRefs) return; setHistoryRefs(selection); setHistoryLimit(100); setGitHistory(current => ({ ...current, commits: [], loading: true })); }} />
-              <input aria-label="Filter commit history" type="search" placeholder="Filter message, author, branch, or ID" className="h-7 w-full rounded border border-line bg-white px-2 text-[11px] text-ink placeholder:text-muted focus-visible:outline-brand" value={historyQuery} onChange={event => setHistoryQuery(event.target.value)} />
-            </div>
-            {gitHistory.loading && !gitHistory.commits.length ? <p className="py-2 text-[11px] text-muted">Loading history...</p> : null}
-            {!gitHistory.loading && !gitHistory.active ? <p className="py-2 text-[11px] text-muted">This project is not a Git repository.</p> : null}
-            {!gitHistory.loading && gitHistory.active && !gitHistory.commits.length ? <p className="py-6 text-center text-xs text-muted">{historyRefs?.length === 0 ? "Select branches to show their history." : historyRefs ? "No commits in this selection." : "No commits yet."}</p> : null}
-            {!gitHistory.loading && gitHistory.commits.length > 0 && !historyGraph.rows.length ? <p className="py-4 text-xs text-muted">No loaded commits match. Clear the filter or load more history.</p> : null}
-            <p className="mb-2 text-[10px] leading-4 text-muted">Newer commits are above their ancestors. Lines meet at shared commits.</p>
-            <div className="scm-history-scroll" style={{ "--scm-graph-width": `${historyGraph.width}px` }}>
-            <div ref={historyListRef} role="list" aria-label="Branch history graph" className="scm-history-graph" onScroll={() => mirrorHistoryScroll(historyListRef, historyScrollbarRef)}>
-            {historyGraph.rows.map((row) => {
-              const { commit } = row;
-              const isExpanded = expandedCommits.has(commit.hash);
-              const isCopied = copiedCommitHash === commit.hash;
-              return (
-                <div key={commit.hash} role="listitem" className="scm-history-row">
-                <div className="scm-history-text">
-                <div onContextMenu={event => openHistoryMenu(event, commit)} onKeyDown={event => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) openHistoryMenu(event, commit); }} className={`min-w-0 rounded-md transition-colors ${isExpanded ? "bg-slate-50" : "hover:bg-slate-50"}`}>
-                  <div className="flex items-center rounded-md">
-                    <button
-                      aria-expanded={isExpanded}
-                      className="flex min-w-0 flex-1 items-center rounded-md px-1.5 py-1.5 text-left outline-none focus-visible:bg-slate-100"
-                      type="button"
-                      onClick={() => setExpandedCommits((current) => isExpanded
-                        ? withoutSetValue(current, commit.hash)
-                        : withSetValue(current, commit.hash))}
-                    >
-                      <span className="min-w-0 flex-1">
-                        <span className={`block text-[11px] font-medium leading-4 text-ink ${isExpanded ? "whitespace-pre-wrap break-words" : "truncate"}`}>{isExpanded ? (commit.message || commit.subject) : commit.subject}</span>
-                        <GitHistoryRefs commit={commit} />
-                        <span className="scm-history-meta text-[9px] leading-3 text-muted">
-                          <span className="scm-history-author" title={commit.author}>{commit.author}</span>
-                          <span className="scm-history-when">
-                            <span aria-hidden="true">·</span>
-                            <span className="scm-history-time">{relativeCommitTime(commit.authoredAt)}</span>
-                          </span>
-                          <span className="scm-history-id">
-                            <span className="scm-history-hash font-mono">{commit.shortHash}</span>
-                            <GitHistoryStats commit={commit} />
-                          </span>
-                        </span>
-                      </span>
-                    </button>
-                    <button
-                      aria-label={isCopied ? `Copied commit ID ${commit.shortHash}` : `Copy commit ID ${commit.shortHash}`}
-                      className="mt-0.5 grid h-6 w-5 shrink-0 self-start place-items-center rounded text-muted outline-none hover:bg-slate-200 hover:text-ink focus-visible:bg-slate-200 focus-visible:text-ink dark:hover:bg-white/10 dark:focus-visible:bg-white/10"
-                      title={isCopied ? "Commit ID copied" : "Copy commit ID"}
-                      type="button"
-                      onClick={() => void copyCommitHash(commit)}
-                    >
-                      {isCopied ? <Check size={11} /> : <Copy size={11} />}
-                    </button>
-                  </div>
-                </div>
-                </div>
-                  <GitHistoryLane row={row} width={historyGraph.width} />
-                </div>
-              );
-            })}
-            </div>
-            <div ref={historyScrollbarRef} aria-hidden="true" tabIndex={-1} className="scm-history-scrollbar" onScroll={() => mirrorHistoryScroll(historyScrollbarRef, historyListRef)}><div /></div>
-            </div>
-            {gitHistory.hasMore && historyLimit < 5000 ? <button type="button" className="my-2 w-full rounded border border-line py-1 text-[11px] text-muted hover:text-ink disabled:opacity-50" disabled={gitHistory.loading} onClick={() => setHistoryLimit(limit => limit + 100)}>Load more history</button> : null}
-            {gitHistory.hasMore && historyLimit >= 5000 ? <p className="py-2 text-[11px] text-muted">Showing 5,000 commits. Select a branch to narrow history.</p> : null}
-
-              </> : null}
-            </>}
-          </div>
-          {sourceControl.active && sourceTab === "changes" && sourceControl.entries.length > 0 ? (
-                <form className="scm-composer shrink-0 space-y-2 border-t border-line bg-slate-50 p-3" onSubmit={(event) => { event.preventDefault(); void changeSourceControl("commit", commitMessage); }}>
-                  <label className="block text-xs font-semibold" htmlFor="scm-commit-message">Commit message</label>
-                  <div className="relative">
-                  <button type="button" aria-label="Generate commit message with Rem" aria-busy={generatingMessage} title={generatingMessage ? "Rem is drafting your commit message" : "Generate a commit message with Rem"} className="rem-action-button absolute right-1 top-1 grid h-8 w-8 place-items-center rounded border border-line bg-canvas text-ink hover:text-brand focus-visible:outline-brand disabled:opacity-40" disabled={gitBusy || loadingCommitJob || generatingMessage || !stagedCount || sourceControl.entries.some(entry => entry.status === "!")} onClick={() => void generateCommitMessage()}><RemActionIcon /><span className="sr-only">{generatingMessage ? "Generating…" : "Generate with Rem"}</span></button>
-                  <textarea id="scm-commit-message" aria-label="Commit message" placeholder="Describe your changes…" rows={2} className="scm-commit-message w-full pr-11 resize-none rounded border border-line bg-white px-2 py-1 text-xs focus-visible:outline" value={commitMessage} onChange={(event) => editCommitMessage(event.target.value)} onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && commitMessage.trim() && !gitOperationBusy && stagedCount) { event.preventDefault(); void changeSourceControl("commit", commitMessage); } }} />
-                  </div>
-                  <button type="submit" className="h-8 w-full rounded bg-brand text-[11px] font-semibold text-white disabled:opacity-40" disabled={loadingCommitJob || generatingMessage || gitStatusPending || gitOperationBusy || !commitMessage.trim() || !stagedCount || sourceControl.entries.some(entry => entry.status === "!")}>{gitOperationBusy ? "Working…" : `Commit ${stagedCount} staged file${stagedCount === 1 ? "" : "s"}`}</button>
-                  <p className="text-[11px] text-muted">Only staged files will be committed. Unresolved conflicts block commits.</p>
-                </form>
-
-          ) : null}
-      </section>
-
-      {worktreeMenu && sidebarView === "source-control" && sourceTab === "branches" ? <WorktreeContextMenu
-        {...worktreeMenu}
-        operations={worktreeMenu.branchMenu ? [...integrationOperations, ["worktree-branch", "Create worktree from branch", worktrees.loading || worktreeMenu.source === sourceControl.branch || worktrees.items.some(item => item.branch === worktreeMenu.source)], ["branch-delete", "Delete branch", worktrees.loading || worktreeMenu.source === sourceControl.branch || worktrees.items.some(item => item.branch === worktreeMenu.source)]] : integrationOperations}
-        disabled={gitBusy}
-        onClose={() => setWorktreeMenu(null)}
-        onSelect={(kind, target) => {
-          if (kind === "branch-delete" || kind === "worktree-branch") {
-            const branch = worktreeMenu.source;
-            setWorktreeMenu(null);
-            if (kind === "branch-delete") void deleteBranch(branch);
-            else void createBranchWorktree(branch);
-            return;
-          }
-          setIntegrationSource(worktreeMenu.source);
-          setIntegrationRequest({ kind, target });
-          setWorktreeMenu(null);
-        }}
-      /> : null}
-      {branchRequest ? <Dialog title="Checkout new branch" onClose={() => { if (!gitBusy) setBranchRequest(null); }} panelClassName="w-full max-w-sm rounded-lg border border-line bg-white p-4 shadow-panel">
-        <form className="space-y-3" onSubmit={async event => { event.preventDefault(); if (!branchDraft.trim() || gitBusy) return; if (await changeSourceControl("branch-commit", { hash: branchRequest.hash, branch: branchDraft.trim() })) setBranchRequest(null); }}>
-          <h3 className="text-sm font-semibold">Checkout new branch</h3>
-          <p className="text-xs text-muted">Start at {branchRequest.hash.slice(0, 8)}</p>
-          <label className="block text-xs">Branch name<input autoFocus aria-label="New branch name" className="mt-1 h-9 w-full rounded border border-line bg-canvas px-2 text-sm focus-visible:outline" value={branchDraft} onChange={event => setBranchDraft(event.target.value)} /></label>
-          {gitError ? <p role="alert" className="text-xs text-red-700">{gitError}</p> : null}
-          <div className="flex justify-end gap-2"><button type="button" disabled={gitBusy} onClick={() => setBranchRequest(null)} className="rounded border border-line px-3 py-2 text-xs">Cancel</button><button type="submit" disabled={gitBusy || !branchDraft.trim()} className="rounded bg-brand px-3 py-2 text-xs text-white disabled:opacity-40">Checkout branch</button></div>
-        </form>
-      </Dialog> : null}
-      {historyMenu && sidebarView === "source-control" && sourceTab === "history" ? <WorktreeContextMenu {...historyMenu} operations={historyOperations} disabled={gitBusy} onClose={() => setHistoryMenu(null)} onSelect={kind => void historyAction(kind)} /> : null}
+      <SourceControlPanel
+        state={sourceControlState}
+        rootPath={rootPath}
+        activeFilePath={activeFilePath}
+        sidebarView={sidebarView}
+        confirm={confirm}
+        onOpenFile={onOpenFile}
+        onSelectProject={onSelectProject}
+      />
       {contextMenu ? (
         <ExplorerContextMenu
           canPaste={Boolean(clipboardEntry) && !transferBusy && !gitBusy}
@@ -1926,60 +1086,6 @@ export default function CodeFileExplorer({
             <button type="button" className="rounded border border-line px-3 py-2 text-xs" onClick={() => resolveDuplicate("keep-both")}>Keep both</button>
             <button type="button" className="rounded border border-line px-3 py-2 text-xs" onClick={() => resolveDuplicate("replace")}>{duplicateRequest.entry.isDirectory ? "Replace folder" : "Replace file"}</button>
             <button type="button" className="rounded border border-line px-3 py-2 text-xs" onClick={() => resolveDuplicate("cancel")}>Cancel</button>
-          </div>
-        </Dialog>
-      ) : null}
-
-      {worktreeRemoval ? (
-        <Dialog
-          title={worktreeRemoval.requiresForce ? "Discard changes and remove worktree?" : "Remove worktree?"}
-          onClose={() => { if (!gitOperationRef.current) setWorktreeRemoval(null); }}
-          panelClassName="w-full max-w-md rounded-xl border border-line bg-white p-5 text-ink"
-        >
-          <h2 className="text-sm font-semibold">{worktreeRemoval.requiresForce ? "Discard changes and remove worktree?" : "Remove worktree?"}</h2>
-          <p className="mt-3 break-all text-xs text-muted">{worktreeRemoval.path}</p>
-          <p className="mt-3 text-xs">{worktreeRemoval.requiresForce ? "This worktree has uncommitted changes. Removing it will permanently discard all uncommitted changes and untracked files, and delete its folder. The branch will be kept." : "This removes the worktree and its folder. The branch will be kept."}</p>
-          {worktreeRemovalError ? <p role="alert" className="mt-3 break-words text-xs text-red-600">{worktreeRemovalError}</p> : null}
-          <div className="mt-5 flex justify-end gap-2">
-            <button type="button" className="rounded border border-line px-3 py-2 text-xs" disabled={gitOperationBusy} onClick={() => setWorktreeRemoval(null)}>Cancel</button>
-            <button aria-label={worktreeRemoval.requiresForce ? "Discard changes and remove" : "Confirm worktree removal"} type="button" className="rounded bg-red-600 px-3 py-2 text-xs text-white disabled:opacity-50" disabled={gitBusy} onClick={() => removeWorktree(worktreeRemoval)}>{gitOperationBusy ? "Removing…" : worktreeRemoval.requiresForce ? "Discard changes and remove" : "Remove worktree"}</button>
-          </div>
-        </Dialog>
-      ) : null}
-
-      {branchCleanup ? (
-        <Dialog
-          title="Clean up branches?"
-          onClose={() => { if (!gitOperationRef.current) setBranchCleanup(null); }}
-          panelClassName="w-full max-w-lg rounded-xl border border-line bg-white p-5 text-ink"
-        >
-          <h2 className="text-sm font-semibold">Clean up branches?</h2>
-          {branchCleanup.loading ? <p role="status" className="mt-3 text-xs text-muted">Checking branches…</p> : null}
-          {branchCleanup.plan ? <>
-            <p className="mt-3 text-xs">{branchCleanup.plan.remove.length ? "These branches have no commits of their own. A branch you always keep, or a newer branch, already contains everything on them. Their worktree folders will be deleted too." : "There are no outdated branches to clean up."}</p>
-            {branchCleanup.plan.remove.length ? <ul aria-label="Branches to delete" className="mt-3 max-h-60 space-y-1.5 overflow-y-auto text-xs">
-              {branchCleanup.plan.remove.map(item => <li key={item.branch} className="rounded bg-slate-50 px-2 py-1.5">
-                <span className="block break-all font-medium">{item.branch}</span>
-                <span className="block break-all text-[11px] text-muted">Already in {item.newer}{item.worktree ? ` · ${item.worktree}` : ""}</span>
-              </li>)}
-            </ul> : null}
-            {branchCleanup.plan.kept.length ? <>
-              <h3 className="mt-4 text-xs font-semibold">Kept</h3>
-              <ul aria-label="Outdated branches kept" className="mt-1 space-y-1 text-[11px] text-muted">
-                {branchCleanup.plan.kept.map(item => <li key={item.branch} className="break-all">{item.branch} · {item.reason}</li>)}
-              </ul>
-            </> : null}
-          </> : null}
-          {branchCleanup.plan ? <section aria-label="Always keep" className="mt-4 space-y-2 border-t border-line pt-3">
-            <h3 className="text-xs font-semibold">Always keep</h3>
-            <p className="text-[11px] text-muted">Branch names or patterns such as release/*, separated by commas. Stored in Git config, not committed.</p>
-            <CleanupKeepField label="This project" patterns={branchCleanup.plan.keepPatterns?.project || []} disabled={gitBusy || branchCleanup.saving} onSave={patterns => saveCleanupKeep("project", patterns)} />
-            <CleanupKeepField label="All projects" patterns={branchCleanup.plan.keepPatterns?.user || []} disabled={gitBusy || branchCleanup.saving} onSave={patterns => saveCleanupKeep("user", patterns)} />
-          </section> : null}
-          {branchCleanup.error ? <p role="alert" className="mt-3 whitespace-pre-wrap break-words text-xs text-red-600">{branchCleanup.error}</p> : null}
-          <div className="mt-5 flex justify-end gap-2">
-            <button type="button" className="rounded border border-line px-3 py-2 text-xs" disabled={gitOperationBusy} onClick={() => setBranchCleanup(null)}>{branchCleanup.plan?.remove.length ? "Cancel" : "Close"}</button>
-            {branchCleanup.plan?.remove.length ? <button type="button" className="rounded bg-red-600 px-3 py-2 text-xs text-white disabled:opacity-50" disabled={gitBusy || branchCleanup.saving} onClick={() => void runBranchCleanup()}>{gitOperationBusy ? "Deleting…" : `Delete ${branchCleanup.plan.remove.length} branch${branchCleanup.plan.remove.length === 1 ? "" : "es"}`}</button> : null}
           </div>
         </Dialog>
       ) : null}
@@ -2040,18 +1146,6 @@ export default function CodeFileExplorer({
       {confirmDialog}
     </div>
   );
-}
-
-export function relativeCommitTime(authoredAt, now = Date.now()) {
-  const elapsed = Math.max(0, now - new Date(authoredAt).getTime());
-  const minutes = Math.floor(elapsed / 60000);
-  if (minutes < 1) return "now";
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}d ago`;
-  return new Date(authoredAt).toLocaleDateString();
 }
 
 export function explorerShortcutAction(event, options = {}) {
@@ -2172,21 +1266,8 @@ function MenuButton({ danger = false, disabled = false, icon: Icon, label, onCli
 }
 
 // Keep the typed text until it is saved so commas and spaces are not rewritten while typing.
-function CleanupKeepField({ label, patterns, disabled, onSave }) {
-  const saved = patterns.join(", ");
-  const [draft, setDraft] = useState(saved);
-  useEffect(() => { setDraft(saved); }, [saved]);
-  const parsed = draft.split(/[\s,]+/).filter(Boolean);
-  const changed = parsed.join(", ") !== saved;
-  const save = () => { if (changed && !disabled) onSave(parsed); };
-  return <div className="flex items-center gap-2 text-[11px]">
-    <span className="w-20 shrink-0 text-muted">{label}</span>
-    <input aria-label={`Always keep in ${label.toLowerCase()}`} className="h-7 min-w-0 flex-1 rounded border border-line bg-white px-2 text-[11px] outline-none focus:border-indigo-500" placeholder="dev, main" value={draft} disabled={disabled} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); save(); } }} />
-    <button type="button" aria-label={`Save branches always kept in ${label.toLowerCase()}`} className="h-7 shrink-0 rounded border border-line px-2 text-[11px] disabled:opacity-40" disabled={disabled || !changed} onClick={save}>Save</button>
-  </div>;
-}
 
-export function visibleTreeRows(rootPath, directories, expanded, query = "", statuses = []) {
+function visibleTreeRows(rootPath, directories, expanded, query = "", statuses = []) {
   const rows = [];
   const normalizedQuery = query.trim().toLowerCase();
   function visit(directory, depth) {
@@ -2244,9 +1325,6 @@ export function sourceControlStatusForPath(rootPath, targetPath, statuses = [], 
   return statuses.find(change => samePath(joinWorkspacePath(rootPath, change.path), targetPath))?.status ?? "";
 }
 
-function sourceControlSnapshotsEqual(left, right) {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
 
 export function nextCopyName(name = "copy", existingNames = new Set()) {
   const dotIndex = name.lastIndexOf(".");
@@ -2261,17 +1339,7 @@ export function nextCopyName(name = "copy", existingNames = new Set()) {
   return candidate;
 }
 
-export function joinWorkspacePath(directory = "", name = "") {
-  const separator = directory.includes("\\") && !directory.includes("/") ? "\\" : "/";
-  return `${directory.replace(/[\\/]+$/, "")}${separator}${name.replace(/^[\\/]+/, "")}`;
-}
 
-export function parentWorkspacePath(value = "") {
-  const normalized = value.replace(/[\\/]+$/, "");
-  const index = Math.max(normalized.lastIndexOf("/"), normalized.lastIndexOf("\\"));
-  if (index <= 0) return normalized.slice(0, Math.max(index, 1)) || normalized;
-  return normalized.slice(0, index);
-}
 
 export function workspaceAncestorPaths(rootPath = "", targetPath = "") {
   if (!pathWithin(targetPath, rootPath) || samePath(targetPath, rootPath)) return [];
@@ -2285,7 +1353,7 @@ export function workspaceAncestorPaths(rootPath = "", targetPath = "") {
   return ancestors;
 }
 
-export function explorerMenuPosition(clientX, clientY, viewportWidth = window.innerWidth, viewportHeight = window.innerHeight) {
+function explorerMenuPosition(clientX, clientY, viewportWidth = window.innerWidth, viewportHeight = window.innerHeight) {
   const width = 224;
   const height = 324;
   const availableWidth = Number.isFinite(viewportWidth) ? viewportWidth : 1024;
@@ -2308,15 +1376,7 @@ function entryForPath(rootPath, directories, targetPath) {
   return null;
 }
 
-function workspaceBasename(value = "") {
-  const normalized = value.replace(/[\\/]+$/, "");
-  const index = Math.max(normalized.lastIndexOf("/"), normalized.lastIndexOf("\\"));
-  return normalized.slice(index + 1);
-}
 
-export function mainWorktreePath(worktrees = [], fallback = "") {
-  return String(worktrees[0]?.path || fallback).trim();
-}
 
 function workspaceRelativePath(rootPath = "", targetPath = "") {
   const root = displayPath(rootPath);
@@ -2346,12 +1406,3 @@ function discardDirectoryBranch(setDirectories, branchPath) {
   ));
 }
 
-export function sourceControlErrorSummary(message) {
-  if (/^(Commit-message generation failed|Could not check commit-message generation):/i.test(message)) return message;
-  if (/unsaved editor/i.test(message)) return "Save your editor changes and try again.";
-  if (/conflict|unmerged/i.test(message)) return "Resolve the Git conflicts before continuing.";
-  if (/authentication|permission denied|could not read Username/i.test(message)) return "Git authentication failed. Check your remote access and try again.";
-  if (/restart the desktop/i.test(message)) return "Restart the desktop app to enable Git actions.";
-  if (/network|could not resolve|unable to access/i.test(message)) return "Could not reach the remote. Check your connection and try again.";
-  return "Git could not complete this action. Review the details and try again.";
-}

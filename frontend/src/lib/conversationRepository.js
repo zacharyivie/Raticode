@@ -1,11 +1,11 @@
 import { loadConversationMessages, saveConversationMessages, removeConversationMessages } from "./conversationStorage.js";
 
 // History pages count conversation messages; thoughts and hidden context are extra.
-export const CONVERSATION_PAGE_SIZE = 15;
+const CONVERSATION_PAGE_SIZE = 15;
 const SEARCH_PAGE_SIZE = 40;
 const keyFor = id => `gofer-flow-chat-thread:${id}`;
 // 0: thought, loaded on demand. 1: counted message. 2: hidden context.
-export const laneOf = message => message.kind === "thought" ? 0 : message.kind === "memory" || message.kind === "continuation-context" ? 2 : 1;
+const laneOf = message => message.kind === "thought" ? 0 : message.kind === "memory" || message.kind === "continuation-context" ? 2 : 1;
 // Index of the first row of the latest page: everything after the message
 // that precedes its `limit` conversation messages.
 export function pageStart(messages, limit = CONVERSATION_PAGE_SIZE) {

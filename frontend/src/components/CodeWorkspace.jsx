@@ -52,7 +52,8 @@ import {
   Save,
   X,
 } from "lucide-react";
-import { diagnosticsToMarkers, diagnosticToMarker } from "../lib/rattishRanges.js";
+import { diagnosticToMarker } from "../lib/rattishRanges.js";
+import { applyDiagnosticReplacement, setRattishMarkers } from "../lib/rattishQuickFixes.js";
 import {
   formatKeybinding, DEFAULT_APP_SETTINGS,
   KEYBINDING_COMMANDS,
@@ -525,6 +526,8 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
       },
       revealDiagnostic: (diagnostic) =>
         textEditorRefs.current.get(sourcePath)?.revealDiagnostic?.(diagnostic),
+      applyReplacement: (diagnostic, replacement, expected) =>
+        textEditorRefs.current.get(sourcePath)?.applyReplacement?.(diagnostic, replacement, expected),
       runCommand: (command) => {
         if (command === "edit.find" && browserViewStates[currentPath]?.ready) {
           window.dispatchEvent(new CustomEvent("gofer:find-page", { detail: { clientId: browserTabs[currentPath] ? currentPath : `html:${currentPath}` } }));
@@ -1691,6 +1694,16 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
       editor.setPosition({ lineNumber: marker.startLineNumber, column: marker.startColumn });
       editor.focus();
     },
+    // undefined while the file is still loading, so a caller can try again once it opens.
+    applyReplacement: (diagnostic, replacement, expected) => {
+      const monaco = monacoRef.current;
+      const editor = editorRef.current;
+      if (!monaco || !editor || !editableRef.current) return undefined;
+      if (editor.getOption(monaco.editor.EditorOption.readOnly)) return false;
+      const applied = applyDiagnosticReplacement(monaco, editor, diagnostic, replacement, expected);
+      if (applied) editor.focus();
+      return applied;
+    },
     runCommand: (command) => {
       const editor = editorRef.current;
       if (!editor) return false;
@@ -1766,11 +1779,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
       );
       modelRef.current = model;
       savedVersionRef.current = session?.content === session?.savedContent ? model.getAlternativeVersionId() : null;
-      monaco.editor.setModelMarkers(
-        model,
-        "rattish",
-        diagnosticsToMarkers(monaco, model, model.getValue(), diagnosticsRef.current),
-      );
+      setRattishMarkers(monaco, model, diagnosticsRef.current);
       const initialEditorSettings = editorSettingsRef.current;
       const editorOptions = {
         automaticLayout: false,
@@ -1956,11 +1965,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
     const monaco = monacoRef.current;
     const model = modelRef.current;
     if (!monaco || !model) return;
-    monaco.editor.setModelMarkers(
-      model,
-      "rattish",
-      diagnosticsToMarkers(monaco, model, model.getValue(), diagnostics),
-    );
+    setRattishMarkers(monaco, model, diagnostics);
   }, [diagnostics]);
 
   useEffect(() => {
@@ -2126,7 +2131,7 @@ export function MarkdownModeToggle({ disabled = false, editing, onModeChange }) 
   );
 }
 
-export function DocumentModeToggle({ disabled = false, editing, label, onModeChange }) {
+function DocumentModeToggle({ disabled = false, editing, label, onModeChange }) {
   return (
     <div
       aria-label={`${label} view mode`}
@@ -2155,7 +2160,7 @@ export function DocumentModeToggle({ disabled = false, editing, label, onModeCha
   );
 }
 
-export function SvgPreview({ content, path, onEdit }) {
+function SvgPreview({ content, path, onEdit }) {
   const source = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(content ?? "")}`;
   return (
     <div
@@ -2169,7 +2174,7 @@ export function SvgPreview({ content, path, onEdit }) {
   );
 }
 
-export function MediaPreview({ path, active = true }) {
+function MediaPreview({ path, active = true }) {
   const kind = mediaKind(path) || "image";
   const mediaRef = useRef(null);
   const [state, setState] = useState({ url: "", error: "", loading: true });
@@ -2387,7 +2392,7 @@ export function EditorTabsMenu({ entries, activePath, label = "All editor tabs",
   </details>;
 }
 
-export function WorkflowTabControls({ tab, onAction }) {
+function WorkflowTabControls({ tab, onAction }) {
   const status = tab.status || "ready";
   const StatusIcon = ["running", "starting", "submitting", "queued", "stopping"].includes(status) ? Loader2 : ["failed", "error", "disconnected"].includes(status) ? AlertTriangle : ["success", "succeeded", "completed"].includes(status) ? Check : tab.unreadFailure ? AlertTriangle : null;
   return <>

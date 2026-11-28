@@ -102,18 +102,25 @@ def clean_worker_temp(
     uid = os.getuid()
     chosen = list(temp_roots(uid) if roots is None else roots)
     result = TempCleanupResult()
-    found = [root for root in (_trusted_root(path, uid) for path in chosen) if root is not None]
-    if not found:
-        return result
-    references = _process_references([root.path for root in found] if held is None else None, held)
-    since = running_turns_since(clock) if running_since is None else running_since
-    measure = _used_percent if used_percent is None else used_percent
-    for root in found:
-        busy = measure(root.path) >= PRESSURE_PERCENT
-        limit = PRESSURE_STALE_SECONDS if busy else STALE_SECONDS
-        device = root.path.lstat().st_dev
-        for entry in _units(root, uid):
-            _settle(entry, device, uid, references, clock, limit, since, dry_run, result)
+    opened = [(path, _open_root(path, uid)) for path in chosen]
+    found = [(path, handle) for path, handle in opened if handle is not None]
+    try:
+        if not found:
+            return result
+        references = _process_references(
+            [path for path, _ in found] if held is None else None, held
+        )
+        since = running_turns_since(clock) if running_since is None else running_since
+        measure = _used_percent if used_percent is None else used_percent
+        for path, handle in found:
+            busy = measure(path) >= PRESSURE_PERCENT
+            limit = PRESSURE_STALE_SECONDS if busy else STALE_SECONDS
+            root = _Root(path, has_containers=path.name == f"claude-{uid}")
+            for unit in _units(root, handle, uid):
+                _settle(unit, uid, references, clock, limit, since, dry_run, result)
+    finally:
+        for _, handle in found:
+            _close(handle)
     if result.removed:
         log.info(
             "%s %d leftover worker temp entr%s, freeing %s",
@@ -247,47 +254,87 @@ def request_temp_cleanup() -> None:
 # Judging entries ------------------------------------------------------------------
 
 
-def _trusted_root(path: Path, uid: int) -> _Root | None:
-    """A root this account owns that no one else can write to, or None."""
+# Every folder below is reached through an open handle, never by its path again: a
+# worker that can write a root could otherwise swap a folder for a link to the user's
+# home between the check and the delete, and the delete would follow it. Windows has
+# none of these flags but O_RDONLY; the server imports this module there too, and the
+# sweep itself runs only on Linux (sweeps_worker_temp).
+_FOLDER_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _Unit:
+    """One entry to judge: its path (for messages and process references), the open
+    folder holding it and its name there."""
+
+    path: Path
+    parent: int
+    name: str
+
+
+def _open_root(path: Path, uid: int) -> int | None:
+    """A handle on a root this account owns that no one else can write to, or None."""
     try:
-        info = path.lstat()
+        handle = os.open(path, _FOLDER_FLAGS)
     except OSError:
         return None
+    info = os.fstat(handle)
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid or info.st_mode & 0o022:
+        _close(handle)
         return None
-    return _Root(path, has_containers=path.name == f"claude-{uid}")
+    return handle
 
 
-def _units(root: _Root, uid: int) -> Iterator[Path]:
-    """The entries to judge: top-level ones, or the ones inside a container folder."""
-    for entry in _entries(root.path):
-        if root.has_containers and _is_container(entry, uid):
-            yield from _entries(entry)
-        else:
-            yield entry
-
-
-def _is_container(entry: Path, uid: int) -> bool:
-    if not (entry.name.startswith("-") or entry.name == TEST_RUNS.format(uid=uid)):
-        return False
+def _open_child(parent: int, name: str) -> int | None:
     try:
-        info = entry.lstat()
+        return os.open(name, _FOLDER_FLAGS, dir_fd=parent)
     except OSError:
-        return False
-    return stat.S_ISDIR(info.st_mode) and info.st_uid == uid
+        return None
 
 
-def _entries(folder: Path) -> list[Path]:
+def _close(handle: int) -> None:
+    try:
+        os.close(handle)
+    except OSError:
+        pass
+
+
+def _units(root: _Root, handle: int, uid: int) -> Iterator[_Unit]:
+    """The entries to judge: top-level ones, or the ones inside a container folder."""
+    for name in _names(handle):
+        if root.has_containers and _is_container_name(name, uid):
+            inner = _open_child(handle, name)
+            if inner is not None:
+                try:
+                    info = os.fstat(inner)
+                    if stat.S_ISDIR(info.st_mode) and info.st_uid == uid:
+                        for child in _names(inner):
+                            yield _Unit(root.path / name / child, inner, child)
+                        continue
+                finally:
+                    _close(inner)
+        yield _Unit(root.path / name, handle, name)
+
+
+def _is_container_name(name: str, uid: int) -> bool:
+    return name.startswith("-") or name == TEST_RUNS.format(uid=uid)
+
+
+def _names(folder: int) -> list[str]:
     try:
         with os.scandir(folder) as found:
-            return sorted(Path(entry.path) for entry in found)
+            return sorted(entry.name for entry in found)
     except OSError:
         return []
 
 
 def _settle(
-    entry: Path,
-    device: int,
+    unit: _Unit,
     uid: int,
     references: _References,
     clock: float,
@@ -296,11 +343,11 @@ def _settle(
     dry_run: bool,
     result: TempCleanupResult,
 ) -> None:
-    survey = _survey(entry, device, uid, clock)
-    if survey is None or references.holds(entry):
+    survey = _survey(unit, uid, clock)
+    if survey is None or references.holds(unit.path):
         result.kept += 1
         return
-    newest, size, special = survey
+    newest, size, special, identity = survey
     age = clock - newest
     if age <= limit or (special and age <= SERVER_STALE_SECONDS):
         result.kept += 1
@@ -309,70 +356,104 @@ def _settle(
         result.kept += 1
         return
     if not dry_run:
-        _remove(entry)
-        if os.path.lexists(entry):
-            log.warning("Couldn't fully remove the worker temp entry %s", entry)
+        _remove(unit, identity)
+        if _lstat(unit) is not None:
+            log.warning("Couldn't fully remove the worker temp entry %s", unit.path)
             result.kept += 1
             return
-    result.removed.append(entry)
+    result.removed.append(unit.path)
     result.freed_bytes += size
 
 
-def _survey(entry: Path, device: int, uid: int, clock: float) -> tuple[float, int, bool] | None:
-    """Newest change, disk space and whether a socket or pipe is inside.
+def _lstat(unit: _Unit) -> os.stat_result | None:
+    try:
+        return os.stat(unit.name, dir_fd=unit.parent, follow_symlinks=False)
+    except OSError:
+        return None
+
+
+def _survey(unit: _Unit, uid: int, clock: float) -> tuple[float, int, bool, tuple[int, int]] | None:
+    """Newest change, disk space, whether a socket or pipe is inside, and the entry's
+    (device, inode) to check again just before it is removed.
 
     None means the entry must be kept: another account owns part of it, part of it
     is another file system, or it couldn't be read. A modification time in the
     future is set by hand and ignored; the change time can't be set that way.
     """
+    info = _lstat(unit)
+    if info is None:
+        return None
     try:
-        info = entry.lstat()
+        device = os.fstat(unit.parent).st_dev
     except OSError:
         return None
     if info.st_uid != uid or info.st_dev != device:
         return None
+    identity = (info.st_dev, info.st_ino)
     newest = _changed(info, clock)
     size = _disk_bytes(info)
     special = stat.S_ISSOCK(info.st_mode) or stat.S_ISFIFO(info.st_mode)
     if not stat.S_ISDIR(info.st_mode):
-        return newest, size, special
-    pending = [entry]
-    while pending:
-        folder = pending.pop()
-        try:
-            with os.scandir(folder) as found:
-                children = list(found)
-        except OSError:
+        return newest, size, special, identity
+    top = _open_child(unit.parent, unit.name)
+    if top is None:
+        return None
+    pending = [top]
+    try:
+        if (os.fstat(top).st_dev, os.fstat(top).st_ino) != identity:
             return None
-        for child in children:
+        while pending:
+            folder = pending.pop()
             try:
-                item = child.stat(follow_symlinks=False)
+                with os.scandir(folder) as found:
+                    children = list(found)
             except OSError:
-                continue
-            if item.st_uid != uid or item.st_dev != device:
                 return None
-            newest = max(newest, _changed(item, clock))
-            size += _disk_bytes(item)
-            special = special or stat.S_ISSOCK(item.st_mode) or stat.S_ISFIFO(item.st_mode)
-            if stat.S_ISDIR(item.st_mode):
-                pending.append(Path(child.path))
-    return newest, size, special
+            try:
+                for child in children:
+                    try:
+                        item = child.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if item.st_uid != uid or item.st_dev != device:
+                        return None
+                    newest = max(newest, _changed(item, clock))
+                    size += _disk_bytes(item)
+                    special = special or stat.S_ISSOCK(item.st_mode) or stat.S_ISFIFO(item.st_mode)
+                    if stat.S_ISDIR(item.st_mode):
+                        inner = _open_child(folder, child.name)
+                        if inner is None:
+                            return None
+                        pending.append(inner)
+            finally:
+                _close(folder)
+    finally:
+        for left in pending:
+            _close(left)
+    return newest, size, special, identity
 
 
 def _changed(info: os.stat_result, clock: float) -> float:
     return max(info.st_ctime, info.st_mtime if info.st_mtime <= clock else 0.0)
 
 
-def _remove(entry: Path) -> None:
-    if entry.is_symlink() or not entry.is_dir():
-        # A link goes as a link; what it points at stays.
-        try:
-            entry.unlink()
-        except OSError:
-            pass
+def _remove(unit: _Unit, identity: tuple[int, int]) -> None:
+    """Remove the entry the survey judged, inside the folder it was found in.
+
+    Nothing goes when the name now leads somewhere else (a folder swapped since the
+    survey). A link goes as a link; what it points at stays. rmtree with ``dir_fd``
+    works through open folder handles and refuses a link.
+    """
+    info = _lstat(unit)
+    if info is None or (info.st_dev, info.st_ino) != identity:
         return
-    # On Linux rmtree works through open folder handles and never follows links.
-    shutil.rmtree(entry, ignore_errors=True)
+    if stat.S_ISDIR(info.st_mode):
+        shutil.rmtree(unit.name, dir_fd=unit.parent, ignore_errors=True)
+        return
+    try:
+        os.unlink(unit.name, dir_fd=unit.parent)
+    except OSError:
+        pass
 
 
 def _disk_bytes(info: os.stat_result) -> int:

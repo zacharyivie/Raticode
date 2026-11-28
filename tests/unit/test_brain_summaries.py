@@ -23,7 +23,8 @@ from gofer.ui.brain_summaries import (
     with_summary,
 )
 from gofer.ui.report_outputs import ReportTools, save_report
-from tests.helpers.brain_library import wait_idle
+from tests.helpers.brain_library import doc_at, wait_idle
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 
 SECTION = "## Short answer\n\nThe section paragraph answers the question.\n"
 
@@ -167,13 +168,6 @@ def test_local_second_brain_save_note_writes_the_summary(tmp_path: Path) -> None
 # Library: stored beside the passages, returned to Rem, never cited
 
 
-@pytest.fixture
-def library(tmp_path: Path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
-
-
 def build(library: BrainLibrary, tmp_path: Path) -> dict[str, Any]:
     root = tmp_path / "brain"
     (root / "Notes").mkdir(parents=True)
@@ -193,10 +187,6 @@ def build(library: BrainLibrary, tmp_path: Path) -> dict[str, Any]:
     wait_idle(library)
     library.update_brain({"id": brain["id"], "patch": {"settings": {"allowCloud": True}}})
     return brain
-
-
-def doc_at(library: BrainLibrary, path: str) -> dict[str, Any]:
-    return next(doc for doc in library.entities("documents") if doc["path"] == path)
 
 
 def serve(tmp_path: Path, brain: dict[str, Any], monkeypatch, check) -> None:

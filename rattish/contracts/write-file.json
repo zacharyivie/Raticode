@@ -8,12 +8,12 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
-      "path": {"type": "string", "minLength": 1, "x-rattish-type": "Path"},
-      "content": {"type": "string"},
-      "encoding": {"type": "string", "minLength": 1},
-      "create_dirs": {"type": "boolean"},
-      "overwrite": {"type": "boolean"},
-      "append": {"type": "boolean"}
+      "path": {"description": "Target filesystem path.", "type": "string", "minLength": 1, "x-rattish-type": "Path"},
+      "content": {"description": "Authored text to write.", "type": "string"},
+      "encoding": {"description": "Text encoding.", "type": "string", "minLength": 1},
+      "create_dirs": {"description": "Allow creation of missing destination parents.", "type": "boolean"},
+      "overwrite": {"description": "Allow replacing an existing destination.", "type": "boolean"},
+      "append": {"description": "Append instead of replacing text.", "type": "boolean"}
     },
     "required": ["path"],
     "additionalProperties": false

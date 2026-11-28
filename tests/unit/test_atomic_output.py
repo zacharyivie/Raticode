@@ -238,6 +238,7 @@ def test_atomic_outputs_can_create_the_same_parent_concurrently(tmp_path, monkey
 
     monkeypatch.setattr(os, "mkdir", concurrent_mkdir)
 
+    # Not the shared file writer: writes one name through an exclusive atomic output.
     def write(name):
         with atomic_binary_output(tmp_path / "shared" / name, exclusive=True) as output:
             output.write(name.encode())

@@ -302,29 +302,21 @@ class KanbanTest {
         assertTrue((Kanban.move(todo.copy(status = "done"), "todo") as OrganizationModel.Move.Allowed).reopen)
     }
 
-    @Test fun undoFollowsTheDesktopsCanUndoMove() {
-        val rem = ticket("/1")
-        // Rem's tickets come back from Backlog, To do, Done and Cancelled.
-        for (from in listOf("backlog", "todo", "done", "cancelled")) {
-            for (to in listOf("backlog", "todo", "done", "cancelled")) assertTrue("$from to $to", Kanban.canUndoMove(rem.copy(status = from), to))
+    @Test fun undoFollowsTheCasesTheDesktopIsTestedAgainst() {
+        // undo-move.json is shared with frontend/src/lib/remKanban.test.mjs, so both apps offer Undo for the same moves.
+        val cases = JSONObject(javaClass.getResource("/undo-move.json")!!.readText()).getJSONArray("cases")
+        assertTrue(cases.length() > 0)
+        val base = ticket("/1")
+        for (i in 0 until cases.length()) {
+            val case = cases.getJSONObject(i)
+            val scope = case.getString("scope")
+            val paused = case.getString("paused")
+            val column = case.getString("column")
+            val before = base.copy(scope = scope, status = case.getString("status"), paused = paused)
+            val why = case.optString("why").let { if (it.isBlank()) "" else ": $it" }
+            val name = "${scope.ifBlank { "no scope" }} ${before.status}${if (paused.isNotBlank()) " paused" else ""} to $column$why"
+            assertEquals(name, case.getBoolean("undo"), Kanban.canUndoMove(before, column))
         }
-        // Never after starting work, for either name of In progress.
-        assertFalse(Kanban.canUndoMove(rem, "running"))
-        assertFalse(Kanban.canUndoMove(rem, "in_progress"))
-        // Never for a paused ticket, whose only move resumes it.
-        assertFalse(Kanban.canUndoMove(rem.copy(paused = "user"), "backlog"))
-        // Not back into In review or Blocked, which a review decides.
-        assertFalse(Kanban.canUndoMove(rem.copy(status = "in_review"), "todo"))
-        assertFalse(Kanban.canUndoMove(rem.copy(status = "blocked"), "backlog"))
-        assertFalse(Kanban.canUndoMove(rem.copy(status = "in_progress"), "todo"))
-        // An organization's tickets come back only from Backlog and To do.
-        val org = ticket("beta/3")
-        assertTrue(Kanban.canUndoMove(org.copy(status = "backlog"), "todo"))
-        assertTrue(Kanban.canUndoMove(org.copy(status = "todo"), "backlog"))
-        assertFalse(Kanban.canUndoMove(org.copy(status = "todo"), "running"))
-        assertFalse(Kanban.canUndoMove(org, "todo"))
-        for (from in listOf("in_progress", "in_review", "done", "cancelled")) assertFalse(from, Kanban.canUndoMove(org.copy(status = from), "todo"))
-        assertFalse(Kanban.canUndoMove(org.copy(status = "todo", paused = "user"), "backlog"))
     }
 
     @Test fun aMoveSaysWhatItDidInTheDesktopsWords() {
@@ -411,6 +403,61 @@ class KanbanTest {
         val decline = Kanban.decideParams(ticket("/2"), false, " not now ")
         assertEquals("decline", decline.getString("action")); assertEquals("not now", decline.getString("reason"))
         assertFalse(Kanban.decideParams(ticket("/2"), true, "x").has("reason"))
+    }
+
+    @Test fun editingARemTicketSendsOnlyWhatChangedAtItsRevision() {
+        val mine = ticket("/1").copy(description = "Old details", kind = "develop", doneWhen = "It builds", doneWhenKnown = true)
+        val start = Kanban.draftOf(mine)
+        assertEquals(TicketDraft("Mine", "Old details", "low", "develop", "It builds", 3), start)
+        fun edit(title: String = "Mine", description: String = "Old details", priority: String = "low", kind: String = "develop", doneWhen: String = "It builds") =
+            Kanban.editParams(mine, start, start.copy(title = title, description = description, priority = priority, kind = kind, doneWhen = doneWhen))
+        val params = edit(" Mine, renamed ", "New details", "critical", "research", " It builds \n\n The tests pass ")!!
+        assertEquals("edit", params.getString("action")); assertEquals("1", params.getString("ticket_id")); assertEquals("rem", params.getString("scope"))
+        assertEquals(3L, params.getLong("expected_revision")); assertFalse(params.has("organization_id"))
+        assertEquals("Mine, renamed", params.getString("title")); assertEquals("New details", params.getString("description"))
+        assertEquals("critical", params.getString("priority")); assertEquals("research", params.getString("type"))
+        assertEquals("It builds\nThe tests pass", params.getString("done_when"))
+        // Only the changed fields go; nothing changed, or no title, sends nothing.
+        val one = edit(description = "Old details ", priority = "high", doneWhen = "It builds\n")!!
+        assertEquals(setOf("action", "ticket_id", "scope", "expected_revision", "priority"), one.keys().asSequence().toSet())
+        assertNull(edit())
+        assertNull(edit(title = "  ", description = "Other"))
+        // A description the board may have cut, and Done when from a desktop that doesn't send it, stay as they are.
+        val long = mine.copy(description = "x".repeat(Kanban.DESCRIPTION_SHOWN), doneWhenKnown = false)
+        val longStart = Kanban.draftOf(long)
+        assertNull(Kanban.editParams(long, longStart, longStart.copy(description = "shorter", doneWhen = "A new check")))
+        // Rem's tickets that aren't running or paused can be edited, proposals included; an organization's can't from here.
+        assertTrue(Kanban.canEdit(mine)); assertTrue(Kanban.canEdit(ticket("/2")))
+        assertFalse(Kanban.canEdit(mine.copy(running = true))); assertFalse(Kanban.canEdit(mine.copy(paused = "user")))
+        assertFalse(Kanban.canEdit(mine.copy(status = "done"))); assertFalse(Kanban.canEdit(ticket("acme/1")))
+        assertEquals(listOf("develop", "research", "maintain"), Kanban.editKinds(mine).map { it.first })
+        assertEquals("errand", Kanban.editKinds(mine.copy(kind = "errand")).last().first)
+        // The board says whether the desktop sends Done when.
+        assertFalse(ticket("/1").doneWhenKnown)
+        val sent = DesktopViews.parse(Kanban.BOARD, JSONObject("""{"tickets":[{"ticket_id":"5","scope":"rem","title":"T","status":"todo","done_when":""}]}""")) as KanbanBoard
+        assertTrue(sent.tickets.single().doneWhenKnown)
+    }
+
+    @Test fun aTicketThatChangesWhileItsEditSheetIsOpenKeepsTheOtherChange() {
+        val mine = ticket("/1").copy(description = "Old details", kind = "develop", doneWhen = "It builds", doneWhenKnown = true)
+        val start = Kanban.draftOf(mine)
+        // The user renames it while the desktop raises its priority and adds a check, at a newer revision.
+        val typed = start.copy(title = "Mine, renamed")
+        val newer = mine.copy(priority = "high", doneWhen = "It builds\nThe tests pass", revision = 4)
+        // Sent against the snapshot the sheet opened with, the save carries the old revision, so the desktop refuses it as stale
+        // instead of undoing the other change.
+        val stale = Kanban.editParams(newer, start, typed)!!
+        assertEquals(3L, stale.getLong("expected_revision"))
+        assertEquals(setOf("action", "ticket_id", "scope", "expected_revision", "title"), stale.keys().asSequence().toSet())
+        // Moved onto the newer copy, the untouched fields follow it and the typed title stays; Save sends only the title, at the new revision.
+        val rebased = Kanban.rebaseDraft(start, typed, Kanban.draftOf(newer))
+        assertEquals(TicketDraft("Mine, renamed", "Old details", "high", "develop", "It builds\nThe tests pass", 4), rebased)
+        val params = Kanban.editParams(newer, Kanban.draftOf(newer), rebased)!!
+        assertEquals(4L, params.getLong("expected_revision"))
+        assertEquals(setOf("action", "ticket_id", "scope", "expected_revision", "title"), params.keys().asSequence().toSet())
+        assertEquals("Mine, renamed", params.getString("title"))
+        // A field the user changed stays theirs even when the desktop changed it too.
+        assertEquals("medium", Kanban.rebaseDraft(start, typed.copy(priority = "medium"), Kanban.draftOf(newer)).priority)
     }
 
     @Test fun newTicketGoesToRemOrAnOrganization() {

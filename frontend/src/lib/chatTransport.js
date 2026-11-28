@@ -1,4 +1,5 @@
 import { apiUrl } from "./api.js";
+import { ndjsonBatches } from "./ndjson.js";
 
 // Reattach to backend-owned work after a transport interruption. Never retry the
 // POST: it launches work. Sequence numbers resume delivery without duplicates.
@@ -28,20 +29,12 @@ export async function fetchChatTurn(body, { signal, fetchImpl = fetch } = {}) {
     async start(controller) {
       try {
         for (let attempt = 0; ; attempt++) {
-          const decoder = new TextDecoder();
-          let buffer = "";
           try {
-            while (!cancelled) {
-              const { done, value } = await reader.read();
-              buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
-              if (done && buffer) buffer += "\n";
-              const lines = buffer.split("\n");
-              buffer = lines.pop();
+            if (!cancelled) for await (const lines of ndjsonBatches(reader)) {
               const delivered = [];
               let nextSequence = sequence;
               let nextTerminal = terminal;
               for (const line of lines) {
-                if (!line.trim()) continue;
                 const event = JSON.parse(line);
                 if (event.sequence && event.sequence <= nextSequence) continue;
                 nextSequence = event.sequence || nextSequence;
@@ -52,7 +45,7 @@ export async function fetchChatTurn(body, { signal, fetchImpl = fetch } = {}) {
               if (delivered.length) controller.enqueue(encoder.encode(`${delivered.join("\n")}\n`));
               sequence = nextSequence;
               terminal = nextTerminal;
-              if (done) break;
+              if (cancelled) break;
             }
             if (terminal || cancelled) break;
           } catch (error) {

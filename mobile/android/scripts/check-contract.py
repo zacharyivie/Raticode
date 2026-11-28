@@ -83,6 +83,24 @@ for kind, fixture, mutations in (
                                                lambda e: e['payload']['params'].update(clear='everything'),
                                                lambda e: e['payload']['params'].update(expected_revision='3'),
                                                lambda e: e['payload']['params'].update(project='/home/me/site')]),
+    # Objectives name one of Rem's projects by its ID, never a folder, with bounded text and a known action.
+    ('event', 'desktop.action.selfwork-objectives', [lambda e: e['payload']['params'].update(project='/home/me/site'),
+                                                     lambda e: e['payload']['params'].update(project_id='/home/me/site'),
+                                                     lambda e: e['payload']['params'].update(action='set'),
+                                                     lambda e: e['payload']['params'].pop('action'),
+                                                     lambda e: e['payload']['params'].update(text='x' * 201),
+                                                     lambda e: e['payload']['params'].update(done_when='x' * 501),
+                                                     lambda e: e['payload']['params'].update(id='../x'),
+                                                     lambda e: e['payload']['params'].update(expected_revision='4')]),
+    # A move names a project by ID or says global true, never both and never a folder.
+    ('event', 'desktop.action.selfwork-objectives-move', [lambda e: e['payload']['params'].update(project_id='6f1c2a8e-3b4d-5e6f-8a9b-0c1d2e3f4a5b'),
+                                                          lambda e: e['payload']['params'].update(**{'global': False}),
+                                                          lambda e: e['payload']['params'].update(**{'global': 'yes'}),
+                                                          lambda e: e['payload']['params'].update(project='')]),
+    # Levels of effort are whole percents by project ID, never by folder.
+    ('event', 'desktop.action.selfwork-settings-effort', [lambda e: e['payload']['params'].update(project_effort={'/home/me/site': 30}),
+                                                          lambda e: e['payload']['params']['project_effort'].update({'6f1c2a8e-3b4d-5e6f-8a9b-0c1d2e3f4a5b': 101}),
+                                                          lambda e: e['payload']['params']['project_effort'].update({'6f1c2a8e-3b4d-5e6f-8a9b-0c1d2e3f4a5b': '30'})]),
     # A worker's account is an account ID or "" for the default sign-in, never a name, folder or both changes at once.
     ('event', 'desktop.action.organizations-worker-account', [lambda e: e['payload']['params'].update(account='../work'),
                                                               lambda e: e['payload']['params'].update(account='work'),

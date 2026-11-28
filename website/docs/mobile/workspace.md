@@ -17,7 +17,7 @@ Find each page in **More**, or put it on the bottom bar. When the computer is to
 Tap a file to open it full screen:
 
 - code and text with line numbers, highlighting, wrapping and find
-- previews of Markdown, HTML (no scripts, nothing loaded from the internet) and SVG
+- previews of Markdown, HTML (no scripts, nothing loaded from the internet) and SVG. A web page shows on the base color its own styles name, so a dark report whose background is a gradient stays dark instead of turning white.
 - PDFs page by page, zoomable pictures, video and sound
 - other formats offer **Open in another app** and **Save to phone**
 
@@ -48,7 +48,7 @@ The same default applies to **Open** on a file Rem or your computer sent, such a
 
 What you open this way is treated as untrusted:
 
-- The file opens in a viewer of its own, read only, up to 50 MB. Text shows its first 2 MB.
+- The file opens in a viewer of its own, read only, up to 50 MB. Text shows its first 2 MB. The viewer stops above Android's navigation bar, so the end of the file isn't hidden behind it.
 - Web pages and SVG drawings show without running their scripts, loading anything from the internet or reading other files, like HTML previews in **Files**.
 - The viewer has no **Ask Rem**. Nothing you open this way goes to Rem, a thread or your computer.
 - Raticode reads only the file the other app gave it, with Android's one-time permission for that file. It asks for no storage permission, so apps that hand over a plain file path instead of sharing the file can't open it in Raticode.
@@ -97,14 +97,14 @@ The **Auto mode** card turns [Auto mode](../advanced/organizations.md#auto-mode)
 
 - Add a ticket for Rem or an organization, assign it, or hand one of Rem's tickets to an organization.
 - Long-press a ticket to move it.
-- After a move, a notice at the bottom of the board or the ticket's page names the ticket and where it went, such as "REM-12 moved to Backlog.", "REM-12 cancelled." or "REM-12 started." **Undo** on the notice moves the ticket back to the column it came from, as on [your computer's board](../rem/board.md). A move that starts or resumes work, and a move out of **In review** or **Blocked**, gets a notice without Undo, and so does any move of a paused ticket. A notice with Undo stays for about 10 seconds and others for about 4, longer if your phone's accessibility settings ask for more time; **×** closes it. If your computer refuses a move, it says why instead. *Not in a released version yet.*
+- After a move, a notice at the bottom of the board or the ticket's page names the ticket and where it went, such as "REM-12 moved to Backlog.", "REM-12 cancelled." or "REM-12 started." **Undo** on the notice moves the ticket back to the column it came from, as on [your computer's board](../rem/board.md). A move that starts or resumes work, and a move out of **In review** or **Blocked**, gets a notice without Undo, and so does any move of a paused ticket. A notice with Undo stays for about 10 seconds and others for about 4, longer if your phone's accessibility settings ask for more time; **×** closes it. If your computer refuses a move, it says why instead. *New in Raticode 0.6.1 and Raticode Mobile 0.37.0.*
 - The filters, the column you were on and the open section (**Board**, **Proposed**, **People** or **Self-work**) stay after you leave the board or close the app. A filter that's on is highlighted, and **Clear filters** turns them off. If a saved organization, person or project is gone, that filter shows everything again and the others stay. The phone keeps its own filters, separate from your computer's.
 - Open a ticket to see it at a glance (see [A ticket's page](#a-ticket-s-page)).
 - **History and comments** on a ticket's page lists each status change with its reason, oldest first, and comments from you, Rem and workers. Long results stay folded until you tap **Show the full text**. Add a comment at the bottom.
 - Offline, a ticket shows the history you last loaded. An older computer asks you to update it instead.
 - Tapping a ticket pill in Rem's chat opens that ticket here. A ticket no longer on the board says so.
 - A ticket that contradicts one of the project's decisions shows a red **Violates D-4** badge on its card, and its page shows a **Violates decisions** chip with the reason in the box at the top. Self-work won't start it until you change the ticket or the decision; see [Self-work keeps to decisions](../rem/board.md#self-work-keeps-to-decisions). An older computer sends no marker, so nothing shows. *New in Raticode 0.6.0 and Raticode Mobile 0.36.0.*
-- One of Rem's open tickets shows its [self-work objective](../rem/board.md#self-work-honors-the-objectives) on one short line of its card: the objective it advances, or **Not on an objective: self-work leaves it** while objectives are open. Its page has an **Objective** section with the same words as your computer's sheet, such as why self-work leaves it and **Move it to In progress to start it anyway.** An older computer sends neither, so nothing shows. *Not in a released version yet.*
+- One of Rem's open tickets shows its [self-work objective](../rem/board.md#self-work-honors-the-objectives) on one short line of its card: the objective it advances, or **Not on an objective: self-work leaves it** while objectives are open. Its page has an **Objective** section with the same words as your computer's sheet, such as why self-work leaves it and **Move it to In progress to start it anyway.** An older computer sends neither, so nothing shows. *New in Raticode 0.6.1 and Raticode Mobile 0.37.0.*
 - A ticket that [waits for other tickets](../rem/board.md#tickets-that-wait-for-other-tickets) shows **Waits for:** on its card. Its page lists them in **Waits for**, where you add one with **Wait for a ticket…** or remove one with its **×**. If one was cancelled, the card and page show a notice instead. An older computer sends no list, so nothing shows.
 
 ### A ticket's page
@@ -114,14 +114,15 @@ A ticket's page is laid out to be read in a few seconds. Nothing from the earlie
 - **At the top:** the key, who owns the ticket, a large title, and colored chips for its column, **Running**, **Paused** and **High** or **Critical** priority.
 - **Column strip:** a strip of dots shows where the ticket is between **Backlog** and **Done**. A blocked or paused ticket shows the reason in a tinted box.
 - **Auto-approved:** this is a chip. Tap it to read why self-work approved the ticket.
-- **From** a desktop's name: this chip marks a proposal from a self-work pass that ran on a paired desktop through **Run there**. Such a proposal always waits for your approval, even with auto-approval on. Tap it to read why. The card shows the same label, and the self-work report says **To approve, from** that desktop. Not in a released version yet.
+- **From** a desktop's name: this chip marks a proposal from a self-work pass that ran on a paired desktop through **Run there**. Such a proposal always waits for your approval, even with auto-approval on. Tap it to read why. The card shows the same label, and the self-work report says **To approve, from** that desktop. *New in Raticode 0.6.1 and Raticode Mobile 0.37.0.*
 - **Assigned to:** shows the assignee with their avatar. **Change** picks someone else, and **Their projects** opens their page. When a Rem ticket can't be handed to an organization right now, **Why can't I change this?** explains.
 - **Facts:** **Column**, **Priority**, **Project**, **Kind**, **Waits for** and **Added** show as tiles. Tap **Column** to move the ticket.
-- **Done when:** the ticket's finish line, one check per line, above **Why Rem suggests it**. A proposal shows it before you approve. An older computer doesn't send it, so nothing shows. *Not in a released version yet.*
+- **Done when:** the ticket's finish line, one check per line, above **Why Rem suggests it**. A proposal shows it before you approve. An older computer doesn't send it, so nothing shows. *New in Raticode 0.6.1 and Raticode Mobile 0.37.0.*
 - **Folded text:** **Why Rem suggests it** and **Last result** show their first sentence, with **Show more** for the rest. **Details** folds when it's long.
 - **Waits for** and **Waited on by:** each lists tickets with a status dot. Tap one to open it. **Waited on by** shows which tickets are waiting for this one.
 - **Pinned actions:** **Move** stays pinned at the bottom of the screen, with **Open** *organization* on an organization's ticket. A proposal pins **Approve** and **Decline** instead.
-- **Cancel ticket:** one of Rem's tickets that isn't done, running or paused also pins **Cancel ticket**. It doesn't ask first: the notice that follows has **Undo**. A cancelled ticket pins **Restore to Backlog** instead of **Move**. *Not in a released version yet.*
+- **Edit:** one of Rem's tickets in **Backlog**, **To do** or **Blocked** that isn't running or paused, proposals included, has **Edit** beside its title. It opens a sheet with **Title**, **Description**, **Priority**, **Kind of work** and **Done when** (one check per line), as on [your computer](../rem/board.md#the-board). **Save** sends only what you changed. If the ticket changes on your computer while the sheet is open, the fields you didn't touch follow the newer copy, so Save doesn't undo that change. A field you changed keeps what you typed, even if it also changed on your computer: unlike your computer's form, the phone doesn't warn about that, and Save replaces the other change. If a run started, or the ticket changed just as you saved, your computer says why. A description longer than the board sends stays as it is. With a computer that doesn't send **Done when**, the sheet leaves it out. An organization's tickets aren't edited here. *New in Raticode 0.6.2 and Raticode Mobile 0.38.0.*
+- **Cancel ticket:** one of Rem's tickets that isn't done, running or paused also pins **Cancel ticket**. It doesn't ask first: the notice that follows has **Undo**. A cancelled ticket pins **Restore to Backlog** instead of **Move**. *New in Raticode 0.6.1 and Raticode Mobile 0.37.0.*
 
 An organization's ticket in **Orgs › Issues** uses the same layout. Its first two actions are pinned at the bottom, such as **Accept** and **Request changes** for work to review, or **Approve plan**. The others, and **Cancel ticket**, are under **⋯**. Assignee, priority, due date, project, milestone and epic show as tiles, and tapping one opens its page.
 
@@ -130,17 +131,18 @@ The board also has:
 | Section | What it does |
 | --- | --- |
 | **Proposed** | Rem's ideas, with **Approve** and **Decline**. Nothing runs until you approve it. |
-| **People** | Rem and every organization's agents. Tap someone to choose the projects they may work in during self-work. |
+| **People** | Rem and every organization's workers. Tap someone to choose the projects they may work in during self-work. |
 | **Self-work** | What Rem is doing on its own, where it can work, its objectives, and the report of tickets added and work done. **Self-work settings** opens its settings. |
 
-**Objectives** sits above the report on the **Self-work** section and lists the [objectives](../rem/board.md#objectives) that guide the self-work session, in the computer's order: open ones first, newest first. *Not in a released version yet.*
+**Objectives** sits above the report on the **Self-work** section and lists the [objectives](../rem/board.md#objectives) that guide the self-work session, in the computer's order: open ones first, newest first. *New in Raticode 0.6.1 and Raticode Mobile 0.37.0.*
 
 - Each row shows the objective and whether it's **Open** or **Done**. Tap it for its **Done when** line (or that it's open-ended), who checked it off and the evidence they gave. One row opens at a time, and a second tap closes it.
 - The count by the heading is this session's done/total, such as **1/3**, as in Rem's side pane on your computer.
 - Objectives finished in earlier sessions are in a folded **Stale** group with how many there are. Tap it to open it.
 - With no objectives for this session, the card says so in the computer's words.
 - The phone shows the first 30, as the side pane does; the card says how many more are on your computer.
-- The list is read-only here. To change it, tell Rem in its chat, typed or spoken. An older computer sends no objectives, so the card doesn't show.
+- Below the global list, each of Rem's projects has its own folding section with its own objectives, its **Level of effort** and its threads now against its share, as on your computer; see [Each project's objectives and level of effort](../rem/board.md#each-project-s-objectives-and-level-of-effort). Add an objective with **+** in the list or a project's section, tap a checkbox to check one off or reopen it, and remove one from its row. **Edit**, next to **Remove** under an open row, opens a sheet with the objective, its **Done when** and **Applies to**: **Every project** or one of Rem's projects, so you can move it to another list. With a computer that can't move objectives yet, the sheet has no **Applies to** and changes only the words and **Done when**. Set a project's level of effort with − and +; the other projects share the rest. When Rem has only one project, it holds 100% and its section has no − and +. **Ask Rem** in a project's section has Rem write three to five broad, open-ended objectives for it, as on your computer ([Ask Rem for a project's objectives](../rem/board.md#ask-rem-for-a-project-s-objectives)); it shows **Asking Rem…** while Rem writes, then how many it added or why it couldn't. A computer without Ask Rem shows no button. *New in Raticode 0.6.2 and Raticode Mobile 0.38.0.*
+- With an older computer the list is read-only: to change it, tell Rem in its chat, typed or spoken. A computer older still sends no objectives, so the card doesn't show.
 
 ### Self-work settings
 
@@ -180,6 +182,8 @@ The **All runs** list needs Raticode Mobile 0.35.0 and Raticode 0.5.5. With an o
 :::
 
 **All runs** at the top of **More › Workflows** lists the runs of every workflow in your open projects, newest first, like the computer's [Workflow runs](../studio/runs.md#every-workflow-s-runs) view. Each run shows its workflow, status, when it started, how long it took, whether it was started by hand, a trigger, the phone or Rem, and its tokens and estimated cost. Chips filter by time (24 hours, 7 days, 30 days or all time), status and workflow, and the line above the list totals what matches. Tap a run to open it in its workflow. The phone shows the newest 60 runs; older ones are on the computer. A run whose model step moved to a [fallback provider](../nodes/agent.md#fallback-providers) reads **switched provider**, and in the run's steps that step says which provider it left, why, and which one answered. That needs Raticode 0.5.5 on the computer; the phone app needs no update. A model step also names the provider app version it started, such as *Provider: Claude Code 2.3.1*; that needs a computer with Raticode 0.6.0 or later, and the phone app needs no update.
+
+A failed, interrupted or stopped run shows why it stopped under its status, in red: the first line of its error, such as *Node test exited with code 1*, cut to two lines. A workflow's own run history shows the same line. Open the run to read the whole error. Like the computer's [Workflow runs](../studio/runs.md#every-workflow-s-runs) view, the error is cut to 300 characters before it reaches the phone. This needs Raticode 0.6.2 on the computer and Raticode Mobile 0.38.0. With Raticode 0.6.1 or older on the computer, rows show no error line. *New in Raticode 0.6.2 and Raticode Mobile 0.38.0.*
 
 ### Run with inputs
 
@@ -324,6 +328,7 @@ Each post shows who proposed it, when it goes out and to which accounts, its war
 - An approval covers the exact version the phone showed. If the post changed on the computer in the meantime, the computer refuses the approval and the list refreshes, so you see the new version first.
 - The phone shows the first 4,000 characters of each text and can't show images, videos or a post's options, such as a video title or a LinkedIn link preview title. When a post has more than the phone shows, approving says so and asks you to check it on the computer first.
 - **Publish now** sends a due or stuck account's post, such as a [LinkedIn tap to publish](../advanced/posts.md#linkedin-tap-to-publish). For Patreon, Buy Me a Coffee and TikTok, **Open** goes to the site's post page and **Mark posted** takes the link to the post you made.
+- A post with a [Facebook or YouTube copy the computer couldn't delete](../advanced/posts.md#a-copy-that-couldn-t-be-deleted) is in **Needs attention**, with the platform's message, **View the copy**, **Try again** and **I deleted it**, as on the computer. Each asks once more.
 - **Publishing** at the top pauses or resumes all publishing, like **Pause all publishing** on the computer. Resuming asks first.
 
 The phone has your trust here, as at the computer, so a tap is your approval. Rem, tasks and workflows still can't approve: they reach Posts only through their propose-only tools. Like everything the phone sends, decisions go through the [suspicious-request check](pairing.md#suspicious-requests-lock-the-phone), and the post's activity log records them as yours, from the phone. The phone can't write or edit posts, connect accounts or change Posts settings; account logins never travel to it.

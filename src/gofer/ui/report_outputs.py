@@ -297,6 +297,37 @@ def render_pdf(content: str) -> bytes:
     return data
 
 
+_VIEWPORT = re.compile(r"<meta\b[^>]*\bname\s*=\s*[\"']?viewport\b", re.I)
+# The property itself, not the prefers-color-scheme media query, which doesn't declare one.
+_COLOR_SCHEME = re.compile(
+    r"(?<![\w-])color-scheme\s*:|<meta\b[^>]*\bname\s*=\s*[\"']?color-scheme\b", re.I
+)
+NO_VIEWPORT = (
+    'This report has no <meta name="viewport" content="width=device-width, '
+    'initial-scale=1">, so a phone lays it out at desktop width and shrinks it. Add it '
+    "to the head of later reports."
+)
+NO_COLOR_SCHEME = (
+    "This report doesn't declare its color scheme, so a phone in dark mode may recolor "
+    "it. Add color-scheme: dark (or light, or light dark) to :root in later reports."
+)
+
+
+def screen_warnings(content: str, report_format: str) -> list[str]:
+    """What keeps an HTML report from fitting a phone, for the author to fix next time.
+
+    The report is saved as written: Raticode can't tell which color scheme a design meant,
+    and authored styling is kept exactly.
+    """
+    if report_format not in {"html", "slides"} or not re.search(r"<html[\s>]", content, re.I):
+        return []
+    return [
+        warning
+        for pattern, warning in ((_VIEWPORT, NO_VIEWPORT), (_COLOR_SCHEME, NO_COLOR_SCHEME))
+        if not pattern.search(content)
+    ]
+
+
 def _free_name(target: Path, root: Path) -> str:
     """Suggest the first unused -vN name next to an existing report."""
     stem = re.sub(r"-v\d+$", "", target.stem)
@@ -383,6 +414,7 @@ def write_report(
     content, rewritten, flagged = rewrite_links(
         content, target.name if report_format != "pdf" else "source.html", root, target.parent
     )
+    fit_warnings = screen_warnings(content, report_format)
     prepared = prepare_report(content, report_format)
     if len(prepared.encode("utf-8")) > MAX_REPORT_BYTES:
         raise ValueError("The prepared report exceeds 2 MB. Shorten the report or its assets.")
@@ -397,6 +429,8 @@ def write_report(
             if len(warnings) > 20
             else []
         )
+    if fit_warnings:
+        result["screenWarnings"] = fit_warnings
     # Keep the authored PDF source searchable by existing knowledge tools.
     with atomic_binary_output(root / relative, exclusive=True) as output:
         output.write(data)

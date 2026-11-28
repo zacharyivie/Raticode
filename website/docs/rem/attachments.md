@@ -35,6 +35,31 @@ Several places put a text file in Rem's message box for you to ask about. Nothin
 
 Text from a run, the workflow source or a terminal is marked as untrusted inside the file, between BEGIN and END lines with a random tag, so Rem reads it as data rather than instructions. A run's output and a terminal selection keep at most their last 200 lines, cut to 8 KB, and password inputs show as a mask.
 
+## Files Rem links to
+
+New in Raticode 0.6.2 and Raticode Mobile 0.38.0.
+
+When one of Rem's messages links to a file on your computer, the file also shows at the bottom of that message, as a tile like the files you attach. This covers Rem's replies, the updates it posts when a task finishes, and each worker's replies in a task's work thread, such as its screenshots, recordings, reports and logs. It's built in for everyone, with no setting or memory to turn on.
+
+- Only a Markdown link to a full path of a file that exists, such as `[screenshot](</home/me/shots/after.png>)`, gets a tile. Web addresses, folders, relative paths, symbolic links and files that are gone don't.
+- A file shows once per message, at most 8 per message. One that already shows on the message, as a file Rem sent or a saved report's card, doesn't get a second tile.
+- Files the [sensitive-file rule](#what-rem-won-t-attach) protects, such as keys, passwords, sign-ins and Raticode's own data, keep their link but get no tile.
+- Nothing is copied or moved. The tile points at the file where it is: click it to preview the file, as with your own attachments. A tile for a file you've since deleted says it's no longer available.
+- In a work thread, only the worker's replies get tiles, not the instructions from Rem or you. A file deleted since the reply also says it's no longer available.
+- On the phone, the same tiles show under the message and under a worker's reply in a work thread. Tapping one fetches the file from the computer the same way tapping its link does, with the same checks. A work thread's file has to be inside an open project or the evidence folder of that thread's task. See [Rem on the phone](../mobile/rem.md).
+
+### Where workers save evidence
+
+A worker whose shell runs in Claude Code's sandbox, such as one doing self-work or a task another computer handed over, keeps its temp files in a private scratch folder, `<data>/rem-work/turn-scratch/<run>-execute`, in Raticode's [data folder](../advanced/security.md). Its instructions name an `evidence` folder inside it, and it saves the screenshots, recordings, logs and other evidence it links there. When the turn ends, the rest of the scratch folder is removed and the evidence folder stays, so the tiles under the worker's reply still open.
+
+- Evidence files and your own attachments are the only parts of Raticode's data that get tiles. A file elsewhere in the scratch folder doesn't.
+- An evidence folder is kept for 30 days after its task's run ends, then removed. It goes sooner if the task and its work thread are deleted first.
+- A worker that doesn't run in Claude Code's sandbox, such as a Codex worker or one you're watching, has no scratch folder. Its evidence stays wherever it saved it.
+
+### What Rem won't attach
+
+Rem doesn't attach a file that may hold passwords, keys or sign-ins (such as `.env`, `auth.json` or anything under `~/.ssh`), or Raticode's own data, unless your message names its full path. A linked file under that rule keeps its link but gets no tile.
+
 ## Text files in Rem's chat
 
 *Changed in Raticode 0.6.0. Earlier versions sent only the first 20,000 characters of a file as stored, HTML markup included, and Rem had no way to read further.*

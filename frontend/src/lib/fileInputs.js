@@ -2,9 +2,9 @@
 // The backend lists them with type "file" and file: {accept, maxSize}; the value is a path.
 // The run copies the file into its own folder when it starts, so this only checks early.
 
-export const DEFAULT_FILE_MAX_SIZE = 20 * 1024 * 1024;
+const DEFAULT_FILE_MAX_SIZE = 20 * 1024 * 1024;
 
-export function isFileInput(spec) {
+function isFileInput(spec) {
   return spec?.type === "file" || (spec?.schema?.type === "string" && spec?.schema?.format === "file");
 }
 

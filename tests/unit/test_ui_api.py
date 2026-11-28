@@ -585,6 +585,118 @@ def test_rattish_graph_edits_cannot_make_a_valid_workflow_invalid(tmp_path: Path
     assert source_path.read_text(encoding="utf-8") == _GRAPH_EDITOR_SOURCE
 
 
+_PASTED_NODES = """Node prepare:
+  type: bash-command
+  command: echo ready
+  to:
+    - fresh when node.prepare.output.stdout contains "ready"
+    - gone
+
+Node fresh:
+  type: bash-command
+  command: echo fresh
+  needs:
+    - prepare
+    - missing
+  to: review
+"""
+
+# prepare is taken, so it becomes prepare-copy and the route and needs follow it; the
+# route to gone and the need on missing name nodes that exist nowhere, so they go.
+_PASTED_AFTER = """
+Node prepare-copy:
+  type: bash-command
+  command: echo ready
+  to:
+    - fresh when node.prepare-copy.output.stdout contains "ready"
+
+Node fresh:
+  type: bash-command
+  command: echo fresh
+  needs: prepare-copy
+  to: review
+"""
+
+
+def test_rattish_paste_nodes_renames_taken_names_and_drops_links_to_missing_nodes(
+    tmp_path: Path,
+) -> None:
+    opened = _graph_editor_workflow(tmp_path, "Graph Only", _GRAPH_EDITOR_SOURCE)
+
+    pasted = mutate_rattish_document_payload(
+        "graph-only",
+        [{"kind": "paste_nodes", "source": _PASTED_NODES}],
+        opened["sourceRevision"],
+        tmp_path,
+    )
+
+    assert pasted["source"] == _GRAPH_EDITOR_SOURCE + _PASTED_AFTER
+    assert pasted["pastedNodes"] == ["prepare-copy", "fresh"]
+    assert pasted["compilation"]["state"] == "valid"
+    routes = {(edge["from"], edge["to"]) for edge in pasted["graph"]["edges"]}
+    assert ("prepare-copy", "fresh") in routes
+    assert ("fresh", "review") in routes
+
+    again = mutate_rattish_document_payload(
+        "graph-only",
+        [{"kind": "paste_nodes", "source": _PASTED_NODES}],
+        pasted["sourceRevision"],
+        tmp_path,
+    )
+    assert again["pastedNodes"] == ["prepare-copy-2", "fresh-copy"]
+    assert "needs: prepare-copy-2" in again["source"]
+
+
+def test_rattish_paste_nodes_refuses_a_paste_that_stops_the_workflow_compiling(
+    tmp_path: Path,
+) -> None:
+    opened = _graph_editor_workflow(tmp_path, "Graph Only", _GRAPH_EDITOR_SOURCE)
+    source_path = Path(opened["sourcePath"])
+    broken = 'Node empty:\n  type: bash-command\n  command: ""\n'
+    combined = _GRAPH_EDITOR_SOURCE + "\n" + broken
+    first_error = next(
+        item["message"]
+        for item in analyze_rattish_document_payload("graph-only", combined, tmp_path)[
+            "diagnostics"
+        ]
+        if item["severity"] == "error"
+    )
+
+    with pytest.raises(RattishEditorError) as refused:
+        mutate_rattish_document_payload(
+            "graph-only",
+            [{"kind": "paste_nodes", "source": broken}],
+            opened["sourceRevision"],
+            tmp_path,
+        )
+
+    assert str(refused.value) == (
+        f"This change was not saved because it would make the workflow invalid: {first_error}"
+    )
+    assert source_path.read_text(encoding="utf-8") == _GRAPH_EDITOR_SOURCE
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["", "just some words", "Workflow:\n  name: Other\n", "Node half:\n", "Node a:\n  type x\n"],
+)
+def test_rattish_paste_nodes_refuses_text_that_is_not_node_declarations(
+    tmp_path: Path, text: str
+) -> None:
+    opened = _graph_editor_workflow(tmp_path, "Graph Only", _GRAPH_EDITOR_SOURCE)
+    source_path = Path(opened["sourcePath"])
+
+    with pytest.raises(RattishEditorError, match="The clipboard doesn't hold workflow nodes"):
+        mutate_rattish_document_payload(
+            "graph-only",
+            [{"kind": "paste_nodes", "source": text}],
+            opened["sourceRevision"],
+            tmp_path,
+        )
+
+    assert source_path.read_text(encoding="utf-8") == _GRAPH_EDITOR_SOURCE
+
+
 def test_rattish_graph_edits_can_repair_an_invalid_workflow(tmp_path: Path) -> None:
     invalid = _GRAPH_EDITOR_SOURCE.replace("command: echo review", 'command: ""')
     opened = _graph_editor_workflow(tmp_path, "Graph Only", invalid)

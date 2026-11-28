@@ -303,7 +303,7 @@ def test_rem_only_looks_at_tickets_raticode_stopped(tmp_path: Path) -> None:
                 "Rejected in review by Avery Lane; the user or Rem can reopen it",
                 "Rejected in review by you; the user or Rem can reopen it",
                 "Blocked by you: wait for the design",
-                "Run limit for this task reached. Reopen it to allow more runs.",
+                "Run limit for this ticket reached. Reopen it to allow more runs.",
                 "Waiting for working hours",
             ]
         )

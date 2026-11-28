@@ -74,18 +74,18 @@ The full error is in the app log under **Settings > Developer**.
 AppImage (use the exact file name you downloaded):
 
 ```bash
-chmod +x ./Raticode-0.6.1-x86_64.AppImage
-./Raticode-0.6.1-x86_64.AppImage
+chmod +x ./Raticode-0.6.2-x86_64.AppImage
+./Raticode-0.6.2-x86_64.AppImage
 ```
 
 Distribution packages:
 
 ```bash
 # Debian or Ubuntu
-sudo apt install ./Raticode-0.6.1-amd64.deb
+sudo apt install ./Raticode-0.6.2-amd64.deb
 
 # Fedora
-sudo dnf install ./Raticode-0.6.1-x86_64.rpm
+sudo dnf install ./Raticode-0.6.2-x86_64.rpm
 ```
 
 Change the version in the file name for another release. The AppImage, `.deb` and `.rpm` builds update themselves.
@@ -169,24 +169,25 @@ Each release has a checksum file per platform: `checksums-linux.txt`, `checksums
 sha256sum --check --ignore-missing checksums-linux.txt
 
 # macOS: compare the result with the file's line in checksums-macos.txt
-shasum -a 256 Raticode-0.6.1-arm64.dmg
+shasum -a 256 Raticode-0.6.2-arm64.dmg
 ```
 
 ```powershell
 # Windows: compare the result with the file's line in checksums-windows.txt
-(Get-FileHash .\Raticode-Setup-0.6.1.exe).Hash.ToLower()
+(Get-FileHash .\Raticode-Setup-0.6.2.exe).Hash.ToLower()
 ```
 
 Release files also carry GitHub build provenance, which shows they were built by Raticode's release workflow from the repository's source. With the [GitHub CLI](https://cli.github.com/) signed in:
 
 ```bash
-gh attestation verify ./Raticode-0.6.1-x86_64.AppImage --repo zacharyivie/Raticode
+gh attestation verify ./Raticode-0.6.2-x86_64.AppImage --repo zacharyivie/Raticode
 ```
 
 ## Updates and backups
 
 - Use the app's **Update** button, or watch the [release page](https://github.com/zacharyivie/Raticode/releases).
-- **Automatic checks (from 0.5.5).** While **Check for updates** is on in **Settings > General**, Raticode asks GitHub for a new release when it starts and every 10 minutes while it runs, one request at a time. A failed check waits longer before the next try (10, 20, 40, 80 minutes, then every 2 hours), and a check GitHub rate-limits waits until GitHub's reset time. A failed check is never reported as up to date: the check button gets an amber dot and its tooltip names the problem. When a newer version is out, an **Update** button with its version number appears next to the check button; it downloads and installs the update. Turning the setting off stops the automatic checks; the check button still works. Raticode 0.5.5 to 0.6.0 also showed a once-a-day banner under the top bar; the next release drops it, so the toolbar button is the only update prompt (not yet released).
+- **Automatic checks (from 0.5.5).** While **Check for updates** is on in **Settings > General**, Raticode asks GitHub for a new release when it starts and every 10 minutes while it runs, one request at a time. A failed check waits longer before the next try (10, 20, 40, 80 minutes, then every 2 hours), and a check GitHub rate-limits waits until GitHub's reset time. A failed check is never reported as up to date: the check button gets an amber dot and its tooltip names the problem. When a newer version is out, an **Update** button with its version number appears next to the check button; it downloads and installs the update. Turning the setting off stops the automatic checks; the check button still works. Raticode 0.5.5 to 0.6.0 also showed a once-a-day banner under the top bar; from 0.6.1 the toolbar button is the only update prompt.
+- **What's new (from 0.6.2).** The first time a newer version starts, the toolbar shows **Raticode updated to X.Y.Z** with a **What's new** button. It opens the [changelog](https://github.com/zacharyivie/Raticode/blob/main/CHANGELOG.md) notes for every version since the one you last ran, up to the one now running, and a link to that version's release page. The notes ship inside the app, so they show without a network connection. Dismissing the notice or opening What's new means it doesn't come back for that version. A first install shows no notice. Updating from 0.6.1 or earlier, which didn't record the version you ran, shows the notice with the running version's notes. **Help › What's New** opens the notes for the running version at any time. If the changelog has no notes for it, the dialog says so and links the release page.
 - On a Mac, see [Mac updates](#mac-updates). An AUR install updates through pacman ([Arch Linux](#arch-linux-aur)).
 - Before moving between incompatible versions, back up your project files and Raticode's data folder. [Local data](./advanced/security.md#stored-data) lists where it lives.
 

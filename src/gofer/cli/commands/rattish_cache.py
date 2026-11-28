@@ -12,7 +12,7 @@ from typing import Any
 
 import typer
 
-from gofer.cli.output import fail
+from gofer.cli.output import fail, require_format
 
 app = typer.Typer(
     help=(
@@ -32,12 +32,6 @@ _DATA_DIR_OPTION = typer.Option(
     None, "--data-dir", help="Override the data folder that holds the cache."
 )
 _FORMAT_OPTION = typer.Option("text", "--format", help="Output format: text or json.")
-
-
-def _require_format(output_format: str) -> None:
-    if output_format not in {"text", "json"}:
-        typer.echo("Unsupported format. Use 'text' or 'json'.", err=True)
-        raise typer.Exit(2)
 
 
 def _resolve_workflow_id(
@@ -91,7 +85,7 @@ def show(
     from gofer.rattish.result_cache import ResultCache
     from gofer.utils.paths import get_data_dir
 
-    _require_format(output_format)
+    require_format(output_format)
     base = data_dir or get_data_dir()
     safe_id = _resolve_workflow_id(source, workflow_id, base, output_format)
     stats = ResultCache(base).stats(safe_id)
@@ -121,7 +115,7 @@ def clear(
     from gofer.rattish.result_cache import ResultCache
     from gofer.utils.paths import get_data_dir
 
-    _require_format(output_format)
+    require_format(output_format)
     base = data_dir or get_data_dir()
     cache = ResultCache(base)
     try:

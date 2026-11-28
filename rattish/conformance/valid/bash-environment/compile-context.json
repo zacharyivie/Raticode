@@ -8,7 +8,7 @@
   "entrypoint": "workflow.rattish",
   "contracts": {
     "bash-command": {
-      "version": 1,
+      "version": 2,
       "fingerprint": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
     }
   }

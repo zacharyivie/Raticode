@@ -814,3 +814,22 @@ def test_updater_metadata_reader_matches_electron_builder_output(candidate: Any)
         "Raticode-0.5.3-amd64.deb",
     ]
     assert files[0]["blockMapSize"] == "288947"
+
+
+def test_a_version_without_its_changelog_section_cant_be_published(candidate, tmp_path) -> None:
+    for name in (
+        "pyproject.toml",
+        "uv.lock",
+        "frontend/package.json",
+        "frontend/package-lock.json",
+    ):
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / name, tmp_path / name)
+    version = candidate.versions(ROOT)
+    changelog = tmp_path / "CHANGELOG.md"
+    # What's new in the app shows only "## X.Y.Z - date" sections.
+    changelog.write_text("# Changelog\n\n## Unreleased\n\n- New\n\n## 0.0.1 - 2026-01-01\n")
+    with pytest.raises(ValueError, match="CHANGELOG.md needs"):
+        candidate.versions(tmp_path)
+    changelog.write_text(f"# Changelog\n\n## {version} - 2026-12-01\n\n- New\n")
+    assert candidate.versions(tmp_path) == version

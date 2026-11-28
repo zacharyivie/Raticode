@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { apiJson } from "../lib/api";
 
-export const DEFAULT_LOCAL_SERVER_URL = "http://127.0.0.1:11434/v1";
+const DEFAULT_LOCAL_SERVER_URL = "http://127.0.0.1:11434/v1";
 
 // Mirrors is_loopback_base_url in gofer/core/provider_profiles.py. The backend decides;
 // this only picks which fields and warning the form shows while the user types.

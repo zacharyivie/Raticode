@@ -499,7 +499,13 @@ def empty_usage() -> dict[str, Any]:
     }
 
 
-def _add_call(target: dict[str, Any], tokens: dict[str, int], partial: bool) -> None:
+def count_tokens(target: dict[str, Any], tokens: Mapping[str, int], partial: bool) -> None:
+    """Add one call's tokens to a total that ``empty_usage`` started.
+
+    Ticket and workflow run totals share this rule. A call is reported when it gave a
+    total, or both input and output, and didn't end early; partial when it gave some
+    tokens; unknown when it gave none. Without a total, input plus output stands in.
+    """
     target["calls"] += 1
     complete = "total_tokens" in tokens or {"input_tokens", "output_tokens"} <= tokens.keys()
     if complete and not partial:
@@ -570,7 +576,7 @@ def run_usage(run_ids: Iterable[Any], data_dir: Path | None = None) -> dict[str,
                 for row in rows:
                     tokens = {} if row["estimated"] else json.loads(row["tokens"])
                     target = totals.setdefault(row["run_id"], empty_usage())
-                    _add_call(target, tokens, bool(row["partial"]))
+                    count_tokens(target, tokens, bool(row["partial"]))
     except (OSError, sqlite3.Error, ValueError) as exc:
         logger.warning("Could not read run usage (%s)", type(exc).__name__)
     return totals

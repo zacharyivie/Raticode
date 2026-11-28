@@ -102,6 +102,42 @@ def test_links_are_removed_as_links_and_their_targets_stay(tmp_path: Path) -> No
     assert (outside / "cache2" / "entry").exists()
 
 
+@pytest.mark.parametrize("swapped", ["container", "root"])
+def test_a_folder_swapped_for_a_link_after_the_survey_never_leads_the_delete_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, swapped: str
+) -> None:
+    """Nightly audit, 26 November: the sweep checked a container folder (or the root) by
+    path and then deleted by path again, so a worker that swapped it for a link to the
+    user's home between the two had ``rmtree`` delete ``~/Projects``."""
+    root = _root(tmp_path)
+    decoy = _profile(root / "-x" / "Projects")
+    home = tmp_path / "home"
+    victim = _profile(home / "Projects")
+    survey = temp_cleanup._survey
+
+    def survey_then_swap(*args: object, **kwargs: object) -> object:
+        found = survey(*args, **kwargs)  # type: ignore[arg-type]
+        moved = root / "-x" if swapped == "container" else root
+        if not os.path.islink(moved):
+            moved.rename(moved.with_name(moved.name + "-real"))
+            moved.symlink_to(home if swapped == "container" else tmp_path / "fake-root")
+            if swapped == "root":
+                (tmp_path / "fake-root").mkdir()
+                (tmp_path / "fake-root" / "-x").symlink_to(home)
+        return found
+
+    monkeypatch.setattr(temp_cleanup, "_survey", survey_then_swap)
+    _sweep(root)
+
+    assert (victim / "places.sqlite").stat().st_size == 64 * 1024
+    assert (victim / "cache2" / "entry").exists()
+    # What the survey judged, in the folder it was found in, is what went.
+    real = root.with_name(root.name + "-real") / "-x" if swapped == "root" else root / "-x-real"
+    assert not (real / "Projects").exists()
+    # The old path now leads through the link to the victim, which is still there.
+    assert decoy.resolve() == victim.resolve()
+
+
 def test_a_folder_a_process_uses_is_kept(tmp_path: Path) -> None:
     root = _root(tmp_path)
     by_cwd = _profile(root / "server-cwd-AAAAAA")

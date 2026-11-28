@@ -80,12 +80,13 @@ test("reset countdown reads in days, hours and minutes from now", () => {
   assert.equal(resetCountdown("not a date", now), "");
 });
 
-test("last-checked time is relative while recent", () => {
+test("last-checked time is relative for a week, then a date", () => {
   const now = Date.parse("2026-11-17T12:00:00Z");
   assert.equal(checkedLabel("2026-11-17T11:59:40Z", now), "Checked just now");
   assert.equal(checkedLabel("2026-11-17T11:46:00Z", now), "Checked 14 min ago");
-  assert.equal(checkedLabel("2026-11-17T09:00:00Z", now), "Checked 3h ago");
-  assert.match(checkedLabel("2026-11-15T09:00:00Z", now), /^Checked Nov 15/);
+  assert.equal(checkedLabel("2026-11-17T09:00:00Z", now), "Checked 3 h ago");
+  assert.equal(checkedLabel("2026-11-15T09:00:00Z", now), "Checked 2 days ago");
+  assert.equal(checkedLabel("2026-11-01T09:00:00Z", now), "Checked Nov 1");
   assert.equal(checkedLabel(null, now), "Not checked yet");
 });
 

@@ -8,7 +8,7 @@ import MediaViewer from "./MediaViewer.jsx";
 import { formatAttachmentBytes } from "../lib/chatAttachments.js";
 import { mediaKind } from "../lib/mediaKind.js";
 
-export function replyMediaKind(file) {
+function replyMediaKind(file) {
   const kind = mediaKind(file?.name || file?.path);
   return kind === "image" || kind === "video" ? kind : "";
 }

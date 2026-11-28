@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import threading
 from collections import Counter
 from pathlib import Path
@@ -44,7 +45,7 @@ Node ship:
 
 
 def done(stdout: str = "") -> dict[str, Any]:
-    return {"stdout": stdout, "stderr": "", "exit_code": 0}
+    return {"stdout": stdout, "stderr": "", "exit_code": 0, "truncated": False}
 
 
 class Fake:
@@ -404,7 +405,8 @@ def test_the_cli_resumes_a_failed_run(tmp_path: Path) -> None:
         tmp_path,
         "Rattish: 1\nWorkflow:\n  name: CLI resume\n"
         "Node first:\n  type: bash-command\n  command: printf first >> runs.txt\n  to: second\n"
-        f"Node second:\n  type: bash-command\n  command: test -f {flag}\n  needs: first\n",
+        f"Node second:\n  type: bash-command\n  command: test -f {shlex.quote(str(flag))}\n"
+        "  needs: first\n",
     )
     runner = CliRunner()
     arguments = ["--data-dir", str(base)]

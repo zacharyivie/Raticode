@@ -165,7 +165,8 @@ def test_rem_discovery_is_small_and_provider_uses_private_mcp(
     )
     assert SWARM_HELP not in prompt
     assert "wakeIntervalSeconds" not in prompt
-    assert "private" not in prompt
+    # The server's address stays out; the prompt names the checkout, whose path may say "private".
+    assert "127.0.0.1:1234/private" not in prompt
     assert len(json.dumps(SWARM_TOOL)) < 700
     command = _build_chat_command(
         provider=provider,

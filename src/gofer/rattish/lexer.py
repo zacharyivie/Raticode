@@ -3,28 +3,48 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from gofer.rattish.diagnostics import SourcePosition
 
 
-class DuplicateJsonKeyError(ValueError):
-    pass
+class StrictJsonError(ValueError):
+    """JSON that Python's decoder accepts but strict JSON does not."""
 
 
 def strict_json_loads(source: str) -> Any:
-    """Decode strict JSON while rejecting duplicate object member names."""
+    """Decode strict JSON: no duplicate member names and only finite numbers."""
 
     def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, value in pairs:
             if key in result:
-                raise DuplicateJsonKeyError(f"Duplicate JSON object key {key!r}.")
+                raise StrictJsonError(f"Duplicate JSON object key {key!r}.")
             result[key] = value
         return result
 
-    return json.loads(source, object_pairs_hook=reject_duplicates)
+    def reject_constant(name: str) -> Any:
+        raise StrictJsonError(f"{name} is not a JSON number.")
+
+    def finite_float(text: str) -> float:
+        value = float(text)
+        if not math.isfinite(value):
+            raise StrictJsonError(f"JSON number {text} is out of range.")
+        return value
+
+    try:
+        return json.loads(
+            source,
+            object_pairs_hook=reject_duplicates,
+            parse_constant=reject_constant,
+            parse_float=finite_float,
+        )
+    except (json.JSONDecodeError, StrictJsonError):
+        raise
+    except ValueError as exc:  # an integer longer than Python's digit limit
+        raise StrictJsonError(str(exc)) from exc
 
 
 @dataclass(frozen=True, slots=True)

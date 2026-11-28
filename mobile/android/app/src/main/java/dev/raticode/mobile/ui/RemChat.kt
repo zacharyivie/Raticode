@@ -476,6 +476,7 @@ private fun RemMessageRow(client: LiveClient, home: RemHome, row: MessageRow, on
                 PhoneActionCards(message.phoneActions, colors.muted, rememberPhoneActionOpener(), rememberContactPicker())
                 RemMemoryNoteView(client, message)
                 RemResultActions(client, home, message, live)
+                if (message.linkedFiles.isNotEmpty()) LinkedFileTiles(message.linkedFiles, source)
                 if (followUps) RemFollowUps(message.suggestions, onFollowUp)
             }
             // The stamp and the message's ⋯ menu (Reply, Copy, model and time) share one line.
@@ -484,6 +485,22 @@ private fun RemMessageRow(client: LiveClient, home: RemHome, row: MessageRow, on
                 Spacer(Modifier.weight(1f))
                 if (onReply != null || message.body.isNotBlank()) RemMessageMenu(message, onReply)
             }
+        }
+    }
+}
+
+/**
+ * Files a Rem message or a worker's reply links to, as tiles like the user's attachments, under the message. Each stays on the desktop
+ * until tapped; a tap asks for it the same way tapping its link does, so the desktop checks the file again.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun LinkedFileTiles(files: List<RemLinkedFile>, source: LinkSource?) {
+    val links = LocalChatLinks.current
+    FlowRow(Modifier.testTag("remLinkedFiles"), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        files.forEach { file ->
+            AttachmentTileView(file.name, file.size, null, FileKinds.previewMode(file.name), sending = false, missing = false,
+                onOpen = { if (source != null) links?.open(file.link, source) })
         }
     }
 }

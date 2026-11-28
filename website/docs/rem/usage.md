@@ -25,7 +25,7 @@ The two don't need to match. Provider totals include work done outside Raticode,
 | Sign-in state | For Claude Code, and for each Codex or Grok account: **Signed in**, **Needs sign-in**, **Claude Code not found** (or **Codex not found**, **Grok not found**) or **Sign-in not checked**. A Codex account reads it from Codex's `account/read`, a Grok account from whether Grok's `_x.ai/billing` answers. Other rows show their usage status. |
 | Meters | Each Claude Code card has its **5-hour** and **Weekly** windows side by side, with the percentage left. A window with no reading yet still has its place and says **No reading yet**. Other windows the account reports, such as a weekly Opus limit, follow them. |
 | Reset countdown | Under each meter, for example **resets in 2h 14m**, or **resets in 3d 4h** when it's days away. **reset time passed** means the reading is out of date; refresh it. |
-| Last checked | When Raticode last read the account, such as **Checked 4 min ago** |
+| Last checked | When Raticode last read the account, such as **Checked 4 min ago** or **Checked 2 days ago**. After a week it shows the date |
 
 A card that needs sign-in keeps its **Sign in** button. For a Claude Code, Codex or Grok account it starts the same one-click sign-in as **Settings > Providers**, and the card updates when you've approved it in your browser. If the provider refuses, the card shows the provider's own message. Rem skips that account until then.
 
@@ -268,7 +268,7 @@ On the phone, the **Usage** page shows the same estimate. In the CLI, `Raticode 
 
   *New in 0.6.0.*
 - **Project check failed first try**: of the tickets with a recorded check run, how many failed Raticode's check on the first try.
-- **Flaky check runs**: check runs that failed, then passed when Raticode [ran them again on the same commit](./home.md#raticode-runs-the-project-s-check-itself). They aren't counted as first-try failures or repairs. *Not in a released version yet.*
+- **Flaky check runs**: check runs that failed, then passed when Raticode [ran them again on the same commit](./home.md#raticode-runs-the-project-s-check-itself). They aren't counted as first-try failures or repairs. *New in 0.6.0.*
 - **Tokens per accepted ticket**: the tokens all of an accepted ticket's runs used, from the same token history as the chart.
 - **You stepped in**: your **Request changes** and the tickets you moved by hand.
 
@@ -280,7 +280,7 @@ The [self-work report](./board.md#the-report-when-self-work-stops) card shows on
 
 ## What each turn sends
 
-This isn't in a release yet. When Rem builds a turn's prompt, it records how big each part was: its length in characters and an estimated token count. The estimate is the characters divided by 4. It's a rough guide, not what the provider counts. Raticode stores the sizes only, never the text, in the usage history on this computer, and removes turns older than 90 days.
+New in 0.6.0. When Rem builds a turn's prompt, it records how big each part was: its length in characters and an estimated token count. The estimate is the characters divided by 4. It's a rough guide, not what the provider counts. Raticode stores the sizes only, never the text, in the usage history on this computer, and removes turns older than 90 days.
 
 | Part | What it is |
 | --- | --- |
@@ -314,7 +314,7 @@ Rem also calls its chat model without tools, outside any thread: to write a chat
 
 Each request is recorded, so a reply that needed a lookup shows up twice: once as first sent and once with what the lookup added. These calls have no session, so every part is sent each time. Their data is JSON full of IDs, paths and times, which tokenizes more densely than prose, so the provider usually counts more tokens than the estimate.
 
-Each request also records why Rem sent it, and whether its answer could be used. This isn't in a release yet.
+Each request also records why Rem sent it, and whether its answer could be used. New in 0.6.0.
 
 | Attempt | When Rem sends it |
 | --- | --- |

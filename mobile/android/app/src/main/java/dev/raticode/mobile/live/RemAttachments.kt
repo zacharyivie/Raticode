@@ -1,6 +1,5 @@
 package dev.raticode.mobile.live
 
-import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -74,15 +73,7 @@ object RemAttachments {
      * when its file is shown. Returns whether any were dropped.
      */
     fun dropQueued(state: JSONObject): Boolean {
-        val outbox = state.optJSONArray("outbox") ?: return false
-        val kept = JSONArray()
-        for (i in 0 until outbox.length()) {
-            val event = JSONObject(outbox.getString(i))
-            if (event.optString("type") != "desktop.action" || event.optJSONObject("payload")?.optString("op") != OP) kept.put(outbox.getString(i))
-        }
-        if (kept.length() == outbox.length()) return false
-        state.put("outbox", kept)
-        return true
+        return Outbox.drop(state) { it.optString("type") == "desktop.action" && it.optJSONObject("payload")?.optString("op") == OP }
     }
 
     /** Why a fetch didn't give a file, from the desktop's answer. */

@@ -7,7 +7,6 @@ import json
 import os
 import re
 import threading
-import uuid
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -43,6 +42,7 @@ from gofer.rattish.runtime import (
     load_ir,
 )
 from gofer.rattish.storage import registered_source_root
+from gofer.utils.atomic_output import replace_file
 from gofer.utils.brand_compat import LEGACY_WORKSPACE_DIRECTORIES
 from gofer.utils.paths import get_data_dir
 
@@ -355,6 +355,11 @@ def _cached_compiler(asset_root: Path, identity: AssetIdentity) -> RattishCompil
     )
 
 
+def provider_contracts() -> dict[str, ProviderContract]:
+    """The installed Rattish provider contracts, by Rattish provider ID."""
+    return _provider_contracts(rattish_asset_root())
+
+
 def _provider_contracts(asset_root: Path) -> dict[str, ProviderContract]:
     paths = [
         asset_root / "schemas" / "provider-contract.schema.json",
@@ -656,13 +661,9 @@ def _remember_artifact(key: ValidatedArtifactKey, entry: _ValidatedArtifact) -> 
 
 
 def _write_json_atomic(path: Path, document: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
-        temporary.write_bytes(canonical_json_bytes(document) + b"\n")
-        os.replace(temporary, path)
+        replace_file(path, canonical_json_bytes(document) + b"\n")
     except OSError as exc:
-        temporary.unlink(missing_ok=True)
         raise RattishArtifactError(f"Could not publish internal Rattish artifact: {exc}") from exc
 
 

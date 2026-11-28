@@ -23,6 +23,8 @@ function childEnv(base) {
 const runsIn = (base) => fs.readdirSync(path.join(base, `raticode-tests-${process.getuid()}`));
 
 // The script writes to os.tmpdir(), the way a leaking test does, and prints the folder.
+// It leaves that profile behind on purpose, so its stderr holds a temp_left_behind
+// line; children that aren't checked for it ignore stderr so the line stays out of this run's output.
 const WRITE = `require(${JSON.stringify(HELPER)});
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), "firefox-profile-"));
@@ -37,7 +39,7 @@ function run(base, body) {
 // Start a child, wait until it has written its folder, then give it the signal.
 function runUntilSignal(base, signal) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["-e", `${WRITE}setInterval(() => {}, 1000);`], { env: childEnv(base), stdio: ["ignore", "pipe", "inherit"] });
+    const child = spawn(process.execPath, ["-e", `${WRITE}setInterval(() => {}, 1000);`], { env: childEnv(base), stdio: ["ignore", "pipe", "ignore"] });
     let out = "";
     child.stdout.on("data", (data) => {
       out += data;
@@ -79,13 +81,99 @@ test("The next run clears a run that was killed outright, but not one still runn
   const killed = await runUntilSignal(base, "SIGKILL");
   assert.equal(fs.existsSync(path.join(killed.dir)), true);
 
-  const live = spawn(process.execPath, ["-e", `${WRITE}setInterval(() => {}, 1000);`], { env: childEnv(base), stdio: ["ignore", "pipe", "inherit"] });
+  const live = spawn(process.execPath, ["-e", `${WRITE}setInterval(() => {}, 1000);`], { env: childEnv(base), stdio: ["ignore", "pipe", "ignore"] });
   t.after(() => live.kill("SIGKILL"));
   const liveDir = await new Promise((resolve) => live.stdout.once("data", (data) => resolve(String(data).trim())));
 
   assert.equal(run(base, "").status, 0);
   assert.equal(fs.existsSync(killed.dir), false);
   assert.equal(fs.existsSync(path.join(liveDir)), true);
+});
+
+// The count shows a test that stopped cleaning up, even though the folder still goes.
+test("A run prints how many entries its tests left behind, and nothing when they left none", linuxOnly, (t) => {
+  const base = fixture(t);
+  const leaky = run(base, "");
+  assert.equal(leaky.status, 0, leaky.stderr);
+  assert.match(leaky.stderr, /^ℹ temp_left_behind 1 \(firefox-profile-\*\)$/m);
+  assert.deepEqual(runsIn(base), []);
+
+  const failed = run(base, 'throw new Error("test failed");');
+  assert.notEqual(failed.status, 0);
+  assert.match(failed.stderr, /^ℹ temp_left_behind 1 \(firefox-profile-\*\)$/m);
+
+  const clean = run(base, "fs.rmSync(profile, { recursive: true });");
+  assert.equal(clean.status, 0, clean.stderr);
+  assert.doesNotMatch(clean.stderr, /temp_left_behind/);
+  assert.deepEqual(runsIn(base), []);
+});
+
+test("npm test's totals print the count once, even when it is 0", linuxOnly, (t) => {
+  const base = fixture(t);
+  const report = `const { reportLeftBehind } = require(${JSON.stringify(HELPER)});`;
+  const leaky = run(base, `${report}\nreportLeftBehind((line) => process.stdout.write(line));`);
+  assert.equal(leaky.status, 0, leaky.stderr);
+  assert.match(leaky.stdout, /^ℹ temp_left_behind 1 \(firefox-profile-\*\)$/m);
+  assert.doesNotMatch(leaky.stderr, /temp_left_behind/);
+
+  const clean = run(base, `${report}\nfs.rmSync(profile, { recursive: true });\nprocess.stdout.write("count " + reportLeftBehind((line) => process.stdout.write(line)) + "\\n");`);
+  assert.equal(clean.status, 0, clean.stderr);
+  assert.match(clean.stdout, /^ℹ temp_left_behind 0$/m);
+  assert.match(clean.stdout, /^count 0$/m);
+  assert.deepEqual(runsIn(base), []);
+});
+
+// npm test stops its files on Ctrl+C and prints its totals after the folder is gone.
+test("A stopped run prints the real count while removing its folder, and its totals don't print 0 after", linuxOnly, async (t) => {
+  const base = fixture(t);
+  const script = `process.on("SIGTERM", () => setTimeout(() => {
+  process.stdout.write("totals " + reportLeftBehind((line) => process.stdout.write(line)) + "\\n");
+  process.exit(1);
+}, 10));
+${WRITE}const { reportLeftBehind } = require(${JSON.stringify(HELPER)});
+setInterval(() => {}, 1000);`;
+  const result = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["-e", script], { env: childEnv(base), stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (data) => {
+      if (!stdout) child.kill("SIGTERM");
+      stdout += data;
+    });
+    child.stderr.on("data", (data) => { stderr += data; });
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+  assert.equal(result.code, 1, result.stderr);
+  assert.match(result.stderr, /^ℹ temp_left_behind 1 \(firefox-profile-\*\)$/m);
+  assert.match(result.stdout, /^totals null$/m);
+  assert.doesNotMatch(result.stdout, /temp_left_behind/);
+  assert.deepEqual(runsIn(base), []);
+});
+
+test("A child sharing its parent's folder doesn't print a count; its parent does", linuxOnly, (t) => {
+  const base = fixture(t);
+  const child = `const { reportLeftBehind } = require(${JSON.stringify(HELPER)});
+fs.writeFileSync(path.join(os.tmpdir(), "child-leftover"), "");
+process.stdout.write("count " + reportLeftBehind() + "\\n");`;
+  const parent = `const { spawnSync } = require("node:child_process");
+const result = spawnSync(process.execPath, ["-e", ${JSON.stringify(WRITE)} + ${JSON.stringify(child)}], { encoding: "utf8" });
+if (!/^count null$/m.test(result.stdout) || /temp_left_behind/.test(result.stderr)) throw new Error("child printed a count: " + result.stdout + result.stderr);
+`;
+  const result = run(base, parent);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /^ℹ temp_left_behind 3 \(firefox-profile-\* ×2, child-leftover\)$/m);
+});
+
+test("Leftovers are grouped by name without their random ending, most common first", () => {
+  const { leftBehindLine } = require(HELPER);
+  assert.equal(leftBehindLine([]), "ℹ temp_left_behind 0\n");
+  assert.equal(
+    leftBehindLine(["firefox-port-test-a1B2c3", "Downloads", "browser-sessions-Zz9y8x", "browser-sessions-q1w2e3"]),
+    "ℹ temp_left_behind 4 (browser-sessions-* ×2, Downloads, firefox-port-test-*)\n",
+  );
+  const many = Array.from({ length: 10 }, (_, index) => `kind${index}-abcdef`);
+  assert.match(leftBehindLine(many), /^ℹ temp_left_behind 10 \(kind0-\*, .*kind7-\*, 2 more kinds\)\n$/);
 });
 
 test("A child shares its parent's folder and leaves it in place", linuxOnly, (t) => {
@@ -136,7 +224,7 @@ test("A run whose base can't be written still removes everything it wrote to the
   assert.deepEqual(fs.readdirSync(fallbackRuns(normalTemp)), []);
 
   const stopped = await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["-e", `${WRITE}setInterval(() => {}, 1000);`], { env, stdio: ["ignore", "pipe", "inherit"] });
+    const child = spawn(process.execPath, ["-e", `${WRITE}setInterval(() => {}, 1000);`], { env, stdio: ["ignore", "pipe", "ignore"] });
     child.stdout.once("data", () => child.kill("SIGTERM"));
     child.on("error", reject);
     child.on("exit", (code, signal) => resolve(signal));

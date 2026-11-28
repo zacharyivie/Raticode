@@ -59,6 +59,27 @@ class RemTaskChecksTest {
         assertFalse(RemTaskChecks.groups(listOf(RemCheck("a", "", "unknown", ""))).reviewed)
     }
 
+    @Test fun parsesTheReviewsNotesWithSeverityAxisAndFile() {
+        val notes = JSONArray()
+            .put(JSONObject().put("severity", "note").put("axis", "standards").put("file", "src/a.py").put("explanation", " Rename x. "))
+            .put(JSONObject().put("severity", "should_fix").put("axis", "spec").put("file", "").put("explanation", "y".repeat(4000)))
+            .put(JSONObject().put("severity", "odd").put("axis", "odd").put("explanation", "Kept anyway."))
+            .put(JSONObject().put("severity", "note").put("explanation", "  "))
+        val run = JSONObject().put("run_id", "r").put("state", "succeeded").put("criteria", JSONArray().put(check("a", "pass")))
+            .put("review_notes", notes)
+        val parsed = (DesktopViews.parse("rem.task:t", taskJson(run)) as RemTask).lastRun!!.notes
+        assertEquals(RemReviewNote("note", "standards", "src/a.py", " Rename x. "), parsed[0])
+        assertEquals(1500, parsed[1].explanation.length)
+        val items = RemTaskChecks.notes(parsed)
+        // Read as on the desktop: the explanation, then "severity · axis · file"; a blank note is left out.
+        assertEquals(listOf("Rename x." to "Note · standards · src/a.py", "y".repeat(1500) to "Should fix · task", "Kept anyway." to "Note"),
+            items.map { it.title to it.reason })
+        assertTrue(items.all { it.outcome == RemTaskChecks.Outcome.NOTES })
+        // Older desktops, and task lists, send none.
+        assertTrue((DesktopViews.parse("rem.task:t", taskJson(JSONObject().put("run_id", "r"))) as RemTask).lastRun!!.notes.isEmpty())
+        assertTrue((DesktopViews.parse("rem.task:t", taskJson(run)) as RemTask).runs.single().notes.isEmpty())
+    }
+
     @Test fun longReasonsFold() {
         assertFalse(RemTaskChecks.longReason("Short."))
         assertTrue(RemTaskChecks.longReason("x".repeat(241)))

@@ -13,7 +13,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-import click
 import pytest
 from typer.testing import CliRunner
 
@@ -227,8 +226,7 @@ def test_errors_go_to_stderr_and_formats_are_unified(tmp_path) -> None:
 
 def test_schema_and_help_point_at_rattish() -> None:
     root = _invoke("--help")
-    # Typer forces colored help on GitHub Actions; compare the plain text.
-    assert "rattish docs --format json" in " ".join(click.unstyle(root.stdout).split())
+    assert "rattish docs --format json" in " ".join(root.stdout.split())
     assert "schema --format json" not in root.stdout
 
     pointer = _invoke("schema")

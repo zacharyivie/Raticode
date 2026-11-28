@@ -27,7 +27,7 @@ async function main() {
   });
   await app.whenReady();
   const { createServer } = await import("vite");
-  vite = await createServer({ cacheDir: testViteCacheDir(), root: path.join(root, "frontend"), logLevel: "error", server: { host: "127.0.0.1", port: 0 }, plugins: [{
+  vite = await createServer({ configLoader: "runner", cacheDir: testViteCacheDir(), root: path.join(root, "frontend"), logLevel: "error", server: { host: "127.0.0.1", port: 0 }, plugins: [{
     name: "organization-capture",
     resolveId(id) { if (id === "/organization-entry.jsx") return id; },
     load(id) { if (id === "/organization-entry.jsx") return `import React, {useState} from "react"; import {createRoot} from "react-dom/client"; import OrganizationWorkspace from "/src/components/OrganizationWorkspace.jsx"; import "/src/styles/index.css"; function App() { const [id,setId] = useState(location.hash.slice(1) || "new"); return <main style={{height:"100vh",display:"flex"}}><OrganizationWorkspace key={id} rootPath={${JSON.stringify(ready.project)}} organizationId={id} onSelect={setId} onClose={()=>{}} /></main>; } createRoot(document.getElementById("root")).render(<App/>);`; },
@@ -114,7 +114,7 @@ async function main() {
           await shot(`${tag}-employee-tools`);
         }
         if (scene === "work") { await clickText("Work"); await shot(`${tag}-work`); }
-        if (scene === "task-edit") { await clickText("Work"); await clickText("New task"); await shot(`${tag}-task-edit`); }
+        if (scene === "task-edit") { await clickText("Work"); await clickText("New ticket"); await shot(`${tag}-task-edit`); }
         if (scene === "task-open") { await clickText("Work"); await clickText(first.title, ".org-task-open"); await shot(`${tag}-task-open`); }
         if (scene === "history") { await clickText("Configuration history"); await shot(`${tag}-history`); }
         if (scene === "restore") { await clickText("Configuration history"); await evaluate("[...document.querySelectorAll('button')].filter(b => /Preview restore|Preview/.test(b.textContent) && !b.disabled).at(-1)?.click()"); await sleep(400); await shot(`${tag}-restore`); }

@@ -86,8 +86,8 @@ def check_heartbeats(before: list[dict[str, Any]], after: list[dict[str, Any]]) 
         beat = employee.get("heartbeatSeconds") or 0
         if 0 < beat < MIN_HEARTBEAT_SECONDS and previous.get(employee.get("id")) != beat:
             raise ValueError(
-                f"{employee.get('name') or employee.get('id')}'s heartbeat must be at least "
-                "15 minutes (900 seconds) apart"
+                f"{employee.get('name') or employee.get('id')}'s check-in interval must be at "
+                "least 15 minutes (900 seconds)"
             )
 
 
@@ -360,9 +360,9 @@ class Employee(BaseModel):
     def valid_provider(self) -> Employee:
         provider_permission_args(self.provider, self.permissionMode)
         if self.heartbeatSeconds and self.heartbeatSeconds < 60:
-            raise ValueError("Heartbeats must be at least 60 seconds apart")
+            raise ValueError("Check-in interval must be at least 60 seconds")
         if not self.name.strip():
-            raise ValueError("Employee name is required")
+            raise ValueError("Worker name is required")
         if any(s.name in {"organizations", "rem_threads"} for s in self.resources.mcpServers):
             raise ValueError("Organization and thread tools are supplied by the runtime")
         self.responsibilities = [r.strip() for r in self.responsibilities if r.strip()]
@@ -489,17 +489,17 @@ class OrganizationConfig(BaseModel):
     def validate_graph(self) -> OrganizationConfig:
         ids = {employee.id for employee in self.employees}
         if len(ids) != len(self.employees):
-            raise ValueError("Employee IDs must be unique")
+            raise ValueError("Worker IDs must be unique")
         by_id = {employee.id: employee for employee in self.employees}
         if len({target.id for target in self.executionTargets}) != len(self.executionTargets):
             raise ValueError("Execution target IDs must be unique")
         for target in self.executionTargets:
             if set(target.employees) - ids:
-                raise ValueError("Execution target references an unknown employee")
+                raise ValueError("Execution target references an unknown worker")
             if target.secretRef and any(
                 target.secretRef not in by_id[eid].secretRefs for eid in target.employees
             ):
-                raise ValueError("Remote target credentials must be granted to its employees")
+                raise ValueError("Remote target credentials must be granted to its workers")
         for employee in self.employees:
             seen = {employee.id}
             manager = employee.reportsTo
@@ -550,7 +550,7 @@ class OrganizationConfig(BaseModel):
             if employee.workspacePaths is not None and any(
                 not Path(path).is_absolute() for path in employee.workspacePaths
             ):
-                raise ValueError("Employee workspace grants must be absolute paths")
+                raise ValueError("Worker workspace grants must be absolute paths")
         validate_plan(self, ids)
         self.remSecondBrain.pop("grantId", None)
         # Runs find the folder's library brain each time; that mark is never stored.
@@ -1500,7 +1500,7 @@ class OrganizationStore:
             if state == "running" and runtime.get("archived"):
                 raise ValueError("Restore this archived organization before starting it")
             if state == "running" and not config.get("projectRoots"):
-                raise ValueError("Assign a Raticode project before starting employees")
+                raise ValueError("Assign a Raticode project before starting workers")
             if state == "paused":
                 runtime["generation"] += 1
                 runtime["pauseReason"] = reason or "Paused"
@@ -1923,7 +1923,7 @@ class OrganizationStore:
                 and not kept("reviewer")
             )
         ):
-            raise ValueError("Reviewer must be a different, existing employee")
+            raise ValueError("Reviewer must be a different, existing worker")
         if (
             task.get("goalId")
             and task["goalId"] not in {g["id"] for g in config.get("goalRecords", [])}
@@ -1972,7 +1972,7 @@ class OrganizationStore:
             and task["assignee"] not in {e["id"] for e in config["employees"]}
             and not kept("assignee")
         ):
-            raise ValueError("Unknown employee")
+            raise ValueError("Unknown worker")
         if (
             task["project"]
             and task["project"] not in {p["id"] for p in config["projects"]}

@@ -14,14 +14,8 @@ from typing import Any
 import pytest
 
 from gofer.ui.brain_library import BrainLibrary
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 from tests.helpers.brain_library import wait_idle
-
-
-@pytest.fixture
-def library(tmp_path: Path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
 
 
 def opened(library: BrainLibrary, tmp_path: Path) -> tuple[dict[str, Any], Path]:

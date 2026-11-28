@@ -5,7 +5,7 @@
 // the phone's TicketMentions.kt: a whole word, not part of a path, word or version.
 export const TICKET_KEY = /(?<![A-Za-z0-9_\-/.#@])[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,6}(?![A-Za-z0-9_-]|\.[0-9])/g;
 
-export const TICKET_STATUS_LABELS = Object.freeze({
+const TICKET_STATUS_LABELS = Object.freeze({
   backlog: "Backlog",
   todo: "To do",
   in_progress: "In progress",

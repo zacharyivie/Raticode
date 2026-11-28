@@ -6,7 +6,7 @@ pageClass: docs-layout
 
 # Keyboard shortcuts
 
-These are the default bindings. **Settings > Keybindings** shows your current assignments and lets you change them.
+These are the default bindings. **Settings > Keybindings** shows your current assignments and lets you change them; **Help › Keyboard Shortcuts** opens it.
 
 `Mod` means Command on macOS and Ctrl on Windows or Linux. Bindings explicitly labelled Ctrl use Ctrl on every platform. Comma-separated chords are pressed in sequence.
 
@@ -15,7 +15,7 @@ These are the default bindings. **Settings > Keybindings** shows your current as
 | Action | Default |
 | --- | --- |
 | Show all commands, the [command palette](#command-palette-and-quick-open) | Mod+Shift+P |
-| [Quick open](#command-palette-and-quick-open) a file, workflow, Rem thread or Settings section | Mod+P |
+| [Quick open](#command-palette-and-quick-open) a file, workflow, Rem thread, board ticket or Settings section | Mod+P |
 | Open settings | Mod+, |
 | Open file | Mod+O |
 | Open project folder | Mod+K, Mod+O |
@@ -29,6 +29,9 @@ These are the default bindings. **Settings > Keybindings** shows your current as
 | Toggle bottom panel | Mod+` |
 | New terminal | Ctrl+T |
 | Close terminal | Ctrl+W |
+| Open the **Search** plugin and its search box, while Search is on in **Settings > Plugins**. Not listed in **Settings > Keybindings** | Mod+Shift+F |
+| [Find in terminal](../studio/terminal.md#find-in-a-terminal), with a terminal focused (from 0.6.2) | Ctrl+Shift+F; Command+F on macOS |
+| Open a link or file path in terminal output (from 0.6.2) | Mod+click ([details](../studio/terminal.md#open-links-in-output)) |
 | Dictate a message | Mod+Alt+V (press again to finish) |
 | Dictate to Rem from any app, once turned on in **Settings > Devices** (from 0.5.5) | Ctrl+Alt+Space, in every app ([details](../rem/attachments.md#dictate-from-any-app)) |
 | Ask Rem about your screen, once **Show Rem your screen** and **Dictate to Rem from any app** are on in **Settings > Devices** (from 0.5.5) | Ctrl+Alt+Shift+Space, in every app ([details](../rem/attachments.md#show-rem-your-screen)) |
@@ -46,7 +49,9 @@ Press **Mod+Shift+P** for the command palette. It lists every command in **Setti
 - A **Go to** entry for every plugin in the activity rail: **Go to Rem**, **Go to Workflows**, **Go to File explorer**, **Go to Browser tabs**, **Go to Search**, **Go to Source control**, **Go to Kanban**, **Go to Posts**, **Go to Swarms**, **Go to Organizations** and **Go to Second Brain**. Each opens the plugin as its rail button does, and Go to Rem opens Rem's home. Common words find them too, such as `git` for Source control, `tickets` for Kanban and `find` for Search. Posts, Swarms, Organizations and Second Brain appear only once they're on in **Settings > Developer > Feature Preview**. A plugin you hid from the rail stays in the list, greyed out, until you show it again in **Settings > Plugins**.
 - **Settings:** followed by a section name, such as **Settings: Devices**, opens Settings at that section.
 
-Press **Mod+P** for quick open. It searches the open project's files, its workflows, the titles of your Rem threads on this computer and the Settings sections. Files come from git: tracked files and new files git doesn't ignore. A folder outside git is read directly, skipping `node_modules`, `.venv`, `dist` and `build`. Quick open shows at most 20,000 files and says so when a project has more.
+Press **Mod+P** for quick open. It searches the open project's files, its workflows, the titles of your Rem threads on this computer, the tickets on the [global board](../rem/board.md) and the Settings sections. Files come from git: tracked files and new files git doesn't ignore. A folder outside git is read directly, skipping `node_modules`, `.venv`, `dist` and `build`. Quick open shows at most 20,000 files and says so when a project has more.
+
+Each ticket shows its title, with its key and column beside it, such as `REM-412 · Blocked`. Type its key with or without the dash (`REM-412` or `rem412`), or a word from its title. Open tickets come before **Done** and closed ones. Choosing a ticket opens it on the board, like a [ticket pill](../rem/home.md#ticket-pills). Tickets are listed only while the **Kanban** plugin is shown in the activity rail. New in 0.6.2.
 
 Both work the same way:
 
@@ -157,6 +162,7 @@ Only the KDE route of the dictation shortcut has been tried on a real desktop. T
 | Close active file | Mod+W |
 | Find in file | Mod+F |
 | Toggle word wrap | Alt+Z |
+| [Quick Fix a misspelled name](../studio/editors.md#fix-a-misspelled-name-in-one-click) in a workflow (from 0.6.2) | Mod+. |
 
 Editor-only commands require a relevant editor to be focused. The in-app **File**, **Edit**, **Selection**, **View**, **Terminal** and **Help** menus list further editor shortcuts, such as Ctrl+H to replace, Ctrl+/ to toggle a comment and Shift+Alt+F to format.
 
@@ -167,6 +173,9 @@ Editor-only commands require a relevant editor to be focused. The in-app **File*
 | Add node, from a searchable picker | Tab ([details](../studio/editors.md#add-a-node)) |
 | Select all nodes | Mod+A |
 | Delete selection | Delete |
+| [Copy the selected nodes](../studio/editors.md#copy-cut-and-paste-nodes) | Mod+C |
+| [Cut the selected nodes](../studio/editors.md#copy-cut-and-paste-nodes) | Mod+X |
+| [Paste nodes](../studio/editors.md#copy-cut-and-paste-nodes) | Mod+V |
 | [Undo the last graph edit](../studio/editors.md#undo-and-redo-graph-edits) | Mod+Z |
 | [Redo a graph edit](../studio/editors.md#undo-and-redo-graph-edits) | Mod+Shift+Z, or Ctrl+Y on Windows |
 | Zoom in | = |

@@ -12,22 +12,13 @@ const http = require("node:http");
 const { app } = require("electron");
 const { checkSlowFramePage, createSlowFramePages } = require("./slow-frame-page.cjs");
 const { CHROME, findBrowser } = require("../chromium-engine.cjs");
+const { chromiumForTesting, waitFor } = require("./test-wait.cjs");
+const WAIT = { timeout: 20_000, interval: 100 };
 
 // A Chrome for Testing build that Playwright downloaded stands in for Chrome
 // when Google Chrome itself isn't installed.
-function chromeForTesting() {
-  const root = path.join(os.homedir(), ".cache", "ms-playwright");
-  try {
-    for (const entry of fs.readdirSync(root).filter((name) => /^chromium-\d+$/.test(name)).sort().reverse()) {
-      const candidate = path.join(root, entry, "chrome-linux64", "chrome");
-      if (fs.existsSync(candidate)) return candidate;
-    }
-  } catch { /* No Playwright downloads. */ }
-  return "";
-}
-
 if (!findBrowser(CHROME)) {
-  const stand = process.platform === "linux" ? chromeForTesting() : "";
+  const stand = process.platform === "linux" ? chromiumForTesting() : "";
   if (!stand) {
     console.log("Chrome is not installed; skipping the Chrome studio test.");
     app.exit(0);
@@ -67,16 +58,6 @@ const site = http.createServer((request, response) => {
   </body>`);
 });
 
-async function waitFor(check, message, timeout = 20000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const value = await check();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(message);
-}
-
 function chromePids() {
   if (process.platform !== "linux") return [];
   return fs.readdirSync("/proc").filter((entry) => /^\d+$/.test(entry)).filter((pid) => {
@@ -93,30 +74,30 @@ async function run() {
   const window = await created;
   await new Promise((resolve) => window.webContents.once("did-finish-load", resolve));
   const page = (code) => window.webContents.executeJavaScript(code);
-  await waitFor(() => page("document.querySelector('#root')?.children.length > 0"), "Studio did not render");
+  await waitFor(() => page("document.querySelector('#root')?.children.length > 0"), "Studio did not render", WAIT);
 
   // Choose Chrome in Settings > Browser, as the user would.
   await page("document.querySelector('[aria-label=\"Open settings\"]').click()");
-  await waitFor(() => page("Boolean(document.querySelector('nav[aria-label=\"Settings categories\"]'))"), "Settings did not open");
+  await waitFor(() => page("Boolean(document.querySelector('nav[aria-label=\"Settings categories\"]'))"), "Settings did not open", WAIT);
   await page("[...document.querySelectorAll('nav[aria-label=\"Settings categories\"] button')].find((item) => item.textContent.trim() === 'Browser').click()");
-  await waitFor(() => page("Boolean(document.querySelector('select[aria-label=\"Default browser for new tabs\"]'))"), "The web browser setting is missing");
+  await waitFor(() => page("Boolean(document.querySelector('select[aria-label=\"Default browser for new tabs\"]'))"), "The web browser setting is missing", WAIT);
   await page(`(() => {
     const select = document.querySelector('select[aria-label="Default browser for new tabs"]');
     Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(select, "chrome");
     select.dispatchEvent(new Event("change", { bubbles: true }));
   })()`);
-  await waitFor(async () => JSON.parse(await page("localStorage.getItem('raticode.settings.v1')") || "{}").browser?.engine === "chrome", "The choice was not saved");
-  await waitFor(() => page("/Google Chrome found at/.test(document.body.innerText)"), "Settings did not report the installed Chrome");
-  await waitFor(() => page("Boolean(document.querySelector('[data-testid=\"chrome-settings\"]'))"), "The Chrome section did not appear");
-  await waitFor(() => page("[...document.querySelectorAll('[data-testid=\"chrome-settings\"] button')].some((item) => item.textContent.trim() === 'Chrome settings' && !item.disabled)"), "The Chrome window buttons are not available");
+  await waitFor(async () => JSON.parse(await page("localStorage.getItem('raticode.settings.v1')") || "{}").browser?.engine === "chrome", "The choice was not saved", WAIT);
+  await waitFor(() => page("/Google Chrome found at/.test(document.body.innerText)"), "Settings did not report the installed Chrome", WAIT);
+  await waitFor(() => page("Boolean(document.querySelector('[data-testid=\"chrome-settings\"]'))"), "The Chrome section did not appear", WAIT);
+  await waitFor(() => page("[...document.querySelectorAll('[data-testid=\"chrome-settings\"] button')].some((item) => item.textContent.trim() === 'Chrome settings' && !item.disabled)"), "The Chrome window buttons are not available", WAIT);
   assert.equal(await page("Boolean(document.querySelector('[data-testid=\"firefox-settings\"]'))"), false);
   await page("document.querySelector('[aria-label=\"Open settings\"]').click()");
 
   // A web tab now streams from Chrome.
   const base = `http://127.0.0.1:${site.address().port}`;
   window.webContents.send("gofer:browser-open-tab", { url: `${base}/`, background: false });
-  await waitFor(() => page("Number(document.querySelector('[data-engine=\"chrome\"]')?.dataset.frames || 0) > 0"), "No Chrome frame was drawn", 30000);
-  await waitFor(async () => (await page("[...document.querySelectorAll('[role=tab]')].map((tab) => tab.textContent).join('|')")).includes("Chrome page"), "The tab strip did not show the Chrome page title");
+  await waitFor(() => page("Number(document.querySelector('[data-engine=\"chrome\"]')?.dataset.frames || 0) > 0"), "No Chrome frame was drawn", { ...WAIT, timeout: 30000 });
+  await waitFor(async () => (await page("[...document.querySelectorAll('[role=tab]')].map((tab) => tab.textContent).join('|')")).includes("Chrome page"), "The tab strip did not show the Chrome page title", WAIT);
   // Hidden tabs have no visible text; the active one carries the Chrome label.
   assert.equal(await page("[...document.querySelectorAll('[data-integrated-browser]')].some((item) => item.innerText.includes('Chrome'))"), true);
   assert.equal(await page("document.querySelectorAll('webview').length"), 0);
@@ -128,19 +109,19 @@ async function run() {
     window.webContents.sendInputEvent({ type: "mouseUp", x: Math.round(box.x + x), y: Math.round(box.y + y), button: "left", clickCount: 1 });
   };
   click(100, 40);
-  await waitFor(() => page("document.activeElement?.getAttribute('aria-label') === 'Chrome page'"), "The Chrome view did not take keyboard focus");
+  await waitFor(() => page("document.activeElement?.getAttribute('aria-label') === 'Chrome page'"), "The Chrome view did not take keyboard focus", WAIT);
   for (const key of ["h", "i"]) {
     window.webContents.sendInputEvent({ type: "keyDown", keyCode: key });
     window.webContents.sendInputEvent({ type: "char", keyCode: key });
     window.webContents.sendInputEvent({ type: "keyUp", keyCode: key });
   }
-  await waitFor(async () => (await page("[...document.querySelectorAll('[role=tab]')].map((tab) => tab.textContent).join('|')")).includes("typed:hi"), "Typing did not reach the Chrome page");
+  await waitFor(async () => (await page("[...document.querySelectorAll('[role=tab]')].map((tab) => tab.textContent).join('|')")).includes("typed:hi"), "Typing did not reach the Chrome page", WAIT);
   click(100, 130);
   // Trusted input, and the page doesn't see "HeadlessChrome".
-  await waitFor(async () => (await page("[...document.querySelectorAll('[role=tab]')].map((tab) => tab.textContent).join('|')")).includes("clicked:true:false"), "The click did not reach Chrome as trusted input");
+  await waitFor(async () => (await page("[...document.querySelectorAll('[role=tab]')].map((tab) => tab.textContent).join('|')")).includes("clicked:true:false"), "The click did not reach Chrome as trusted input", WAIT);
 
   // Rem works in its own Chrome tab in the background; the user's focus stays put.
-  const service = await waitFor(() => globalThis.__raticodeTestHooks?.agentBrowserService, "Browser service did not start");
+  const service = await waitFor(() => globalThis.__raticodeTestHooks?.agentBrowserService, "Browser service did not start", WAIT);
   const grant = await (await fetch(`${service.url}/admin`, {
     method: "POST",
     headers: { Authorization: `Bearer ${service.adminToken}` },
@@ -157,7 +138,7 @@ async function run() {
   const before = await chromeViews();
   const opened = await call("open", { url: `${base}/rem` });
   assert.equal(opened.title, "Rem page");
-  await waitFor(() => (async () => (await chromeViews()) === before + 1)(), "Rem's Chrome tab did not join the studio");
+  await waitFor(() => (async () => (await chromeViews()) === before + 1)(), "Rem's Chrome tab did not join the studio", WAIT);
   const { snapshot } = await call("snapshot");
   const ref = (pattern) => snapshot.match(pattern)[1];
   await call("type", { ref: ref(/- textbox "Query" \[ref=(e\d+)\]/), text: "chrome" });
@@ -165,7 +146,7 @@ async function run() {
   assert.equal(clicked.title, "done:chrome");
   assert.equal(await page("document.activeElement.id"), "user-field");
   await call("close");
-  await waitFor(() => (async () => (await chromeViews()) === before)(), "Closing Rem's tab did not remove it");
+  await waitFor(() => (async () => (await chromeViews()) === before)(), "Closing Rem's tab did not remove it", WAIT);
   // A frame that never finishes doesn't hold up Rem's actions.
   await checkSlowFramePage(call, base, "Chrome");
 

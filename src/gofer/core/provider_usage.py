@@ -18,9 +18,11 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from gofer.core.http import read_response_bytes
 from gofer.core.provider_capabilities import ProviderId, resolve_provider_executable
@@ -40,6 +42,9 @@ from gofer.subscriptions.acp_transport import (
 )
 from gofer.utils.paths import get_data_dir
 from gofer.utils.process import env_with_executable_on_path, run_subprocess
+
+if TYPE_CHECKING:
+    from gofer.core.provider_accounts import AccountAdapter
 
 REFRESH_TIMEOUT_SECONDS = 12
 # Antigravity and Claude Code report through their own CLI, which needs time to start.
@@ -1091,6 +1096,287 @@ def _cursor_spending(api_key: str, email: str) -> list[dict[str, Any]]:
     return []
 
 
+@dataclass(frozen=True)
+class _UsageRequest:
+    """What refresh_provider_usage's shared setup hands to a provider's usage reader."""
+
+    provider: str
+    profile: str | None
+    settings: ResolvedProviderSettings
+    config: dict[str, str]
+    env: dict[str, str]
+    data_dir: Path | None
+
+
+# A reader updates and returns the row, or returns a new row that says why it can't
+# read usage. Errors propagate: refresh_provider_usage turns them into the row's status.
+_UsageReader = Callable[[dict[str, Any], _UsageRequest], Awaitable[dict[str, Any]]]
+
+
+async def _read_account_usage(
+    row: dict[str, Any], request: _UsageRequest, adapter: AccountAdapter
+) -> dict[str, Any]:
+    # An account: only its CLI's own status and usage commands. Raticode
+    # never reads, stores or sends this account's sign-in.
+    from gofer.core.provider_accounts import (
+        NEEDS_SIGN_IN,
+        account_config_dir,
+        account_status,
+        get_account,
+    )
+
+    data_dir = request.data_dir
+    account = get_account(str(request.profile), data_dir, request.provider)
+    account_state = await asyncio.to_thread(account_status, account, data_dir=data_dir)
+    if account_state.get("state") == NEEDS_SIGN_IN:
+        return {
+            **row,
+            "status": "auth_required",
+            "needs_sign_in": True,
+            "reason": "Needs sign-in. Use Sign in in Settings > Providers "
+            f"> {adapter.label} accounts.",
+        }
+    executable = adapter.find_executable()
+    account_windows = (
+        await adapter.read_usage(
+            executable,
+            adapter.environment(account_config_dir(account, data_dir)),
+            data_dir,
+        )
+        if executable and adapter.read_usage is not None
+        else None
+    )
+    if account_windows is None:
+        if adapter.read_usage is None:
+            return {
+                **row,
+                "status": "unavailable",
+                "reason": f"{adapter.label} can't report an account's usage yet.",
+            }
+        return {
+            **row,
+            "status": "auth_required" if executable else "unavailable",
+            "reason": f"{adapter.label} could not report this account's usage. "
+            "Refresh again, or sign in again if it keeps failing.",
+            "retry_after_seconds": CLAUDE_FAILURE_BACKOFF_SECONDS,
+        }
+    row.update(
+        source=adapter.usage_source or f"{adapter.label} usage",
+        windows=account_windows,
+        status="available" if account_windows else "unavailable",
+        reason=None
+        if account_windows
+        else f"{adapter.label} returned no subscription usage windows.",
+    )
+    return row
+
+
+async def _read_cursor_usage(row: dict[str, Any], request: _UsageRequest) -> dict[str, Any]:
+    config, env, profile = request.config, request.env, request.profile
+    # Profile values override the environment, including explicit empty values.
+    key = config.get("admin_api_key") or _account_env(env, "RATICODE_CURSOR_ADMIN_API_KEY", profile)
+    email = config.get("email") or _account_env(env, "RATICODE_CURSOR_USAGE_EMAIL", profile)
+    if key and email:
+        # Team reporting was configured explicitly, so it takes precedence.
+        windows = await asyncio.to_thread(_cursor_spending, key, email)
+        row.update(
+            source="Cursor Admin API /teams/spend",
+            windows=windows,
+            status="available" if windows else "unavailable",
+            reason=None if windows else "No spending record matched the configured team member.",
+        )
+        return row
+    session = (
+        None
+        if request.settings.extra_args or _account_env(env, "CURSOR_API_ENDPOINT", profile)
+        else await asyncio.to_thread(_cursor_native_token, env, profile)
+    )
+    if not session:
+        return {
+            **row,
+            "status": "auth_required",
+            "reason": "Run cursor-agent login to sign in, then refresh usage. "
+            "API-key and custom-endpoint connections cannot read plan usage.",
+        }
+    windows = await asyncio.to_thread(_cursor_allowance, session)
+    row.update(
+        source="Cursor account usage summary",
+        windows=windows,
+        status="available" if windows else "unavailable",
+        reason=None if windows else "Cursor returned no plan usage measurements.",
+    )
+    return row
+
+
+async def _read_claude_code_usage(row: dict[str, Any], request: _UsageRequest) -> dict[str, Any]:
+    config, env, profile = request.config, request.env, request.profile
+    token: str | None = config.get("oauth_token") or _account_env(
+        env, "CLAUDE_CODE_OAUTH_TOKEN", profile
+    )
+    different_auth = any(
+        _account_env(env, name, profile)
+        for name in (
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+        )
+    )
+    native = not token and not request.settings.extra_args and not different_auth
+    executable = (
+        resolve_provider_executable("claude_code")
+        if native and (not profile or env.get("CLAUDE_CONFIG_DIR"))
+        else None
+    )
+    windows = None
+    if executable:
+        # Preferred: Claude Code reads, renews and protects its own sign-in.
+        windows = await _claude_cli_allowance(executable, env, request.data_dir)
+        if windows is not None:
+            row["source"] = "Claude Code /usage"
+    if windows is None:
+        if native:
+            token = await asyncio.to_thread(_claude_native_token, env, profile)
+        if not token:
+            return {
+                **row,
+                "status": "auth_required" if executable else "configuration_required",
+                "reason": (
+                    "Claude Code could not report usage. Run claude and sign in, then refresh."
+                    if executable
+                    else "Sign in with Claude Code, or connect a Claude OAuth access "
+                    "token with user:profile scope in Usage settings. Anthropic API "
+                    "keys and inference-only setup tokens cannot read subscription "
+                    "limits."
+                ),
+                "retry_after_seconds": CLAUDE_FAILURE_BACKOFF_SECONDS,
+            }
+        windows = await asyncio.to_thread(_claude_allowance, token)
+        row["source"] = "Claude OAuth /api/oauth/usage"
+    row.update(
+        windows=windows,
+        status="available" if windows else "unavailable",
+        reason=None if windows else "Claude returned no subscription usage windows.",
+    )
+    return row
+
+
+async def _read_opencode_usage(row: dict[str, Any], request: _UsageRequest) -> dict[str, Any]:
+    accounts = await asyncio.to_thread(_opencode_accounts, request.env, request.profile)
+    if accounts is None:
+        return {
+            **row,
+            "status": "unavailable",
+            "reason": "This profile does not point at its own OpenCode sign-in.",
+        }
+    windows, expired = await _opencode_allowance(accounts)
+    row.update(
+        source="OpenCode subscription sign-ins",
+        windows=windows,
+        status="available" if windows else "unavailable",
+        reason=None
+        if windows
+        else "OpenCode's subscription sign-in has expired. It renews the next time OpenCode runs."
+        if expired
+        else "OpenCode is not signed in to a Claude or ChatGPT subscription. Free "
+        "models and API keys have no allowance to report.",
+    )
+    return row
+
+
+async def _read_cli_command_usage(row: dict[str, Any], request: _UsageRequest) -> dict[str, Any]:
+    """Antigravity and Grok: the provider CLI's own usage or billing command."""
+    provider, env = request.provider, request.env
+    executable = resolve_provider_executable(cast(ProviderId, provider))
+    if not executable:
+        return {
+            **row,
+            "status": "not_installed",
+            "reason": "Install this provider CLI to read account allowances.",
+        }
+    if request.settings.extra_args:
+        return {
+            **row,
+            "status": "unavailable",
+            "reason": "This profile's CLI arguments cannot be used safely for account lookup.",
+        }
+    if provider == "antigravity":
+        status, reason, windows = await _antigravity_allowance(executable, env, request.data_dir)
+        source = "agy /usage"
+    else:
+        status, reason, windows = await _grok_allowance(executable, env)
+        source = "grok _x.ai/billing"
+    row.update(status=status, reason=reason, source=source, windows=windows)
+    return row
+
+
+async def _read_reporting_api_usage(row: dict[str, Any], request: _UsageRequest) -> dict[str, Any]:
+    """OpenAI API and Anthropic API: the organization's usage report via an Admin API key."""
+    from gofer.core.provider_usage_reports import fetch_reporting_usage
+
+    provider, config, env, profile = request.provider, request.config, request.env, request.profile
+    prefix = "OPENAI" if provider == "openai_api" else "ANTHROPIC"
+    key = config.get("admin_api_key") or _account_env(
+        env, f"RATICODE_{prefix}_ADMIN_API_KEY", profile
+    )
+    if not key:
+        return {
+            **row,
+            "status": "configuration_required",
+            "reason": "Open Settings → Usage → Configure reporting to add an "
+            "organization Admin API key. Inference API keys cannot read usage reports.",
+        }
+    report_config = {**config, "admin_api_key": key}
+    scope = "project_id" if provider == "openai_api" else "workspace_id"
+    if scope not in report_config:
+        value = _account_env(env, f"RATICODE_{prefix}_{scope.upper()}", profile)
+        if value:
+            report_config[scope] = value
+    windows = await asyncio.to_thread(fetch_reporting_usage, provider, report_config)
+    row.update(
+        source=f"{PROVIDER_LABELS[provider]} organization usage report",
+        windows=windows,
+        status="available" if windows else "unavailable",
+        reason="Organization usage is metered billing; no token allowance is reported."
+        if windows
+        else "No usage records were returned for the reporting period.",
+    )
+    return row
+
+
+async def _read_rpc_usage(row: dict[str, Any], request: _UsageRequest) -> dict[str, Any]:
+    """Codex and GitHub Copilot: account metadata over the CLI's JSON-RPC server."""
+    provider = request.provider
+    executable = resolve_provider_executable(cast(ProviderId, provider))
+    if not executable:
+        return {
+            **row,
+            "status": "not_installed",
+            "reason": "Install this provider CLI to read account allowances.",
+        }
+    status, reason, source, windows = await _rpc_allowance(
+        provider, executable, request.settings, request.env
+    )
+    row.update(status=status, reason=reason, source=source, windows=windows)
+    return row
+
+
+# The reader for each provider ID. An account's adapter is used before this table.
+_USAGE_READERS: dict[str, _UsageReader] = {
+    "cursor": _read_cursor_usage,
+    "claude_code": _read_claude_code_usage,
+    "opencode": _read_opencode_usage,
+    "antigravity": _read_cli_command_usage,
+    "grok": _read_cli_command_usage,
+    "openai_api": _read_reporting_api_usage,
+    "anthropic_api": _read_reporting_api_usage,
+    "codex": _read_rpc_usage,
+    "copilot": _read_rpc_usage,
+}
+
+
 async def refresh_provider_usage(
     provider: str, profile: str | None = None, *, data_dir: Path | None = None
 ) -> dict[str, Any]:
@@ -1135,242 +1421,19 @@ async def refresh_provider_usage(
     from gofer.core.provider_accounts import account_adapter
 
     adapter = account_adapter(provider) if settings.account_id else None
+    reader = _USAGE_READERS.get(provider)
+    if adapter is None and reader is None:
+        return row
+    request = _UsageRequest(provider, profile, settings, config, env, data_dir)
     command_line = provider in {"claude_code", "antigravity"} or adapter is not None
     try:
         async with asyncio.timeout(
             CLI_REFRESH_TIMEOUT_SECONDS if command_line else REFRESH_TIMEOUT_SECONDS
         ):
             if adapter is not None:
-                # An account: only its CLI's own status and usage commands. Raticode
-                # never reads, stores or sends this account's sign-in.
-                from gofer.core.provider_accounts import (
-                    NEEDS_SIGN_IN,
-                    account_config_dir,
-                    account_status,
-                    get_account,
-                )
-
-                account = get_account(str(profile), data_dir, provider)
-                account_state = await asyncio.to_thread(account_status, account, data_dir=data_dir)
-                if account_state.get("state") == NEEDS_SIGN_IN:
-                    return {
-                        **row,
-                        "status": "auth_required",
-                        "needs_sign_in": True,
-                        "reason": "Needs sign-in. Use Sign in in Settings > Providers "
-                        f"> {adapter.label} accounts.",
-                    }
-                executable = adapter.find_executable()
-                account_windows = (
-                    await adapter.read_usage(
-                        executable,
-                        adapter.environment(account_config_dir(account, data_dir)),
-                        data_dir,
-                    )
-                    if executable and adapter.read_usage is not None
-                    else None
-                )
-                if account_windows is None:
-                    if adapter.read_usage is None:
-                        return {
-                            **row,
-                            "status": "unavailable",
-                            "reason": f"{adapter.label} can't report an account's usage yet.",
-                        }
-                    return {
-                        **row,
-                        "status": "auth_required" if executable else "unavailable",
-                        "reason": f"{adapter.label} could not report this account's usage. "
-                        "Refresh again, or sign in again if it keeps failing.",
-                        "retry_after_seconds": CLAUDE_FAILURE_BACKOFF_SECONDS,
-                    }
-                row.update(
-                    source=adapter.usage_source or f"{adapter.label} usage",
-                    windows=account_windows,
-                    status="available" if account_windows else "unavailable",
-                    reason=None
-                    if account_windows
-                    else f"{adapter.label} returned no subscription usage windows.",
-                )
-            elif provider == "cursor":
-                # Profile values override the environment, including explicit empty values.
-                key = config.get("admin_api_key") or _account_env(
-                    env, "RATICODE_CURSOR_ADMIN_API_KEY", profile
-                )
-                email = config.get("email") or _account_env(
-                    env, "RATICODE_CURSOR_USAGE_EMAIL", profile
-                )
-                if key and email:
-                    # Team reporting was configured explicitly, so it takes precedence.
-                    windows = await asyncio.to_thread(_cursor_spending, key, email)
-                    row.update(
-                        source="Cursor Admin API /teams/spend",
-                        windows=windows,
-                        status="available" if windows else "unavailable",
-                        reason=None
-                        if windows
-                        else "No spending record matched the configured team member.",
-                    )
-                else:
-                    session = (
-                        None
-                        if settings.extra_args or _account_env(env, "CURSOR_API_ENDPOINT", profile)
-                        else await asyncio.to_thread(_cursor_native_token, env, profile)
-                    )
-                    if not session:
-                        return {
-                            **row,
-                            "status": "auth_required",
-                            "reason": "Run cursor-agent login to sign in, then refresh usage. "
-                            "API-key and custom-endpoint connections cannot read plan usage.",
-                        }
-                    windows = await asyncio.to_thread(_cursor_allowance, session)
-                    row.update(
-                        source="Cursor account usage summary",
-                        windows=windows,
-                        status="available" if windows else "unavailable",
-                        reason=None if windows else "Cursor returned no plan usage measurements.",
-                    )
-            elif provider == "claude_code":
-                token: str | None = config.get("oauth_token") or _account_env(
-                    env, "CLAUDE_CODE_OAUTH_TOKEN", profile
-                )
-                different_auth = any(
-                    _account_env(env, name, profile)
-                    for name in (
-                        "ANTHROPIC_API_KEY",
-                        "ANTHROPIC_AUTH_TOKEN",
-                        "ANTHROPIC_BASE_URL",
-                        "CLAUDE_CODE_USE_BEDROCK",
-                        "CLAUDE_CODE_USE_VERTEX",
-                        "CLAUDE_CODE_USE_FOUNDRY",
-                    )
-                )
-                native = not token and not settings.extra_args and not different_auth
-                executable = (
-                    resolve_provider_executable("claude_code")
-                    if native and (not profile or env.get("CLAUDE_CONFIG_DIR"))
-                    else None
-                )
-                windows = None
-                if executable:
-                    # Preferred: Claude Code reads, renews and protects its own sign-in.
-                    windows = await _claude_cli_allowance(executable, env, data_dir)
-                    if windows is not None:
-                        row["source"] = "Claude Code /usage"
-                if windows is None:
-                    if native:
-                        token = await asyncio.to_thread(_claude_native_token, env, profile)
-                    if not token:
-                        return {
-                            **row,
-                            "status": "auth_required" if executable else "configuration_required",
-                            "reason": (
-                                "Claude Code could not report usage. Run claude and sign in, "
-                                "then refresh."
-                                if executable
-                                else "Sign in with Claude Code, or connect a Claude OAuth access "
-                                "token with user:profile scope in Usage settings. Anthropic API "
-                                "keys and inference-only setup tokens cannot read subscription "
-                                "limits."
-                            ),
-                            "retry_after_seconds": CLAUDE_FAILURE_BACKOFF_SECONDS,
-                        }
-                    windows = await asyncio.to_thread(_claude_allowance, token)
-                    row["source"] = "Claude OAuth /api/oauth/usage"
-                row.update(
-                    windows=windows,
-                    status="available" if windows else "unavailable",
-                    reason=None if windows else "Claude returned no subscription usage windows.",
-                )
-            elif provider == "opencode":
-                accounts = await asyncio.to_thread(_opencode_accounts, env, profile)
-                if accounts is None:
-                    return {
-                        **row,
-                        "status": "unavailable",
-                        "reason": "This profile does not point at its own OpenCode sign-in.",
-                    }
-                windows, expired = await _opencode_allowance(accounts)
-                row.update(
-                    source="OpenCode subscription sign-ins",
-                    windows=windows,
-                    status="available" if windows else "unavailable",
-                    reason=None
-                    if windows
-                    else "OpenCode's subscription sign-in has expired. It renews the next time "
-                    "OpenCode runs."
-                    if expired
-                    else "OpenCode is not signed in to a Claude or ChatGPT subscription. Free "
-                    "models and API keys have no allowance to report.",
-                )
-            elif provider in {"antigravity", "grok"}:
-                executable = resolve_provider_executable(cast(ProviderId, provider))
-                if not executable:
-                    return {
-                        **row,
-                        "status": "not_installed",
-                        "reason": "Install this provider CLI to read account allowances.",
-                    }
-                if settings.extra_args:
-                    return {
-                        **row,
-                        "status": "unavailable",
-                        "reason": "This profile's CLI arguments cannot be used safely for "
-                        "account lookup.",
-                    }
-                if provider == "antigravity":
-                    status, reason, windows = await _antigravity_allowance(
-                        executable, env, data_dir
-                    )
-                    source = "agy /usage"
-                else:
-                    status, reason, windows = await _grok_allowance(executable, env)
-                    source = "grok _x.ai/billing"
-                row.update(status=status, reason=reason, source=source, windows=windows)
-            elif provider in {"openai_api", "anthropic_api"}:
-                from gofer.core.provider_usage_reports import fetch_reporting_usage
-
-                prefix = "OPENAI" if provider == "openai_api" else "ANTHROPIC"
-                key = config.get("admin_api_key") or _account_env(
-                    env, f"RATICODE_{prefix}_ADMIN_API_KEY", profile
-                )
-                if not key:
-                    return {
-                        **row,
-                        "status": "configuration_required",
-                        "reason": "Open Settings → Usage → Configure reporting to add an "
-                        "organization Admin API key. Inference API keys cannot read usage reports.",
-                    }
-                report_config = {**config, "admin_api_key": key}
-                scope = "project_id" if provider == "openai_api" else "workspace_id"
-                if scope not in report_config:
-                    value = _account_env(env, f"RATICODE_{prefix}_{scope.upper()}", profile)
-                    if value:
-                        report_config[scope] = value
-                windows = await asyncio.to_thread(fetch_reporting_usage, provider, report_config)
-                row.update(
-                    source=f"{PROVIDER_LABELS[provider]} organization usage report",
-                    windows=windows,
-                    status="available" if windows else "unavailable",
-                    reason="Organization usage is metered billing; no token allowance is reported."
-                    if windows
-                    else "No usage records were returned for the reporting period.",
-                )
-            elif provider in {"codex", "copilot"}:
-                executable = resolve_provider_executable(cast(ProviderId, provider))
-                if not executable:
-                    return {
-                        **row,
-                        "status": "not_installed",
-                        "reason": "Install this provider CLI to read account allowances.",
-                    }
-                status, reason, source, windows = await _rpc_allowance(
-                    provider, executable, settings, env
-                )
-                row.update(status=status, reason=reason, source=source, windows=windows)
-            else:
-                return row
+                row = await _read_account_usage(row, request, adapter)
+            elif reader is not None:
+                row = await reader(row, request)
         if row["status"] == "available":
             row["observed_at"] = datetime.now(UTC).isoformat()
             _drop_past_resets(row["windows"])

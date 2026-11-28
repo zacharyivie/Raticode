@@ -1,6 +1,7 @@
 // What each Rem turn sends: the size of each part of its prompt (gofer/core/turn_context.py).
 // The backend stores character counts only, never the text; tokens are characters / 4.
 import { apiUrl } from "./api.js";
+import { shortDate } from "./timeText.js";
 
 export const ESTIMATE_NOTE = "Tokens are estimated as characters ÷ 4.";
 
@@ -113,7 +114,7 @@ export function currentRulesLine(current) {
   if (!current) return "";
   const date = current.since ? new Date(current.since) : null;
   const since = date && !Number.isNaN(date.getTime())
-    ? ` since ${date.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`
+    ? ` since ${shortDate(date)}`
     : "";
   const calls = `${current.calls} ${current.calls === 1 ? "call" : "calls"}`;
   return `Current rules${since}: ${current.reasked} re-asked · ${current.failed} failed of ${calls}`;

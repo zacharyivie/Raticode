@@ -188,7 +188,7 @@ export function ProviderModelEffortFields({
   );
 }
 
-export function ProviderDiscoveryLoading({ className = "" }) {
+function ProviderDiscoveryLoading({ className = "" }) {
   return <div role="status" aria-live="polite" aria-busy="true"
     className={`flex min-h-10 items-center gap-3 rounded-xl border border-line bg-white px-3 py-2 text-xs text-muted ${className}`}>
     <LoaderCircle aria-hidden="true" className="h-4 w-4 shrink-0 text-brand motion-safe:animate-spin" />

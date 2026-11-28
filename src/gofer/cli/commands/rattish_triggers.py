@@ -17,14 +17,16 @@ import signal
 import sys
 import threading
 import time
+from functools import partial
 from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Any
 
 import typer
 
+from gofer.cli.approval import approve_version, changes_text
 from gofer.cli.client import ExitCode, in_agent_session
-from gofer.cli.output import confirm_unseen
+from gofer.cli.output import confirm_unseen, require_format
 from gofer.rattish.trigger_defaults import (
     DEFAULT_DEBOUNCE_SECONDS,
     DEFAULT_MAX_RUN_SECONDS,
@@ -81,6 +83,12 @@ _APPROVAL_STATES = {
     "changed": "Workflow changed since you approved it.",
     "unapproved": "Waiting for you to approve this workflow version.",
 }
+_trigger_changes_text = partial(
+    changes_text,
+    noun="trigger",
+    states=_APPROVAL_STATES,
+    missing="The workflow file is missing, so the trigger's runs fail until it's back.",
+)
 _YES_OPTION = typer.Option(
     False, "--yes", "-y", help="Approve changes waiting for review without asking."
 )
@@ -102,12 +110,6 @@ def _store(data_dir: Path | None) -> TriggerStore:
     from gofer.rattish.triggers import TriggerStore
 
     return TriggerStore(data_dir or get_data_dir())
-
-
-def _require_format(output_format: str) -> None:
-    if output_format not in {"text", "json"}:
-        typer.echo("--format must be text or json.", err=True)
-        raise typer.Exit(2)
 
 
 def _fail(error: Exception, output_format: str) -> typer.Exit:
@@ -159,6 +161,7 @@ def _parse_inputs(values: list[str] | None) -> dict[str, Any]:
 def _trigger_payload(store: TriggerStore, record: TriggerRecord) -> dict[str, Any]:
     from gofer.rattish.triggers import (
         approval_status,
+        cron_summary,
         describe_trigger,
         next_run_at,
         trigger_limit_state,
@@ -170,6 +173,7 @@ def _trigger_payload(store: TriggerStore, record: TriggerRecord) -> dict[str, An
     return {
         **record.to_payload(),
         "description": describe_trigger(record),
+        "summary": cron_summary(record),
         "nextRunAt": next_run_at(record),
         "webhookUrl": webhook_url(record.id, store.webhook_port())
         if record.kind == "webhook"
@@ -213,6 +217,9 @@ def _trigger_line(payload: dict[str, Any]) -> str:
         f"usage-limit={'wait' if payload.get('waitForUsageLimit', True) else 'fail'}",
     ]
     if payload["kind"] == "cron":
+        if payload.get("summary"):
+            # The description reads in words, so keep the expression it came from.
+            pieces.insert(4, f'cron="{payload["config"]["expression"]}"')
         pieces.append(f"missed={payload['missed']}")
     if payload["nextRunAt"]:
         pieces.append(f"next={payload['nextRunAt']}")
@@ -287,7 +294,7 @@ def _add(
         widened_steps,
     )
 
-    _require_format(output_format)
+    require_format(output_format)
     store = _store(data_dir)
     try:
         record, token = store.create(
@@ -475,7 +482,7 @@ def list_triggers(
     from gofer.rattish.trigger_service import scheduler_status
     from gofer.rattish.triggers import RUNS_ONLY_WHILE_RUNNING_NOTICE
 
-    _require_format(output_format)
+    require_format(output_format)
     store = _store(data_dir)
     triggers = [_trigger_payload(store, item) for item in store.list_triggers(source)]
     status = scheduler_status(store)
@@ -539,7 +546,7 @@ def update(
     """
     from gofer.rattish.triggers import TriggerError, cost_report_warnings
 
-    _require_format(output_format)
+    require_format(output_format)
     changes: dict[str, Any] = {
         key: value
         for key, value in {
@@ -658,7 +665,7 @@ def _offer_approval(
 
     shown = trigger_changes(store, trigger_id)
     if fmt == "text":
-        typer.echo(_changes_text(shown))
+        typer.echo(_trigger_changes_text(shown))
     if shown["state"] == "approved":
         return {"approved": True}
     if not yes and not typer.confirm("Approve this version for the trigger?", default=False):
@@ -707,7 +714,7 @@ def _set_enabled(
 ) -> None:
     from gofer.rattish.triggers import TriggerError
 
-    _require_format(output_format)
+    require_format(output_format)
     store = _store(data_dir)
     try:
         record = store.update(trigger_id, enabled=enabled, actor=_actor())
@@ -745,7 +752,7 @@ def disable(
 def _set_paused(paused: bool, every: bool, output_format: str, data_dir: Path | None) -> None:
     from gofer.rattish.trigger_service import scheduler_status
 
-    _require_format(output_format)
+    require_format(output_format)
     verb = "pause" if paused else "resume"
     if not every:
         typer.echo(
@@ -812,7 +819,7 @@ def resume(
 
     Refused inside a Raticode agent turn (exit 5).
     """
-    _require_format(output_format)
+    require_format(output_format)
     _refuse_in_agent_turn("resume every trigger", output_format)
     _set_paused(False, every, output_format, data_dir)
 
@@ -841,7 +848,7 @@ def budget(
     from gofer.rattish.triggers import TriggerError
     from gofer.ui.rattish_triggers import daily_budget_payload, set_daily_budget_payload
 
-    _require_format(output_format)
+    require_format(output_format)
     base = data_dir or get_data_dir()
     body: dict[str, Any] = {}
     if max_cost_usd is not None:
@@ -877,7 +884,7 @@ def remove(
     """Delete a trigger and its history."""
     from gofer.rattish.triggers import TriggerError
 
-    _require_format(output_format)
+    require_format(output_format)
     try:
         _store(data_dir).delete(trigger_id)
     except TriggerError as exc:
@@ -900,7 +907,7 @@ def rotate_token(
     """
     from gofer.rattish.triggers import TriggerError
 
-    _require_format(output_format)
+    require_format(output_format)
     _refuse_in_agent_turn("replace a webhook's token", output_format)
     try:
         token = _store(data_dir).rotate_token(trigger_id)
@@ -925,7 +932,7 @@ def webhook_port(
     """
     from gofer.rattish.triggers import TriggerError
 
-    _require_format(output_format)
+    require_format(output_format)
     if port is not None:
         _refuse_in_agent_turn("change the webhook port", output_format)
     store = _store(data_dir)
@@ -940,34 +947,6 @@ def webhook_port(
         typer.echo(str(store.webhook_port()))
 
 
-def _changes_text(changes: dict[str, Any]) -> str:
-    from gofer.rattish.trigger_approval import unified_diff_text
-
-    state = changes["state"]
-    if state == "approved":
-        return "This trigger runs the workflow as it is now. Nothing to approve."
-    if state == "missing":
-        return "The workflow file is missing, so the trigger's runs fail until it's back."
-    lines = [_APPROVAL_STATES.get(state, "")]
-    if changes.get("approvedAt"):
-        lines.append(f"Approved {changes['approvedAt']} from {changes.get('approvedBy')}.")
-    marked = changes.get("changedDuringRun")
-    if marked:
-        lines.append(
-            f"{marked.get('path')} changed during a triggered run, so the step that uses it "
-            "wasn't run."
-        )
-    body = unified_diff_text(changes)
-    if marked and not body:
-        body = "No file differs from the approved version now."
-    lines.append(body or "No file differs; the workflow uses a different set of files now.")
-    if changes.get("unseen"):
-        from gofer.rattish.trigger_approval import unseen_note
-
-        lines.append(unseen_note(changes["unseen"]))
-    return "\n".join(line for line in lines if line)
-
-
 @app.command("changes")
 def changes(
     trigger_id: str = typer.Argument(..., help="Trigger ID."),
@@ -977,7 +956,7 @@ def changes(
     """Show what changed in the workflow since this trigger's version was approved."""
     from gofer.rattish.triggers import TriggerError, trigger_changes
 
-    _require_format(output_format)
+    require_format(output_format)
     try:
         result = trigger_changes(_store(data_dir), trigger_id)
     except TriggerError as exc:
@@ -985,7 +964,7 @@ def changes(
     if output_format == "json":
         typer.echo(json.dumps({"ok": True, "changes": result}, sort_keys=True))
     else:
-        typer.echo(_changes_text(result))
+        typer.echo(_trigger_changes_text(result))
 
 
 @app.command("approve")
@@ -1016,81 +995,36 @@ def approve(
         trigger_changes,
     )
 
-    _require_format(output_format)
-    if in_agent_session():
-        if output_format == "json":
-            typer.echo(
-                json.dumps({"ok": False, "error": USER_ONLY, "code": "user_only"}, sort_keys=True)
-            )
-        else:
-            typer.echo(USER_ONLY, err=True)
-        raise typer.Exit(int(ExitCode.AUTH))
+    require_format(output_format)
     store = _store(data_dir)
-    try:
-        shown = trigger_changes(store, trigger_id)
-    except TriggerError as exc:
-        raise _fail(exc, output_format) from None
-    if output_format == "text":
-        typer.echo(_changes_text(shown))
-    if shown["state"] == "approved" and fingerprint is None:
-        if output_format == "json":
-            typer.echo(
-                json.dumps({"ok": True, "approved": False, "changes": shown}, sort_keys=True)
-            )
-        return
-    expected = fingerprint or shown["fingerprint"]
-    if not yes:
-        if output_format == "json":
-            typer.echo(
-                json.dumps(
-                    {
-                        "ok": False,
-                        "error": "Add --yes to approve without a prompt.",
-                        "changes": shown,
-                    },
-                    sort_keys=True,
-                )
-            )
-            raise typer.Exit(2)
-        if not typer.confirm("Approve this version for the trigger?", default=False):
-            typer.echo("Not approved. The trigger keeps skipping its starts until you approve.")
-            raise typer.Exit(1)
-    accept_unseen = confirm_unseen(
-        shown.get("unseen") or [], yes=yes, unseen=unseen, fmt=output_format
-    )
-    try:
-        record = approve_trigger(
+    approve_version(
+        noun="trigger",
+        output_format=output_format,
+        yes=yes,
+        unseen=unseen,
+        fingerprint=fingerprint,
+        user_only=USER_ONLY,
+        show=lambda: trigger_changes(store, trigger_id),
+        approve=lambda expected, accept_unseen: approve_trigger(
             store,
             trigger_id,
             actor="user",
             by="cli",
             expected_fingerprint=expected,
             accept_unseen=accept_unseen,
-        )
-    except UnseenChanges as exc:
-        if output_format == "json":
-            typer.echo(
-                json.dumps(
-                    {"ok": False, "error": str(exc), "unseen": exc.files, "changes": shown},
-                    sort_keys=True,
-                )
-            )
-        else:
-            typer.echo(_unseen_refusal(exc.files), err=True)
-        raise typer.Exit(2) from None
-    except ApprovalConflict as exc:
-        if output_format == "json":
-            typer.echo(json.dumps({"ok": False, "error": str(exc), "conflict": True}))
-        else:
-            typer.echo(str(exc), err=True)
-        raise typer.Exit(int(ExitCode.CONFLICT)) from None
-    except TriggerError as exc:
-        raise _fail(exc, output_format) from None
-    payload = _trigger_payload(store, record)
-    if output_format == "json":
-        typer.echo(json.dumps({"ok": True, "approved": True, "trigger": payload}, sort_keys=True))
-    else:
-        typer.echo(f"Approved. {payload['id']} runs this version of the workflow from now on.")
+        ),
+        errors=TriggerError,
+        error_exit=lambda exc: _fail(exc, output_format),
+        approval_conflict=ApprovalConflict,
+        unseen_changes=UnseenChanges,
+        text=_trigger_changes_text,
+        prompt="Approve this version for the trigger?",
+        declined="Not approved. The trigger keeps skipping its starts until you approve.",
+        approved=lambda record: (
+            f"Approved. {record.id} runs this version of the workflow from now on."
+        ),
+        payload=lambda record: _trigger_payload(store, record),
+    )
 
 
 @app.command("history")
@@ -1104,7 +1038,7 @@ def history(
     data_dir: Path | None = _DATA_DIR_OPTION,
 ) -> None:
     """Show recent runs, including failed, missed and skipped ones."""
-    _require_format(output_format)
+    require_format(output_format)
     store = _store(data_dir)
     events = store.events(trigger_id=trigger_id, limit=limit)
     if failures:
@@ -1133,7 +1067,7 @@ def status(
     from gofer.rattish.trigger_service import scheduler_status
     from gofer.rattish.triggers import RUNS_ONLY_WHILE_RUNNING_NOTICE, TriggerStore
 
-    _require_format(output_format)
+    require_format(output_format)
     base = data_dir or get_data_dir()
     store = TriggerStore(base)
     current = scheduler_status(store)
@@ -1159,7 +1093,7 @@ def login(
     """Start the scheduler at login, so triggers still fire after a reboot."""
     from gofer.rattish.trigger_login import LoginEntryError, login_status, set_login_enabled
 
-    _require_format(output_format)
+    require_format(output_format)
     if state not in {"on", "off", "status"}:
         typer.echo("Choose on, off, or status.", err=True)
         raise typer.Exit(2)

@@ -44,10 +44,13 @@ from gofer.rattish.editor import (
 from gofer.rattish.parser import parse_rattish_recovering
 from gofer.rattish.preflight import run_preflight
 from gofer.rattish.run_retention import (
-    DEFAULT_RETENTION_SETTINGS,
     RETENTION_SETTINGS_FILE,
+    UNREADABLE_RETENTION_MESSAGE,
     coerce_retention_settings,
     prune_run_records,
+    read_retention_document,
+    retention_workflows,
+    save_retention_settings,
 )
 from gofer.rattish.run_service import (
     NEVER_STARTED_STATUSES,
@@ -56,6 +59,7 @@ from gofer.rattish.run_service import (
     RattishRunResult,
     StartedBy,
     effective_run_status,
+    fold_run_journal,
     new_run_id,
     rattish_run_from_preview,
     rerun_rattish_run,
@@ -274,15 +278,19 @@ def create_workflow_from_starter_payload(
     name: str,
     project_root: Path,
     *,
+    provider: str | None = None,
     registry_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Copy a starter workflow into the project and return its studio summary."""
+    """Copy a starter workflow into the project and return its studio summary.
+
+    PROVIDER, the app the dialog picked, replaces the provider the starter lists.
+    """
     from gofer.rattish.starters import create_workflow_from_starter
 
     base = _data_dir(registry_dir)
     try:
         registered = create_workflow_from_starter(
-            project_root, starter_id, name or None, registry_dir=base
+            project_root, starter_id, name or None, provider=provider, registry_dir=base
         )
     except (RattishWorkspaceError, RattishArtifactError, RattishError) as exc:
         raise WorkflowCreateError(str(exc)) from exc
@@ -290,11 +298,17 @@ def create_workflow_from_starter_payload(
 
 
 def starter_workflows_payload() -> dict[str, Any]:
-    """The starter workflows the new-workflow dialog offers."""
-    from gofer.rattish.starters import list_starters
+    """The starter workflows the new-workflow dialog offers, and the apps it may pick.
+
+    providerApps lists the app IDs that can run a starter's model nodes.
+    """
+    from gofer.rattish.starters import list_starters, provider_apps
 
     try:
-        return {"starters": [starter.to_payload() for starter in list_starters()]}
+        return {
+            "starters": [starter.to_payload() for starter in list_starters()],
+            "providerApps": provider_apps(),
+        }
     except RattishWorkspaceError as exc:
         raise WorkflowCreateError(str(exc)) from exc
 
@@ -1620,6 +1634,10 @@ def _read_rattish_run_artifact(path: Path, *, settled: bool = False) -> dict[str
             # A run here saves its final record before it stops counting as active,
             # so it may have finished after the read. Its record says so now.
             return _read_rattish_run_artifact(path, settled=True)
+        folded = fold_run_journal(path) if status == "interrupted" else None
+        if folded is not None:
+            folded["status"] = effective_run_status(folded)
+            return folded
         document["status"] = status
     return document
 
@@ -2008,7 +2026,10 @@ def prune_workflow_run_logs_payload(
 ) -> dict[str, Any]:
     base = _data_dir(data_dir)
     if keep_last is None and keep_days is None and keep_failed_days is None:
-        saved_settings = retention_settings_payload(base, workflow_id)["settings"]
+        saved = retention_settings_payload(base, workflow_id)
+        if not saved["readable"]:
+            raise WorkflowLogError(UNREADABLE_RETENTION_MESSAGE)
+        saved_settings = saved["settings"]
         keep_last = saved_settings.get("keepLast")
         keep_days = saved_settings.get("keepDays")
         keep_failed_days = saved_settings.get("keepFailedDays")
@@ -2045,28 +2066,9 @@ def prune_workflow_run_logs_payload(
     }
 
 
-def _retention_settings_path(base: Path) -> Path:
-    return _safe_path(base, "settings", RETENTION_SETTINGS_FILE, error_cls=WorkflowLogError)
-
-
-def _coerce_retention_settings(value: Any) -> dict[str, int]:
-    return coerce_retention_settings(value)
-
-
-def _read_retention_document(base: Path) -> dict[str, Any]:
-    path = _retention_settings_path(base)
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def _retention_workflow_document(document: dict[str, Any]) -> dict[str, Any]:
-    workflows = document.get("workflows")
-    return cast(dict[str, Any], workflows) if isinstance(workflows, dict) else {}
+def _check_retention_settings_path(base: Path) -> None:
+    # The settings folder must not lead outside the data folder.
+    _safe_path(base, "settings", RETENTION_SETTINGS_FILE, error_cls=WorkflowLogError)
 
 
 def retention_settings_payload(
@@ -2076,11 +2078,13 @@ def retention_settings_payload(
     base = _data_dir(data_dir)
     if workflow_id:
         _validate_storage_workflow_id(workflow_id, WorkflowLogError)
-    document = _read_retention_document(base)
-    global_settings = _coerce_retention_settings(document.get("global"))
-    workflows = _retention_workflow_document(document)
+    _check_retention_settings_path(base)
+    document = read_retention_document(base)
+    readable = document is not None
+    global_settings = coerce_retention_settings((document or {}).get("global"))
+    workflows = retention_workflows(document or {})
     workflow_settings = (
-        _coerce_retention_settings(workflows.get(workflow_id))
+        coerce_retention_settings(workflows.get(workflow_id))
         if workflow_id and workflow_id in workflows
         else None
     )
@@ -2089,6 +2093,8 @@ def retention_settings_payload(
         "global": global_settings,
         "workflow": workflow_settings,
         "settings": workflow_settings or global_settings,
+        "readable": readable,
+        "warning": None if readable else UNREADABLE_RETENTION_MESSAGE,
     }
 
 
@@ -2101,18 +2107,8 @@ def update_retention_settings_payload(
     base = _data_dir(data_dir)
     if workflow_id:
         _validate_storage_workflow_id(workflow_id, WorkflowLogError)
-    document = _read_retention_document(base)
-    workflows = _retention_workflow_document(document)
-    if workflow_id:
-        workflows[workflow_id] = _coerce_retention_settings(settings)
-        document["workflows"] = workflows
-    else:
-        document["global"] = _coerce_retention_settings(settings)
-    document.setdefault("global", DEFAULT_RETENTION_SETTINGS)
-    document.setdefault("workflows", workflows)
-    path = _retention_settings_path(base)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(document, indent=2, sort_keys=True), encoding="utf-8")
+    _check_retention_settings_path(base)
+    save_retention_settings(base, workflow_id, settings)
     return retention_settings_payload(base, workflow_id)
 
 
@@ -2817,6 +2813,8 @@ def _rattish_ui_events(document: Mapping[str, Any]) -> list[dict[str, Any]]:
                     if event.get("cached") and event.get("outcome") == "success"
                     else "retried"
                     if event["type"] in {"node_retried", "node_fell_back"}
+                    else "truncated"
+                    if event["type"] == "node_output_truncated"
                     else "stopped"
                     if event["type"] == "node_stopped" or event.get("status") == "stopped"
                     else "completed"

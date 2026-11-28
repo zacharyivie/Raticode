@@ -1,9 +1,9 @@
 import { useEffect, useMemo } from "react";
-import { ArrowLeft, CircleAlert, CircleCheck, Download, FolderKanban, FolderOpen, HardDrive, HeartPulse, Inbox, Info, Library, Loader2, Network, Repeat, ScrollText, Search, Settings2, Trash2, Upload, X } from "lucide-react";
-import { useSecondBrain, viewFor, navigate, openDialog, cancelTask, dismissTask, dismissToast, dismissError, adoptLegacyRoot, ensureLibrary, setResearchProvider, refreshLibrary, startTask } from "../lib/secondBrainStore.js";
+import { ArrowLeft, CircleAlert, CircleCheck, Download, FolderKanban, FolderOpen, HardDrive, HeartPulse, Inbox, Info, Library, Loader2, Network, RefreshCw, Repeat, ScrollText, Search, Settings2, Trash2, Upload, X } from "lucide-react";
+import { useSecondBrain, viewFor, navigate, openDialog, cancelTask, dismissTask, dismissToast, dismissError, adoptLegacyRoot, ensureLibrary, setResearchProvider, refreshLibrary, startTask, rebuildIndex } from "../lib/secondBrainStore.js";
 import { noticeDuration } from "../lib/notices.js";
 import { Notice } from "./Notice.jsx";
-import { BrainMark, Pill, ProgressBar } from "./SecondBrainParts.jsx";
+import { BrainMark, Pill, Popover, ProgressBar } from "./SecondBrainParts.jsx";
 import SearchView from "./SecondBrainSearch.jsx";
 import { CollectionsView } from "./SecondBrainCollections.jsx";
 import { ReportsView } from "./SecondBrainReports.jsx";
@@ -47,6 +47,21 @@ function Toast({ tone = "success", ...props }) {
   return <Notice className="sb-toast" dismissClassName="sb-icon-button" tone={tone} icon={<Icon size={15} aria-hidden="true" />} {...props} />;
 }
 
+// The toolbar's failed-index warning opens the stored error with the two ways forward.
+function IndexWarning({ brain }) {
+  return <Popover label="Index needs attention" focusPanel align="end" className="sb-index-warning" triggerClassName="sb-pill-button" trigger={<Pill tone="warning">Index needs attention</Pill>}>
+    {close => <>
+      <p>Indexing stopped with an error</p>
+      <pre className="sb-index-error sb-mono">{brain.index.error || "No error details were saved."}</pre>
+      <p className="sb-hint">Search can miss recent changes until you rebuild the index. Rebuilding replaces only the cache. Documents, citations and report evidence are kept.</p>
+      <div className="sb-actions">
+        <button type="button" className="sb-button sb-primary" onClick={() => { close(true); void rebuildIndex(brain); }}><RefreshCw size={14} />Rebuild index</button>
+        <button type="button" className="sb-link" onClick={() => { close(); navigate("health"); }}><HeartPulse size={13} aria-hidden="true" />Library health</button>
+      </div>
+    </>}
+  </Popover>;
+}
+
 export default function SecondBrainWorkspace({ onClose, assistant = {}, memorySettings = {} }) {
   const providerState = useProviderCapabilities();
   const store = useSecondBrain();
@@ -70,7 +85,7 @@ export default function SecondBrainWorkspace({ onClose, assistant = {}, memorySe
       <button className="sb-icon-button" type="button" aria-label="Back to editor" title="Back to editor" onClick={onClose}><ArrowLeft size={17} /></button>
       {brain ? <div className="sb-toolbar-title"><BrainMark brain={brain} /><div><h2>{brain.name}</h2><small className="sb-mono" title={brain.root}>{brain.root}</small></div></div> : <div className="sb-toolbar-title"><h2>Second Brain</h2></div>}
       {brain && brain.state === "available" ? <div className="sb-toolbar-actions">
-        {brain.index.state === "updating" ? <Pill tone="brand" title={`${brain.index.pending} documents waiting for extraction`}>Indexing · {brain.index.progress}%</Pill> : brain.index.state === "failed" ? <Pill tone="warning" title={brain.index.error}>Index needs attention</Pill> : null}
+        {brain.index.state === "updating" ? <Pill tone="brand" title={`${brain.index.pending} documents waiting for extraction`}>Indexing · {brain.index.progress}%</Pill> : brain.index.state === "failed" ? <IndexWarning brain={brain} /> : null}
         <button className="sb-button" type="button" onClick={() => openDialog("export")}><Download size={14} />Export</button>
         <button className="sb-icon-button" type="button" aria-label="Brain settings" title="Brain settings" aria-pressed={view.section === "settings"} onClick={() => navigate("settings")}><Settings2 size={17} /></button>
       </div> : null}

@@ -1,7 +1,19 @@
+# The color settings go before the imports below, so ruff allows imports after code here.
+# ruff: noqa: E402
 from __future__ import annotations
 
-import json
 import os
+
+# Tests compare plain text, whatever terminal colors the shell that started them asks
+# for. Rich reads these when a console is made or prints, and Typer decides at import
+# whether its help and error panels are a terminal (GitHub Actions always is), so
+# they are set before anything imports either one. Tests that need colors set them.
+for name in ("FORCE_COLOR", "CLICOLOR_FORCE", "PY_COLORS", "TTY_COMPATIBLE"):
+    os.environ.pop(name, None)
+os.environ["NO_COLOR"] = "1"
+os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
+
+import json
 import shutil
 import subprocess
 import tempfile
@@ -11,10 +23,19 @@ from pathlib import Path
 
 import pytest
 
-from gofer.core import command_slots, model_lifecycle, secrets_folder
+from gofer.core import (
+    claude_accounts,
+    codex_accounts,
+    command_slots,
+    grok_accounts,
+    model_lifecycle,
+    provider_accounts,
+    secrets_folder,
+)
 from gofer.core.agent import AgentResult
 from gofer.core.provider_profiles import ResolvedProviderSettings
 from gofer.subscriptions.base import Subscription
+from gofer.ui.brain_library import BrainLibrary
 from gofer.utils import process
 from gofer.utils.paths import get_data_dir
 
@@ -102,12 +123,87 @@ def host_independent_worker_room() -> Iterator[None]:
         command_slots.memory_hold, computers.local_pressure = hold, pressure
 
 
+# Every test's temp folder sits under a folder named like macOS's
+# "~/Library/Application Support" plus a non-ASCII letter, so a test that builds
+# a shell command, a URL, a Markdown link or JSON from a path without quoting or
+# encoding it fails on every computer, not only for users whose paths have them.
+SPACED_TEMP_FOLDER = "Application Support ñ"
+
+
+@pytest.fixture
+def tmp_path(tmp_path: Path) -> Path:
+    """pytest's own per-test temp folder, one folder down at ``SPACED_TEMP_FOLDER``.
+
+    A child of each test's folder rather than a different base temp folder, so
+    parallel runs in other worktrees can't clear it, and a file an unquoted command
+    writes at the first word of the path lands in this test's own folder.
+    """
+    folder = tmp_path / SPACED_TEMP_FOLDER
+    folder.mkdir()
+    return folder
+
+
+@pytest.fixture
+def linked_tmp_path(tmp_path: Path) -> Path:
+    """A temp folder reached through a symbolic link above it.
+
+    Like ``/home -> var/home`` on Fedora Kinoite and Silverblue. ``tmp_path`` alone
+    never has one, because pytest resolves its base temp folder.
+    """
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "linked"
+    link.symlink_to(real, target_is_directory=True)
+    folder = link / "work"
+    folder.mkdir()
+    return folder
+
+
 @pytest.fixture
 def credential_guards(monkeypatch: pytest.MonkeyPatch) -> None:
     from gofer.core import codex_sandbox, credential_mask
 
     monkeypatch.setattr(codex_sandbox, "ENABLED", True)
     monkeypatch.setattr(credential_mask, "ENABLED", True)
+
+
+# Each built-in account adapter finds its CLI on PATH through one module function.
+# A test supplies its own CLI by replacing that function or the adapter's lookup.
+_REAL_CLI_LOOKUPS = {
+    "claude_code": (claude_accounts, "_claude_executable"),
+    "codex": (codex_accounts, "_codex_executable"),
+    "grok": (grok_accounts, "_grok_executable"),
+}
+_REAL_CLI_FUNCTIONS = {
+    provider: getattr(module, name) for provider, (module, name) in _REAL_CLI_LOOKUPS.items()
+}
+_BUILTIN_CLI_LOOKUPS = {
+    provider: adapter.executable for provider, adapter in provider_accounts.adapters().items()
+}
+_REAL_RUN = subprocess.run
+
+
+def _supplied_status_cli(
+    adapter: provider_accounts.AccountAdapter, run: Callable[..., object]
+) -> str | None:
+    lookup = adapter.executable
+    builtin = lookup is not None and lookup is _BUILTIN_CLI_LOOKUPS.get(adapter.provider)
+    if builtin:
+        module, name = _REAL_CLI_LOOKUPS[adapter.provider]
+        supplied = getattr(module, name) is not _REAL_CLI_FUNCTIONS[adapter.provider]
+    else:
+        supplied = lookup is not None
+    if supplied or run is not _REAL_RUN:
+        return adapter.find_executable()
+    return None
+
+
+def _no_model_download(library: BrainLibrary) -> object:
+    if library.model is None:
+        raise RuntimeError(
+            "Tests don't download embedding models. Set library.model to a fake one."
+        )
+    return library.model
 
 
 @pytest.fixture(autouse=True)
@@ -169,6 +265,12 @@ def isolated_gofer_data_dir(
 
     monkeypatch.setattr(provider_capabilities, "APP_VERSION_READS", False)
     monkeypatch.setattr(provider_capabilities, "_app_versions", {})
+    # An account's sign-in check never finds or starts the provider's real CLI. With
+    # none, the state is unavailable, unless a test supplies its own CLI or run function.
+    monkeypatch.setattr(provider_accounts, "status_executable", _supplied_status_cli)
+    # Second Brain's related-meaning search never downloads its embedding model.
+    # Tests that need vectors set library.model or replace _local_model or _embedding.
+    monkeypatch.setattr(BrainLibrary, "_local_model", _no_model_download)
 
     # A backend whose data folder is tmp_path puts its trusted tools folder in the
     # base folder that the test's neighbours share (one per pytest-xdist worker).

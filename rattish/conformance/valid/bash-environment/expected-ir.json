@@ -11,12 +11,12 @@
     "entrypoint": "workflow.rattish",
     "project_root": "/fixture/project",
     "source_fingerprint": "sha256:707fe565f052452ff0cc58a97d90b404daf3885f31ab7fd6e3f0e2e6e1094a9f",
-    "compilation_fingerprint": "sha256:98034d3edc90037ed739fbbc4573ab9510f7e0b8a336f46f7fa9dff3214391e6",
+    "compilation_fingerprint": "sha256:3bbf309b083567030b437f820bcfff3f44563fdaba6e95fde3a7f6d37068c499",
     "dependencies": [
       {
         "kind": "node_contract",
         "id": "bash-command",
-        "version": 1,
+        "version": 2,
         "path": null,
         "fingerprint": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
       }
@@ -59,7 +59,7 @@
       "runtime_handler": "raticode.bash_command",
       "contract": {
         "node_type": "bash-command",
-        "version": 1,
+        "version": 2,
         "fingerprint": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
       },
       "configuration": {
@@ -125,12 +125,16 @@
             },
             "exit_code": {
               "type": "integer"
+            },
+            "truncated": {
+              "type": "boolean"
             }
           },
           "required": [
             "stdout",
             "stderr",
-            "exit_code"
+            "exit_code",
+            "truncated"
           ],
           "additionalProperties": false
         },

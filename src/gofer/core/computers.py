@@ -58,6 +58,7 @@ from gofer.core.command_slots import (
 )
 from gofer.core.placement_eligibility import desktop_reason
 from gofer.core.worker_claims import CONSUMERS, RUNNING_WORK_LIMIT, clean_label
+from gofer.utils.atomic_output import replace_file
 
 # The longest memory hold detail a paired desktop's reading may carry.
 MEMORY_HOLD_CHARS = 80
@@ -253,12 +254,8 @@ def _load(data_dir: Path) -> dict[str, Any]:
 
 
 def _save(data_dir: Path, value: dict[str, Any]) -> None:
-    data_dir.mkdir(parents=True, exist_ok=True)
-    path = _store_path(data_dir)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    temporary.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
+    text = json.dumps(value, sort_keys=True) + "\n"
+    replace_file(_store_path(data_dir), text.encode("utf-8"))
 
 
 def this_computer_id(data_dir: Path, device_id: str | None = None) -> str:

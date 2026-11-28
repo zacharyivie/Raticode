@@ -20,20 +20,11 @@ const { createAgentBrowserController } = require("../agent-browser.cjs");
 const { remSiteAllowed, sanitizeBrowserPolicy } = require("../browser-policy.cjs");
 const { checkSlowFramePage, createSlowFramePages } = require("./slow-frame-page.cjs");
 const { pageText } = require("./hidden-text-pages.cjs");
+const { chromiumForTesting, waitFor } = require("./test-wait.cjs");
+const WAIT = { timeout: 10_000, interval: 50 };
 
-function chromeForTesting() {
-  const root = path.join(os.homedir(), ".cache", "ms-playwright");
-  try {
-    for (const entry of fs.readdirSync(root).filter((name) => /^chromium-\d+$/.test(name)).sort().reverse()) {
-      const candidate = path.join(root, entry, "chrome-linux64", "chrome");
-      if (fs.existsSync(candidate)) return candidate;
-    }
-  } catch { /* No Playwright downloads. */ }
-  return "";
-}
-
-const CHROME_PATH = process.env.RATICODE_SKIP_CHROME_TESTS === "1" ? "" : (findBrowser(CHROME) || (process.platform === "linux" ? chromeForTesting() : ""));
-const EDGE_PATH = process.env.RATICODE_SKIP_EDGE_TESTS === "1" ? "" : (findBrowser(EDGE) || (process.platform === "linux" ? chromeForTesting() : ""));
+const CHROME_PATH = process.env.RATICODE_SKIP_CHROME_TESTS === "1" ? "" : (findBrowser(CHROME) || (process.platform === "linux" ? chromiumForTesting() : ""));
+const EDGE_PATH = process.env.RATICODE_SKIP_EDGE_TESTS === "1" ? "" : (findBrowser(EDGE) || (process.platform === "linux" ? chromiumForTesting() : ""));
 const FIREFOX_PATH = process.env.RATICODE_SKIP_FIREFOX_TESTS === "1" ? "" : findFirefox();
 
 const ENGINES = {
@@ -120,16 +111,6 @@ const ref = (snapshot, role, name) => {
   return match[1];
 };
 
-async function waitFor(check, message, timeout = 10000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const value = await check();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(message);
-}
-
 for (const [name, spec] of Object.entries(ENGINES)) {
   const skip = { skip: spec.path ? false : `${name} is not installed` };
 
@@ -150,13 +131,13 @@ for (const [name, spec] of Object.entries(ENGINES)) {
 
       // Hover reaches the page as real pointer movement.
       await call("hover", { ref: ref(snapshot, "button", "Hover") });
-      await waitFor(async () => /hovered:true/.test(await out()), "hover did not reach the page");
+      await waitFor(async () => /hovered:true/.test(await out()), "hover did not reach the page", WAIT);
 
       // Right, middle and double clicks.
       await call("click", { ref: ref(snapshot, "button", "Mouse"), button: "right" });
       await call("click", { ref: ref(snapshot, "button", "Mouse"), button: "middle" });
       await call("click", { ref: ref(snapshot, "button", "Mouse"), doubleClick: true });
-      await waitFor(async () => /down:2:true.*menu.*down:1:true.*down:0:true.*down:0:true.*double:true/.test(await out()), `clicks did not reach the page: ${await out()}`);
+      await waitFor(async () => /down:2:true.*menu.*down:1:true.*down:0:true.*down:0:true.*double:true/.test(await out()), `clicks did not reach the page: ${await out()}`, WAIT);
 
       // Typing, keys with modifiers, and Enter submitting the form.
       const query = ref(snapshot, "textbox", "Query");
@@ -166,9 +147,9 @@ for (const [name, spec] of Object.entries(ENGINES)) {
       await call("press", { key: "Control+a" });
       await call("press", { key: "X" });
       assert.equal(await value("document.getElementById('q').value"), '"X"', "Control+a should select the text, so X replaces it");
-      await waitFor(async () => /key:a\+ctrl:true/.test(await out()), `Control+a did not reach the page: ${await out()}`);
+      await waitFor(async () => /key:a\+ctrl:true/.test(await out()), `Control+a did not reach the page: ${await out()}`, WAIT);
       const submitted = await call("type", { ref: query, text: "go", submit: true });
-      await waitFor(async () => (await call("tabs")).tabs[0].title === "submitted:go", `Enter did not submit: ${submitted.title}`);
+      await waitFor(async () => (await call("tabs")).tabs[0].title === "submitted:go", `Enter did not submit: ${submitted.title}`, WAIT);
       const tabbed = await call("press", { key: "Tab" });
       assert.notEqual(tabbed.focused, "input#q", "Tab moved focus on");
 
@@ -191,18 +172,18 @@ for (const [name, spec] of Object.entries(ENGINES)) {
       assert.deepEqual(asked.dialog, { type: "prompt", message: "Name?", defaultPrompt: "x" });
       await assert.rejects(call("snapshot"), /dialog is open/);
       await call("dialog", { accept: true, promptText: "Ada" });
-      await waitFor(async () => /prompt:Ada/.test(await out()), `the prompt answer did not reach the page: ${await out()}`);
+      await waitFor(async () => /prompt:Ada/.test(await out()), `the prompt answer did not reach the page: ${await out()}`, WAIT);
 
       // Reload, then back and forward through history.
       const reloaded = await call("reload");
-      await waitFor(async () => /^Actions [2-9]/.test((await call("tabs")).tabs[0].title), `reload did not load the page again: ${reloaded.title}`);
+      await waitFor(async () => /^Actions [2-9]/.test((await call("tabs")).tabs[0].title), `reload did not load the page again: ${reloaded.title}`, WAIT);
       ({ snapshot } = await call("snapshot"));
       const second = await call("click", { ref: ref(snapshot, "link", "Two") });
-      await waitFor(async () => (await call("tabs")).tabs[0].title === "Two", `the link did not open: ${second.title}`);
+      await waitFor(async () => (await call("tabs")).tabs[0].title === "Two", `the link did not open: ${second.title}`, WAIT);
       await call("back");
-      await waitFor(async () => /^Actions/.test((await call("tabs")).tabs[0].title), "back did not return");
+      await waitFor(async () => /^Actions/.test((await call("tabs")).tabs[0].title), "back did not return", WAIT);
       await call("forward");
-      await waitFor(async () => (await call("tabs")).tabs[0].title === "Two", "forward did not return to the second page");
+      await waitFor(async () => (await call("tabs")).tabs[0].title === "Two", "forward did not return to the second page", WAIT);
       await assert.rejects(call("forward"), /no page to go forward/);
 
       const shot = await call("screenshot");
@@ -229,7 +210,7 @@ for (const [name, spec] of Object.entries(ENGINES)) {
       await user.loadURL(`${base}/`);
       const { snapshot } = await call("snapshot");
       await call("type", { ref: ref(snapshot, "textbox", "Query"), text: "shared", submit: true });
-      await waitFor(async () => (await call("tabs")).tabs[0].title === "submitted:shared", "Rem's typing did not reach the shared tab");
+      await waitFor(async () => (await call("tabs")).tabs[0].title === "submitted:shared", "Rem's typing did not reach the shared tab", WAIT);
       assert.equal((await call("tabs")).tabs[0].sharedByUser, true);
       const shot = await call("screenshot");
       assert.ok(shot.image.length > 1000);

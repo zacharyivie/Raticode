@@ -16,8 +16,9 @@ Rem's tickets have keys like `REM-12`. The columns are **Backlog**, **To do**, *
 
 <AppScreenshot name="board" caption="The board after Rem added five tickets for a project. The sidebar shows the self-work state and Rem's latest report." />
 
-- **New ticket** adds a ticket for Rem or an organization. Once you've typed or chosen something in it, a click outside leaves it open and Escape asks before discarding it. **Search tickets** and the avatars above the board filter it.
+- **New ticket** adds a ticket for Rem or an organization. A ticket for Rem can get a **Done when** right away, one check per line. Once you've typed or chosen something in it, a click outside leaves it open and Escape asks before discarding it. **Search tickets** and the avatars above the board filter it.
 - Click a ticket, or focus it and press Enter or Space, to open it. Keyboard focus moves into the open ticket, and the ticket stays highlighted on the board. Escape or **×** closes it and puts focus back on that ticket, or on the board's first ticket if it has left the board. Escape doesn't close it while you're typing a reason to decline it. A screen reader reads each ticket's key and title, then the lines it shows, such as why it's blocked, its objective and **Your approval**.
+- **Edit a ticket.** An open ticket of Rem's shows its **Priority** and **Kind** (Build, Research or Maintain). While it isn't running or paused, and is in **Backlog**, **To do** or **Blocked**, **Edit** at the top changes its **Title**, **Description**, **Priority**, **Kind** and **Done when** (one check per line). Proposals can be edited too, before you approve them. **Save** sends only the fields you changed. If the ticket changed since you opened the form, or a run started on it, Raticode says why and keeps what you typed. Fields you didn't touch follow the newest copy of the ticket. If a field you changed was also changed somewhere else, such as by Rem or on the phone, the form says so and **Save** is refused instead of undoing that change. Escape closes the form. With unsaved changes, Escape, **Cancel**, **×** or opening another ticket asks before discarding them. A description longer than the board shows (4,000 characters) stays as it is. An organization's tickets are edited in their own [Organizations](../advanced/organizations.md) sheet. On the phone it's **Edit** on the ticket's page; see [A ticket's page](../mobile/workspace.md#a-ticket-s-page). New in Raticode 0.6.2 and Raticode Mobile 0.38.0.
 - **Formatted text.** An open ticket shows its description, **Why Rem suggests this** and **Result** as formatted text, like Rem's chat: code, bold, lists and links. Images don't load there; an image shows as its description. A description longer than about 12 lines starts folded, with **Show all** under it, so **Done when**, **Waits for** and **Move** stay in view. An organization ticket's **Details** and an epic's **About** are formatted the same way. Titles stay plain text. New in 0.6.1.
 - **Undo after a move or cancel.** Dragging a ticket, or using a ticket's **Move** buttons, shows a notice at the bottom of the board that names the ticket and where it went, such as "REM-12 cancelled." or "REM-12 moved to Backlog." **Undo** on the notice moves it back to the column it came from. A move that starts work (**Start now**, **Resume**, or a drag to **In progress**) and **Decline** get a notice without Undo, and so does a move out of **In review** or **Blocked**, since a ticket only gets there from its run. A notice with Undo stays for at least 10 seconds and doesn't close while the pointer is on it or it has focus; others close after 4 seconds, and **×** closes any of them. Errors stay until you dismiss them. New in 0.6.1.
 - **Filters stay put.** Whose tickets, the search, the person you picked, **Closed** and the Board or People view are kept on this computer. They're still set when you come back to the board or restart Raticode. A filter that's on is highlighted, and **Clear filters** turns them all off. If a saved organization or person is gone, that filter shows everyone again and the others stay. Each [organization's board](../advanced/organizations.md#find-your-way-around) keeps its own filters, and the phone keeps its own.
@@ -25,6 +26,7 @@ Rem's tickets have keys like `REM-12`. The columns are **Backlog**, **To do**, *
 - You can hand one of Rem's tickets to an organization. An organization's ticket can't go to Rem; create a new one instead.
 - Rem can create, edit, move and assign tickets when you ask in chat. It can't approve its own proposals or mark a ticket done. The one exception is [auto-approval](#let-rem-approve-its-own-tickets), which only you can turn on.
 - Rem's replies name tickets by key. A key such as `REM-12` in Rem's chat shows as a pill you can click to open the ticket; see [Ticket pills](./home.md#ticket-pills).
+- **Mod+P** finds a ticket from anywhere in Raticode. [Quick open](../reference/shortcuts.md#command-palette-and-quick-open) searches the board's tickets by key, such as `REM-12` or `rem12`, or by title, and Enter opens the ticket here. New in 0.6.2.
 
 ### Tickets follow their task
 
@@ -58,7 +60,7 @@ A ticket can list the tickets it waits for, so work happens in the right order. 
 
 - **On the card.** A waiting ticket shows **Waits for:** and the title of the first ticket that isn't Done yet, with **and N more** when there are others. The line goes away once every one of them is Done.
 - **Edit the list** in the ticket's **Waits for** section: pick a ticket from **Wait for a ticket…**, or remove one with its **×**. You can change the list even while the ticket runs. On the phone it's the same section on the ticket's page, and from a terminal it's `Raticode tickets edit REM-7 --waits-for REM-3`; see [Tickets from the CLI](../reference/cli-rem.md#tickets).
-- **Same board only.** Rem's tickets wait for Rem's tickets, and an organization's for its own. For an organization's ticket this is the same list as its dependencies in the [Organizations](../advanced/organizations.md#tasks-and-independent-review) tab.
+- **Same board only.** Rem's tickets wait for Rem's tickets, and an organization's for its own. For an organization's ticket this is the same list as its dependencies in the [Organizations](../advanced/organizations.md#tickets-and-independent-review) tab.
 - **Self-work waits.** Self-work doesn't start, pick back up or pull a ticket from Backlog until every ticket it waits for is **Done**. An organization holds its ticket in **Blocked** the same way. You can still start a waiting ticket yourself with **Start now**.
 - **When one is cancelled,** the waiting ticket stays where it is and shows a notice instead: the cancelled ticket's key and title, and that it won't start on its own. Its history gets the same note. You decide: remove the cancelled ticket from the list, restore it, or cancel or start the waiting ticket. A ticket can't start waiting for a ticket that's already cancelled.
 - **When one is closed as a duplicate,** tickets that waited for it wait for the ticket it was merged into instead, with a note in their history. If that would make a ticket wait for itself or in a loop, it keeps the old link and gets the cancelled notice above.
@@ -132,7 +134,7 @@ Self-work is on by default but does nothing until Rem has at least one project.
 
 - **It starts** after 15 minutes without a message from you: in Rem's chat, on any device, or in a worker thread. In a [timed window](#timed-self-work) it starts right away.
 - **It ends** with your next message. Running work finishes, and nothing new starts.
-- **Start it now** with **Start self-work** in Rem's side pane, or tell Rem "start self-work now". It starts within seconds instead of waiting for quiet minutes, and keeps going while you chat until you turn it off. See [Start self-work now](#start-self-work-now) (not yet released).
+- **Start it now** with **Start self-work** in Rem's side pane, or tell Rem "start self-work now". It starts within seconds instead of waiting for quiet minutes, and keeps going while you chat until you turn it off. See [Start self-work now](#start-self-work-now). New in 0.6.1.
 - **Turn it on or off** in [Settings](#settings), or tell Rem: "turn on self-work", "stop self-work", "is self-work on?". Turned on, it waits for 15 quiet minutes as usual. See [Turn it on or off from the chat](#turn-it-on-or-off-from-the-chat).
 - **Set a time** by telling Rem: "enable self-work until 7 PM tonight", "self-work from 11 PM to 7 AM". See [Timed self-work](#timed-self-work).
 
@@ -147,7 +149,7 @@ About once a week, and when a session ends, a [guardrail retro](#guardrail-retro
 
 Each proposal comes with a finish line: one to three statements a reviewer can check, such as a command that passes or a screen that shows a named thing. They become the ticket's **Done when**, one review check each. Statements that can't be checked, like "works well" or "is cleaner", are dropped. New in 0.6.0.
 
-An open ticket shows its **Done when** under the description, one item per line, on the computer and on the phone. A proposal shows it too, so you can judge the finish line before you approve. Organization tickets show theirs the same way. To change it, use `Raticode tickets edit REM-12 --done-when "…"`. Not in a released version yet.
+An open ticket shows its **Done when** under the description, one item per line, on the computer and on the phone. A proposal shows it too, so you can judge the finish line before you approve. Organization tickets show theirs the same way. Change it with **Edit** in the open ticket (see [The board](#the-board)), by asking Rem, or with `Raticode tickets edit REM-12 --done-when "…"` from a script. New in 0.6.1; **Edit** is new in 0.6.2.
 
 #### Design and module depth
 
@@ -169,7 +171,7 @@ Proposals wait in Backlog, marked as proposed, until you choose **Approve for To
 - **You set them by telling Rem.** When you turn self-work on, set a window or say what it should focus on ("self-work until 7 PM, focus on the studio's UX and Second Brain reliability"), Rem turns your words into objectives and replaces the open ones. Done ones stay on the list as history. Ask for open-ended work, such as "start self-work and focus on hardening existing logic before the release", and Rem writes it open-ended, as you said it; name a finish line and Rem records it as **Done when**.
 - **No instructions means no change.** When self-work starts and you said nothing about what to work on, the current objectives stay in force.
 - **An empty list gets Rem's own.** If the list has no open objectives when a session starts and you gave no instructions, Rem writes two to four objectives of its own from its projects, their open tickets and recent work, each with a **Done when** finish line, and says so in the chat. Self-work starts nothing new until it has, usually a few seconds, so its first work already follows them. If Rem can't write any, self-work goes on as it would with no objectives.
-- **Out of work, Rem may add more.** When nothing is left to start and research found nothing new, Rem may add one to three new objectives, each with a finish line (at most twice a session), and then starts a new round of research guided by them.
+- **Rem adds objectives only when none are open.** While any objective is open, whether you wrote it, Rem wrote it from your words or Rem picked it itself, and whether it is open-ended or has a finish line, Rem never adds one on its own: the open ones are what self-work works toward. When nothing is left to start and research found nothing new, Rem checks off any open objective whose **Done when** is met. Only if that leaves none open does it add one to three new objectives, each with a finish line (at most twice a session), and start a new round of research guided by them. Your open-ended objectives can't be checked off by Rem, so while one is open self-work stays with them and says it's out of work. Only you add more while objectives are open, in the list or by asking Rem in the chat.
 - **Every task reads them fresh.** Self-work reads the list again just before each task it starts, so a change you make now applies to the next task. Tasks get the open objectives in their instructions: ticket work as context for that ticket only, ranking to judge how much each ticket advances them, and research to propose only work that does.
 - **Which objective a task serves.** Every ticket self-work starts while objectives are open serves one, and the task that works on it shows that objective under its name in the side pane. Research for an objective shows it the same way. Each objective shows how many running tasks are on it.
 
@@ -188,7 +190,7 @@ While the list has at least one open objective, self-work only works toward it. 
 
 #### Objectives take turns
 
-Not in a released version yet.
+New in 0.6.1.
 
 With two or more open objectives, self-work shares its threads among them instead of spending most of them on one. Each time it starts a ticket or a research run, it picks the objective with the least work so far: the tasks running for it now plus the tasks self-work started for it this session.
 
@@ -199,9 +201,11 @@ With two or more open objectives, self-work shares its threads among them instea
 
 Edit the list yourself at any time: **+** adds one, the checkbox checks one off or reopens it, and each row's menu has **Edit** and **Remove**.
 
+Checking off, reopening and removing show at once, and Raticode saves them in the background in the order you made them, so you can check off several in a row without waiting. Reopening one before its check was saved cancels both. If a change can't be saved, its row goes back and the side pane says why. When Rem, the phone or the CLI changed the list first, none of your waiting changes are saved, since they were made on the old list: look at the list again and redo them. New in 0.6.2.
+
 #### An objective's details
 
-Not in a released version yet.
+New in 0.6.1.
 
 Select an objective's text, or focus it and press Enter or Space, to open its details under the row. One row opens at a time, and Escape or a second select closes it. The details show:
 
@@ -212,11 +216,11 @@ Select an objective's text, or focus it and press Enter or Space, to open its de
 
 Pointing at a row with the mouse shows the same details as a tooltip.
 
-On the phone, the board's **Self-work** section lists the objectives to read; tap one to open the same details under it, one at a time. To change them from the phone, tell Rem in its chat; see [Global board and self-work](../mobile/workspace.md#global-board-and-self-work). Not in a released version yet.
+On the phone, the board's **Self-work** section lists the objectives; tap one to open the same details under it, one at a time. With a desktop that has [each project's objectives](#each-project-s-objectives-and-level-of-effort), you can also add, check off, reopen and remove objectives, globally or in a project's section, and set each project's level of effort; with an older desktop, tell Rem in its chat. See [Global board and self-work](../mobile/workspace.md#global-board-and-self-work). New in 0.6.1; changing them from the phone is new in Raticode 0.6.2 and Raticode Mobile 0.38.0.
 
 #### Order, sessions and stale objectives
 
-Not in a released version yet.
+New in 0.6.1.
 
 - **Newest first, open ones on top.** Open objectives always sit above done ones, and each group lists the newest first. Objectives Rem writes together keep the order it wrote them in. The order is fixed, so rows have no **Move up** or **Move down**.
 - **The count is for this session.** The number by the heading is done/total for the current self-work session, such as **1/3**, or just the total while none are done.
@@ -226,14 +230,54 @@ Not in a released version yet.
 
 **When Rem checks one off.** You can check off anything. Rem checks one off only when it has written doneness criteria (**Done when**) and it can say how they were fully met; that evidence is kept with the objective. An open-ended objective has no criteria, so Rem never checks it off. If you tell Rem an objective is done, it checks it off with your word as the reason.
 
+### Each project's objectives and level of effort
+
+New in 0.6.2.
+
+Under **Objectives**, each of Rem's projects has its own folding section, so you can tell Rem what to do in several projects at once. The list at the top holds the global objectives, which steer every project. A project's section shows its name, how many of its own objectives are done, its **Level of effort** and how many threads it holds now against its share, such as **3 of 3 threads**. The same sections are in Rem's side pane and in **Settings > Rem**, under **Self-work**.
+
+- **A project's objectives steer only that project.** Its tickets must advance one of its own objectives or a global one to start, and research for its objectives runs only in that project. Another project's objectives never pull its tickets, even when Rem's check thinks a ticket would help them. A project with no open objective of its own, while no global one is open, picks tickets and research angles as usual.
+- **Add one in the section.** **+** in a project's section adds an objective to that project. Check, edit and remove work as in the global list. Tell Rem in the chat too: "for agent-trading, focus on cutting drawdowns" sets agent-trading's own objectives and leaves the others alone.
+- **Ask Rem for a project's objectives.** **Ask Rem** in a project's section has Rem write three to five new objectives for that project. See [Ask Rem for a project's objectives](#ask-rem-for-a-project-s-objectives).
+- **Stale ones fold under each project.** A project's objectives done in earlier sessions sit in their own folded **Stale** group at the end of its section, with how many there are, as in the global list. Open it to see them; each section remembers whether its group is open. The same fold is in Settings > Rem.
+- **Long lists page per project.** A section loads its project's newest 30 objectives first. When the project has more, **Show more** at the end of its list, or of its open **Stale** group, loads the next 30 for that project alone. Settings > Rem shows the first 30 and says **More in Rem's side pane**.
+- **Move one with Edit.** Editing an objective shows **Applies to**: **Every project** or one of Rem's enabled projects. Pick another and save, and the objective moves to that section. It keeps its ID, so the tasks and tickets working on it still count toward it. If the list it would move to already has the same open objective, or is full (30 open), Raticode says so and the objective stays where it was. Rem's chat edits change only the words; they never move one.
+- **Only enabled projects have a section.** Turn a project off under **Rem's projects** and its section goes away. Its objectives and level of effort are kept and come back when you turn it on again.
+
+#### Ask Rem for a project's objectives
+
+New in 0.6.2.
+
+Open a project's section and select **Ask Rem**. Rem reads what the project is now: its docs (such as `README.md` and `AGENTS.md`), its folders, its recent commits, its open tickets and every objective that steers it. Then it adds three to five new objectives to that project's own list. One press never adds more than five, and never more than the 30 open objectives a list holds.
+
+- **Broad enough for a whole session.** Each one names an area and a direction that self-work can follow for a whole session, potentially several dozen tickets, such as "Improve UX across the project's features", "Audit unit tests and rewrite or remove unhelpful ones" or "Harden error handling and recovery in the sync code". Nothing one or a few tickets could finish: an objective that starts like a single task (fix, add, rename, upgrade, implement, create, delete, move or make), names a ticket key or a file, or repeats or rewords an open objective is sent back to Rem once with the reason, and anything still like that is left out.
+- **Open-ended, because you asked.** They have no **Done when**, like the ones you write or ask for in the chat, so Rem never checks them off and they stay until you check them off or remove them. They don't count toward the six open objectives Rem may keep of its own. Rem's own rules don't change: on its own it still writes objectives only with a finish line.
+- **It takes a minute or so.** While Rem writes, the button reads **Asking Rem…** and the section says Rem is reading the project. Then it says how many it added, or why it couldn't, such as the model's provider being out of allowance. A project can have one ask at a time. An ask started on the phone or from the CLI shows the same way in the side pane and Settings > Rem.
+- **Rem's tool-free model writes them.** No worker or task runs, and nothing in the project changes. Edit, move or remove the new objectives like any others.
+
+The phone has the same button in each project's section, and `Raticode selfwork objectives ask --project NAME` does it from a terminal.
+
+#### Level of effort
+
+A project's **Level of effort** is its share of self-work's threads, in percent. With **Max threads** at 10, Raticode at 70% and agent-trading at 30%, Raticode holds up to 7 threads and agent-trading 3.
+
+- **Threads, not tasks.** What counts is how many threads a project holds at once. Raticode can finish five 20-minute tickets one after another in one thread while agent-trading runs the same three long tasks; each project still holds its own share.
+- **The numbers total 100.** New projects split evenly. Change one project's number and the others share the rest in the proportions they had. A project added later starts with an even share, and the others scale around it.
+- **Rounding.** Each project gets the whole threads its share covers. A thread left over goes to the project closest to its next one, and between two equally close projects to the larger share: 70/30 of 3 threads is 2 and 1.
+- **Unused threads are lent.** A project with nothing it can start lends its threads to the others. When it has work again, the next thread that frees goes to it; nothing running is stopped to give threads back.
+- **Your work still comes first.** The shares split the threads your own running tasks leave free. Work that paused for yours picks up first, whatever its project's share.
+- **See it.** Settings > Rem, each project's section and the self-work status line show threads by project while self-work runs, such as "Threads by project: Raticode 7 of 7, agent-trading 3 of 3."
+
+Set it in a project's section, under **Rem's projects** in Settings > Rem, on the phone, or with `Raticode selfwork set --effort agent-trading=30`. Rem reads the levels but doesn't change them.
+
 #### What Rem may write
 
 Rem's own objectives must be short goals of at least three words that don't name a ticket key or a single file, and it keeps at most six open ones of its own. Workers and agent tokens can read the list but not change it.
 
-- **A finish line for everything Rem picks itself.** An objective Rem writes on its own initiative, when the list is empty at a session's start, when self-work runs out of work, or in a chat turn you didn't start (such as a task finishing), needs a concrete, checkable **Done when** of at least three words, such as "Every Second Brain tool error found in this session's research is fixed with a regression test". One without it is refused. If Rem's answer leaves a finish line out, Rem is asked once more, and anything still without one is left out; the chat names it. An open-ended goal Rem picked for itself kept most of self-work on one thing for as long as it ran, which is why open-ended objectives are reserved for you. Not in a released version yet.
-- **From your words, open-ended is fine.** When you tell Rem in the chat what self-work should work on, its objectives may stay open-ended.
+- **A finish line for everything Rem picks itself.** An objective Rem writes on its own initiative, when the list is empty at a session's start, when self-work runs out of work with every objective done, or in a chat turn you didn't start (such as a task finishing) while no objective is open, needs a concrete, checkable **Done when** of at least three words, such as "Every Second Brain tool error found in this session's research is fixed with a regression test". One without it is refused. If Rem's answer leaves a finish line out, Rem is asked once more, and anything still without one is left out; the chat names it. An open-ended goal Rem picked for itself kept most of self-work on one thing for as long as it ran, which is why open-ended objectives are reserved for you. New in 0.6.1.
+- **From your words, open-ended is fine.** When you tell Rem in the chat what self-work should work on, its objectives may stay open-ended. So may the ones [Ask Rem](#ask-rem-for-a-project-s-objectives) writes when you press it in a project's section.
 - **Older open-ended ones get a finish line.** An open-ended objective Rem wrote on its own before this rule is given a finish line when the next session starts, and the chat says what it wrote. Self-work starts nothing new until then, usually a few seconds. An objective you wrote or asked for, and one you made open-ended by clearing its **Done when**, stays as it is.
-- **On its own, Rem only adds.** On its own it can only add objectives, check them off and give one of its own a finish line; editing, removing or reopening takes your message or your own click.
+- **On its own, Rem only adds, and only to an empty list.** On its own it can only add objectives while none is open, check them off and give one of its own a finish line; editing, removing or reopening takes your message or your own click.
 
 ### Let Rem approve its own tickets
 
@@ -243,7 +287,7 @@ Rem's own objectives must be short goals of at least three words that don't name
 - **How they're marked.** Each one has an **Auto-approved** badge on the board and the phone, and its history starts with an **Auto-approved by self-work** entry saying you haven't reviewed it. The report and Rem's chat update say how many it approved.
 - **They're still yours.** Edit, move or cancel them like any ticket. Rem still can't mark its own tickets Done; they finish through the usual independent review.
 - **No cap on the number.** It keeps approving new ideas until self-work ends: when you send a message, a [window](#timed-self-work) ends or you turn self-work off. How much it researches is set by the usual [limits](#limits-and-safety), and your [token and rate limits](#self-work-limits) stop it starting new work.
-- **Ideas from a paired desktop always wait for you.** When you send a waiting self-work research or Guardrail pass to a paired desktop with [Run there](home.md#run-waiting-work-on-a-paired-desktop), what it proposes comes back as proposals waiting for your approval, never auto-approved. Each one shows **From** and that desktop's name on the board and the phone, its history starts with a **Proposed on** entry naming the desktop, and `Raticode tickets list` shows `(proposal from Desk B)`. Passes that ran on this computer are approved as usual. A backlog ranking that ran there approves nothing either way: a ranking only orders tickets already on the board. Not in a released version yet.
+- **Ideas from a paired desktop always wait for you.** When you send a waiting self-work research or Guardrail pass to a paired desktop with [Run there](home.md#run-waiting-work-on-a-paired-desktop), what it proposes comes back as proposals waiting for your approval, never auto-approved. Each one shows **From** and that desktop's name on the board and the phone, its history starts with a **Proposed on** entry naming the desktop, and `Raticode tickets list` shows `(proposal from Desk B)`. Passes that ran on this computer are approved as usual. A backlog ranking that ran there approves nothing either way: a ranking only orders tickets already on the board. New in 0.6.1.
 - **Ideas that contradict a decision aren't added.** An idea that contradicts one of the project's [decisions](home.md#how-the-work-is-held-to-decisions) never reaches the board, approval on or off; see [Self-work keeps to decisions](#self-work-keeps-to-decisions). New in 0.6.0.
 - **What's still left out.** An idea that repeats a ticket on the board, in an organization or one you declined isn't added. A research run may close one of these tickets as a duplicate, never one you wrote. When Rem ranks the backlog it can leave one out as no longer making sense, like any other.
 - **Its other limits still apply**: Rem's projects, **Max threads**, the [token and rate limits](#self-work-limits), Blocked tickets and To do first, and [your work first](#your-work-comes-first).
@@ -325,7 +369,7 @@ Work you ask for counts against **Max threads** ahead of self-work. Self-work ma
 
 The computer counts too. Organization workers and phone turns share its worker limit, so your task can wait for a worker while self-work is still under **Max threads**. Then self-work pauses one task, the lowest-priority one with a worker, for each task of yours that waits and has no free worker on Rem's computers. For example, with a worker limit of 3, two organization workers and one self-work task running, the task you start pauses that self-work task. Your task gets the freed worker, not an organization (see [Where work runs](./home.md#where-work-runs)).
 
-- **What counts as yours**: a chat request that starts a task or a follow-up, a task you start or run, a ticket you move to **In progress**, and your scheduled tasks.
+- **What counts as yours**: a chat request that starts a task or a follow-up, a task you start or run, a ticket you move to **In progress**, and your scheduled tasks. Self-work you resume or follow up on, in the chat or in its thread, is yours from then on: it never pauses for **Max threads**, however many you resumed at once, and it doesn't wait behind your other tasks for a worker. *Changed in 0.6.2:* before this, only self-work you resumed from a pause counted as yours, so self-work you followed up on after it was blocked could pause again for your other tasks.
 - **What pauses first**: the lowest priority. Research and backlog ranking go before any ticket, then tickets from **Low** up to **Critical**. Among equals, one that hasn't started goes first, then the most recently started. Your own tasks never pause, and neither does self-work you resumed yourself.
 - **How it pauses**: like [pausing a task](./home.md#pause-and-resume-a-task). The run, its thread and any worktree are kept, and it frees its thread. Its card reads **Paused for your work**, and its ticket shows **Blocked** with a comment saying why.
 - **When it resumes**: as soon as a thread is free again, for example when one of your tasks finishes, even while you're still here. The highest priority picks up first, before Rem starts anything new. It continues in the same thread, so nothing is done twice. You can also resume it yourself at any time, or move its ticket to **In progress**.
@@ -334,7 +378,7 @@ Rem says so once in the chat ("Paused 1 self-work task so your work runs first: 
 
 ### Start self-work now
 
-Starting self-work and turning it on are different (not yet released):
+Starting self-work and turning it on are different (new in 0.6.1):
 
 - **Start self-work now** begins work within seconds, without waiting for 15 quiet minutes. If self-work is off, it turns on. If it's already on and waiting, it stops waiting. It keeps starting work while you chat, until you turn it off or its [stop condition](#stop-condition-and-latest-time) is met. Turned on again later, it waits for quiet minutes as usual.
 - **Turning it on** only flips the switch: self-work then starts after 15 minutes without a message from you.
@@ -349,7 +393,7 @@ Start it now in any of these ways:
 
 ### Start or stop from Rem's side pane
 
-On the desktop, the button under Rem's name in the side pane starts and stops self-work (not yet released).
+On the desktop, the button under Rem's name in the side pane starts and stops self-work. New in 0.6.1.
 
 - **Start self-work** [starts self-work now](#start-self-work-now) and keeps it going until you stop it. It works toward the [Objectives](#objectives) as they are; the button doesn't add, change or check off any.
 - While self-work is on but waiting for 15 quiet minutes, the line under the button ends with **Start now**, which starts it without the wait.
@@ -401,7 +445,7 @@ When a window ends:
 
 ### Stop condition and latest time
 
-Tell Rem what "done" means for this self-work session, and it stops by itself once that's true. You can add a time it stops by at the latest, whatever happens. *Not in a released version yet.*
+Tell Rem what "done" means for this self-work session, and it stops by itself once that's true. You can add a time it stops by at the latest, whatever happens. *New in 0.6.0.*
 
 | You say | What happens |
 | --- | --- |
@@ -459,7 +503,8 @@ Self-work's settings are in **Settings > Rem**, under **Self-work**. Settings yo
 | **Weekly allowance per day** | 14 when you choose Daily cap | With **Daily cap**: self-work starts nothing new once it used this percent of the weekly allowance of the account it would run on today: Claude Code's default sign-in, or one of your [accounts](./providers.md#self-work-on-accounts). A Grok account counts its credits, with the cap scaled to the credits period. *New in 0.6.0.* |
 | **Aim by reset** and **Finish before reset** | 97% and 3 hours | With **Pace to reset**: how much of the allowance to have used when it resets, and how many hours before the reset to get there. *New in 0.6.0.* |
 | **Accounts** | Rem's setting | Which account the runs self-work starts use, one choice per provider with accounts. See [Which account self-work uses](#which-account-self-work-uses). *New in 0.6.0.* |
-| **Rem's projects** | None | Where Rem may work on its own |
+| **Rem's projects** | None | Where Rem may work on its own. Each chosen project shows its **Level of effort** and threads now against its share. |
+| **Level of effort** | Even split | Each of Rem's projects' share of self-work's threads; they total 100%. See [Level of effort](#level-of-effort). *New in 0.6.2.* |
 
 <AppScreenshot name="selfwork-settings" caption="Self-work in Settings > Rem: when Rem starts on its own, how many threads it keeps going, which projects it may touch, and its latest report." />
 
@@ -588,9 +633,9 @@ When a self-work run or any [review](./home.md#how-work-is-checked) uses Claude 
 - **No network for the shell.** Commands such as `curl`, `git fetch`, `gh` or `npm install` can't reach any host. Web search and page reading still work when the task has web access, since those are separate tools.
 - **Credentials are hidden.** The shell can't see `~/.ssh`, `~/.claude`, `~/.gnupg`, cloud and package-manager logins, Raticode's own data folder, or a headless backend's [secrets folder](../reference/headless.md#secrets-without-a-keychain). Claude Code's file-reading tool is kept from the same credential folders, because the sandbox only covers shell commands.
 - **The project's own Claude Code settings aren't loaded.** A project's `.claude/settings.json` and `settings.local.json` can name hooks, and Claude Code runs hooks outside its sandbox, so a cloned repository could otherwise run anything as you. These runs load only your own Claude Code settings. The project's `CLAUDE.md` files still reach the agent: Raticode passes the ones in the project folder and the folders above it, up to but not including your home folder, as instructions (Claude Code already loads your own `~/.claude/CLAUDE.md`), and lists the ones in subfolders for the agent to read when it works there. Workflow agent steps that use Claude Code work the same way, and a profile that passes its own `--setting-sources` is refused.
-- **Research and reviews can't change the project.** Test and tool caches go to a private scratch folder that's removed when the turn ends. Self-work that develops or maintains a project can change only that project and, for a worktree, its repository's `.git` folder.
+- **Research and reviews can't change the project.** Test and tool caches go to a private scratch folder that's removed when the turn ends, except for a worker's [evidence folder](./attachments.md#where-workers-save-evidence). Self-work that develops or maintains a project can change only that project and, for a worktree, its repository's `.git` folder.
 - **Empty files can appear in the project while a command runs.** To protect files like `.bashrc`, `.gitconfig`, `.mcp.json` and `.claude/settings.json`, the sandbox puts an empty read-only placeholder in the project folder for each one that doesn't exist, and Claude Code removes them when the command ends. They can show as new files in Source Control during a long command. If a run is stopped mid-command, Raticode removes any placeholders left behind when the turn ends.
-- **Leftover temp files are cleared for you.** Claude Code points the shell's temp folder at `/tmp/claude-<uid>`, and the rest of `/tmp` and `/var/tmp` is read-only to it. On many Linux systems `/tmp` is held in memory, so browser profiles and builds that tests leave there take RAM until they're deleted. On Linux, Raticode clears them itself, outside the sandbox, when it starts, every hour and after a turn ends. It removes an entry in `/tmp/claude-<uid>`, or a test run's folder in `raticode-tests-<uid>` under `/tmp` or `/var/tmp`, only when it's yours, no process uses it, and nothing in it has changed for 3 hours (1 hour once that folder's file system is 80% full) or since a turn that's still running began. A folder holding a socket or pipe gets 12 hours. Links are removed without following them. The sandbox isn't widened for this. A Raticode started from inside a worker never clears these folders. Unreleased.
+- **Leftover temp files are cleared for you.** Claude Code points the shell's temp folder at `/tmp/claude-<uid>`, and the rest of `/tmp` and `/var/tmp` is read-only to it. On many Linux systems `/tmp` is held in memory, so browser profiles and builds that tests leave there take RAM until they're deleted. On Linux, Raticode clears them itself, outside the sandbox, when it starts, every hour and after a turn ends. It removes an entry in `/tmp/claude-<uid>`, or a test run's folder in `raticode-tests-<uid>` under `/tmp` or `/var/tmp`, only when it's yours, no process uses it, and nothing in it has changed for 3 hours (1 hour once that folder's file system is 80% full) or since a turn that's still running began. A folder holding a socket or pipe gets 12 hours. Links are removed without following them. The sandbox isn't widened for this. A Raticode started from inside a worker never clears these folders. New in 0.6.1.
 - **Queued tests still wait for a slot**, but run inside the agent's own memory limits rather than getting a limit of their own.
 - **If the sandbox can't start, the run doesn't.** Rem blocks the ticket, or marks the task **Couldn't finish**, with the reason, such as a missing `bubblewrap` package.
 

@@ -17,6 +17,7 @@ from gofer.ui.brain_series import (
     parse_edition,
     series_index,
 )
+from tests.helpers.brain_library import library as library  # noqa: F401 - fixture
 from tests.helpers.brain_library import wait_idle
 
 
@@ -135,6 +136,7 @@ def paragraph(topic: str, index: int, extra: str = "") -> str:
     return f"Finding {index} about {topic} {extra}: {words}."
 
 
+# Writes a dated HTML report, unlike the shared write.
 def write(path: Path, title: str, paragraphs: list[str], age_days: float) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     body = "".join(f"<p>{text}</p>" for text in paragraphs)
@@ -144,13 +146,6 @@ def write(path: Path, title: str, paragraphs: list[str], age_days: float) -> Non
     )
     moment = time.time() - 86400 * age_days
     os.utime(path, (moment, moment))
-
-
-@pytest.fixture
-def library(tmp_path: Path):
-    service = BrainLibrary(tmp_path / "app", start=False)
-    yield service
-    service.close()
 
 
 def test_search_lists_editions_newest_first_at_the_best_place(library, tmp_path, monkeypatch):

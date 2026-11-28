@@ -5,6 +5,7 @@ import MazeBackdrop from './MazeBackdrop.vue'
 import HeroScene from './HeroScene.vue'
 import { usePlatform } from './usePlatform'
 import { assetUrl, desktopPlatforms, desktopRelease, mobileApk, mobileAssetUrl, releaseUrl } from '../../../../data/releases'
+import { supportProjectUrl } from '../../../../data/site'
 
 const { os, android } = usePlatform()
 
@@ -49,6 +50,10 @@ const primaryLabel = computed(() => {
         <a class="rc-btn rc-btn-ghost" :href="withBase('/docs/')">
           Read the docs
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6" /></svg>
+        </a>
+        <a class="rc-btn rc-btn-ghost hero-support" :href="supportProjectUrl" target="_blank" rel="noopener noreferrer">
+          <span class="hero-support-cup" aria-hidden="true">☕</span>
+          Support Raticode
         </a>
       </div>
 
@@ -205,6 +210,23 @@ const primaryLabel = computed(() => {
   gap: 14px;
   margin-top: 38px;
   animation: rise 1s 0.24s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+/* A ghost button with the support banner's amber, so it reads as the coffee link
+   without competing with Download. */
+.hero-support {
+  border-color: rgba(255, 182, 72, 0.38);
+  background: rgba(255, 182, 72, 0.06);
+}
+
+.hero-support:hover {
+  border-color: rgba(255, 182, 72, 0.7);
+  background: rgba(255, 182, 72, 0.12);
+}
+
+.hero-support-cup {
+  font-size: 18px;
+  line-height: 1;
 }
 
 .hero-meta {

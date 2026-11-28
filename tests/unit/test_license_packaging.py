@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -253,3 +254,37 @@ def test_every_shipped_python_package_has_a_review_for_its_locked_version():
         if not reviewed or (len(versions) == 1 and reviewed != versions):
             unreviewed.append(f"{name} {', '.join(versions)}")
     assert unreviewed == []
+
+
+def test_bundle_includes_packages_only_the_pairing_extra_needs(license_build):
+    # The backend binary is built with the devices extra, so its packages ship and need notices.
+    root, distributions, output = license_build
+    location = root / "paired"
+    location.mkdir()
+    (location / "LICENSE").write_text("paired license")
+    distributions["paired"] = SimpleNamespace(
+        metadata={"Name": "paired", "License-Expression": "Apache-2.0"},
+        version="1",
+        files=[Path("LICENSE")],
+        requires=[],
+        locate_file=lambda file: location / file,
+    )
+    distributions["raticode"].requires = ["example", 'paired; extra == "devices"']
+    lock = root / "uv.lock"
+    lock.write_text(lock.read_text() + '\n[[package]]\nname = "paired"\nversion = "1"')
+    reviewed = root / "packaging/licenses/reviewed.json"
+    policy = json.loads(reviewed.read_text())
+    policy["python"]["paired"] = {"version": "1", "license": "Apache-2.0"}
+    reviewed.write_text(json.dumps(policy))
+    collector.collect(output)
+    inventory = json.loads((output / "inventory.json").read_text())
+    assert ("paired", "1") in {(row["name"], row["version"]) for row in inventory}
+    assert (output / "python/paired-1/0-LICENSE").read_text() == "paired license"
+
+
+def test_bundled_extras_match_the_backend_build():
+    builds = [ROOT / "scripts/build-backend-binary.cjs", ROOT / "scripts/build-backend-binary.sh"]
+    for build in builds:
+        text = build.read_text(encoding="utf-8")
+        extras = set(re.findall(r"""--extra["']?,?\s*["']?([a-z]+)""", text))
+        assert extras == collector.BUNDLED_EXTRAS, build.name

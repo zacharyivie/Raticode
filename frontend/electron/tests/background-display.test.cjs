@@ -47,6 +47,19 @@ test("without xvfb-run the launch fails on xvfb-run itself, so the missing-Xvfb 
   assert.equal(launch.command, "xvfb-run");
 });
 
+test("a headless launch skips Xvfb but still never reaches the desktop", () => {
+  const args = ["--ozone-platform=headless", "test.browser.cjs"];
+  const launch = backgroundLaunch("/fixture/electron", args, desktopEnv, "linux", () => "/usr/bin/found");
+  assert.equal(launch.command, "/fixture/electron");
+  assert.deepEqual(launch.args, args);
+  for (const name of ["DISPLAY", "WAYLAND_DISPLAY", "XDG_SESSION_TYPE", "DBUS_SESSION_BUS_PID"]) assert.equal(launch.env[name], undefined, name);
+  assert.equal(launch.env.DBUS_SESSION_BUS_ADDRESS, NO_SESSION_BUS);
+  assert.equal(launch.env.NO_AT_BRIDGE, "1");
+  assert.equal(launch.env.KEEP, "yes");
+  assert.equal(needsBackgroundDisplay(launch.env, "linux"), false, "the entry script doesn't start Xvfb itself");
+  assert.equal(desktopEnv.DISPLAY, ":0");
+});
+
 test("visible runs, nested launches and other platforms keep the plain Electron launch", () => {
   for (const [env, platform] of [
     [{ RATICODE_TEST_VISIBLE: "1" }, "linux"],

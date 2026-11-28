@@ -531,7 +531,7 @@ Node inspect:
                 )
         return HandlerResult(
             True,
-            {"stdout": node["id"], "stderr": "", "exit_code": 0},
+            {"stdout": node["id"], "stderr": "", "exit_code": 0, "truncated": False},
         )
 
     result = await execute_workflow(

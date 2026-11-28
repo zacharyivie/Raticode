@@ -8,13 +8,13 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
-      "output_path": {"type": "string", "minLength": 1, "x-rattish-type": "Path"},
-      "template": {"type": "string"},
-      "template_path": {"type": ["string", "null"], "minLength": 1, "x-rattish-type": "Path"},
-      "variables": {"type": "object", "additionalProperties": {"type": "string"}},
-      "encoding": {"type": "string", "minLength": 1},
-      "create_dirs": {"type": "boolean"},
-      "overwrite": {"type": "boolean"}
+      "output_path": {"description": "Destination for rendered text.", "type": "string", "minLength": 1, "x-rattish-type": "Path"},
+      "template": {"description": "Inline template text.", "type": "string"},
+      "template_path": {"description": "Readable template source file.", "type": ["string", "null"], "minLength": 1, "x-rattish-type": "Path"},
+      "variables": {"description": "Authored string template locals.", "type": "object", "additionalProperties": {"type": "string"}},
+      "encoding": {"description": "Text encoding.", "type": "string", "minLength": 1},
+      "create_dirs": {"description": "Allow creation of missing destination parents.", "type": "boolean"},
+      "overwrite": {"description": "Allow replacing an existing destination.", "type": "boolean"}
     },
     "required": ["output_path"],
     "additionalProperties": false

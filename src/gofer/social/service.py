@@ -432,6 +432,7 @@ class SocialService:
             view["fold_at"] = fold_at(variant["platform"], text)
             variants.append(view)
         result["variants"] = variants
+        result["platform_copies"] = [copy_view(item) for item in post.get("_cancel_native") or []]
         return result
 
     # Proposing and editing ------------------------------------------------------------
@@ -537,16 +538,12 @@ class SocialService:
                 self._event(db, post_id, actor, "approval.cleared", {"reason": "edited"})
             post["approval"] = None
             post["review_state"] = "proposed"
+            for variant in held:
+                _queue_copy(post, variant, now)
             for variant in post["variants"]:
                 variant.update(state="pending", message="", next_retry_at=None)
-            post.setdefault("_cancel_native", []).extend(
-                {
-                    "account_id": v["account_id"],
-                    "platform": v["platform"],
-                    "remote_id": v["remote_id"],
-                }
-                for v in held
-            )
+                if any(variant is item for item in held):
+                    variant.update(remote_id="", url="")
             self._save(db, post)
             self._event(
                 db, post_id, actor, "edited", {"content_hash": content_hash(post), "from": before}
@@ -923,13 +920,7 @@ class SocialService:
                     if variant["state"] == "publishing":
                         raise SocialError("A send is in progress. Try again in a moment.")
                     if variant["state"] == "held_by_platform" and variant.get("remote_id"):
-                        post.setdefault("_cancel_native", []).append(
-                            {
-                                "account_id": variant["account_id"],
-                                "platform": variant["platform"],
-                                "remote_id": variant["remote_id"],
-                            }
-                        )
+                        _queue_copy(post, variant, self.clock())
                     if variant["state"] not in DONE_VARIANT_STATES:
                         variant["state"] = "cancelled"
                 if post["review_state"] in REVIEW_STATES:
@@ -1004,6 +995,40 @@ class SocialService:
             self._event(
                 db, post_id, actor, "marked_posted", _via({"variant": variant_id, "url": link}, via)
             )
+            return self._view(post)
+
+    def platform_copy(
+        self, actor: str, post_id: str, copy_id: Any, action: str, *, via: str = ""
+    ) -> dict[str, Any]:
+        """The user's choice for a platform copy Raticode couldn't delete.
+
+        ``retry`` tries the delete again on the publisher's next pass, starting the back-off
+        over. ``deleted`` drops it: the user deleted the copy on the platform themselves,
+        which also lets an edited post go to that account again.
+        """
+        names = {"retry": "try deleting it again", "deleted": "mark it deleted"}
+        if action not in names:
+            raise SocialError("Unknown action.")
+        self._require_user(actor, names[action])
+        with self._lock, self.connect() as db:
+            post = self._load(db, post_id)
+            copies = post.get("_cancel_native") or []
+            item = next((c for c in copies if copy_key(c) == copy_id), None)
+            if item is None:
+                raise SocialError("That copy is no longer waiting to be deleted.", "not_found")
+            if action == "deleted":
+                post["_cancel_native"] = [c for c in copies if c is not item]
+                kind = "platform_copy_marked_deleted"
+            else:
+                item.update(waiting=False, next_try_at=None, attempts=0)
+                kind = "platform_copy_retry"
+            self._save(db, post)
+            detail = {
+                "copy": copy_key(item),
+                "account": item.get("account_id"),
+                "url": item.get("url") or "",
+            }
+            self._event(db, post_id, actor, kind, _via(detail, via))
             return self._view(post)
 
     # Templates and timing -------------------------------------------------------------
@@ -1158,6 +1183,21 @@ class SocialService:
                 for row in db.execute(f"SELECT body FROM posts WHERE state IN ({marks})", states)
             ]
 
+    def posts_with_platform_copies(self, skip_states: tuple[str, ...]) -> list[dict[str, Any]]:
+        """Posts outside ``skip_states`` that still have platform copies to delete.
+
+        A post whose copy couldn't be deleted can end up declined, expired, missed or
+        published, states the publisher otherwise leaves alone.
+        """
+        marks = ",".join("?" for _ in skip_states)
+        with self.connect() as db:
+            rows = db.execute(
+                f"SELECT body FROM posts WHERE state NOT IN ({marks}) AND body LIKE ?",
+                (*skip_states, '%"_cancel_native": [{%'),
+            )
+            posts = [json.loads(row["body"]) for row in rows]
+        return [post for post in posts if post.get("_cancel_native")]
+
     def sends_since(self, account_id: str, since: datetime) -> int:
         with self.connect() as db:
             return int(
@@ -1173,6 +1213,58 @@ class SocialService:
     ) -> None:
         with self.connect() as db:
             self._event(db, post_id, actor, kind, detail)
+
+
+def copy_key(item: Mapping[str, Any]) -> str:
+    """A pending platform copy's ID. Copies queued before IDs existed get one from the copy."""
+    saved = item.get("id")
+    if isinstance(saved, str) and saved:
+        return saved
+    seed = f"{item.get('account_id')}\x1f{item.get('platform')}\x1f{item.get('remote_id')}"
+    return "copy-" + hashlib.sha256(seed.encode()).hexdigest()[:10]
+
+
+def _queue_copy(post: dict[str, Any], variant: Mapping[str, Any], now: datetime) -> None:
+    """Remember a copy a platform holds so the publisher deletes it (gofer.social.publisher)."""
+    post.setdefault("_cancel_native", []).append(
+        {
+            "id": f"copy-{uuid4().hex[:10]}",
+            "account_id": variant["account_id"],
+            "account_name": variant.get("account_name") or "",
+            "platform": variant["platform"],
+            "variant_id": variant["id"],
+            "remote_id": variant["remote_id"],
+            "url": variant.get("url") or "",
+            "queued_at": iso(now),
+            "attempts": 0,
+            "next_try_at": None,
+            "error": "",
+            "waiting": False,
+        }
+    )
+
+
+def copy_view(item: Mapping[str, Any]) -> dict[str, Any]:
+    """What the post view shows of a copy still waiting to be deleted on its platform.
+
+    ``waiting`` means Raticode stopped trying and waits for Try again or I deleted it;
+    otherwise ``next_try_at`` says when it tries next (None: on the next pass).
+    """
+    platform = PLATFORMS.get(str(item.get("platform")))
+    return {
+        "id": copy_key(item),
+        "account_id": item.get("account_id"),
+        "account_name": item.get("account_name") or (platform.label if platform else ""),
+        "platform": item.get("platform"),
+        "platform_label": platform.label if platform else str(item.get("platform")),
+        "variant_id": item.get("variant_id"),
+        "url": item.get("url") or "",
+        "queued_at": item.get("queued_at"),
+        "attempts": int(item.get("attempts") or 0),
+        "next_try_at": item.get("next_try_at"),
+        "error": item.get("error") or "",
+        "waiting": bool(item.get("waiting")),
+    }
 
 
 def _via(detail: dict[str, Any], via: str) -> dict[str, Any]:

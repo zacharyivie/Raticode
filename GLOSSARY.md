@@ -16,6 +16,7 @@ Shared words for Raticode. Use the term in the first column in anything users re
 | finding | A problem the reviewer reports, on the `spec` or `standards` axis, with severity blocker, should fix or note. | `findings`, `rem_review_findings` | issue, nit, comment |
 | decision | An answer Rem reuses instead of asking again, such as the branch work lands on. Some have a record file in `.raticode/decisions`. | `decision`, `rem_decisions`, `rem_decision_records` | rule, policy, setting |
 | self-work | Work Rem starts on its own toward the user's objectives when the user is away. | `self_work`, `rem_self_work` | autopilot, background work, idle work |
+| level of effort | One of Rem's projects' share of self-work's threads, in percent; the enabled projects total 100. Threads held at once count, not tasks finished. | `project_effort` (setting), `effort_percent`, `rem_self_work_effort` | share, weight, allocation, quota in anything users read |
 | data folder | Where Raticode keeps databases, logs, threads and settings on this computer. A path may still contain an old product name, such as `taskurotta-dev`. | `get_data_dir()`, `GOFER_DATA_DIR`, `data_dir` | taskurotta folder, gofer folder, state folder, app data |
 | workflow | A Rattish program in `workflow.rattish` that Raticode runs node by node. | `workflow` | pipeline, flow, automation, recipe |
 | project | A folder the user opened in Raticode. Tasks and threads can be scoped to one. | `project`, `project_dir` | workspace, repo (unless it means the git repository itself) |

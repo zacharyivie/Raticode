@@ -34,6 +34,7 @@ from gofer.ui.organization_store import (
     now,
     ticket_prefix,
 )
+from gofer.utils.atomic_output import replace_file
 from gofer.utils.process import (
     build_subprocess_env,
     git_push_blocked_environment,
@@ -388,10 +389,7 @@ def _mirror(org: dict[str, Any], entry: dict[str, Any]) -> dict[str, str] | None
         "",
     ]
     content = "\n".join(lines)
-    folder.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".md.tmp")
-    temporary.write_text(content)
-    temporary.replace(path)
+    replace_file(path, content.encode("utf-8"))
     if previous and previous != str(path):
         Path(previous).unlink(missing_ok=True)
     return {"path": str(path), "sha256": digest(content)}
@@ -415,7 +413,7 @@ def _save_entry(
         if params.get("expectedVersion") != current["version"]:
             raise OrganizationConflict("This entry changed. Read it before saving.")
         if employee_id and current["author"] != f"employee:{employee_id}":
-            raise ValueError("Employees update only entries they wrote; save a new entry instead")
+            raise ValueError("Workers update only entries they wrote; save a new entry instead")
         if current.get("source") and {"body", "title"} & set(item):
             raise ValueError("Edit Second Brain notes in the Second Brain, then refresh them")
     editable = {"kind", "title", "summary", "body", "topic", "projectId", "links", "archived"}
@@ -616,7 +614,7 @@ def _add_link(
         if link is None or link["kind"] != "asserted":
             raise ValueError("Choose an agent link to remove")
         if employee_id and link["actor"] != actor:
-            raise ValueError("Employees remove only their own links")
+            raise ValueError("Workers remove only their own links")
         link["removed"] = {"actor": actor, "at": now()}
         return link
     known = org["runtime"].get("knowledge", {})
@@ -1070,7 +1068,7 @@ def knowledge_action(
     def mutate(current: dict[str, Any]) -> dict[str, Any]:
         runtime = current["runtime"]
         if run_id is not None and not any(t["claim"] == run_id for t in runtime["tasks"]):
-            raise OrganizationConflict("This employee turn has been revoked")
+            raise OrganizationConflict("This worker turn has been revoked")
         if action == "knowledge_read":
             entry = runtime.get("knowledge", {}).get(params.get("id"))
             if entry is None:

@@ -8,10 +8,10 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
-      "path": {"type": "string", "minLength": 1, "x-rattish-type": "Path"},
-      "use_trash": {"type": "boolean"},
-      "recursive": {"type": "boolean"},
-      "missing_ok": {"type": "boolean"}
+      "path": {"description": "Target filesystem path.", "type": "string", "minLength": 1, "x-rattish-type": "Path"},
+      "use_trash": {"description": "Use trash rather than permanent removal.", "type": "boolean"},
+      "recursive": {"description": "Permit recursive operation.", "type": "boolean"},
+      "missing_ok": {"description": "Allow an absent target.", "type": "boolean"}
     },
     "required": ["path"],
     "additionalProperties": false

@@ -1,6 +1,7 @@
 // Settings > Usage > Tokens in Raticode: periods, the saved choices and the stacked chart.
 // Mirrors gofer/core/usage_history.py, which does the bucketing.
 import { usageProviderName } from "./usage.js";
+import { clockTime, dateTime, localTimeZone, monthName, shortDate } from "./timeText.js";
 
 export const USAGE_RANGES = [
   { key: "24h", short: "24h", label: "Last 24 hours" },
@@ -65,7 +66,7 @@ export const USAGE_SPLITS = [
   { key: "account", label: "By account" },
 ];
 export const USAGE_SPLIT_STORAGE = "raticode.usage.chartSplit";
-export const DEFAULT_USAGE_SPLIT = "provider";
+const DEFAULT_USAGE_SPLIT = "provider";
 
 export function loadUsageSplit(storage = globalThis.window?.localStorage) {
   try {
@@ -95,12 +96,8 @@ export function customRangeError(start, end, today = localDateString()) {
   return "";
 }
 
-export function viewerTimeZone() {
-  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { return ""; }
-}
-
 /** The query string the usage endpoints take for a period. */
-export function usageRangeQuery(range, timeZone = viewerTimeZone()) {
+export function usageRangeQuery(range, timeZone = localTimeZone()) {
   const value = normalizeUsageRange(range);
   const params = new URLSearchParams({ range: value.key });
   if (value.key === "custom") { params.set("start", value.start); params.set("end", value.end); }
@@ -110,13 +107,8 @@ export function usageRangeQuery(range, timeZone = viewerTimeZone()) {
 
 export function usageRangeLabel(range) {
   const value = normalizeUsageRange(range);
-  if (value.key === "custom") return `${formatDay(value.start)} to ${formatDay(value.end)}`;
+  if (value.key === "custom") return `${shortDate(value.start) || value.start} to ${shortDate(value.end) || value.end}`;
   return USAGE_RANGES.find(item => item.key === value.key).label;
-}
-
-function formatDay(text) {
-  const date = new Date(`${text}T12:00:00`);
-  return Number.isNaN(date.getTime()) ? text : date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
 /** Short token counts for axes: 950, 12K, 3.4M, 1.2B. */
@@ -151,23 +143,17 @@ function wallClock(stamp) {
 export function bucketLabel(bucket, kind, long = false) {
   const start = wallClock(bucket?.start);
   if (!start) return "";
-  if (kind === "hour") {
-    const time = start.toLocaleTimeString(undefined, { hour: "numeric", minute: start.getMinutes() ? "2-digit" : undefined });
-    return long ? `${start.toLocaleDateString(undefined, { month: "short", day: "numeric" })}, ${time}` : time;
-  }
-  if (kind === "week") {
-    const day = start.toLocaleDateString(undefined, { month: "short", day: "numeric", ...(long ? { year: "numeric" } : {}) });
-    return long ? `Week of ${day}` : day;
-  }
-  if (kind === "month") return start.toLocaleDateString(undefined, long ? { month: "long", year: "numeric" } : { month: "short", year: "2-digit" });
+  if (kind === "hour") return long ? dateTime(start) : clockTime(start);
+  if (kind === "week") return long ? `Week of ${shortDate(start)}` : shortDate(start);
+  if (kind === "month") return monthName(start, { long });
   if (kind === "year") return String(start.getFullYear());
-  return start.toLocaleDateString(undefined, { month: "short", day: "numeric", ...(long ? { weekday: "short", year: "numeric" } : {}) });
+  return shortDate(start, { weekday: long });
 }
 
 // Patterns, by position, for a provider the backend sent no style for. Those are drawn gray.
 // Every other provider's brand colors and pattern come with the series, from the one palette
 // in gofer/core/provider_colors.py, which the phone reads too.
-export const FALLBACK_PATTERNS = ["stripes", "dots", "horizontal", "vertical", "cross", "grid", "back-stripes", "checks", "rings", "solid"];
+const FALLBACK_PATTERNS = ["stripes", "dots", "horizontal", "vertical", "cross", "grid", "back-stripes", "checks", "rings", "solid"];
 const PATTERNS = new Set([...FALLBACK_PATTERNS]);
 const HEX = /^#[0-9a-f]{6}$/i;
 

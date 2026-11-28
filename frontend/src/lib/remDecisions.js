@@ -231,7 +231,7 @@ export function closedLabel(item) {
 // A decision record whose file is in the repository. It is retired, not forgotten: the
 // backend keeps it turned down and rewrites its file with status: rejected, since deleting
 // it would let the file bring it back as a new decision (rem_decisions.written).
-export function isWritten(item) {
+function isWritten(item) {
   return isRecord(item) && Boolean(item?.record_path);
 }
 
@@ -262,7 +262,7 @@ export const RECORD_SECTIONS = Object.freeze([
   Object.freeze({ key: "check", label: "How we check it", max: 600 }),
 ]);
 export const RECORD_LISTS = Object.freeze(["applies_to", "forbids", "signals"]);
-export const RECORD_LIST_MAX = 10;
+const RECORD_LIST_MAX = 10;
 const TEXT_LIMITS = Object.freeze({ answer: DECISION_ANSWER_MAX, question: 500, why: 300, note: 300 });
 
 // The record's sections that have text, as {key, label, text}.
@@ -544,7 +544,7 @@ export function applyDecisionChange(view, change, stamp = new Date().toISOString
 // Changes the user asked Rem for in chat (rem_decisions.propose_edit). Rem never applies
 // one: the card under its reply, and the Decisions list while it waits, show each part's
 // before and after with OK and Cancel. The desktop rewrites the card once it is settled.
-export const EDIT_EMPTY = "(empty)";
+const EDIT_EMPTY = "(empty)";
 
 // The card's heading: "Change D-3?" or "Replace D-3?".
 export const editTitle = card => `${card?.action === "replace" ? "Replace" : "Change"} ${card?.decision || "this decision"}?`;

@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import "./SecondBrainGraph.css";
 import { ArrowLeft, FolderKanban, FolderOpen, GitMerge, MessagesSquare, Pencil, Plus, ScrollText, Search } from "lucide-react";
-import { formatDay } from "../lib/secondBrain.js";
+import { libraryDay } from "../lib/secondBrain.js";
 import { makerLabel, projectDocuments } from "../lib/secondBrainGraph.js";
 import { graphKey, mergeProjects, navigate, openDocument, saveProject, setDocumentProject, uid, useBrainData, useSecondBrain, viewFor } from "../lib/secondBrainStore.js";
 import { Basis } from "./SecondBrainConnections.jsx";
@@ -30,7 +30,7 @@ function DocumentRows({ rows, reportsByPath, filter }) {
     return <li key={doc.id}>
       <TypeIcon type={doc.type} size={14} />
       <button type="button" className="sb-project-title" onClick={() => openDocument(doc.id, { preview: false })} title={doc.path}>{doc.title}</button>
-      <small className="sb-muted">{[formatDay(doc.dates.modified), maker(report)].filter(Boolean).join(" · ")}</small>
+      <small className="sb-muted">{[libraryDay(doc.dates.modified), maker(report)].filter(Boolean).join(" · ")}</small>
       <Basis basis={assignment.basis} detail={assignment.detail} />
     </li>;
   })}</ul>;
@@ -86,7 +86,7 @@ function ProjectPage({ brain, project, result, store, view }) {
       : tab === "knowledge" ? <DocumentRows rows={knowledge} reportsByPath={reportsByPath} filter={filter} />
       : tab === "conversations" ? (threads.length ? <ul className="sb-project-rows">{threads.map(thread => <li key={thread.threadId}>
         <MessagesSquare size={14} aria-hidden="true" /><span className="sb-project-title">{thread.title}</span>
-        <small className="sb-muted">{[thread.updatedAt ? formatDay(thread.updatedAt) : "", `${thread.messageCount} messages`].filter(Boolean).join(" · ")}</small>
+        <small className="sb-muted">{[thread.updatedAt ? libraryDay(thread.updatedAt) : "", `${thread.messageCount} messages`].filter(Boolean).join(" · ")}</small>
         <button type="button" className="sb-mini-button" onClick={() => window.goferDesktop?.workspace?.revealPath?.(`${brain.root}/${thread.snapshot}`)}><FolderOpen size={12} />Show in folder</button>
       </li>)}</ul> : <p className="sb-hint">No archived Rem conversations ran in this project’s folders. Conversations appear here when the conversation archive is stored in this brain.</p>)
       : <TopicMap brain={brain} projectId={project.id} embedded />}

@@ -6,6 +6,7 @@ import json
 import os
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +21,11 @@ from gofer.rattish.run_service import _resume_claim, new_run_id, run_rattish_fil
 from gofer.rattish.trigger_service import TriggerRun, run_in_process
 from gofer.rattish.workspaces import RegisteredWorkflow, create_registered_workflow
 from gofer.ui.api import (
+    WorkflowLogError,
     latest_workflow_log_payload,
     list_workflow_run_logs_payload,
     prune_workflow_run_logs_payload,
+    retention_settings_payload,
     update_retention_settings_payload,
 )
 
@@ -335,3 +338,131 @@ def test_rattish_prune_command_uses_saved_settings(workflow) -> None:
     assert [run["id"] for run in payload["runs"]] == ["old"]
     assert payload["keep"] == {"keepLast": 0, "keepDays": 1, "keepFailedDays": 1}
     assert _remaining(registered) == {"old"}
+
+
+def _retention_file(data_dir: Path) -> Path:
+    return data_dir / "settings" / "retention.json"
+
+
+def test_unreadable_settings_pause_clean_up_until_saved_again(workflow) -> None:
+    registered, data_dir = workflow
+    update_retention_settings_payload(
+        data_dir,
+        workflow_id=registered.workflow_id,
+        settings={"keepLast": 1000, "keepDays": 365, "keepFailedDays": 365},
+    )
+    # Emptied, as a crash in the middle of a save could leave it.
+    _retention_file(data_dir).write_text("", encoding="utf-8")
+    month_ago = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+    for index in range(150):
+        _record(registered, f"run-{index:03d}", started_at=month_ago, age_seconds=index)
+
+    # The defaults (keep 100, for 14 days) would delete 50 of these runs.
+    assert (
+        run_retention.apply_run_retention(data_dir, registered.workflow_id, _logs(registered)) == []
+    )
+    assert len(_remaining(registered)) == 150
+    payload = retention_settings_payload(data_dir, registered.workflow_id)
+    assert payload["readable"] is False
+    assert payload["warning"] == run_retention.UNREADABLE_RETENTION_MESSAGE
+
+    saved = update_retention_settings_payload(
+        data_dir,
+        workflow_id=registered.workflow_id,
+        settings={"keepLast": 100, "keepDays": 14, "keepFailedDays": 30},
+    )
+
+    assert saved["readable"] is True and saved["warning"] is None
+    deleted = run_retention.apply_run_retention(data_dir, registered.workflow_id, _logs(registered))
+    assert len(deleted) == 50
+    assert len(_remaining(registered)) == 100
+
+
+@pytest.mark.parametrize("content", ["{", "[]", '"keep"', "\xff"])
+def test_settings_that_are_not_a_json_object_cant_be_read(tmp_path: Path, content: str) -> None:
+    path = _retention_file(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(content.encode("latin-1"))
+
+    assert run_retention.read_retention_document(tmp_path) is None
+    assert run_retention.saved_retention_settings(tmp_path, "any-flow") is None
+
+
+def test_missing_settings_file_uses_the_defaults(tmp_path: Path) -> None:
+    assert run_retention.read_retention_document(tmp_path) == {}
+    assert (
+        run_retention.saved_retention_settings(tmp_path, "any-flow")
+        == run_retention.DEFAULT_RETENTION_SETTINGS
+    )
+    assert retention_settings_payload(tmp_path, "any-flow")["warning"] is None
+
+
+def test_rattish_prune_refuses_when_settings_cant_be_read(workflow) -> None:
+    registered, data_dir = workflow
+    _record(registered, "old", status="passed")
+    path = _retention_file(data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json", encoding="utf-8")
+    runner = CliRunner()
+    base = ["rattish", "prune", str(registered.entrypoint), "--data-dir", str(data_dir)]
+
+    refused = runner.invoke(app, [*base, "--apply"])
+    refused_json = runner.invoke(app, [*base, "--format", "json"])
+    explicit = runner.invoke(app, [*base, "--keep-last", "0", "--keep-days", "0", "--apply"])
+
+    assert refused.exit_code == 2, refused.output
+    assert run_retention.UNREADABLE_RETENTION_MESSAGE in refused.output
+    assert refused_json.exit_code == 2, refused_json.output
+    error = json.loads(refused_json.stdout)["error"]
+    assert error["message"] == run_retention.UNREADABLE_RETENTION_MESSAGE
+    # --keep options replace the saved settings, so they still work.
+    assert explicit.exit_code == 0, explicit.output
+    assert _remaining(registered) == set()
+
+
+def test_prune_payload_refuses_saved_settings_that_cant_be_read(workflow) -> None:
+    registered, data_dir = workflow
+    _record(registered, "old", status="passed")
+    path = _retention_file(data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("[]", encoding="utf-8")
+
+    with pytest.raises(WorkflowLogError, match="automatic clean-up is paused"):
+        prune_workflow_run_logs_payload(registered.workflow_id, data_dir, dry_run=False)
+    assert _remaining(registered) == {"old"}
+
+
+def test_saves_at_the_same_time_keep_every_workflow(tmp_path: Path) -> None:
+    workflow_ids = [f"flow-{index:02d}" for index in range(20)]
+    barrier = threading.Barrier(len(workflow_ids))
+    errors: list[BaseException] = []
+
+    def save(index: int, workflow_id: str) -> None:
+        try:
+            barrier.wait()
+            update_retention_settings_payload(
+                tmp_path,
+                workflow_id=workflow_id,
+                settings={"keepLast": index, "keepDays": index, "keepFailedDays": index},
+            )
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=save, args=(index, workflow_id))
+        for index, workflow_id in enumerate(workflow_ids)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    document = json.loads(_retention_file(tmp_path).read_text(encoding="utf-8"))
+    assert sorted(document["workflows"]) == workflow_ids
+    for index, workflow_id in enumerate(workflow_ids):
+        assert document["workflows"][workflow_id]["keepLast"] == index
+    assert sorted(path.name for path in tmp_path.joinpath("settings").iterdir()) == [
+        "retention.json",
+        "retention.lock",
+    ]

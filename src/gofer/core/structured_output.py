@@ -10,6 +10,8 @@ from jsonschema.exceptions import SchemaError, ValidationError  # type: ignore[i
 from referencing import Registry
 from referencing.exceptions import Unresolvable
 
+from gofer.core.json_types import json_type
+
 
 class StructuredOutputError(ValueError):
     """An agent response could not be validated as its declared result type."""
@@ -153,9 +155,9 @@ def _schema_types(
         return {item for item in schema_type if isinstance(item, str)}
     enum_values = schema.get("enum")
     if isinstance(enum_values, list) and enum_values:
-        return {_json_type(value) for value in enum_values}
+        return {json_type(value) for value in enum_values}
     if "const" in schema:
-        return {_json_type(schema["const"])}
+        return {json_type(schema["const"])}
     for keyword in ("anyOf", "oneOf"):
         branches = schema.get(keyword)
         if isinstance(branches, list):
@@ -182,22 +184,6 @@ def _schema_types(
             result = _intersect_json_types(result, item)
         return result
     return None
-
-
-def _json_type(value: Any) -> str:
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "boolean"
-    if isinstance(value, int):
-        return "integer"
-    if isinstance(value, float):
-        return "number"
-    if isinstance(value, str):
-        return "string"
-    if isinstance(value, list):
-        return "array"
-    return "object"
 
 
 def _intersect_json_types(left: set[str], right: set[str]) -> set[str]:

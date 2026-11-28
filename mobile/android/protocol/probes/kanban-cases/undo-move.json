@@ -1,0 +1,31 @@
+{
+  "about": "When a board move offers Undo. Read by frontend/src/lib/remKanban.test.mjs (canUndoMove) and mobile/android KanbanTest.kt (Kanban.canUndoMove). status and paused are the ticket before the move; column is where it was moved; undo is the expected answer.",
+  "cases": [
+    {"scope": "rem", "status": "backlog", "paused": "", "column": "todo", "undo": true},
+    {"scope": "rem", "status": "todo", "paused": "", "column": "backlog", "undo": true},
+    {"scope": "rem", "status": "todo", "paused": "", "column": "cancelled", "undo": true},
+    {"scope": "rem", "status": "todo", "paused": "", "column": "done", "undo": true},
+    {"scope": "rem", "status": "done", "paused": "", "column": "backlog", "undo": true, "why": "Rem's done tickets can be marked done again"},
+    {"scope": "rem", "status": "cancelled", "paused": "", "column": "todo", "undo": true},
+    {"scope": "rem", "status": "todo", "paused": "", "column": "in_progress", "undo": false, "why": "starting work has no Undo"},
+    {"scope": "rem", "status": "todo", "paused": "", "column": "running", "undo": false, "why": "running is the phone's name for In progress"},
+    {"scope": "rem", "status": "backlog", "paused": "", "column": "running", "undo": false},
+    {"scope": "rem", "status": "todo", "paused": "user", "column": "backlog", "undo": false, "why": "a paused ticket's only move resumes it"},
+    {"scope": "rem", "status": "todo", "paused": "priority", "column": "in_progress", "undo": false},
+    {"scope": "rem", "status": "in_review", "paused": "", "column": "todo", "undo": false, "why": "nothing moves a ticket back into In review"},
+    {"scope": "rem", "status": "blocked", "paused": "", "column": "cancelled", "undo": false, "why": "nor into Blocked"},
+    {"scope": "rem", "status": "in_progress", "paused": "", "column": "todo", "undo": false},
+    {"scope": "organization", "status": "backlog", "paused": "", "column": "todo", "undo": true},
+    {"scope": "organization", "status": "todo", "paused": "", "column": "backlog", "undo": true},
+    {"scope": "organization", "status": "todo", "paused": "", "column": "in_progress", "undo": false},
+    {"scope": "organization", "status": "todo", "paused": "", "column": "running", "undo": false},
+    {"scope": "organization", "status": "todo", "paused": "user", "column": "backlog", "undo": false},
+    {"scope": "organization", "status": "blocked", "paused": "", "column": "todo", "undo": false, "why": "an organization ticket reopens instead"},
+    {"scope": "organization", "status": "in_progress", "paused": "", "column": "todo", "undo": false},
+    {"scope": "organization", "status": "in_review", "paused": "", "column": "todo", "undo": false},
+    {"scope": "organization", "status": "done", "paused": "", "column": "todo", "undo": false},
+    {"scope": "organization", "status": "cancelled", "paused": "", "column": "todo", "undo": false},
+    {"scope": "", "status": "todo", "paused": "", "column": "backlog", "undo": false, "why": "a ticket of unknown scope has no Undo"},
+    {"scope": "team", "status": "backlog", "paused": "", "column": "todo", "undo": false}
+  ]
+}

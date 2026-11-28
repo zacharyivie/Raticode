@@ -9,6 +9,7 @@ import { remThreadWasCleared } from "./remHomeStore.js";
 import { turnAccount } from "./threadAccounts.js";
 import { ARCHIVE_GIT_LIMIT, threadIndexEntry } from "./threadActivity.js";
 import { samePath } from "./workspacePaths.js";
+import { dateTime } from "./timeText.js";
 
 const chatThreadsStorageKey = "gofer-flow-chat-threads";
 
@@ -98,10 +99,7 @@ export function formatThreadDate(value) {
   if (!value) return "No messages yet";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "No messages yet";
-  return date.toLocaleString([], {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
+  return dateTime(date);
 }
 
 export function reportArchiveError(error) {

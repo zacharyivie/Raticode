@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import os
 import re
 import shlex
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -242,3 +243,265 @@ def test_finds_a_virtualenv_python_in_the_checkout(check_dev: Any, tmp_path: Pat
     python.write_text("")
     assert check_dev.find_python(tmp_path) == str(python)
     assert check_dev.find_python(tmp_path, "/opt/py") == "/opt/py"
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            *args,
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+
+def _branch_changing(tmp_path: Path, changed: str) -> Path:
+    """A repository whose branch adds ``changed`` on top of a branch named base."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "README.md").write_text("start\n")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-q", "-m", "start")
+    _git(repo, "branch", "base")
+    _git(repo, "checkout", "-q", "-b", "work")
+    path = repo / changed
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("changed\n")
+    _git(repo, "add", changed)
+    _git(repo, "commit", "-q", "-m", "change")
+    return repo
+
+
+def test_frontend_lint_runs_npm_run_lint_in_frontend_when_a_frontend_file_changed(
+    check_dev: Any, tmp_path: Path
+) -> None:
+    repo = _branch_changing(tmp_path, "frontend/src/App.jsx")
+    (repo / "frontend/node_modules").mkdir()
+    check = check_dev.frontend_lint_check(repo, "base")
+    assert check.command == ["npm", "run", "lint"]
+    assert check.folder == "frontend"
+    assert check.outcome is None
+
+    # A stand-in npm records where it ran and with which arguments.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    npm = bin_dir / "npm"
+    npm.write_text('#!/bin/sh\necho "ran $* in $(pwd)"\n')
+    npm.chmod(0o755)
+    result = check_dev.run_check(check, repo, {"PATH": f"{bin_dir}:/usr/bin:/bin"})
+    assert result.passed, result.output
+    assert result.output.strip() == f"ran run lint in {repo / 'frontend'}"
+    lines: list[str] = []
+    assert check_dev.run_all([check], lambda _: result, lines.append) == 0
+    assert lines[0].split()[:3] == ["PASS", "frontend", "lint"]
+
+
+def test_frontend_lint_skips_with_a_reason_when_no_frontend_file_changed(
+    check_dev: Any, tmp_path: Path
+) -> None:
+    repo = _branch_changing(tmp_path, "src/gofer/module.py")
+    check = check_dev.frontend_lint_check(repo, "base")
+    result = check_dev.run_check(check, repo, {})
+    assert result.passed
+    lines: list[str] = []
+    assert check_dev.run_all([check], lambda _: result, lines.append) == 0
+    assert lines[0].split()[:3] == ["SKIP", "frontend", "lint"]
+    assert "frontend lint: Skipped: no frontend files changed since base." in lines
+
+
+def test_frontend_lint_fails_and_names_npm_ci_when_node_modules_is_missing(
+    check_dev: Any, tmp_path: Path
+) -> None:
+    repo = _branch_changing(tmp_path, "frontend/src/App.jsx")
+    check = check_dev.frontend_lint_check(repo, "base")
+    result = check_dev.run_check(check, repo, {})
+    assert not result.passed
+    assert "run npm ci in frontend first" in result.output
+    lines: list[str] = []
+    assert check_dev.run_all([check], lambda _: result, lines.append) == 1
+    assert lines[0].split()[:3] == ["FAIL", "frontend", "lint"]
+
+
+def test_frontend_lint_fails_when_the_base_branch_is_unknown(
+    check_dev: Any, tmp_path: Path
+) -> None:
+    repo = _branch_changing(tmp_path, "frontend/src/App.jsx")
+    result = check_dev.run_check(check_dev.frontend_lint_check(repo, "no-such-base"), repo, {})
+    assert not result.passed
+    assert "Couldn't list the files changed since no-such-base" in result.output
+
+
+def test_the_check_dev_test_itself_is_in_the_repo_wide_list(check_dev: Any) -> None:
+    # It scans the whole tests/ tree, so drift it finds must fail the landing check.
+    assert "tests/unit/test_check_dev.py" in check_dev.REPO_WIDE_TESTS
+
+
+def _repo_with(tmp_path: Path, files: dict[str, str], changed: Sequence[str]) -> Path:
+    """A repository holding ``files`` whose branch changes ``changed`` on top of base."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    for name, text in files.items():
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text(text, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "start")
+    _git(repo, "branch", "base")
+    _git(repo, "checkout", "-q", "-b", "work")
+    for name in changed:
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{path.read_text() if path.exists() else ''}# changed\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "change")
+    return repo
+
+
+def _selected(check: Any) -> list[str]:
+    return [word for word in check.command if word.startswith("tests/")]
+
+
+def test_module_names_follow_the_source_path(check_dev: Any) -> None:
+    name = check_dev.module_name
+    assert name("src/gofer/cli/commands/rattish_shortcuts.py") == (
+        "gofer.cli.commands.rattish_shortcuts"
+    )
+    assert name("src/gofer/cli/__init__.py") == "gofer.cli"
+    assert name("src/gofer/cli/data.json") is None
+    assert name("scripts/check-dev.py") is None
+    assert name("tests/unit/test_cli_output.py") is None
+
+
+def test_changing_rattish_shortcuts_selects_test_cli_output(check_dev: Any, tmp_path: Path) -> None:
+    changed = "src/gofer/cli/commands/rattish_shortcuts.py"
+    output_test = "tests/unit/test_cli_output.py"
+    repo = _repo_with(
+        tmp_path,
+        {
+            changed: "",
+            output_test: (ROOT / output_test).read_text(encoding="utf-8"),
+            "tests/unit/test_other.py": "from gofer.cli.commands import rattish_secrets\n",
+        },
+        [changed],
+    )
+    check = check_dev.changed_module_tests_check(repo, "base", "py", parallel_tests=True)
+    assert check.name == "tests of changed modules"
+    assert check.outcome is None
+    assert _selected(check) == [output_test]
+    # Same pytest flags and workers as the repo-wide check, only the files differ.
+    repo_wide = check_dev.build_checks("py", "base", parallel_tests=True)[2].command
+    assert check.command[: -len(_selected(check))] == repo_wide[: -len(check_dev.REPO_WIDE_TESTS)]
+    # And the real tests/ tree has that import too.
+    assert output_test in check_dev.tests_importing(ROOT, {"gofer.cli.commands.rattish_shortcuts"})
+
+
+def test_selects_each_import_form_and_nothing_else(check_dev: Any, tmp_path: Path) -> None:
+    tests = {
+        "tests/unit/test_import.py": "import gofer.app.store as store\n",
+        "tests/unit/test_from_module.py": "from gofer.app.store import Store\n",
+        "tests/unit/test_from_package.py": "from gofer.app import (\n    other,\n    store,\n)\n",
+        "tests/unit/test_similar_names.py": (
+            "import gofer.app.stores\nfrom gofer.app import store_two\n"
+            "from gofer.app.store_two import x\n"
+        ),
+        "tests/unit/test_mentions_only.py": '"""gofer.app.store is named here."""\nstore = 1\n',
+        "tests/unit/test_relative.py": "from .app import store\n",
+        "tests/unit/helper_store.py": "from gofer.app import store\n",
+        # Already run by the repo-wide check.
+        "tests/unit/test_cli_parity.py": "from gofer.app import store\n",
+    }
+    repo = _repo_with(tmp_path, {"src/gofer/app/store.py": "", **tests}, ["src/gofer/app/store.py"])
+    check = check_dev.changed_module_tests_check(repo, "base", "py", parallel_tests=False)
+    assert _selected(check) == [
+        "tests/unit/test_from_module.py",
+        "tests/unit/test_from_package.py",
+        "tests/unit/test_import.py",
+    ]
+    assert "-n" not in check.command
+
+
+def test_runs_the_selected_tests_and_fails_when_one_fails(check_dev: Any, tmp_path: Path) -> None:
+    repo = _repo_with(
+        tmp_path,
+        {
+            "src/gofer/__init__.py": "",
+            "src/gofer/sample.py": "VALUE = 1\n",
+            "tests/test_sample.py": "from gofer import sample\n\n"
+            "def test_value():\n    assert sample.VALUE == 2\n",
+        },
+        ["src/gofer/sample.py"],
+    )
+    check = check_dev.changed_module_tests_check(repo, "base", sys.executable, parallel_tests=False)
+    env = {**os.environ, "PYTHONPATH": str(repo / "src")}
+    env.pop("PYTEST_ADDOPTS", None)
+    result = check_dev.run_check(check, repo, env)
+    assert not result.passed
+    assert "FAILED tests/test_sample.py::test_value" in result.output
+    lines: list[str] = []
+    assert check_dev.run_all([check], lambda _: result, lines.append) == 1
+    assert lines[0].startswith("FAIL  tests of changed modules")
+
+    (repo / "src/gofer/sample.py").write_text("VALUE = 2\n")
+    assert check_dev.run_check(check, repo, env).passed
+
+
+def test_more_than_150_selected_files_skip_with_a_pointer_to_the_full_suite(
+    check_dev: Any, tmp_path: Path
+) -> None:
+    count = check_dev.MAX_CHANGED_MODULE_TESTS + 1
+    tests = {f"tests/unit/test_{n}.py": "from gofer.app import store\n" for n in range(count)}
+    repo = _repo_with(tmp_path, {"src/gofer/app/store.py": "", **tests}, ["src/gofer/app/store.py"])
+    check = check_dev.changed_module_tests_check(repo, "base", "py", parallel_tests=True)
+    result = check_dev.run_check(check, repo, {})
+    assert result.passed
+    assert result.output.startswith("Skipped: ")
+    assert f"{count} test files" in result.output
+    assert "AGENTS.md" in result.output and "full suite" in result.output
+    lines: list[str] = []
+    assert check_dev.run_all([check], lambda _: result, lines.append) == 0
+    assert lines[0].startswith("SKIP  tests of changed modules")
+    assert any(line.startswith("tests of changed modules: Skipped: ") for line in lines)
+    # The guard reads the cap, so the cap is what the ticket asked for.
+    assert check_dev.MAX_CHANGED_MODULE_TESTS == 150
+
+
+def test_changed_module_tests_skip_when_no_source_module_changed(
+    check_dev: Any, tmp_path: Path
+) -> None:
+    repo = _branch_changing(tmp_path, "frontend/src/App.jsx")
+    result = check_dev.run_check(
+        check_dev.changed_module_tests_check(repo, "base", "py", parallel_tests=False), repo, {}
+    )
+    assert result.passed
+    assert result.skip_reason == "Skipped: no src/gofer Python files changed since base."
+
+
+def test_changed_module_tests_skip_when_no_test_imports_the_module(
+    check_dev: Any, tmp_path: Path
+) -> None:
+    repo = _branch_changing(tmp_path, "src/gofer/lonely.py")
+    result = check_dev.run_check(
+        check_dev.changed_module_tests_check(repo, "base", "py", parallel_tests=False), repo, {}
+    )
+    assert result.passed
+    assert result.skip_reason is not None
+    assert "no test file" in result.skip_reason
+
+
+def test_changed_module_tests_fail_when_the_base_branch_is_unknown(
+    check_dev: Any, tmp_path: Path
+) -> None:
+    repo = _branch_changing(tmp_path, "src/gofer/module.py")
+    check = check_dev.changed_module_tests_check(repo, "no-such-base", "py", parallel_tests=False)
+    result = check_dev.run_check(check, repo, {})
+    assert not result.passed
+    assert "Couldn't list the files changed since no-such-base" in result.output

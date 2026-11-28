@@ -33,6 +33,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -163,6 +164,105 @@ def weighted_progress(milestones: list[dict[str, Any]]) -> dict[str, Any]:
         "acceptedCount": len(accepted),
         "totalCount": len(active),
     }
+
+
+# The board tool each worker turn gets on its own loopback URL. Rem's tool for
+# managing swarms is rem_swarms.SWARM_TOOL, a different surface.
+WORKER_SWARM_TOOL: dict[str, Any] = {
+    "name": "swarm_action",
+    "description": "Read board and update swarm progress.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": [
+                    "git",
+                    "digest",
+                    "request_approval",
+                    "read",
+                    "message",
+                    "objectives",
+                    "milestone",
+                    "complete",
+                    "verify",
+                    "integrate",
+                    "repair",
+                    "replan",
+                    "resolve_attempt",
+                ],
+            },
+            "agents": {"type": "array", "items": {"type": "object"}},
+            "description": {"type": "string"},
+            "recommendedAction": {"type": "string"},
+            "requestId": {"type": "string"},
+            "body": {"type": "string"},
+            "operation": {
+                "type": "string",
+                "enum": ["status", "diff", "stage", "commit", "push", "create_pr"],
+            },
+            "paths": {"type": "array", "items": {"type": "string"}},
+            "staged": {"type": "boolean"},
+            "message": {"type": "string"},
+            "remote": {"type": "string"},
+            "base": {"type": "string"},
+            "title": {"type": "string"},
+            "recipientId": {"type": "string"},
+            "actionable": {"type": "boolean"},
+            "objectives": {"type": "array", "items": {"type": "object"}},
+            "revision": {"type": "integer"},
+            "reason": {"type": "string"},
+            "milestoneId": {"type": "string"},
+            "attemptId": {"type": "string"},
+            "workspaceRoot": {"type": "string"},
+            "status": {"type": "string"},
+            "evidence": {"type": "string"},
+            "section": {"type": "string"},
+            "offset": {"type": "integer"},
+            "limit": {"type": "integer"},
+            "result": {"type": "object"},
+            "resolution": {"type": "string", "enum": ["review", "dismiss"]},
+        },
+        "required": ["action"],
+    },
+}
+
+
+@dataclass
+class _AgentTurn:
+    """What one agent turn's setup, provider stream and finish share."""
+
+    root: str
+    swarm_id: str
+    agent_id: str
+    cancel: threading.Event
+    token: str
+    started_at: float
+    timed_out: threading.Event = field(default_factory=threading.Event)
+    # Filled in by _prepare_turn; run stays empty when the turn never read it.
+    run: dict[str, Any] = field(default_factory=dict)
+    agent: dict[str, Any] = field(default_factory=dict)
+    attempt_id: str | None = None
+    launched: bool = False
+    progress_before: str = ""
+    board_mark: int = 0
+    turn_limit: float = 0.0
+    working_dir: Path = field(default_factory=Path)
+    context: dict[str, Any] = field(default_factory=dict)
+    prompt: str = ""
+    transcript: list[dict[str, Any]] = field(default_factory=list)
+    tool_url: str | None = None
+    deadline: threading.Timer | None = None
+    saw_final: bool = False
+    error: str | None = None
+
+    @property
+    def key(self) -> str:
+        return f"{self.swarm_id}:{self.agent_id}"
+
+    def redact(self, text: str) -> str:
+        """Hide the turn's tool URL, or its token before the URL exists."""
+        return text.replace(self.tool_url or self.token, "[swarm tool]")
 
 
 class SwarmManager:
@@ -3337,495 +3437,442 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                 self._save(swarm)
 
     async def _turn(self, root: str, swarm_id: str, agent_id: str, cancel: threading.Event) -> None:
-        token = secrets.token_urlsafe(32)
-        error: str | None = None
-        tool_url: str | None = None
-        launched = False
-        turn_attempt_id: str | None = None
-        board_mark = 0
-        timed_out = threading.Event()
-        deadline: threading.Timer | None = None
-        turn_limit = 0.0
-        started_at = time.monotonic()
-        progress_before = ""
-        saw_final = False
-        provider_started = False
-        context: dict[str, Any] = {}
+        turn = _AgentTurn(
+            root,
+            swarm_id,
+            agent_id,
+            cancel,
+            token=secrets.token_urlsafe(32),
+            started_at=time.monotonic(),
+        )
         try:
-            with self._lock:
-                swarm = self._get(root, swarm_id)
-                run = swarm["run"]
-                if run["state"] != "running" or cancel.is_set():
-                    return
-                if scope := run.get("organization"):
-                    from gofer.ui.organization_execution import swarm_usage
-
-                    cost = swarm_usage(run).get("cost_usd")
-                    if run["turnCount"] >= scope["turnLimit"] or (
-                        scope.get("budgetUsd") is not None
-                        and run["turnCount"]
-                        and (cost is None or cost >= scope["budgetUsd"])
-                    ):
-                        set_run_state(run, "paused")
-                        run["pauseReason"] = (
-                            "Organization reservation exhausted or cost unavailable"
-                        )
-                        self._save(swarm)
-                        return
-                agent = next(a for a in run["configuration"]["agents"] if a["id"] == agent_id)
-                eligible = [
-                    m
-                    for m in run["messages"]
-                    if self._dispatchable(run, m, agent_id)
-                    and any(
-                        d["agentId"] == agent_id and d["state"] == "queued" for d in m["deliveries"]
-                    )
-                ]
-                if not eligible:
-                    return
-                selected = next((m for m in eligible if m.get("attemptId")), None)
-                retry_id = run["agentStates"][agent_id].get("retryAttemptId")
-                attempt = self._attempt(run, retry_id) if retry_id else None
-                if selected and (attempt is None or selected["attemptId"] != attempt["id"]):
-                    attempt = self._attempt(run, selected["attemptId"])
-                    run["agentStates"][agent_id].pop("consecutiveFailures", None)
-                if any(m.get("recovery") for m in eligible):
-                    run["recovery"] = {"state": "working", "updatedAt": _now()}
-                if attempt is None:
-                    attempt = {
-                        "id": _id(),
-                        "milestoneId": None,
-                        "ownerId": agent_id,
-                        "state": "pending",
-                        "createdAt": _now(),
-                    }
-                    run.setdefault("attempts", []).append(attempt)
-                turn_attempt_id = attempt["id"]
-                active = self._active.get(f"{swarm_id}:{agent_id}")
-                if active is not None:
-                    active["attemptId"] = turn_attempt_id
-                launched = True
-                progress_before = self._progress_signature(run)
-                board_mark = len(run["messages"])
-                turn_limit = float(run["configuration"].get("maxTurnSeconds") or 0)
-                self._tokens[token] = (root, swarm_id, agent_id, run["id"])
-                self._turn_tokens.add(token)
-                inbox: list[dict[str, Any]] = []
-                for message in eligible:
-                    if message.get("attemptId") and message["attemptId"] != turn_attempt_id:
-                        continue
-                    if len(inbox) >= 10:
-                        break
-                    for delivery in message["deliveries"]:
-                        if delivery["agentId"] == agent_id and delivery["state"] == "queued":
-                            delivery.update(
-                                state="starting",
-                                reason="Starting agent turn",
-                                executionAttemptId=turn_attempt_id,
-                            )
-                            inbox.append(message)
-                if attempt.get("startedAt"):
-                    attempt.setdefault("usageHistory", []).append(attempt.pop("usage", None))
-                attempt.update(
-                    state="running",
-                    startedAt=_now(),
-                    lastActivityAt=_now(),
-                    messageIds=[m["id"] for m in inbox],
-                )
-                run["turnCount"] += 1
-                run["agentStates"][agent_id].update(
-                    state="working",
-                    turnKey=hashlib.sha256(token.encode()).hexdigest(),
-                    error=None,
-                    attemptId=turn_attempt_id,
-                    milestoneId=attempt.get("milestoneId"),
-                    lastActivityAt=_now(),
-                )
-                self._event(
-                    run,
-                    "turn_started",
-                    agent_id,
-                    {"messageIds": [m["id"] for m in inbox], "attemptId": turn_attempt_id},
-                )
-                self._save(swarm)
-                if "workspace" not in attempt:
-                    project = self._agent_project(run, agent_id)
-                    if project != run["workspace"].get("projectRoot", run["workspace"]["path"]):
-                        projects = run.setdefault("projectWorkspaces", {})
-                        if project not in projects:
-                            # Legacy runs may not have prepared every project yet.
-                            projects[project] = self._prepare_project_workspace(
-                                swarm, run["id"], project
-                            )
-                            self._save(swarm)
-                    attempt["projectRoot"] = project
-                    attempt["workspace"] = workspaces.prepare_attempt(
-                        self._workspace_for(run, attempt), turn_attempt_id
-                    )
-                working_dir = Path(attempt["workspace"]["path"])
-                run["agentStates"][agent_id]["workspace"] = str(working_dir)
-                context = self._context(run, agent, inbox, attempt)
-                attempt["contextChars"] = len(json.dumps(context))
-                self._save(swarm)
-                prompt = self._instructions(swarm, agent, token)
-            if attempt.get("workspace", {}).get("setup") == "pending":
-                setup = self._setup_note(
-                    root, swarm_id, agent_id, turn_attempt_id, attempt.get("projectRoot") or root
-                )
-                if setup and setup.get("status") != "passed":
-                    context["worktreeSetup"] = (
-                        f"{setup['summary']} Prepare what your checks need yourself, and don't "
-                        "change the project's setup file to get around the approval."
-                    )
-            # Prior snapshots stay in the audit log; don't resend them every turn.
-            transcript = []
-            transcript.append({"role": "user", "body": json.dumps(context)})
-            with self._lock:
-                current = self._get(root, swarm_id)
-                current["run"]["agentStates"][agent_id].setdefault("messages", []).extend(
-                    transcript
-                )
-                self._save(current)
-            resources = copy.deepcopy(agent.get("resources", {}))
-            if self._http:
-                tool_url = self._http.register(
-                    lambda name, args: self.tool(token, args),
-                    [
-                        {
-                            "name": "swarm_action",
-                            "description": "Read board and update swarm progress.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "action": {
-                                        "type": "string",
-                                        "enum": [
-                                            "git",
-                                            "digest",
-                                            "request_approval",
-                                            "read",
-                                            "message",
-                                            "objectives",
-                                            "milestone",
-                                            "complete",
-                                            "verify",
-                                            "integrate",
-                                            "repair",
-                                            "replan",
-                                            "resolve_attempt",
-                                        ],
-                                    },
-                                    "agents": {"type": "array", "items": {"type": "object"}},
-                                    "description": {"type": "string"},
-                                    "recommendedAction": {"type": "string"},
-                                    "requestId": {"type": "string"},
-                                    "body": {"type": "string"},
-                                    "operation": {
-                                        "type": "string",
-                                        "enum": [
-                                            "status",
-                                            "diff",
-                                            "stage",
-                                            "commit",
-                                            "push",
-                                            "create_pr",
-                                        ],
-                                    },
-                                    "paths": {"type": "array", "items": {"type": "string"}},
-                                    "staged": {"type": "boolean"},
-                                    "message": {"type": "string"},
-                                    "remote": {"type": "string"},
-                                    "base": {"type": "string"},
-                                    "title": {"type": "string"},
-                                    "recipientId": {"type": "string"},
-                                    "actionable": {"type": "boolean"},
-                                    "objectives": {"type": "array", "items": {"type": "object"}},
-                                    "revision": {"type": "integer"},
-                                    "reason": {"type": "string"},
-                                    "milestoneId": {"type": "string"},
-                                    "attemptId": {"type": "string"},
-                                    "workspaceRoot": {"type": "string"},
-                                    "status": {"type": "string"},
-                                    "evidence": {"type": "string"},
-                                    "section": {"type": "string"},
-                                    "offset": {"type": "integer"},
-                                    "limit": {"type": "integer"},
-                                    "result": {"type": "object"},
-                                    "resolution": {"type": "string", "enum": ["review", "dismiss"]},
-                                },
-                                "required": ["action"],
-                            },
-                        }
-                    ],
-                    instructions=prompt,
-                )
-                resources.setdefault("mcpServers", []).append(
-                    {"name": "swarm", "type": "http", "url": tool_url}
-                )
-            kwargs: dict[str, Any] = {}
-            if turn_limit:
-                # A hung provider must not hold its slot and worktree forever.
-                def expire() -> None:
-                    timed_out.set()
-                    cancel.set()
-
-                deadline = threading.Timer(turn_limit, expire)
-                deadline.daemon = True
-                deadline.start()
-            if agent["allowSteering"] and agent["provider"] == "codex":
-                from gofer.ui.codex_steering import CodexTurnControl
-
-                control = CodexTurnControl()
-                self._active[f"{swarm_id}:{agent_id}"]["steering"] = control
-                kwargs["steering"] = control
-            async for event in self._stream(
-                unlimited_output=True,
-                provider=agent["provider"],
-                model=agent["model"],
-                effort=agent["effort"],
-                messages=transcript,
-                workflow={
-                    "id": f"swarm-{swarm_id}-{agent_id}",
-                    "projectRoot": str(working_dir),
-                    "remResources": resources,
-                    # Without remote permission, shell `git push` fails too, not just
-                    # the managed tool. The chat runner applies this to the process.
-                    # An organization's Block git push setting wins over the swarm's own.
-                    "remBlockGitPush": swarm_git.organization_blocks_push(run)
-                    or not swarm_git.permissions(run["configuration"].get("gitPermissions"))[
-                        "remote"
-                    ],
-                    **({"organizationRun": run["organization"]} if run.get("organization") else {}),
-                },
-                working_dir=working_dir,
-                data_dir=self.data_dir,
-                resource_limits=self.resource_limits,
-                cancel_event=cancel,
-                agent_instructions=prompt,
-                permission_mode=agent.get("permissionMode"),
-                trusted_swarm_url=tool_url,
-                # Agents get their worktree, not the app's data folder with the
-                # swarm database and other agents' worktrees.
-                trust_data_dir=False,
-                **kwargs,
-            ):
-                with self._lock:
-                    if not self._capability_current(token):
-                        break
-                if provider_started and event["type"] == "thought":
-                    self._record_activity(swarm_id, agent_id, event, tool_url or token, token=token)
-                    continue
-                provider_started = True
-                with self._lock:
-                    current = self._get(root, swarm_id)
-                    current_run = current["run"]
-                    current_attempt = self._attempt(current_run, turn_attempt_id)
-                    if current_attempt:
-                        current_attempt["lastActivityAt"] = _now()
-                        if isinstance(event.get("usage"), dict):
-                            current_attempt["usage"] = event["usage"]
-                        if event.get("sessionId"):
-                            current_attempt["sessionId"] = str(event["sessionId"])
-                    current_run["agentStates"][agent_id]["lastActivityAt"] = _now()
-                    if event["type"] == "error":
-                        error = str(event.get("error", "Provider failed"))
-                    elif event["type"] == "final":
-                        saw_final = True
-                        body = str(event.get("message", {}).get("body", "")).strip()
-                        body = body.replace(tool_url or token, "[swarm tool]")
-                        current_run["agentStates"][agent_id].setdefault("messages", []).append(
-                            {"role": "assistant", "body": body}
-                        )
-                        if body:
-                            self._post(
-                                current,
-                                agent_id,
-                                {"body": body, "recipientId": "all", "actionable": False},
-                            )
-                    elif event["type"] == "compaction":
-                        current_run["agentStates"][agent_id]["messages"] = event["messages"]
-                    elif event["type"] == "thought":
-                        safe_trace = json.loads(
-                            json.dumps(event).replace(tool_url or token, "[swarm tool]")
-                        )
-                        traces = current_run["agentStates"][agent_id].setdefault("traces", [])
-                        traces.append(safe_trace)
-                        del traces[:-100]
-                        current_run["agentStates"][agent_id]["activity"] = str(
-                            event.get("text", "")
-                        ).replace(tool_url or token, "[swarm tool]")[:1000]
-                    for message in current_run["messages"]:
-                        for delivery in message["deliveries"]:
-                            if delivery["agentId"] == agent_id and delivery["state"] == "starting":
-                                delivery.update(state="accepted", reason="Provider turn started")
-                    self._save(current)
+            if self._prepare_turn(turn) is None:
+                return
+            resources = self._register_turn_tool(turn)
+            await self._stream_turn(turn, resources)
         except TimeoutError:
-            error = "Provider request timed out"
+            turn.error = "Provider request timed out"
         except asyncio.CancelledError:
-            error = "Agent turn interrupted"
+            turn.error = "Agent turn interrupted"
         except Exception as exc:
             log.warning("Swarm agent %s turn failed", agent_id, exc_info=True)
-            error = str(exc)
+            turn.error = str(exc)
         finally:
-            if deadline is not None:
-                deadline.cancel()
-            if timed_out.is_set():
-                minutes = round(turn_limit / 60)
-                limit_text = f"{minutes} minutes" if minutes else f"{turn_limit:g} seconds"
-                error = (
-                    f"The turn ran longer than {limit_text} and was stopped. "
-                    "Review its workspace before retrying."
+            await self._finish_turn(turn)
+
+    def _prepare_turn(self, turn: _AgentTurn) -> dict[str, Any] | None:
+        """Claim the agent's queued messages and build its prompt; None skips the turn."""
+        root, swarm_id, agent_id, token = turn.root, turn.swarm_id, turn.agent_id, turn.token
+        with self._lock:
+            swarm = self._get(root, swarm_id)
+            run = turn.run = swarm["run"]
+            if run["state"] != "running" or turn.cancel.is_set():
+                return None
+            if scope := run.get("organization"):
+                from gofer.ui.organization_execution import swarm_usage
+
+                cost = swarm_usage(run).get("cost_usd")
+                if run["turnCount"] >= scope["turnLimit"] or (
+                    scope.get("budgetUsd") is not None
+                    and run["turnCount"]
+                    and (cost is None or cost >= scope["budgetUsd"])
+                ):
+                    set_run_state(run, "paused")
+                    run["pauseReason"] = "Organization reservation exhausted or cost unavailable"
+                    self._save(swarm)
+                    return None
+            agent = turn.agent = next(
+                a for a in run["configuration"]["agents"] if a["id"] == agent_id
+            )
+            eligible = [
+                m
+                for m in run["messages"]
+                if self._dispatchable(run, m, agent_id)
+                and any(
+                    d["agentId"] == agent_id and d["state"] == "queued" for d in m["deliveries"]
                 )
-            if tool_url and self._http:
-                self._http.revoke(tool_url)
+            ]
+            if not eligible:
+                return None
+            selected = next((m for m in eligible if m.get("attemptId")), None)
+            retry_id = run["agentStates"][agent_id].get("retryAttemptId")
+            attempt = self._attempt(run, retry_id) if retry_id else None
+            if selected and (attempt is None or selected["attemptId"] != attempt["id"]):
+                attempt = self._attempt(run, selected["attemptId"])
+                run["agentStates"][agent_id].pop("consecutiveFailures", None)
+            if any(m.get("recovery") for m in eligible):
+                run["recovery"] = {"state": "working", "updatedAt": _now()}
+            if attempt is None:
+                attempt = {
+                    "id": _id(),
+                    "milestoneId": None,
+                    "ownerId": agent_id,
+                    "state": "pending",
+                    "createdAt": _now(),
+                }
+                run.setdefault("attempts", []).append(attempt)
+            turn_attempt_id = turn.attempt_id = attempt["id"]
+            active = self._active.get(turn.key)
+            if active is not None:
+                active["attemptId"] = turn_attempt_id
+            turn.launched = True
+            turn.progress_before = self._progress_signature(run)
+            turn.board_mark = len(run["messages"])
+            turn.turn_limit = float(run["configuration"].get("maxTurnSeconds") or 0)
+            self._tokens[token] = (root, swarm_id, agent_id, run["id"])
+            self._turn_tokens.add(token)
+            inbox: list[dict[str, Any]] = []
+            for message in eligible:
+                if message.get("attemptId") and message["attemptId"] != turn_attempt_id:
+                    continue
+                if len(inbox) >= 10:
+                    break
+                for delivery in message["deliveries"]:
+                    if delivery["agentId"] == agent_id and delivery["state"] == "queued":
+                        delivery.update(
+                            state="starting",
+                            reason="Starting agent turn",
+                            executionAttemptId=turn_attempt_id,
+                        )
+                        inbox.append(message)
+            if attempt.get("startedAt"):
+                attempt.setdefault("usageHistory", []).append(attempt.pop("usage", None))
+            attempt.update(
+                state="running",
+                startedAt=_now(),
+                lastActivityAt=_now(),
+                messageIds=[m["id"] for m in inbox],
+            )
+            run["turnCount"] += 1
+            run["agentStates"][agent_id].update(
+                state="working",
+                turnKey=hashlib.sha256(token.encode()).hexdigest(),
+                error=None,
+                attemptId=turn_attempt_id,
+                milestoneId=attempt.get("milestoneId"),
+                lastActivityAt=_now(),
+            )
+            self._event(
+                run,
+                "turn_started",
+                agent_id,
+                {"messageIds": [m["id"] for m in inbox], "attemptId": turn_attempt_id},
+            )
+            self._save(swarm)
+            if "workspace" not in attempt:
+                project = self._agent_project(run, agent_id)
+                if project != run["workspace"].get("projectRoot", run["workspace"]["path"]):
+                    projects = run.setdefault("projectWorkspaces", {})
+                    if project not in projects:
+                        # Legacy runs may not have prepared every project yet.
+                        projects[project] = self._prepare_project_workspace(
+                            swarm, run["id"], project
+                        )
+                        self._save(swarm)
+                attempt["projectRoot"] = project
+                attempt["workspace"] = workspaces.prepare_attempt(
+                    self._workspace_for(run, attempt), turn_attempt_id
+                )
+            turn.working_dir = Path(attempt["workspace"]["path"])
+            run["agentStates"][agent_id]["workspace"] = str(turn.working_dir)
+            context = turn.context = self._context(run, agent, inbox, attempt)
+            attempt["contextChars"] = len(json.dumps(context))
+            self._save(swarm)
+            turn.prompt = self._instructions(swarm, agent, token)
+        if attempt.get("workspace", {}).get("setup") == "pending":
+            setup = self._setup_note(
+                root, swarm_id, agent_id, turn_attempt_id, attempt.get("projectRoot") or root
+            )
+            if setup and setup.get("status") != "passed":
+                context["worktreeSetup"] = (
+                    f"{setup['summary']} Prepare what your checks need yourself, and don't "
+                    "change the project's setup file to get around the approval."
+                )
+        # Prior snapshots stay in the audit log; don't resend them every turn.
+        turn.transcript = [{"role": "user", "body": json.dumps(context)}]
+        with self._lock:
+            current = self._get(root, swarm_id)
+            current["run"]["agentStates"][agent_id].setdefault("messages", []).extend(
+                turn.transcript
+            )
+            self._save(current)
+        return context
+
+    def _register_turn_tool(self, turn: _AgentTurn) -> dict[str, Any]:
+        """Serve this turn's own swarm_action tool; _finish_turn revokes its URL."""
+        resources: dict[str, Any] = copy.deepcopy(turn.agent.get("resources", {}))
+        if self._http:
+            token = turn.token
+            turn.tool_url = self._http.register(
+                lambda name, args: self.tool(token, args),
+                [WORKER_SWARM_TOOL],
+                instructions=turn.prompt,
+            )
+            resources.setdefault("mcpServers", []).append(
+                {"name": "swarm", "type": "http", "url": turn.tool_url}
+            )
+        return resources
+
+    async def _stream_turn(self, turn: _AgentTurn, resources: dict[str, Any]) -> None:
+        """Run the provider and save its activity, usage and final reply as they arrive."""
+        root, swarm_id, agent_id, token = turn.root, turn.swarm_id, turn.agent_id, turn.token
+        run, agent = turn.run, turn.agent
+        kwargs: dict[str, Any] = {}
+        if turn.turn_limit:
+            # A hung provider must not hold its slot and worktree forever.
+            def expire() -> None:
+                turn.timed_out.set()
+                turn.cancel.set()
+
+            turn.deadline = threading.Timer(turn.turn_limit, expire)
+            turn.deadline.daemon = True
+            turn.deadline.start()
+        if agent["allowSteering"] and agent["provider"] == "codex":
+            from gofer.ui.codex_steering import CodexTurnControl
+
+            control = CodexTurnControl()
+            self._active[turn.key]["steering"] = control
+            kwargs["steering"] = control
+        provider_started = False
+        async for event in self._stream(
+            unlimited_output=True,
+            provider=agent["provider"],
+            model=agent["model"],
+            effort=agent["effort"],
+            messages=turn.transcript,
+            workflow={
+                "id": f"swarm-{swarm_id}-{agent_id}",
+                "projectRoot": str(turn.working_dir),
+                "remResources": resources,
+                # Without remote permission, shell `git push` fails too, not just
+                # the managed tool. The chat runner applies this to the process.
+                # An organization's Block git push setting wins over the swarm's own.
+                "remBlockGitPush": swarm_git.organization_blocks_push(run)
+                or not swarm_git.permissions(run["configuration"].get("gitPermissions"))["remote"],
+                **({"organizationRun": run["organization"]} if run.get("organization") else {}),
+            },
+            working_dir=turn.working_dir,
+            data_dir=self.data_dir,
+            resource_limits=self.resource_limits,
+            cancel_event=turn.cancel,
+            agent_instructions=turn.prompt,
+            permission_mode=agent.get("permissionMode"),
+            trusted_swarm_url=turn.tool_url,
+            # Agents get their worktree, not the app's data folder with the
+            # swarm database and other agents' worktrees.
+            trust_data_dir=False,
+            **kwargs,
+        ):
             with self._lock:
-                stale = launched and not self._capability_current(token)
-                self._tokens.pop(token, None)
-                self._turn_tokens.discard(token)
-                if stale:
-                    launched = False
-                if launched and not saw_final and not error:
-                    error = "Provider ended without a final result"
-                if stale:
-                    self._active.pop(f"{swarm_id}:{agent_id}", None)
-                elif not launched:
-                    self._active.pop(f"{swarm_id}:{agent_id}", None)
-                    current = self._get(root, swarm_id)
-                    if current["run"]["state"] == "stopping" and not any(
-                        a["swarmId"] == swarm_id for a in self._active.values()
-                    ):
-                        current["run"]["state"] = "stopped"
-                        self._save(current)
-                else:
-                    current = self._get(root, swarm_id)
-                    run = current["run"]
-                    if error:
-                        error = error.replace(tool_url or token, "[swarm tool]")
-                    failed = bool(error or cancel.is_set())
-                    run["agentStates"][agent_id].update(
-                        state="interrupted" if failed else "idle", error=error
-                    )
-                    attempt = self._attempt(run, turn_attempt_id)
-                    if attempt:
-                        attempt.update(
-                            finishedAt=_now(),
-                            durationSeconds=round(time.monotonic() - started_at, 3),
-                        )
-                        if failed:
-                            attempt["state"] = "uncertain"
-                        elif attempt["state"] == "running":
-                            attempt["state"] = "succeeded"
-                        if not failed:
-                            run["agentStates"][agent_id]["boardCursor"] = context.get(
-                                "boardCursor", 0
-                            )
-                        self._update_usage(run)
-                    if not failed:
-                        for key in ("retryAt", "retryAttemptId", "consecutiveFailures"):
-                            run["agentStates"][agent_id].pop(key, None)
-                    if (
-                        not failed
-                        and run["state"] == "running"
-                        and not any(
-                            a["swarmId"] == swarm_id and a["agentId"] != agent_id
-                            for a in self._active.values()
-                        )
-                    ):
-                        if self._progress_signature(run) == progress_before:
-                            run["stalledTurns"] = run.get("stalledTurns", 0) + 1
-                        else:
-                            run["stalledTurns"] = 0
-                        stall_limit = run["configuration"].get("stallTurnLimit")
-                        if stall_limit and run["stalledTurns"] >= stall_limit:
-                            set_run_state(run, "paused")
-                            run.update(
-                                replanRequired=True,
-                                pauseReason=f"No progress in {run['stalledTurns']} turns in a "
-                                "row. Record a changed plan, then resume.",
-                            )
-                            self._event(
-                                run, "stalled", "system", {"stalledTurns": run["stalledTurns"]}
-                            )
-                    for message in run["messages"]:
-                        for delivery in message["deliveries"]:
-                            if delivery["agentId"] == agent_id and delivery["state"] in {
-                                "starting",
-                                "accepted",
-                            }:
-                                delivery.update(
-                                    state="uncertain" if error or cancel.is_set() else "completed",
-                                    reason="Turn interrupted; review before resending"
-                                    if error or cancel.is_set()
-                                    else "Agent turn completed",
-                                )
-                    self._event(
-                        run, "turn_failed" if error else "turn_finished", agent_id, {"error": error}
-                    )
-                    if run["state"] == "stopping" and not any(
-                        a["swarmId"] == swarm_id and a.get("agentId") != agent_id
-                        for a in [*self._active.values(), *self._checks.values()]
-                    ):
-                        run["state"] = "stopped"
-                    elif failed and not cancel.is_set() and run["state"] in {"running", "paused"}:
-                        self._schedule_retry(current, agent_id, attempt, error or "Provider failed")
-                    elif (
-                        run["state"] == "running"
-                        and agent_id != self._orchestrator(current)
-                        # A milestone update or message already told the orchestrator.
-                        and not any(
-                            m["senderId"] == agent_id and m.get("actionable")
-                            for m in run["messages"][board_mark:]
-                        )
-                    ):
+                if not self._capability_current(token):
+                    break
+            if provider_started and event["type"] == "thought":
+                self._record_activity(
+                    swarm_id, agent_id, event, turn.tool_url or token, token=token
+                )
+                continue
+            provider_started = True
+            with self._lock:
+                current = self._get(root, swarm_id)
+                current_run = current["run"]
+                state = current_run["agentStates"][agent_id]
+                current_attempt = self._attempt(current_run, turn.attempt_id)
+                if current_attempt:
+                    current_attempt["lastActivityAt"] = _now()
+                    if isinstance(event.get("usage"), dict):
+                        current_attempt["usage"] = event["usage"]
+                    if event.get("sessionId"):
+                        current_attempt["sessionId"] = str(event["sessionId"])
+                state["lastActivityAt"] = _now()
+                if event["type"] == "error":
+                    turn.error = str(event.get("error", "Provider failed"))
+                elif event["type"] == "final":
+                    turn.saw_final = True
+                    body = turn.redact(str(event.get("message", {}).get("body", "")).strip())
+                    state.setdefault("messages", []).append({"role": "assistant", "body": body})
+                    if body:
                         self._post(
                             current,
-                            "system",
-                            {
-                                "body": (
-                                    f"Agent {agent_id}: "
-                                    f"{'interrupted' if failed else 'turn finished'}. "
-                                    "Review its board findings and milestone evidence."
-                                ),
-                                "actionable": True,
-                            },
+                            agent_id,
+                            {"body": body, "recipientId": "all", "actionable": False},
                         )
-                    self._save(current)
-                    active = self._active.get(f"{swarm_id}:{agent_id}")
-                    if active is not None:
-                        active["outcome"] = "uncertain" if error or cancel.is_set() else "completed"
-                    self._active.pop(f"{swarm_id}:{agent_id}", None)
-                    self._recover_idle(current)
+                elif event["type"] == "compaction":
+                    state["messages"] = event["messages"]
+                elif event["type"] == "thought":
+                    traces = state.setdefault("traces", [])
+                    traces.append(json.loads(turn.redact(json.dumps(event))))
+                    del traces[:-100]
+                    state["activity"] = turn.redact(str(event.get("text", "")))[:1000]
+                for message in current_run["messages"]:
+                    for delivery in message["deliveries"]:
+                        if delivery["agentId"] == agent_id and delivery["state"] == "starting":
+                            delivery.update(state="accepted", reason="Provider turn started")
+                self._save(current)
 
-                if swarm_id in self._runnable:
-                    self._due[swarm_id] = 0
-                self._wake.set()
-                cleanup = (
-                    (copy.deepcopy(self._workspace_for(run, attempt)), copy.deepcopy(attempt))
-                    if launched
-                    and attempt
-                    and attempt.get("state") == "succeeded"
-                    and not any(
-                        i["state"] == "pending" and i.get("attemptId") == attempt["id"]
-                        for i in run.get("humanInbox", [])
-                    )
-                    and not attempt.get("milestoneId")
-                    and self._workspace_for(run, attempt).get("mode") == "git"
-                    else None
+    async def _finish_turn(self, turn: _AgentTurn) -> None:
+        """Settle the attempt, deliveries and agent state, then clean up finished worktrees."""
+        root, swarm_id, agent_id, token = turn.root, turn.swarm_id, turn.agent_id, turn.token
+        cancel = turn.cancel
+        if turn.deadline is not None:
+            turn.deadline.cancel()
+        if turn.timed_out.is_set():
+            minutes = round(turn.turn_limit / 60)
+            limit_text = f"{minutes} minutes" if minutes else f"{turn.turn_limit:g} seconds"
+            turn.error = (
+                f"The turn ran longer than {limit_text} and was stopped. "
+                "Review its workspace before retrying."
+            )
+        if turn.tool_url and self._http:
+            self._http.revoke(turn.tool_url)
+        error, launched = turn.error, turn.launched
+        run, attempt = turn.run, None
+        with self._lock:
+            stale = launched and not self._capability_current(token)
+            self._tokens.pop(token, None)
+            self._turn_tokens.discard(token)
+            if stale:
+                launched = False
+            if launched and not turn.saw_final and not error:
+                error = "Provider ended without a final result"
+            if stale:
+                self._active.pop(turn.key, None)
+            elif not launched:
+                self._active.pop(turn.key, None)
+                current = self._get(root, swarm_id)
+                if current["run"]["state"] == "stopping" and not any(
+                    a["swarmId"] == swarm_id for a in self._active.values()
+                ):
+                    current["run"]["state"] = "stopped"
+                    self._save(current)
+            else:
+                current = self._get(root, swarm_id)
+                run = current["run"]
+                if error:
+                    error = turn.redact(error)
+                failed = bool(error or cancel.is_set())
+                run["agentStates"][agent_id].update(
+                    state="interrupted" if failed else "idle", error=error
                 )
-                if cleanup:
-                    self._cleaning_attempts.add(cleanup[1]["id"])
-                accepted_cleanup = self._reserve_accepted_cleanup(run)
-            # Filesystem work must not hold the manager lock or block its event
-            # loop: status and pause requests need to remain available.
+                attempt = self._attempt(run, turn.attempt_id)
+                if attempt:
+                    attempt.update(
+                        finishedAt=_now(),
+                        durationSeconds=round(time.monotonic() - turn.started_at, 3),
+                    )
+                    if failed:
+                        attempt["state"] = "uncertain"
+                    elif attempt["state"] == "running":
+                        attempt["state"] = "succeeded"
+                    if not failed:
+                        run["agentStates"][agent_id]["boardCursor"] = turn.context.get(
+                            "boardCursor", 0
+                        )
+                    self._update_usage(run)
+                if not failed:
+                    for key in ("retryAt", "retryAttemptId", "consecutiveFailures"):
+                        run["agentStates"][agent_id].pop(key, None)
+                if (
+                    not failed
+                    and run["state"] == "running"
+                    and not any(
+                        a["swarmId"] == swarm_id and a["agentId"] != agent_id
+                        for a in self._active.values()
+                    )
+                ):
+                    if self._progress_signature(run) == turn.progress_before:
+                        run["stalledTurns"] = run.get("stalledTurns", 0) + 1
+                    else:
+                        run["stalledTurns"] = 0
+                    stall_limit = run["configuration"].get("stallTurnLimit")
+                    if stall_limit and run["stalledTurns"] >= stall_limit:
+                        set_run_state(run, "paused")
+                        run.update(
+                            replanRequired=True,
+                            pauseReason=f"No progress in {run['stalledTurns']} turns in a "
+                            "row. Record a changed plan, then resume.",
+                        )
+                        self._event(run, "stalled", "system", {"stalledTurns": run["stalledTurns"]})
+                for message in run["messages"]:
+                    for delivery in message["deliveries"]:
+                        if delivery["agentId"] == agent_id and delivery["state"] in {
+                            "starting",
+                            "accepted",
+                        }:
+                            delivery.update(
+                                state="uncertain" if error or cancel.is_set() else "completed",
+                                reason="Turn interrupted; review before resending"
+                                if error or cancel.is_set()
+                                else "Agent turn completed",
+                            )
+                self._event(
+                    run, "turn_failed" if error else "turn_finished", agent_id, {"error": error}
+                )
+                if run["state"] == "stopping" and not any(
+                    a["swarmId"] == swarm_id and a.get("agentId") != agent_id
+                    for a in [*self._active.values(), *self._checks.values()]
+                ):
+                    run["state"] = "stopped"
+                elif failed and not cancel.is_set() and run["state"] in {"running", "paused"}:
+                    self._schedule_retry(current, agent_id, attempt, error or "Provider failed")
+                elif (
+                    run["state"] == "running"
+                    and agent_id != self._orchestrator(current)
+                    # A milestone update or message already told the orchestrator.
+                    and not any(
+                        m["senderId"] == agent_id and m.get("actionable")
+                        for m in run["messages"][turn.board_mark :]
+                    )
+                ):
+                    self._post(
+                        current,
+                        "system",
+                        {
+                            "body": (
+                                f"Agent {agent_id}: "
+                                f"{'interrupted' if failed else 'turn finished'}. "
+                                "Review its board findings and milestone evidence."
+                            ),
+                            "actionable": True,
+                        },
+                    )
+                self._save(current)
+                active = self._active.get(turn.key)
+                if active is not None:
+                    active["outcome"] = "uncertain" if error or cancel.is_set() else "completed"
+                self._active.pop(turn.key, None)
+                self._recover_idle(current)
+
+            if swarm_id in self._runnable:
+                self._due[swarm_id] = 0
+            self._wake.set()
+            cleanup = (
+                (copy.deepcopy(self._workspace_for(run, attempt)), copy.deepcopy(attempt))
+                if launched
+                and attempt
+                and attempt.get("state") == "succeeded"
+                and not any(
+                    i["state"] == "pending" and i.get("attemptId") == attempt["id"]
+                    for i in run.get("humanInbox", [])
+                )
+                and not attempt.get("milestoneId")
+                and self._workspace_for(run, attempt).get("mode") == "git"
+                else None
+            )
             if cleanup:
-                try:
-                    await asyncio.to_thread(workspaces.cleanup_completed_turn, *cleanup)
-                finally:
-                    with self._lock:
-                        self._cleaning_attempts.discard(cleanup[1]["id"])
-                        self._wake.set()
-            if accepted_cleanup:
-                await asyncio.to_thread(self._cleanup_accepted_attempts, accepted_cleanup)
+                self._cleaning_attempts.add(cleanup[1]["id"])
+            # A turn that failed before reading its run has nothing to clean up.
+            accepted_cleanup = self._reserve_accepted_cleanup(run) if run else []
+        # Filesystem work must not hold the manager lock or block its event
+        # loop: status and pause requests need to remain available.
+        if cleanup:
+            try:
+                await asyncio.to_thread(workspaces.cleanup_completed_turn, *cleanup)
+            finally:
+                with self._lock:
+                    self._cleaning_attempts.discard(cleanup[1]["id"])
+                    self._wake.set()
+        if accepted_cleanup:
+            await asyncio.to_thread(self._cleanup_accepted_attempts, accepted_cleanup)
 
     def close(self) -> None:
         self._closed.set()

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, ArchiveRestore, FolderOpen, ShieldCheck } from "lucide-react";
-import { formatBytes, formatDay, formatTime } from "../lib/secondBrain.js";
+import { formatBytes, libraryDay } from "../lib/secondBrain.js";
+import { dateTime } from "../lib/timeText.js";
 import { WEEKDAYS, archiveLabel, backupCounts, backupSettings, packageFit, scheduleLabel } from "../lib/secondBrainBackups.js";
 import { isSampleLibrary, startTask, updateBrain, useSecondBrain } from "../lib/secondBrainStore.js";
 import { brainRequest } from "../lib/secondBrainApi.js";
@@ -44,14 +45,14 @@ export function BackupSettings({ brain }) {
     <div className="sb-backup-status" data-tone={brain.backupWarning ? "warning" : verified ? "success" : undefined}>
       {brain.backupWarning ? <AlertTriangle size={16} aria-hidden="true" /> : <ShieldCheck size={16} aria-hidden="true" />}
       <div>
-        <strong>Last verified backup: {verified ? formatDay(verified.at, { relative: true }) : "none yet"}</strong>
-        {verified ? <small>{formatTime(verified.at)} · {backupCounts(verified)}{verified.conversations ? "" : " · without the conversation archive"}</small> : null}
+        <strong>Last verified backup: {verified ? libraryDay(verified.at, { relative: true }) : "none yet"}</strong>
+        {verified ? <small>{dateTime(verified.at)} · {backupCounts(verified)}{verified.conversations ? "" : " · without the conversation archive"}</small> : null}
         {brain.backupWarning && attempt?.state !== "kept" ? <small role="status">{brain.backupWarning} Check the backup folder, or back up now.</small> : null}
-        {attempt?.state === "failed" ? <small role="alert">Last attempt {formatTime(attempt.at)} failed: {attempt.error}</small> : null}
+        {attempt?.state === "failed" ? <small role="alert">Last attempt {dateTime(attempt.at)} failed: {attempt.error}</small> : null}
       </div>
     </div>
     {attempt?.state === "kept" ? <div className="sb-inline-note sb-callout" data-tone="warning" role="status"><AlertTriangle size={15} aria-hidden="true" /><div>
-      <strong>Backup of {formatTime(attempt.at)} {attempt.detail || "kept, much smaller than the last backup"}</strong>
+      <strong>Backup of {dateTime(attempt.at)} {attempt.detail || "kept, much smaller than the last backup"}</strong>
       <dl className="sb-facts"><div><dt>This backup</dt><dd>{backupCounts(attempt)}</dd></div><div><dt>Last full backup</dt><dd>{backupCounts(verified)}</dd></div></dl>
       <p>No older copies were removed. Check the brain folder: if files went missing, restore them from the last full backup. If you removed them on purpose, accept the smaller size so older copies rotate out again.</p>
     </div><button type="button" className="sb-button" disabled={running} onClick={() => startTask({ kind: "backup", label: `Backing up ${brain.name}`, brainId: brain.id, acceptSmaller: true })}>Accept smaller size</button></div> : null}

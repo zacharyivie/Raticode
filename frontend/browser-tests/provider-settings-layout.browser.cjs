@@ -4,7 +4,7 @@
 // line, missing apps folded into "Not installed", and the
 // workflow-only sources folded below the coding apps with one-line summaries.
 // Isolated: mock provider and account APIs, no real CLIs, keys or backend.
-// Run: electron --no-sandbox browser-tests/provider-settings-layout.browser.cjs
+// Run: npm run test:provider-settings-layout-browser
 // Set PROVIDER_SETTINGS_SCREENSHOTS=<folder> to save a screenshot of each state.
 // Where no X server can start (such as an agent's sandbox), set
 // RATICODE_TEST_BACKGROUND_DISPLAY=1 and add --ozone-platform=headless
@@ -69,7 +69,7 @@ let vite;
 async function main() {
   await app.whenReady();
   const { createServer } = await import("vite");
-  vite = await createServer({ root: path.join(__dirname, ".."), logLevel: "error", cacheDir: path.join(profile, "vite-cache"),
+  vite = await createServer({ configLoader: "runner", root: path.join(__dirname, ".."), logLevel: "error", cacheDir: path.join(profile, "vite-cache"),
     server: { host: "127.0.0.1", port: 0 }, plugins: [{
       name: "provider-settings-layout-test",
       resolveId(id) { if (id === "/settings-entry.jsx") return id; },

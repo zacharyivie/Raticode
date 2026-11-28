@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiUrl } from "../lib/api.js";
 import { pollWithoutOverlap } from "../lib/statusPolling.js";
+import { dateTime } from "../lib/timeText.js";
 
 // Use the same compact controls and theme tokens as the surrounding settings.
 const button = "rounded border border-line px-3 py-1.5 text-xs hover:bg-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500 disabled:opacity-50";
@@ -256,7 +257,7 @@ export default function PairedDevices() {
             return <li className={`${card} space-y-3 ${peer.state === "pending" ? "border-warning/60" : ""}`} key={peer.device_id}>
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0"><h5 className="text-sm font-semibold">{peer.name || `${deviceName(peer)}${activePeers.length > 1 ? ` ${index + 1}` : ""}`}</h5>
-                  <p className="text-[11px] text-muted">{peer.last_seen ? `Last connected ${new Date(peer.last_seen * 1000).toLocaleString()}` : "Not connected yet"}</p></div>
+                  <p className="text-[11px] text-muted">{peer.last_seen ? `Last connected ${dateTime(peer.last_seen * 1000)}` : "Not connected yet"}</p></div>
                 <Pill tone={tone}>{label}</Pill>
               </div>
               {peer.state === "pending" && <div className="space-y-3 rounded-md bg-warning-soft p-3">
@@ -389,11 +390,11 @@ export default function PairedDevices() {
 }
 
 function when(seconds) {
-  return seconds ? new Date(seconds * 1000).toLocaleString() : "";
+  return seconds ? dateTime(seconds * 1000) : "";
 }
 
 // A phone the suspicious-request guard locked, and the requests it flagged.
-export function PhoneLock({ peer, lock, count, requests, busy, confirming, setConfirming, action }) {
+function PhoneLock({ peer, lock, count, requests, busy, confirming, setConfirming, action }) {
   if (!lock && !count) return null;
   const name = peer.name || "this phone";
   return <div className={`space-y-2 rounded-md p-3 ${lock ? "bg-danger-soft" : "bg-surface-muted"}`} aria-label={`Suspicious requests from ${name}`}>

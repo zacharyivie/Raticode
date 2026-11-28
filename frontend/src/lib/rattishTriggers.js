@@ -1,4 +1,5 @@
 import { apiJson } from "./api.js";
+import { dateTime } from "./timeText.js";
 
 export const RUNS_ONLY_WHILE_RUNNING =
   "Triggers run only while Raticode or its background scheduler is running.";
@@ -39,7 +40,7 @@ export function statusLabel(status) {
 }
 
 // Why a trigger won't run its workflow as it is now, or "" when it will.
-export const APPROVAL_TEXT = {
+const APPROVAL_TEXT = {
   changed: "Workflow changed since you approved it",
   unapproved: "Waiting for you to approve this workflow version",
 };
@@ -72,7 +73,7 @@ export function approvalNotice(trigger) {
 export function approvedLine(approval) {
   if (!approval?.approvedAt) return "";
   const how = APPROVED_BY[approval.approvedBy];
-  return `This version was approved ${formatWhen(approval.approvedAt)}${how ? ` ${how}` : ""}.`;
+  return `This version was approved ${dateTime(approval.approvedAt, { weekday: true })}${how ? ` ${how}` : ""}.`;
 }
 
 export function fileChangeLabel(change) {
@@ -102,7 +103,9 @@ export function triggerTitle(trigger) {
 }
 
 export function triggerDetail(trigger) {
-  if (trigger.kind === "cron") return `${trigger.config.expression} · ${trigger.config.timezone}`;
+  // A cron trigger reads in words when its schedule is a common one; the card shows the
+  // expression under them. Otherwise the expression stands alone.
+  if (trigger.kind === "cron") return `${trigger.summary || trigger.config.expression} · ${trigger.config.timezone}`;
   if (trigger.kind === "file") {
     const pattern = trigger.config.glob === "*" ? "" : ` · ${trigger.config.glob}`;
     return `${trigger.config.path}${pattern}`;
@@ -184,18 +187,6 @@ export function schedulerSummary(scheduler) {
   };
 }
 
-export function formatWhen(value) {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleString([], {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
 
 export function emptyTriggerDraft(kind = "cron", defaultTimezone = "UTC") {
   return {
@@ -272,7 +263,7 @@ export function formatRunTimeInput(seconds) {
     .join("");
 }
 
-export function timeLimitText(trigger) {
+function timeLimitText(trigger) {
   return trigger.maxRunSeconds ? `Time limit: ${formatRunTime(trigger.maxRunSeconds)}` : "No time limit";
 }
 
@@ -406,7 +397,7 @@ export function pauseSummary(state) {
   if (!state) return "";
   const { triggers = 0, enabled = 0 } = state;
   if (state.pause?.paused) {
-    const since = formatWhen(state.pause.pausedAt);
+    const since = dateTime(state.pause.pausedAt, { weekday: true });
     return `Paused${since ? ` since ${since}` : ""}. Cron times are skipped, not caught up. Resuming turns back on the ${enabled} of ${triggers} that were on.`;
   }
   if (!triggers) return "No triggers yet.";

@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -181,7 +182,8 @@ private fun OpenedFileScreen(uri: Uri, type: String?, ownFile: Boolean, locked: 
                     Icon(ThreadIcons.WrapText, "Wrap long lines", tint = if (wrap) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            Box(Modifier.weight(1f).fillMaxWidth()) {
+            // Drawn edge to edge: keep the file's last lines above the navigation bar.
+            Box(Modifier.weight(1f).fillMaxWidth().navigationBarsPadding()) {
                 when (current) {
                     OpenedFile.Loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.dp) }
                     is OpenedFile.Problem -> Box(Modifier.fillMaxSize().padding(24.dp).testTag("openedFileProblem"), contentAlignment = Alignment.Center) {

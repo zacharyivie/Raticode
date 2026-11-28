@@ -9,7 +9,7 @@ import "./CommandPalette.css";
 
 const TITLES = {
   commands: { label: "Command palette", placeholder: "Type a command…", empty: "No commands match." },
-  files: { label: "Quick open", placeholder: "Search files, workflows, Rem threads and settings…", empty: "Nothing matches." },
+  files: { label: "Quick open", placeholder: "Search files, workflows, Rem threads, tickets and settings…", empty: "Nothing matches." },
 };
 
 function Highlighted({ text, indices }) {

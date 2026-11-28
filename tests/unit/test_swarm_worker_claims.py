@@ -191,10 +191,14 @@ def test_the_api_counts_a_running_swarm_turn_as_swarms(
     assert this["running_threads"] == 1 and this["capacity"] == 0
     turns.release.set()
     wait_for(lambda: claims.held() == 0)
-    [this] = cast(dict[str, Any], ui_tests._request(tmp_path, "GET", "/api/computers").json())[
-        "computers"
-    ]
-    assert this["running_by_kind"]["swarms"] == 0
+
+    def swarms_running() -> int:
+        body = cast(dict[str, Any], ui_tests._request(tmp_path, "GET", "/api/computers").json())
+        return int(body["computers"][0]["running_by_kind"]["swarms"])
+
+    # The turn's own record ends just after its worker claim, so a busy computer can
+    # still count it for a moment.
+    wait_for(lambda: swarms_running() == 0)
 
 
 def test_an_organizations_swarm_turn_counts_as_organizations(tmp_path: Path) -> None:

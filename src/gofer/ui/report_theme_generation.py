@@ -14,6 +14,7 @@ from typing import Any
 from gofer.core.provider_capabilities import IMAGE_ATTACHMENT_PROVIDERS
 from gofer.ui.chat import ChatProviderError, stream_workflow_chat
 from gofer.ui.chat_media import store_chat_attachments
+from gofer.ui.report_themes import SCREEN_RULES
 
 
 async def generate_report_theme(
@@ -57,6 +58,8 @@ async def generate_report_theme(
         "embedded CSS, responsive layout, readable print styles, and accessible contrast. "
         "Use a sample project review with clearly labeled illustrative content, a small table, "
         "and a diagram. Do not use scripts, remote assets, forms, or network requests. "
+        "The instructions must say how the theme adapts to phones, and the demo must follow "
+        "these rules, which every report gets: " + SCREEN_RULES + " "
         "Read attached reference files as needed. "
         "Do not write files or run unrelated commands. "
         "Return the demo in the JSON response, with properly escaped JSON strings. "

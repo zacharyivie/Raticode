@@ -285,7 +285,7 @@ def parse_package(files: dict[str, str]) -> dict[str, Any]:
         if path == "AGENTS.md" or path.endswith("/AGENTS.md")
     }
     if len(set(agents.values())) != len(agents):
-        raise ValueError("Duplicate employee slugs")
+        raise ValueError("Duplicate worker slugs")
 
     def employee_ref(source: str, value: Any) -> str | None:
         if value is None:

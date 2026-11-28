@@ -161,6 +161,112 @@ def test_git_common_dir_is_reported_only_outside_the_worktree(tmp_path: Path) ->
     assert claude_sandbox.git_common_dir(tmp_path / "missing") is None
 
 
+_GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+
+
+def _repo_with_worktree(folder: Path) -> tuple[Path, Path]:
+    """A repository at ``folder/repo`` with one commit and a ``git worktree add`` checkout."""
+    repo = folder / "repo"
+    repo.mkdir(parents=True)
+    subprocess.run([*_GIT, "init", "-q", str(repo)], check=True)
+    (repo / "a").write_text("a")
+    subprocess.run([*_GIT, "-C", str(repo), "add", "a"], check=True)
+    subprocess.run([*_GIT, "-C", str(repo), "commit", "-qm", "init"], check=True)
+    worktree = folder / "wt"
+    subprocess.run([*_GIT, "-C", str(repo), "worktree", "add", "-q", str(worktree)], check=True)
+    return repo, worktree
+
+
+def _git_reads(folder: Path, flag: str) -> Path:
+    """What git itself resolves for ``folder``, to show a planted pointer does work."""
+    completed = subprocess.run(
+        ["git", "-C", str(folder), "rev-parse", "--path-format=absolute", flag],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return Path(completed.stdout.strip()).resolve()
+
+
+def test_a_dot_git_file_pointing_at_another_repositorys_worktree_gets_no_shared_git(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    other, other_worktree = _repo_with_worktree(tmp_path / "other")
+    _, own_worktree = _repo_with_worktree(tmp_path / "own")
+    other_admin = (other / ".git" / "worktrees" / other_worktree.name).resolve()
+    # An earlier turn rewrote its own worktree's .git file.
+    (own_worktree / ".git").write_text(f"gitdir: {other_admin}\n")
+    assert _git_reads(own_worktree, "--git-common-dir") == (other / ".git").resolve()
+
+    with caplog.at_level("WARNING", logger=claude_sandbox.__name__):
+        assert claude_sandbox.repository_git_dir(own_worktree) is None
+        assert claude_sandbox.git_common_dir(own_worktree) is None
+    refusals = [r for r in caplog.records if "gets no write access" in r.getMessage()]
+    assert len(refusals) == 1  # Logged once, not on every turn.
+    assert "doesn't list" in refusals[0].getMessage()
+
+
+def test_a_worker_made_git_folder_naming_another_repository_gets_no_shared_git(
+    tmp_path: Path,
+) -> None:
+    other, _ = _repo_with_worktree(tmp_path / "other")
+    _, own_worktree = _repo_with_worktree(tmp_path / "own")
+    # A folder the turn could write, made to look like a worktree folder of the other
+    # repository, even naming this checkout back in its own gitdir file.
+    planted = own_worktree / ".planted-git"
+    planted.mkdir()
+    (planted / "HEAD").write_text("ref: refs/heads/master\n")
+    (planted / "commondir").write_text(f"{(other / '.git').resolve()}\n")
+    (planted / "gitdir").write_text(f"{(own_worktree / '.git').resolve()}\n")
+    (own_worktree / ".git").write_text(f"gitdir: {planted.resolve()}\n")
+    assert _git_reads(own_worktree, "--git-common-dir") == (other / ".git").resolve()
+
+    assert claude_sandbox.repository_git_dir(own_worktree) is None
+    assert claude_sandbox.git_common_dir(own_worktree) is None
+
+
+def test_a_linked_worktree_and_its_subfolder_get_their_repositorys_git(tmp_path: Path) -> None:
+    repo, worktree = _repo_with_worktree(tmp_path)
+    common = (repo / ".git").resolve()
+    assert claude_sandbox.repository_git_dir(worktree) == common
+    assert claude_sandbox.repository_git_dir(repo) == common
+    sub = worktree / "app"
+    sub.mkdir()
+    assert claude_sandbox.git_common_dir(sub) == common
+    # A main checkout whose .git is a link to another folder isn't its own repository.
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    (linked / ".git").symlink_to(repo / ".git")
+    assert claude_sandbox.repository_git_dir(linked) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="Claude Code has no sandbox on Windows")
+async def test_a_chat_turn_in_a_linked_worktree_may_write_its_repositorys_git(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(claude_sandbox, "unavailable_reason", lambda: None)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run([*_GIT, "init", "-q", str(repo)], check=True)
+    (repo / "a").write_text("a")
+    subprocess.run([*_GIT, "-C", str(repo), "add", "a"], check=True)
+    subprocess.run([*_GIT, "-C", str(repo), "commit", "-qm", "init"], check=True)
+    # The fake turn works in tmp_path/project, here a `git worktree add` checkout.
+    project = tmp_path / "project"
+    subprocess.run([*_GIT, "-C", str(repo), "worktree", "add", "-q", str(project)], check=True)
+
+    seen = await _fake_claude_turn(
+        monkeypatch,
+        tmp_path,
+        {"readOnly": False, "claudeSandbox": True, "runId": "run"},
+        scratch=tmp_path / "data" / "rem-work" / "turn-scratch" / "run-wt",
+    )
+    argv = seen["argv"]
+    settings = json.loads(argv[argv.index("--settings") + 1])
+    assert str((repo / ".git").resolve()) in settings["sandbox"]["filesystem"]["allowWrite"]
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="command slots are POSIX only")
 def test_sandboxed_slot_commands_skip_their_own_systemd_scope(monkeypatch, tmp_path) -> None:
     started: list[dict[str, Any]] = []
@@ -176,6 +282,8 @@ def test_sandboxed_slot_commands_skip_their_own_systemd_scope(monkeypatch, tmp_p
     monkeypatch.delenv(command_slots.HELD_ENV, raising=False)
     monkeypatch.delenv(command_slots.ACTIVITY_ENV, raising=False)
     monkeypatch.setattr(command_slots, "command_memory_limit", lambda: 1024)
+    # This computer's own bus may be out of reach (a sandboxed test run); stand in for one.
+    monkeypatch.setattr(command_slots, "_user_bus_reachable", lambda path: True)
     assert command_slots.run("test", ["true"]) == 0
     monkeypatch.setenv(command_slots.SANDBOX_ENV, "1")
     assert command_slots.run("test", ["true"]) == 0
@@ -343,8 +451,12 @@ def test_project_instructions_are_capped(monkeypatch, tmp_path) -> None:
     project.mkdir()
     (project / "CLAUDE.md").write_text("x" * (claude_sandbox.MAX_INSTRUCTION_BYTES + 100))
     text = claude_sandbox.project_instruction_args(project)[-1]
-    assert "at most 64 KB" in text
-    assert text.count("x") <= claude_sandbox.MAX_INSTRUCTION_BYTES
+    # Measure only the file's body: the header above it names the CLAUDE.md path,
+    # which can hold any character the temp folder does.
+    body = text.split("checked into the codebase):\n\n", 1)[1]
+    body, note = body.split("\n[Cut here: ", 1)
+    assert "at most 64 KB" in note
+    assert body == "x" * claude_sandbox.MAX_INSTRUCTION_BYTES
 
 
 @pytest.mark.asyncio
@@ -521,3 +633,63 @@ async def test_a_sandbox_that_cannot_start_blocks_the_turn_with_its_reason(
     assert str(raised.value) == f"{chat.CLAUDE_SANDBOX_BLOCKED} bwrap is missing."
     # Nothing ran, so no tokens were spent on a turn that couldn't start.
     assert started == []
+
+
+def _repo_with_worktrees(tmp_path: Path, *names: str) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run([*_GIT, "init", "-q", str(repo)], check=True)
+    (repo / "a").write_text("a")
+    subprocess.run([*_GIT, "-C", str(repo), "add", "a"], check=True)
+    subprocess.run([*_GIT, "-C", str(repo), "commit", "-qm", "init"], check=True)
+    for name in names:
+        subprocess.run(
+            [*_GIT, "-C", str(repo), "worktree", "add", "-q", "-b", name, str(tmp_path / name)],
+            check=True,
+        )
+    return (repo / ".git").resolve()
+
+
+def test_a_worktree_turn_can_commit_but_not_change_the_repositorys_hooks_or_config(
+    tmp_path: Path,
+) -> None:
+    common = _repo_with_worktrees(tmp_path, "project", "other")
+    project = tmp_path / "project"
+    own = common / "worktrees" / "project"
+    controls = claude_sandbox.git_control_paths(project, claude_sandbox.git_common_dir(project))
+    expected = [
+        common / "hooks",
+        common / "config",
+        common / "info",
+        own / "commondir",
+        own / "gitdir",
+        own / "config.worktree",
+        common / "worktrees" / "other",
+    ]
+    assert set(expected) <= set(controls)
+    # Its own admin folder holds the index and HEAD its commits write.
+    assert own not in controls
+    assert claude_sandbox.git_control_paths(project, None) == []
+    rules = claude_sandbox.git_control_deny_rules([common / "hooks"])
+    assert rules == [f"Edit(/{common}/hooks)", f"Edit(/{common}/hooks/**)"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="Claude Code has no sandbox on Windows")
+async def test_a_sandboxed_worktree_turn_cant_write_the_shared_hooks_or_config(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(claude_sandbox, "unavailable_reason", lambda: None)
+    common = _repo_with_worktrees(tmp_path, "project")
+    seen = await _fake_claude_turn(
+        monkeypatch,
+        tmp_path,
+        {"readOnly": False, "claudeSandbox": True, "runId": "run"},
+        scratch=tmp_path / "data" / "rem-work" / "turn-scratch" / "run-1",
+    )
+    settings = json.loads(seen["argv"][seen["argv"].index("--settings") + 1])
+    files = settings["sandbox"]["filesystem"]
+    assert str(common) in files["allowWrite"]
+    for path in (common / "hooks", common / "config", common / "worktrees/project/gitdir"):
+        assert str(path) in files["denyWrite"]
+        assert f"Edit(/{path}/**)" in settings["permissions"]["deny"]

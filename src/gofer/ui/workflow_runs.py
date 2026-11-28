@@ -36,8 +36,9 @@ log = logging.getLogger(__name__)
 
 SUMMARY_DIRECTORY = "rattish-run-summaries"
 # 2 added each run's provider fallbacks. 3 keys each file by the run folder's real
-# path, so the run lists and the clean-up after each run share one file.
-SUMMARY_VERSION = 3
+# path, so the run lists and the clean-up after each run share one file. 4 names the
+# step that failed, and its exit code, in the error line.
+SUMMARY_VERSION = 4
 # The most provider switches a run summary keeps.
 MAX_FALLBACKS = 10
 DEFAULT_LIMIT = 100
@@ -119,11 +120,70 @@ def _id_time(run_id: str) -> datetime | None:
         return None
 
 
-def run_error_message(document: Mapping[str, Any]) -> str:
-    """A run record's error message, cut to the length the run lists show."""
+@dataclass(frozen=True, slots=True)
+class FailedStep:
+    """The step whose failure ended a run, its exit code when it had one, and its error."""
+
+    node_id: str
+    exit_code: int | None
+    message: str
+
+
+def failed_step(document: Mapping[str, Any]) -> FailedStep | None:
+    """The run's last failed step when that failure is why the run failed.
+
+    None for runs that didn't fail at a step, such as preflight and input failures,
+    and for usage-limit failures, whose own line says when the run can go on.
+    """
+    if document.get("status") != "failed":
+        return None
+    from gofer.rattish.trigger_service import usage_limit_failure
+
+    if usage_limit_failure(document) is not None:
+        return None
     error = document.get("error")
-    message = error.get("message") if isinstance(error, Mapping) else None
-    return str(message)[:300] if message else ""
+    run_message = str(error.get("message") or "") if isinstance(error, Mapping) else ""
+    for record in reversed(document.get("runs") or []):
+        if not isinstance(record, Mapping) or record.get("outcome") != "failure":
+            continue
+        step_error = record.get("error")
+        step_error = step_error if isinstance(step_error, Mapping) else {}
+        message = str(step_error.get("message") or "")
+        if run_message and message and message != run_message:
+            return None  # The run failed for another reason after this step's failure.
+        details = step_error.get("details")
+        output = record.get("output")
+        code = (details if isinstance(details, Mapping) else {}).get("exit_code")
+        if code is None and isinstance(output, Mapping):
+            code = output.get("exit_code")
+        valid = isinstance(code, int) and not isinstance(code, bool)
+        return FailedStep(str(record.get("node_id") or ""), code if valid else None, message)
+    return None
+
+
+def run_failure_line(document: Mapping[str, Any], *, limit: int | None = None) -> str:
+    """A run's error, led by the step that failed: 'Step build failed (exit 3): …'.
+
+    ``limit`` cuts the error text, never the step part. Runs that didn't fail at a
+    step get their error unchanged.
+    """
+    error = document.get("error")
+    message = str(error.get("message") or "") if isinstance(error, Mapping) else ""
+    step = failed_step(document)
+    if step is not None and step.node_id:
+        message = message or step.message
+    text = message[:limit] if limit is not None else message
+    if step is None or not step.node_id:
+        return text
+    lead = f"Step {step.node_id} failed" + (
+        f" (exit {step.exit_code})" if step.exit_code is not None else ""
+    )
+    return f"{lead}: {text}" if text else f"{lead}."
+
+
+def run_error_message(document: Mapping[str, Any]) -> str:
+    """A run record's error line, its error text cut to the length the run lists show."""
+    return run_failure_line(document, limit=300)
 
 
 def _summary_of(document: Mapping[str, Any]) -> dict[str, Any]:
@@ -161,6 +221,11 @@ def _summary_of(document: Mapping[str, Any]) -> dict[str, Any]:
         for switch in record.get("fallbacks") or []
         if isinstance(switch, Mapping)
     ]
+    step = failed_step(document)
+    if step is not None and step.node_id:
+        entry["failed_step"] = step.node_id
+        if step.exit_code is not None:
+            entry["exit_code"] = step.exit_code
     if fallbacks:
         entry["fallbacks"] = fallbacks[:MAX_FALLBACKS]
     for key in ("runner_pid", "runner_start"):

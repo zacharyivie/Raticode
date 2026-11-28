@@ -208,7 +208,7 @@ async function main() {
   await app.whenReady();
   const { createServer } = await import("vite");
   // A private optimizer cache keeps the running dev app's shared one untouched.
-  vite = await createServer({ root, logLevel: "error", cacheDir: testViteCacheDir("rem-home"), server: { host: "127.0.0.1", port: 0 }, plugins: [{
+  vite = await createServer({ configLoader: "runner", root, logLevel: "error", cacheDir: testViteCacheDir("rem-home"), server: { host: "127.0.0.1", port: 0 }, plugins: [{
     name: "rem-home-capture",
     resolveId(id) { if (id === "/rem-home-entry.jsx") return id; },
     load(id) { if (id === "/rem-home-entry.jsx") return entry; },

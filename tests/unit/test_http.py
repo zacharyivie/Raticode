@@ -149,8 +149,8 @@ def test_urllib_http_client_sends_request_and_maps_success_response(
     )
 
     assert response.status == 201
-    assert response.headers["Content-Type"] == "application/json"
-    assert response.headers["X-Gofer-Test"] == "success"
+    assert response.headers["content-type"] == "application/json"
+    assert response.headers["x-gofer-test"] == "success"
     assert response.body == b'{"ok": true}'
     assert calls == {
         "host": "127.0.0.1",
@@ -186,7 +186,7 @@ def test_urllib_http_client_maps_non_2xx_response_without_raising(
     )
 
     assert response.status == 418
-    assert response.headers["X-Error"] == "teapot"
+    assert response.headers["x-error"] == "teapot"
     assert response.body == b"request failed"
 
 
@@ -307,6 +307,22 @@ def _send_wire_response(
     return UrllibHttpClient()._send_sync(
         HttpRequest(method, "http://127.0.0.1/", network_allowlist=["127.0.0.1"])
     )
+
+
+def test_http_client_keeps_repeated_response_headers_by_lowercase_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = _send_wire_response(
+        monkeypatch,
+        b"HTTP/1.1 200 OK\r\nSet-Cookie: a=1\r\nset-cookie: b=2\r\nVia: one\r\n"
+        b"VIA: two\r\nContent-Length: 0\r\n\r\n",
+    )
+
+    assert response.headers == {
+        "set-cookie": "a=1\nb=2",
+        "via": "one, two",
+        "content-length": "0",
+    }
 
 
 def test_http_client_rejects_truncated_content_length(monkeypatch: pytest.MonkeyPatch) -> None:

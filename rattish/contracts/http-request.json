@@ -8,20 +8,22 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
-      "method": {"type": "string", "minLength": 1},
-      "url": {"type": "string", "minLength": 1},
-      "headers": {"type": "object", "additionalProperties": {"type": "string"}},
-      "params": {"type": "object", "additionalProperties": {"type": "string"}},
-      "json": {},
-      "body": {"type": ["string", "null"]},
-      "request_timeout": {"type": "string", "pattern": "^[1-9][0-9]*(?:ms|s|m|h|d)$"},
+      "method": {"description": "HTTP method.", "type": "string", "minLength": 1},
+      "url": {"description": "HTTP or HTTPS endpoint.", "type": "string", "minLength": 1},
+      "headers": {"description": "String HTTP headers.", "type": "object", "additionalProperties": {"type": "string"}},
+      "params": {"description": "String query parameters.", "type": "object", "additionalProperties": {"type": "string"}},
+      "json": {"description": "JSON request body; excludes authored body."},
+      "body": {"description": "Text request body.", "type": ["string", "null"]},
+      "request_timeout": {"description": "Per-request timeout.", "type": "string", "pattern": "^[1-9][0-9]*(?:ms|s|m|h|d)$"},
       "retry": {
+        "description": "Attempt count, backoff, and retry-on-statuses map.",
         "type": "object",
         "x-rattish-apply-property-defaults": true,
         "properties": {
-          "attempts": {"type": "integer", "minimum": 1, "default": 1},
-          "backoff": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)(?:ms|s|m|h|d)$", "default": "0s"},
+          "attempts": {"description": "Total attempts, including the first.", "type": "integer", "minimum": 1, "default": 1},
+          "backoff": {"description": "Wait between attempts.", "type": "string", "pattern": "^(?:0|[1-9][0-9]*)(?:ms|s|m|h|d)$", "default": "0s"},
           "retry_on_statuses": {
+            "description": "HTTP statuses that trigger another attempt.",
             "type": "array",
             "items": {"type": "integer", "minimum": 100, "maximum": 599},
             "uniqueItems": true,
@@ -31,19 +33,21 @@
         "additionalProperties": false
       },
       "expected_statuses": {
+        "description": "Accepted HTTP status codes.",
         "type": "array",
         "items": {"type": "integer", "minimum": 100, "maximum": 599},
         "minItems": 1,
         "uniqueItems": true
       },
       "response_mode": {
+        "description": "Response interpretation.",
         "type": "string",
         "enum": ["auto", "json", "text", "none"],
         "x-rattish-case-insensitive": true
       },
-      "output_mapping": {"type": "object", "additionalProperties": {"type": "string"}},
-      "secret_fields": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
-      "network_allowlist": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+      "output_mapping": {"description": "Named response selectors, such as json.id or headers.etag.", "type": "object", "additionalProperties": {"type": "string"}},
+      "secret_fields": {"description": "Request field redaction declarations.", "type": "array", "items": {"type": "string"}, "uniqueItems": true},
+      "network_allowlist": {"description": "Configured network destination constraints.", "type": "array", "items": {"type": "string"}, "uniqueItems": true}
     },
     "required": ["url"],
     "additionalProperties": false
@@ -80,7 +84,7 @@
       "type": "object",
       "properties": {
         "status": {"type": "integer"},
-        "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+        "headers": {"description": "Response headers by lowercase name. A repeated header's values are joined with a comma and a space, and Set-Cookie values with a line break.", "type": "object", "additionalProperties": {"type": "string"}},
         "body": {"type": "string"},
         "json": {},
         "value": {},

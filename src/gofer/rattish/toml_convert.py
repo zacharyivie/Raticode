@@ -226,7 +226,8 @@ def _relabel(conversion: TomlConversion, source_label: str) -> TomlConversion:
 
 
 def _quote_arg(value: str) -> str:
-    return value if re.fullmatch(r"[\w./~@:+-]+", value) else json.dumps(value)
+    # Without ensure_ascii a shell would get "\u00f1" instead of the letter.
+    return value if re.fullmatch(r"[\w./~@:+-]+", value) else json.dumps(value, ensure_ascii=False)
 
 
 class _Raw(str):

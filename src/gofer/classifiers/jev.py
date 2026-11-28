@@ -20,14 +20,19 @@ import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Literal
 
 import anyio
 
-from gofer.core.http import HttpClient, HttpRequest, HttpResponse, UrllibHttpClient
+from gofer.core.http import (
+    RETRY_AFTER_MAX_SECONDS,
+    HttpClient,
+    HttpRequest,
+    HttpResponse,
+    UrllibHttpClient,
+    retry_after_seconds,
+)
 
 JEV_API_BASE = "https://api.typesafe.ai/v1"
 JEV_ENDPOINT = f"{JEV_API_BASE}/systemone"
@@ -38,7 +43,7 @@ DEFAULT_JEV_THRESHOLD = 0.5
 REQUEST_TIMEOUT_SECONDS = 15.0
 MAX_IN_FLIGHT = 4
 MIN_COOLDOWN_SECONDS = 60.0
-MAX_COOLDOWN_SECONDS = 300.0
+MAX_COOLDOWN_SECONDS = RETRY_AFTER_MAX_SECONDS
 MAX_STATE_BYTES = 512 * 1024
 USAGE_PROVIDER = "jev"
 LONG_CONTEXT_HEADER = "TypeSafe-Danger-Zone-Long-Context"
@@ -248,23 +253,6 @@ def _tokens(payload: Any) -> tuple[int | None, int | None]:
         return value
 
     return count("input_tokens"), count("output_tokens")
-
-
-def retry_after_seconds(headers: Mapping[str, str], *, now: datetime | None = None) -> float | None:
-    """Seconds from a Retry-After header, given as seconds or an HTTP date."""
-    value = next((v for k, v in headers.items() if k.lower() == "retry-after"), None)
-    if value is None:
-        return None
-    value = value.strip()
-    if value.isdigit():
-        return float(value)
-    try:
-        when = parsedate_to_datetime(value)
-    except (TypeError, ValueError, IndexError):
-        return None
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=UTC)
-    return max(0.0, (when - (now or datetime.now(UTC))).total_seconds())
 
 
 def _rejection_fields(body: bytes) -> list[str]:

@@ -45,6 +45,11 @@ def python_license_declaration(dist) -> str:
     ).strip()
 
 
+# The extras scripts/build-backend-binary.cjs builds the backend with: their
+# packages ship in the app, so their notices must ship too.
+BUNDLED_EXTRAS = frozenset({"xlsx", "devices"})
+
+
 def verify_review(policy: dict, ecosystem: str, name: str, version: str, license: str) -> None:
     reviews = policy.get(ecosystem, {})
     expected = reviews.get(
@@ -88,7 +93,7 @@ def collect(output: Path) -> None:
     locked = {(re.sub(r"[-_.]+", "-", p["name"]).lower(), p["version"]) for p in lock_packages}
     required = set()
     pending = [
-        ("raticode", frozenset({"xlsx"})),
+        ("raticode", BUNDLED_EXTRAS),
         ("pyinstaller", frozenset()),
         ("pyinstaller-hooks-contrib", frozenset()),
     ]

@@ -601,7 +601,7 @@ def test_restore_stages_a_private_copy_before_moving_anything(
     order: list[str] = []
     real_replace = os.replace
 
-    def replace(src: Any, dst: Any) -> None:
+    def replace(src: Any, dst: Any, **kwargs: Any) -> None:
         source = Path(src)
         if backups.PARTIAL.fullmatch(source.name):
             assert mode(source) == 0o600 or sys.platform == "win32"
@@ -610,7 +610,7 @@ def test_restore_stages_a_private_copy_before_moving_anything(
         elif Path(dst).parent.parent == tmp_path / backups.FOLDER:
             assert (tmp_path / backups.FOLDER / backups.RESTORING).is_file()
             order.append(f"aside {source.name}")
-        real_replace(src, dst)
+        real_replace(src, dst, **kwargs)
 
     seen = disk_full_at(monkeypatch)
     monkeypatch.setattr(os, "replace", replace)
@@ -681,10 +681,10 @@ def test_a_failed_swap_puts_the_moved_files_back(
     before = damaged_with_wal(tmp_path)
     real_replace = os.replace
 
-    def replace(src: Any, dst: Any) -> None:
+    def replace(src: Any, dst: Any, **kwargs: Any) -> None:
         if backups.PARTIAL.fullmatch(Path(src).name):
             raise OSError(errno.EIO, "Input/output error")
-        real_replace(src, dst)
+        real_replace(src, dst, **kwargs)
 
     monkeypatch.setattr(os, "replace", replace)
     with pytest.raises(OSError):
@@ -870,7 +870,7 @@ class Stopped(BaseException):
 def _stop_at(monkeypatch: pytest.MonkeyPatch, point: str) -> None:
     real_replace = os.replace
 
-    def replace(src: Any, dst: Any) -> None:
+    def replace(src: Any, dst: Any, **kwargs: Any) -> None:
         source = Path(src)
         if point == "swap" and backups.PARTIAL.fullmatch(source.name):
             raise Stopped
@@ -879,7 +879,7 @@ def _stop_at(monkeypatch: pytest.MonkeyPatch, point: str) -> None:
                 raise Stopped
         if point == "notice" and Path(dst).name == backups.NOTICES:
             raise Stopped
-        real_replace(src, dst)
+        real_replace(src, dst, **kwargs)
 
     monkeypatch.setattr(os, "replace", replace)
 

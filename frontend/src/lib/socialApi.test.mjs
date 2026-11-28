@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  accountNotice, bulkApprovable, fillBlanks, foldText, slotLabel, templateBlanks, templateBody, templateDraft, timeTargets, charCounter, countChars, duplicateDraft, durationLabel, fromLocalInput, groupPosts, laneFor, lineDiff, linkParts,
+  accountNotice, bulkApprovable, fillBlanks, foldText, slotLabel, templateBlanks, templateBody, templateDraft, timeTargets, charCounter, countChars, duplicateDraft, durationLabel, fromLocalInput, groupPosts, laneFor, lineDiff, linkParts, undeletedCopies,
   normalizeDomain, optionLines, quickTimes, sourceLabel, timeZoneChoices, toLocalInput, variantActions, weekStrip, zonedInput, zonedToIso,
 } from "./socialApi.js";
 import {
@@ -21,6 +21,15 @@ test("posts land in the lane their state calls for", () => {
   for (const state of ["failed", "missed", "needs_attention", "partly_published"]) assert.equal(laneFor(post(state)), "problems");
   for (const variant of ["failed", "missed", "needs_reconnect", "outcome_unknown", "held"]) assert.equal(laneFor(post("scheduled", [{ state: variant }])), "problems");
   for (const state of ["declined", "cancelled", "expired"]) assert.equal(laneFor(post(state)), "closed");
+});
+
+test("a platform copy Raticode couldn't delete puts the post in Problems", () => {
+  const stuck = { platform_copies: [{ id: "copy-1", error: "Permissions error", waiting: true }] };
+  for (const state of ["cancelled", "scheduled", "declined", "published"]) assert.equal(laneFor(post(state, [{ state: "cancelled" }], stuck)), "problems");
+  // A copy not tried yet isn't a problem, and a post under review stays in review.
+  assert.equal(laneFor(post("cancelled", [], { platform_copies: [{ id: "copy-2", error: "" }] })), "closed");
+  assert.equal(laneFor(post("proposed", [], stuck)), "review");
+  assert.deepEqual(undeletedCopies(post("cancelled", [], { platform_copies: [...stuck.platform_copies, { id: "copy-2", error: "" }] })).map(c => c.id), ["copy-1"]);
 });
 
 test("grouping sorts scheduled posts by time and keeps closed ones apart", () => {

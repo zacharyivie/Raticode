@@ -99,6 +99,51 @@ Node record-success:
 
 Structured predicates such as `node.review.output.approved` need a successful producer with a compatible output schema. They don't read an agent's prose as a Boolean.
 
+### Conditions on untyped data
+
+Some values have no declared type, such as an `http-request` node's `json` or a member of an input declared only as an object. From 0.6.2, a condition on them compiles with any operator, and the values' JSON types decide when the route runs:
+
+```rattish
+Rattish: 1
+
+Workflow:
+  name: Sort an issue
+
+Node fetch:
+  type: http-request
+  method: get
+  url: https://example.com/issue
+  to:
+    - triage when node.fetch.output.json.labels contains "bug"
+    - archive when node.fetch.output.json.state == "closed"
+    - review otherwise
+
+Node triage:
+  type: write-file
+  path: reports/issue.txt
+  content: A bug to triage.
+  needs: fetch
+
+Node archive:
+  type: write-file
+  path: reports/issue.txt
+  content: Closed.
+  needs: fetch
+
+Node review:
+  type: write-file
+  path: reports/issue.txt
+  content: Needs a look.
+  needs: fetch
+```
+
+- `==` and `!=` never match values of different JSON types. `true` doesn't equal `1`, and `"10"` doesn't equal `10`. `10` equals `10.0`.
+- `<`, `<=`, `>` and `>=` need two numbers or two strings. `matches` needs two strings. `contains` looks for a string in a string or among an object's keys, and for any value in a list.
+- A missing value makes any comparison false. A null value makes `<`, `<=`, `>`, `>=`, `contains` and `matches` false. Either way `otherwise` can catch it.
+- Any other mix stops the run with `RATTISH_RUNTIME_PREDICATE_TYPE_MISMATCH`, such as `>` on the text `"10"`. The error names the node, the route target, the operator and both types. It never shows the values.
+
+When both sides have a declared type, the compiler still checks them, so `node.fetch.output.status == "200"` is a compile error (`RATTISH_PREDICATE_TYPE_MISMATCH`): `status` is a number. The same goes for `contains` with a declared string or object on the left and a declared non-string on the right, such as `node.fetch.output.body contains node.fetch.output.status` (from 0.6.2).
+
 ## Cycles and limits
 
 A route can loop back to an earlier node. Set a workflow or node `max-runs`, a timeout, or both, so a repair and review cycle can't repeat forever.

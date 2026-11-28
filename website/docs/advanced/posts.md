@@ -212,7 +212,7 @@ Under the accounts, **Publishing rules** apply to every post and save as you cha
 | **Scheduled** | Approved posts waiting for their time |
 | **Due now** | LinkedIn posts waiting for your **Publish** tap |
 | **Published** | Posts that went out, with links to them |
-| **Problems** | Posts that failed, were missed, need a reconnect, hit a cap or have an unknown result |
+| **Problems** | Posts that failed, were missed, need a reconnect, hit a cap or have an unknown result, and posts with a [Facebook or YouTube copy Raticode couldn't delete](#a-copy-that-couldn-t-be-deleted) |
 
 Each card shows a preview per account with a character count and a **see more** marker where the feed cuts the text, every link's full address, media, who proposed it and why, the pages it drew on, and warnings (see [Safety](#safety)). Notes about its time say when another post goes to the same account within 3 hours, or when it's set for midnight to 6 AM in its time zone. Rem's revisions show what changed since you last saw the post.
 
@@ -318,7 +318,7 @@ Limits on each source: 10 open proposals at a time and 20 a day. Rem's chat, all
 The publisher runs in the same background process as [workflow triggers](../workflows/triggers.md): the app's backend while Raticode is open, or `Raticode rattish triggers start` from the login entry when it's closed. Only one process owns it at a time, so a post can't go out twice. It runs no AI model and sends the approved bytes as they are.
 
 - **Late window.** A post sent after its time says so. Past the late window (2 hours by default, set in **Posts > Accounts > Publishing rules** or per post), it becomes **missed** and waits for you instead of going out days late.
-- **Computer off.** Nothing local runs. A Facebook post scheduled more than about 11 minutes ahead, and a YouTube video scheduled at least 15 minutes ahead, is handed to that platform's own scheduler right after you approve, so it goes out with the computer off. **Cancel** deletes the held copy.
+- **Computer off.** Nothing local runs. A Facebook post scheduled more than about 11 minutes ahead, and a YouTube video scheduled at least 15 minutes ahead, is handed to that platform's own scheduler right after you approve, so it goes out with the computer off. **Cancel**, or an edit, deletes the held copy. If that delete fails, see [A copy that couldn't be deleted](#a-copy-that-couldn-t-be-deleted).
 - **Not approved in time.** A proposal still waiting when its time and its late window have both passed becomes **expired**.
 - **Pause all publishing** (top of Posts, or **Pause everything** in Publishing rules). Stops every scheduled send and every due prompt. Times that pass while paused are skipped, not caught up. Two things still go out: an account's post you send yourself with **Publish** or **Publish now**, and Facebook posts or YouTube videos already handed to that platform's own scheduler (cancel those to stop them).
 
@@ -344,6 +344,20 @@ A post's accounts are independent: a LinkedIn variant waiting for you doesn't ho
 | No answer after sending | **Result unknown.** Raticode never sends it again by itself, because that could post twice. Check the platform, then choose **It posted** (paste the link) or **Send again**. |
 | A cap or LinkedIn's daily limit | **Held at a cap** until you choose **Publish now** or **Edit or change time**. Caps count a rolling 24 hours and 30 days, so **Publish now** holds again until the window has room. LinkedIn's limit resets at midnight UTC. |
 | A deleted Discord webhook | The account is turned off. Add a new webhook to post again. |
+| Raticode hits an error of its own with one post | The post's copies still waiting to be sent say "Raticode hit an error with this post (the error's name) and will try again." You get one notification, and Raticode tries the post again on each pass while your other posts keep going. A copy it was sending right then is left alone, so it can still show **Result unknown**, and copies already in **Problems** keep their own message. If cancelling a copy Facebook or YouTube holds hits an error like this, Raticode keeps that copy on its list and tries to cancel it again. |
+| A Facebook or YouTube copy couldn't be deleted after you edited or cancelled the post | The post moves to **Problems** with the platform's message and a link to the copy. Network, server and rate limit errors are tried again after 1, 5, 15 and 60 minutes, then hourly. A refusal, a login problem or a removed account stops until you choose **Try again** or **I deleted it**. An edited post doesn't go to that account until the old copy is gone, so two copies can't go out. See [below](#a-copy-that-couldn-t-be-deleted). |
+
+### A copy that couldn't be deleted
+
+A Facebook post or YouTube video handed to the platform's scheduler is a copy the platform holds. When you cancel the post, or edit it so it needs a new approval, Raticode asks the platform to delete that copy. If the platform says no, the copy could still go out at its time, so the post's card in **Problems** shows it:
+
+- **An earlier copy on Facebook Page wasn't deleted** (or YouTube), with the account and the platform's own message, such as a permissions error.
+- When Raticode tries next, or **Raticode stopped trying** when the error won't fix itself: the platform refused, the login stopped working (the account also shows **Needs reconnect**), or the account was removed in Raticode.
+- **View the copy** opens it on the platform.
+- **Try again** asks the platform to delete it on the next pass, about 15 seconds later. Use it after reconnecting the account or fixing the permission.
+- **I deleted it**: delete the copy on the platform yourself first, then choose this. Raticode forgets the copy and stops trying.
+
+While an edited post's old copy is still waiting, the new version isn't handed to that account, so only one of them can go out. Once the old copy is deleted, by Raticode or by you, the new version goes ahead at its time. If its time and late window pass first, it becomes **missed**. Every attempt and choice is in the post's activity log.
 
 ## Safety
 

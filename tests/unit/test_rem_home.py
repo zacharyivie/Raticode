@@ -3759,11 +3759,12 @@ def test_each_model_call_in_a_reply_starts_its_shown_draft_over(home: RemHome):
 
 def test_a_failed_reply_keeps_the_decision_that_failed_for_tracing(home: RemHome):
     bad = {
-        "reply": "I’ll update it.",
-        "controls": [{"task_id": "made-up", "action": "follow_up", "message": "Go"}],
+        "reply": "I’ll start them.",
+        # A new task can't wait for one listed after it, so the reply fails.
+        "tasks": [recipe(title="First", after=["new:1"]), recipe(title="Second")],
     }
     home.generate = lambda *args: bad
-    home.submit_message({"request_id": "trace", "body": "Update the task"})
+    home.submit_message({"request_id": "trace", "body": "Start both"})
     home._reply()
     shown = next(m for m in home.store.conversation()["messages"] if m["id"] == "reply-trace")
     assert shown["body"].startswith("I couldn’t finish that request")
@@ -3772,7 +3773,7 @@ def test_a_failed_reply_keeps_the_decision_that_failed_for_tracing(home: RemHome
     with home.store.read() as db:
         row = db.execute("SELECT body FROM messages WHERE id='reply-trace'").fetchone()
     reply = json.loads(row[0])
-    assert reply["diagnostic"]["error"].startswith("UnusableControl: ")
+    assert reply["diagnostic"]["error"].startswith("ValueError: ")
     assert json.loads(reply["diagnostic"]["decision"]) == bad
 
 
@@ -4457,6 +4458,68 @@ def test_transient_review_failure_retries_review_without_repeating_work(
     assert (workers, reviews) == (1, 2)
 
 
+def test_busy_chat_turns_never_block_a_rem_task(home: RemHome, tmp_path: Path):
+    """Eight chat turns used to fill the turns Rem's tasks shared, and the next task's
+    turn was refused with "Too many active Rem turns" and blocked (2026-11-27)."""
+    release = threading.Event()
+    try:
+        for index in range(home.jobs.max_active):
+            home.jobs.start(f"chat-{index}", "turn", lambda emit: release.wait(10))
+        task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+        run = wait_run(home, task["id"], {"blocked", "succeeded"})
+    finally:
+        release.set()
+    assert run["state"] == "succeeded", run
+
+
+def test_a_run_with_no_room_for_its_turn_waits_in_the_queue_instead_of_blocking(
+    home: RemHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import gofer.ui.rem_home as rem_home_module
+    from gofer.ui.chat_jobs import TASK_POOL
+
+    monkeypatch.setattr(rem_home_module, "TURN_ROOM_RETRY_SECONDS", 0.2)
+    # As when the worker limit was lowered below the turns Rem's tasks already hold.
+    monkeypatch.setattr(home, "_admission", lambda: 1)
+    release = threading.Event()
+    home.jobs.start("other-task", "turn", lambda emit: release.wait(10), pool=TASK_POOL, limit=1)
+    try:
+        task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+        deadline = time.monotonic() + 5
+        while True:
+            home.tick()
+            with home.store.read() as db:
+                run = home.store.get(db, "runs", task["active_run"]["id"])
+            assert run["state"] != "blocked", run
+            if run["state"] == "queued" and run.get("waiting_reason") == (
+                rem_home_module.TURN_ROOM_WAIT
+            ):
+                break
+            assert time.monotonic() < deadline, run
+            time.sleep(0.01)
+        # Nothing reached the thread or counted as a provider retry.
+        assert not run.get("transient_retries")
+        assert not run.get("active_turn_id")
+        assert home.store.thread(run["thread_id"])["messages"] == []
+    finally:
+        release.set()
+    run = wait_run(home, task["id"], {"blocked", "succeeded"})
+    assert run["state"] == "succeeded", run
+
+
+def test_blocked_runs_hold_no_self_work_thread_and_runs_waiting_for_room_do():
+    from gofer.ui.rem_home import TURN_ROOM_WAIT
+    from gofer.ui.rem_self_work import _holds_thread
+
+    clock = datetime.now(UTC)
+    soon = (clock + timedelta(seconds=15)).isoformat()
+    assert not _holds_thread({"state": "blocked"}, clock)
+    # It starts again in seconds, so its project's share still counts it.
+    assert _holds_thread(
+        {"state": "queued", "not_before": soon, "waiting_reason": TURN_ROOM_WAIT}, clock
+    )
+
+
 def test_persistent_provider_outage_blocks_after_bounded_retries(
     home: RemHome, tmp_path: Path, instant_retries: None
 ):
@@ -4715,7 +4778,52 @@ def test_conversation_asks_again_when_decision_is_not_json(home: RemHome):
     home._reply()
     assert len(prompts) == 2
     assert "not the requested JSON object" in prompts[1]
+    # The model sees what it sent, so it only has to put that answer into the object.
+    assert json.dumps("I'll look into that report first.") in prompts[1]
     assert home.store.conversation()["messages"][-1]["body"] == "Started the fixes."
+
+
+def test_a_reply_still_in_prose_after_asking_again_is_shown_as_its_answer(home: RemHome):
+    """2026-11-27: two prose replies to "has self-work been 50/50?" became an error."""
+    answer = (
+        "Roughly yes. Self-work finished 14 ticket runs for auto-day-trading and 11 "
+        "for Raticode since 15:10, so the split is close to the 50/50 you set."
+    )
+    prompts: list[str] = []
+
+    def generate(prompt, config, cancel):
+        prompts.append(prompt)
+        raise MalformedDecision(answer if len(prompts) == 2 else "Let me look at the runs.")
+
+    home.generate = generate
+    home.submit_message({"request_id": "split", "body": "Has self-work been 50/50?"})
+    home._reply()
+    assert len(prompts) == 2
+    assert json.dumps("Let me look at the runs.") in prompts[1]
+    conversation = home.store.conversation()
+    reply = conversation["messages"][-1]
+    assert reply["id"] == "reply-split"
+    assert reply["body"].startswith(answer)
+    assert reply["body"].endswith("I didn't start or change anything with this reply.")
+    assert "couldn’t read my own reply" not in reply["body"] and not reply.get("diagnostic")
+    assert not home.store.tasks()
+    assert conversation["conversation"]["turn_state"] == "idle"
+    assert conversation["conversation"]["processed"] == "split"
+
+
+def test_a_long_prose_reply_keeps_its_note_and_opens_the_rest_in_details(home: RemHome):
+    answer = ("This sentence explains one part of the self-work split. " * 120).strip()
+
+    def generate(prompt, config, cancel):
+        raise MalformedDecision(answer)
+
+    home.generate = generate
+    home.submit_message({"request_id": "long", "body": "Explain the split."})
+    home._reply()
+    reply = home.store.conversation()["messages"][-1]
+    assert len(reply["body"]) <= 4000
+    assert reply["body"].endswith("I didn't start or change anything with this reply.")
+    assert reply["details"] and answer.endswith(reply["details"][-40:])
 
 
 def test_unreadable_decision_explains_itself_without_parser_errors(home: RemHome):
@@ -4734,7 +4842,19 @@ def test_unreadable_decision_explains_itself_without_parser_errors(home: RemHome
     assert home.store.conversation()["conversation"]["turn_state"] == "idle"
     error = home.store.conversation()["messages"][-1]["body"]
     assert "Expecting value" not in error and "char 0" not in error
-    assert "couldn’t read my own reply" in error and "didn’t change anything" in error
+    assert "came back empty" in error and "didn’t change anything" in error
+
+
+def test_a_cut_off_decision_without_a_reply_still_explains_itself(home: RemHome):
+    def generate(prompt, config, cancel):
+        raise MalformedDecision('{"tasks": [{"title": "Fix the')
+
+    home.generate = generate
+    home.submit_message({"request_id": "cut", "body": "Fix it."})
+    home._reply()
+    error = home.store.conversation()["messages"][-1]["body"]
+    assert "stopped part way through" in error and "didn’t change anything" in error
+    assert '"tasks"' not in error
 
 
 def test_a_retried_reply_is_logged_as_routine_and_never_quoted(home: RemHome, caplog):
@@ -4769,7 +4889,7 @@ def test_failed_requests_reach_the_app_log_at_the_right_level(home: RemHome, cap
     caplog.set_level(logging.DEBUG, logger="gofer")
 
     def unreadable(prompt, config, cancel):
-        raise MalformedDecision("still chatting, private words")
+        raise MalformedDecision('{"tasks": ["still chatting, private words"')
 
     home.generate = unreadable
     home.submit_message({"request_id": "garbled", "body": "private words"})
@@ -4919,7 +5039,9 @@ def test_active_turns_are_not_idle(home: RemHome, tmp_path: Path, monkeypatch: p
     assert thoughts == [f"Working {index}" for index in range(8)]
 
 
-def test_decision_effects_commit_together_or_not_at_all(home: RemHome, tmp_path: Path):
+def test_a_control_that_fails_is_left_out_and_the_rest_of_the_decision_applies(
+    home: RemHome, tmp_path: Path
+):
     first = home.create_task({"request_id": "first", **recipe(tmp_path)})["task"]
     second = home.create_task(
         {"request_id": "second", **recipe(tmp_path / "other", title="Other")}
@@ -4937,7 +5059,34 @@ def test_decision_effects_commit_together_or_not_at_all(home: RemHome, tmp_path:
     home.submit_message({"request_id": "both", "body": "Stop one and recheck the other"})
     home._reply()
     tasks = {t["id"]: t for t in home.store.tasks()}
-    assert len(tasks) == 2
+    assert len(tasks) == 3
+    assert tasks[first["id"]]["active_run"]["state"] != "queued"
+    with home.store.read() as db:
+        assert home.store.setting(db, "memories")
+    reply = next(m for m in home.store.conversation()["messages"] if m["body"].startswith("Done"))
+    assert (
+        "I couldn't apply one task change, so I left it out: the review retry of “Other”: "
+        "This run does not have an interrupted review to retry."
+    ) in reply["body"]
+    assert home.store.conversation()["conversation"]["turn_state"] == "idle"
+
+
+def test_decision_effects_commit_together_or_not_at_all(home: RemHome, tmp_path: Path):
+    first = home.create_task({"request_id": "first", **recipe(tmp_path)})["task"]
+    home.generate = lambda p, c, e: {
+        "reply": "Done.",
+        "controls": [{"task_id": first["id"], "action": "cancel"}],
+        # A new task can't wait for one listed after it, so starting the tasks fails.
+        "tasks": [
+            recipe(tmp_path, title="Brand new", after=["new:1"]),
+            recipe(tmp_path, title="Later"),
+        ],
+        "memories": ["Prefers short replies"],
+    }
+    home.submit_message({"request_id": "both", "body": "Stop one and start two"})
+    home._reply()
+    tasks = {t["id"]: t for t in home.store.tasks()}
+    assert len(tasks) == 1
     assert tasks[first["id"]]["active_run"]["state"] == "queued"
     with home.store.read() as db:
         assert home.store.setting(db, "memories") == {}
@@ -5004,7 +5153,7 @@ def test_unknown_run_states_are_rejected(home: RemHome, tmp_path: Path):
 
 
 def test_retitled_duplicate_proposal_continues_the_existing_task(home: RemHome, tmp_path: Path):
-    from gofer.ui.rem_home import title_key
+    from gofer.ui.rem_reply_effects import title_key
 
     assert title_key("Fix  Theo’s digest!") == title_key("fix theo's digest")
     task = home.create_task(
@@ -5405,20 +5554,22 @@ def test_waiting_or_running_tests_keep_a_quiet_turn_alive(
     import gofer.ui.rem_home as rem_home_module
     from gofer.core.command_slots import activity_path, heartbeat, slots_root
 
-    monkeypatch.setattr(rem_home_module, "TURN_IDLE_SECONDS", 0.3)
+    # The idle window leaves a busy machine time to start each turn and finish it
+    # after its last event; the worker's silence is still more than twice as long.
+    monkeypatch.setattr(rem_home_module, "TURN_IDLE_SECONDS", 1.0)
     monkeypatch.setattr("gofer.core.command_slots.HEARTBEAT_SECONDS", 0.05)
     original = home.source
 
     async def source(**kwargs):
-        if "independent read-only reviewer" not in kwargs["agent_instructions"]:
-            # A gated command reports progress through the turn's activity file,
-            # never through provider events.
-            path = activity_path(slots_root(home.data_dir), kwargs["workflow"]["chatThreadId"])
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with heartbeat(str(path)):
-                await asyncio.sleep(1)
-        async for event in original(**kwargs):
-            yield event
+        # A gated command reports progress through the turn's activity file,
+        # never through provider events.
+        path = activity_path(slots_root(home.data_dir), kwargs["workflow"]["chatThreadId"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with heartbeat(str(path)):
+            if "independent read-only reviewer" not in kwargs["agent_instructions"]:
+                await asyncio.sleep(2.5)
+            async for event in original(**kwargs):
+                yield event
 
     home.source = source
     task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
@@ -5448,7 +5599,8 @@ def test_reply_keeps_details_follow_ups_and_timing(home: RemHome):
     home.generate = generate
     home.submit_message({"request_id": "rich-reply", "body": "Which option?"})
     home._reply()
-    assert seen[0]["turn_label"] == "Reading your message"
+    # The request and its records are read before the model is asked.
+    assert seen[0]["turn_label"] == "Thinking about your message"
     assert seen[1]["turn_label"] == "Reading earlier messages"
     assert seen[2]["draft_reply"] == "Short ans"
     reply = next(m for m in home.store.conversation()["messages"] if m["id"] == "reply-rich-reply")

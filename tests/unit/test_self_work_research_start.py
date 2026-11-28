@@ -234,7 +234,8 @@ def test_a_report_from_before_commits_were_recorded_starts_from_its_date():
 # Text only Rem's recorded call carries; the sizes file must never hold it.
 PROMPT_TEXT = "PRIVATE-BOARD-TEXT "
 RULES_TEXT = "PRIVATE-RULES-TEXT "
-USAGE_FILE = re.compile(r"file (\S+context-usage\.json) \(JSON\)")
+# The path may hold spaces, so the match runs from "the file " to the name.
+USAGE_FILE = re.compile(r"the file (.+?context-usage\.json) \(JSON\)")
 
 
 @pytest.mark.parametrize("provider", ["codex", "claude_code"])

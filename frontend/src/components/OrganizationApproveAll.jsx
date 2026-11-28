@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, CheckCheck, Clock, ShieldCheck, X } from "lucide-react";
 import { APPROVE_RESULT, approvalOrder, approveAllSummary, plural } from "../lib/organizations.js";
+import { dateTime } from "../lib/timeText.js";
 import "./OrganizationApproveAll.css";
 
 const ICONS = { approved: Check, failed: X, skipped: Clock };
@@ -50,7 +51,7 @@ export default function ApproveAllRequests({ requests, busy, onApprove, buttonCl
     onKeyDown={event => { if (event.key === "Escape" && !running) { event.preventDefault(); event.stopPropagation(); setList(null); } }}>
     <p className="org-approve-all-head" id="org-approve-all-title"><ShieldCheck size={15} aria-hidden="true" /><strong>Approve these {plural(list.length, "request")} from Rem?</strong></p>
     <ol className="org-approve-all-list">{list.map(request => <li key={request.id}>
-      <span><span className="org-approve-all-summary">{request.summary}</span><small>Asked {new Date(request.at).toLocaleString()}</small></span>
+      <span><span className="org-approve-all-summary">{request.summary}</span><small>Asked {dateTime(request.at)}</small></span>
     </li>)}</ol>
     <p className="org-approve-all-note">They apply in this order: changes first, starting the organization last. A change made for an older version of the organization is left waiting instead of undoing newer changes. Requests that arrive after you opened this list aren&apos;t included.</p>
     {newer > 0 && <p className="org-approve-all-note" role="status">{plural(newer, "newer request")} arrived and {newer === 1 ? "isn't" : "aren't"} in this list.</p>}

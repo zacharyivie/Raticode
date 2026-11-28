@@ -10,6 +10,7 @@ import pytest
 from gofer.ui.chat import ChatProviderError, build_chat_prompt
 from gofer.ui.chat_sessions import with_chat_session
 from gofer.ui.report_theme_generation import generate_report_theme, validate_theme_draft
+from gofer.ui.report_themes import REPORT_THEME_PROMPTS, SCREEN_RULES, report_theme_rules
 from gofer.ui.second_brain import SecondBrain, with_second_brain
 
 
@@ -87,6 +88,8 @@ async def test_theme_generation_uses_selection_and_isolated_screenshot(
         assert kwargs["effort"] == "high"
         assert kwargs["workflow"]["remResources"] == {"shell": False, "web": False, "agents": False}
         assert "remSecondBrain" not in kwargs["workflow"]
+        # A generated theme and its demo are held to the same phone rules as reports.
+        assert SCREEN_RULES in kwargs["messages"][0]["body"]
         attachment = kwargs["messages"][0]["attachments"][0]
         assert (
             kwargs["data_dir"] / "chat-attachments/theme-preview" / attachment["storageName"]
@@ -341,3 +344,56 @@ def test_theme_file_is_refused_when_its_contents_do_not_match_its_name(
 
     with pytest.raises(ValueError, match="changed after Raticode wrote it"):
         read_theme_file(theme_file)
+
+
+# A custom theme of the kind that made the 2026-11-27 report unreadable on a phone: it
+# places the title card over the hero art and letter-spaces every heading.
+SYNTHWAVE = (
+    "Neon Horizon Synthwave: void #0B0620. Place the title in a see-through dark card over "
+    "the hero. Display font uppercase with letter-spacing .06-.12em."
+)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        *({"format": "html", "theme": name} for name in REPORT_THEME_PROMPTS),
+        {"format": "html", "theme": "custom-synthwave", "instructions": SYNTHWAVE},
+        {"format": "slides", "theme": "custom-synthwave", "instructions": SYNTHWAVE},
+        {"format": "html", "enabled": False},
+    ],
+)
+def test_every_theme_carries_the_phone_screen_rules(config: dict[str, Any]) -> None:
+    rules = report_theme_rules(config)
+    assert SCREEN_RULES in rules
+    # The screen rules come last, so they win over a custom design direction.
+    assert rules.endswith(SCREEN_RULES)
+    for rule in (
+        'name="viewport"',
+        "color-scheme: dark",
+        "Give html a solid background-color",
+        "put any page gradient on body",
+        "below 760px put the title and its kicker in normal flow after the art",
+        "negative margins",
+        "letter-spacing at .04em or less",
+        "overflow-wrap: anywhere",
+        "200%",
+        "4.5:1",
+        "navigation bar",
+    ):
+        assert rule in SCREEN_RULES
+
+
+def test_markdown_reports_without_a_theme_skip_the_screen_rules() -> None:
+    assert SCREEN_RULES not in report_theme_rules({"format": "md", "enabled": False})
+
+
+def test_reaches_the_turn_prompt_with_a_custom_theme() -> None:
+    prompt = build_chat_prompt(
+        "codex",
+        "cli-default",
+        [],
+        {"remReportTheme": {"theme": "custom-synthwave", "instructions": SYNTHWAVE}},
+    )
+    assert SYNTHWAVE in prompt
+    assert SCREEN_RULES in prompt

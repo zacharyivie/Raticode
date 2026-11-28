@@ -13,10 +13,11 @@ to 1 MiB. A run whose values don't fit saves none of them, and its record says w
 so Resume and Run again explain instead of starting with partial values.
 
 The file goes when its run goes: ``delete_run_files`` removes the record, its stop
-marker, this file and the run's file input copies (``file_inputs``) together, and
-every place here that deletes a Rattish run calls it. Each run also ends by sweeping
-values whose record is gone (``remove_orphaned_values``), so a run deleted some other
-way, such as by hand or by an older clean-up, doesn't leave its inputs behind.
+marker, its journal (``run_journal``), this file and the run's file input copies
+(``file_inputs``) together, and every place here that deletes a Rattish run calls
+it. Each run also ends by sweeping values whose record is gone
+(``remove_orphaned_values``), so a run deleted some other way, such as by hand or by
+an older clean-up, doesn't leave its inputs behind.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from gofer.rattish.contracts import canonical_json_bytes
+from gofer.rattish.run_journal import JOURNAL_SUFFIX
 from gofer.utils.atomic_output import atomic_binary_output, unlink_without_links
 
 SAVED_VALUES_VERSION = 1
@@ -89,6 +91,24 @@ def _size(value: Any) -> int:
     return len(canonical_json_bytes(value))
 
 
+def trigger_events_refusal(events: Collection[Mapping[str, Any]]) -> str:
+    """Why these trigger events are too many or too large to save, or "" when they fit.
+
+    Raises ``TypeError``, ``ValueError``, ``UnicodeError`` or ``RecursionError`` for
+    events that aren't JSON.
+    """
+    if len(events) > MAX_SAVED_EVENTS:
+        return (
+            f"It was started by {len(events)} trigger events, more than the "
+            f"{MAX_SAVED_EVENTS} Raticode saves."
+        )
+    if any(_size(event.get("payload")) > MAX_EVENT_PAYLOAD_BYTES for event in events) or (
+        _size(list(events)) > MAX_SAVED_EVENTS_BYTES
+    ):
+        return "Its trigger event is larger than 1 MiB, so it wasn't saved."
+    return ""
+
+
 def plan_saved_values(
     ir: Mapping[str, Any],
     supplied_inputs: Mapping[str, Any],
@@ -115,15 +135,8 @@ def plan_saved_values(
     try:
         if _size(kept) > MAX_SAVED_INPUTS_BYTES:
             reason = "Its input values are larger than 1 MiB, so they weren't saved."
-        elif len(events) > MAX_SAVED_EVENTS:
-            reason = (
-                f"It was started by {len(events)} trigger events, more than the "
-                f"{MAX_SAVED_EVENTS} Raticode saves."
-            )
-        elif any(_size(event.get("payload")) > MAX_EVENT_PAYLOAD_BYTES for event in events) or (
-            _size(events) > MAX_SAVED_EVENTS_BYTES
-        ):
-            reason = "Its trigger event is larger than 1 MiB, so it wasn't saved."
+        else:
+            reason = trigger_events_refusal(events)
     except (TypeError, ValueError, UnicodeError, RecursionError):
         reason = "Its values can't be saved as JSON."
     if reason:
@@ -254,7 +267,7 @@ def merge_withheld_inputs(
 
 
 def delete_run_files(record: Path) -> None:
-    """Delete a run: its record, stop marker, saved values and file input copies.
+    """Delete a run: its record, stop marker, journal, saved values and file input copies.
 
     Missing files are fine.
     """
@@ -265,6 +278,7 @@ def delete_run_files(record: Path) -> None:
     for path in (
         folder / record.name,
         folder / f"{record.stem}.stop",
+        folder / f"{record.stem}{JOURNAL_SUFFIX}",
         folder / f"{record.stem}{SAVED_VALUES_SUFFIX}",
     ):
         try:

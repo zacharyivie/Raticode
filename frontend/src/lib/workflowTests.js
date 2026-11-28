@@ -143,7 +143,7 @@ export const SHELL_CHOICES = [
 ];
 
 // One check as editable strings. Values that are JSON stay text until save.
-export function draftFromCheck(check = { type: "text", target: "outputs", contains: "" }) {
+function draftFromCheck(check = { type: "text", target: "outputs", contains: "" }) {
   const draft = {
     type: check.type,
     label: check.label ?? "",

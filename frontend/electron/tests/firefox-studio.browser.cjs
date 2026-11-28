@@ -13,6 +13,8 @@ const { checkSlowFramePage, createSlowFramePages } = require("./slow-frame-page.
 const { findFirefox } = require("../firefox-engine.cjs");
 const { writePrefs } = require("../firefox-profile.cjs");
 const { zip } = require("./zip-fixture.cjs");
+const { waitFor } = require("./test-wait.cjs");
+const WAIT = { timeout: 20_000, interval: 100 };
 
 if (!findFirefox()) {
   console.log("Firefox is not installed; skipping the Firefox studio test.");
@@ -67,16 +69,6 @@ const site = http.createServer((request, response) => {
   </body>`);
 });
 
-async function waitFor(check, message, timeout = 20000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const value = await check();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(message);
-}
-
 function firefoxPids() {
   if (process.platform !== "linux") return [];
   return fs.readdirSync("/proc").filter((entry) => /^\d+$/.test(entry)).filter((pid) => {
@@ -93,28 +85,28 @@ async function run() {
   const window = await created;
   await new Promise((resolve) => window.webContents.once("did-finish-load", resolve));
   const page = (code) => window.webContents.executeJavaScript(code);
-  await waitFor(() => page("document.querySelector('#root')?.children.length > 0"), "Studio did not render");
+  await waitFor(() => page("document.querySelector('#root')?.children.length > 0"), "Studio did not render", WAIT);
 
   // Choose Firefox in Settings > Browser, as the user would.
   await page("document.querySelector('[aria-label=\"Open settings\"]').click()");
-  await waitFor(() => page("Boolean(document.querySelector('nav[aria-label=\"Settings categories\"]'))"), "Settings did not open");
+  await waitFor(() => page("Boolean(document.querySelector('nav[aria-label=\"Settings categories\"]'))"), "Settings did not open", WAIT);
   await page("[...document.querySelectorAll('nav[aria-label=\"Settings categories\"] button')].find((item) => item.textContent.trim() === 'Browser').click()");
-  await waitFor(() => page("Boolean(document.querySelector('select[aria-label=\"Default browser for new tabs\"]'))"), "The web browser setting is missing");
-  await waitFor(() => page("/Firefox found at/.test(document.body.innerText)"), "Settings did not report the installed Firefox");
+  await waitFor(() => page("Boolean(document.querySelector('select[aria-label=\"Default browser for new tabs\"]'))"), "The web browser setting is missing", WAIT);
+  await waitFor(() => page("/Firefox found at/.test(document.body.innerText)"), "Settings did not report the installed Firefox", WAIT);
   await page(`(() => {
     const select = document.querySelector('select[aria-label="Default browser for new tabs"]');
     Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(select, "firefox");
     select.dispatchEvent(new Event("change", { bubbles: true }));
   })()`);
-  await waitFor(async () => JSON.parse(await page("localStorage.getItem('raticode.settings.v1')") || "{}").browser?.engine === "firefox", "The choice was not saved");
+  await waitFor(async () => JSON.parse(await page("localStorage.getItem('raticode.settings.v1')") || "{}").browser?.engine === "firefox", "The choice was not saved", WAIT);
 
   // Firefox's own settings, extensions and importing appear with Firefox chosen.
   // Raticode's confirmation dialogs answer "OK"; nobody can click them on a hidden display.
   const { dialog } = require("electron");
   const confirmations = [];
   dialog.showMessageBox = async (...args) => { confirmations.push(args.at(-1)); return { response: 0 }; };
-  await waitFor(() => page("Boolean(document.querySelector('[data-testid=\"firefox-settings\"]'))"), "The Firefox section did not appear");
-  await waitFor(() => page("Boolean(document.getElementById('firefox-pref-font-size-variable-x-western'))"), "Firefox settings did not load");
+  await waitFor(() => page("Boolean(document.querySelector('[data-testid=\"firefox-settings\"]'))"), "The Firefox section did not appear", WAIT);
+  await waitFor(() => page("Boolean(document.getElementById('firefox-pref-font-size-variable-x-western'))"), "Firefox settings did not load", WAIT);
   await page(`(() => {
     const input = document.getElementById("firefox-pref-font-size-variable-x-western");
     input.focus();
@@ -126,34 +118,34 @@ async function run() {
     const data = await page("window.goferBrowser.library('firefox-settings')");
     const font = data.settings.find((item) => item.pref === "font.size.variable.x-western");
     return font.value === 19 && font.source === "raticode";
-  }, "The Firefox font size setting was not saved");
+  }, "The Firefox font size setting was not saved", WAIT);
   const tab = (name) => page(`[...document.querySelectorAll('[data-testid="firefox-settings"] [role=tab]')].find((item) => item.textContent === ${JSON.stringify(name)}).click()`);
   const press = (label) => page(`[...document.querySelectorAll('[data-testid="firefox-settings"] button')].find((item) => item.textContent.trim() === ${JSON.stringify(label)}).click()`);
   await tab("Import");
   await press("Find my Firefox profiles");
-  await waitFor(() => page("Boolean(document.querySelector('input[name=\"firefox-profile\"]'))"), "The everyday profile was not found");
+  await waitFor(() => page("Boolean(document.querySelector('input[name=\"firefox-profile\"]'))"), "The everyday profile was not found", WAIT);
   await page("document.querySelector('input[name=\"firefox-profile\"]').click()");
-  await waitFor(() => page("/Bookmarks and history/.test(document.querySelector('[aria-label=\"What to import\"]')?.innerText || '')"), "The profile's contents were not listed");
+  await waitFor(() => page("/Bookmarks and history/.test(document.querySelector('[aria-label=\"What to import\"]')?.innerText || '')"), "The profile's contents were not listed", WAIT);
   await page("[...document.querySelectorAll('[aria-label=\"What to import\"] button')].find((item) => item.textContent.trim() === 'Import').click()");
-  await waitFor(() => page("/Import finished/.test(document.querySelector('[data-testid=\"firefox-settings\"]').innerText)"), "The import did not finish", 60000)
+  await waitFor(() => page("/Import finished/.test(document.querySelector('[data-testid=\"firefox-settings\"]').innerText)"), "The import did not finish", { ...WAIT, timeout: 60000 })
     .catch(async (error) => { throw new Error(`${error.message}: ${await page("document.querySelector('[data-testid=\"firefox-settings\"]').innerText")}`); });
   const report = await page("document.querySelector('[data-testid=\"firefox-settings\"]').innerText");
   assert.match(report, /Blocker wasn’t added: it is not signed by Mozilla/, report);
   assert.ok(confirmations.some((options) => /only reads that profile/.test(options.detail)), "The import was not confirmed first");
   assert.equal(fs.readFileSync(path.join(everyday, "prefs.js"), "utf8").includes("person@example.com"), true, "The everyday profile changed");
   await tab("Extensions");
-  await waitFor(() => page("/No extensions yet/.test(document.querySelector('[data-testid=\"firefox-settings\"]').innerText)"), "The extension list did not load", 30000);
+  await waitFor(() => page("/No extensions yet/.test(document.querySelector('[data-testid=\"firefox-settings\"]').innerText)"), "The extension list did not load", { ...WAIT, timeout: 30000 });
   await page("document.querySelector('[aria-label=\"Open settings\"]').click()");
 
   // The setting chosen in Raticode wins over the imported one.
   window.webContents.send("gofer:browser-open-tab", { url: `http://127.0.0.1:${site.address().port}/font`, background: false });
-  await waitFor(async () => (await page("[...document.querySelectorAll('[role=tab]')].map((tab) => tab.textContent).join('|')")).includes("font:19px"), "Firefox did not use the font size chosen in Raticode", 30000);
+  await waitFor(async () => (await page("[...document.querySelectorAll('[role=tab]')].map((tab) => tab.textContent).join('|')")).includes("font:19px"), "Firefox did not use the font size chosen in Raticode", { ...WAIT, timeout: 30000 });
 
   // A web tab now streams from Firefox.
   const base = `http://127.0.0.1:${site.address().port}`;
   window.webContents.send("gofer:browser-open-tab", { url: `${base}/`, background: false });
-  await waitFor(() => page("Number(document.querySelector('[data-engine=\"firefox\"]')?.dataset.frames || 0) > 0"), "No Firefox frame was drawn", 30000);
-  await waitFor(async () => (await page("[...document.querySelectorAll('[role=tab]')].map((tab) => tab.textContent).join('|')")).includes("Firefox page"), "The tab strip did not show the Firefox page title");
+  await waitFor(() => page("Number(document.querySelector('[data-engine=\"firefox\"]')?.dataset.frames || 0) > 0"), "No Firefox frame was drawn", { ...WAIT, timeout: 30000 });
+  await waitFor(async () => (await page("[...document.querySelectorAll('[role=tab]')].map((tab) => tab.textContent).join('|')")).includes("Firefox page"), "The tab strip did not show the Firefox page title", WAIT);
   // Hidden tabs have no visible text; the active one carries the Firefox label.
   assert.equal(await page("[...document.querySelectorAll('[data-integrated-browser]')].some((item) => item.innerText.includes('Firefox'))"), true);
   assert.equal(await page("document.querySelectorAll('webview').length"), 0);
@@ -165,18 +157,18 @@ async function run() {
     window.webContents.sendInputEvent({ type: "mouseUp", x: Math.round(box.x + x), y: Math.round(box.y + y), button: "left", clickCount: 1 });
   };
   click(100, 40);
-  await waitFor(() => page("document.activeElement?.getAttribute('aria-label') === 'Firefox page'"), "The Firefox view did not take keyboard focus");
+  await waitFor(() => page("document.activeElement?.getAttribute('aria-label') === 'Firefox page'"), "The Firefox view did not take keyboard focus", WAIT);
   for (const key of ["h", "i"]) {
     window.webContents.sendInputEvent({ type: "keyDown", keyCode: key });
     window.webContents.sendInputEvent({ type: "char", keyCode: key });
     window.webContents.sendInputEvent({ type: "keyUp", keyCode: key });
   }
-  await waitFor(async () => (await page("[...document.querySelectorAll('[role=tab]')].map((tab) => tab.textContent).join('|')")).includes("typed:hi"), "Typing did not reach the Firefox page");
+  await waitFor(async () => (await page("[...document.querySelectorAll('[role=tab]')].map((tab) => tab.textContent).join('|')")).includes("typed:hi"), "Typing did not reach the Firefox page", WAIT);
   click(100, 130);
-  await waitFor(async () => (await page("[...document.querySelectorAll('[role=tab]')].map((tab) => tab.textContent).join('|')")).includes("clicked:true:true"), "The click did not reach Firefox as trusted input");
+  await waitFor(async () => (await page("[...document.querySelectorAll('[role=tab]')].map((tab) => tab.textContent).join('|')")).includes("clicked:true:true"), "The click did not reach Firefox as trusted input", WAIT);
 
   // Rem works in its own Firefox tab in the background; the user's focus stays put.
-  const service = await waitFor(() => globalThis.__raticodeTestHooks?.agentBrowserService, "Browser service did not start");
+  const service = await waitFor(() => globalThis.__raticodeTestHooks?.agentBrowserService, "Browser service did not start", WAIT);
   const grant = await (await fetch(`${service.url}/admin`, {
     method: "POST",
     headers: { Authorization: `Bearer ${service.adminToken}` },
@@ -193,7 +185,7 @@ async function run() {
   const before = await firefoxViews();
   const opened = await call("open", { url: `${base}/rem` });
   assert.equal(opened.title, "Rem page");
-  await waitFor(() => (async () => (await firefoxViews()) === before + 1)(), "Rem's Firefox tab did not join the studio");
+  await waitFor(() => (async () => (await firefoxViews()) === before + 1)(), "Rem's Firefox tab did not join the studio", WAIT);
   const { snapshot } = await call("snapshot");
   const ref = (pattern) => snapshot.match(pattern)[1];
   await call("type", { ref: ref(/- textbox "Query" \[ref=(e\d+)\]/), text: "firefox" });
@@ -201,7 +193,7 @@ async function run() {
   assert.equal(clicked.title, "done:firefox");
   assert.equal(await page("document.activeElement.id"), "user-field");
   await call("close");
-  await waitFor(() => (async () => (await firefoxViews()) === before)(), "Closing Rem's tab did not remove it");
+  await waitFor(() => (async () => (await firefoxViews()) === before)(), "Closing Rem's tab did not remove it", WAIT);
   // A frame that never finishes doesn't hold up Rem's actions.
   await checkSlowFramePage(call, base, "Firefox");
 

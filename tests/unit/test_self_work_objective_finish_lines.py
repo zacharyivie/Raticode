@@ -38,6 +38,20 @@ def said(home: RemHome) -> list[str]:
 
 def test_a_user_requested_open_ended_objective_is_kept_but_rems_own_needs_a_finish_line(board):
     home, _, _ = board
+    # On its own, whether in self-work or a turn the user didn't start, Rem can't write one
+    # without a finish line, even to an empty list.
+    for source in ("self_work", "own"):
+        with pytest.raises(objectives.ObjectiveRefused, match="finish line"):
+            change(home, {"action": "add", "text": STUDIO}, actor="rem", source=source)
+        # A finish line too vague to check is refused as well.
+        with pytest.raises(objectives.ObjectiveRefused, match="too vague"):
+            change(
+                home,
+                {"action": "add", "text": STUDIO, "done_when": "When done"},
+                actor="rem",
+                source=source,
+            )
+    assert texts(home) == []
     # The user asks in chat for open-ended work: Rem writes it as asked, with no finish line.
     reply = decide_objectives(
         home,
@@ -50,28 +64,18 @@ def test_a_user_requested_open_ended_objective_is_kept_but_rems_own_needs_a_fini
     with home.store.read() as db:
         shown = objectives.for_prompt(objectives.read(db, home.store))
     assert shown[0].get("open_ended") is True and "needs_done_when" not in shown[0]
-    # On its own, whether in self-work or a turn the user didn't start, Rem can't.
+    # Asked for by the user, it stays open-ended: no planner gives it a finish line.
+    assert not objectives.needs_finish_line(listed(home)[0])
+    # And while it is open Rem adds nothing beside it on its own, finish line or not.
     for source in ("self_work", "own"):
-        with pytest.raises(objectives.ObjectiveRefused, match="finish line"):
-            change(home, {"action": "add", "text": STUDIO}, actor="rem", source=source)
-        # A finish line too vague to check is refused as well.
-        with pytest.raises(objectives.ObjectiveRefused, match="too vague"):
+        with pytest.raises(objectives.ObjectiveRefused, match="still open"):
             change(
                 home,
-                {"action": "add", "text": STUDIO, "done_when": "When done"},
+                {"action": "add", "text": STUDIO, "done_when": STUDIO_DONE},
                 actor="rem",
                 source=source,
             )
     assert texts(home) == [HARDEN]
-    # Asked for by the user, it stays open-ended: no planner gives it a finish line.
-    assert not objectives.needs_finish_line(listed(home)[0])
-    change(
-        home,
-        {"action": "add", "text": STUDIO, "done_when": STUDIO_DONE},
-        actor="rem",
-        source="self_work",
-    )
-    assert texts(home) == [STUDIO, HARDEN]
     # The user may still write open-ended objectives of their own.
     change(home, {"action": "add", "text": "Keep the docs honest"}, actor="user")
     assert "Keep the docs honest" in texts(home)
@@ -88,6 +92,23 @@ def test_a_chat_turn_the_user_didnt_start_is_rem_on_its_own(board):
     with home.store.connect() as db:
         result, _ = objectives.apply_request(db, home.store, request, from_user=True)
     assert result is not None and texts(home) == [STUDIO]
+
+
+def test_a_turn_the_user_didnt_start_adds_nothing_while_an_objective_is_open(board):
+    home, _, _ = board
+    change(home, {"action": "add", "text": HARDEN}, actor="user")
+    request = objectives.ObjectivesRequest(
+        action="add", items=[objectives.NewObjective(text=STUDIO, done_when=STUDIO_DONE)]
+    )
+    # A task finishing, a schedule: Rem's own idea, with a finish line, is still refused.
+    with home.store.connect() as db:
+        result, sentence = objectives.apply_request(db, home.store, request, from_user=False)
+    assert result is None and "still open" in sentence
+    assert texts(home) == [HARDEN]
+    # The user asking for it, here or on their phone, adds it.
+    with home.store.connect() as db:
+        result, _ = objectives.apply_request(db, home.store, request, from_user=True)
+    assert result is not None and texts(home) == [STUDIO, HARDEN]
 
 
 def test_the_planner_is_told_to_give_finish_lines_and_repairs_an_answer_without_them(board):

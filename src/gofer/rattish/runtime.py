@@ -41,8 +41,19 @@ from gofer.core.approvals import (
     NotificationAdapter,
     wait_for_decision,
 )
-from gofer.core.http import HttpClient, HttpRequest, UrllibHttpClient, append_query_params
+from gofer.core.http import (
+    RETRY_AFTER_MAX_SECONDS,
+    RETRY_AFTER_STATUSES,
+    HttpClient,
+    HttpRequest,
+    HttpResponse,
+    UrllibHttpClient,
+    append_query_params,
+    response_header_fields,
+    retry_after_seconds,
+)
 from gofer.core.http_retry import HttpRetryPolicy
+from gofer.core.json_types import NUMBER_TYPES, json_equal, json_type
 from gofer.core.llm_prompts import common_llm_task_prompt
 from gofer.core.network_policy import NetworkPolicyViolation, validate_http_request_url
 from gofer.core.provider_profiles import (
@@ -91,7 +102,7 @@ from gofer.utils.atomic_output import atomic_binary_output, mkdir_without_links,
 from gofer.utils.logging import get_logger
 from gofer.utils.open_target import checked_open_target
 from gofer.utils.paths import get_data_dir
-from gofer.utils.process import run_subprocess
+from gofer.utils.process import CapturedOutput, run_command_capture
 
 log = get_logger(__name__)
 # The data folder whose saved workflow secrets secret["NAME"] reads; None means the default.
@@ -104,6 +115,54 @@ class UnsupportedRattishRuntimeError(RuntimeError):
 
 class InvalidRattishWorkflowInputError(ValueError):
     """Raised when supplied workflow inputs do not satisfy the compiled interface."""
+
+
+class PredicateTypeMismatchError(Exception):
+    """A route condition's operator can't use the JSON types its values have at run time.
+
+    It names the operator and both JSON types, never the values, which may be private.
+    """
+
+    def __init__(self, operator: str, left_type: str, right_type: str) -> None:
+        self.operator = operator
+        self.left_type = left_type
+        self.right_type = right_type
+        left, right = _with_article(left_type), _with_article(right_type)
+        if operator == "contains":
+            message = f"contains can't look for {right} in {left}."
+        elif operator == "matches":
+            message = f"matches needs two strings, but got {left} and {right}."
+        else:
+            message = f"{operator} needs two numbers or two strings, but got {left} and {right}."
+        super().__init__(message)
+
+    def details(self) -> dict[str, str]:
+        return {
+            "operator": self.operator,
+            "left_type": self.left_type,
+            "right_type": self.right_type,
+        }
+
+
+class BindingExpressionTypeError(Exception):
+    """A `with` condition (name: a > b) met values whose JSON types its operator can't use."""
+
+    def __init__(self, binding: str, mismatch: PredicateTypeMismatchError) -> None:
+        self.binding = binding
+        self.mismatch = mismatch
+        super().__init__(f"The condition in binding {binding!r} failed: {mismatch}")
+
+
+def _with_article(json_type_name: str) -> str:
+    return f"{'an' if json_type_name[:1] in 'aeiou' else 'a'} {json_type_name}"
+
+
+_ORDERINGS: dict[str, Callable[[Any, Any], Any]] = {
+    "<": lambda left, right: left < right,
+    "<=": lambda left, right: left <= right,
+    ">": lambda left, right: left > right,
+    ">=": lambda left, right: left >= right,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +185,8 @@ class NodeExecutionResult:
     fallbacks: tuple[Mapping[str, Any], ...] = ()
     # When the output came from the result cache: when that answer was first made.
     cached_at: str | None = None
+    # Run events the handler asks for, each with a ``type`` and its details.
+    notices: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +232,8 @@ class HandlerResult:
     success: bool
     output: Any
     error: RuntimeErrorInfo | None = None
+    # Run events for the step, such as ``node_output_truncated``.
+    notices: tuple[Mapping[str, Any], ...] = ()
 
 
 RuntimeHandler = Callable[
@@ -478,6 +541,17 @@ async def execute_node(
                 {"exception": type(exc).__name__},
             ),
         )
+    except BindingExpressionTypeError as exc:
+        handled = HandlerResult(
+            False,
+            {},
+            RuntimeErrorInfo(
+                "configuration",
+                "RATTISH_RUNTIME_PREDICATE_TYPE_MISMATCH",
+                str(exc),
+                {"node_id": node["id"], "binding": exc.binding, **exc.mismatch.details()},
+            ),
+        )
     except BindingSourceMissingError as exc:
         handled = HandlerResult(
             False,
@@ -564,6 +638,7 @@ async def execute_node(
         handled.output,
         handled.error,
         cached_at=cached.created_at if cached is not None and handled.success else None,
+        notices=handled.notices if cached is None else (),
     )
 
 
@@ -1104,7 +1179,7 @@ async def _http_request_handler(
     params_value = _binding_or_configuration(bindings, configuration, "params")
     if not isinstance(headers_value, Mapping) or not isinstance(params_value, Mapping):
         raise ValueError("HTTP headers and params must be objects.")
-    headers = {str(key): str(value) for key, value in headers_value.items()}
+    headers = _request_headers(headers_value)
     params = {str(key): str(value) for key, value in params_value.items()}
     allowlist = [str(value) for value in configuration["network_allowlist"]]
     try:
@@ -1128,7 +1203,8 @@ async def _http_request_handler(
     body: bytes | None = None
     if json_payload is not None:
         body = canonical_json_bytes(json_payload)
-        headers.setdefault("Content-Type", "application/json")
+        if not any(name.lower() == "content-type" for name in headers):
+            headers["Content-Type"] = "application/json"
     elif body_value is not None:
         body = str(body_value).encode("utf-8")
 
@@ -1152,8 +1228,18 @@ async def _http_request_handler(
             last_error = exc
         if response is not None and not (attempt < attempts and response.status in retry_statuses):
             break
-        if attempt < attempts and backoff_seconds:
-            await anyio.sleep(backoff_seconds)
+        if attempt == attempts:
+            break
+        wait = backoff_seconds
+        requested = _retry_after(response)
+        if requested is not None:
+            # Retrying sooner than the server asked only fails again; a wait past the
+            # ceiling would hold the run too long, so the response below fails instead.
+            if requested > RETRY_AFTER_MAX_SECONDS:
+                break
+            wait = max(wait, requested)
+        if wait:
+            await anyio.sleep(wait)
 
     if response is None:
         message = "HTTP request did not produce a response."
@@ -1181,13 +1267,13 @@ async def _http_request_handler(
                 json_error = exc
     response_data = {
         "status": response.status,
-        "headers": dict(response.headers),
+        "headers": response_header_fields(response.headers.items()),
         "body": body_text,
         "json": parsed_json,
     }
     try:
         selected = {
-            name: _dotted_value(response_data, path)
+            name: _dotted_value(response_data, _response_mapping_path(path))
             for name, path in configuration["output_mapping"].items()
         }
     except (KeyError, IndexError, TypeError, ValueError) as exc:
@@ -1228,17 +1314,33 @@ async def _http_request_handler(
             ),
         )
     if response.status not in {int(value) for value in configuration["expected_statuses"]}:
+        message = f"HTTP response status {response.status} was not expected."
+        details: dict[str, Any] = {"status": response.status}
+        requested = _retry_after(response)
+        if requested is not None and requested <= RETRY_AFTER_MAX_SECONDS:
+            # The step's retry-count waits at least this long before its next attempt.
+            details["retry_after_ms"] = math.ceil(requested * 1000)
+        elif requested is not None:
+            # Also covers a digit string so long it reads as infinity.
+            asked = f"{math.ceil(requested)} seconds" if requested <= 86_400 else "more than a day"
+            details["retryable"] = False
+            message += (
+                f" The server asked to wait {asked} before trying again, more than the "
+                f"{RETRY_AFTER_MAX_SECONDS:g}-second limit, so it wasn't retried."
+            )
         return HandlerResult(
             False,
             output,
-            RuntimeErrorInfo(
-                "network",
-                "RATTISH_HTTP_UNEXPECTED_STATUS",
-                f"HTTP response status {response.status} was not expected.",
-                {"status": response.status},
-            ),
+            RuntimeErrorInfo("network", "RATTISH_HTTP_UNEXPECTED_STATUS", message, details),
         )
     return HandlerResult(True, output)
+
+
+def _retry_after(response: HttpResponse | None) -> float | None:
+    """The wait a 429 or 503 response asks for in its Retry-After header, in seconds."""
+    if response is None or response.status not in RETRY_AFTER_STATUSES:
+        return None
+    return retry_after_seconds(response.headers)
 
 
 async def _read_web_page_handler(
@@ -2379,6 +2481,29 @@ def _duration_seconds(value: str, *, allow_zero: bool = False) -> float:
     return int(match.group(1)) * factors[match.group(2)]
 
 
+def _request_headers(values: Mapping[Any, Any]) -> dict[str, str]:
+    """Request headers with names compared case-insensitively, the last spelling winning.
+
+    Rattish lowercases block-map keys, so Content-Type can arrive as content-type.
+    """
+    headers: dict[str, str] = {}
+    for key, value in values.items():
+        name = str(key)
+        for existing in [known for known in headers if known.lower() == name.lower()]:
+            del headers[existing]
+        headers[name] = str(value)
+    return headers
+
+
+def _response_mapping_path(path: str) -> str:
+    """Lowercase the header name in an output-mapping path such as headers.Content-Type."""
+    root, separator, rest = path.partition(".")
+    if root != "headers" or not separator:
+        return path
+    name, dot, tail = rest.partition(".")
+    return f"{root}.{name.lower()}{dot}{tail}"
+
+
 def _dotted_value(value: Any, path: str) -> Any:
     current = value
     for part in path.split("."):
@@ -2389,11 +2514,18 @@ def _dotted_value(value: Any, path: str) -> Any:
     return current
 
 
-def command_failure_message(label: str, returncode: int, stdout: str, stderr: str) -> str:
-    """Describe nonzero exits even when a command writes its diagnostics to stdout."""
+def command_failure_message(
+    label: str, returncode: int, stdout: str, stderr: str, *, stdout_tail: str = ""
+) -> str:
+    """Describe nonzero exits even when a command writes its diagnostics to stdout.
+
+    Errors print last, so the end of stderr, or of stdout when stderr is empty, is kept.
+    ``stdout_tail`` is the real end of a stdout that was cut at the output limit.
+    """
     if stderr.strip():
-        return stderr.strip()[-8192:]
+        return stderr.strip()[-FAILURE_DETAIL_CHARS:]
     detail = stdout.strip()
+    found = ""
     try:
         payload = json.loads(detail)
     except (ValueError, TypeError):
@@ -2415,9 +2547,60 @@ def command_failure_message(label: str, returncode: int, stdout: str, stderr: st
                 return value.strip()
             return ""
 
-        detail = first_error(payload) or detail
+        found = first_error(payload)
+    if found:
+        detail = found[:FAILURE_DETAIL_CHARS]
+    else:
+        detail = (stdout_tail.strip() or detail)[-FAILURE_DETAIL_CHARS:]
     prefix = f"{label} exited with status {returncode}."
-    return prefix + (" " + detail[:8192] if detail else "")
+    return prefix + (" " + detail if detail else "")
+
+
+# How much of a failed command's output its failure reason quotes.
+FAILURE_DETAIL_CHARS = 8192
+
+
+def _command_output(captured: CapturedOutput, **extra: Any) -> dict[str, Any]:
+    return {
+        "stdout": captured.stdout,
+        "stderr": captured.stderr,
+        "exit_code": captured.returncode,
+        **extra,
+        "truncated": captured.truncated,
+    }
+
+
+def _truncation_notices(
+    node: Mapping[str, Any], captured: CapturedOutput, limit: int
+) -> tuple[Mapping[str, Any], ...]:
+    """The run event saying a step's output passed the output limit."""
+    streams = [
+        name
+        for name, cut in (
+            ("stdout", captured.stdout_truncated),
+            ("stderr", captured.stderr_truncated),
+        )
+        if cut
+    ]
+    if not streams:
+        return ()
+    kept = []
+    if captured.stdout_truncated:
+        kept.append(f"stdout kept its first {limit:,} bytes")
+    if captured.stderr_truncated:
+        kept.append("stderr kept its start and its last 64 KiB")
+    return (
+        {
+            "type": "node_output_truncated",
+            "message": (
+                f"Step {node['id']!r} wrote more than the {limit:,}-byte output limit: "
+                + " and ".join(kept)
+                + ". The rest was not saved or passed on."
+            ),
+            "limit_bytes": limit,
+            "streams": streams,
+        },
+    )
 
 
 async def _bash_handler(
@@ -2433,26 +2616,39 @@ async def _bash_handler(
         else _resolve_project_path(context.project_root, working_dir)
     )
     timeout_ms = node["execution"]["timeout_ms"]
-    returncode, stdout, stderr = await run_subprocess(
+    limit = context.max_subprocess_output_bytes
+    captured = await run_command_capture(
         shells.command_args(shells.configured_shell(configuration), configuration["command"]),
         cwd=cwd,
         env=environment,
         stdin=bindings.stdin,
         timeout=None if timeout_ms is None else timeout_ms / 1000,
-        max_output_bytes=context.max_subprocess_output_bytes,
+        max_output_bytes=limit,
     )
-    output = {"stdout": stdout, "stderr": stderr, "exit_code": returncode}
-    if returncode == 0:
-        return HandlerResult(True, output)
+    output = _command_output(captured)
+    notices = _truncation_notices(node, captured, limit)
+    if captured.returncode == 0:
+        return HandlerResult(True, output, notices=notices)
     return HandlerResult(
         False,
         output,
         RuntimeErrorInfo(
             "command",
             "RATTISH_RUNTIME_COMMAND_FAILED",
-            command_failure_message("Command", returncode, stdout, stderr),
-            {"exit_code": returncode},
+            _captured_failure_message("Command", captured),
+            {"exit_code": captured.returncode},
         ),
+        notices=notices,
+    )
+
+
+def _captured_failure_message(label: str, captured: CapturedOutput) -> str:
+    return command_failure_message(
+        label,
+        captured.returncode,
+        captured.stdout,
+        captured.stderr,
+        stdout_tail=captured.stdout_tail,
     )
 
 
@@ -2547,19 +2743,19 @@ async def _open_resource_handler(
         os.startfile(target)  # type: ignore[attr-defined]
         return HandlerResult(True, {"target": target, "resource_type": resource_type})
     command = _open_resource_command(target, resource_type, configuration["args"])
-    returncode, stdout, stderr = await run_subprocess(
+    captured = await run_command_capture(
         command,
         max_output_bytes=context.max_subprocess_output_bytes,
     )
-    if returncode != 0:
+    if captured.returncode != 0:
         return HandlerResult(
             False,
             {"target": target, "resource_type": resource_type},
             RuntimeErrorInfo(
                 "command",
                 "RATTISH_RUNTIME_COMMAND_FAILED",
-                stderr or stdout or f"Resource opener exited with status {returncode}.",
-                {"exit_code": returncode, "target": target},
+                _captured_failure_message("Resource opener", captured),
+                {"exit_code": captured.returncode, "target": target},
             ),
         )
     return HandlerResult(True, {"target": target, "resource_type": resource_type})
@@ -2794,31 +2990,29 @@ async def _script_handler(
         # ``interpreter`` is the shell-script's shell choice: auto, bash or powershell.
         run_path = approved_files.script_to_run(script_path, shells.script_reader(interpreter))
         argv = shells.script_args(interpreter, str(run_path), configuration["args"])
-    returncode, stdout, stderr = await run_subprocess(
+    limit = context.max_subprocess_output_bytes
+    captured = await run_command_capture(
         argv,
         cwd=context.project_root,
         env=environment,
         stdin=bindings.stdin,
         timeout=None if timeout_ms is None else timeout_ms / 1000,
-        max_output_bytes=context.max_subprocess_output_bytes,
+        max_output_bytes=limit,
     )
-    output = {
-        "stdout": stdout,
-        "stderr": stderr,
-        "exit_code": returncode,
-        "script_path": str(script_path),
-    }
-    if returncode == 0:
-        return HandlerResult(True, output)
+    output = _command_output(captured, script_path=str(script_path))
+    notices = _truncation_notices(node, captured, limit)
+    if captured.returncode == 0:
+        return HandlerResult(True, output, notices=notices)
     return HandlerResult(
         False,
         output,
         RuntimeErrorInfo(
             "command",
             "RATTISH_RUNTIME_COMMAND_FAILED",
-            command_failure_message("Script", returncode, stdout, stderr),
-            {"exit_code": returncode, "script_path": str(script_path)},
+            _captured_failure_message("Script", captured),
+            {"exit_code": captured.returncode, "script_path": str(script_path)},
         ),
+        notices=notices,
     )
 
 
@@ -2869,6 +3063,8 @@ def _resolve_bindings_in(node: Mapping[str, Any], context: RuntimeContext) -> Re
                 context.node_statuses,
                 context.node_errors,
             )
+        except PredicateTypeMismatchError as exc:
+            raise BindingExpressionTypeError(str(binding["name"]), exc) from exc
         except (KeyError, IndexError, TypeError) as exc:
             missing = _missing_secret_name(binding)
             if missing is not None:
@@ -3196,27 +3392,41 @@ def _evaluate_predicate(
         )
         if left is _MISSING or right is _MISSING:
             return False
-        operator = predicate["operator"]
-        try:
-            if operator == "==":
-                return bool(left == right)
-            if operator == "!=":
-                return bool(left != right)
-            if operator == "<":
-                return bool(left < right)
-            if operator == "<=":
-                return bool(left <= right)
-            if operator == ">":
-                return bool(left > right)
-            if operator == ">=":
-                return bool(left >= right)
-            if operator == "contains":
-                return bool(right in left)
-            if operator == "matches":
-                return re.search(str(right), str(left)) is not None
-        except (TypeError, re.error):
-            return False
+        return _compare_json(str(predicate["operator"]), left, right)
     raise UnsupportedRattishRuntimeError(f"Predicate kind {kind!r} is not implemented.")
+
+
+def _compare_json(operator: str, left: Any, right: Any) -> bool:
+    """Apply a comparison operator by JSON types, never Python's coercions.
+
+    == and != never match across types (true isn't 1). Ordering, contains and matches on a
+    null give false; on other types that don't fit they raise PredicateTypeMismatchError.
+    """
+    if operator == "==":
+        return json_equal(left, right)
+    if operator == "!=":
+        return not json_equal(left, right)
+    left_type, right_type = json_type(left), json_type(right)
+    if operator == "contains" and left_type == "array":
+        return any(json_equal(item, right) for item in left)
+    if "null" in {left_type, right_type}:
+        return False
+    if operator in {"<", "<=", ">", ">="}:
+        numbers = left_type in NUMBER_TYPES and right_type in NUMBER_TYPES
+        if numbers or left_type == right_type == "string":
+            return bool(_ORDERINGS[operator](left, right))
+    elif operator == "contains":
+        if left_type in {"string", "object"} and right_type == "string":
+            return right in left
+    elif operator == "matches":
+        if left_type == right_type == "string":
+            try:
+                return re.search(right, left) is not None
+            except re.error:
+                return False
+    else:
+        raise UnsupportedRattishRuntimeError(f"Predicate operator {operator!r} is not implemented.")
+    raise PredicateTypeMismatchError(operator, left_type, right_type)
 
 
 def _predicate_uses_output(predicate: Mapping[str, Any]) -> bool:

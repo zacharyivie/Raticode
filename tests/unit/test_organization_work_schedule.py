@@ -657,7 +657,7 @@ def test_reassigning_needs_a_reason_a_coworker_in_the_project_and_this_org(
             expectedRevision=revision,
             changes={"assignee": "bea"},
         )
-    with pytest.raises(ValueError, match="Unknown employee"):
+    with pytest.raises(ValueError, match="Unknown worker"):
         worker(
             manager,
             made,

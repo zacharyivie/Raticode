@@ -1,6 +1,6 @@
 import { apiJson } from "./api.js";
 
-export function generationRequest(path, body) {
+function generationRequest(path, body) {
   return apiJson(path, { method: body === undefined ? undefined : "POST", body, failure: "Could not load Rem generation jobs." });
 }
 export async function startGenerationJob(kind, request, selection) {

@@ -13,6 +13,8 @@ const path = require("node:path");
 const http = require("node:http");
 const { app, BrowserWindow, screen, webContents } = require("electron");
 const { browserContentZoomFactor } = require("../browser-utils.cjs");
+const { waitFor } = require("./test-wait.cjs");
+const WAIT = { timeout: 15_000, interval: 100, retryErrors: true };
 
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-browser-window-zoom-test-"));
 const home = path.join(profile, "home");
@@ -44,21 +46,6 @@ const site = http.createServer((_request, response) => {
 const log = (message) => console.log(`[browser window zoom] ${message}`);
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function waitFor(check, message, timeout = 15000) {
-  const deadline = Date.now() + timeout;
-  let last;
-  while (Date.now() < deadline) {
-    try {
-      last = await check();
-      if (last) return last;
-    } catch (error) {
-      last = error;
-    }
-    await wait(100);
-  }
-  throw new Error(`${message}${last instanceof Error ? ` (${last.message})` : ""}`);
-}
-
 async function run() {
   await new Promise((resolve) => api.listen(0, "127.0.0.1", resolve));
   await new Promise((resolve) => site.listen(0, "127.0.0.1", resolve));
@@ -69,23 +56,23 @@ async function run() {
   const window = await created;
   await new Promise((resolve) => window.webContents.once("did-finish-load", resolve));
   const page = (code) => window.webContents.executeJavaScript(code);
-  await waitFor(() => page("document.querySelector('#root')?.children.length > 0"), "Studio did not render");
+  await waitFor(() => page("document.querySelector('#root')?.children.length > 0"), "Studio did not render", WAIT);
   // The app at 125%, a size the zoom keys never reach.
   await page(`localStorage.setItem("raticode.settings.v1", JSON.stringify({ browser: { homepage: ${JSON.stringify(siteUrl)} } })); localStorage.setItem("raticode.textZoom.v1", "125")`);
   window.webContents.reload();
   await new Promise((resolve) => window.webContents.once("did-finish-load", resolve));
-  await waitFor(() => page("Boolean(document.querySelector('.studio-sidebar #sidebar-tab-browser'))"), "Studio did not render after reload");
-  await waitFor(() => Math.abs(window.webContents.getZoomFactor() - 1.25) < 0.001, "The app did not zoom to 125%");
+  await waitFor(() => page("Boolean(document.querySelector('.studio-sidebar #sidebar-tab-browser'))"), "Studio did not render after reload", WAIT);
+  await waitFor(() => Math.abs(window.webContents.getZoomFactor() - 1.25) < 0.001, "The app did not zoom to 125%", WAIT);
   await page("document.querySelector('.studio-sidebar #sidebar-tab-browser').click()");
 
   const inWindow = (target) => (code) => target.webContents.executeJavaScript(code);
   const click = (target, selector) => inWindow(target)(`(() => { const node = ${selector}; if (!node) return false; node.click(); return true; })()`);
   const otherWindow = () => BrowserWindow.getAllWindows().find((item) => item !== window && !item.isDestroyed());
 
-  await waitFor(() => page("Boolean(document.querySelector('[data-testid=browser-empty]')?.offsetParent)"), "The empty Browser plugin did not show");
+  await waitFor(() => page("Boolean(document.querySelector('[data-testid=browser-empty]')?.offsetParent)"), "The empty Browser plugin did not show", WAIT);
   await click(window, "document.querySelector('[data-browser-family=\"raticode\"]')");
-  const guest = await waitFor(() => webContents.getAllWebContents().find((contents) => !contents.isDestroyed() && contents.getType() === "window" && contents.getURL() === siteUrl), "No view for the chromium tab");
-  await waitFor(async () => (await guest.executeJavaScript("document.title")) === "Zoom page", "The chromium tab did not load the test page");
+  const guest = await waitFor(() => webContents.getAllWebContents().find((contents) => !contents.isDestroyed() && contents.getType() === "window" && contents.getURL() === siteUrl), "No view for the chromium tab", WAIT);
+  await waitFor(async () => (await guest.executeJavaScript("document.title")) === "Zoom page", "The chromium tab did not load the test page", WAIT);
 
   // Where the slot is in the window's own pixels: its CSS box times that
   // window's zoom, read from the page that measured it (devicePixelRatio is
@@ -113,24 +100,24 @@ async function run() {
       if (!view || !slot || !view.getVisible()) return false;
       last = { view: view.getBounds(), slot };
       return near(last.view, slot.bounds);
-    }, `The chromium tab's page is not on its slot ${where}`, 10000).catch((error) => {
+    }, `The chromium tab's page is not on its slot ${where}`, { ...WAIT, timeout: 10000 }).catch((error) => {
       throw new Error(`${error.message}: view ${JSON.stringify(last?.view)}, slot ${JSON.stringify(last?.slot?.bounds)} at window zoom ${last?.slot?.zoom}`);
     });
     const expectedPageZoom = browserContentZoomFactor(last.slot.zoom, 1);
-    await waitFor(() => Math.abs(guest.getZoomFactor() - expectedPageZoom) < 0.01, `The page's zoom ${guest.getZoomFactor()} doesn't follow its window's zoom ${last.slot.zoom} ${where}`, 5000);
+    await waitFor(() => Math.abs(guest.getZoomFactor() - expectedPageZoom) < 0.01, `The page's zoom ${guest.getZoomFactor()} doesn't follow its window's zoom ${last.slot.zoom} ${where}`, { ...WAIT, timeout: 5000 });
     log(`${where}: view ${JSON.stringify(last.view)} on slot ${JSON.stringify(last.slot.bounds)} (window zoom ${last.slot.zoom}, page zoom ${guest.getZoomFactor()}).`);
   };
 
   const popOut = async () => {
     assert.equal(await click(window, "document.querySelector('[data-testid=browser-window-toggle]')"), true, "the tab bar has a Pop out button");
-    const popout = await waitFor(otherWindow, "Pop out did not open a window");
-    await waitFor(() => viewOf(popout), "The chromium tab's page didn't move into the browser's window");
+    const popout = await waitFor(otherWindow, "Pop out did not open a window", WAIT);
+    await waitFor(() => viewOf(popout), "The chromium tab's page didn't move into the browser's window", WAIT);
     return popout;
   };
   const popIn = async (popout) => {
     assert.equal(await click(popout, "document.querySelector('[data-testid=browser-window-toggle]')"), true, "the browser's window has a Bring browser back button");
-    await waitFor(() => popout.isDestroyed(), "Bring browser back did not close the window");
-    await waitFor(() => viewOf(window), "The chromium tab's page didn't come back to Raticode's window");
+    await waitFor(() => popout.isDestroyed(), "Bring browser back did not close the window", WAIT);
+    await waitFor(() => viewOf(window), "The chromium tab's page didn't come back to Raticode's window", WAIT);
   };
 
   await assertOnSlot(window, "in Raticode's window at 125%");
@@ -145,7 +132,7 @@ async function run() {
     await page("window.dispatchEvent(new KeyboardEvent('keydown', { key: '-', code: 'Minus', ctrlKey: true, bubbles: true, cancelable: true }))");
     await wait(150);
   }
-  await waitFor(() => Math.abs(window.webContents.getZoomFactor() - 0.8) < 0.001, `The app did not zoom to 80% (${window.webContents.getZoomFactor()})`);
+  await waitFor(() => Math.abs(window.webContents.getZoomFactor() - 0.8) < 0.001, `The app did not zoom to 80% (${window.webContents.getZoomFactor()})`, WAIT);
   await assertOnSlot(window, "in Raticode's window at 80%");
   popout = await popOut();
   await assertOnSlot(popout, "popped out at 80%");

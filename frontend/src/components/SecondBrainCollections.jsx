@@ -1,7 +1,8 @@
 import SecondBrainProvider, { useResearchSelection } from "./SecondBrainProvider.jsx";
 import { useState } from "react";
 import { ArrowLeft, CircleHelp, Download, Library, MessageSquareQuote, MoreHorizontal, Plus, Scale, ScrollText, Search, Sparkles, Trash2, TriangleAlert, X, ArrowUpRight, Pencil } from "lucide-react";
-import { formatDay, formatTime } from "../lib/secondBrain.js";
+import { libraryDay } from "../lib/secondBrain.js";
+import { dateTime } from "../lib/timeText.js";
 import { useSecondBrain, viewFor, navigate, updateCollection, startTask, deleteCollection, openDialog, openDocument, documentById, blockById, applySavedSearch, deleteSavedSearch, uid, libraryFor } from "../lib/secondBrainStore.js";
 import { CitationState, DraftInput, Empty, Menu, Pill, TypeIcon, askRem } from "./SecondBrainParts.jsx";
 import { searchLibrary } from "../lib/secondBrain.js";
@@ -27,7 +28,7 @@ function CollectionList({ brain, store }) {
       <span className="sb-card-title"><Library size={16} aria-hidden="true" /><strong>{collection.name}</strong></span>
       <p>{collection.brief || "No research brief yet."}</p>
       <span className="sb-card-meta"><span>{itemCount(collection)} items</span><span>{sources.length} sources</span>{collection.questions.filter(question => !question.done).length ? <span>{collection.questions.filter(question => !question.done).length} open questions</span> : null}{reports ? <span>{reports} report{reports === 1 ? "" : "s"}</span> : null}</span>
-      <span className="sb-card-foot"><small>Updated {formatDay(collection.updated, { relative: true })}</small>{changed ? <Pill tone="warning">{changed} source{changed === 1 ? "" : "s"} changed</Pill> : null}</span>
+      <span className="sb-card-foot"><small>Updated {libraryDay(collection.updated, { relative: true })}</small>{changed ? <Pill tone="warning">{changed} source{changed === 1 ? "" : "s"} changed</Pill> : null}</span>
     </button>; })}</div> : <Empty icon={Library} title="No collections yet" actions={<button className="sb-button sb-primary" type="button" onClick={() => openDialog("new-collection")}><Plus size={14} />New collection</button>}>Start from a question, then add documents or passages from search results and the reader.</Empty>}
     <div className="sb-page-head sb-subhead"><div><h3>Saved searches</h3><p>Saved searches store criteria and update as the library changes.</p></div></div>
     {saved.length ? <div className="sb-table-wrap"><table className="sb-table"><thead><tr><th scope="col">Name</th><th scope="col">Query</th><th scope="col" className="sb-num">Results</th><th scope="col"><span className="sb-sr-only">Actions</span></th></tr></thead><tbody>
@@ -98,7 +99,7 @@ function CollectionDetail({ collection, store, brain, tab }) {
     <button type="button" className="sb-back" onClick={() => navigate("collections", { collectionId: "" })}><ArrowLeft size={14} />All collections</button>
     <div className="sb-page-head">
       <div className="sb-collection-title"><DraftInput label="Collection name" className="sb-title-input" value={collection.name} onCommit={name => name.trim() && updateCollection(collection.id, { name: name.trim() })} />
-        <p>{itemCount(collection)} items · {docs.length} sources · versions pinned when added · updated {formatDay(collection.updated, { relative: true })}</p></div>
+        <p>{itemCount(collection)} items · {docs.length} sources · versions pinned when added · updated {libraryDay(collection.updated, { relative: true })}</p></div>
       <div className="sb-actions">
         <button type="button" className="sb-button" onClick={() => openDialog("summarize", { docIds: docs.map(doc => doc.id), collectionId: collection.id })}><Sparkles size={14} />Summarize</button>
         <button type="button" className="sb-button sb-primary" onClick={() => openDialog("report-builder", { collectionId: collection.id })}><ScrollText size={14} />Create cited report</button>
@@ -111,7 +112,7 @@ function CollectionDetail({ collection, store, brain, tab }) {
       </div>
     </div>
     <nav className="sb-subtabs" aria-label="Collection views">{[["evidence", "Evidence"], ["compare", "Compare sources"], ["reports", `Reports · ${reports.length}`]].map(([id, label]) => <button key={id} type="button" aria-current={tab === id ? "page" : undefined} onClick={() => setTab(id)}>{label}</button>)}</nav>
-    {tab === "compare" ? <CompareTab collection={collection} store={store} brain={brain} /> : tab === "reports" ? <div>{reports.length ? <ul className="sb-report-list">{reports.map(report => <li key={report.id}><button type="button" onClick={() => navigate("reports", { reportId: report.id })}><ScrollText size={16} aria-hidden="true" /><span><strong>{report.title}</strong><small>{formatTime(report.generatedAt)} · {report.citations.length} citations · {report.provider}</small></span></button></li>)}</ul> : <Empty icon={ScrollText} title="No reports from this collection yet" actions={<button className="sb-button sb-primary" type="button" onClick={() => openDialog("report-builder", { collectionId: collection.id })}>Create cited report</button>} />}</div> : <div className="sb-notebook">
+    {tab === "compare" ? <CompareTab collection={collection} store={store} brain={brain} /> : tab === "reports" ? <div>{reports.length ? <ul className="sb-report-list">{reports.map(report => <li key={report.id}><button type="button" onClick={() => navigate("reports", { reportId: report.id })}><ScrollText size={16} aria-hidden="true" /><span><strong>{report.title}</strong><small>{dateTime(report.generatedAt)} · {report.citations.length} citations · {report.provider}</small></span></button></li>)}</ul> : <Empty icon={ScrollText} title="No reports from this collection yet" actions={<button className="sb-button sb-primary" type="button" onClick={() => openDialog("report-builder", { collectionId: collection.id })}>Create cited report</button>} />}</div> : <div className="sb-notebook">
       <div className="sb-notebook-main">
         <section className="sb-brief"><label htmlFor={`brief-${collection.id}`}><h4>Research brief</h4></label><DraftArea id={`brief-${collection.id}`} label="Research brief" rows={3} placeholder="What question is this collection answering?" value={collection.brief} onCommit={brief => updateCollection(collection.id, { brief })} /></section>
         {changed.length ? <div className="sb-inline-note" data-tone="warning"><TriangleAlert size={14} aria-hidden="true" />{changed.length} item{changed.length === 1 ? "" : "s"} came from a version that has since changed. Each keeps the version it was collected from until you review it.</div> : null}

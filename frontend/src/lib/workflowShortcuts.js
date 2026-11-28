@@ -12,7 +12,7 @@ export const WORKFLOW_SHORTCUTS_CHANGED = "gofer:workflow-shortcuts-changed";
 // A changed workflow's notice was clicked: Settings > Devices opens that shortcut's review.
 export const WORKFLOW_SHORTCUT_REVIEW = "gofer:workflow-shortcut-review";
 // The dictation shortcuts, which a workflow shortcut may not take.
-export const RESERVED_SHORTCUT_COMMANDS = [
+const RESERVED_SHORTCUT_COMMANDS = [
   ["voice.dictateAnywhere", "Dictate to Rem from any app"],
   ["voice.askAboutScreen", "Ask Rem about your screen"],
 ];

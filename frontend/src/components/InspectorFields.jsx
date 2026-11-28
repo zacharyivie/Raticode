@@ -8,7 +8,7 @@ import { useConfirm } from "./ConfirmDialog.jsx";
 import { Dialog } from "./Dialog.jsx";
 import { PathNameDialog } from "./PathNameDialog.jsx";
 
-export function fieldDiagnosticState(diagnostics = []) {
+function fieldDiagnosticState(diagnostics = []) {
   const visibleDiagnostics = diagnostics.filter((diagnostic) =>
     diagnostic?.severity === "error" || diagnostic?.severity === "warning",
   );
@@ -23,14 +23,14 @@ export function fieldDiagnosticState(diagnostics = []) {
   };
 }
 
-export function fieldBorderClass(diagnostics = [], base = "border-line focus:border-brand") {
+function fieldBorderClass(diagnostics = [], base = "border-line focus:border-brand") {
   const { severity } = fieldDiagnosticState(diagnostics);
   if (severity === "error") return "border-red-300 focus:border-red-500 focus:ring-red-100";
   if (severity === "warning") return "border-amber-300 focus:border-amber-500 focus:ring-amber-100";
   return base;
 }
 
-export function FieldDiagnosticMessage({ diagnostics = [], id }) {
+function FieldDiagnosticMessage({ diagnostics = [], id }) {
   const { diagnostics: visibleDiagnostics, severity } = fieldDiagnosticState(diagnostics);
   if (!visibleDiagnostics.length) return null;
   return (
@@ -43,6 +43,29 @@ export function FieldDiagnosticMessage({ diagnostics = [], id }) {
       {visibleDiagnostics[0].message}
     </p>
   );
+}
+
+// The help line under a field's label, such as a node contract field's description. It
+// sits inside the <label>, so a control with help names itself from the label text alone
+// (aria-labelledby) and reads the help as its description (aria-describedby).
+function useFieldHelp(description) {
+  const labelId = useId();
+  const helpId = useId();
+  const text = typeof description === "string" ? description.trim() : "";
+  return {
+    describedBy: text ? helpId : null,
+    help: text ? (
+      <span className="mt-0.5 block text-[11px] font-normal leading-4 text-muted" id={helpId}>
+        {text}
+      </span>
+    ) : null,
+    labelId,
+    labelledBy: text ? labelId : undefined,
+  };
+}
+
+function joinIds(...ids) {
+  return ids.filter(Boolean).join(" ") || undefined;
 }
 
 export function InspectorSection({ children, className = "", title }) {
@@ -248,7 +271,7 @@ export function useCommittedDraft({ enterCommits = true, format, onCommit, parse
 
 // What an onCommit result says about a refused save: null means refused with no reason,
 // { error } carries the reason, anything else (a saved document, undefined) means saved.
-export function refusedSaveMessage(result) {
+function refusedSaveMessage(result) {
   if (result === null) return "This change wasn't saved.";
   if (result && typeof result === "object" && typeof result.error === "string") {
     return result.error || "This change wasn't saved.";
@@ -285,6 +308,7 @@ export function DraftFieldMessage({ id, state }) {
 
 export function TextField({
   commitOnBlur = false,
+  description,
   diagnostics = [],
   label,
   onChange,
@@ -318,12 +342,12 @@ export function TextField({
   const diagnosticId = useId();
   const draftDiagnosticId = useId();
   const hasFieldDiagnostics = fieldDiagnosticState(diagnostics).diagnostics.length > 0;
-  const describedBy = [
+  const fieldHelp = useFieldHelp(description);
+  const describedBy = joinIds(
+    fieldHelp.describedBy,
     hasFieldDiagnostics ? diagnosticId : null,
     canDraft && (draftState.error || draftState.conflict) ? draftDiagnosticId : null,
-  ]
-    .filter(Boolean)
-    .join(" ") || undefined;
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -392,10 +416,12 @@ export function TextField({
   return (
     <>
       <label className="block">
-        <span className="text-xs font-medium text-muted">{label}</span>
+        <span className="text-xs font-medium text-muted" id={fieldHelp.labelId}>{label}</span>
+        {fieldHelp.help}
         <span className="relative mt-1 block">
           <input
             aria-describedby={describedBy}
+            aria-labelledby={fieldHelp.labelledBy}
             aria-invalid={
               Boolean(canDraft && draftState.error) || fieldDiagnosticState(diagnostics).severity === "error" || undefined
             }
@@ -1062,6 +1088,7 @@ function defaultCopyName(name = "", index = null) {
 
 export function NumberField({
   allowRuntimeReference = false,
+  description,
   diagnostics = [],
   label,
   min,
@@ -1072,23 +1099,25 @@ export function NumberField({
   const diagnosticId = useId();
   const draftDiagnosticId = useId();
   const hasFieldDiagnostics = fieldDiagnosticState(diagnostics).diagnostics.length > 0;
+  const fieldHelp = useFieldHelp(description);
   const draftState = useCommittedDraft({
     format: (nextValue) => String(nextValue ?? ""),
     onCommit: onChange,
     parse: (text) => parseNumberDraft(text, min, allowRuntimeReference),
     value,
   });
-  const describedBy = [
+  const describedBy = joinIds(
+    fieldHelp.describedBy,
     hasFieldDiagnostics ? diagnosticId : null,
     draftState.error || draftState.conflict ? draftDiagnosticId : null,
-  ]
-    .filter(Boolean)
-    .join(" ") || undefined;
+  );
   return (
     <label className="block">
-      <span className="text-xs font-medium text-muted">{label}</span>
+      <span className="text-xs font-medium text-muted" id={fieldHelp.labelId}>{label}</span>
+      {fieldHelp.help}
       <input
         aria-describedby={describedBy}
+        aria-labelledby={fieldHelp.labelledBy}
         aria-invalid={
           Boolean(draftState.error) || fieldDiagnosticState(diagnostics).severity === "error" || undefined
         }
@@ -1172,6 +1201,7 @@ function RuntimeReferenceField({ label, onChange, value }) {
 
 export function SelectField({
   allowRuntimeReference = false,
+  description,
   diagnostics = [],
   label,
   onChange,
@@ -1180,14 +1210,17 @@ export function SelectField({
 }) {
   const diagnosticId = useId();
   const hasFieldDiagnostics = fieldDiagnosticState(diagnostics).diagnostics.length > 0;
+  const fieldHelp = useFieldHelp(description);
   const usesRuntimeReference = allowRuntimeReference && isExactReference(value);
   const selectedValue = usesRuntimeReference ? "__runtime_reference__" : (value ?? "");
   return (
     <div className="block">
       <label>
-        <span className="text-xs font-medium text-muted">{label}</span>
+        <span className="text-xs font-medium text-muted" id={fieldHelp.labelId}>{label}</span>
+        {fieldHelp.help}
         <select
-          aria-describedby={hasFieldDiagnostics ? diagnosticId : undefined}
+          aria-describedby={joinIds(fieldHelp.describedBy, hasFieldDiagnostics ? diagnosticId : null)}
+          aria-labelledby={fieldHelp.labelledBy}
           aria-invalid={fieldDiagnosticState(diagnostics).severity === "error" || undefined}
           className={`mt-1 h-10 w-full rounded-lg border bg-white px-3 text-sm outline-none transition ${fieldBorderClass(diagnostics)}`}
           value={selectedValue}
@@ -1219,6 +1252,7 @@ export function SelectField({
 
 export function TextareaField({
   commitOnBlur = false,
+  description,
   diagnostics = [],
   label,
   onChange,
@@ -1229,6 +1263,7 @@ export function TextareaField({
   const diagnosticId = useId();
   const draftDiagnosticId = useId();
   const hasFieldDiagnostics = fieldDiagnosticState(diagnostics).diagnostics.length > 0;
+  const fieldHelp = useFieldHelp(description);
   const draftState = useCommittedDraft({
     enterCommits: false,
     format: (nextValue) => String(nextValue ?? ""),
@@ -1236,19 +1271,19 @@ export function TextareaField({
     parse: (text) => ({ ok: true, value: text }),
     value,
   });
-  const describedBy =
-    [
-      hasFieldDiagnostics ? diagnosticId : null,
-      commitOnBlur && (draftState.error || draftState.conflict) ? draftDiagnosticId : null,
-    ]
-      .filter(Boolean)
-      .join(" ") || undefined;
+  const describedBy = joinIds(
+    fieldHelp.describedBy,
+    hasFieldDiagnostics ? diagnosticId : null,
+    commitOnBlur && (draftState.error || draftState.conflict) ? draftDiagnosticId : null,
+  );
   const draftError = commitOnBlur && draftState.error;
   return (
     <label className="block">
-      <span className="text-xs font-medium text-muted">{label}</span>
+      <span className="text-xs font-medium text-muted" id={fieldHelp.labelId}>{label}</span>
+      {fieldHelp.help}
       <textarea
         aria-describedby={describedBy}
+        aria-labelledby={fieldHelp.labelledBy}
         aria-invalid={
           Boolean(draftError) || fieldDiagnosticState(diagnostics).severity === "error" || undefined
         }
@@ -1285,6 +1320,7 @@ export function TextareaField({
 export function ToggleField({
   allowRuntimeReference = false,
   checked,
+  description,
   diagnostics = [],
   disabled = false,
   label,
@@ -1292,7 +1328,11 @@ export function ToggleField({
 }) {
   const diagnosticId = useId();
   const hasFieldDiagnostics = fieldDiagnosticState(diagnostics).diagnostics.length > 0;
+  const fieldHelp = useFieldHelp(description);
   const usesRuntimeReference = allowRuntimeReference && isExactReference(checked);
+  const labelText = (
+    <span className="text-sm font-medium text-slate-700" id={fieldHelp.labelId}>{label}</span>
+  );
   return (
     <div>
       <label
@@ -1300,9 +1340,17 @@ export function ToggleField({
           disabled ? "cursor-not-allowed bg-slate-50 text-muted dark:bg-[#252526]" : ""
         }`}
       >
-        <span className="text-sm font-medium text-slate-700">{label}</span>
+        {fieldHelp.help ? (
+          <span className="min-w-0">
+            {labelText}
+            {fieldHelp.help}
+          </span>
+        ) : (
+          labelText
+        )}
         <input
-          aria-describedby={hasFieldDiagnostics ? diagnosticId : undefined}
+          aria-describedby={joinIds(fieldHelp.describedBy, hasFieldDiagnostics ? diagnosticId : null)}
+          aria-labelledby={fieldHelp.labelledBy}
           aria-invalid={fieldDiagnosticState(diagnostics).severity === "error" || undefined}
           checked={usesRuntimeReference ? false : Boolean(checked)}
           className="h-4 w-4 accent-indigo-600"
@@ -1357,7 +1405,7 @@ export function ListField({ diagnostics = [], label, onChange, placeholder, valu
   );
 }
 
-export function DraftTextareaField({ diagnostics, label, placeholder, rows, state }) {
+function DraftTextareaField({ diagnostics, label, placeholder, rows, state }) {
   const diagnosticId = useId();
   const draftDiagnosticId = useId();
   const hasFieldDiagnostics = fieldDiagnosticState(diagnostics).diagnostics.length > 0;
@@ -1409,7 +1457,7 @@ export function parseJsonBodyEditorValue(text) {
   }
 }
 
-export function JsonBodyField({ label, onChange, value }) {
+export function JsonBodyField({ description, label, onChange, value }) {
   const draftState = useCommittedDraft({
     format: formatJsonBodyEditorValue,
     onCommit: onChange,
@@ -1417,14 +1465,24 @@ export function JsonBodyField({ label, onChange, value }) {
     value,
   });
   const draftDiagnosticId = useId();
+  const fieldHelp = useFieldHelp(description);
 
   return (
     <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
-      {label}
+      {fieldHelp.help ? (
+        <span>
+          <span id={fieldHelp.labelId}>{label}</span>
+          {fieldHelp.help}
+        </span>
+      ) : (
+        label
+      )}
       <textarea
-        aria-describedby={
-          draftState.error || draftState.conflict ? draftDiagnosticId : undefined
-        }
+        aria-describedby={joinIds(
+          fieldHelp.describedBy,
+          draftState.error || draftState.conflict ? draftDiagnosticId : null,
+        )}
+        aria-labelledby={fieldHelp.labelledBy}
         aria-invalid={Boolean(draftState.error) || undefined}
         className={`min-h-[8rem] rounded-lg border bg-white px-2 py-1.5 font-mono text-xs text-slate-900 outline-none transition focus:ring-2 focus:ring-brand/20 ${
           draftState.error

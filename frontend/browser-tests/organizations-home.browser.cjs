@@ -37,7 +37,7 @@ async function main() {
   const fault = { fail: false, delay: 0 };
   await app.whenReady();
   const { createServer } = await import("vite");
-  vite = await createServer({ root: path.join(root, "frontend"), cacheDir: testViteCacheDir("organization-home"), server: { host: "127.0.0.1", port: 0 }, plugins: [{
+  vite = await createServer({ configLoader: "runner", root: path.join(root, "frontend"), cacheDir: testViteCacheDir("organization-home"), server: { host: "127.0.0.1", port: 0 }, plugins: [{
     name: "organization-home-test",
     resolveId(id) { if (id === "/organization-home-entry.jsx") return id; },
     load(id) {

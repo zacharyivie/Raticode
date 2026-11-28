@@ -2,7 +2,7 @@ export const EDITOR_SESSION_KEY = 'raticode.editorSession.v2';
 const activities = ['workflows', 'files', 'search', 'source-control', 'organizations', 'second-brain', 'browser'];
 // Main content kept across restarts; swarms and organizations need an item chosen again.
 const mainContents = ['editor', 'rem', 'second-brain', 'browser'];
-export const isBrowserPath = path => typeof path === 'string' && (path.startsWith('raticode-browser:') || path.startsWith('browser:'));
+const isBrowserPath = path => typeof path === 'string' && (path.startsWith('raticode-browser:') || path.startsWith('browser:'));
 const cleanPaths = list => [...new Set((Array.isArray(list) ? list : []).filter(path => typeof path === 'string' && path.length && path.length < 8192))].slice(0, 100);
 
 // Web tabs live in the Browser plugin, file tabs in the File explorer. Sessions

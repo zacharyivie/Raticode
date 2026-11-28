@@ -8,9 +8,9 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
-      "target": {"type": "string", "minLength": 1},
-      "resource_type": {"enum": ["auto", "file", "folder", "url", "app"], "x-rattish-case-insensitive": true},
-      "args": {"type": "array", "items": {"type": "string"}}
+      "target": {"description": "File, folder, URL, or application to open.", "type": "string", "minLength": 1},
+      "resource_type": {"description": "Interpretation of the resource target.", "enum": ["auto", "file", "folder", "url", "app"], "x-rattish-case-insensitive": true},
+      "args": {"description": "Ordered argument strings.", "type": "array", "items": {"type": "string"}}
     },
     "required": ["target"],
     "additionalProperties": false

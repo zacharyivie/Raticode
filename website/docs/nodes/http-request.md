@@ -35,7 +35,9 @@ Node step:
 
 - **Defaults.** GET, a 30-second timeout, one attempt, expected status 200. List other statuses yourself for endpoints that return 201 or 204.
 - **Retries.** Set attempts, backoff and retry-on-statuses on purpose, especially for requests that write data.
-- **Payload.** Use `json` or `body`, not both. A bound payload port overrides the matching field you wrote.
+- **Retry-After.** When a 429 or 503 response has a `Retry-After` header, in seconds or as an HTTP date, the step waits that long or the backoff, whichever is longer, before its next attempt from `retry-on-statuses`. The step's `retry-count` waits it out too. If the server asks for more than 300 seconds, the step stops retrying and fails with an error that names the wait. Each retry shown in the run says how long it waits.
+- **Payload.** Use `json` or `body`, not both. A bound payload port overrides the matching field you wrote. A `json` payload is sent with `Content-Type: application/json` unless your `headers` set a Content-Type of their own.
+- **Header names.** Header names match whatever their case, so each one goes out once. Response header names are lowercase: read `node.step.output.headers.content-type`. `headers.Content-Type` finds the same header, in a reference and in `output-mapping`. A header the server sends more than once keeps every value, joined with `, `, or with a line break for `set-cookie`, because cookie dates contain commas.
 - **Response modes** are `auto`, `json`, `text` and `none`. Output includes the raw body, parsed JSON when there is some, selected values and request details.
 - `output-mapping` picks values out of the response by path. `network-allowlist` limits where requests may go.
 - Bind secrets for protected values, and check the redaction fields. An allowed host can still send back content you shouldn't trust.
@@ -56,7 +58,7 @@ Fields for this node only. The [shared node fields](./index.md#shared-node-field
 | `retry` | object | `{"attempts": 1, "backoff": "0s", "retry-on-statuses": []}` | Attempt count, backoff, and retry-on-statuses map. |
 | `expected-statuses` | list of integer | `[200]` | Accepted HTTP status codes. |
 | `response-mode` | `auto`, `json`, `text`, `none` | `"auto"` | Response interpretation. |
-| `output-mapping` | object | `{}` | Named response selectors. |
+| `output-mapping` | object | `{}` | Named response selectors, such as json.id or headers.etag. |
 | `secret-fields` | list of string | `[]` | Request field redaction declarations. |
 | `network-allowlist` | list of string | `[]` | Configured network destination constraints. |
 
@@ -77,7 +79,7 @@ Output fields, with their exact selector names:
 | Field | Value type |
 | --- | --- |
 | `status` | integer |
-| `headers` | object |
+| `headers` | object of strings, by lowercase name |
 | `body` | string |
 | `json` | any JSON value |
 | `value` | any JSON value |

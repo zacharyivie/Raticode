@@ -1,0 +1,660 @@
+{
+ "captured_from": "dev 2e5c98ea",
+ "cases": [
+  {
+   "name": "plain",
+   "kind": "worker_instructions",
+   "run": {
+    "id": "run-golden",
+    "epoch": 3,
+    "thread_id": "thread-golden",
+    "created_at": "2026-11-20T09:00:00+00:00",
+    "repair_count": 0,
+    "recipe": {
+     "type": "errand",
+     "title": "Tidy the notes",
+     "prompt": "Tidy the meeting notes in notes/ and list what changed.",
+     "project_dir": "/home/user/projects/notes",
+     "acceptance_criteria": [
+      {
+       "id": "c1",
+       "description": "The notes are tidied.",
+       "authored_by": "user"
+      }
+     ]
+    },
+    "config": {
+     "provider": "claude_code"
+    }
+   },
+   "glossary": "",
+   "auto": false,
+   "sleeping_guidance": "\nRem stops a turn after 20 minutes with no output from you, and after 2 hours in total. Background shell jobs, sleep and long silent commands produce no output, and a stopped turn ends its background jobs. To wait for CI or another outside job, check it in the foreground in bounded chunks: a loop that checks the status about every 60 seconds, stops at the first failed job, exits after at most 9 minutes and prints the status, run with a 10-minute tool timeout. Then decide and check again. Note run IDs in your messages so a resumed turn can find them. Never end a message with 'waiting for results' while a background job does the waiting, and never run gh run watch or a similar watcher without a time bound. For a wait longer than about 10 minutes, call rem_wait.sleep with what you're waiting for and when to check again (5 to 120 minutes), then end your turn with one line of status. Rem frees your worker slot and resumes this same thread when the time is up. Sleeping is not a result: the task is reviewed only after your final answer.",
+   "expected": "You are a separate worker thread assigned by Rem, the user's coordinator. Rem can answer your clarifying questions and make routine decisions within the user-authorized goal. Direct questions to Rem rather than assuming the human user is your conversation partner. Perform this task within its authorized scope. Do not delegate the goal again. Inspect prior work before resuming. Report artifacts, actual check results, and blockers. {{EVIDENCE_LINKS}} Start your final answer with one short sentence describing the result for the user. Your answer does not accept the task. An independent reviewer will check it. Never deploy, publish, send external messages, spend money, or run a workflow unless the task explicitly authorizes that action. Rem can open and create local project folders. If this work needs a folder that isn't this task's project, such as a new project or a folder an organization should own, don't ask the user to open it: stop and name its absolute path in your result. Rem opens it and continues the work there. This task has no rem_artifacts tool; save any report it asks for with the report or note tools available to you.\nRem stops a turn after 20 minutes with no output from you, and after 2 hours in total. Background shell jobs, sleep and long silent commands produce no output, and a stopped turn ends its background jobs. To wait for CI or another outside job, check it in the foreground in bounded chunks: a loop that checks the status about every 60 seconds, stops at the first failed job, exits after at most 9 minutes and prints the status, run with a 10-minute tool timeout. Then decide and check again. Note run IDs in your messages so a resumed turn can find them. Never end a message with 'waiting for results' while a background job does the waiting, and never run gh run watch or a similar watcher without a time bound. For a wait longer than about 10 minutes, call rem_wait.sleep with what you're waiting for and when to check again (5 to 120 minutes), then end your turn with one line of status. Rem frees your worker slot and resumes this same thread when the time is up. Sleeping is not a result: the task is reviewed only after your final answer.\n\nPrivate task requirements:\n{\"acceptance_criteria\": [{\"authored_by\": \"user\", \"description\": \"The notes are tidied.\", \"id\": \"c1\"}], \"prompt\": \"Tidy the meeting notes in notes/ and list what changed.\", \"type\": \"errand\"}"
+  },
+  {
+   "name": "auto_mode",
+   "kind": "worker_instructions",
+   "run": {
+    "id": "run-golden",
+    "epoch": 3,
+    "thread_id": "thread-golden",
+    "created_at": "2026-11-20T09:00:00+00:00",
+    "repair_count": 0,
+    "recipe": {
+     "type": "errand",
+     "title": "Tidy the notes",
+     "prompt": "Tidy the meeting notes in notes/ and list what changed.",
+     "project_dir": "/home/user/projects/notes",
+     "acceptance_criteria": [
+      {
+       "id": "c1",
+       "description": "The notes are tidied.",
+       "authored_by": "user"
+      }
+     ]
+    },
+    "config": {
+     "provider": "claude_code"
+    },
+    "self_work": {
+     "kind": "ticket"
+    }
+   },
+   "glossary": "",
+   "auto": true,
+   "sleeping_guidance": "\nRem stops a turn after 20 minutes with no output from you, and after 2 hours in total. Background shell jobs, sleep and long silent commands produce no output, and a stopped turn ends its background jobs. To wait for CI or another outside job, check it in the foreground in bounded chunks: a loop that checks the status about every 60 seconds, stops at the first failed job, exits after at most 9 minutes and prints the status, run with a 10-minute tool timeout. Then decide and check again. Note run IDs in your messages so a resumed turn can find them. Never end a message with 'waiting for results' while a background job does the waiting, and never run gh run watch or a similar watcher without a time bound. For a wait longer than about 10 minutes, call rem_wait.sleep with what you're waiting for and when to check again (5 to 120 minutes), then end your turn with one line of status. Rem frees your worker slot and resumes this same thread when the time is up. Sleeping is not a result: the task is reviewed only after your final answer.",
+   "expected": "You are a separate worker thread assigned by Rem, the user's coordinator. Rem can answer your clarifying questions and make routine decisions within the user-authorized goal. Direct questions to Rem rather than assuming the human user is your conversation partner. Perform this task within its authorized scope. Do not delegate the goal again. Inspect prior work before resuming. Report artifacts, actual check results, and blockers. {{EVIDENCE_LINKS}} Start your final answer with one short sentence describing the result for the user. Your answer does not accept the task. An independent reviewer will check it. Never deploy, publish, send external messages, spend money, or run a workflow unless the task explicitly authorizes that action. Rem can open and create local project folders. If this work needs a folder that isn't this task's project, such as a new project or a folder an organization should own, don't ask the user to open it: stop and name its absolute path in your result. Rem opens it and continues the work there. This task has no rem_artifacts tool; save any report it asks for with the report or note tools available to you.\nRem stops a turn after 20 minutes with no output from you, and after 2 hours in total. Background shell jobs, sleep and long silent commands produce no output, and a stopped turn ends its background jobs. To wait for CI or another outside job, check it in the foreground in bounded chunks: a loop that checks the status about every 60 seconds, stops at the first failed job, exits after at most 9 minutes and prints the status, run with a 10-minute tool timeout. Then decide and check again. Note run IDs in your messages so a resumed turn can find them. Never end a message with 'waiting for results' while a background job does the waiting, and never run gh run watch or a similar watcher without a time bound. For a wait longer than about 10 minutes, call rem_wait.sleep with what you're waiting for and when to check again (5 to 120 minutes), then end your turn with one line of status. Rem frees your worker slot and resumes this same thread when the time is up. Sleeping is not a result: the task is reviewed only after your final answer.\n{{auto_mode.WORKER_GUIDANCE}}\nPrivate task requirements:\n{\"acceptance_criteria\": [{\"authored_by\": \"user\", \"description\": \"The notes are tidied.\", \"id\": \"c1\"}], \"prompt\": \"Tidy the meeting notes in notes/ and list what changed.\", \"type\": \"errand\"}"
+  },
+  {
+   "name": "proving_test",
+   "kind": "worker_instructions",
+   "run": {
+    "id": "run-golden",
+    "epoch": 3,
+    "thread_id": "thread-golden",
+    "created_at": "2026-11-20T09:00:00+00:00",
+    "repair_count": 0,
+    "recipe": {
+     "type": "develop",
+     "title": "Tidy the notes",
+     "prompt": "Fix the total in totals.py.",
+     "project_dir": "/home/user/projects/notes",
+     "acceptance_criteria": [
+      {
+       "id": "c1",
+       "description": "The notes are tidied.",
+       "authored_by": "user"
+      }
+     ]
+    },
+    "config": {
+     "provider": "claude_code"
+    },
+    "previous_success": {
+     "for": "2026-11-19T09:00:00+00:00",
+     "summary": "Fixed it."
+    },
+    "after_results": [
+     {
+      "task": "Prepare data",
+      "result": "Data is ready."
+     }
+    ]
+   },
+   "glossary": "This project's shared words are in /home/user/projects/notes/GLOSSARY.md. Read it before naming anything.\n",
+   "auto": false,
+   "sleeping_guidance": "\nRem stops a turn after 20 minutes with no output from you, and after 2 hours in total. Background shell jobs, sleep and long silent commands produce no output, and a stopped turn ends its background jobs. To wait for CI or another outside job, check it in the foreground in bounded chunks: a loop that checks the status about every 60 seconds, stops at the first failed job, exits after at most 9 minutes and prints the status, run with a 10-minute tool timeout. Then decide and check again. Note run IDs in your messages so a resumed turn can find them. Never end a message with 'waiting for results' while a background job does the waiting, and never run gh run watch or a similar watcher without a time bound. For a wait longer than about 10 minutes, call rem_wait.sleep with what you're waiting for and when to check again (5 to 120 minutes), then end your turn with one line of status. Rem frees your worker slot and resumes this same thread when the time is up. Sleeping is not a result: the task is reviewed only after your final answer.",
+   "expected": "You are a separate worker thread assigned by Rem, the user's coordinator. Rem can answer your clarifying questions and make routine decisions within the user-authorized goal. Direct questions to Rem rather than assuming the human user is your conversation partner. Perform this task within its authorized scope. Do not delegate the goal again. Inspect prior work before resuming. Report artifacts, actual check results, and blockers. {{EVIDENCE_LINKS}} Start your final answer with one short sentence describing the result for the user. Your answer does not accept the task. An independent reviewer will check it. Never deploy, publish, send external messages, spend money, or run a workflow unless the task explicitly authorizes that action. Rem can open and create local project folders. If this work needs a folder that isn't this task's project, such as a new project or a folder an organization should own, don't ask the user to open it: stop and name its absolute path in your result. Rem opens it and continues the work there. This task has no rem_artifacts tool; save any report it asks for with the report or note tools available to you.\nRem stops a turn after 20 minutes with no output from you, and after 2 hours in total. Background shell jobs, sleep and long silent commands produce no output, and a stopped turn ends its background jobs. To wait for CI or another outside job, check it in the foreground in bounded chunks: a loop that checks the status about every 60 seconds, stops at the first failed job, exits after at most 9 minutes and prints the status, run with a 10-minute tool timeout. Then decide and check again. Note run IDs in your messages so a resumed turn can find them. Never end a message with 'waiting for results' while a background job does the waiting, and never run gh run watch or a similar watcher without a time bound. For a wait longer than about 10 minutes, call rem_wait.sleep with what you're waiting for and when to check again (5 to 120 minutes), then end your turn with one line of status. Rem frees your worker slot and resumes this same thread when the time is up. Sleeping is not a result: the task is reviewed only after your final answer.\n{{PROVING_TEST_GUIDANCE}}\nThis project's shared words are in /home/user/projects/notes/GLOSSARY.md. Read it before naming anything.\nPrivate task requirements:\n{\"acceptance_criteria\": [{\"authored_by\": \"user\", \"description\": \"The notes are tidied.\", \"id\": \"c1\"}], \"prompt\": \"Fix the total in totals.py.\", \"type\": \"develop\"}{{OCCURRENCE_GUIDANCE}}{\"new_since\": \"2026-11-19T09:00:00+00:00\", \"previous_accepted_run\": {\"for\": \"2026-11-19T09:00:00+00:00\", \"summary\": \"Fixed it.\"}, \"schedule_timezone\": \"UTC\", \"started_by\": \"request\", \"this_run_for\": \"2026-11-20T09:00:00+00:00\"}{{after_tasks.PREREQUISITE_GUIDANCE}}[{\"result\": \"Data is ready.\", \"task\": \"Prepare data\"}]"
+  },
+  {
+   "name": "research_with_rem_artifacts",
+   "kind": "worker_instructions",
+   "run": {
+    "id": "run-golden",
+    "epoch": 3,
+    "thread_id": "thread-golden",
+    "created_at": "2026-11-20T09:00:00+00:00",
+    "repair_count": 0,
+    "recipe": {
+     "type": "research",
+     "title": "Tidy the notes",
+     "prompt": "Compare the tools.",
+     "project_dir": "/home/user/projects/notes",
+     "acceptance_criteria": [
+      {
+       "id": "c1",
+       "description": "The notes are tidied.",
+       "authored_by": "user"
+      }
+     ]
+    },
+    "config": {
+     "provider": "claude_code"
+    }
+   },
+   "glossary": "",
+   "auto": false,
+   "sleeping_guidance": "\nRem stops a turn after 20 minutes with no output from you, and after 2 hours in total. Background shell jobs, sleep and long silent commands produce no output, and a stopped turn ends its background jobs. To wait for CI or another outside job, check it in the foreground in bounded chunks: a loop that checks the status about every 60 seconds, stops at the first failed job, exits after at most 9 minutes and prints the status, run with a 10-minute tool timeout. Then decide and check again. Note run IDs in your messages so a resumed turn can find them. Never end a message with 'waiting for results' while a background job does the waiting, and never run gh run watch or a similar watcher without a time bound. For a wait longer than about 10 minutes, call rem_wait.sleep with what you're waiting for and when to check again (5 to 120 minutes), then end your turn with one line of status. Rem frees your worker slot and resumes this same thread when the time is up. Sleeping is not a result: the task is reviewed only after your final answer.",
+   "expected": "You are a separate worker thread assigned by Rem, the user's coordinator. Rem can answer your clarifying questions and make routine decisions within the user-authorized goal. Direct questions to Rem rather than assuming the human user is your conversation partner. Perform this task within its authorized scope. Do not delegate the goal again. Inspect prior work before resuming. Report artifacts, actual check results, and blockers. {{EVIDENCE_LINKS}} Start your final answer with one short sentence describing the result for the user. Your answer does not accept the task. An independent reviewer will check it. Never deploy, publish, send external messages, spend money, or run a workflow unless the task explicitly authorizes that action. Rem can open and create local project folders. If this work needs a folder that isn't this task's project, such as a new project or a folder an organization should own, don't ask the user to open it: stop and name its absolute path in your result. Rem opens it and continues the work there. Save the research report using rem_artifacts.save_report, which targets the selected Second Brain or reports/rem in the selected project. Give it a path relative to that folder. Saved reports are never replaced, so choose a new file name if one is taken. When the report cites Second Brain sources, pass its evidence, title and question as the tool's description explains. Research cannot change source code.\nRem stops a turn after 20 minutes with no output from you, and after 2 hours in total. Background shell jobs, sleep and long silent commands produce no output, and a stopped turn ends its background jobs. To wait for CI or another outside job, check it in the foreground in bounded chunks: a loop that checks the status about every 60 seconds, stops at the first failed job, exits after at most 9 minutes and prints the status, run with a 10-minute tool timeout. Then decide and check again. Note run IDs in your messages so a resumed turn can find them. Never end a message with 'waiting for results' while a background job does the waiting, and never run gh run watch or a similar watcher without a time bound. For a wait longer than about 10 minutes, call rem_wait.sleep with what you're waiting for and when to check again (5 to 120 minutes), then end your turn with one line of status. Rem frees your worker slot and resumes this same thread when the time is up. Sleeping is not a result: the task is reviewed only after your final answer.\n\nPrivate task requirements:\n{\"acceptance_criteria\": [{\"authored_by\": \"user\", \"description\": \"The notes are tidied.\", \"id\": \"c1\"}], \"prompt\": \"Compare the tools.\", \"type\": \"research\"}"
+  },
+  {
+   "name": "research_without_rem_artifacts",
+   "kind": "worker_instructions",
+   "run": {
+    "id": "run-golden",
+    "epoch": 3,
+    "thread_id": "thread-golden",
+    "created_at": "2026-11-20T09:00:00+00:00",
+    "repair_count": 0,
+    "recipe": {
+     "type": "research",
+     "title": "Tidy the notes",
+     "prompt": "Rank the backlog.",
+     "project_dir": "/home/user/projects/notes",
+     "acceptance_criteria": [
+      {
+       "id": "c1",
+       "description": "The notes are tidied.",
+       "authored_by": "user"
+      }
+     ]
+    },
+    "config": {
+     "provider": "claude_code"
+    },
+    "self_work": {
+     "kind": "triage"
+    }
+   },
+   "glossary": "",
+   "auto": false,
+   "sleeping_guidance": "\nRem stops a turn after 20 minutes with no output from you, and after 2 hours in total. Background shell jobs, sleep and long silent commands produce no output, and a stopped turn ends its background jobs. To wait for CI or another outside job, check it in the foreground in bounded chunks: a loop that checks the status about every 60 seconds, stops at the first failed job, exits after at most 9 minutes and prints the status, run with a 10-minute tool timeout. Then decide and check again. Note run IDs in your messages so a resumed turn can find them. Never end a message with 'waiting for results' while a background job does the waiting, and never run gh run watch or a similar watcher without a time bound. For a wait longer than about 10 minutes, call rem_wait.sleep with what you're waiting for and when to check again (5 to 120 minutes), then end your turn with one line of status. Rem frees your worker slot and resumes this same thread when the time is up. Sleeping is not a result: the task is reviewed only after your final answer.",
+   "expected": "You are a separate worker thread assigned by Rem, the user's coordinator. Rem can answer your clarifying questions and make routine decisions within the user-authorized goal. Direct questions to Rem rather than assuming the human user is your conversation partner. Perform this task within its authorized scope. Do not delegate the goal again. Inspect prior work before resuming. Report artifacts, actual check results, and blockers. {{EVIDENCE_LINKS}} Start your final answer with one short sentence describing the result for the user. Your answer does not accept the task. An independent reviewer will check it. Never deploy, publish, send external messages, spend money, or run a workflow unless the task explicitly authorizes that action. Rem can open and create local project folders. If this work needs a folder that isn't this task's project, such as a new project or a folder an organization should own, don't ask the user to open it: stop and name its absolute path in your result. Rem opens it and continues the work there. This task has no rem_artifacts tool; save any report it asks for with the report or note tools available to you.\nRem stops a turn after 20 minutes with no output from you, and after 2 hours in total. Background shell jobs, sleep and long silent commands produce no output, and a stopped turn ends its background jobs. To wait for CI or another outside job, check it in the foreground in bounded chunks: a loop that checks the status about every 60 seconds, stops at the first failed job, exits after at most 9 minutes and prints the status, run with a 10-minute tool timeout. Then decide and check again. Note run IDs in your messages so a resumed turn can find them. Never end a message with 'waiting for results' while a background job does the waiting, and never run gh run watch or a similar watcher without a time bound. For a wait longer than about 10 minutes, call rem_wait.sleep with what you're waiting for and when to check again (5 to 120 minutes), then end your turn with one line of status. Rem frees your worker slot and resumes this same thread when the time is up. Sleeping is not a result: the task is reviewed only after your final answer.\n\nPrivate task requirements:\n{\"acceptance_criteria\": [{\"authored_by\": \"user\", \"description\": \"The notes are tidied.\", \"id\": \"c1\"}], \"prompt\": \"Rank the backlog.\", \"type\": \"research\"}"
+  },
+  {
+   "name": "review_plain",
+   "kind": "review_prompt",
+   "run": {
+    "id": "run-golden",
+    "epoch": 3,
+    "thread_id": "thread-golden",
+    "created_at": "2026-11-20T09:00:00+00:00",
+    "repair_count": 0,
+    "recipe": {
+     "type": "errand",
+     "title": "Tidy the notes",
+     "prompt": "Tidy the meeting notes in notes/ and list what changed.",
+     "project_dir": "/home/user/projects/notes",
+     "acceptance_criteria": [
+      {
+       "id": "c1",
+       "description": "The notes are tidied.",
+       "authored_by": "user"
+      }
+     ]
+    },
+    "config": {
+     "provider": "claude_code"
+    }
+   },
+   "decided": null,
+   "check": null,
+   "proving": null,
+   "answer": "Done: tidied three notes.\nProving test: tests/test_notes.py::test_tidy",
+   "traces": [
+    {
+     "type": "tool_start",
+     "id": "t1",
+     "name": "Bash",
+     "input": {
+      "command": "pytest"
+     }
+    },
+    {
+     "type": "tool_result",
+     "id": "t1",
+     "name": "Bash",
+     "input": {
+      "command": "pytest"
+     },
+     "output": "1 passed",
+     "exit_code": 0,
+     "status": "completed"
+    }
+   ],
+   "artifacts": [
+    {
+     "path": "/home/user/projects/notes/report.html",
+     "kind": "report"
+    }
+   ],
+   "before": "sha256:abc123",
+   "auto": false,
+   "standards": "",
+   "expected": "{{REVIEW_RULES}}{{review_findings.REVIEW_FORMAT}}{\"artifacts\": [{\"kind\": \"report\", \"path\": \"/home/user/projects/notes/report.html\"}], \"occurrence\": null, \"receipts\": [{\"exit_code\": 0, \"id\": \"t1\", \"input\": {\"command\": \"pytest\"}, \"name\": \"Bash\", \"output\": \"1 passed\", \"status\": \"completed\", \"type\": \"tool_result\"}], \"recipe\": {\"acceptance_criteria\": [{\"authored_by\": \"user\", \"description\": \"The notes are tidied.\", \"id\": \"c1\"}], \"project_dir\": \"/home/user/projects/notes\", \"prompt\": \"Tidy the meeting notes in notes/ and list what changed.\", \"title\": \"Tidy the notes\", \"type\": \"errand\"}, \"subject_hash\": \"sha256:abc123\", \"worker_result\": \"Done: tidied three notes.\\nProving test: tests/test_notes.py::test_tidy\"}"
+  },
+  {
+   "name": "review_decided_check",
+   "kind": "review_prompt",
+   "run": {
+    "id": "run-golden",
+    "epoch": 3,
+    "thread_id": "thread-golden",
+    "created_at": "2026-11-20T09:00:00+00:00",
+    "repair_count": 0,
+    "recipe": {
+     "type": "develop",
+     "title": "Tidy the notes",
+     "prompt": "Fix the total in totals.py.",
+     "project_dir": "/home/user/projects/notes",
+     "acceptance_criteria": [
+      {
+       "id": "c1",
+       "description": "The notes are tidied.",
+       "authored_by": "user"
+      }
+     ]
+    },
+    "config": {
+     "provider": "claude_code"
+    },
+    "previous_success": {
+     "for": "2026-11-19T09:00:00+00:00",
+     "summary": "Fixed it."
+    }
+   },
+   "decided": {
+    "passed": true,
+    "records": [
+     {
+      "id": "D-5",
+      "decision": "Each change gets its own worktree.",
+      "file": ".raticode/decisions/0005.md"
+     }
+    ]
+   },
+   "check": {
+    "decision_id": "D-3",
+    "command": "python3 scripts/check-dev.py",
+    "folder": "/home/user/projects/notes",
+    "head": "abc1234",
+    "exit_code": 0,
+    "passed": true,
+    "output": "all checks passed",
+    "seconds": 12.5,
+    "ran_at": "2026-11-20T09:30:00+00:00"
+   },
+   "proving": {
+    "test": "tests/test_notes.py::test_tidy",
+    "ran": true,
+    "failed_before": true,
+    "passes_after": true,
+    "before": {
+     "commit": "base111",
+     "command": "pytest x",
+     "exit_code": 1,
+     "outcome": "failed",
+     "seconds": 1.0,
+     "output": "1 failed"
+    },
+    "after": {
+     "commit": "head222",
+     "command": "pytest x",
+     "exit_code": 0,
+     "outcome": "passed",
+     "seconds": 1.0,
+     "output": "1 passed"
+    }
+   },
+   "answer": "Done: tidied three notes.\nProving test: tests/test_notes.py::test_tidy",
+   "traces": [
+    {
+     "type": "tool_start",
+     "id": "t1",
+     "name": "Bash",
+     "input": {
+      "command": "pytest"
+     }
+    },
+    {
+     "type": "tool_result",
+     "id": "t1",
+     "name": "Bash",
+     "input": {
+      "command": "pytest"
+     },
+     "output": "1 passed",
+     "exit_code": 0,
+     "status": "completed"
+    }
+   ],
+   "artifacts": [
+    {
+     "path": "/home/user/projects/notes/report.html",
+     "kind": "report"
+    }
+   ],
+   "before": "sha256:abc123",
+   "auto": true,
+   "standards": "\nAlso judge the change against STANDARDS.md.\n",
+   "expected": "{{REVIEW_RULES}}{{review_findings.REVIEW_FORMAT}}\nAlso judge the change against STANDARDS.md.\n{{auto_mode.REVIEW_GUIDANCE}}{{REVIEW_DECISIONS}}{{project_checks.REVIEW_GUIDANCE}}{{REVIEW_PROVING_TEST}}{\"artifacts\": [{\"kind\": \"report\", \"path\": \"/home/user/projects/notes/report.html\"}], \"decision_records\": [{\"decision\": \"Each change gets its own worktree.\", \"file\": \".raticode/decisions/0005.md\", \"id\": \"D-5\"}], \"occurrence\": {\"new_since\": \"2026-11-19T09:00:00+00:00\", \"previous_accepted_run\": {\"for\": \"2026-11-19T09:00:00+00:00\", \"summary\": \"Fixed it.\"}, \"schedule_timezone\": \"UTC\", \"started_by\": \"request\", \"this_run_for\": \"2026-11-20T09:00:00+00:00\"}, \"raticode_check\": {\"command\": \"python3 scripts/check-dev.py\", \"commit\": \"abc1234\", \"decision_id\": \"D-3\", \"exit_code\": 0, \"first_run_left\": [], \"first_run_output_tail\": \"\", \"flaky\": false, \"flaky_in_changed_files\": [], \"folder\": \"/home/user/projects/notes\", \"output_tail\": \"all checks passed\", \"passed\": true, \"produced_by\": \"Raticode, not the worker\", \"ran_at\": \"2026-11-20T09:30:00+00:00\", \"ran_in\": \"task_worktree\", \"ran_in_reason\": \"\", \"seconds\": 12.5, \"summary\": \"Raticode ran `python3 scripts/check-dev.py` in its sandbox in /home/user/projects/notes at abc1234: passed in 12.5 s.\"}, \"raticode_proving_test\": {\"after\": {\"command\": \"pytest x\", \"commit\": \"head222\", \"exit_code\": 0, \"outcome\": \"passed\", \"output_tail\": \"1 passed\", \"seconds\": 1.0}, \"before\": {\"command\": \"pytest x\", \"commit\": \"base111\", \"exit_code\": 1, \"outcome\": \"failed\", \"output_tail\": \"1 failed\", \"seconds\": 1.0, \"test_files_added\": null}, \"failed_before\": true, \"passes_after\": true, \"produced_by\": \"Raticode, not the worker\", \"ran\": true, \"ran_at\": \"\", \"status\": \"fails before the change and passes after it\", \"summary\": \"Raticode ran `tests/test_notes.py::test_tidy` in its sandbox: on the base commit None with only the task's test files added it failed (exit code 1); on the work's commit None it passed. It fails before the change and passes after it.\", \"test\": \"tests/test_notes.py::test_tidy\"}, \"receipts\": [{\"exit_code\": 0, \"id\": \"t1\", \"input\": {\"command\": \"pytest\"}, \"name\": \"Bash\", \"output\": \"1 passed\", \"status\": \"completed\", \"type\": \"tool_result\"}], \"recipe\": {\"acceptance_criteria\": [{\"authored_by\": \"user\", \"description\": \"The notes are tidied.\", \"id\": \"c1\"}], \"project_dir\": \"/home/user/projects/notes\", \"prompt\": \"Fix the total in totals.py.\", \"title\": \"Tidy the notes\", \"type\": \"develop\"}, \"subject_hash\": \"sha256:abc123\", \"worker_result\": \"Done: tidied three notes.\\nProving test: tests/test_notes.py::test_tidy\"}"
+  },
+  {
+   "name": "review_recovery_inspection",
+   "kind": "review_prompt",
+   "run": {
+    "id": "run-golden",
+    "epoch": 3,
+    "thread_id": "thread-golden",
+    "created_at": "2026-11-20T09:00:00+00:00",
+    "repair_count": 0,
+    "recipe": {
+     "type": "errand",
+     "title": "Tidy the notes",
+     "prompt": "Tidy the meeting notes in notes/ and list what changed.",
+     "project_dir": "/home/user/projects/notes",
+     "acceptance_criteria": [
+      {
+       "id": "c1",
+       "description": "The notes are tidied.",
+       "authored_by": "user"
+      }
+     ]
+    },
+    "config": {
+     "provider": "claude_code"
+    },
+    "recovery_inspection": true
+   },
+   "decided": {
+    "passed": true,
+    "records": []
+   },
+   "check": null,
+   "proving": null,
+   "answer": "Done: tidied three notes.\nProving test: tests/test_notes.py::test_tidy",
+   "traces": [
+    {
+     "type": "tool_start",
+     "id": "t1",
+     "name": "Bash",
+     "input": {
+      "command": "pytest"
+     }
+    },
+    {
+     "type": "tool_result",
+     "id": "t1",
+     "name": "Bash",
+     "input": {
+      "command": "pytest"
+     },
+     "output": "1 passed",
+     "exit_code": 0,
+     "status": "completed"
+    }
+   ],
+   "artifacts": [
+    {
+     "path": "/home/user/projects/notes/report.html",
+     "kind": "report"
+    }
+   ],
+   "before": "sha256:abc123",
+   "auto": false,
+   "standards": "",
+   "expected": "{{REVIEW_RULES}}{{review_findings.REVIEW_FORMAT}}{\"artifacts\": [{\"kind\": \"report\", \"path\": \"/home/user/projects/notes/report.html\"}], \"occurrence\": null, \"receipts\": [{\"exit_code\": 0, \"id\": \"t1\", \"input\": {\"command\": \"pytest\"}, \"name\": \"Bash\", \"output\": \"1 passed\", \"status\": \"completed\", \"type\": \"tool_result\"}], \"recipe\": {\"acceptance_criteria\": [{\"authored_by\": \"user\", \"description\": \"The notes are tidied.\", \"id\": \"c1\"}], \"project_dir\": \"/home/user/projects/notes\", \"prompt\": \"Tidy the meeting notes in notes/ and list what changed.\", \"title\": \"Tidy the notes\", \"type\": \"errand\"}, \"subject_hash\": \"sha256:abc123\", \"worker_result\": \"Done: tidied three notes.\\nProving test: tests/test_notes.py::test_tidy\"}\nThis is restart recovery. Inspect the existing worker transcript, files and command receipts first. Do not repeat its actions. Also return safe_to_resume:true only if incomplete work can continue without repeating an uncertain external action, payment, deletion, deployment or message. Otherwise return false and explain precisely what cannot be established. Do not demand user input for facts found in Raticode records."
+  },
+  {
+   "name": "worktree_no_setup",
+   "kind": "turn_text",
+   "run": {
+    "id": "run-golden",
+    "epoch": 3,
+    "thread_id": "thread-golden",
+    "created_at": "2026-11-20T09:00:00+00:00",
+    "repair_count": 0,
+    "recipe": {
+     "type": "errand",
+     "title": "Tidy the notes",
+     "prompt": "Tidy the meeting notes in notes/ and list what changed.",
+     "project_dir": "/home/user/projects/notes",
+     "acceptance_criteria": [
+      {
+       "id": "c1",
+       "description": "The notes are tidied.",
+       "authored_by": "user"
+      }
+     ]
+    },
+    "config": {
+     "provider": "claude_code"
+    },
+    "worktree": {
+     "root": "/home/user/.local/share/raticode/worktrees/run-golden",
+     "branch": "rem/tidy-notes"
+    }
+   },
+   "root": "/home/user/.local/share/raticode/worktrees/run-golden",
+   "skill": null,
+   "landing": null,
+   "check": null,
+   "expected": "\nAnother Rem task is changing /home/user/projects/notes at the same time, so this task uses a temporary git worktree at /home/user/.local/share/raticode/worktrees/run-golden on branch rem/tidy-notes, created from the project's latest commit. Work only in this worktree, never in the original project folder, and commit finished changes to this branch. Install or link dependencies here if checks need them. Rem removes the worktree afterwards and keeps the branch."
+  },
+  {
+   "name": "worktree_setup_passed",
+   "kind": "turn_text",
+   "run": {
+    "id": "run-golden",
+    "epoch": 3,
+    "thread_id": "thread-golden",
+    "created_at": "2026-11-20T09:00:00+00:00",
+    "repair_count": 0,
+    "recipe": {
+     "type": "errand",
+     "title": "Tidy the notes",
+     "prompt": "Tidy the meeting notes in notes/ and list what changed.",
+     "project_dir": "/home/user/projects/notes",
+     "acceptance_criteria": [
+      {
+       "id": "c1",
+       "description": "The notes are tidied.",
+       "authored_by": "user"
+      }
+     ]
+    },
+    "config": {
+     "provider": "claude_code"
+    },
+    "worktree": {
+     "root": "/home/user/.local/share/raticode/worktrees/run-golden",
+     "branch": "rem/tidy-notes"
+    },
+    "worktree_setup": {
+     "status": "passed",
+     "summary": "Linked node_modules."
+    }
+   },
+   "root": "/home/user/.local/share/raticode/worktrees/run-golden",
+   "skill": null,
+   "landing": null,
+   "check": null,
+   "expected": "\nAnother Rem task is changing /home/user/projects/notes at the same time, so this task uses a temporary git worktree at /home/user/.local/share/raticode/worktrees/run-golden on branch rem/tidy-notes, created from the project's latest commit. Work only in this worktree, never in the original project folder, and commit finished changes to this branch. Install or link dependencies here if checks need them. Rem removes the worktree afterwards and keeps the branch.\nThe project's worktree setup already ran here: Linked node_modules."
+  },
+  {
+   "name": "worktree_setup_failed",
+   "kind": "turn_text",
+   "run": {
+    "id": "run-golden",
+    "epoch": 3,
+    "thread_id": "thread-golden",
+    "created_at": "2026-11-20T09:00:00+00:00",
+    "repair_count": 0,
+    "recipe": {
+     "type": "errand",
+     "title": "Tidy the notes",
+     "prompt": "Tidy the meeting notes in notes/ and list what changed.",
+     "project_dir": "/home/user/projects/notes",
+     "acceptance_criteria": [
+      {
+       "id": "c1",
+       "description": "The notes are tidied.",
+       "authored_by": "user"
+      }
+     ]
+    },
+    "config": {
+     "provider": "claude_code"
+    },
+    "worktree": {
+     "root": "/home/user/.local/share/raticode/worktrees/run-golden",
+     "branch": "rem/tidy-notes"
+    },
+    "worktree_setup": {
+     "status": "needs_approval",
+     "summary": "The project's worktree setup waits for your approval."
+    }
+   },
+   "root": "/home/user/.local/share/raticode/worktrees/run-golden",
+   "skill": null,
+   "landing": null,
+   "check": null,
+   "expected": "\nAnother Rem task is changing /home/user/projects/notes at the same time, so this task uses a temporary git worktree at /home/user/.local/share/raticode/worktrees/run-golden on branch rem/tidy-notes, created from the project's latest commit. Work only in this worktree, never in the original project folder, and commit finished changes to this branch. Install or link dependencies here if checks need them. Rem removes the worktree afterwards and keeps the branch.\nThe project's worktree setup waits for your approval. Prepare what your checks need yourself, and don't change the project's setup file to get around the approval."
+  },
+  {
+   "name": "skill_with_landing",
+   "kind": "turn_text",
+   "run": {
+    "id": "run-golden",
+    "epoch": 3,
+    "thread_id": "thread-golden",
+    "created_at": "2026-11-20T09:00:00+00:00",
+    "repair_count": 0,
+    "recipe": {
+     "type": "develop",
+     "title": "Tidy the notes",
+     "prompt": "Tidy the meeting notes in notes/ and list what changed.",
+     "project_dir": "/home/user/projects/notes",
+     "acceptance_criteria": [
+      {
+       "id": "c1",
+       "description": "The notes are tidied.",
+       "authored_by": "user"
+      }
+     ]
+    },
+    "config": {
+     "provider": "claude_code"
+    }
+   },
+   "root": "/home/user/.local/share/raticode/worktrees/run-golden",
+   "skill": "worktree-dev-flow",
+   "landing": "dev",
+   "check": null,
+   "expected": "\nThe enabled worktree-dev-flow skill sets how changes to this project are made, and Rem has not created a worktree for this task. Unless the task says to work in place, follow the skill to choose or create the worktree and branch, and make every edit, check and commit there. Other Rem tasks may be working in /home/user/projects/notes at the same time, so leave the checkout's own files and branch alone, with one exception: landing. A Rem task can't move its own thread to another folder: where the skill says to switch the thread into the worktree or to ask the user to, skip that step and keep working in the worktree by absolute path.\nThe task isn't finished until its branch has landed on the project's integration branch (local dev, the project's recorded decision): rebase, rerun the checks and fast-forward dev as the skill describes. This task already authorizes that step, so don't wait for a separate go-ahead. If dev is checked out in a folder with no uncommitted changes, including the project's own checkout, fast-forward it there with git merge --ff-only. If it can't land, for example because that folder has uncommitted changes or the rebase conflicts, say so in the first line of your result. Rem checks before accepting the task that the branches it committed to are on dev."
+  },
+  {
+   "name": "skill_without_landing",
+   "kind": "turn_text",
+   "run": {
+    "id": "run-golden",
+    "epoch": 3,
+    "thread_id": "thread-golden",
+    "created_at": "2026-11-20T09:00:00+00:00",
+    "repair_count": 0,
+    "recipe": {
+     "type": "develop",
+     "title": "Tidy the notes",
+     "prompt": "Tidy the meeting notes in notes/ and list what changed.",
+     "project_dir": "/home/user/projects/notes",
+     "acceptance_criteria": [
+      {
+       "id": "c1",
+       "description": "The notes are tidied.",
+       "authored_by": "user"
+      }
+     ]
+    },
+    "config": {
+     "provider": "claude_code"
+    }
+   },
+   "root": "/home/user/.local/share/raticode/worktrees/run-golden",
+   "skill": "worktree-dev-flow",
+   "landing": null,
+   "check": null,
+   "expected": "\nThe enabled worktree-dev-flow skill sets how changes to this project are made, and Rem has not created a worktree for this task. Unless the task says to work in place, follow the skill to choose or create the worktree and branch, and make every edit, check and commit there. Other Rem tasks may be working in /home/user/projects/notes at the same time, so leave the checkout's own files and branch alone, with one exception: landing. A Rem task can't move its own thread to another folder: where the skill says to switch the thread into the worktree or to ask the user to, skip that step and keep working in the worktree by absolute path."
+  },
+  {
+   "name": "decided_check",
+   "kind": "turn_text",
+   "run": {
+    "id": "run-golden",
+    "epoch": 3,
+    "thread_id": "thread-golden",
+    "created_at": "2026-11-20T09:00:00+00:00",
+    "repair_count": 0,
+    "recipe": {
+     "type": "develop",
+     "title": "Tidy the notes",
+     "prompt": "Tidy the meeting notes in notes/ and list what changed.",
+     "project_dir": "/home/user/projects/notes",
+     "acceptance_criteria": [
+      {
+       "id": "c1",
+       "description": "The notes are tidied.",
+       "authored_by": "user"
+      }
+     ]
+    },
+    "config": {
+     "provider": "claude_code"
+    }
+   },
+   "root": "/home/user/.local/share/raticode/worktrees/run-golden",
+   "skill": null,
+   "landing": null,
+   "check": {
+    "id": "D-3",
+    "answer": "python3 scripts/check-dev.py"
+   },
+   "expected": "\nBefore the review, Raticode runs this project's decided check (D-3) itself in the task's worktree: `python3 scripts/check-dev.py`. It runs in a sandbox with no network that can write only to that folder and its own temporary folder. Run it yourself before you finish; a failure comes back to you with its output."
+  },
+  {
+   "name": "skill_landing_and_check",
+   "kind": "turn_text",
+   "run": {
+    "id": "run-golden",
+    "epoch": 3,
+    "thread_id": "thread-golden",
+    "created_at": "2026-11-20T09:00:00+00:00",
+    "repair_count": 0,
+    "recipe": {
+     "type": "maintain",
+     "title": "Tidy the notes",
+     "prompt": "Tidy the meeting notes in notes/ and list what changed.",
+     "project_dir": "/home/user/projects/notes",
+     "acceptance_criteria": [
+      {
+       "id": "c1",
+       "description": "The notes are tidied.",
+       "authored_by": "user"
+      }
+     ]
+    },
+    "config": {
+     "provider": "claude_code"
+    }
+   },
+   "root": "/home/user/.local/share/raticode/worktrees/run-golden",
+   "skill": "worktree-dev-flow",
+   "landing": "dev",
+   "check": {
+    "id": "D-3",
+    "answer": "python3 scripts/check-dev.py"
+   },
+   "expected": "\nThe enabled worktree-dev-flow skill sets how changes to this project are made, and Rem has not created a worktree for this task. Unless the task says to work in place, follow the skill to choose or create the worktree and branch, and make every edit, check and commit there. Other Rem tasks may be working in /home/user/projects/notes at the same time, so leave the checkout's own files and branch alone, with one exception: landing. A Rem task can't move its own thread to another folder: where the skill says to switch the thread into the worktree or to ask the user to, skip that step and keep working in the worktree by absolute path.\nThe task isn't finished until its branch has landed on the project's integration branch (local dev, the project's recorded decision): rebase, rerun the checks and fast-forward dev as the skill describes. This task already authorizes that step, so don't wait for a separate go-ahead. If dev is checked out in a folder with no uncommitted changes, including the project's own checkout, fast-forward it there with git merge --ff-only. If it can't land, for example because that folder has uncommitted changes or the rebase conflicts, say so in the first line of your result. Rem checks before accepting the task that the branches it committed to are on dev.\nBefore the review, Raticode runs this project's decided check (D-3) itself in the task's worktree: `python3 scripts/check-dev.py`. It runs in a sandbox with no network that can write only to that folder and its own temporary folder. Run it yourself before you finish; a failure comes back to you with its output."
+  }
+ ]
+}

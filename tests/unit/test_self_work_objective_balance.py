@@ -90,8 +90,10 @@ def test_backlog_pulls_take_turns_even_when_one_objective_ranks_higher(board):
         return [t for t in worker_titles(fake) if t in serves]
 
     wait_for(lambda: not tick(home) and len(pulled()) >= 2, 10)
-    # The best-ranked UI ticket first, then the CLI objective gets its turn.
-    assert pulled()[0].startswith("UI ticket") and pulled()[1] == "CLI ticket"
+    # One pull for each objective, not the two best-ranked UI tickets. Which comes first
+    # depends on timing: when the ranking's thread frees before its record clears, research
+    # for the older UI objective takes it, and the CLI objective then has less work.
+    assert {serves[title] for title in pulled()[:2]} == {UI, CLI}
     with home.store.read() as db:
         session = home.store.setting(db, "self_work_state")["session"]
     assert set(session["objective_starts"]) == {i["id"] for i in listed(home)}

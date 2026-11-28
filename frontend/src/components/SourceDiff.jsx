@@ -1,6 +1,6 @@
 // A unified diff, added lines green and removed lines red. The test sets' Show source
 // change view and a trigger's Review changes share it.
-export function diffLineTone(line) {
+function diffLineTone(line) {
   if (line.startsWith("+") && !line.startsWith("+++")) return "text-emerald-700 dark:text-emerald-300";
   if (line.startsWith("-") && !line.startsWith("---")) return "text-red-700 dark:text-red-300";
   return "text-muted";

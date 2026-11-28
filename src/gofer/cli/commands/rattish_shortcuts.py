@@ -18,7 +18,7 @@ from typing import Any
 
 import typer
 
-from gofer.cli.output import confirm_unseen, fail
+from gofer.cli.output import fail, require_format
 
 app = typer.Typer(
     help=(
@@ -36,12 +36,6 @@ _APPROVAL_STATES = {
     "changed": "Changed since you approved it: the shortcut won't run it until you approve.",
     "unapproved": "Waiting for you to approve this workflow version.",
 }
-
-
-def _require_format(output_format: str) -> None:
-    if output_format not in {"text", "json"}:
-        typer.echo("Unsupported format. Use 'text' or 'json'.", err=True)
-        raise typer.Exit(2)
 
 
 def _key_label(binding: str) -> str:
@@ -84,7 +78,7 @@ def list_shortcuts(
     from gofer.ui.workflow_shortcuts import list_payload
     from gofer.utils.paths import get_data_dir
 
-    _require_format(output_format)
+    require_format(output_format)
     base = data_dir or get_data_dir()
     try:
         payload = list_payload(base, details=True)
@@ -125,7 +119,7 @@ def remove_shortcut(
     from gofer.ui.workflow_shortcuts import remove_payload
     from gofer.utils.paths import get_data_dir
 
-    _require_format(output_format)
+    require_format(output_format)
     base = data_dir or get_data_dir()
     try:
         removed = remove_payload(base, shortcut_id.strip())["removed"]
@@ -140,26 +134,6 @@ def remove_shortcut(
         f"Removed shortcut {removed['id']} ({_key_label(removed['binding'])}). A running "
         "Raticode lets go of the key within half a minute."
     )
-
-
-def _changes_text(changes: dict[str, Any]) -> str:
-    from gofer.rattish.trigger_approval import unified_diff_text
-
-    state = changes["state"]
-    if state == "approved":
-        return "This shortcut runs the workflow as it is now. Nothing to approve."
-    if state == "missing":
-        return "The workflow file is missing, so the shortcut can't run it until it's back."
-    lines = [_APPROVAL_STATES.get(state, "")]
-    if changes.get("approvedAt"):
-        lines.append(f"Approved {changes['approvedAt']} from {changes.get('approvedBy')}.")
-    body = unified_diff_text(changes)
-    lines.append(body or "No file differs; the workflow uses a different set of files now.")
-    if changes.get("unseen"):
-        from gofer.rattish.trigger_approval import unseen_note
-
-        lines.append(unseen_note(changes["unseen"]))
-    return "\n".join(line for line in lines if line)
 
 
 @app.command("approve")
@@ -187,7 +161,7 @@ def approve(
     again; with --yes it also needs --unseen. Only you can approve: inside a Raticode
     agent turn this is refused (exit 5).
     """
-    from gofer.cli.client import ExitCode, in_agent_session
+    from gofer.cli.approval import approve_version, changes_text
     from gofer.rattish.workflow_shortcuts import (
         USER_ONLY,
         ApprovalConflict,
@@ -199,88 +173,45 @@ def approve(
     )
     from gofer.utils.paths import get_data_dir
 
-    _require_format(output_format)
-    if in_agent_session():
-        if output_format == "json":
-            typer.echo(
-                json.dumps({"ok": False, "error": USER_ONLY, "code": "user_only"}, sort_keys=True)
-            )
-        else:
-            typer.echo(USER_ONLY, err=True)
-        raise typer.Exit(int(ExitCode.AUTH))
+    require_format(output_format)
     base = data_dir or get_data_dir()
     shortcut_id = shortcut_id.strip()
-    try:
-        shown = shortcut_changes(base, shortcut_id)
-    except ShortcutNotFound as exc:
-        raise fail(
-            f"{exc} Run `Raticode rattish shortcuts list` to see them.", output_format
-        ) from None
-    except ShortcutError as exc:
-        raise fail(str(exc), output_format) from None
-    if output_format == "text":
-        typer.echo(_changes_text(shown))
-    if shown["state"] == "approved" and fingerprint is None:
-        if output_format == "json":
-            typer.echo(
-                json.dumps({"ok": True, "approved": False, "changes": shown}, sort_keys=True)
-            )
-        return
-    expected = fingerprint or shown["fingerprint"]
-    if not yes:
-        if output_format == "json":
-            typer.echo(
-                json.dumps(
-                    {
-                        "ok": False,
-                        "error": "Add --yes to approve without a prompt.",
-                        "changes": shown,
-                    },
-                    sort_keys=True,
-                )
-            )
-            raise typer.Exit(2)
-        if not typer.confirm("Approve this version for the shortcut?", default=False):
-            typer.echo("Not approved. The shortcut won't run the workflow until you approve.")
-            raise typer.Exit(1)
-    accept_unseen = confirm_unseen(
-        shown.get("unseen") or [], yes=yes, unseen=unseen, fmt=output_format
-    )
-    try:
-        record = approve_shortcut(
+
+    def error_exit(exc: Exception) -> typer.Exit:
+        if isinstance(exc, ShortcutNotFound):
+            return fail(f"{exc} Run `Raticode rattish shortcuts list` to see them.", output_format)
+        return fail(str(exc), output_format)
+
+    approve_version(
+        noun="shortcut",
+        output_format=output_format,
+        yes=yes,
+        unseen=unseen,
+        fingerprint=fingerprint,
+        user_only=USER_ONLY,
+        show=lambda: shortcut_changes(base, shortcut_id),
+        approve=lambda expected, accept_unseen: approve_shortcut(
             base,
             shortcut_id,
             actor="user",
             by="cli",
             expected_fingerprint=expected,
             accept_unseen=accept_unseen,
-        )
-    except UnseenChanges as exc:
-        if output_format == "json":
-            typer.echo(
-                json.dumps(
-                    {"ok": False, "error": str(exc), "unseen": exc.files, "changes": shown},
-                    sort_keys=True,
-                )
-            )
-        else:
-            from gofer.rattish.trigger_approval import unseen_refusal
-
-            typer.echo(unseen_refusal(exc.files), err=True)
-        raise typer.Exit(2) from None
-    except ApprovalConflict as exc:
-        if output_format == "json":
-            typer.echo(json.dumps({"ok": False, "error": str(exc), "conflict": True}))
-        else:
-            typer.echo(str(exc), err=True)
-        raise typer.Exit(int(ExitCode.CONFLICT)) from None
-    except ShortcutError as exc:
-        raise fail(str(exc), output_format) from None
-    if output_format == "json":
-        typer.echo(
-            json.dumps(
-                {"ok": True, "approved": True, "shortcut": record.to_payload()}, sort_keys=True
-            )
-        )
-    else:
-        typer.echo(f"Approved. Shortcut {record.id} runs this version of the workflow from now on.")
+        ),
+        errors=ShortcutError,
+        error_exit=error_exit,
+        approval_conflict=ApprovalConflict,
+        unseen_changes=UnseenChanges,
+        text=lambda shown: changes_text(
+            shown,
+            noun="shortcut",
+            states=_APPROVAL_STATES,
+            missing="The workflow file is missing, so the shortcut can't run it until it's back.",
+        ),
+        prompt="Approve this version for the shortcut?",
+        declined="Not approved. The shortcut won't run the workflow until you approve.",
+        approved=lambda record: (
+            f"Approved. Shortcut {record.id} runs this version of the workflow from now on."
+        ),
+        payload=lambda record: record.to_payload(),
+    )

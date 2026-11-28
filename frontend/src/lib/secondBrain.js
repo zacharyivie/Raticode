@@ -2,6 +2,8 @@
 // workspace and Rem request builder. Search here runs over the in-memory
 // indexed library snapshot; provider retrieval adds genuine semantic results.
 
+import { shortDate, timeAgo } from "./timeText.js";
+
 export const DOCUMENT_TYPES = [["note", "Note"], ["report", "Report"], ["text", "Text"], ["html", "Web page"], ["pdf", "PDF"], ["capture", "Web capture"]];
 export const DATE_FIELDS = [["modified", "Modified"], ["added", "Added"], ["published", "Published"], ["captured", "Captured"], ["generated", "Report generated"]];
 export const READING_STATES = [["unread", "Unread"], ["starred", "Starred"], ["reviewed", "Reviewed"], ["highlighted", "Highlighted"], ["annotated", "Has annotations"]];
@@ -308,8 +310,8 @@ export function reportSeriesRows(reports, documents, series = []) {
   });
 }
 
-export const isReplaced = doc => Number(Boolean(doc?.replacedBy?.docId));
-export const isLowered = (doc, library = {}) => Number(Boolean(loweredBy(doc, library.folderRules?.[doc?.brainId])));
+const isReplaced = doc => Number(Boolean(doc?.replacedBy?.docId));
+const isLowered = (doc, library = {}) => Number(Boolean(loweredBy(doc, library.folderRules?.[doc?.brainId])));
 // Keeps the order of current results and moves replaced reports after them, with files in a
 // folder listed after other results between the two.
 export function demoteReplaced(results, library = {}) {
@@ -388,27 +390,23 @@ export function formatBytes(bytes) {
   return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
 }
 
-export function formatDay(iso, { relative = false, now = new Date() } = {}) {
-  if (!iso) return "Unknown";
-  const date = new Date(iso.length === 10 ? `${iso}T12:00:00` : iso);
-  if (Number.isNaN(date.getTime())) return "Unknown";
+// How the library dates things: "Nov 3" ("Nov 3, 2025" in another year), "Unknown" for no
+// date, and with relative: true "Today", "Yesterday" or "3 days ago" within the last week.
+export function libraryDay(iso, { relative = false, now = new Date() } = {}) {
+  const day = shortDate(iso, { now });
+  if (!day) return "Unknown";
   if (relative) {
+    const date = new Date(iso.length === 10 ? `${iso}T12:00:00` : iso);
     const days = Math.round((new Date(now.toDateString()) - new Date(date.toDateString())) / 86400000);
     if (days === 0) return "Today";
     if (days === 1) return "Yesterday";
-    if (days > 1 && days < 7) return `${days} days ago`;
+    if (days > 1 && days < 7) return timeAgo(now.getTime() - days * 86400000, now);
   }
-  return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-}
-
-// Date and minute, without seconds: "Oct 5, 2026, 4:22 PM".
-export function formatTime(iso) {
-  const date = new Date(iso);
-  return iso && !Number.isNaN(date.getTime()) ? date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "Unknown";
+  return day;
 }
 
 // Passages before a document's first heading sit under this placeholder heading.
-export const UNTITLED_SECTION = "Document";
+const UNTITLED_SECTION = "Document";
 
 // The section a passage sits in, or "" when it comes before any heading.
 export const sectionName = block => (block?.heading && block.heading !== UNTITLED_SECTION ? block.heading : "");
@@ -462,7 +460,7 @@ export const HEALTH_KINDS = [
 
 // Why a link shows in the dead-link list. Only absolute links inside the brain are repaired
 // automatically; the others need a person to choose the right file.
-export const LINK_REASONS = [
+const LINK_REASONS = [
   ["absolute", "Absolute path inside the brain", "Works on this computer, breaks when the brain moves. Make it relative."],
   ["missing", "Missing file", "Nothing exists at this path."],
   ["temporary", "Temporary folder", "Points to /tmp or a similar folder that is cleared. Copy the file into the brain."],

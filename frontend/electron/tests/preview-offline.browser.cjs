@@ -19,6 +19,8 @@ const { app, BrowserWindow } = electron;
 const { createBrowserSessions } = require("../browser-sessions.cjs");
 const { createBrowserStore } = require("../browser-store.cjs");
 const { PARTITIONS } = require("../browser-policy.cjs");
+const { waitFor } = require("./test-wait.cjs");
+const WAIT = { timeout: 10_000, interval: 50 };
 
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-preview-offline-test-"));
 const project = path.join(profile, "project");
@@ -43,16 +45,6 @@ function finish(error) {
   if (error) console.error(error);
   else console.log("Preview offline regression passed.");
   app.exit(error ? 1 : 0);
-}
-
-async function waitFor(check, label, timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const value = await check();
-    if (value) return value;
-    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${label}`);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
 }
 
 const settle = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -146,13 +138,13 @@ app.whenReady().then(async () => {
     const guest = electron.webContents.getAllWebContents().find((contents) => !before.has(contents.id) && contents.getType() === "window");
     browsers.browserAction(event, { action: "adopt", id: state.id, webContentsId: -1 });
     browsers.browserAction(event, { action: "place", id: state.id, x: 0, y: 0, width: 1000, height: 600, visible: true });
-    await waitFor(() => guest.getURL().startsWith("file:") && !guest.isLoading(), `${path.basename(file)} to load`);
+    await waitFor(() => guest.getURL().startsWith("file:") && !guest.isLoading(), `Timed out waiting for ${path.basename(file)} to load`, WAIT);
     return { id: state.id, guest };
   }
 
   // 1. A project report reads a file in its folder and can't send it anywhere.
   const report = await openPreview(path.join(project, "report.html"), { grantId: "project" });
-  const title = await waitFor(() => (report.guest.getTitle().startsWith("read:") ? report.guest.getTitle() : ""), "the report's script");
+  const title = await waitFor(() => (report.guest.getTitle().startsWith("read:") ? report.guest.getTitle() : ""), "Timed out waiting for the report's script", WAIT);
   assert.equal(title, "read:secret-notes:reached:", "the report read its folder but reached nothing");
   await settle(1500);
   assert.deepEqual(received, [], "the preview sent something to the server");
@@ -166,27 +158,27 @@ app.whenReady().then(async () => {
   // choice is remembered for that file.
   const chartPath = path.join(project, "chart.html");
   const chart = await openPreview(chartPath, { grantId: "project" });
-  await waitFor(() => statesOf(chart.id).some((state) => state.remoteContent?.blocked > 0), "the chart's blocked picture");
+  await waitFor(() => statesOf(chart.id).some((state) => state.remoteContent?.blocked > 0), "Timed out waiting for the chart's blocked picture", WAIT);
   assert.equal(await chart.guest.executeJavaScript("document.getElementById('picture').naturalWidth"), 0);
   assert.deepEqual(received, []);
   browsers.browserAction(event, { action: "preview-remote", id: chart.id, allowed: true });
   // The tab moves to the online profile: a new view showing the same file.
-  chart.guest = await waitFor(() => guestIn(PARTITIONS.previewOnline, chartPath), "the chart in the online profile");
-  await waitFor(() => statesOf(chart.id).at(-1)?.remoteContent?.allowed === true, "the chart's allowed state");
-  await waitFor(async () => (await chart.guest.executeJavaScript("document.getElementById('picture')?.complete && document.getElementById('picture').naturalWidth")) === 1, "the remote picture");
+  chart.guest = await waitFor(() => guestIn(PARTITIONS.previewOnline, chartPath), "Timed out waiting for the chart in the online profile", WAIT);
+  await waitFor(() => statesOf(chart.id).at(-1)?.remoteContent?.allowed === true, "Timed out waiting for the chart's allowed state", WAIT);
+  await waitFor(async () => (await chart.guest.executeJavaScript("document.getElementById('picture')?.complete && document.getElementById('picture').naturalWidth")) === 1, "Timed out waiting for the remote picture", WAIT);
   assert.deepEqual(received, ["GET /picture.png"]);
   assert.equal(store.previewRemoteAllowed(chartPath), true);
   // The report next to it is still offline.
   assert.equal(store.previewRemoteAllowed(path.join(project, "report.html")), false);
   // A new preview of the same file loads it straight away.
   const again = await openPreview(chartPath, { grantId: "project" });
-  await waitFor(async () => (await again.guest.executeJavaScript("document.getElementById('picture')?.complete && document.getElementById('picture').naturalWidth")) === 1, "the remembered picture");
+  await waitFor(async () => (await again.guest.executeJavaScript("document.getElementById('picture')?.complete && document.getElementById('picture').naturalWidth")) === 1, "Timed out waiting for the remembered picture", WAIT);
   browsers.browserAction(event, { action: "close", id: again.id });
   // Blocking it again goes back to offline.
   received.length = 0;
   browsers.browserAction(event, { action: "preview-remote", id: chart.id, allowed: false });
-  chart.guest = await waitFor(() => guestIn(PARTITIONS.preview, chartPath), "the chart back in the offline profile");
-  await waitFor(() => !chart.guest.isLoading(), "the chart to reload");
+  chart.guest = await waitFor(() => guestIn(PARTITIONS.preview, chartPath), "Timed out waiting for the chart back in the offline profile", WAIT);
+  await waitFor(() => !chart.guest.isLoading(), "Timed out waiting for the chart to reload", WAIT);
   await settle(500);
   assert.equal(await chart.guest.executeJavaScript("document.getElementById('picture').naturalWidth"), 0);
   assert.deepEqual(received, []);
@@ -206,7 +198,7 @@ app.whenReady().then(async () => {
   external.guest.focus();
   external.guest.sendInputEvent({ type: "mouseDown", x: 40, y: 40, button: "left", clickCount: 1 });
   external.guest.sendInputEvent({ type: "mouseUp", x: 40, y: 40, button: "left", clickCount: 1 });
-  const opened = await waitFor(() => openTabs().at(-1), "the clicked link's Browser tab");
+  const opened = await waitFor(() => openTabs().at(-1), "Timed out waiting for the clicked link's Browser tab", WAIT);
   assert.equal(opened.url, `${base}/clicked`);
   assert.ok(external.guest.getURL().endsWith("/page.html"), "the preview itself went to the website");
   await settle(300);
@@ -273,7 +265,7 @@ document.addEventListener("mousedown", () => {
   };
   try {
     const routes = await openPreview(routesPage("routes.html"), { grantId: "project" });
-    await waitFor(() => routes.guest.getTitle().startsWith("routes:"), "the routes page's script", 15000);
+    await waitFor(() => routes.guest.getTitle().startsWith("routes:"), "Timed out waiting for the routes page's script", { ...WAIT, timeout: 15000 });
     await settle(1000);
     assert.deepEqual(reached, [], `an offline preview reached the network outside the request guard (${routes.guest.getTitle()})`);
     browsers.browserAction(event, { action: "close", id: routes.id });
@@ -281,8 +273,8 @@ document.addEventListener("mousedown", () => {
     const onlinePath = routesPage("routes-online.html");
     store.setPreviewRemote(onlinePath, true);
     const online = await openPreview(onlinePath, { grantId: "project" });
-    await waitFor(() => online.guest.getTitle().startsWith("routes:"), "the online routes page's script", 15000);
-    await waitFor(() => reached.includes("stun"), "WebRTC from a page allowed online", 5000);
+    await waitFor(() => online.guest.getTitle().startsWith("routes:"), "Timed out waiting for the online routes page's script", { ...WAIT, timeout: 15000 });
+    await waitFor(() => reached.includes("stun"), "Timed out waiting for WebRTC from a page allowed online", { ...WAIT, timeout: 5000 });
   } finally {
     udp.close();
     turn.close();

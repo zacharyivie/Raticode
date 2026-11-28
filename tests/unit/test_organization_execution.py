@@ -377,7 +377,7 @@ def test_remote_target_reserves_usage_and_links_parent(
 
 def test_execution_target_grants_cannot_be_supplied_by_employee(setup: Any) -> None:
     manager, org, call = setup
-    with pytest.raises(ValueError, match="outside employee grants"):
+    with pytest.raises(ValueError, match="outside the worker.s grants"):
         call("task_create", title="Bypass", assignee="worker", execution={"targetId": "arbitrary"})
     with pytest.raises(ValueError, match="targetId"):
         call(

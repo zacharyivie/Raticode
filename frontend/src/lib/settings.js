@@ -73,7 +73,7 @@ export const REPORT_THEMES = [
 ];
 
 export const SETTINGS_STORAGE_KEY = "raticode.settings.v1";
-export const RATICODE_BROWSER_HOME = "raticode://home";
+const RATICODE_BROWSER_HOME = "raticode://home";
 
 export const KEYBINDING_COMMANDS = [
   { id: "palette.commands", label: "Show all commands", group: "Application", scope: "global", defaultBinding: "Mod+Shift+KeyP" },
@@ -102,9 +102,16 @@ export const KEYBINDING_COMMANDS = [
   { id: "panel.toggle", label: "Toggle bottom panel", group: "Panel", scope: "global", defaultBinding: "Mod+Backquote" },
   { id: "terminal.new", label: "New terminal", group: "Terminal", scope: "global", defaultBinding: "Ctrl+KeyT" },
   { id: "terminal.close", label: "Close terminal", group: "Terminal", scope: "terminal", defaultBinding: "Ctrl+KeyW" },
+  // The shell owns plain Ctrl keys (readline's Ctrl+F moves the cursor), so Windows and
+  // Linux add Shift, as the terminal's Copy and Paste do. A Mac has Command for it.
+  { id: "terminal.find", label: "Find in terminal", group: "Terminal", scope: "terminal", defaultBinding: /Mac|iPhone|iPad/i.test(globalThis.navigator?.platform ?? "") ? "Mod+KeyF" : "Ctrl+Shift+KeyF" },
   { id: "graph.addNode", label: "Add node", group: "Graph editor", scope: "graph", defaultBinding: "Tab" },
   { id: "graph.selectAll", label: "Select all nodes", group: "Graph editor", scope: "graph", defaultBinding: "Mod+KeyA" },
   { id: "graph.deleteSelection", label: "Delete selection", group: "Graph editor", scope: "graph", defaultBinding: "Delete" },
+  // Copied nodes are their workflow.rattish text, so they also paste into a chat or the code editor.
+  { id: "graph.copy", label: "Copy nodes", group: "Graph editor", scope: "graph", defaultBinding: "Mod+KeyC" },
+  { id: "graph.cut", label: "Cut nodes", group: "Graph editor", scope: "graph", defaultBinding: "Mod+KeyX" },
+  { id: "graph.paste", label: "Paste nodes", group: "Graph editor", scope: "graph", defaultBinding: "Mod+KeyV" },
   // Only while the graph has focus; Windows also takes Ctrl+Y for Redo (matchesCommand).
   { id: "graph.undo", label: "Undo graph edit", group: "Graph editor", scope: "graph", defaultBinding: "Mod+KeyZ" },
   { id: "graph.redo", label: "Redo graph edit", group: "Graph editor", scope: "graph", defaultBinding: "Mod+Shift+KeyZ" },
@@ -585,7 +592,7 @@ function safeString(value, fallback, maxLength) {
 }
 
 // Accepts "github.com", "https://github.com/x" or a comma-separated list.
-export function siteListValue(value) {
+function siteListValue(value) {
   const items = Array.isArray(value) ? value : String(value ?? "").split(/[\s,]+/);
   const sites = items.map((item) => {
     let input = String(item ?? "").trim().toLowerCase().replace(/^\*\./, "");

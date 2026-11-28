@@ -93,6 +93,12 @@ def versions(root: Path = ROOT) -> str:
         "Python, frontend and npm lock versions must agree",
     )
     require(locked == [python], "uv.lock project version must agree")
+    # The app shows this section as What's new after the update.
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    require(
+        re.search(rf"^## {re.escape(python)} - \d{{4}}-\d{{2}}-\d{{2}}$", changelog, re.MULTILINE),
+        f"CHANGELOG.md needs a '## {python} - YYYY-MM-DD' section for What's new",
+    )
     return python
 
 
@@ -381,9 +387,7 @@ def validate_manifest(manifest: dict[str, Any], repo: str, sha: str, version: st
     expected_groups = required_files(version, manifest["windows_signed"], manifest["macos_signed"])
     for group, expected in expected_groups.items():
         actual = {name for name, info in files.items() if info["group"] == group}
-        optional = (
-            {f"Raticode-{version}-x86_64.AppImage.blockmap"} if group == "linux" else set()
-        )
+        optional = {f"Raticode-{version}-x86_64.AppImage.blockmap"} if group == "linux" else set()
         require(expected <= actual <= expected | optional, f"Candidate {group} inventory mismatch")
     for name, info in files.items():
         require(
@@ -644,12 +648,7 @@ def publish(repo: str) -> None:
     # Draft tag names are editable metadata, including GitHub's untagged-* names.
     # Discover ready drafts by their marker; read_candidate verifies their identity
     # using the attested manifest and successful source run before publication.
-    candidates = public or [
-        r
-        for r in releases
-        if r["draft"]
-        and READY in (r.get("body") or "")
-    ]
+    candidates = public or [r for r in releases if r["draft"] and READY in (r.get("body") or "")]
     require(
         candidates,
         "No verified draft for this commit. Finish Prepare release candidate on stage, "

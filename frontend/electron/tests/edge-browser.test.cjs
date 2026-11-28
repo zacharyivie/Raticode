@@ -17,18 +17,8 @@ const { BROWSERS, EDGE, createChromiumEngine, findBrowser } = require("../chromi
 const { ChromiumContents } = require("../chromium-contents.cjs");
 const { createAgentBrowserController } = require("../agent-browser.cjs");
 const { remSiteAllowed, sanitizeBrowserPolicy } = require("../browser-policy.cjs");
-
-function chromiumForTesting() {
-  const root = path.join(os.homedir(), ".cache", "ms-playwright");
-  try {
-    for (const entry of fs.readdirSync(root).filter((name) => /^chromium-\d+$/.test(name)).sort().reverse()) {
-      for (const candidate of [path.join(root, entry, "chrome-linux64", "chrome"), path.join(root, entry, "chrome-linux", "chrome")]) {
-        if (fs.existsSync(candidate)) return candidate;
-      }
-    }
-  } catch { /* No Playwright downloads. */ }
-  return "";
-}
+const { chromiumForTesting, waitFor } = require("./test-wait.cjs");
+const WAIT = { timeout: 10_000, interval: 50 };
 
 const EDGE_PATH = process.env.RATICODE_SKIP_EDGE_TESTS === "1" ? "" : (findBrowser(EDGE) || (process.platform === "linux" ? chromiumForTesting() : ""));
 const realEdge = { skip: EDGE_PATH ? false : "Neither Microsoft Edge nor a Chromium stand-in is installed" };
@@ -36,16 +26,6 @@ const engineOptions = (dataDir, extra = {}) => ({ browser: EDGE, dataDir, env: {
 
 function temp(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-}
-
-async function waitFor(check, message, timeout = 10000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const value = await check();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(message);
 }
 
 test("Edge is a browser of the Chromium engine, found from the explicit path or the usual install folders", () => {
@@ -260,11 +240,11 @@ test("a streamed Edge tab sends frames, takes typing, keeps its sign-ins across 
   try {
     await contents.loadURL(`${base}/`);
     contents.setView({ width: 800, height: 600, scale: 1 }, true);
-    await waitFor(() => frames.length >= 1, "no frame arrived");
+    await waitFor(() => frames.length >= 1, "no frame arrived", WAIT);
     assert.equal(frames[0].data[0], 0xff, "frames are JPEG");
     contents.handleInput([{ t: "down", x: 50, y: 25, button: 0 }, { t: "up", x: 50, y: 25, button: 0 }]);
     for (const key of ["H", "i"]) contents.handleInput([{ t: "keydown", key }, { t: "keyup", key }]);
-    await waitFor(async () => (await contents.evaluateIn("test", "document.getElementById('name').value")) === "Hi", "typing did not reach the page");
+    await waitFor(async () => (await contents.evaluateIn("test", "document.getElementById('name').value")) === "Hi", "typing did not reach the page", WAIT);
     // Pages see the browser's own name, not HeadlessChrome.
     await contents.loadURL(`${base}/ua`);
     assert.equal(contents.getTitle(), "normal");
@@ -283,7 +263,7 @@ test("a streamed Edge tab sends frames, takes typing, keeps its sign-ins across 
     await engine.stopAndWait();
     contents.markDead("Edge stopped");
     await contents.reloadPage(false);
-    await waitFor(() => !contents.isLoading() && contents.getTitle() === "Signed in", "the tab did not come back");
+    await waitFor(() => !contents.isLoading() && contents.getTitle() === "Signed in", "the tab did not come back", WAIT);
     await contents.loadURL(`${base}/two`);
     assert.equal(await contents.evaluateIn("test", "document.cookie"), "sid=user-secret");
     assert.equal(fs.statSync(path.join(dataDir, "edge-profile")).mode & 0o777, 0o700);
@@ -314,7 +294,7 @@ test("Edge does not outlive a Raticode process that dies", realEdge, async () =>
   });
   if (process.platform === "linux") assert.ok(running().length > 0, "Edge should be running");
   child.kill("SIGKILL");
-  await waitFor(() => running().length === 0, "Edge kept running after its Raticode process died", 15000);
+  await waitFor(() => running().length === 0, "Edge kept running after its Raticode process died", { ...WAIT, timeout: 15000 });
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
